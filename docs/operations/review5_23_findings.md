@@ -13,14 +13,14 @@
 **Money path:** source truth → forecast signal → executable edge → release authorization
 
 `_check_forecast_executable_bundle()` 的实际证明对象只是 readiness_state SQL proxy。
-它没有调用 `read_executable_forecast()`，也没有验证 source_run, source_run_coverage, ensemble_snapshots_v2, extrema-authority classification, selected bundle, member floor, complete/partial policy。
+它没有调用 `read_executable_forecast()`，也没有验证 source_run, source_run_coverage, ensemble_snapshots, extrema-authority classification, selected bundle, member floor, complete/partial policy。
 
 更糟糕的是 self-test fixture 直接 SQL 插入一个 LIVE_ELIGIBLE readiness row，且没有 `expires_at`。
 canonical writer `write_readiness_state()` 明确规定 `status == "LIVE_ELIGIBLE"` 时 `expires_at` 必须存在，否则 raise。
 
 **Live-money failure scenario**
 1. readiness_state 里有 LIVE_ELIGIBLE row，expires_at=NULL 或 strategy_key=NULL。
-2. 实际 source_run_coverage 或 ensemble_snapshots_v2 缺失、过期、non-contributing。
+2. 实际 source_run_coverage 或 ensemble_snapshots 缺失、过期、non-contributing。
 3. Release gate PASS。
 4. Operator 以为 forecast leg live-ready；evaluator/runtime 实际没有 executable forecast truth。
 
@@ -105,7 +105,7 @@ Raw `observed_high` float compared to integer settlement bin boundaries. Settlem
 ### P1-3 — P_raw Monte Carlo is not exactly replayable because RNG seed is implicit
 
 **Severity:** P1 statistical/replay blocker
-**Files:** src/signal/ensemble_signal.py, src/engine/evaluator.py, scripts/rebuild_calibration_pairs_v2.py
+**Files:** src/signal/ensemble_signal.py, src/engine/evaluator.py, scripts/rebuild_calibration_pairs.py
 **Money path:** forecast signal → calibration → edge → sizing → learning/replay
 
 `p_raw_vector_from_maxes()` uses `np.random.default_rng()` with no seed. Runtime high MC count reduces variance but does not make decisions replayable. Near-threshold decisions can flip across evaluations.

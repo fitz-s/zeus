@@ -73,7 +73,7 @@ class TIGGEIngest:
         self._payload_fetcher = payload_fetcher
         # Live-blockers 2026-05-01: when invoked from the trading-side
         # _fetch_registered_ingest_ensemble, the city is forwarded so this
-        # adapter can read directly from ensemble_snapshots_v2 (populated by
+        # adapter can read directly from ensemble_snapshots (populated by
         # the data-ingest daemon) instead of expecting a pre-staged JSON
         # payload. JSON-payload mode (env var or artifact-declared) still
         # wins when both are configured, preserving the original contract.
@@ -142,7 +142,7 @@ class TIGGEIngest:
             "TIGGE gate is open but no operator-approved payload is configured. "
             f"Set {PAYLOAD_PATH_ENV}=<json path> or add `payload_path: <json path>` "
             "to the tigge_ingest_decision evidence artifact, or ensure the "
-            "data-ingest daemon has populated ensemble_snapshots_v2 with fresh "
+            "data-ingest daemon has populated ensemble_snapshots with fresh "
             "tigge_* rows for the requested city."
         )
 
@@ -355,7 +355,7 @@ def _fetch_db_payload(city: object, fetch_time: datetime) -> ForecastBundle | No
         "fetch_time": source_fetch_time or captured_at or capture_dt.isoformat(),
         "captured_at": captured_at or capture_dt.isoformat(),
         "recorded_at": recorded_at,
-        "synthesised_from": "ensemble_snapshots_v2.high+low",
+        "synthesised_from": "ensemble_snapshots.high+low",
     }
 
     return ForecastBundle(

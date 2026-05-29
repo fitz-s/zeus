@@ -53,7 +53,7 @@ def load_calibration_data() -> list[CalibrationRecord]:
     db_path = get_db_path()
     conn = sqlite3.connect(str(db_path))
     
-    # v1.F20: migrated from legacy ensemble_snapshots to ensemble_snapshots_v2
+    # v1.F20: migrated from legacy ensemble_snapshots to ensemble_snapshots
     query = """
     SELECT
         e.city,
@@ -63,7 +63,7 @@ def load_calibration_data() -> list[CalibrationRecord]:
         NULL as p_cal_json,
         s.winning_bin,
         s.settlement_value
-    FROM ensemble_snapshots_v2 e
+    FROM ensemble_snapshots e
     JOIN settlements s ON e.city = s.city AND e.target_date = s.target_date
     WHERE e.p_raw_json IS NOT NULL
       AND s.winning_bin IS NOT NULL

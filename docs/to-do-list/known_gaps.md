@@ -22,13 +22,13 @@ failed.
 ## CRITICAL: SQLite 单写者锁导致 live daemon 崩溃 (2026-05-04)
 
 **Status:** PARTIALLY FIXED — Wave35 prevents
-`rebuild_calibration_pairs_v2.py` and `refit_platt_v2.py` write mode from
+`rebuild_calibration_pairs.py` and `refit_platt.py` write mode from
 defaulting to the canonical shared `zeus-world.db`; they now require an explicit
 isolated `--db` target and reject the live shared world DB before opening a
 write connection. Full calibration DB physical isolation and promotion tooling
 remain open architecture work.
 **First observed:** 2026-05-04
-**Root cause:** SQLite 单写者模型。WAL 模式允许并发读，但同一时刻只有一个写者可以持有写锁。`rebuild_calibration_pairs_v2.py` 跑了 30+ 分钟写事务，任何需要写锁的操作（包括 `init_schema()`）都会等待或超时崩溃。
+**Root cause:** SQLite 单写者模型。WAL 模式允许并发读，但同一时刻只有一个写者可以持有写锁。`rebuild_calibration_pairs.py` 跑了 30+ 分钟写事务，任何需要写锁的操作（包括 `init_schema()`）都会等待或超时崩溃。
 
 **Severity by scenario:**
 
@@ -38,7 +38,7 @@ remain open architecture work.
 | 重建脚本在盘前运行但超时 | **HIGH** — 开盘时仍锁定 |
 | 正常数据采集（非重建） | LOW — 短事务，WAL 通常够用 |
 
-**Immediate mitigation:** 不要在 live 时段（或盘前 2h 内）运行 `rebuild_calibration_pairs_v2.py`。操作员手动调度。
+**Immediate mitigation:** 不要在 live 时段（或盘前 2h 内）运行 `rebuild_calibration_pairs.py`。操作员手动调度。
 
 **Structural fixes (options):**
 1. **写锁 timeout + 快速失败**：rebuild 脚本持有锁超过 N 秒时主动放锁，live daemon 设置短 `timeout` 而不是无限等待——最小成本，治标。
@@ -611,7 +611,7 @@ pin runtime MC floor and explicit evaluator/monitor n_mc threading.
 **Still open — data-layer packet required:** do not attempt to green-test these
 without an approved schema/data plan:
 
-- `test_calibration_weight_continuity`: current `ensemble_snapshots_v2` and
+- `test_calibration_weight_continuity`: current `ensemble_snapshots` and
   `calibration_pairs_v2` still use binary `training_allowed`; there is no
   persisted `precision_weight REAL CHECK (0 <= precision_weight <= 1)`.
 - `test_weight_floor_nonzero_for_ambig_only`: current LOW ingest can still

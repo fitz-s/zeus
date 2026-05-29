@@ -4,7 +4,7 @@
 #                  K1 DB split commit eba80d2b9d (2026-05-11)
 #
 # Scope: Covers batch-2 scripts only (data_chain_monitor.sh, ingest_grib_to_snapshots.py,
-#        rebuild_calibration_pairs_v2.py).
+#        rebuild_calibration_pairs.py).
 #
 # NOTE: Bundle with tests/test_k1_reader_isolation.py once both PRs merge
 #       (fix/k1-reader-sweep-2026-05-17 + fix/k1-readers-batch-2-2026-05-17).
@@ -24,14 +24,14 @@ REPO = Path(__file__).resolve().parent.parent
 FORECAST_CLASS_TABLES = {
     "observations",
     "settlements",
-    "settlements_v2",
+    "settlement_outcomes",
     "source_run",
     "job_run",
     "source_run_coverage",
     "readiness_state",
-    "market_events_v2",
-    "ensemble_snapshots_v2",
-    "calibration_pairs_v2",
+    "market_events",
+    "ensemble_snapshots",
+    "calibration_pairs",
 }
 
 # Patterns that indicate routing to world.db — both Python and shell variants
@@ -43,10 +43,10 @@ BAD_PATTERNS = [
 
 # Batch-2 fixed scripts — explicit list, not a glob (avoids false positives from
 # scripts awaiting fix in other PRs).
-# NOTE: rebuild_calibration_pairs_v2.py is intentionally excluded from this parametrized
+# NOTE: rebuild_calibration_pairs.py is intentionally excluded from this parametrized
 # test because it legitimately references ZEUS_WORLD_DB_PATH in a write-guard function
 # (_resolve_isolated_calibration_write_db_path) that prevents accidental writes to world.db.
-# Its K1 fix is covered by test_rebuild_calibration_pairs_v2_dry_run_default_is_forecasts.
+# Its K1 fix is covered by test_rebuild_calibration_pairs_dry_run_default_is_forecasts.
 BATCH2_SCRIPTS = [
     REPO / "scripts" / "data_chain_monitor.sh",
     REPO / "scripts" / "ingest_grib_to_snapshots.py",
@@ -69,17 +69,17 @@ def test_batch2_no_forecast_class_via_world_connection(script: Path) -> None:
     )
 
 
-def test_rebuild_calibration_pairs_v2_dry_run_default_is_forecasts() -> None:
-    """rebuild_calibration_pairs_v2.py dry-run default must point at ZEUS_FORECASTS_DB_PATH."""
-    src = (REPO / "scripts" / "rebuild_calibration_pairs_v2.py").read_text()
+def test_rebuild_calibration_pairs_dry_run_default_is_forecasts() -> None:
+    """rebuild_calibration_pairs.py dry-run default must point at ZEUS_FORECASTS_DB_PATH."""
+    src = (REPO / "scripts" / "rebuild_calibration_pairs.py").read_text()
     # The dry-run block must import ZEUS_FORECASTS_DB_PATH, not ZEUS_WORLD_DB_PATH
     dry_run_block = src[src.find("if args.dry_run:"):]
     assert "ZEUS_FORECASTS_DB_PATH" in dry_run_block, (
-        "rebuild_calibration_pairs_v2.py dry-run default must use ZEUS_FORECASTS_DB_PATH"
+        "rebuild_calibration_pairs.py dry-run default must use ZEUS_FORECASTS_DB_PATH"
     )
     # Ensure the old world path is not present in the dry-run block
     assert "ZEUS_WORLD_DB_PATH" not in dry_run_block, (
-        "rebuild_calibration_pairs_v2.py dry-run block must not reference ZEUS_WORLD_DB_PATH"
+        "rebuild_calibration_pairs.py dry-run block must not reference ZEUS_WORLD_DB_PATH"
     )
 
 

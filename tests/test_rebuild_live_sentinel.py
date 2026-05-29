@@ -5,7 +5,7 @@
 """Tests for T1E rebuild sentinel check and transaction sharding.
 
 Invariants asserted:
-  T1E-REBUILD-SENTINEL-REFUSES: rebuild_calibration_pairs_v2.py exits non-zero
+  T1E-REBUILD-SENTINEL-REFUSES: rebuild_calibration_pairs.py exits non-zero
     when .zeus/rebuild_lock.do_not_run_during_live exists. The check fires BEFORE
     any sqlite3.connect call.
   T1E-REBUILD-TRANSACTION-SHARDED: rebuild_v2 commits per (city, metric) bucket.
@@ -13,7 +13,7 @@ Invariants asserted:
   T1E-REBUILD-COMPLETE-SENTINEL: a live rebuild scope is marked in_progress
     before bucket commits and complete only after all post-write gates pass.
   T1E-REFIT-REBUILD-COMPLETE-GATE: live Platt refit refuses to promote
-    calibration_pairs_v2 unless the exact rebuild scope is complete.
+    calibration_pairs unless the exact rebuild scope is complete.
 
 Tests:
   test_rebuild_refuses_during_live_subprocess   — sentinel present → sys.exit(1) via subprocess
@@ -41,9 +41,9 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).parent.parent
-SCRIPT_PATH = REPO_ROOT / "scripts" / "rebuild_calibration_pairs_v2.py"
+SCRIPT_PATH = REPO_ROOT / "scripts" / "rebuild_calibration_pairs.py"
 _REFIT_IMPORT_MODULES = (
-    "scripts.refit_platt_v2",
+    "scripts.refit_platt",
     "src.calibration.manager",
     "src.calibration.platt",
 )
@@ -55,12 +55,12 @@ _REFIT_IMPORT_MODULES = (
 
 @pytest.fixture(scope="module")
 def rebuild_mod():
-    """Import rebuild_calibration_pairs_v2 with sentinel bypassed for unit tests.
+    """Import rebuild_calibration_pairs with sentinel bypassed for unit tests.
 
     The sentinel check (_check_live_sentinel) is patched to a no-op before the
     first import. Module is cached by sys.modules so subsequent imports reuse it.
     """
-    mod_name = "scripts.rebuild_calibration_pairs_v2"
+    mod_name = "scripts.rebuild_calibration_pairs"
     # Remove cached copy if present (from a previous test run that hit sys.exit)
     sys.modules.pop(mod_name, None)
 
@@ -110,7 +110,7 @@ def _import_refit_mod_with_sklearn_stub():
             "sklearn.linear_model": linear_model_mod,
         },
     ):
-        mod = importlib.import_module("scripts.refit_platt_v2")
+        mod = importlib.import_module("scripts.refit_platt")
     return mod, previous_modules
 
 
@@ -164,7 +164,7 @@ def test_sentinel_check_fires_before_db_connect():
     when the path exists, before any connect call.
     """
     # Reload with sentinel present (patch connect to detect if called)
-    mod_name = "scripts.rebuild_calibration_pairs_v2"
+    mod_name = "scripts.rebuild_calibration_pairs"
     sys.modules.pop(mod_name, None)
 
     sentinel_path = REPO_ROOT / ".zeus" / "rebuild_lock.do_not_run_during_live"
@@ -257,13 +257,13 @@ def test_rebuild_write_target_guard_rejects_default_and_shared_world(rebuild_mod
     with pytest.raises(RuntimeError, match="requires --db"):
         rebuild_mod._resolve_isolated_calibration_write_db_path(
             None,
-            script_name="rebuild_calibration_pairs_v2.py",
+            script_name="rebuild_calibration_pairs.py",
         )
 
     with pytest.raises(RuntimeError, match="canonical shared world DB"):
         rebuild_mod._resolve_isolated_calibration_write_db_path(
             str(ZEUS_WORLD_DB_PATH),
-            script_name="rebuild_calibration_pairs_v2.py",
+            script_name="rebuild_calibration_pairs.py",
         )
 
     shared_alias = tmp_path / "shared-world-alias.db"
@@ -275,14 +275,14 @@ def test_rebuild_write_target_guard_rejects_default_and_shared_world(rebuild_mod
         with pytest.raises(RuntimeError, match="canonical shared world DB"):
             rebuild_mod._resolve_isolated_calibration_write_db_path(
                 str(shared_alias),
-                script_name="rebuild_calibration_pairs_v2.py",
+                script_name="rebuild_calibration_pairs.py",
             )
 
     isolated = tmp_path / "calibration_pairs_stage.db"
     assert (
         rebuild_mod._resolve_isolated_calibration_write_db_path(
             str(isolated),
-            script_name="rebuild_calibration_pairs_v2.py",
+            script_name="rebuild_calibration_pairs.py",
         )
         == isolated.resolve()
     )
@@ -291,7 +291,7 @@ def test_rebuild_write_target_guard_rejects_default_and_shared_world(rebuild_mod
 def test_rebuild_write_mode_without_isolated_db_fails_before_connect(rebuild_mod):
     """Default live write path fails closed before any sqlite write connection."""
     with (
-        patch.object(sys, "argv", ["rebuild_calibration_pairs_v2.py", "--no-dry-run", "--force"]),
+        patch.object(sys, "argv", ["rebuild_calibration_pairs.py", "--no-dry-run", "--force"]),
         patch("sqlite3.connect", side_effect=AssertionError("must not connect")),
     ):
         assert rebuild_mod.main() == 1
@@ -300,7 +300,7 @@ def test_rebuild_write_mode_without_isolated_db_fails_before_connect(rebuild_mod
 def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild_mod, tmp_path):
     """An explicit isolated DB may use the existing write path under the bulk lock.
 
-    K3 retrofit (2026-05-12): rebuild_calibration_pairs_v2 now wraps its
+    K3 retrofit (2026-05-12): rebuild_calibration_pairs now wraps its
     write path in ``bulk_lock_with_chunker(...)`` (cooperative LIVE-yield)
     rather than the bare ``db_writer_lock(BULK)`` context. The lock-seam
     invariant is unchanged (BULK fcntl held during the write path); only
@@ -323,7 +323,7 @@ def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild
             sys,
             "argv",
             [
-                "rebuild_calibration_pairs_v2.py",
+                "rebuild_calibration_pairs.py",
                 "--no-dry-run",
                 "--force",
                 "--db",
@@ -338,7 +338,7 @@ def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild
         ),
         patch("sqlite3.connect", return_value=mock_conn) as connect,
         patch.object(rebuild_mod, "init_schema", return_value=None),
-        patch.object(rebuild_mod, "apply_v2_schema", return_value=None),
+        patch.object(rebuild_mod, "apply_canonical_schema", return_value=None),
         patch.object(
             rebuild_mod,
             "rebuild_all_v2",
@@ -349,7 +349,7 @@ def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild
 
     connect.assert_called_once_with(isolated.resolve())
     assert lock_calls == [
-        (isolated.resolve(), "scripts.rebuild_calibration_pairs_v2"),
+        (isolated.resolve(), "scripts.rebuild_calibration_pairs"),
     ]
 
 
@@ -362,13 +362,13 @@ def test_refit_write_target_guard_rejects_default_and_shared_world(tmp_path):
         with pytest.raises(RuntimeError, match="requires --db"):
             refit_mod._resolve_isolated_calibration_write_db_path(
                 None,
-                script_name="refit_platt_v2.py",
+                script_name="refit_platt.py",
             )
 
         with pytest.raises(RuntimeError, match="canonical shared world DB"):
             refit_mod._resolve_isolated_calibration_write_db_path(
                 str(ZEUS_WORLD_DB_PATH),
-                script_name="refit_platt_v2.py",
+                script_name="refit_platt.py",
             )
 
         shared_alias = tmp_path / "shared-world-alias.db"
@@ -380,14 +380,14 @@ def test_refit_write_target_guard_rejects_default_and_shared_world(tmp_path):
             with pytest.raises(RuntimeError, match="canonical shared world DB"):
                 refit_mod._resolve_isolated_calibration_write_db_path(
                     str(shared_alias),
-                    script_name="refit_platt_v2.py",
+                    script_name="refit_platt.py",
                 )
 
         isolated = tmp_path / "platt_stage.db"
         assert (
             refit_mod._resolve_isolated_calibration_write_db_path(
                 str(isolated),
-                script_name="refit_platt_v2.py",
+                script_name="refit_platt.py",
             )
             == isolated.resolve()
         )
@@ -400,7 +400,7 @@ def test_refit_write_mode_without_isolated_db_fails_before_connect():
     refit_mod, previous_modules = _import_refit_mod_with_sklearn_stub()
     try:
         with (
-            patch.object(sys, "argv", ["refit_platt_v2.py", "--no-dry-run", "--force"]),
+            patch.object(sys, "argv", ["refit_platt.py", "--no-dry-run", "--force"]),
             patch("sqlite3.connect", side_effect=AssertionError("must not connect")),
         ):
             assert refit_mod.main() == 1
@@ -429,7 +429,7 @@ def test_refit_write_mode_with_isolated_db_reaches_existing_write_seam(tmp_path)
                 sys,
                 "argv",
                 [
-                    "refit_platt_v2.py",
+                    "refit_platt.py",
                     "--no-dry-run",
                     "--force",
                     "--db",
@@ -440,7 +440,7 @@ def test_refit_write_mode_with_isolated_db_reaches_existing_write_seam(tmp_path)
             patch.object(refit_mod, "db_writer_lock", side_effect=fake_lock),
             patch("sqlite3.connect", return_value=mock_conn) as connect,
             patch.object(refit_mod, "init_schema", return_value=None),
-            patch.object(refit_mod, "apply_v2_schema", return_value=None),
+            patch.object(refit_mod, "apply_canonical_schema", return_value=None),
             patch.object(
                 refit_mod,
                 "refit_all_v2",
@@ -488,8 +488,8 @@ def test_rebuild_shards_transactions_commit_per_city(rebuild_mod):
         pass
 
     rows = [
-        FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "sa"}),
-        FakeRow({"city": city_b, "data_version": high_spec.allowed_data_version, "snapshot_id": "sb"}),
+        FakeRow({"city": city_a, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "sa"}),
+        FakeRow({"city": city_b, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "sb"}),
     ]
 
     with (
@@ -548,7 +548,7 @@ def test_rebuild_all_v2_no_outer_savepoint(rebuild_mod):
 
     city_a = available_cities[0]
     high_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "high")
-    rows = [{"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s1"}]
+    rows = [{"city": city_a, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "s1"}]
 
     class FakeRow(dict):
         pass
@@ -611,7 +611,7 @@ def test_rebuild_marks_scope_in_progress_then_complete(rebuild_mod):
         pass
 
     rows = [
-        FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s-ok"}),
+        FakeRow({"city": city_a, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "s-ok"}),
     ]
 
     def successful_process(_conn, _snap, city, *, spec, n_mc, rng, stats,
@@ -659,7 +659,7 @@ def test_rebuild_validation_failure_leaves_scope_in_progress_not_complete(rebuil
         pass
 
     rows = [
-        FakeRow({"city": city_a, "data_version": high_spec.allowed_data_version, "snapshot_id": "s-zero"}),
+        FakeRow({"city": city_a, "dataset_id": high_spec.allowed_data_version, "snapshot_id": "s-zero"}),
     ]
 
     with (

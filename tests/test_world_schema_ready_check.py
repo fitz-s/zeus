@@ -17,6 +17,11 @@ from pathlib import Path
 
 import pytest
 
+# B2 (2026-05-28): SCHEMA_VERSION / SCHEMA_FORECASTS_VERSION constants removed from src/state/db.py.
+# Frozen values for fixture use: world DB user_version=43, forecasts DB user_version=7.
+_SCHEMA_VERSION = 43
+_SCHEMA_FORECASTS_VERSION = 7
+
 
 class TestWorldSchemaReadyCheck:
     """Unit tests for _startup_world_schema_ready_check() in src.main."""
@@ -90,10 +95,10 @@ class TestWorldSchemaReadyCheck:
 
         world_db = tmp_path / "zeus-world.db"
         with sqlite3.connect(world_db) as conn:
-            conn.execute(f"PRAGMA user_version = {db_module.SCHEMA_VERSION}")
+            conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
 
-        assert _startup_world_db_schema_ready_check() == str(db_module.SCHEMA_VERSION)
+        assert _startup_world_db_schema_ready_check() == str(_SCHEMA_VERSION)
 
     def test_stale_forecasts_sentinel_ignored_when_forecasts_db_schema_current(self, tmp_path, monkeypatch):
         """Legacy forecasts_schema_ready.json no longer gates live startup."""
@@ -168,10 +173,10 @@ class TestWorldSchemaReadyCheck:
 
         forecasts_db = tmp_path / "zeus-forecasts.db"
         with sqlite3.connect(forecasts_db) as conn:
-            conn.execute(f"PRAGMA user_version = {db_module.SCHEMA_FORECASTS_VERSION}")
+            conn.execute(f"PRAGMA user_version = {_SCHEMA_FORECASTS_VERSION}")
         monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", forecasts_db)
 
-        assert _startup_forecasts_schema_ready_check() == str(db_module.SCHEMA_FORECASTS_VERSION)
+        assert _startup_forecasts_schema_ready_check() == str(_SCHEMA_FORECASTS_VERSION)
 
     def test_function_exists_in_main(self):
         """Structural: _startup_world_schema_ready_check must exist in src/main.py."""
@@ -224,10 +229,10 @@ class TestWorldSchemaReadyCheck:
 
         world_db = tmp_path / "zeus-world.db"
         with sqlite3.connect(world_db) as conn:
-            conn.execute(f"PRAGMA user_version = {db_module.SCHEMA_VERSION - 1}")
+            conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION - 1}")
         monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
 
-        assert _startup_world_db_schema_prepare() == str(db_module.SCHEMA_VERSION)
+        assert _startup_world_db_schema_prepare() == str(_SCHEMA_VERSION)
         with sqlite3.connect(world_db) as conn:
             row = conn.execute("PRAGMA user_version").fetchone()
             tail = conn.execute(
@@ -235,14 +240,14 @@ class TestWorldSchemaReadyCheck:
             ).fetchone()
 
         assert row is not None
-        assert row[0] == db_module.SCHEMA_VERSION
+        assert row[0] == _SCHEMA_VERSION
         assert tail == (1,)
 
     def test_v2_schema_uses_savepoint_inside_caller_owned_transaction(self, tmp_path):
         """The v2 schema owner must not require a caller-owned transaction commit.
 
         Pre-v2 idempotent repairs can leave a supplied connection inside a
-        transaction. ``apply_v2_schema()`` must use a nested savepoint in that
+        transaction. ``apply_canonical_schema()`` must use a nested savepoint in that
         case, not force the caller to commit unrelated writes first.
         """
         import sqlite3
@@ -261,7 +266,7 @@ class TestWorldSchemaReadyCheck:
             )
             conn.execute("INSERT INTO pre_v2_dirty_helper DEFAULT VALUES")
 
-            v2_schema.apply_v2_schema(conn, forecast_tables=False)
+            v2_schema.apply_canonical_schema(conn, forecast_tables=False)
 
             assert conn.in_transaction is True
             assert conn.execute("SELECT COUNT(*) FROM pre_v2_dirty_helper").fetchone()[0] == 1
@@ -306,7 +311,7 @@ class TestWorldSchemaReadyCheck:
             conn.execute("BEGIN")
             assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
 
-            v2_schema.apply_v2_schema(conn, forecast_tables=False)
+            v2_schema.apply_canonical_schema(conn, forecast_tables=False)
 
             assert conn.in_transaction is True
             assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)

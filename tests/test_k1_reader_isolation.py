@@ -24,12 +24,12 @@ SCRIPTS = REPO / "scripts"
 # Tables that are exclusively forecast_class post-K1-split (not ghost-copied to world)
 # Per architecture/db_table_ownership.yaml: forecast_class entries with no world ghost.
 FORECAST_ONLY_TABLES = {
-    "calibration_pairs_v2",   # 91M rows in forecasts.db; ghost on world is legacy_archived
+    "calibration_pairs",   # 91M rows in forecasts.db; ghost on world is legacy_archived
     "source_run",
     "source_run_coverage",
     "readiness_state",
-    "market_events_v2",
-    "ensemble_snapshots_v2",
+    "market_events",
+    "ensemble_snapshots",
     "job_run",
 }
 
@@ -118,7 +118,7 @@ def test_log_forward_market_substrate_does_not_accept_positional_conn():
     """K-A regression: log_forward_market_substrate must be keyword-only (no positional conn).
 
     Callers that pass the cycle trades-rooted conn as a positional argument would
-    silently route INSERT INTO market_events_v2 to trades.db MAIN (0-row shell).
+    silently route INSERT INTO market_events to trades.db MAIN (0-row shell).
     Decision A2 fix: function opens its own forecasts conn; conn param removed.
     """
     import ast
@@ -173,7 +173,7 @@ def test_log_forward_market_substrate_opens_forecasts_path():
 
 def test_monitor_refresh_settlements_query_uses_forecasts_qualifier():
     """K-B regression (F48/F103): settlements query in _check_persistence_anomaly
-    must use forecasts.settlements_v2, not bare settlements or settlements_v2.
+    must use forecasts.settlement_outcomes, not bare settlements or settlement_outcomes.
 
     Bare name under cycle conn resolves to trades.db MAIN (0 rows) — silent dead-read.
     """
@@ -182,19 +182,19 @@ def test_monitor_refresh_settlements_query_uses_forecasts_qualifier():
     # Must NOT have bare FROM settlements (old name)
     assert "FROM settlements " not in src and "FROM settlements\n" not in src, (
         "monitor_refresh.py: bare 'FROM settlements' found — must use "
-        "'FROM forecasts.settlements_v2' (K-B fix F48/F103)."
+        "'FROM forecasts.settlement_outcomes' (K-B fix F48/F103)."
     )
-    # Must NOT have bare FROM settlements_v2 in SQL (comment/docstring mentions are OK)
+    # Must NOT have bare FROM settlement_outcomes in SQL (comment/docstring mentions are OK)
     import re as _re
-    # SQL context: FROM immediately before settlements_v2 (not qualified by schema prefix)
-    bare_sql = _re.search(r'FROM\s+settlements_v2\b', src)
+    # SQL context: FROM immediately before settlement_outcomes (not qualified by schema prefix)
+    bare_sql = _re.search(r'FROM\s+settlement_outcomes\b', src)
     assert bare_sql is None, (
-        "monitor_refresh.py: bare 'FROM settlements_v2' found — must use "
-        "'FROM forecasts.settlements_v2' (K-B fix F48/F103)."
+        "monitor_refresh.py: bare 'FROM settlement_outcomes' found — must use "
+        "'FROM forecasts.settlement_outcomes' (K-B fix F48/F103)."
     )
 
-    assert "forecasts.settlements_v2" in src, (
-        "monitor_refresh.py: must contain 'FROM forecasts.settlements_v2' "
+    assert "forecasts.settlement_outcomes" in src, (
+        "monitor_refresh.py: must contain 'FROM forecasts.settlement_outcomes' "
         "in _check_persistence_anomaly (K-B fix F48/F103)."
     )
 
@@ -240,7 +240,7 @@ WORLD_ONLY_TABLES_UNDER_K1 = {
     "temp_persistence",                  # F102 — world_class, ETL writes to zeus-world.db
     "validated_calibration_transfers",   # F41 — world_class
     "observation_instants_v2",           # F43 — 1.8M rows in world.db
-    "platt_models_v2",                   # F43 — 1.4K rows in world.db
+    "platt_models",                   # F43 — 1.4K rows in world.db
     "data_coverage",                     # F43 — world-class (cross-DB write target post-K1)
     "daily_observation_revisions",       # F43 — world-class
 }

@@ -51,7 +51,7 @@ _WARM_DAILY_MAX = [30.0 + 0.1 * i for i in range(51)]  # 00Z: warm, peak-capturi
 _COLD_DAILY_MAX = [15.0 + 0.1 * i for i in range(51)]  # 12Z: cold, post-peak
 
 _CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
+CREATE TABLE IF NOT EXISTS ensemble_snapshots (
     snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
@@ -68,7 +68,7 @@ CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
     spread REAL,
     is_bimodal INTEGER,
     model_version TEXT,
-    data_version TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
     training_allowed INTEGER NOT NULL DEFAULT 1,
     causality_status TEXT NOT NULL DEFAULT 'OK',
     boundary_ambiguous INTEGER NOT NULL DEFAULT 0,
@@ -92,9 +92,9 @@ CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
 """
 
 _INSERT_SQL = """
-INSERT INTO ensemble_snapshots_v2
+INSERT INTO ensemble_snapshots
     (city, target_date, temperature_metric, available_at, fetch_time,
-     members_json, data_version, causality_status, authority,
+     members_json, dataset_id, causality_status, authority,
      recorded_at, members_unit, issue_time, source_id,
      forecast_window_attribution_status, contributes_to_target_extrema)
 VALUES (?, ?, ?, ?, ?, ?, ?, 'OK', 'VERIFIED', ?, 'degC', ?, 'ecmwf_open_data', ?, ?)

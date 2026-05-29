@@ -3,8 +3,10 @@
 # Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 4: No _v<N>, _old, _new, _legacy siblings of canonical tables.
-xfail(strict=False): ensemble_snapshots_v2, calibration_pairs_v2, settlements_v2, etc.
-still exist today. PR3 B3 will canonicalize.
+
+STRICT after PR3 B3 (2026-05-28): all _v2 table siblings dropped except
+observation_instants_v2 which is retained intentionally (V1V2 inventory §C:
+parallel observation tier with distinct schema, not a migration pair).
 """
 import re
 import sqlite3
@@ -23,6 +25,13 @@ _SIBLING_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Intentional retentions — must have documented authority basis.
+# observation_instants_v2: V1V2 inventory §C — parallel observation tier,
+#   distinct schema (NOT a migration pair). Retained permanently.
+ALLOWED_TABLE_SIBLINGS = {
+    "observation_instants_v2",
+}
+
 
 def _get_all_tables(init_fn):
     conn = sqlite3.connect(":memory:")
@@ -37,23 +46,21 @@ def _get_all_tables(init_fn):
     return [r[0] for r in rows]
 
 
-@pytest.mark.xfail(strict=False, reason="awaits PR3 B3 sweep — _v2 table siblings still present")
 def test_world_schema_no_versioned_table_siblings():
     """init_schema must produce no _v<N>/_old/_new/_legacy table siblings."""
     from src.state.db import init_schema  # type: ignore[import]
     tables = _get_all_tables(init_schema)
-    bad = [t for t in tables if _SIBLING_RE.search(t)]
+    bad = [t for t in tables if _SIBLING_RE.search(t) and t not in ALLOWED_TABLE_SIBLINGS]
     assert bad == [], (
         f"World schema contains {len(bad)} versioned-sibling tables: {bad}"
     )
 
 
-@pytest.mark.xfail(strict=False, reason="awaits PR3 B3 sweep — _v2 table siblings still present")
 def test_forecasts_schema_no_versioned_table_siblings():
     """init_schema_forecasts must produce no _v<N>/_old/_new/_legacy siblings."""
     from src.state.db import init_schema_forecasts  # type: ignore[import]
     tables = _get_all_tables(init_schema_forecasts)
-    bad = [t for t in tables if _SIBLING_RE.search(t)]
+    bad = [t for t in tables if _SIBLING_RE.search(t) and t not in ALLOWED_TABLE_SIBLINGS]
     assert bad == [], (
         f"Forecasts schema contains {len(bad)} versioned-sibling tables: {bad}"
     )

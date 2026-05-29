@@ -21,7 +21,7 @@
   Falls back to freshest-by-available_at when issue_time is NULL. Filtered by
   data_version, metric, lead, optional season months, authority, contributor policy, and
   a training-cutoff (``settled_before``) to prevent leakage.
-- ``model_bias_ens_v2`` store: the ENS-product posterior-bias table with full lineage
+- ``model_bias_ens`` store: the ENS-product posterior-bias table with full lineage
   (live/prior source + data_version, month, unit, variances, paired delta, training cutoff).
   Distinct from the legacy deterministic ``model_bias`` (trained on the wrong product).
   Real-DB table ownership (world vs forecasts) is a review item; tests use a fixture.
@@ -35,7 +35,7 @@ import statistics
 from datetime import datetime, timezone
 
 MODEL_BIAS_ENS_V2_SCHEMA = """
-CREATE TABLE IF NOT EXISTS model_bias_ens_v2(
+CREATE TABLE IF NOT EXISTS model_bias_ens(
     city TEXT NOT NULL,
     season TEXT NOT NULL,
     month INTEGER NOT NULL DEFAULT 0,
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS model_bias_ens_v2(
 """
 
 # Canonical domain-identity extension columns added by migration
-# scripts/migrate_model_bias_ens_v2_canonical_fields.py (Zeus #64 / #68 / #69).
+# scripts/migrate_model_bias_ens_canonical_fields.py (Zeus #64 / #68 / #69).
 # These are NOT in the PRIMARY KEY (SQLite prohibits ALTER TABLE to add PK columns).
 # The producer (fit_full_transport_error_models.py) inserts them; legacy onboard_cities
 # rows carry NULL in these columns and are identifiable by error_model_family IS NULL.
@@ -113,7 +113,7 @@ def _to_c(value: float, unit: str | None) -> float:
 
 
 def init_ens_bias_schema(conn: sqlite3.Connection) -> None:
-    """Create model_bias_ens_v2 base table (idempotent) and apply all canonical
+    """Create model_bias_ens base table (idempotent) and apply all canonical
     extension columns (PRAGMA-guarded ALTER TABLE, also idempotent).
 
     Zeus #64 FT-ship F2 (2026-05-26): unified init so both init_schema (daemon
@@ -125,12 +125,12 @@ def init_ens_bias_schema(conn: sqlite3.Connection) -> None:
 
     # Apply canonical extension columns. SQLite has no ADD COLUMN IF NOT EXISTS,
     # so we use PRAGMA table_info to check before each ALTER.
-    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+    existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens)").fetchall()}
     for col, sql_type in _CANONICAL_EXTENSION_COLUMNS:
         if col in existing_cols:
             continue
         try:
-            conn.execute(f"ALTER TABLE model_bias_ens_v2 ADD COLUMN {col} {sql_type}")
+            conn.execute(f"ALTER TABLE model_bias_ens ADD COLUMN {col} {sql_type}")
             conn.commit()
         except sqlite3.OperationalError as exc:
             # Race-safe: another writer added the column between our PRAGMA check and ALTER.
@@ -151,7 +151,7 @@ _REQUIRED_PRODUCER_COLUMNS: tuple[str, ...] = (
 
 
 def assert_model_bias_schema_ready(conn: sqlite3.Connection) -> None:
-    """Fail CLOSED if model_bias_ens_v2 lacks any canonical producer column (SD5 / Blocker G).
+    """Fail CLOSED if model_bias_ens lacks any canonical producer column (SD5 / Blocker G).
 
     write_bias_model only stamps gate_set_hash / coverage_months / scale fields WHEN the
     columns exist (PRAGMA-guarded, for backward compat). That is correct for reads but
@@ -159,16 +159,16 @@ def assert_model_bias_schema_ready(conn: sqlite3.Connection) -> None:
     with NULL domain identity and 'succeed'. This preflight makes the producer refuse to run
     until init_ens_bias_schema / the canonical migration has been applied.
     """
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens)").fetchall()}
     if not existing:
         raise RuntimeError(
-            "assert_model_bias_schema_ready: model_bias_ens_v2 does not exist — "
+            "assert_model_bias_schema_ready: model_bias_ens does not exist — "
             "run init_ens_bias_schema(conn) before fitting."
         )
     missing = [c for c in _REQUIRED_PRODUCER_COLUMNS if c not in existing]
     if missing:
         raise RuntimeError(
-            "assert_model_bias_schema_ready: model_bias_ens_v2 is missing required "
+            "assert_model_bias_schema_ready: model_bias_ens is missing required "
             f"canonical columns {missing}; producer refuses to run (would write rows "
             "without domain identity). Apply init_ens_bias_schema / the canonical migration."
         )
@@ -185,7 +185,7 @@ def build_pair_batch_manifest(
 ) -> dict:
     """Immutable, content-addressed manifest of ONE calibration-pair rebuild batch (SD4 / Blocker F).
 
-    ``consumed_rows`` are the model_bias_ens_v2 STAGING rows the rebuild drew p_raw from — each a
+    ``consumed_rows`` are the model_bias_ens STAGING rows the rebuild drew p_raw from — each a
     mapping with city, season, metric, live_data_version, fit_signature_hash, gate_set_hash. The
     manifest records the error-model DOMAIN identity so a downstream Platt/identity fit can verify
     its pairs belong to the intended gate set and were generated from the expected sources (the
@@ -278,7 +278,7 @@ def load_bucket_residuals(
     anti-leakage seam — NOT a settlement-known-time cutoff. For rigorous historical
     rebuilds, prefer a settled_at/fact-known-time cutoff once that column is available.
     """
-    where = ["e.city = ?", "e.data_version = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
+    where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
     params: list[object] = [city, data_version, metric, lead_max]
     if require_verified:
         where.append("e.authority = 'VERIFIED'")
@@ -303,8 +303,8 @@ def load_bucket_residuals(
         f"""
         SELECT e.target_date AS td, e.members_json AS mj, e.members_unit AS mu,
                e.available_at AS av, e.issue_time AS it, s.settlement_value AS sv
-        FROM ensemble_snapshots_v2 e
-        JOIN settlements_v2 s
+        FROM ensemble_snapshots e
+        JOIN settlement_outcomes s
           ON s.city = e.city AND s.target_date = e.target_date
          AND s.temperature_metric = e.temperature_metric
         WHERE {" AND ".join(where)}
@@ -407,7 +407,7 @@ def write_bias_model(
     gate_set_hash: str | None = None,
     coverage_months: str | None = None,
 ) -> None:
-    """Persist one bias-model row to model_bias_ens_v2.
+    """Persist one bias-model row to model_bias_ens.
 
     The canonical extension fields (bias_c, residual_sd_c, …) are optional;
     supplying them requires that the canonical-fields migration has been applied
@@ -417,7 +417,7 @@ def write_bias_model(
     The writer does NOT call conn.commit() — callers control transaction scope.
     """
     # Determine which columns are available in this DB (idempotent extension support).
-    _existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+    _existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens)").fetchall()}
     _has_canonical = "error_model_family" in _existing
 
     base_cols = (
@@ -471,14 +471,14 @@ def write_bias_model(
             ext_vals.append(coverage_months)
         placeholders = ",".join(["?"] * (len(base_vals) + len(ext_vals)))
         conn.execute(
-            f"INSERT OR REPLACE INTO model_bias_ens_v2 ({base_cols}{ext_cols}) "
+            f"INSERT OR REPLACE INTO model_bias_ens ({base_cols}{ext_cols}) "
             f"VALUES ({placeholders})",
             base_vals + ext_vals,
         )
     else:
         placeholders = ",".join(["?"] * len(base_vals))
         conn.execute(
-            f"INSERT OR REPLACE INTO model_bias_ens_v2 ({base_cols}) "
+            f"INSERT OR REPLACE INTO model_bias_ens ({base_cols}) "
             f"VALUES ({placeholders})",
             base_vals,
         )
@@ -540,7 +540,7 @@ def read_bias_model(
         )
 
     base_sql = (
-        "SELECT * FROM model_bias_ens_v2 WHERE city=? AND season=? AND metric=? "
+        "SELECT * FROM model_bias_ens WHERE city=? AND season=? AND metric=? "
         "AND live_data_version=? AND month=?"
     )
     base_params: tuple = (city, season, metric, live_data_version, (0 if month is None else int(month)))
@@ -548,7 +548,7 @@ def read_bias_model(
     if error_model_family is not None:
         # Check canonical columns exist before adding the filter (defensive for DBs
         # that haven't been migrated yet — treats them as having no matching VERIFIED row).
-        existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens_v2)").fetchall()}
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens)").fetchall()}
         if "error_model_family" not in existing or "authority" not in existing:
             # Schema predates F2 migration — no VERIFIED rows possible.
             return None
@@ -639,7 +639,7 @@ def _forecast_means(
     Uses the same cycle preference as load_bucket_residuals: HIGH → 0Z cycle,
     LOW → 12Z cycle. Falls back to freshest-by-available_at when issue_time is NULL.
     """
-    where = ["e.city = ?", "e.data_version = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
+    where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
     params: list[object] = [city, data_version, metric, lead_max]
     if require_verified:
         where.append("e.authority = 'VERIFIED'")
@@ -651,7 +651,7 @@ def _forecast_means(
     rows = conn.execute(
         f"SELECT e.target_date AS td, e.members_json AS mj, e.members_unit AS mu, "
         f"e.available_at AS av, e.issue_time AS it "
-        f"FROM ensemble_snapshots_v2 e WHERE {' AND '.join(where)} "
+        f"FROM ensemble_snapshots e WHERE {' AND '.join(where)} "
         f"ORDER BY e.available_at",
         params,
     ).fetchall()

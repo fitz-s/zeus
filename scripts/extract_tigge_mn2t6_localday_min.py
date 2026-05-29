@@ -308,7 +308,7 @@ def build_low_snapshot_json(
     # Old rule: any(boundary_ambiguous) quarantined the whole 51-member snapshot when
     # even 1 member fired — probabilistically near-certain to trigger.
     # New rule: majority threshold (≥26/51 ≈ 51%) before quarantine.
-    # Empirical basis: ensemble_snapshots_v2 last-7-days shows ambiguous_member_count
+    # Empirical basis: ensemble_snapshots last-7-days shows ambiguous_member_count
     # is continuously distributed 0-51; 26 (51% of 51-member ensemble) is the v1
     # default. Operator-tunable via AMBIGUITY_MAJORITY_THRESHOLD env var.
     # SYNTHESIS.md Addendum 2 §5 + §9.

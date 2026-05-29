@@ -199,8 +199,8 @@ def test_obs_v2_main_writes_manifest_and_fails_on_failed_windows(
     tmp_path: Path,
 ) -> None:
     module = _load_script(
-        REPO_ROOT / "scripts" / "backfill_obs_v2.py",
-        "test_backfill_obs_v2_guardrails",
+        REPO_ROOT / "scripts" / "backfill_obs.py",
+        "test_backfill_obs_guardrails",
     )
 
     def fake_backfill(*_args, **_kwargs):
@@ -219,7 +219,7 @@ def test_obs_v2_main_writes_manifest_and_fails_on_failed_windows(
 
     monkeypatch.setattr(module, "_backfill_wu_city", fake_backfill)
     monkeypatch.setattr(
-        "src.state.schema.v2_schema.apply_v2_schema",
+        "src.state.schema.v2_schema.apply_canonical_schema",
         lambda _conn: None,
     )
     manifest = tmp_path / "obs_v2_manifest.json"
@@ -245,7 +245,7 @@ def test_obs_v2_main_writes_manifest_and_fails_on_failed_windows(
 
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     assert exit_code == 1
-    assert payload["script_name"] == "backfill_obs_v2.py"
+    assert payload["script_name"] == "backfill_obs.py"
     assert payload["completeness"]["passed"] is False
     assert payload["counters"]["windows_failed"] == 1
     assert payload["completeness"]["hard_blocker_reasons"] == ["failed_windows"]
@@ -256,8 +256,8 @@ def test_obs_v2_failed_windows_are_hard_blockers_above_threshold(
     tmp_path: Path,
 ) -> None:
     module = _load_script(
-        REPO_ROOT / "scripts" / "backfill_obs_v2.py",
-        "test_backfill_obs_v2_failed_window_hard_blocker",
+        REPO_ROOT / "scripts" / "backfill_obs.py",
+        "test_backfill_obs_failed_window_hard_blocker",
     )
 
     def fake_backfill(*_args, **_kwargs):
@@ -276,7 +276,7 @@ def test_obs_v2_failed_windows_are_hard_blockers_above_threshold(
 
     monkeypatch.setattr(module, "_backfill_wu_city", fake_backfill)
     monkeypatch.setattr(
-        "src.state.schema.v2_schema.apply_v2_schema",
+        "src.state.schema.v2_schema.apply_canonical_schema",
         lambda _conn: None,
     )
     manifest = tmp_path / "obs_v2_threshold_manifest.json"
@@ -311,8 +311,8 @@ def test_obs_v2_empty_windows_are_hard_blockers(
     tmp_path: Path,
 ) -> None:
     module = _load_script(
-        REPO_ROOT / "scripts" / "backfill_obs_v2.py",
-        "test_backfill_obs_v2_empty_window_hard_blocker",
+        REPO_ROOT / "scripts" / "backfill_obs.py",
+        "test_backfill_obs_empty_window_hard_blocker",
     )
 
     def fake_backfill(*_args, **_kwargs):
@@ -331,7 +331,7 @@ def test_obs_v2_empty_windows_are_hard_blockers(
 
     monkeypatch.setattr(module, "_backfill_wu_city", fake_backfill)
     monkeypatch.setattr(
-        "src.state.schema.v2_schema.apply_v2_schema",
+        "src.state.schema.v2_schema.apply_canonical_schema",
         lambda _conn: None,
     )
     manifest = tmp_path / "obs_v2_empty_window_manifest.json"
@@ -365,8 +365,8 @@ def test_obs_v2_dry_run_counts_row_build_errors_as_failures(
     tmp_path: Path,
 ) -> None:
     module = _load_script(
-        REPO_ROOT / "scripts" / "backfill_obs_v2.py",
-        "test_backfill_obs_v2_row_build_errors",
+        REPO_ROOT / "scripts" / "backfill_obs.py",
+        "test_backfill_obs_row_build_errors",
     )
 
     monkeypatch.setattr(module, "_retry_schedule", lambda: [])
@@ -406,8 +406,8 @@ def test_obs_v2_main_fails_when_requested_city_is_unsupported(
     tmp_path: Path,
 ) -> None:
     module = _load_script(
-        REPO_ROOT / "scripts" / "backfill_obs_v2.py",
-        "test_backfill_obs_v2_unsupported_city",
+        REPO_ROOT / "scripts" / "backfill_obs.py",
+        "test_backfill_obs_unsupported_city",
     )
     manifest = tmp_path / "obs_v2_unsupported_manifest.json"
 

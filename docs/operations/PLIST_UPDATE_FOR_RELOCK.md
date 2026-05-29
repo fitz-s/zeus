@@ -19,7 +19,7 @@
 | `launchctl getenv ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` | `true` (launchd user-domain leak from prior `launchctl setenv`) | **MUST `launchctl unsetenv` before loading any plist** — see §1.5 + §6 |
 | `ZEUS_ENTRY_FORECAST_READINESS_WRITER` in plist | `1` ✅ | (no change) |
 | `entry_forecast.source_id` | `ecmwf_open_data` ✅ | (no change) |
-| `entry_forecast.source_transport` | `ensemble_snapshots_v2_db_reader` ✅ | (no change) |
+| `entry_forecast.source_transport` | `ensemble_snapshots_db_reader` ✅ | (no change) |
 | ECMWF/TIGGE physical-equivalence diagnostic | passes locally ✅ (yaml `status: BINDING_2026_05_10`) | (no change) |
 | `launchctl list \| grep zeus` | empty (no daemons loaded) | load order: riskguard → data-ingest → live-trading → heartbeat-sensor (skip calibration-transfer-eval) |
 
@@ -93,7 +93,7 @@ The writer flag in §1 is necessary but not sufficient. The reader path it activ
    ```sh
    python -m json.tool state/entry_forecast_promotion_evidence.json
    ```
-3. `ensemble_snapshots_v2` must contain entries-eligible rows for each (city, target_local_date, source_id=ecmwf_open_data, cycle, horizon_profile) the daemon will price for. **Cross-domain serving (ecmwf_open_data) is now authorized via the legacy static mapping per §1.5.1 supersession** — calibration transfer flag-OFF + `live_promotion_approved=True` (Fix G, commit `4584c150`) routes ECMWF Opendata → TIGGE Platt → LIVE_ELIGIBLE. `validated_calibration_transfers` rows are the Phase B upgrade path, not a current launch precondition.
+3. `ensemble_snapshots` must contain entries-eligible rows for each (city, target_local_date, source_id=ecmwf_open_data, cycle, horizon_profile) the daemon will price for. **Cross-domain serving (ecmwf_open_data) is now authorized via the legacy static mapping per §1.5.1 supersession** — calibration transfer flag-OFF + `live_promotion_approved=True` (Fix G, commit `4584c150`) routes ECMWF Opendata → TIGGE Platt → LIVE_ELIGIBLE. `validated_calibration_transfers` rows are the Phase B upgrade path, not a current launch precondition.
 
 §3.1 and §3.2 are now both ✅ verified. The writer flag may stay ON (`1`) per §1.
 

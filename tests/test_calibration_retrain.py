@@ -61,10 +61,10 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def _create_platt_models_v2(conn: sqlite3.Connection) -> None:
+def _create_platt_models(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
-        CREATE TABLE platt_models_v2 (
+        CREATE TABLE platt_models (
           model_key TEXT PRIMARY KEY,
           temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high','low')),
           cluster TEXT NOT NULL,
@@ -95,7 +95,7 @@ def _create_platt_models_v2(conn: sqlite3.Connection) -> None:
 def _seed_active_platt_model(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
-        INSERT INTO platt_models_v2 (
+        INSERT INTO platt_models (
           model_key, temperature_metric, cluster, season, data_version,
           input_space, param_A, param_B, param_C, bootstrap_params_json,
           n_samples, brier_insample, fitted_at, is_active, authority,
@@ -343,7 +343,7 @@ def test_frozen_replay_pass_promotes_new_version(tmp_path):
 def test_frozen_replay_pass_replaces_existing_live_platt_row(tmp_path):
     artifact = _decision_artifact(tmp_path)
     conn = _conn()
-    _create_platt_models_v2(conn)
+    _create_platt_models(conn)
     _seed_active_platt_model(conn)
     _insert_trade(conn, "CONFIRMED", 1)
 
@@ -362,7 +362,7 @@ def test_frozen_replay_pass_replaces_existing_live_platt_row(tmp_path):
     live_rows = conn.execute(
         """
         SELECT param_A, param_B, param_C, n_samples, authority
-          FROM platt_models_v2
+          FROM platt_models
          WHERE model_key = ?
         """,
         (TEST_MODEL_KEY,),

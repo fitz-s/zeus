@@ -3,7 +3,7 @@
 # Authority basis: backtest_v2_port_2026_05_07.md §D2+D3
 #
 # Dynamic SQL safety (PR #87 Copilot reply): all f-string SQL in this module
-# interpolates only module-level table-name constants (sv2_table, cp_v2_table,
+# interpolates only module-level table-name constants (sv2_table, cp_table,
 # etc.) resolved from the ReplayContext dataclass, which are themselves derived
 # from compile-time string literals — never from user-controlled input.
 # check_dynamic_sql.py baseline has been updated to include this file.
@@ -11,13 +11,13 @@
 
 Public entry: run_selection_coverage()
 
-Per (city, target_date, snapshot) joining calibration_pairs_v2 ⨝ settlements_v2:
-  1. Load p_raw from ensemble_snapshots_v2, calibrate via calibrate_and_normalize.
+Per (city, target_date, snapshot) joining calibration_pairs ⨝ settlement_outcomes:
+  1. Load p_raw from ensemble_snapshots, calibrate via calibrate_and_normalize.
   2. Construct p_market per --p-market flag.
   3. Build MarketAnalysis with MODEL_ONLY_POSTERIOR_MODE.
   4. Call scan_full_hypothesis_family (LIVE FDR path — NOT find_edges + fdr_filter).
   5. Call apply_familywise_fdr.
-  6. Compare picked bins to settlements_v2.winning_bin. Emit hit ∈ {1, 0, NULL}.
+  6. Compare picked bins to settlement_outcomes.winning_bin. Emit hit ∈ {1, 0, NULL}.
 
 Writes ONLY to zeus_backtest.db. Does NOT write to world.db.
 
@@ -262,16 +262,16 @@ def _score_one_snapshot(
         base_result["missing_reason"] = "empty_p_raw"
         return base_result
 
-    if not ctx._calibration_pairs_v2_table:
+    if not ctx._calibration_pairs_table:
         raise ReplayPreflightError(
-            "selection_coverage requires forecasts calibration_pairs_v2 authority table."
+            "selection_coverage requires forecasts calibration_pairs authority table."
         )
 
     # -- Load calibration pair labels for bin construction
     cp_rows = ctx.conn.execute(
         f"""
         SELECT DISTINCT range_label
-        FROM {ctx._calibration_pairs_v2_table}
+        FROM {ctx._calibration_pairs_table}
         WHERE city = ?
           AND target_date = ?
           AND temperature_metric = ?
@@ -487,7 +487,7 @@ def run_selection_coverage(
     """Run selection-coverage replay: score live FDR bin picks vs settled outcomes.
 
     Reads from forecasts DB authority tables
-    (calibration_pairs_v2, settlements_v2, ensemble_snapshots_v2).
+    (calibration_pairs, settlement_outcomes, ensemble_snapshots).
     Writes ONLY to zeus_backtest.db. Does NOT write to world.db.
 
     Args:
@@ -504,19 +504,19 @@ def run_selection_coverage(
     conn.row_factory = sqlite3.Row
     ctx = ReplayContext(conn, allow_snapshot_only_reference=True)
 
-    cp_v2_table = ctx._calibration_pairs_v2_table
-    sv2_table = ctx._settlements_v2_table
-    if not cp_v2_table or not sv2_table:
+    cp_table = ctx._calibration_pairs_table
+    sv2_table = ctx._settlement_outcomes_table
+    if not cp_table or not sv2_table:
         conn.close()
         raise ReplayPreflightError(
-            "selection_coverage requires forecasts calibration_pairs_v2 and "
-            "settlements_v2 authority tables."
+            "selection_coverage requires forecasts calibration_pairs and "
+            "settlement_outcomes authority tables."
         )
 
-    # Check whether settlements_v2 has a snapshot_id column.
+    # Check whether settlement_outcomes has a snapshot_id column.
     # Use PRAGMA <schema>.table_info(<table>) so the query runs against the
     # correct attached schema (world.*) rather than main — the bare form
-    # PRAGMA table_info(settlements_v2) silently returns 0 rows when the table
+    # PRAGMA table_info(settlement_outcomes) silently returns 0 rows when the table
     # lives under the attached "world" schema (PR #87 Copilot fix).
     sv2_cols = set()
     try:
@@ -533,7 +533,7 @@ def run_selection_coverage(
 
     snap_id_sel = ", snapshot_id" if has_snapshot_id_col else ""
 
-    # Load settlements_v2
+    # Load settlement_outcomes
     settlement_rows = conn.execute(
         f"""
         SELECT city, target_date, settlement_value, winning_bin{snap_id_sel}
@@ -547,7 +547,7 @@ def run_selection_coverage(
         (start_date, end_date, temperature_metric),
     ).fetchall()
 
-    # Load all calibration_pairs_v2 rows for climatology (no-future-leak enforced per snapshot).
+    # Load all calibration_pairs rows for climatology (no-future-leak enforced per snapshot).
     # Filter by temperature_metric to avoid mixing high/low rows for the same city/date
     # (PR #87 Codex P2: prior query loaded all metrics, producing wrong climatology p-market).
     clim_rows: list[dict] = []
@@ -555,7 +555,7 @@ def run_selection_coverage(
         raw_clim = conn.execute(
             f"""
             SELECT city, target_date, range_label, outcome
-            FROM {cp_v2_table}
+            FROM {cp_table}
             WHERE temperature_metric = ?
             ORDER BY target_date, city, range_label
             """,
@@ -603,7 +603,7 @@ def run_selection_coverage(
         target_date = str(row["target_date"])
         winning_bin = str(row["winning_bin"] or "")
 
-        # Resolve snapshot_id: use settlements_v2 column if present, else latest snapshot
+        # Resolve snapshot_id: use settlement_outcomes column if present, else latest snapshot
         snap_id = None
         if has_snapshot_id_col:
             try:
@@ -669,7 +669,7 @@ def run_selection_coverage(
             settlement_value=row["settlement_value"],
             settlement_unit=city.settlement_unit,
             derived_wu_outcome=None if result["hit"] is None else bool(result["hit"]),
-            truth_source="settlements_v2.winning_bin",
+            truth_source="settlement_outcomes.winning_bin",
             divergence_status=result["missing_reason"] or "scored",
             evidence={
                 "picked_labels": result["picked_labels"],

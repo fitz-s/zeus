@@ -98,7 +98,7 @@ def _ensure_snapshot(
     bid_size: str = "100",
     raw_orderbook_hash: str = "c" * 64,
 ) -> str:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     assert conn is not None
@@ -126,7 +126,7 @@ def _ensure_snapshot(
         )
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-test",
             event_id="event-test",

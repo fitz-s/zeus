@@ -34,7 +34,7 @@ def _coverage_kwargs(**overrides: object) -> dict[str, object]:
         "coverage_id": "coverage-1",
         "source_run_id": "src-run-20260503-00z-high",
         "source_id": "ecmwf_open_data",
-        "source_transport": "ensemble_snapshots_v2_db_reader",
+        "source_transport": "ensemble_snapshots_db_reader",
         "release_calendar_key": "ecmwf_open_data_mx2t6_high:00z-full",
         "track": "mx2t6_high_full_horizon",
         "city_id": "LONDON",
@@ -95,7 +95,7 @@ def test_source_run_coverage_repo_round_trips_future_scope() -> None:
     row = get_source_run_coverage(conn, "coverage-1")
     assert row is not None
     assert row["target_local_date"] == "2026-05-08"
-    assert row["source_transport"] == "ensemble_snapshots_v2_db_reader"
+    assert row["source_transport"] == "ensemble_snapshots_db_reader"
     assert json.loads(row["expected_steps_json"]) == [126, 132, 138, 144]
     assert json.loads(row["snapshot_ids_json"]) == [101]
 
@@ -138,7 +138,7 @@ def test_latest_source_run_coverage_filters_executable_identity() -> None:
         target_local_date=date(2026, 5, 8),
         temperature_metric="high",
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         data_version="ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
         track="mx2t6_high_full_horizon",
         release_calendar_key="ecmwf_open_data_mx2t6_high:00z-full",

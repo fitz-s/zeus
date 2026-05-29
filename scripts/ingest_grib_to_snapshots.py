@@ -7,7 +7,7 @@
 #   the per-file loop). Diagnostic; not a fix. Expected to pinpoint the
 #   wedge on the next ingest cycle.
 # Lifecycle: created=2026-03-26; last_reviewed=2026-05-03; last_reused=2026-05-03
-# Purpose: Audited GRIB→ensemble_snapshots_v2 ingestor (Phase 4B / task #53);
+# Purpose: Audited GRIB→ensemble_snapshots ingestor (Phase 4B / task #53);
 #          applies INV-14 identity spine and Law 5 causality gate before INSERT.
 # Reuse: Requires extracted local-calendar-day JSON files under FIFTY_ONE_ROOT
 #        for the chosen --track. Contract enforcement via
@@ -15,11 +15,11 @@
 #        Post-audit 2026-04-24 (M1 closure): causality is NOT defaulted — any
 #        pre-Phase-5B payload without causality fails with MISSING_CAUSALITY_FIELD.
 #        Test contract: tests/test_ingest_grib_law5_antibody.py.
-"""Audited GRIB-to-ensemble_snapshots_v2 ingestor (Phase 4B, task #53).
+"""Audited GRIB-to-ensemble_snapshots ingestor (Phase 4B, task #53).
 
 Reads pre-extracted local-calendar-day JSON files produced by
   51 source data/scripts/extract_tigge_mx2t6_localday_max.py
-and writes canonical rows to ensemble_snapshots_v2.
+and writes canonical rows to ensemble_snapshots.
 
 Phase 4B: high track only (mx2t6_local_calendar_day_max_v1).
 Phase 5 will reuse this pipeline with --track mn2t6_low.
@@ -68,9 +68,9 @@ from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
 from src.runtime.timeout_guard import run_with_timeout
 from src.state.canonical_write import commit_then_export
-from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection  # K1-batch2 fix 2026-05-17: ensemble_snapshots_v2 + source_run are forecast_class
+from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection  # K1-batch2 fix 2026-05-17: ensemble_snapshots + source_run are forecast_class
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 logger = logging.getLogger(__name__)
@@ -169,7 +169,7 @@ def _provenance_json(
             "settlement_unit",
             "settlement_rounding_policy",
             "bin_grid_id",
-            "bin_schema_version",
+            "bin_schema_id",
             "forecast_window_start_utc",
             "forecast_window_end_utc",
             "forecast_window_start_local",
@@ -386,7 +386,7 @@ def _contract_evidence_fields(
             "settlement_unit": None,
             "settlement_rounding_policy": None,
             "bin_grid_id": None,
-            "bin_schema_version": None,
+            "bin_schema_id": None,
             "forecast_window_start_utc": None,
             "forecast_window_end_utc": None,
             "forecast_window_start_local": None,
@@ -412,7 +412,7 @@ def _contract_evidence_fields(
         "settlement_unit": city.settlement_unit,
         "settlement_rounding_policy": sem.rounding_rule,
         "bin_grid_id": grid.label,
-        "bin_schema_version": "canonical_bin_grid_v1",
+        "bin_schema_id": "canonical_bin_grid_v1",
         "forecast_window_start_utc": window_fields.get("forecast_window_start_utc"),
         "forecast_window_end_utc": window_fields.get("forecast_window_end_utc"),
         "forecast_window_start_local": window_fields.get("forecast_window_start_local"),
@@ -441,7 +441,7 @@ def _contract_evidence_fields(
             settlement_unit=city.settlement_unit,  # type: ignore[arg-type]
             settlement_rounding_policy=sem.rounding_rule,
             bin_grid_id=grid.label,
-            bin_schema_version="canonical_bin_grid_v1",
+            bin_schema_id="canonical_bin_grid_v1",
         )
         evidence_payload = dict(payload)
         evidence_payload.update(window_fields)
@@ -488,7 +488,7 @@ def ingest_json_file(
     source_run_context: SourceRunContext | None = None,
     ingest_backend: str = "unknown",
 ) -> str:
-    """Ingest one extracted JSON file into ensemble_snapshots_v2. Returns status string.
+    """Ingest one extracted JSON file into ensemble_snapshots. Returns status string.
 
     ``ingest_backend`` (TIGGE spec v3 §3 Phase 0 #5 / critic v2 A1 BLOCKER) records
     the live transport that produced the row: ``'ecds'`` (post-cutover ECDS lanes),
@@ -572,9 +572,9 @@ def ingest_json_file(
         # latency on the post-promote 51 GB forecasts.db.
         _t_sel0 = time.monotonic()
         existing = conn.execute(
-            "SELECT manifest_hash, provenance_json FROM ensemble_snapshots_v2 "
+            "SELECT manifest_hash, provenance_json FROM ensemble_snapshots "
             "WHERE city=? AND target_date=? "
-            "AND temperature_metric=? AND issue_time=? AND data_version=?",
+            "AND temperature_metric=? AND issue_time=? AND dataset_id=?",
             (city, target_date, metric.temperature_metric, issue_time, data_version),
         ).fetchone()
         _t_sel_ms = (time.monotonic() - _t_sel0) * 1000
@@ -649,7 +649,7 @@ def ingest_json_file(
         lead_hours=lead_hours,
         members_json=json.dumps(members),
         model_version=model_version,
-        data_version=data_version,
+        dataset_id=data_version,
         source_id=source_run_context.source_id if source_run_context else None,
         source_transport=source_run_context.source_transport if source_run_context else None,
         source_run_id=source_run_context.source_run_id if source_run_context else None,
@@ -673,7 +673,7 @@ def ingest_json_file(
         if overwrite or drift_replace or force_replace_env:
             updated = conn.execute(
                 """
-                UPDATE ensemble_snapshots_v2
+                UPDATE ensemble_snapshots
                 SET physical_quantity = :physical_quantity,
                     observation_field = :observation_field,
                     valid_time = :valid_time,
@@ -704,7 +704,7 @@ def ingest_json_file(
                     settlement_unit = :settlement_unit,
                     settlement_rounding_policy = :settlement_rounding_policy,
                     bin_grid_id = :bin_grid_id,
-                    bin_schema_version = :bin_schema_version,
+                    bin_schema_id = :bin_schema_id,
                     forecast_window_start_utc = :forecast_window_start_utc,
                     forecast_window_end_utc = :forecast_window_end_utc,
                     forecast_window_start_local = :forecast_window_start_local,
@@ -717,7 +717,7 @@ def ingest_json_file(
                   AND target_date = :target_date
                   AND temperature_metric = :temperature_metric
                   AND issue_time = :issue_time
-                  AND data_version = :data_version
+                  AND dataset_id = :dataset_id
                 """,
                 row,
             ).rowcount
@@ -726,16 +726,16 @@ def ingest_json_file(
 
         conn.execute(
             f"""
-            INSERT OR IGNORE INTO ensemble_snapshots_v2
+            INSERT OR IGNORE INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              issue_time, valid_time, available_at, fetch_time, lead_hours,
-             members_json, model_version, data_version, source_id, source_transport,
+             members_json, model_version, dataset_id, source_id, source_transport,
              source_run_id, release_calendar_key, source_cycle_time,
              source_release_time, source_available_at, training_allowed, causality_status,
              boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json,
              members_unit, local_day_start_utc, step_horizon_hours, city_timezone,
              settlement_source_type, settlement_station_id, settlement_unit,
-             settlement_rounding_policy, bin_grid_id, bin_schema_version,
+             settlement_rounding_policy, bin_grid_id, bin_schema_id,
              forecast_window_start_utc, forecast_window_end_utc,
              forecast_window_start_local, forecast_window_end_local,
              forecast_window_local_day_overlap_hours, forecast_window_attribution_status,
@@ -743,13 +743,13 @@ def ingest_json_file(
             VALUES
             (:city, :target_date, :temperature_metric, :physical_quantity, :observation_field,
              :issue_time, :valid_time, :available_at, :fetch_time, :lead_hours,
-             :members_json, :model_version, :data_version, :source_id, :source_transport,
+             :members_json, :model_version, :dataset_id, :source_id, :source_transport,
              :source_run_id, :release_calendar_key, :source_cycle_time,
              :source_release_time, :source_available_at, :training_allowed, :causality_status,
              :boundary_ambiguous, :ambiguous_member_count, :manifest_hash, :provenance_json,
              :members_unit, :local_day_start_utc, :step_horizon_hours, :city_timezone,
              :settlement_source_type, :settlement_station_id, :settlement_unit,
-             :settlement_rounding_policy, :bin_grid_id, :bin_schema_version,
+             :settlement_rounding_policy, :bin_grid_id, :bin_schema_id,
              :forecast_window_start_utc, :forecast_window_end_utc,
              :forecast_window_start_local, :forecast_window_end_local,
              :forecast_window_local_day_overlap_hours, :forecast_window_attribution_status,
@@ -994,7 +994,7 @@ def main(argv: list[str] | None = None) -> int:
             init_schema(conn)
         else:
             conn = get_forecasts_connection(write_class="bulk")  # K1-batch2 fix 2026-05-17
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         summary = ingest_track(
             track=args.track,

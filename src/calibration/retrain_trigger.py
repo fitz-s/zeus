@@ -23,7 +23,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Literal
 
-from src.calibration.store import deactivate_model_v2, save_platt_model_v2
+from src.calibration.store import deactivate_model, save_platt_model
 from src.state.venue_command_repo import load_calibration_trade_facts
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 
@@ -405,8 +405,8 @@ def trigger_retrain(
     frozen_replay_runner: FrozenReplayRunner,
     root: Path | None = None,
     environ: Mapping[str, str] | None = None,
-    promote_writer: PromoteWriter = save_platt_model_v2,
-    deactivate_writer: DeactivateWriter | None = deactivate_model_v2,
+    promote_writer: PromoteWriter = save_platt_model,
+    deactivate_writer: DeactivateWriter | None = deactivate_model,
 ) -> RetrainResult:
     """Gate, replay-check, and promote a candidate calibration version.
 
@@ -476,7 +476,7 @@ def trigger_retrain(
             fitted_at=now,
             promoted_at=now,
         )
-        if deactivate_writer is not None and _table_exists(conn, "platt_models_v2"):
+        if deactivate_writer is not None and _table_exists(conn, "platt_models"):
             deactivate_writer(
                 conn=conn,
                 metric_identity=corpus_filter.metric_identity,
@@ -520,7 +520,7 @@ def trigger_retrain(
 #
 # K1 contract: pure SELECT, no INSERT/UPDATE/DELETE, no JSON persistence.
 # Sibling-coherent with CALIBRATION_HARDENING BATCH 1 canonical-read additions
-# (list_active_platt_models_v2 / list_active_platt_models_legacy in store.py).
+# (list_active_platt_models / list_active_platt_models_legacy in store.py).
 # Critic-harness 30th cycle should pay particular attention to this surface
 # since src/calibration/retrain_trigger.py is HIGH per src/calibration/AGENTS.md
 # L19 (operator-gated retrain promotion seam — live calibration promotion
@@ -577,7 +577,7 @@ def list_recent_retrain_versions(
         ).fetchall()
     except sqlite3.OperationalError:
         # Pre-first-retrain DB without calibration_params_versions table —
-        # mirrors store.py:list_active_platt_models_v2 graceful-empty posture.
+        # mirrors store.py:list_active_platt_models graceful-empty posture.
         return []
     out: list[dict[str, Any]] = []
     for row in rows:

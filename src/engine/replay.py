@@ -45,7 +45,7 @@ LEGACY_SHADOW_SIGNAL_TABLE = "shadow_signals"
 LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE = "legacy_shadow_signal_diagnostic"
 DIAGNOSTIC_REPLAY_REFERENCE_SOURCES = frozenset({
     LEGACY_SHADOW_SIGNAL_DIAGNOSTIC_SOURCE,
-    "ensemble_snapshots_v2.available_at",
+    "ensemble_snapshots.available_at",
     "forecasts_table_synthetic",
 })
 LEGACY_OUTCOME_FACT_DIAGNOSTIC_SOURCE = "outcome_fact_legacy_lifecycle_projection"
@@ -69,7 +69,7 @@ def _table_exists(conn, schema: str, table: str) -> bool:
 
 
 def _first_existing_table(conn, table: str) -> str:
-    # K1 (2026-05-11): forecast-class tables (ensemble_snapshots_v2, ...) live in
+    # K1 (2026-05-11): forecast-class tables (ensemble_snapshots, ...) live in
     # zeus-forecasts.db, ATTACHed as 'forecasts' by get_trade_connection_with_world().
     # Check forecasts first; fall back to world (legacy / monolithic-test layout),
     # then main (pure in-memory test schema with no ATTACH).
@@ -151,7 +151,7 @@ def _metric_filter_sql(columns: set[str], source: str, temperature_metric: str) 
     """Return metric predicate and whether this table can satisfy v2 identity."""
     if "temperature_metric" in columns:
         return " AND temperature_metric = ?", (temperature_metric,), True
-    if source == "ensemble_snapshots_v2":
+    if source == "ensemble_snapshots":
         return "", (), False
     return "", (), True
 
@@ -341,21 +341,26 @@ class ReplayContext:
         self._decision_ref_cache: dict[tuple[str, str, str], Optional[dict]] = {}
         self._snapshot_table_column_cache: dict[str, set[str]] = {}
         self._snapshot_v2_table = _first_existing_forecast_authority_table(
-            self.conn, "ensemble_snapshots_v2"
+            self.conn, "ensemble_snapshots"
         )
         if not self._snapshot_v2_table:
             raise RuntimeError(
-                "Replay topology error: ensemble_snapshots_v2 not found in "
+                "Replay topology error: ensemble_snapshots not found in "
                 "forecasts, world, or main schema (legacy ensemble_snapshots removed by v1.F20)."
             )
-        self._settlements_table = _first_existing_forecast_authority_table(
-            self.conn, "settlements"
+        # B3cont (2026-05-28): bare settlements removed from forecasts.db;
+        # world.db ghost copy may still exist for legacy replay. Use direct
+        # table-exists check (not forecast-class registry) since settlements
+        # is now legacy_archived.
+        self._settlements_table = (
+            "forecasts.settlements" if _table_exists(self.conn, "forecasts", "settlements")
+            else ("settlements" if _table_exists(self.conn, "", "settlements") else "")
         )
-        self._settlements_v2_table = _first_existing_forecast_authority_table(
-            self.conn, "settlements_v2"
+        self._settlement_outcomes_table = _first_existing_forecast_authority_table(
+            self.conn, "settlement_outcomes"
         )
-        self._calibration_pairs_v2_table = _first_existing_forecast_authority_table(
-            self.conn, "calibration_pairs_v2"
+        self._calibration_pairs_table = _first_existing_forecast_authority_table(
+            self.conn, "calibration_pairs"
         )
         # _sp is the schema prefix for world-class legacy replay tables. It must
         # reflect whether zeus-world.db is ATTACHed as 'world', not where
@@ -364,7 +369,7 @@ class ReplayContext:
             _table_exists(self.conn, "world", table)
             for table in (
                 "settlements",
-                "historical_forecasts_v2",
+                "historical_forecasts",
                 "forecasts",
                 "calibration_pairs",
                 "market_events",
@@ -393,15 +398,15 @@ class ReplayContext:
         base_columns = (
             "snapshot_id", "members_json", "p_raw_json", "lead_hours", "spread",
             "is_bimodal", "model_version", "issue_time", "valid_time",
-            "available_at", "fetch_time", "data_version",
+            "available_at", "fetch_time", "dataset_id AS data_version",
         )
         for table, source in (
-            (self._snapshot_v2_table, "ensemble_snapshots_v2"),
+            (self._snapshot_v2_table, "ensemble_snapshots"),
         ):
             if not table:
                 continue
             columns = self._columns_for(table)
-            if not set(base_columns).issubset(columns):
+            if not {c.split(" AS ")[0] for c in base_columns}.issubset(columns):
                 continue
             metric_sql, metric_params, metric_supported = _metric_filter_sql(
                 columns,
@@ -460,7 +465,7 @@ class ReplayContext:
     ):
         """Lightweight diagnostic reference lookup; full snapshot payload may not exist."""
         for table, source in (
-            (self._snapshot_v2_table, "ensemble_snapshots_v2"),
+            (self._snapshot_v2_table, "ensemble_snapshots"),
         ):
             if not table:
                 continue
@@ -505,7 +510,7 @@ class ReplayContext:
         """Load diagnostic historical forecast rows for a replay fallback.
 
         Phase 9C A1 (B093 half-2): conditional v2 read. When
-        historical_forecasts_v2 is populated, query it with `AND
+        historical_forecasts is populated, query it with `AND
         temperature_metric = ?`; else fall back to legacy `forecasts`
         (preserves zero-data Golden Window behavior — v2 is empty until
         user lifts the window + runs backfill).
@@ -527,7 +532,7 @@ class ReplayContext:
                 SELECT source, available_at AS forecast_basis_date,
                        available_at AS forecast_issue_time,
                        lead_days, forecast_value, temp_unit
-                FROM {self._sp}historical_forecasts_v2
+                FROM {self._sp}historical_forecasts
                 WHERE city = ?
                   AND target_date = ?
                   AND temperature_metric = ?
@@ -935,7 +940,7 @@ class ReplayContext:
             "snapshot_source": row["snapshot_source"],
             "authority_scope": (
                 "canonical_snapshot_v2"
-                if row["snapshot_source"] == "ensemble_snapshots_v2"
+                if row["snapshot_source"] == "ensemble_snapshots"
                 else BACKTEST_AUTHORITY_SCOPE
             ),
             "n_members": len(members),
@@ -958,10 +963,14 @@ class ReplayContext:
         temperature_metric: Literal["high", "low"] = "high",
     ) -> Optional[dict]:
         """Get settlement outcome for scoring."""
-        if not self._settlements_table:
+        # B3cont: canonical settlement data lives in forecasts.settlement_outcomes;
+        # bare `settlements` is legacy_archived (world ghost only). Prefer the
+        # canonical table, fall back to legacy for pre-B3 replay DBs.
+        table = self._settlement_outcomes_table or self._settlements_table
+        if not table:
             return None
         row = self.conn.execute(
-            f"SELECT settlement_value, winning_bin FROM {self._settlements_table} "
+            f"SELECT settlement_value, winning_bin FROM {table} "
             "WHERE city = ? AND target_date = ? AND temperature_metric = ? "
             "AND authority = 'VERIFIED'",
             (city_name, target_date, temperature_metric),
@@ -1734,7 +1743,7 @@ def _replay_one_settlement(
                     _entry_price_float,
                     fee_rate=_replay_fee_rate,
                 )
-            # PR 7 (W5): no ExecutableMarketSnapshotV2 in scope at this replay
+            # PR 7 (W5): no ExecutableMarketSnapshot in scope at this replay
             # call point — graceful degrade (effective_context=None, no haircut).
             # allow_missing_context=True required because get_mode() returns "live"
             # unconditionally; replay has no snapshot in scope at this call point.
@@ -2096,8 +2105,8 @@ def run_wu_settlement_sweep(
 ) -> ReplaySummary:
     """Run a WU settlement-value sweep into the derived backtest DB.
 
-    Reads from settlements_v2 (VERIFIED rows, HIGH+LOW) and calibration_pairs_v2.
-    settlements_v2 has 3,290 VERIFIED rows (HIGH+LOW combined); the v1 settlements
+    Reads from settlement_outcomes (VERIFIED rows, HIGH+LOW) and calibration_pairs.
+    settlement_outcomes has 3,290 VERIFIED rows (HIGH+LOW combined); the v1 settlements
     table has the deprecated corpus and is not read here.
     """
     run_id = str(uuid.uuid4())[:12]
@@ -2106,16 +2115,16 @@ def run_wu_settlement_sweep(
         conn,
         allow_snapshot_only_reference=allow_snapshot_only_reference,
     )
-    if not ctx._settlements_v2_table or not ctx._calibration_pairs_v2_table:
+    if not ctx._settlement_outcomes_table or not ctx._calibration_pairs_table:
         conn.close()
         raise ReplayPreflightError(
-            "wu_settlement_sweep requires forecasts settlements_v2 and "
-            "calibration_pairs_v2 authority tables."
+            "wu_settlement_sweep requires forecasts settlement_outcomes and "
+            "calibration_pairs authority tables."
         )
     rows = conn.execute(
         f"""
         SELECT city, target_date, settlement_value, winning_bin, temperature_metric
-        FROM {ctx._settlements_v2_table}
+        FROM {ctx._settlement_outcomes_table}
         WHERE target_date >= ? AND target_date <= ?
           AND authority = 'VERIFIED'
           AND settlement_value IS NOT NULL
@@ -2172,7 +2181,7 @@ def run_wu_settlement_sweep(
             SELECT range_label, p_raw, outcome AS stored_outcome, lead_days,
                    season, cluster, forecast_available_at, decision_group_id,
                    bias_corrected
-            FROM {ctx._calibration_pairs_v2_table}
+            FROM {ctx._calibration_pairs_table}
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = ?
@@ -2305,7 +2314,7 @@ def run_wu_settlement_sweep(
                 derived_wu_outcome=outcome,
                 truth_source="wu_settlement_value",
                 divergence_status="not_applicable",
-                decision_reference_source="calibration_pairs_v2.forecast_available_at",
+                decision_reference_source="calibration_pairs.forecast_available_at",
                 forecast_reference_id=forecast_reference_id,
                 evidence={
                     "p_raw": round(p_raw, 12),
@@ -2551,7 +2560,7 @@ def run_trade_history_audit(start_date: str, end_date: str) -> ReplaySummary:
         settlement = conn.execute(
             """
             SELECT settlement_value
-            FROM forecasts.settlements
+            FROM forecasts.settlement_outcomes
             WHERE city = ? AND target_date = ? AND temperature_metric = ?
               AND authority = 'VERIFIED'
             """,
@@ -2638,7 +2647,7 @@ def run_replay(
             Phase 8 (R-BP): threaded to `_replay_one_settlement`, which already
             accepts the kwarg (see L1107). Default 'high' preserves backward
             compat for every pre-P8 caller. Full B093 half-2 migration to
-            `historical_forecasts_v2` is P9 scope (requires v2 data).
+            `historical_forecasts` is P9 scope (requires v2 data).
 
     Returns:
         ReplaySummary with per-city breakdown and PnL

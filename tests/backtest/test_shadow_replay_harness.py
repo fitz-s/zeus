@@ -76,14 +76,14 @@ class TestLookaheadAntibody:
         fcst_path = tmp_path / "fcst_lookahead.db"
         fcst_conn = sqlite3.connect(str(fcst_path))
         fcst_conn.execute("""
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 snapshot_id TEXT, city TEXT, target_date TEXT,
                 temperature_metric TEXT, available_at TEXT, p_raw_json TEXT
             )
         """)
         available_at = "2025-12-01T12:00:00"
         fcst_conn.execute(
-            "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?)",
+            "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?)",
             ("snap1", "Paris", "2025-12-03", "high", available_at,
              json.dumps([0.1, 0.5, 0.4])),
         )
@@ -156,13 +156,13 @@ class TestDepthAntibody:
         fcst_path = tmp_path / "fcst_depth.db"
         fcst_conn = sqlite3.connect(str(fcst_path))
         fcst_conn.execute("""
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 snapshot_id TEXT, city TEXT, target_date TEXT,
                 temperature_metric TEXT, available_at TEXT, p_raw_json TEXT
             )
         """)
         fcst_conn.execute(
-            "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?)",
+            "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?)",
             ("snap1", "London", "2025-12-10", "high", "2025-12-01T12:00:00",
              json.dumps([0.1, 0.5, 0.4])),
         )
@@ -219,14 +219,14 @@ class TestCountSmoke:
         fcst_path = tmp_path / "fcst_smoke.db"
         fcst_conn = sqlite3.connect(str(fcst_path))
         fcst_conn.execute("""
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 snapshot_id TEXT, city TEXT, target_date TEXT,
                 temperature_metric TEXT, available_at TEXT, p_raw_json TEXT
             )
         """)
         for i in range(n_snapshots):
             fcst_conn.execute(
-                "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?)",
+                "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?)",
                 (
                     f"snap{i}",
                     "Berlin",

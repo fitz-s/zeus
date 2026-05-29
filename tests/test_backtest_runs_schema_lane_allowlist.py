@@ -200,7 +200,7 @@ def test_insert_selection_coverage_divergence_status_accepted(div_status: str):
             (run_id, lane, subject_id, subject_kind, truth_source, divergence_status,
              evidence_json, missing_reason_json, created_at)
         VALUES ('test-run-div', 'selection_coverage', ?, 'selection_coverage_snapshot',
-                'settlements_v2.winning_bin', ?, '{}', '[]', '2026-05-07T00:00:00Z')
+                'settlement_outcomes.winning_bin', ?, '{}', '[]', '2026-05-07T00:00:00Z')
         """,
         (f"subj|{div_status}", div_status),
     )
@@ -229,7 +229,7 @@ def test_unknown_divergence_status_rejected():
                 (run_id, lane, subject_id, subject_kind, truth_source, divergence_status,
                  evidence_json, missing_reason_json, created_at)
             VALUES ('bad-div-run', 'selection_coverage', 'subj|bad', 'selection_coverage_snapshot',
-                    'settlements_v2.winning_bin', '__unknown_divergence__',
+                    'settlement_outcomes.winning_bin', '__unknown_divergence__',
                     '{}', '[]', '2026-05-07T00:00:00Z')
             """
         )

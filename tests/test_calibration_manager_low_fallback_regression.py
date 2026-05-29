@@ -42,7 +42,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.db import init_schema
 from src.types.metric_identity import LOW_LOCALDAY_MIN
 
@@ -72,7 +72,7 @@ def _contract_domain(city: City, *, metric: str = "low") -> ContractOutcomeDomai
         settlement_unit=city.settlement_unit,  # type: ignore[arg-type]
         settlement_rounding_policy="wmo_half_up",
         bin_grid_id=f"{city.settlement_unit}_canonical_v1",
-        bin_schema_version="canonical_bin_grid_v1",
+        bin_schema_id="canonical_bin_grid_v1",
     )
 
 
@@ -86,9 +86,9 @@ def _save_low_v2_model(
     param_A: float = 1.0,
     n_samples: int = 80,
 ) -> None:
-    from src.calibration.store import save_platt_model_v2
+    from src.calibration.store import save_platt_model
 
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=LOW_LOCALDAY_MIN,
         cluster=cluster,
@@ -134,7 +134,7 @@ def test_get_calibrator_low_caller_with_v2_fallback_does_not_raise_unbound_level
     )
     fallback_cluster = other_clusters[0]
 
-    # Stub load_platt_model_v2: return a populated model only when queried
+    # Stub load_platt_model: return a populated model only when queried
     # for the fallback cluster. This forces the fallback loop to enter the
     # `if model_data is not None and model_data["n_samples"] >= level3:`
     # branch — which is where pre-fix code crashed.
@@ -157,7 +157,7 @@ def test_get_calibrator_low_caller_with_v2_fallback_does_not_raise_unbound_level
             }
         return None
 
-    monkeypatch.setattr(mgr_module, "load_platt_model_v2", fake_v2)
+    monkeypatch.setattr(mgr_module, "load_platt_model", fake_v2)
 
     # Pre-fix: this raises UnboundLocalError inside the fallback loop.
     # Post-fix: returns cleanly.
@@ -180,6 +180,7 @@ def test_get_calibrator_high_caller_unchanged_post_fix():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     # No raise; returns the natural empty-DB outcome.
@@ -198,7 +199,8 @@ def test_calibration_authority_result_marks_primary_exact_live_eligible():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
+    mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -232,7 +234,8 @@ def test_calibration_authority_result_blocks_pool_fallback_live_use():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
+    mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     fallback_cluster = next(c for c in calibration_clusters() if c != city.cluster)
@@ -260,7 +263,8 @@ def test_get_calibrator_blocks_low_pool_fallback_at_live_read_seam():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
+    mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     fallback_cluster = next(c for c in calibration_clusters() if c != city.cluster)
@@ -291,7 +295,8 @@ def test_get_calibrator_blocks_low_primary_below_live_n_eff_floor():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
+    mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -321,7 +326,8 @@ def test_calibration_authority_result_marks_low_primary_below_floor_shadow_only(
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
+    mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -353,7 +359,8 @@ def test_get_calibrator_does_not_rescue_modern_low_from_legacy_data_version():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
+    mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -383,7 +390,8 @@ def test_get_calibrator_prefers_tigge_low_contract_window_model_when_present():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
+    mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -422,7 +430,8 @@ def test_get_calibrator_prefers_opendata_low_contract_window_model_when_present(
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
+    mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
     city = _city()
     season = season_from_date("2026-01-15", lat=city.lat)
     _save_low_v2_model(
@@ -477,7 +486,7 @@ def test_calibration_authority_result_blocks_mismatched_primary_v2_domain(monkey
             "bootstrap_params": [],
         }
 
-    monkeypatch.setattr(mgr_module, "load_platt_model_v2", fake_v2)
+    monkeypatch.setattr(mgr_module, "load_platt_model", fake_v2)
 
     result = get_calibration_authority_result(
         conn,

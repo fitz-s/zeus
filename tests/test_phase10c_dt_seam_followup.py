@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-04-19; last_reviewed=2026-04-24; last_reused=2026-04-24
 # Purpose: Phase 10C "LOW-lane Tail + HKO Injection + DT#1 SAVEPOINT" antibodies (R-CQ..R-CX).
 # Reuse: Referenced by regression suite; R-CS-2 updated 2026-04-24 for C5
-#        (HIGH settlement routes through calibration_pairs_v2 post-fix;
+#        (HIGH settlement routes through calibration_pairs post-fix;
 #        test formerly locked in pre-C5 legacy-routing).
 # Authority basis: phase10c_contract.md v2
 
@@ -95,43 +95,13 @@ def _make_position_with_metric(temperature_metric="high"):
 
 
 def _make_calibration_db() -> sqlite3.Connection:
-    """In-memory DB with calibration_pairs + calibration_pairs_v2 tables."""
+    """In-memory DB with canonical calibration_pairs table (B3: v2 schema is canonical)."""
+    from src.state.db import init_schema
+    from src.state.schema.v2_schema import apply_canonical_schema
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE calibration_pairs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT, target_date TEXT, range_label TEXT,
-            p_raw REAL, outcome INTEGER, lead_days REAL,
-            season TEXT, cluster TEXT, forecast_available_at TEXT,
-            settlement_value REAL, decision_group_id TEXT,
-            bias_corrected INTEGER DEFAULT 0,
-            authority TEXT DEFAULT 'UNVERIFIED',
-            bin_source TEXT DEFAULT 'legacy'
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE calibration_pairs_v2 (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT, target_date TEXT,
-            temperature_metric TEXT, observation_field TEXT,
-            range_label TEXT, p_raw REAL, outcome INTEGER,
-            lead_days REAL, season TEXT, cluster TEXT,
-            forecast_available_at TEXT, settlement_value REAL,
-            decision_group_id TEXT, bias_corrected INTEGER DEFAULT 0,
-            authority TEXT DEFAULT 'VERIFIED',
-            bin_source TEXT DEFAULT 'canonical_v1',
-            data_version TEXT, training_allowed INTEGER DEFAULT 0,
-            causality_status TEXT DEFAULT 'OK',
-            snapshot_id INTEGER
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE settlements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT, target_date TEXT, settlement_value REAL
-        )
-    """)
+    init_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -231,7 +201,7 @@ class TestRCRPersistenceAnomalyGate:
 
 
 # ---------------------------------------------------------------------------
-# R-CS — S3: harvester LOW→calibration_pairs_v2 routing
+# R-CS — S3: harvester LOW→calibration_pairs routing
 # ---------------------------------------------------------------------------
 
 
@@ -251,7 +221,7 @@ class TestRCSHarvesterLowRouting:
             lead_days=2.0,
             forecast_issue_time="2026-03-30T00:00:00Z",
             forecast_available_at="2026-03-30T12:00:00Z",
-            source_model_version=(
+            forecast_model_id=(
                 "tigge_mn2t6_local_calendar_day_min_v1"
                 if temperature_metric == "low"
                 else "tigge_mx2t6_local_calendar_day_max_v1"
@@ -261,7 +231,7 @@ class TestRCSHarvesterLowRouting:
         )
 
     def test_r_cs_1_low_settlement_writes_to_v2(self):
-        """R-CS.1: LOW settlement → calibration_pairs_v2 row with metric=low."""
+        """R-CS.1: LOW settlement → calibration_pairs row with metric=low."""
         conn = _make_calibration_db()
         city = _make_wu_city()
 
@@ -279,20 +249,20 @@ class TestRCSHarvesterLowRouting:
         count = self._call_harvest_settlement(conn, city, "low")
         assert count > 0, "R-CS.1: harvest_settlement should create at least 1 pair"
 
-        rows_v2 = conn.execute("SELECT * FROM calibration_pairs_v2").fetchall()
-        assert len(rows_v2) > 0, "R-CS.1: LOW settlement must write to calibration_pairs_v2"
+        rows_v2 = conn.execute("SELECT * FROM calibration_pairs").fetchall()
+        assert len(rows_v2) > 0, "R-CS.1: LOW settlement must write to calibration_pairs"
         assert rows_v2[0]["temperature_metric"] == "low", (
             f"R-CS.1: expected metric='low', got {rows_v2[0]['temperature_metric']!r}"
         )
 
     def test_r_cs_2_high_settlement_routes_to_v2_after_c5(self):
         """R-CS.2 (post-C5 2026-04-24): HIGH settlement routes to
-        calibration_pairs_v2 with canonical HIGH_LOCALDAY_MAX identity.
+        calibration_pairs with canonical HIGH_LOCALDAY_MAX identity.
 
         Pre-C5 behavior (documented in POST_AUDIT_HANDOFF_2026-04-24.md
         §3.1 C5): HIGH branch of harvest_settlement wrote to legacy
         `calibration_pairs` while LOW branch wrote to v2. Because
-        `refit_platt_v2` reads only `calibration_pairs_v2`, HIGH pairs
+        `refit_platt` reads only `calibration_pairs`, HIGH pairs
         silently never reached the trainer. C5 wires HIGH through
         `add_calibration_pair_v2(metric_identity=HIGH_LOCALDAY_MAX)` to
         close this split-brain.
@@ -317,22 +287,17 @@ class TestRCSHarvesterLowRouting:
         count = self._call_harvest_settlement(conn, city, "high")
         assert count > 0, "R-CS.2: harvest_settlement should create at least 1 pair"
 
-        rows_legacy = conn.execute("SELECT * FROM calibration_pairs").fetchall()
-        rows_v2 = conn.execute("SELECT * FROM calibration_pairs_v2").fetchall()
+        rows_v2 = conn.execute("SELECT * FROM calibration_pairs").fetchall()
         assert len(rows_v2) > 0, (
-            "R-CS.2 post-C5: HIGH settlement must write to calibration_pairs_v2"
+            "R-CS.2 post-B3: HIGH settlement must write to canonical calibration_pairs"
         )
         assert rows_v2[0]["temperature_metric"] == "high", (
             f"R-CS.2 post-C5: expected metric='high', got "
             f"{rows_v2[0]['temperature_metric']!r}"
         )
-        assert rows_v2[0]["data_version"] == "tigge_mx2t6_local_calendar_day_max_v1", (
+        assert rows_v2[0]["dataset_id"] == "tigge_mx2t6_local_calendar_day_max_v1", (
             f"R-CS.2 post-C5: expected canonical HIGH data_version; got "
-            f"{rows_v2[0]['data_version']!r}"
-        )
-        assert len(rows_legacy) == 0, (
-            f"R-CS.2 post-C5: HIGH settlement must NOT leak into legacy "
-            f"calibration_pairs; found {len(rows_legacy)} rows"
+            f"{rows_v2[0]['dataset_id']!r}"
         )
 
 
@@ -358,6 +323,7 @@ class TestRCTSettlementSemanticsDispatch:
         """)
         hko = _make_hko_city()
 
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
         # 28.7°C: WMO half-up → 29; oracle_truncate (floor) → 28
         add_calibration_pair(
             conn,
@@ -372,6 +338,9 @@ class TestRCTSettlementSemanticsDispatch:
             forecast_available_at="2026-04-01T00:00:00Z",
             settlement_value=28.7,
             decision_group_id="test-dgid-hko-ct1",
+            metric_identity=HIGH_LOCALDAY_MAX,
+            training_allowed=True,
+            data_version="tigge_test_v1",
             city_obj=hko,
         )
         row = conn.execute("SELECT settlement_value FROM calibration_pairs LIMIT 1").fetchone()
@@ -394,6 +363,7 @@ class TestRCTSettlementSemanticsDispatch:
         """)
         wu = _make_wu_city()
 
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
         # 72.5°F: WMO half-up → 73 (floor(72.5 + 0.5) = floor(73) = 73)
         add_calibration_pair(
             conn,
@@ -408,6 +378,9 @@ class TestRCTSettlementSemanticsDispatch:
             forecast_available_at="2026-04-01T00:00:00Z",
             settlement_value=72.5,
             decision_group_id="test-dgid-wu-ct2",
+            metric_identity=HIGH_LOCALDAY_MAX,
+            training_allowed=True,
+            data_version="tigge_test_v1",
             city_obj=wu,
         )
         row = conn.execute("SELECT settlement_value FROM calibration_pairs LIMIT 1").fetchone()
@@ -417,14 +390,16 @@ class TestRCTSettlementSemanticsDispatch:
         )
 
     def test_r_ct_3_ast_city_obj_in_both_signatures(self):
-        """R-CT.3: AST: both add_calibration_pair* functions have city_obj as required kwonly arg.
+        """R-CT.3: AST: add_calibration_pair has city_obj as required kwonly arg.
 
         P10E: city_obj is no longer optional (City, no default). Still in kwonlyargs.
+        Post-B3: only one canonical function (add_calibration_pair_v2 renamed to
+        add_calibration_pair); add_calibration_pair_v2 no longer exists.
         """
         source = _read_store_source()
         tree = ast.parse(source)
 
-        for fn_name in ("add_calibration_pair", "add_calibration_pair_v2"):
+        for fn_name in ("add_calibration_pair",):
             found = False
             for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef) and node.name == fn_name:
@@ -659,13 +634,13 @@ class TestF104PersistenceNoDataLog:
         from src.engine.monitor_refresh import _check_persistence_anomaly
 
         # Build the same schema-qualified DB shape used by monitor_refresh:
-        # forecasts.settlements_v2 plus world.temp_persistence.
+        # forecasts.settlement_outcomes plus world.temp_persistence.
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
         conn.execute("ATTACH DATABASE ':memory:' AS world")
         conn.execute("""
-            CREATE TABLE forecasts.settlements_v2 (
+            CREATE TABLE forecasts.settlement_outcomes (
                 city TEXT, target_date TEXT, temperature_metric TEXT,
                 authority TEXT, settlement_value REAL
             )
@@ -678,7 +653,7 @@ class TestF104PersistenceNoDataLog:
         """)
         # Insert one settlement so deltas is non-empty (prevents PERSISTENCE_CHECK_DISABLED path).
         conn.execute(
-            "INSERT INTO forecasts.settlements_v2 VALUES (?,?,?,?,?)",
+            "INSERT INTO forecasts.settlement_outcomes VALUES (?,?,?,?,?)",
             ("London", "2026-05-16", "high", "VERIFIED", 68.0),
         )
         conn.commit()

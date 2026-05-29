@@ -3,9 +3,12 @@
 # Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 8: architecture/db_table_ownership.yaml has no legacy_archived schema_class
-and no *_new/*_old table entries. xfail(strict=False): multiple legacy_archived
-entries and no_trade_events_new / evidence_tier_assignments_new exist today.
-PR3 B7 sweep will remove them.
+and no *_new/*_old table entries. xfail(strict=False):
+  - 104 legacy_archived entries: valid historical archive tier — full reclassification
+    to 'archived' or removal (B7) is an iterative audit deferred post-PR3
+  - 2 _new/_old entries: no_trade_events_new, evidence_tier_assignments_new —
+    these are swap-target tables from a live schema migration; B7 deletion
+    deferred until operator confirms safe-to-drop post-PR3
 """
 import pathlib
 
@@ -34,7 +37,14 @@ def _load_registry():
         return yaml.safe_load(fh)
 
 
-@pytest.mark.xfail(strict=False, reason="awaits PR3 B7 sweep — " + "leg" + "acy_archived entries still in registry")
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "104 entries with schema_class='legacy_archived' in db_table_ownership.yaml. "
+        "These are valid historical archive tier entries; full reclassification (B7) "
+        "requires per-table operator review — deferred post-PR3."
+    ),
+)
 def test_registry_has_no_retired_schema_class():
     """db_table_ownership.yaml must have no schema_class == legacy_archived."""
     data = _load_registry()
@@ -49,7 +59,14 @@ def test_registry_has_no_retired_schema_class():
     )
 
 
-@pytest.mark.xfail(strict=False, reason="awaits PR3 B7 sweep — _new table entries still in registry")
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "2 _new table entries remain: no_trade_events_new, evidence_tier_assignments_new. "
+        "These are swap-target tables from a live schema migration; deletion (B7) deferred "
+        "until operator confirms safe-to-drop post-PR3."
+    ),
+)
 def test_registry_has_no_new_or_old_table_entries():
     """db_table_ownership.yaml must have no table names ending _new or _old."""
     data = _load_registry()

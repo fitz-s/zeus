@@ -277,7 +277,7 @@ def test_run_cycle_noop_when_db_current():
 # ---------------------------------------------------------------------------
 # Idempotent re-run — same date called twice should produce identical
 # write counts on the SECOND call when the underlying ingest is idempotent.
-# (The pipeline relies on UNIQUE constraint in ensemble_snapshots_v2; we
+# (The pipeline relies on UNIQUE constraint in ensemble_snapshots; we
 # simulate that here with a stateful fake.)
 # ---------------------------------------------------------------------------
 

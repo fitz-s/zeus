@@ -47,7 +47,7 @@ from src.calibration.platt import (
 )
 from src.config import City
 from src.state.db import get_connection, init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -65,14 +65,14 @@ def _make_conn(tmp_path: Path, name: str = "test") -> sqlite3.Connection:
     db_path = tmp_path / f"{name}.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
 def _insert_identity_row(conn: sqlite3.Connection, cluster: str, season: str) -> None:
-    """Insert an identity_full_transport_v1 platt_models_v2 row directly.
+    """Insert an identity_full_transport_v1 platt_models row directly.
 
-    Bypasses save_platt_model_v2 (which is a @capability-gated write function)
+    Bypasses save_platt_model (which is a @capability-gated write function)
     to insert the identity row without triggering capability enforcement.
     The row uses:
       - calibration_method = 'identity_full_transport_v1'
@@ -93,7 +93,7 @@ def _insert_identity_row(conn: sqlite3.Connection, cluster: str, season: str) ->
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
           (model_key, temperature_metric, cluster, season, data_version,
            input_space, param_A, param_B, param_C, bootstrap_params_json,
            n_samples, brier_insample, fitted_at, is_active, authority,
@@ -111,11 +111,11 @@ def _insert_identity_row(conn: sqlite3.Connection, cluster: str, season: str) ->
 def _insert_platt_row(
     conn: sqlite3.Connection, cluster: str, season: str, n_samples: int = 200
 ) -> None:
-    """Insert a normal (learned) Platt row via save_platt_model_v2."""
-    from src.calibration.store import save_platt_model_v2
+    """Insert a normal (learned) Platt row via save_platt_model."""
+    from src.calibration.store import save_platt_model
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster=cluster,

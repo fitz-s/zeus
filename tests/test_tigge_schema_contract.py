@@ -30,7 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -289,7 +289,7 @@ def mem_db():
     """In-memory SQLite with v2 schema."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

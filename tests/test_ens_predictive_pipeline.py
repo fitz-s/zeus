@@ -27,26 +27,29 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute(
-        """CREATE TABLE ensemble_snapshots_v2(
-            city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
+        """CREATE TABLE ensemble_snapshots(
+            city TEXT, target_date TEXT, temperature_metric TEXT, dataset_id TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
+            issue_time TEXT,
             contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
-            training_allowed INTEGER, causality_status TEXT, authority TEXT,
-            issue_time TEXT)"""
-    )  # Task #116 fix (2026-05-28): real schema has issue_time; ens_bias_repo SELECTs `e.issue_time`.
+            training_allowed INTEGER, causality_status TEXT, authority TEXT)"""
+    )
     c.execute(
-        """CREATE TABLE settlements_v2(city TEXT, target_date TEXT, temperature_metric TEXT,
+        """CREATE TABLE settlement_outcomes(city TEXT, target_date TEXT, temperature_metric TEXT,
             settlement_value REAL, authority TEXT)"""
     )
     return c
 
 
 def _snap(conn, city, date, members, dv, *, unit="degC", contributes=1):
-    # issue_time defaults to target_date midnight UTC (plausible for daily snapshot tests).
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ensemble_snapshots "
+        "(city, target_date, temperature_metric, dataset_id, members_json, members_unit, "
+        "lead_hours, available_at, contributes_to_target_extrema, boundary_ambiguous, "
+        "training_allowed, causality_status, authority) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (city, date, "high", dv, json.dumps(members), unit, 24.0, "2026-05-10T00:00:00Z",
-         contributes, 0, 1, "OK", "VERIFIED", f"{date}T00:00:00+00:00"),
+         contributes, 0, 1, "OK", "VERIFIED"),
     )
 
 
@@ -64,7 +67,7 @@ def test_fit_city_predictive_error_applies_transport(conn):
     for i, d in enumerate(["2026-05-08", "2026-05-09", "2026-05-10"]):
         _snap(conn, "Tokyo", d, [18.0 + i], TIG, contributes=None)     # F50
         _snap(conn, "Tokyo", d, [19.5 + i], OPD)                        # F25 = F50 + 1.5
-        conn.execute("INSERT INTO settlements_v2 VALUES (?,?,?,?,?)", ("Tokyo", d, "high", 20.0 + i, "VERIFIED"))
+        conn.execute("INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)", ("Tokyo", d, "high", 20.0 + i, "VERIFIED"))
     em = fit_city_predictive_error(conn, city="Tokyo", live_data_version=OPD,
                                    prior_data_version=TIG, season_months=(3, 4, 5),
                                    min_live_n=1)

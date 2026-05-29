@@ -93,7 +93,7 @@ def _v2_row(conn, snapshot_id: str):
     return conn.execute(
         """
         SELECT model_version, available_at, fetch_time, valid_time
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE snapshot_id = ?
         """,
         (snapshot_id,),

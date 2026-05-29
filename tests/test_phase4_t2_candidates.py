@@ -29,7 +29,7 @@ from decimal import Decimal
 from src.contracts.decision_natural_key import make_decision_natural_key
 from src.contracts.no_trade_reason import NoTradeReason
 from src.contracts.settlement_outcome import SettlementOutcome
-from src.state.db import SCHEMA_VERSION
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 from src.state.decision_events import write_shadow_decision_event
 from src.strategy.candidates import (
     CandidateContext,
@@ -150,7 +150,7 @@ def _make_metrics(**kwargs: Any) -> SimpleNamespace:
         depth_at_best_ask=5,
         polymarket_end_anchor_source="gamma_explicit",
         bin_grid_id=None,
-        bin_schema_version=None,
+        bin_schema_id=None,
         raw_orderbook_hash_transition_delta_ms=None,
         # FOK arb fields — data-gated defaults (2026-05-22 reframe)
         info_event_observed=False,

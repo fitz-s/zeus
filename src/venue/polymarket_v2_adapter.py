@@ -26,7 +26,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
 from src.contracts import Direction, ExecutionIntent
-from src.contracts.executable_market_snapshot_v2 import (
+from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
 )
@@ -2615,7 +2615,7 @@ def _assert_snapshot_fresh(snapshot: Any) -> None:
         if callable(is_fresh):
             is_fresh = is_fresh()
         if not is_fresh:
-            raise StaleMarketSnapshotError("ExecutableMarketSnapshotV2 is stale")
+            raise StaleMarketSnapshotError("ExecutableMarketSnapshot is stale")
 
     has_captured_at = hasattr(snapshot, "captured_at") or (isinstance(snapshot, dict) and "captured_at" in snapshot)
     has_window = hasattr(snapshot, "freshness_window_seconds") or (
@@ -2623,18 +2623,18 @@ def _assert_snapshot_fresh(snapshot: Any) -> None:
     )
     if has_captured_at or has_window:
         if not (has_captured_at and has_window):
-            raise StaleMarketSnapshotError("ExecutableMarketSnapshotV2 freshness fields are incomplete")
+            raise StaleMarketSnapshotError("ExecutableMarketSnapshot freshness fields are incomplete")
         captured_at = _parse_snapshot_datetime(_snapshot_attr(snapshot, "captured_at"))
         window_seconds = float(_snapshot_attr(snapshot, "freshness_window_seconds"))
         if window_seconds <= 0:
-            raise StaleMarketSnapshotError("ExecutableMarketSnapshotV2 freshness window must be positive")
+            raise StaleMarketSnapshotError("ExecutableMarketSnapshot freshness window must be positive")
         age_seconds = (datetime.now(timezone.utc) - captured_at).total_seconds()
         if _freshness_registry.evaluate("executable_snapshot", age_seconds, override_threshold_seconds=window_seconds) >= FreshnessLevel.STALE:
-            raise StaleMarketSnapshotError("ExecutableMarketSnapshotV2 is outside freshness window")
+            raise StaleMarketSnapshotError("ExecutableMarketSnapshot is outside freshness window")
         return
 
     if not has_is_fresh:
-        raise StaleMarketSnapshotError("ExecutableMarketSnapshotV2 freshness contract missing")
+        raise StaleMarketSnapshotError("ExecutableMarketSnapshot freshness contract missing")
 
 
 def _outcome_label(direction: Direction) -> str:

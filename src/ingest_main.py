@@ -252,22 +252,25 @@ def _write_ingest_heartbeat() -> None:
 # ---------------------------------------------------------------------------
 
 def _write_world_schema_ready_sentinel() -> None:
-    """Atomically write state/world_schema_ready.json after init_schema succeeds."""
+    """Atomically write state/world_schema_ready.json after init_schema succeeds.
+
+    B2 (2026-05-28): schema_version field now contains the content-hash fingerprint
+    from architecture/_schema_fingerprint.txt instead of the legacy yaml version.
+    world_schema_version.yaml deleted; yaml reader removed.
+    """
     from src.config import state_path
 
-    schema_version: str = "unknown_v0"
-    schema_yaml = Path(__file__).parent.parent / "architecture" / "world_schema_version.yaml"
-    if schema_yaml.exists():
+    schema_fingerprint: str = "unknown_fingerprint"
+    fingerprint_path = Path(__file__).parent.parent / "architecture" / "_schema_fingerprint.txt"
+    if fingerprint_path.exists():
         try:
-            import yaml  # type: ignore[import]
-            data = yaml.safe_load(schema_yaml.read_text())
-            schema_version = str(data.get("version", "unknown_v0")) if isinstance(data, dict) else str(data)
+            schema_fingerprint = fingerprint_path.read_text().strip()
         except Exception:
             pass
 
     payload = {
         "written_at": datetime.now(timezone.utc).isoformat(),
-        "schema_version": schema_version,
+        "schema_version": schema_fingerprint,
         "ingest_pid": os.getpid(),
         "init_schema_returned_ok": True,
     }
@@ -275,7 +278,7 @@ def _write_world_schema_ready_sentinel() -> None:
     tmp = Path(str(path) + ".tmp")
     tmp.write_text(json.dumps(payload))
     tmp.replace(path)
-    logger.info("Wrote world_schema_ready sentinel: schema_version=%s", schema_version)
+    logger.info("Wrote world_schema_ready sentinel: schema_fingerprint=%s", schema_fingerprint)
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +615,7 @@ def _opendata_mx2t6_cycle():
 
     Open Data ENS posts 00Z runs by ~07:00 UTC (latency 6-8h). This job runs
     at 07:30 UTC and writes ``ecmwf_opendata_mx2t3_local_calendar_day_max_v1``
-    rows to ``ensemble_snapshots_v2`` (post-2026-05-07 mx2t3 cutover; the
+    rows to ``ensemble_snapshots`` (post-2026-05-07 mx2t3 cutover; the
     schedule job name retains the legacy ``mx2t6`` slug for back-compat with
     ops dashboards).
     """
@@ -628,7 +631,7 @@ def _opendata_mn2t6_cycle():
 
     Runs at 07:35 UTC (5-min offset from the HIGH job to space out downloads).
     Writes ``ecmwf_opendata_mn2t3_local_calendar_day_min_v1`` rows to
-    ``ensemble_snapshots_v2`` (post-2026-05-07 mn2t3 cutover; the schedule
+    ``ensemble_snapshots`` (post-2026-05-07 mn2t3 cutover; the schedule
     job name retains the legacy ``mn2t6`` slug for back-compat with ops
     dashboards).
     """
@@ -890,7 +893,7 @@ def _drift_detector_tick():
     Acquires advisory lock.
     """
     from src.data.dual_run_lock import acquire_lock
-    from src.calibration.retrain_trigger_v2 import check_and_arm_refit
+    from src.calibration.drift_refit_arm import check_and_arm_refit
     from src.state.db import get_world_connection
 
     with acquire_lock("drift_detector") as acquired:
@@ -977,7 +980,7 @@ def _uma_era_end_block() -> int:
 def _uma_resolution_listener_tick():
     """Poll Polygon RPC for UMA OO Settle events — 5-min interval.
 
-    Reads condition_ids from market_events_v2, then calls poll_uma_resolutions
+    Reads condition_ids from market_events, then calls poll_uma_resolutions
     with the configured RPC client. When settings["uma"]["polygon_rpc_url"] is
     absent or empty, the listener short-circuits (returns [] without writing)
     per the default-OFF design in uma_resolution_listener.py.
@@ -1025,14 +1028,14 @@ def _uma_resolution_listener_tick():
         )
         return
 
-    # Collect tracked condition_ids from market_events_v2 (read-only, forecasts DB post-K1).
+    # Collect tracked condition_ids from market_events (read-only, forecasts DB post-K1).
     condition_ids: list[str] = []
     try:
         ro_conn = sqlite3.connect(str(ZEUS_FORECASTS_DB_PATH), timeout=10)
         ro_conn.row_factory = sqlite3.Row
         try:
             rows = ro_conn.execute(
-                "SELECT DISTINCT condition_id FROM market_events_v2 "
+                "SELECT DISTINCT condition_id FROM market_events "
                 "WHERE condition_id IS NOT NULL AND condition_id != ''"
             ).fetchall()
             condition_ids = [str(r["condition_id"]) for r in rows]
@@ -1180,17 +1183,17 @@ def _etl_forecast_skill_tick():
 
 
 # ---------------------------------------------------------------------------
-# STALE fix (2026-05-07): market_events_v2 scan tick — feeds from Gamma API
-# so ingest daemon populates market_events_v2 when trading daemon is down.
+# STALE fix (2026-05-07): market_events scan tick — feeds from Gamma API
+# so ingest daemon populates market_events when trading daemon is down.
 # ---------------------------------------------------------------------------
 
 @_scheduler_job("ingest_market_scan")
 def _market_scan_tick():
-    """Periodic Gamma API market scan to keep market_events_v2 fresh.
+    """Periodic Gamma API market scan to keep market_events fresh.
 
     find_weather_markets() calls _persist_market_events_to_db internally; it
     is idempotent (INSERT OR IGNORE on (market_slug, condition_id)).
-    Running this from the ingest daemon ensures market_events_v2 stays updated
+    Running this from the ingest daemon ensures market_events stays updated
     even when the trading daemon (src/main.py) is paused.
 
     Runs on default executor (writes to zeus-forecasts.db via _persist_market_events_to_db).
@@ -1211,7 +1214,7 @@ def _market_scan_tick():
                 "error": persistence.error,
             }
             logger.warning(
-                "ingest_market_scan: market_events_v2 persistence failed after %d active markets: %s",
+                "ingest_market_scan: market_events persistence failed after %d active markets: %s",
                 len(markets),
                 persistence.error,
             )
@@ -1373,11 +1376,11 @@ _CALIBRATION_STAGE_DB_ENV = "ZEUS_CALIBRATION_STAGE_DB_PATH"
 
 @_scheduler_job("ingest_calibration_auto_promote")
 def _calibration_auto_promote_tick():
-    """F9: Auto-promote calibration_pairs_v2 when the readiness gate passes.
+    """F9: Auto-promote calibration_pairs when the readiness gate passes.
 
-    Gate: invokes ``promote_calibration_pairs_v2.py inspect`` as a subprocess.
+    Gate: invokes ``promote_calibration.py inspect`` as a subprocess.
     If the inspect exit code is 0 (all sentinels complete), invokes
-    ``promote_calibration_pairs_v2.py promote --commit``.
+    ``promote_calibration.py promote --commit``.
 
     Guarded by two env flags:
 
@@ -1386,7 +1389,7 @@ def _calibration_auto_promote_tick():
       Default OFF to prevent accidental production writes before the gate is
       verified.
     * ``ZEUS_CALIBRATION_STAGE_DB_PATH`` — absolute path to the STAGE_DB that
-      was produced by ``rebuild_calibration_pairs_v2.py``.  Must be set when
+      was produced by ``rebuild_calibration_pairs.py``.  Must be set when
       ENABLED=true; tick aborts with a warning if unset.
 
     Runs on default executor (subprocess writes to zeus-forecasts.db via
@@ -1411,7 +1414,7 @@ def _calibration_auto_promote_tick():
         return
 
     venv_python = _etl_subprocess_python()
-    script = Path(__file__).parent.parent / "scripts" / "promote_calibration_pairs_v2.py"
+    script = Path(__file__).parent.parent / "scripts" / "promote_calibration.py"
     if not script.exists():
         logger.warning("[AUTO_PROMOTE] script not found at %s", script)
         return

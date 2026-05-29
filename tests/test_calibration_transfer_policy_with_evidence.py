@@ -24,7 +24,7 @@ from src.data.calibration_transfer_policy import (
     evaluate_calibration_transfer_policy,
     evaluate_calibration_transfer_policy_with_evidence,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ from src.state.schema.v2_schema import apply_v2_schema
 
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -140,11 +140,11 @@ def _insert_target_pairs_for_transfer(
     ]
     conn.executemany(
         """
-        INSERT OR IGNORE INTO calibration_pairs_v2 (
+        INSERT OR IGNORE INTO calibration_pairs (
             pair_id,
             city, target_date, temperature_metric, observation_field, range_label,
             p_raw, outcome, lead_days, season, cluster,
-            forecast_available_at, decision_group_id, data_version,
+            forecast_available_at, decision_group_id, dataset_id,
             source_id, cycle, horizon_profile,
             training_allowed, authority, causality_status, recorded_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -205,7 +205,7 @@ def _insert_row(
         )
     conn.execute(
         """
-        INSERT OR REPLACE INTO platt_models_v2 (
+        INSERT OR REPLACE INTO platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, param_A, param_B, param_C,
             bootstrap_params_json, n_samples, brier_insample,

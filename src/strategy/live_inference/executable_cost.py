@@ -9,8 +9,8 @@ from typing import Literal
 
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.execution_price import polymarket_fee
-from src.contracts.executable_market_snapshot_v2 import (
-    ExecutableMarketSnapshotV2,
+from src.contracts.executable_market_snapshot import (
+    ExecutableMarketSnapshot,
     fee_rate_fraction_from_details,
 )
 
@@ -133,15 +133,15 @@ def quote_book_from_depth_json(
     )
 
 
-def quote_book_from_executable_snapshot(snapshot: ExecutableMarketSnapshotV2) -> NativeQuoteBook:
-    """Build native YES/NO quote book from ExecutableMarketSnapshotV2 facts."""
+def quote_book_from_executable_snapshot(snapshot: ExecutableMarketSnapshot) -> NativeQuoteBook:
+    """Build native YES/NO quote book from ExecutableMarketSnapshot facts."""
 
     depth = json.loads(snapshot.orderbook_depth_jsonb or "{}")
     yes_depth = _depth_for_token_or_label(depth, token_id=snapshot.yes_token_id, label="YES")
     no_depth = _depth_for_token_or_label(depth, token_id=snapshot.no_token_id, label="NO")
     if yes_depth is None or no_depth is None:
         raise ExecutableCostError(
-            "ExecutableMarketSnapshotV2 orderbook_depth_jsonb must contain native YES and NO depth"
+            "ExecutableMarketSnapshot orderbook_depth_jsonb must contain native YES and NO depth"
         )
     return NativeQuoteBook(
         yes_asks=_parse_levels(yes_depth.get("asks", ())),

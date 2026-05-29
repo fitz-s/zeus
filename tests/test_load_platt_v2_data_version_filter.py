@@ -1,7 +1,7 @@
 # Created: 2026-04-30
 # Last reused/audited: 2026-04-30
 # Lifecycle: created=2026-04-30; last_reviewed=2026-04-30; last_reused=never
-# Purpose: Antibody for BLOCKER #1 (architect audit 2026-04-30) — load_platt_model_v2
+# Purpose: Antibody for BLOCKER #1 (architect audit 2026-04-30) — load_platt_model
 #          must filter by data_version when one is supplied so multiple
 #          data_versions per (metric, cluster, season) bucket cannot silently
 #          shadow each other.
@@ -12,14 +12,14 @@
 #                  per MetricIdentity).
 """Antibody — Platt v2 read seam respects data_version.
 
-Pre-fix (architect audit 2026-04-30): load_platt_model_v2 SELECT picked
+Pre-fix (architect audit 2026-04-30): load_platt_model SELECT picked
 ORDER BY fitted_at DESC LIMIT 1 with no data_version filter. UNIQUE constraint
 on platt_models_v2 includes data_version, so multiple versions per (metric,
 cluster, season) could coexist; the lookup would silently pick the newest by
 fitted_at regardless of version. Today's data has one version per metric so
 the lookup was correct, but the contract was implicit.
 
-Post-fix: load_platt_model_v2(data_version=...) filters explicitly. This
+Post-fix: load_platt_model(data_version=...) filters explicitly. This
 antibody pins:
   - When two rows differ ONLY by data_version, the requested version wins.
   - When data_version=None is passed, legacy behavior is preserved (latest
@@ -33,9 +33,9 @@ import sqlite3
 
 import pytest
 
-from src.calibration.store import load_platt_model_v2, save_platt_model_v2
+from src.calibration.store import load_platt_model, save_platt_model
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 
 
@@ -46,15 +46,15 @@ def conn(tmp_path):
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL")
     init_schema(c)
-    apply_v2_schema(c)
+    apply_canonical_schema(c)
     yield c
     c.close()
 
 
 def _save_dummy(conn, *, metric_identity: MetricIdentity, fitted_at: str, A: float):
     """Save a Platt v2 row, then patch fitted_at directly so the test can
-    pin ORDER BY behavior. save_platt_model_v2 sets fitted_at internally."""
-    save_platt_model_v2(
+    pin ORDER BY behavior. save_platt_model sets fitted_at internally."""
+    save_platt_model(
         conn,
         metric_identity=metric_identity,
         cluster="NYC",
@@ -71,7 +71,7 @@ def _save_dummy(conn, *, metric_identity: MetricIdentity, fitted_at: str, A: flo
     )
     conn.execute(
         """
-        UPDATE platt_models_v2
+        UPDATE platt_models
         SET fitted_at = ?
         WHERE temperature_metric = ?
           AND cluster = 'NYC'
@@ -95,14 +95,14 @@ def test_data_version_filter_picks_correct_row(conn):
     )
     _save_dummy(conn, metric_identity=HIGH_V2, fitted_at="2026-04-30T00:00:00Z", A=2.0)
 
-    legacy = load_platt_model_v2(
+    legacy = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
         season="DJF",
         data_version=HIGH_LOCALDAY_MAX.data_version,
     )
-    upgrade = load_platt_model_v2(
+    upgrade = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -125,7 +125,7 @@ def test_data_version_none_falls_back_to_fitted_at_ordering(conn):
     )
     _save_dummy(conn, metric_identity=HIGH_V2, fitted_at="2026-04-30T00:00:00Z", A=2.0)
 
-    no_filter = load_platt_model_v2(
+    no_filter = load_platt_model(
         conn, temperature_metric="high", cluster="NYC", season="DJF", data_version=None,
     )
     assert no_filter is not None
@@ -135,7 +135,7 @@ def test_data_version_none_falls_back_to_fitted_at_ordering(conn):
 def test_data_version_filter_returns_none_when_no_match(conn):
     """If filter is set but no row matches, return None (not silently fall back)."""
     _save_dummy(conn, metric_identity=HIGH_LOCALDAY_MAX, fitted_at="2026-04-29T00:00:00Z", A=1.0)
-    miss = load_platt_model_v2(
+    miss = load_platt_model(
         conn,
         temperature_metric="high",
         cluster="NYC",
@@ -157,11 +157,11 @@ def test_get_calibrator_threads_metric_identity_data_version():
     txt = src_path.read_text(encoding="utf-8")
 
     # The fix introduces an `expected_data_version` resolution + threads it
-    # into BOTH load_platt_model_v2 call sites (primary + season-pool fallback).
+    # into BOTH load_platt_model call sites (primary + season-pool fallback).
     assert "expected_data_version" in txt, (
         "get_calibrator must resolve expected_data_version from MetricIdentity"
     )
     assert txt.count("data_version=expected_data_version") >= 2, (
-        "Both load_platt_model_v2 call sites in get_calibrator must thread "
+        "Both load_platt_model call sites in get_calibrator must thread "
         "data_version=expected_data_version (primary bucket + season-pool fallback)"
     )

@@ -289,7 +289,7 @@ scripts:
     required_helpers: [src.contracts.decision_natural_key.from_artifact_json]
     required_tests: []
   audit_city_data_readiness.py: {class: diagnostic_report_writer, write_targets: [stdout, temp]}
-  audit_observation_instants_v2.py:
+  audit_observation_instants.py:
     class: diagnostic_report_writer
     module_owner: data
     write_targets: [stdout, temp]
@@ -335,10 +335,10 @@ scripts:
     class: etl_writer
     lifecycle: long_lived
     owner_packet: task_2026-04-01_uma_resolution_backfill
-    created_for: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events_v2"
+    created_for: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events"
     status: active
     authority_scope: ingest_write
-    reuse_when: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events_v2. Idempotent on (condition_id, tx_hash) primary key."
+    reuse_when: "One-shot 90-day UMA OO SettlementResolved backfill for condition_ids in market_events. Idempotent on (condition_id, tx_hash) primary key."
     do_not_use_when: "Polygon RPC URL not configured in settings. uma_resolution already fully populated for window."
     canonical_command: "python3 scripts/backfill_uma_resolution_2026.py [--from-date YYYY-MM-DD] [--to-date YYYY-MM-DD]"
     delete_policy: retain_until_superseded
@@ -361,7 +361,7 @@ scripts:
     observability: [state/backfill_manifest_hko_daily_*.json]
     required_tests: [tests/test_backfill_completeness_guardrails.py, tests/test_backfill_scripts_match_live_config.py]
   backfill_hourly_openmeteo.py: {class: etl_writer}
-  backfill_obs_v2.py:
+  backfill_obs.py:
     class: etl_writer
     module_owner: data
     packet: docs/operations/task_2026-04-21_gate_f_data_backfill
@@ -383,8 +383,8 @@ scripts:
     observability: [state/obs_v2_live_tick_log.jsonl]
     required_tests: [tests/test_obs_v2_writer.py]
     notes: "Hourly rolling live writer invoked by src.ingest_main._k2_obs_v2_tick; payload_hash must cover material extrema values so revised source facts enter revision history instead of same-hash material conflicts."
-  fill_obs_v2_dst_gaps.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.ogimet_hourly_client], external_inputs: [Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_dst_fill_log.jsonl], notes: "Targeted gap-fill for Tier 1 WU cities on DST-spring-forward days where WU archive has silent upstream holes. Uses Ogimet as authoritative NOAA-METAR mirror."}
-  fill_obs_v2_meteostat.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.meteostat_bulk_client], external_inputs: [Meteostat bulk CSV], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_meteostat_fill_log.jsonl], notes: "Bulk parallel fill for 45 WU cities via Meteostat's static CDN CSV archives. No rate limit; covers 2024 through ~weeks-behind-real-time. Replaces 12-hour Ogimet serial fill with <2-minute parallel downloads."}
+  fill_obs_dst_gaps.py: {class: etl_writer, required_helpers: [src.data.tier_resolver, src.data.observation_instants_v2_writer, src.data.ogimet_hourly_client], external_inputs: [Ogimet METAR], target_db: state/zeus-world.db, write_targets: [observation_instants_v2], observability: [state/obs_v2_dst_fill_log.jsonl], notes: "Targeted gap-fill for Tier 1 WU cities on DST-spring-forward days where WU archive has silent upstream holes. Uses Ogimet as authoritative NOAA-METAR mirror."}
+
   backfill_ogimet_metar.py:
     class: etl_writer
     required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, scripts.backfill_completeness]
@@ -409,10 +409,7 @@ scripts:
     class: etl_writer
     module_owner: scripts
     required_tests: [tests/test_tigge_snapshot_p_raw_backfill.py, tests/test_replay_time_provenance.py]
-  etl_forecasts_v2_from_legacy.py:
-    class: etl_writer
-    module_owner: data
-    required_tests: [tests/test_etl_forecasts_v2_from_legacy.py]
+
   backfill_tigge_snapshot_p_raw_v2.py: {class: repair, dangerous_if_run: true, apply_flag: "--force", target_db: state/zeus-world.db, unguarded_write_rationale: "Phase 7A metric-aware p_raw backfill; safety gates mirror rebuild_v2 (--dry-run default, --no-dry-run + --force required)."}
   backfill_truth_metadata.py: {class: etl_writer}
   backfill_wu_daily_all.py:
@@ -462,7 +459,7 @@ scripts:
     required_helpers: [src.data.producer_readiness, src.state.db]
     required_tests: []
     reason: "Reports highest evidence-backed completion state plus exact blockers for forecast-live authority chain. Prevents operators/agents from confusing code presence with live data readiness. Salvaged from closed PR #134."
-  compare_diurnal_v1_v2.py: {class: diagnostic}
+
   hko_ingest_tick.py: {class: etl_writer, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Standalone HKO accumulator tick + observation_instants_v2 projection; idempotent via ON CONFLICT / UNIQUE constraints. Designed for cron invocation independent of trading daemon."}
   check_data_pipeline_live_e2e.py:
     # Created: 2026-05-15
@@ -629,7 +626,7 @@ scripts:
     do_not_use_when: "Before task #53 implementation and dry-run evidence exist."
     canonical_command: DO_NOT_RUN
     delete_policy: retain_until_implemented
-    # K1-batch2 fix 2026-05-17: writes ensemble_snapshots_v2 / source_run to forecasts DB.
+    # K1-batch2 fix 2026-05-17: writes ensemble_snapshots / source_run to forecasts DB.
     read_targets: [external_tigge_grib_extracts]
     write_targets: [state/zeus-forecasts.db]
     dry_run_default: true
@@ -639,7 +636,7 @@ scripts:
     dangerous_if_run: false
     promotion_barrier: "Requires task #53 implementation, dry-run evidence, and reviewer approval."
     # K1-batch2 fix 2026-05-17: now uses ZEUS_FORECASTS_DB_PATH / get_forecasts_connection
-    # (ensemble_snapshots_v2 + source_run are forecast_class post-K1 split).
+    # (ensemble_snapshots + source_run are forecast_class post-K1 split).
     required_helpers: [src.state.db.get_forecasts_connection]
     required_tests: [tests/test_data_rebuild_relationships.py, tests/test_k1_reader_isolation_batch2.py]
   investigate_ecmwf_bias.py: {class: diagnostic_report_writer, write_targets: [state/ecmwf_bias_investigation.json, stdout]}
@@ -704,7 +701,7 @@ scripts:
     required_tests: [tests/test_calibration_bins_canonical.py, tests/test_replay_time_provenance.py]
   # K1-batch2 fix 2026-05-17: dry-run reads ZEUS_FORECASTS_DB_PATH (forecast_class);
   # write mode still requires explicit isolated staging DB.
-  rebuild_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run --force", target_db: explicit_isolated_staging_db, read_targets: [state/zeus-forecasts.db, explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; dry-run reads from forecast-class DB (ZEUS_FORECASTS_DB_PATH) read-only, but write mode fails closed unless --db names an isolated staging DB and refuses canonical state/zeus-forecasts.db.", promotion_barrier: "Isolated calibration_pairs_v2 output is not live calibration authority and cannot be promoted without separate operator-approved promotion evidence.", required_helpers: [".zeus/rebuild_lock.do_not_run_during_live (sentinel check at module load)", "scripts/rebuild_calibration_pairs_v2.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py, tests/test_sqlite_busy_timeout.py]}
+  rebuild_calibration_pairs.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run --force", target_db: explicit_isolated_staging_db, read_targets: [state/zeus-forecasts.db, explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], unguarded_write_rationale: "Phase 7A metric-aware v2 rebuild; dry-run reads from forecast-class DB (ZEUS_FORECASTS_DB_PATH) read-only, but write mode fails closed unless --db names an isolated staging DB and refuses canonical state/zeus-forecasts.db.", promotion_barrier: "Isolated calibration_pairs_v2 output is not live calibration authority and cannot be promoted without separate operator-approved promotion evidence.", required_helpers: [".zeus/rebuild_lock.do_not_run_during_live (sentinel check at module load)", "scripts/rebuild_calibration_pairs.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py, tests/test_sqlite_busy_timeout.py]}
   # K1 fix F41 2026-05-17: reads forecast_class data via get_forecasts_connection_with_world().
   evaluate_calibration_transfer_oos.py: {class: repair, canonical_command: "python3 scripts/evaluate_calibration_transfer_oos.py --dry-run", dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run", target_db: state/zeus-forecasts.db, read_targets: [state/zeus-forecasts.db], write_targets: [state/zeus-forecasts.db], unguarded_write_rationale: "Writes validated_calibration_transfers evidence rows only with --no-dry-run; reads forecast_class data via get_forecasts_connection_with_world(); guarded by daemon-lock precondition.", promotion_barrier: "OOS evidence rows cannot authorize live calibration transfer without policy gate flag and operator review.", required_tests: [tests/test_evaluate_calibration_transfer_oos.py, tests/test_k1_reader_isolation.py]}
   rebuild_settlements.py:
@@ -742,93 +739,17 @@ scripts:
     required_tests: []
     reason: "Top-level shim for R3 drift validation and architecture YAML cited-path drift checks."
   rebuild_strategy_tracker_current_regime.py: {class: repair, apply_flag: implicit, target_db: state/strategy_tracker-live.json, unguarded_write_rationale: "Existing tracker rebuild writes tracker/history files without an apply flag; manifest marks it dangerous pending hardening."}
-  refit_platt.py: {class: repair, dangerous_if_run: true, apply_flag: implicit, target_db: state/zeus-world.db, unguarded_write_rationale: "Existing refit writes Platt model tables without an apply flag; manifest marks it dangerous pending hardening."}
-  refit_platt_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run --force", target_db: explicit_isolated_staging_db, read_targets: [state/zeus-world.db, explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], unguarded_write_rationale: "Phase 7A metric-aware v2 refit; dry-run may inspect canonical world DB read-only, but write mode fails closed unless --db names an isolated staging DB and refuses canonical state/zeus-world.db.", promotion_barrier: "Isolated Platt model output is not live calibration authority and cannot be promoted without separate operator-approved promotion evidence.", required_helpers: ["scripts/refit_platt_v2.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py]}
+  refit_platt.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--no-dry-run --force", target_db: explicit_isolated_staging_db, read_targets: [state/zeus-world.db, explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], unguarded_write_rationale: "Phase 7A metric-aware v2 refit; dry-run may inspect canonical world DB read-only, but write mode fails closed unless --db names an isolated staging DB and refuses canonical state/zeus-world.db.", promotion_barrier: "Isolated Platt model output is not live calibration authority and cannot be promoted without separate operator-approved promotion evidence.", required_helpers: ["scripts/refit_platt.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py]}
   # PR #337 full_transport_v1 offline refit pipeline (2026-05-24): four operator-invoked
   # scripts that drive the isolated-DB rebuild+refit+validation workflow without touching
   # any shared live DB. All refusal guards checked at startup.
   seed_isolated_calibration_db.py: {class: repair, dangerous_if_run: false, dry_run_default: false, apply_flag: implicit, target_db: explicit_isolated_staging_db, read_targets: [state/zeus-forecasts.db], write_targets: [explicit_isolated_staging_db], authority_scope: operator_invoked, reuse_when: "Start of a calibration refit cycle: creates the isolated staging DB from live forecasts DB (read-only).", do_not_use_when: "Never run against an existing DB path (script requires non-existent output); never pass a live world/forecasts DB as --out.", canonical_command: "python scripts/seed_isolated_calibration_db.py --out /tmp/iso.db", delete_policy: "Delete after refit cycle; ephemeral staging artifact.", promotion_barrier: "Seed output is a staging input; no promotion authority.", required_helpers: ["scripts/seed_isolated_calibration_db.py::_neutralize_off_union_training_flags"], required_tests: [], unguarded_write_rationale: "Writes a NEW user-specified isolated DB only; refuses any write to canonical live DB paths."}
-  run_offline_calibration_rebuild.py: {class: repair, dangerous_if_run: true, dry_run_default: false, apply_flag: implicit, target_db: explicit_isolated_staging_db, read_targets: [explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], authority_scope: operator_invoked, reuse_when: "After seed_isolated_calibration_db.py: runs rebuild_all_v2() against isolated staging DB with --error-model full_transport_v1.", do_not_use_when: "Never pass canonical live DB as --db (script refuses at startup via _resolve_isolated_calibration_write_db_path).", canonical_command: "python scripts/run_offline_calibration_rebuild.py --db /tmp/iso.db --n-mc 10000 --workers 14 --error-model full_transport_v1", delete_policy: "Ephemeral driver; keep while staging DB is in use.", promotion_barrier: "Calibration pairs output requires separate promotion script.", required_helpers: ["scripts/rebuild_calibration_pairs_v2.py::rebuild_all_v2", "scripts/rebuild_calibration_pairs_v2.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py], unguarded_write_rationale: "Writes only to caller-specified isolated DB; canonical DB refusal enforced by _resolve_isolated_calibration_write_db_path."}
-  run_offline_platt_refit.py: {class: repair, dangerous_if_run: true, dry_run_default: false, apply_flag: implicit, target_db: explicit_isolated_staging_db, read_targets: [explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], authority_scope: operator_invoked, reuse_when: "After run_offline_calibration_rebuild.py completes: runs refit_all_v2() against isolated staging DB; rebuild-complete sentinel gate preserved.", do_not_use_when: "Never pass canonical live world DB as --db (script refuses at startup).", canonical_command: "python scripts/run_offline_platt_refit.py --db /tmp/iso.db --error-model full_transport_v1", delete_policy: "Ephemeral driver; keep while staging DB is in use.", promotion_barrier: "Platt model output requires separate promote_platt_models_v2.py step.", required_helpers: ["scripts/refit_platt_v2.py::refit_all_v2", "scripts/refit_platt_v2.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py], unguarded_write_rationale: "Writes only to caller-specified isolated DB; canonical DB refusal enforced by _resolve_isolated_calibration_write_db_path."}
+  run_offline_calibration_rebuild.py: {class: repair, dangerous_if_run: true, dry_run_default: false, apply_flag: implicit, target_db: explicit_isolated_staging_db, read_targets: [explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], authority_scope: operator_invoked, reuse_when: "After seed_isolated_calibration_db.py: runs rebuild_all_v2() against isolated staging DB with --error-model full_transport_v1.", do_not_use_when: "Never pass canonical live DB as --db (script refuses at startup via _resolve_isolated_calibration_write_db_path).", canonical_command: "python scripts/run_offline_calibration_rebuild.py --db /tmp/iso.db --n-mc 10000 --workers 14 --error-model full_transport_v1", delete_policy: "Ephemeral driver; keep while staging DB is in use.", promotion_barrier: "Calibration pairs output requires separate promotion script.", required_helpers: ["scripts/rebuild_calibration_pairs.py::rebuild_all_v2", "scripts/rebuild_calibration_pairs.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py], unguarded_write_rationale: "Writes only to caller-specified isolated DB; canonical DB refusal enforced by _resolve_isolated_calibration_write_db_path."}
+  run_offline_platt_refit.py: {class: repair, dangerous_if_run: true, dry_run_default: false, apply_flag: implicit, target_db: explicit_isolated_staging_db, read_targets: [explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], authority_scope: operator_invoked, reuse_when: "After run_offline_calibration_rebuild.py completes: runs refit_all_v2() against isolated staging DB; rebuild-complete sentinel gate preserved.", do_not_use_when: "Never pass canonical live world DB as --db (script refuses at startup).", canonical_command: "python scripts/run_offline_platt_refit.py --db /tmp/iso.db --error-model full_transport_v1", delete_policy: "Ephemeral driver; keep while staging DB is in use.", promotion_barrier: "Platt model output requires separate promote_platt.py step.", required_helpers: ["scripts/refit_platt.py::refit_all_v2", "scripts/refit_platt.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py], unguarded_write_rationale: "Writes only to caller-specified isolated DB; canonical DB refusal enforced by _resolve_isolated_calibration_write_db_path."}
   validate_ens_refit_oos.py: {class: diagnostic, dangerous_if_run: false, dry_run_default: true, apply_flag: "N/A (read-only)", target_db: explicit_isolated_staging_db, read_targets: [explicit_isolated_staging_db], write_targets: [stdout], authority_scope: read_only_audit, reuse_when: "After run_offline_platt_refit.py: group-blocked OOS validation of calibration quality; outputs markdown table.", do_not_use_when: "Do not pass a live world/forecasts DB; must be the isolated staging DB.", canonical_command: "python scripts/validate_ens_refit_oos.py --db /tmp/iso.db --metric high", delete_policy: "Long-lived; reusable for any isolated DB.", promotion_barrier: "Read-only; no promotion side effects.", required_helpers: ["src/calibration/platt.py::ExtendedPlattCalibrator"], required_tests: [], unguarded_write_rationale: "N/A — read-only."}
-  promote_platt_models_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-world.db, read_targets: [explicit_isolated_staging_db, state/zeus-world.db], write_targets: [state/zeus-world.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of platt_models_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from refit_platt_v2.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_platt_models_v2.py::_rw_connect", "scripts/promote_platt_models_v2.py::_backup_prod_tables"], required_tests: [tests/test_promote_platt_models_v2.py]}
-  promote_calibration_pairs_v2.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-forecasts.db, read_targets: [explicit_isolated_staging_db, state/zeus-forecasts.db], write_targets: [state/zeus-forecasts.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of calibration_pairs_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from rebuild_calibration_pairs_v2.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_calibration_pairs_v2.py::_rw_connect", "scripts/promote_calibration_pairs_v2.py::_backup_prod_tables"], required_tests: [tests/test_promote_calibration_pairs_v2.py]}
-  # Phase 0 PR 4 — DecisionGroupId NOT NULL migration scripts (2026-05-19)
-  audit_calibration_pairs_v2_null_groups.py:
-    class: validation
-    module_owner: scripts
-    status: scaffold
-    lifecycle: phase0_pr4
-    packet: docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0
-    authority_scope: read_only_audit
-    reuse_when: "Pre-migration audit: count NULL decision_group_id rows on calibration_pairs_v2 and calibration_pairs_v2_archived_2026_05_11."
-    do_not_use_when: "Never use as proof of successful migration; it is read-only preflight only."
-    canonical_command: "python3 scripts/audit_calibration_pairs_v2_null_groups.py"
-    read_targets: [state/zeus-forecasts.db, state/zeus-world.db]
-    write_targets: [stdout]
-    dry_run_default: true
-    apply_flag: null
-    target_db: null
-    dangerous_if_run: false
-    promotion_barrier: "Read-only audit; no promotion side effects."
-    required_helpers: []
-    required_tests: [tests/test_decision_group_id_constraint.py]
-    reason: "Preflight audit for NOT NULL migration on calibration_pairs_v2. Reports NULL count + disk free. SCAFFOLD — not implemented."
-  migrate_calibration_pairs_v2_not_null.py:
-    class: repair
-    module_owner: scripts
-    status: scaffold
-    lifecycle: phase0_pr4
-    packet: docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0
-    dangerous_if_run: true
-    dry_run_default: true
-    apply_flag: "--apply"
-    target_db: "state/zeus-forecasts.db (also state/zeus-world.db for archived table)"
-    read_targets: [state/zeus-forecasts.db, state/zeus-world.db]
-    write_targets: [state/zeus-forecasts.db, state/zeus-world.db]
-    unguarded_write_rationale: "Two modes: --mode=trigger (default, disk-safe): adds BEFORE INSERT + BEFORE UPDATE OF decision_group_id triggers per table, zero disk overhead, RECOMMENDED at 22 GiB free. --mode=rebuild (canonical): CREATE new + INSERT + DROP + RENAME under per-DB SAVEPOINT, requires ~50 GiB headroom. Both modes are per-DB sequential (forecasts.db then world.db), NOT cross-DB ATTACH. Requires --apply; --mode=rebuild also requires --require-free-disk-gib guard."
-    promotion_barrier: "Schema migration is permanent; rollback via rollback_calibration_pairs_v2_not_null.py only if SAVEPOINT failed to self-recover."
-    required_helpers: ["scripts/audit_calibration_pairs_v2_null_groups.py"]
-    required_tests: [tests/test_calibration_pairs_v2_migration.py, tests/test_decision_group_id_constraint.py]
-    reason: "Adds NOT NULL constraint to decision_group_id on both calibration tables. SCAFFOLD — not implemented."
-  rollback_calibration_pairs_v2_not_null.py:
-    class: repair
-    module_owner: scripts
-    status: scaffold
-    lifecycle: phase0_pr4
-    packet: docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0
-    dangerous_if_run: true
-    dry_run_default: true
-    apply_flag: "--apply"
-    target_db: "state/zeus-forecasts.db (also state/zeus-world.db for archived table)"
-    read_targets: [state/zeus-forecasts.db, state/zeus-world.db]
-    write_targets: [state/zeus-forecasts.db, state/zeus-world.db]
-    unguarded_write_rationale: "Reverses NOT NULL migration on calibration_pairs_v2 and archived table. Uses same SAVEPOINT rebuild pattern. Only needed if migrate_calibration_pairs_v2_not_null.py's own SAVEPOINT did not self-recover. Requires backup table {table}_pre_not_null_backup to exist."
-    promotion_barrier: "Rollback is idempotent; backup table must exist (created by migrate script during apply phase)."
-    required_helpers: ["scripts/migrate_calibration_pairs_v2_not_null.py"]
-    required_tests: [tests/test_calibration_pairs_v2_migration.py]
-    reason: "Emergency rollback for NOT NULL migration. SCAFFOLD — not implemented."
-  promote_calibration_v2_stage_to_prod.py:
-    class: repair
-    status: active
-    lifecycle: long_lived
-    authority_scope: repair_write
-    reuse_when: >
-      Promote completed STAGE_DB platt_models_v2 to PROD via atomic backup + BEGIN IMMEDIATE write. Sentinel-completeness gate refuses incomplete rebuilds. calibration_pairs_v2 is forecast-class authority and uses promote_calibration_pairs_v2.py.
-    do_not_use_when: >
-      STAGE_DB sentinel state != COMPLETE (script refuses); PROD currently held by another writer (BEGIN IMMEDIATE will fail).
-    canonical_command: "python3 scripts/promote_calibration_v2_stage_to_prod.py {inspect|promote|verify} --stage-db <PATH> [--commit]"
-    delete_policy: retain_until_superseded
-    read_targets: [state/zeus-world.db, '<STAGE_DB_PATH>']
-    write_targets: [state/zeus-world.db]
-    dry_run_default: true
-    apply_flag: "--commit"
-    target_db: state/zeus-world.db
-    external_inputs: []
-    dangerous_if_run: true
-    promotion_barrier: "--commit required; sentinel-completeness, non-empty STAGE, and STAGE/PROD schema-match gates run before backup/write; atomic gzipped backup before BEGIN IMMEDIATE; rollback if commit fails."
-    required_helpers: []
-    required_tests: [tests/test_promote_calibration_v2_stage_to_prod.py]
+  promote_platt.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-world.db, read_targets: [explicit_isolated_staging_db, state/zeus-world.db], write_targets: [state/zeus-world.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of platt_models_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from refit_platt.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_platt.py::_rw_connect", "scripts/promote_platt.py::_backup_prod_tables"], required_tests: [tests/test_promote_platt.py]}
+  promote_calibration.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-forecasts.db, read_targets: [explicit_isolated_staging_db, state/zeus-forecasts.db], write_targets: [state/zeus-forecasts.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of calibration_pairs_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from rebuild_calibration_pairs.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_calibration.py::_rw_connect", "scripts/promote_calibration.py::_backup_prod_tables"], required_tests: [tests/test_promote_calibration.py]}
+
   regenerate_registries.py:
     class: utility
     reason: "Read-only harness-debate audit utility for manifest completeness/header drift; deliberately audits instead of regenerating authority manifests."
@@ -963,7 +884,7 @@ scripts:
     read_targets: [config/cities.json, state/source_contract_quarantine.json, state/zeus-world.db]
     write_targets: [stdout, state/source_contract_quarantine.json, state/source_contract_auto_convert, config/cities.json, state/zeus-world.db, docs/operations/current_source_validity.md]
     external_inputs: [Polymarket Gamma API, Weather Underground API, NOAA AviationWeather stationinfo API, api.weather.gov points API for US grid changes, Discord webhook optional]
-    required_helpers: [scripts.watch_source_contract, scripts.backfill_wu_daily_all, scripts.rebuild_settlements, scripts.rebuild_calibration_pairs_v2, scripts.refit_platt_v2, src.data.market_scanner, src.riskguard.discord_alerts]
+    required_helpers: [scripts.watch_source_contract, scripts.backfill_wu_daily_all, scripts.rebuild_settlements, scripts.rebuild_calibration_pairs, scripts.refit_platt, src.data.market_scanner, src.riskguard.discord_alerts]
     required_tests: [tests/test_market_scanner_provenance.py]
     reason: "Cron-safe source-contract transition controller that reuses the source watch, computes deterministic conversion/date scopes, keeps affected cities quarantined, writes durable receipts under a cron lock, emits mini-model execution contracts/reports with locator/write-scope safety, and can execute Phase B same-provider WU station conversions only behind explicit apply/force plus evidence gates."
     promotion_barrier: "Default is plan/dry-run. Apply mode is limited to auto-confirmed same-provider WU station changes with exact station metadata, scoped DB commands, backup/DB path evidence, verification, and complete release evidence refs; no live venue placement."
@@ -993,7 +914,7 @@ scripts:
     required_helpers: [scripts.ingest_grib_to_snapshots._contract_evidence_fields, src.contracts.tigge_snapshot_payload.TiggeSnapshotPayload]
     required_tests: [tests/test_low_contract_window_backfill.py, tests/test_phase5_gate_d_low_purity.py]
     reason: "LOW/HIGH alignment recovery repair. Default dry-run scans extracted LOW JSON evidence and reports which legacy LOW snapshots can be copied into contract-window recovery data_versions. Apply mode inserts new recovery rows only; it does not mutate old rows, does not rebuild pairs, and cannot authorize live promotion."
-    promotion_barrier: "Recovery rows must still pass rebuild_calibration_pairs_v2 LOW contract evidence gates and subsequent calibration validation before any live authority change."
+    promotion_barrier: "Recovery rows must still pass rebuild_calibration_pairs LOW contract evidence gates and subsequent calibration validation before any live authority change."
   learning_loop_observation_weekly.py: {class: diagnostic_report_writer, canonical_command: "python3 scripts/learning_loop_observation_weekly.py [--end-date YYYY-MM-DD] [--window-days 7] [--n-windows 4] [--override-bucket KEY=FIELD=VALUE] [--db-path PATH] [--report-out PATH] [--stdout]", write_targets: [stdout, "docs/operations/learning_loop_observation/weekly_<date>.json"], external_inputs: [state/zeus-shared.db], reason: "LEARNING_LOOP packet BATCH 3 (FINAL of FINAL — 5th of 5 R3 §1 #2 edge packets) weekly settlement→pair→retrain pipeline-stall runner. Wires src/state/learning_loop_observation.py compute_learning_loop_state_per_bucket + detect_learning_loop_stall (3 composable stall_kinds: corpus_vs_pair_lag + pairs_ready_no_retrain + drift_no_refit) AND orchestrates cross-packet integration with src/state/calibration_observation.py compute_platt_parameter_snapshot_per_bucket + detect_parameter_drift → JSON report with per-bucket current-window snapshot + per-bucket ParameterStallVerdict + drift_detected_map (cross-packet drift verdict per bucket). Read-only DB access; derived-context output (NOT authority). Per-bucket 3-tuple threshold dict (HIGH=1.3/20/10 tighter, LOW=1.5/30/14 standard; insufficient buckets suppress); operator-tunable via repeated --override-bucket KEY=FIELD=VALUE flags (FIELD ∈ pair_growth/pairs_ready/drift). Exit 1 if any bucket is stall_detected (cron-friendly). sys.path bootstrap pre-applied per LOW-OPERATIONAL-WP-3-1 lesson. CROSS-MODULE ORCHESTRATION: this runner is the ONLY place that performs the cross-packet drift JOIN (per LEARNING_LOOP BATCH 2 detector keeping pure-Python with caller-provided drift_detected). Per round3_verdict.md §1 #2 + ULTIMATE_PLAN.md §4 #4."}
   zpkt.py:
     class: runtime_support
@@ -1320,7 +1241,7 @@ scripts:
     unguarded_write_rationale: "DDL CREATE TABLE/INDEX/TRIGGER with IF NOT EXISTS; idempotent; no data mutation."
     required_helpers: [src.state.db.get_world_connection]
     required_tests: [tests/test_p2_byte_equivalence.py]
-  migrate_ensemble_snapshots_v2_alpha_proxy.py:
+  migrate_ensemble_snapshots_alpha_proxy.py:
     class: migration
     module_owner: engine
     status: active
@@ -1333,12 +1254,12 @@ scripts:
     target_db: state/zeus-forecasts.db
     read_targets: [state/zeus-forecasts.db]
     write_targets: [state/zeus-forecasts.db]
-    canonical_command: "python3 scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py [--db PATH] [--dry-run | --apply]"
+    canonical_command: "python3 scripts/migrate_ensemble_snapshots_alpha_proxy.py [--db PATH] [--dry-run | --apply]"
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
       PR6 one-shot migration: adds first_member_observed_time, run_complete_time,
-      raw_orderbook_hash_transition_delta_ms to ensemble_snapshots_v2.
+      raw_orderbook_hash_transition_delta_ms to ensemble_snapshots.
       All columns nullable; no backfill required. Run once per DB; idempotent on re-run.
     do_not_use_when: "All target columns already present (idempotency guard)."
     promotion_barrier: "Requires explicit --apply flag; dry-run default shows ALTER statements only."
@@ -1670,7 +1591,7 @@ scripts:
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
-      Fit PredictiveErrorModel posteriors (full_transport_v1) into model_bias_ens_v2.
+      Fit PredictiveErrorModel posteriors (full_transport_v1) into model_bias_ens.
       Use --commit to persist; dry-run by default. Requires isolated staging DB.
       Inspect Fix-A cycle selection before reuse.
     do_not_use_when: "Staging DB absent or calibration_pairs_v2 not yet rebuilt."
@@ -1679,7 +1600,7 @@ scripts:
     required_helpers: [src/calibration/ens_bias_repo.py, src/calibration/ens_error_model.py]
     required_tests: [tests/test_full_transport_live_wiring.py]
 
-  scripts/migrate_model_bias_ens_v2_canonical_fields.py:
+  scripts/migrate_model_bias_ens_canonical_fields.py:
     class: schema_migration
     status: active
     lifecycle: ft_ship_2026_05_25
@@ -1691,11 +1612,11 @@ scripts:
     target_db: state/zeus-world.db
     read_targets: [state/zeus-world.db]
     write_targets: [state/zeus-world.db]
-    canonical_command: "python scripts/migrate_model_bias_ens_v2_canonical_fields.py [--db PATH]"
+    canonical_command: "python scripts/migrate_model_bias_ens_canonical_fields.py [--db PATH]"
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
-      Add canonical error-model columns to model_bias_ens_v2 (idempotent).
+      Add canonical error-model columns to model_bias_ens (idempotent).
       ALTERs are guarded by PRAGMA table_info — safe to re-run.
       Run before fit_full_transport_error_models.py.
     do_not_use_when: "Schema already migrated (check PRAGMA table_info first)."
@@ -1754,7 +1675,7 @@ scripts:
     required_helpers: [src/calibration/ens_bias_repo.py]
     required_tests: []
 
-  scripts/promote_model_bias_ens_v2.py:
+  scripts/promote_model_bias_ens.py:
     class: repair
     status: active
     lifecycle: ft_ship_2026_05_26
@@ -1766,16 +1687,16 @@ scripts:
     target_db: "state/zeus-world.db (or --db PATH for staging)"
     read_targets: [state/zeus-world.db]
     write_targets: [state/zeus-world.db]
-    canonical_command: "python scripts/promote_model_bias_ens_v2.py promote [--commit] [--db PATH] [--metric METRIC]"
+    canonical_command: "python scripts/promote_model_bias_ens.py promote [--commit] [--db PATH] [--metric METRIC]"
     external_inputs: []
     delete_policy: retain_until_superseded
     reuse_when: >
-      Promote model_bias_ens_v2 STAGING rows to VERIFIED after shadow-validation passes.
+      Promote model_bias_ens STAGING rows to VERIFIED after shadow-validation passes.
       Requires STAGING rows from fit_full_transport_error_models.py. Use --db for staging DB;
       omit --db to target prod world.db.
     do_not_use_when: "STAGING rows absent or shadow-validation not yet passed."
     promotion_barrier: "Shadow-validation evidence required before promoting to VERIFIED."
-    unguarded_write_rationale: "Writes to model_bias_ens_v2 authority column only (STAGING→VERIFIED); no row creation."
+    unguarded_write_rationale: "Writes to model_bias_ens authority column only (STAGING→VERIFIED); no row creation."
     required_helpers: [src/state/db.py]
     required_tests: []
 
@@ -1796,7 +1717,7 @@ scripts:
     delete_policy: retain_until_superseded
     reuse_when: >
       Build isolated ft_staging DB for full_transport_v1 pair generation.
-      Copies calibration_pairs_v2, ensemble_snapshots_v2, observations etc. from prod
+      Copies calibration_pairs_v2, ensemble_snapshots, observations etc. from prod
       forecasts DB (read-only ATTACH URI) into a fresh staging DB.
     do_not_use_when: "Staging DB already built and posteriors fitted. Will overwrite."
     promotion_barrier: "Output is input to fit_full_transport_error_models.py; not directly promoted."

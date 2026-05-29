@@ -398,7 +398,7 @@ def _coverage_summary(
 # event age, not calendar-grade staleness; a per-family freshness policy is future work.
 _FAMILY_EVENT_PROBE: dict[str, tuple[str, str]] = {
     "observation": ("observations", "target_date"),
-    "market_topology": ("market_events_v2", "created_at"),
+    "market_topology": ("market_events", "created_at"),
     "settlement": ("settlements", "settled_at"),
 }
 

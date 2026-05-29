@@ -62,7 +62,7 @@ file_naming:
         automation_analysis.py: established automation diagnostic report
         baseline_experiment.py: established diagnostic baseline report
         cleanup_ghost_positions.py: established repair command name
-        compare_diurnal_v1_v2.py: established diagnostic comparison helper for diurnal migration parity
+
         data_completeness_audit.py: legacy word-order exception; keep until renamed
         deep_heartbeat.py: established runtime heartbeat helper
         deprecate_legacy_state_files.py: established repair command name
@@ -74,8 +74,8 @@ file_naming:
         equity_curve.py: established diagnostic report command
         evaluate_calibration_transfer_oos.py: established calibration-transfer OOS evidence writer name retained to match validated_calibration_transfers and operator-facing policy terminology
         force_lifecycle.py: established repair command name; dangerous and packet-gated
-        fill_obs_v2_dst_gaps.py: established obs_v2 targeted fill helper; fill_ prefix kept for explicit gap-repair semantics
-        fill_obs_v2_meteostat.py: established obs_v2 bulk fill helper; fill_ prefix kept for explicit source-specific repair semantics
+        fill_obs_dst_gaps.py: established obs_v2 targeted fill helper; fill_ prefix kept for explicit gap-repair semantics
+
         healthcheck.py: established operator entrypoint
         heartbeat_dispatcher.py: established runtime dispatcher
         history_lore_audit.py: harness-debate audit utility; word order retained to match the audited `history_lore.yaml` surface
@@ -93,8 +93,7 @@ file_naming:
         resume_backfills_sequential.sh: K2 sequential backfill orchestrator; resume_ prefix reflects its role as a restart wrapper
         profit_validation_replay.py: established diagnostic report command
         r3_drift_check.py: R3 packet drift shim name fixed by existing packet/runbook references; read-only validation utility.
-        refit_platt.py: established repair command name
-        refit_platt_v2.py: established repair command name (metric-aware v2 variant landed Phase 7A)
+        refit_platt.py: established repair command name (canonical)
         regenerate_registries.py: harness-debate manifest audit/update helper; verb retained because docs already cite this command and safe use is audit-only
         replay_parity.py: established diagnostic command
         semantic_linter.py: established enforcement tool

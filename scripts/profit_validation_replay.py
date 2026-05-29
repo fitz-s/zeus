@@ -66,7 +66,7 @@ def _positive_number(value) -> bool:
 
 def _is_corrected_exit_record(exit_record: dict) -> bool:
     return (
-        exit_record.get("pricing_semantics_version")
+        exit_record.get("pricing_semantics_id")
         == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
         or exit_record.get("corrected_executable_economics_eligible") is True
     )

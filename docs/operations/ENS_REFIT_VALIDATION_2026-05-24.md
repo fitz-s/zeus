@@ -11,7 +11,7 @@ write, no daemon restart, no `bias_correction_enabled` flip.
 
 ## Isolation mechanism
 
-- `scripts/seed_isolated_calibration_db.py` clones `ensemble_snapshots_v2`
+- `scripts/seed_isolated_calibration_db.py` clones `ensemble_snapshots`
   (with `members_unit`), `observations`, `settlements_v2` from the live
   forecasts DB into a lean staging DB and applies the v2 write-target schema.
 - Narrow training-flag hygiene: `training_allowed=0` is set ONLY for rows whose
@@ -50,7 +50,7 @@ bin that settled.
 
 ### Data-coverage caveat (in-scope finding)
 
-The predictive-error fit reads residuals from `ensemble_snapshots_v2 JOIN
+The predictive-error fit reads residuals from `ensemble_snapshots JOIN
 settlements_v2`. `settlements_v2` is heavily concentrated in MAM (Mar–May =
 3,272 of 4,504 high settlements across all cities). Consequently the correction
 mostly applies to spring-target snapshots; other seasons frequently lack enough

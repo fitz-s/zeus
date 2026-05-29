@@ -1143,18 +1143,18 @@ cards:
         - src/data/polymarket_client.py
       tests:
         - tests/test_fdr.py
-        - tests/test_executable_market_snapshot_v2.py
+        - tests/test_executable_market_snapshot.py
         - tests/test_market_analysis.py
         - tests/test_reality_contracts.py
         - tests/test_execution_price.py
         - tests/test_kelly.py
       gates:
-        - pytest -q tests/test_fdr.py tests/test_executable_market_snapshot_v2.py tests/test_market_analysis.py tests/test_reality_contracts.py tests/test_execution_price.py tests/test_kelly.py
+        - pytest -q tests/test_fdr.py tests/test_executable_market_snapshot.py tests/test_market_analysis.py tests/test_reality_contracts.py tests/test_execution_price.py tests/test_kelly.py
     residual_risk: >
       Corrected live semantics are not complete until legacy BinEdge price
       fields stop carrying cross-plane authority, executor limit derivation is
       hardened against posterior/vwmp recomputation, exit symmetry is proven,
-      and reporting/backtest cohorts segregate pricing_semantics_version.
+      and reporting/backtest cohorts segregate pricing_semantics_id.
     invalidation_condition: >
       Close only after the corrected-mode implementation proves side/token/
       snapshot/cost-basis lineage end to end and rejects legacy complement
@@ -1169,7 +1169,7 @@ cards:
         - src/contracts/execution_price.py
         - src/data/polymarket_client.py
         - tests/test_fdr.py
-        - tests/test_executable_market_snapshot_v2.py
+        - tests/test_executable_market_snapshot.py
     downstream_blast_radius:
       - src/engine/market_scanner.py
       - src/execution/exit_lifecycle.py

@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def _make_conn(tmp_path: Path) -> sqlite3.Connection:
@@ -28,7 +28,7 @@ def _make_conn(tmp_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

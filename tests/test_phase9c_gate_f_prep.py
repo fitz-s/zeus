@@ -31,14 +31,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 class TestRBZGetCalibratorMetricAware:
-    """Phase 9C L3 CRITICAL fix: get_calibrator reads platt_models_v2 with
+    """Phase 9C L3 CRITICAL fix: get_calibrator reads platt_models with
     metric discrimination. Pre-P9C the function read exclusively from legacy
     platt_models (no metric column) — a LOW candidate would silently receive
     a HIGH Platt model. This is the structural CRITICAL that blocked LOW
     deployment.
 
     Relationship antibody per critic-carol cycle-3 L9 runtime-probe pattern:
-    the cross-module invariant is writer (save_platt_model_v2) ↔ reader
+    the cross-module invariant is writer (save_platt_model) ↔ reader
     (get_calibrator) symmetric on `temperature_metric` axis. Constructs a
     DB with both HIGH + LOW rows for same (cluster, season) and asserts
     get_calibrator returns the metric-matching row.
@@ -46,46 +46,52 @@ class TestRBZGetCalibratorMetricAware:
 
     def _make_db_with_two_metrics(self) -> sqlite3.Connection:
         """Build minimal v2-schema DB with HIGH + LOW Platt rows for same bucket."""
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # Insert HIGH + LOW Platt rows with DIFFERENT param_A so we can
         # disambiguate which was returned.
+        # recorded_at must be set explicitly to a value before the config
+        # frozen_as_of cutoff (config/settings.json calibration.pin.frozen_as_of
+        # pins to a live-deployment timestamp); CURRENT_TIMESTAMP would be after
+        # the cutoff and cause load_platt_model to exclude the row.
         now = "2026-04-18T00:00:00+00:00"
         conn.execute(
             """
-            INSERT INTO platt_models_v2
+            INSERT INTO platt_models
                 (model_key, temperature_metric, cluster, season, data_version,
                  input_space, param_A, param_B, param_C, bootstrap_params_json,
-                 n_samples, brier_insample, fitted_at, is_active, authority)
+                 n_samples, brier_insample, fitted_at, is_active, authority,
+                 recorded_at)
             VALUES
                 ('high:NYC:JJA:v1:width_normalized_density',
                  'high', 'NYC', 'JJA',
                  'tigge_mx2t6_local_calendar_day_max_v1',
                  'width_normalized_density',
-                 1.23, 0.5, 0.0, '[]', 200, 0.10, ?, 1, 'VERIFIED')
+                 1.23, 0.5, 0.0, '[]', 200, 0.10, ?, 1, 'VERIFIED', ?)
             """,
-            (now,),
+            (now, now),
         )
         conn.execute(
             """
-            INSERT INTO platt_models_v2
+            INSERT INTO platt_models
                 (model_key, temperature_metric, cluster, season, data_version,
                  input_space, param_A, param_B, param_C, bootstrap_params_json,
-                 n_samples, brier_insample, fitted_at, is_active, authority)
+                 n_samples, brier_insample, fitted_at, is_active, authority,
+                 recorded_at)
             VALUES
                 ('low:NYC:JJA:v1:width_normalized_density',
                  'low', 'NYC', 'JJA',
                  'tigge_mn2t6_local_calendar_day_min_v1',
                  'width_normalized_density',
-                 4.56, 0.7, 0.0, '[]', 200, 0.15, ?, 1, 'VERIFIED')
+                 4.56, 0.7, 0.0, '[]', 200, 0.15, ?, 1, 'VERIFIED', ?)
             """,
-            (now,),
+            (now, now),
         )
         conn.commit()
         return conn
@@ -112,7 +118,7 @@ class TestRBZGetCalibratorMetricAware:
         )
         assert cal_low is not None, (
             "R-BZ.1: LOW calibrator lookup returned None despite a LOW row "
-            "existing in platt_models_v2. Pre-P9C this was guaranteed None "
+            "existing in platt_models. Pre-P9C this was guaranteed None "
             "(legacy table has no metric). Post-P9C must find the row."
         )
         assert cal_low.A == pytest.approx(4.56), (
@@ -296,7 +302,7 @@ class TestRCAMonitorLowMetricContinuity:
             def spread(self):
                 return TemperatureDelta(1.0, "F")
 
-        def get_calibrator(conn, city_arg, target_date_arg, *, temperature_metric=None):
+        def get_calibrator(conn, city_arg, target_date_arg, *, temperature_metric=None, **kwargs):
             captured["calibrator_metric"] = temperature_metric
             return None, 4
 
@@ -445,75 +451,29 @@ class TestRCAMonitorLowMetricContinuity:
 
 class TestRCBForecastRowsV2:
     """Phase 9C A1 (B093 half-2): _forecast_rows_for queries
-    historical_forecasts_v2 WITH metric filter when v2 has data; else falls
+    historical_forecasts WITH metric filter when v2 has data; else falls
     back to legacy `forecasts` table. Before P9C the function was
     legacy-only — any v2 data was unreachable even once Golden Window lifts.
+
+    B3 (PR3) drops historical_forecasts entirely
+    (src/state/schema/v2_schema.py:829 — "historical_forecasts — DROPPED in B3").
+    The test_v2_populated_query_filters_by_metric scenario (INSERT into
+    historical_forecasts) is now impossible; the table is never created by
+    apply_canonical_schema. Canonical behavior is legacy-forecasts fallback
+    (test_v2_empty_falls_back_to_legacy below).
     """
-
-    def test_v2_populated_query_filters_by_metric(self):
-        """R-CB.1: when historical_forecasts_v2 has rows for the city+date+metric,
-        _forecast_rows_for returns ONLY the v2 rows with matching metric."""
-        from src.engine.replay import ReplayContext
-        from src.state.schema.v2_schema import apply_v2_schema
-        from src.state.db import init_schema
-
-        conn = sqlite3.connect(":memory:")
-        conn.row_factory = sqlite3.Row
-        init_schema(conn)
-        apply_v2_schema(conn)
-
-        # v2 schema is per-row metric-partitioned (single forecast_value +
-        # temperature_metric column). Seed HIGH and LOW rows for same
-        # (city, target_date); expect translated downstream to (forecast_high=95.0)
-        # / (forecast_low=32.0) via _forecast_rows_for's legacy-shape shim.
-        now = "2026-07-10T00:00:00+00:00"
-        conn.execute(
-            """
-            INSERT INTO historical_forecasts_v2
-                (city, target_date, source, temperature_metric,
-                 forecast_value, temp_unit, lead_days, available_at)
-            VALUES
-                ('NYC', '2026-07-15', 'TIGGE_ECMWF', 'high',
-                 95.0, 'F', 5, ?)
-            """,
-            (now,),
-        )
-        conn.execute(
-            """
-            INSERT INTO historical_forecasts_v2
-                (city, target_date, source, temperature_metric,
-                 forecast_value, temp_unit, lead_days, available_at)
-            VALUES
-                ('NYC', '2026-07-15', 'TIGGE_ECMWF', 'low',
-                 32.0, 'F', 5, ?)
-            """,
-            (now,),
-        )
-        conn.commit()
-
-        ctx = ReplayContext(conn)
-        low_rows = ctx._forecast_rows_for("NYC", "2026-07-15", temperature_metric="low")
-        assert len(low_rows) == 1, (
-            f"R-CB.1: expected 1 LOW row from v2; got {len(low_rows)}"
-        )
-        assert low_rows[0]["forecast_low"] == 32.0, (
-            f"R-CB.1: v2 LOW row's forecast_low must be 32.0; got {low_rows[0]['forecast_low']}"
-        )
-        assert low_rows[0]["forecast_high"] is None, (
-            f"R-CB.1: LOW row's forecast_high is NULL in v2 (metric-partitioned)"
-        )
 
     def test_v2_empty_falls_back_to_legacy(self):
         """R-CB.2: when v2 is empty (Golden Window current state), legacy
         `forecasts` table is queried unchanged. Backward-compat preservation."""
         from src.engine.replay import ReplayContext
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # Seed ONLY legacy forecasts (v2 is empty)
         conn.execute(
@@ -543,7 +503,7 @@ class TestRCBForecastRowsV2:
 
 class TestRCCBoundaryGateWired:
     """Phase 9C A4: evaluator's candidate decision flow reads
-    boundary_ambiguous from ensemble_snapshots_v2 and refuses the candidate
+    boundary_ambiguous from ensemble_snapshots and refuses the candidate
     when the flag is True. Pre-P9C the contract function
     boundary_ambiguous_refuses_signal existed as ORPHAN code (no caller).
     This antibody locks the wire.
@@ -554,13 +514,13 @@ class TestRCCBoundaryGateWired:
         that keeps the gate dormant until data flows (current Golden Window
         state)."""
         from src.engine.evaluator import _read_v2_snapshot_metadata
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         meta = _read_v2_snapshot_metadata(
             conn,
@@ -679,24 +639,24 @@ class TestRCCBoundaryGateWired:
         """
         from src.engine.evaluator import _read_v2_snapshot_metadata
         from src.contracts.boundary_policy import boundary_ambiguous_refuses_signal
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         from src.state.db import init_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # Insert a v2 snapshot row with boundary_ambiguous=1. Schema has
-        # many NOT NULL columns (see v2_schema.py ensemble_snapshots_v2).
+        # many NOT NULL columns (see v2_schema.py ensemble_snapshots).
         now = "2026-07-10T00:00:00+00:00"
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric,
                  physical_quantity, observation_field,
                  available_at, fetch_time, lead_hours,
-                 members_json, model_version, data_version,
+                 members_json, model_version, dataset_id,
                  boundary_ambiguous, authority)
             VALUES
                 ('NYC', '2026-07-15', 'low',
@@ -712,7 +672,7 @@ class TestRCCBoundaryGateWired:
         snapshot_id = conn.execute(
             """
             SELECT snapshot_id
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE city = 'NYC'
               AND target_date = '2026-07-15'
               AND temperature_metric = 'low'
@@ -828,7 +788,7 @@ class TestRCGFitFromPairsLowSkip:
 
     P9C.1 fix: `_fit_from_pairs` accepts `temperature_metric` (default
     "high"), early-returns None for anything else. LOW refits MUST go
-    through scripts/refit_platt_v2.py → save_platt_model_v2 (Golden-
+    through scripts/refit_platt.py → save_platt_model (Golden-
     Window-gated). R-CG locks this invariant.
     """
 
@@ -839,12 +799,12 @@ class TestRCGFitFromPairsLowSkip:
         import sqlite3
         from src.calibration.manager import _fit_from_pairs
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         result = _fit_from_pairs(
             conn, cluster="NYC", season="JJA",
@@ -865,12 +825,12 @@ class TestRCGFitFromPairsLowSkip:
         import sqlite3
         from src.calibration import manager as manager_module
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         calls = []
 
@@ -901,12 +861,12 @@ class TestRCGFitFromPairsLowSkip:
         import sqlite3
         from src.calibration.manager import _fit_from_pairs
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         # HIGH path with no pairs → None (Level 4). Pre-P9C.1 behavior
         # preserved (no metric guard fires for HIGH).

@@ -9,7 +9,7 @@ REL-2  Row counts forecasts.X == world.X for forecast-authority tables (skip unt
 REL-3  No src/ caller reads/writes forecast-authority tables on the world connection (grep).
 REL-4  forecasts.db writer-lock file path is distinct from world.db writer-lock file path.
 REL-5  Pre/post migration timing baseline (skip until operator migration runs).
-REL-6  settlements + settlements_v2 + market_events_v2 atomicity: INSERT then forced rollback
+REL-6  settlements + settlement_outcomes + market_events atomicity: INSERT then forced rollback
        leaves all 3 tables at 0 rows on a fresh forecasts connection.
 REL-7  ATTACH read latency invariant (skip until operator migration runs).
 """
@@ -27,12 +27,12 @@ import pytest
 # ---------------------------------------------------------------------------
 
 FORECAST_TABLES = (
-    "ensemble_snapshots_v2",
-    "calibration_pairs_v2",
+    "ensemble_snapshots",
+    "calibration_pairs",
     "observations",
-    "settlements",
-    "settlements_v2",
-    "market_events_v2",
+    # "settlements" dropped from forecasts.db in B3 (bare ghost shell removed; world-class table stays on zeus-world.db)
+    "settlement_outcomes",
+    "market_events",
     "source_run",
     "job_run",
     "source_run_coverage",
@@ -50,7 +50,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 def test_rel1_init_schema_forecasts_tables_and_version():
     """init_schema_forecasts must create all forecast-authority tables + version."""
-    from src.state.db import SCHEMA_FORECASTS_VERSION, init_schema_forecasts
+    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen; counter cancelled
+    from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
     init_schema_forecasts(conn)
@@ -94,8 +95,8 @@ def test_rel1_init_schema_forecasts_critical_indexes():
 
     # At minimum these covering indexes are required for hot-path queries.
     required = {
-        "idx_ensemble_snapshots_v2_lookup",
-        "idx_calibration_pairs_v2_city_date_metric",
+        "idx_ensemble_snapshots_lookup",
+        "idx_calibration_pairs_city_date_metric",
     }
     missing = required - existing_indexes
     assert not missing, (
@@ -177,7 +178,7 @@ def test_rel3_no_forecast_tables_on_world_connection():
 def test_rel3_grep_smoke_no_crash():
     """REL-3 grep infra smoke: grep runs without error (pre-§5.5 advisory)."""
     result = subprocess.run(
-        ["grep", "-rn", "--include=*.py", "ensemble_snapshots_v2", "src/"],
+        ["grep", "-rn", "--include=*.py", "ensemble_snapshots", "src/"],
         capture_output=True,
         text=True,
         cwd=str(_REPO_ROOT),
@@ -247,31 +248,22 @@ def test_rel5_post_migration_forecasts_db_exists():
 # ---------------------------------------------------------------------------
 # REL-6: Co-transactional trio atomicity.
 #
-#   INSERT settlements + settlements_v2 + market_events_v2 on a single
+#   INSERT settlements + settlement_outcomes + market_events on a single
 #   forecasts connection inside an explicit transaction, then force ROLLBACK.
 #   All 3 tables must remain at 0 rows.
 # ---------------------------------------------------------------------------
 
 def _insert_trio(conn: sqlite3.Connection) -> None:
-    """INSERT one row into each of the 3 co-transactional trio tables.
+    """INSERT one row into each of the co-transactional trio tables.
 
+    B3: bare settlements shell dropped from forecasts.db; trio is now
+    settlement_outcomes + market_events only on forecasts.db.
     Uses named-column INSERT so CHECK constraints and defaults are respected
     without maintaining a fragile positional tuple.
     """
     conn.execute(
         """
-        INSERT INTO settlements (city, target_date, temperature_metric,
-            market_slug, winning_bin, settlement_value, settlement_source,
-            settled_at, authority, observation_field, data_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        ("Chicago", "2026-05-11", "high",
-         "chicago-high-75", "YES", 75.0, "wu",
-         "2026-05-11T00:00:00Z", "VERIFIED", "high_temp", "v2"),
-    )
-    conn.execute(
-        """
-        INSERT INTO settlements_v2 (city, target_date, temperature_metric,
+        INSERT INTO settlement_outcomes (city, target_date, temperature_metric,
             market_slug, winning_bin, settlement_value, settlement_source,
             settled_at, authority)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -282,7 +274,7 @@ def _insert_trio(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        INSERT INTO market_events_v2 (market_slug, city, target_date,
+        INSERT INTO market_events (market_slug, city, target_date,
             temperature_metric, condition_id, outcome, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
@@ -292,31 +284,31 @@ def _insert_trio(conn: sqlite3.Connection) -> None:
 
 
 def test_rel6_trio_atomicity_rollback():
-    """settlements + settlements_v2 + market_events_v2 must roll back atomically."""
+    """settlement_outcomes + market_events must roll back atomically (B3: settlements ghost dropped)."""
     from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
     init_schema_forecasts(conn)
     conn.commit()
 
-    # Begin explicit transaction, insert into all 3 tables, then force ROLLBACK.
+    # Begin explicit transaction, insert into all tables, then force ROLLBACK.
     conn.execute("BEGIN")
     _insert_trio(conn)
     conn.execute("ROLLBACK")
 
-    # All 3 tables must be empty after rollback.
-    for table in ("settlements", "settlements_v2", "market_events_v2"):
+    # All tables must be empty after rollback.
+    for table in ("settlement_outcomes", "market_events"):
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         assert count == 0, (
             f"REL-6: {table} has {count} rows after ROLLBACK — "
-            "co-transactional trio atomicity violated"
+            "co-transactional atomicity violated"
         )
 
     conn.close()
 
 
 def test_rel6_trio_atomicity_commit():
-    """After a successful commit all 3 trio tables must show exactly 1 row."""
+    """After a successful commit settlement_outcomes + market_events must show exactly 1 row."""
     from src.state.db import init_schema_forecasts
 
     conn = sqlite3.connect(":memory:")
@@ -327,7 +319,7 @@ def test_rel6_trio_atomicity_commit():
     _insert_trio(conn)
     conn.execute("COMMIT")
 
-    for table in ("settlements", "settlements_v2", "market_events_v2"):
+    for table in ("settlement_outcomes", "market_events"):
         count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         assert count == 1, (
             f"REL-6: {table} has {count} rows after COMMIT — expected 1"
@@ -349,7 +341,7 @@ def test_rel7_attach_read_latency():
     conn = sqlite3.connect(f"file:{ZEUS_WORLD_DB_PATH}?mode=ro", uri=True)
     conn.execute(f"ATTACH DATABASE ? AS fcast", (str(ZEUS_FORECASTS_DB_PATH),))
     t0 = time.monotonic()
-    conn.execute("SELECT COUNT(*) FROM fcast.ensemble_snapshots_v2").fetchone()
+    conn.execute("SELECT COUNT(*) FROM fcast.ensemble_snapshots").fetchone()
     elapsed = time.monotonic() - t0
     conn.close()
     assert elapsed < 5.0, f"REL-7: ATTACH COUNT(*) took {elapsed:.2f}s (> 5s threshold)"
@@ -364,16 +356,16 @@ def test_rel7_attach_read_latency():
 # ---------------------------------------------------------------------------
 
 _CRITICAL_V2_INDEXES = frozenset({
-    "idx_ensemble_snapshots_v2_lookup",
-    "idx_calibration_pairs_v2_city_date_metric",
+    "idx_ensemble_snapshots_lookup",
+    "idx_calibration_pairs_city_date_metric",
     "idx_ens_v2_source_run",
     "idx_ens_v2_entry_lookup",
-    "idx_calibration_pairs_v2_bucket",
-    "idx_calibration_pairs_v2_refit_core",
-    "idx_settlements_v2_city_date_metric",
-    "idx_settlements_v2_settled_at",
-    "idx_market_events_v2_city_date_metric",
-    "idx_market_events_v2_open",
+    "idx_calibration_pairs_bucket",
+    "idx_calibration_pairs_refit_core",
+    "idx_settlement_outcomes_city_date_metric",
+    "idx_settlement_outcomes_settled_at",
+    "idx_market_events_city_date_metric",
+    "idx_market_events_open",
 })
 
 
@@ -420,8 +412,8 @@ def test_relA_attach_partial_world_still_produces_critical_indexes(
 
     have = _indexes_on(fcast)
     required = {
-        "idx_ensemble_snapshots_v2_lookup",
-        "idx_calibration_pairs_v2_city_date_metric",
+        "idx_ensemble_snapshots_lookup",
+        "idx_calibration_pairs_city_date_metric",
     }
     missing = required - have
     fcast.close()

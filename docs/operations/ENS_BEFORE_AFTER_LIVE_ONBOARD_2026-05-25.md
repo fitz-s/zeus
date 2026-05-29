@@ -20,7 +20,7 @@ trains on these transport-adjusted probabilities. Live inference uses the transp
 as the basis for edge estimates.
 
 **Scale of change:** 17.6M transport rows (HIGH+LOW combined) replace 36.9M none rows as the
-Platt training surface. Groups-per-city change because the transport model requires `ensemble_snapshots_v2`
+Platt training surface. Groups-per-city change because the transport model requires `ensemble_snapshots`
 membership; cities without snapshot coverage fall back to `none` automatically (the table simply
 lacks `full_transport_v1` rows for them).
 

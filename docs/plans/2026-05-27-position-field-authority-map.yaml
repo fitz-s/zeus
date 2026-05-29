@@ -265,7 +265,7 @@ fields:
     disposition: KEEP
     target_pr: C (extend with typed venue observation events — VENUE_POSITION_OBSERVED, REVIEW_REQUIRED)
 
-  - name: rescue_events_v2.authority
+  - name: rescue_events.authority
     location: src/state/db.py
     physical_meaning: |
       Rescue/fallback authority label. resolve_rescue_authority() may return

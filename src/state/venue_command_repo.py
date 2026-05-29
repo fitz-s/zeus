@@ -1007,7 +1007,7 @@ def _assert_snapshot_gate(
 ) -> None:
     """U1 single insertion-point freshness/tradability gate."""
 
-    from src.contracts.executable_market_snapshot_v2 import (
+    from src.contracts.executable_market_snapshot import (
         StaleMarketSnapshotError,
         assert_snapshot_executable,
     )

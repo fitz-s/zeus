@@ -1,14 +1,14 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
 # Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
-# Purpose: Fit PredictiveErrorModel posteriors for all (city, metric, season) buckets and persist to model_bias_ens_v2.
+# Purpose: Fit PredictiveErrorModel posteriors for all (city, metric, season) buckets and persist to model_bias_ens.
 # Reuse: Requires isolated staging DB; inspect Fix-A cycle selection commit before reuse.
-# Authority basis: Zeus #64 / #69 — fit + persist ft posteriors → model_bias_ens_v2.
+# Authority basis: Zeus #64 / #69 — fit + persist ft posteriors → model_bias_ens.
 #   Ported from reference: scripts/run_offline_platt_refit.py + onboard_cities.py
 #   _run_fit_ens_bias_v2 logic. Uses Fix A's corrected metric-aware cycle selection
 #   (commit 5260dd2809 on feat/ft-ship-64).
 """Fit PredictiveErrorModel posteriors for all (city, metric, season) buckets and
-persist them to ``model_bias_ens_v2`` in an isolated staging / copy DB.
+persist them to ``model_bias_ens`` in an isolated staging / copy DB.
 
 For each bucket the pipeline is:
   TIGGE (prior) residuals  ─┐
@@ -19,7 +19,7 @@ For each bucket the pipeline is:
   PredictiveErrorModel (bias_c, residual_sd_c, correction_strength, …)
         │
         ▼
-  write_bias_model → model_bias_ens_v2
+  write_bias_model → model_bias_ens
 
 All 13 canonical extension columns are written alongside the legacy columns.
 
@@ -30,7 +30,7 @@ SAFETY RAILS
   either canonical name.
 * Default is DRY-RUN — prints what would be written without touching the DB.
   Pass ``--commit`` to actually write.
-* The canonical-fields migration (migrate_model_bias_ens_v2_canonical_fields.py)
+* The canonical-fields migration (migrate_model_bias_ens_canonical_fields.py)
   is run automatically (dry-run skipped, commit-mode applied) before fitting starts
   so the target DB always has the canonical columns.
 
@@ -223,9 +223,9 @@ def _fit_signature_hash(
 
 
 def _discover_cities(conn: sqlite3.Connection) -> list[str]:
-    """Return sorted list of cities that have ensemble_snapshots_v2 data."""
+    """Return sorted list of cities that have ensemble_snapshots data."""
     rows = conn.execute(
-        "SELECT DISTINCT city FROM ensemble_snapshots_v2 ORDER BY city"
+        "SELECT DISTINCT city FROM ensemble_snapshots ORDER BY city"
     ).fetchall()
     return [r[0] for r in rows]
 
@@ -354,7 +354,7 @@ def _effective_coverage_months(
 
 def _apply_canonical_migration(conn: sqlite3.Connection) -> None:
     """Ensure canonical columns exist in the target DB (run migration inline)."""
-    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate  # noqa: PLC0415
+    from scripts.migrate_model_bias_ens_canonical_fields import migrate  # noqa: PLC0415
     result = migrate(conn, dry_run=False)
     applied = result.get("applied", [])
     skipped = result.get("skipped_already_present", [])

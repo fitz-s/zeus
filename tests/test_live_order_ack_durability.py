@@ -62,7 +62,7 @@ def _init_db(path: str) -> sqlite3.Connection:
 
 def _insert_prereqs(conn: sqlite3.Connection) -> None:
     """Insert snapshot + envelope + command row so _live_order preconditions hold."""
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.snapshot_repo import insert_snapshot
     from src.state.venue_command_repo import (
@@ -73,7 +73,7 @@ def _insert_prereqs(conn: sqlite3.Connection) -> None:
     snapshot_id = f"snap-{_TOKEN_ID}"
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-ack-test",
             event_id="event-ack-test",

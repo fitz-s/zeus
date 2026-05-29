@@ -26,8 +26,8 @@ import pytest
 
 from src.state.db import init_schema
 from src.state.snapshot_repo import get_snapshot, insert_snapshot
-from src.contracts.executable_market_snapshot_v2 import (
-    ExecutableMarketSnapshotV2,
+from src.contracts.executable_market_snapshot import (
+    ExecutableMarketSnapshot,
     FRESHNESS_WINDOW_DEFAULT,
     is_fresh,
 )
@@ -132,8 +132,8 @@ def _decision(direction: str = "buy_yes"):
     )
 
 
-def _stale_snapshot(snapshot_id: str = "snap-stale", *, captured_at: datetime) -> ExecutableMarketSnapshotV2:
-    return ExecutableMarketSnapshotV2(
+def _stale_snapshot(snapshot_id: str = "snap-stale", *, captured_at: datetime) -> ExecutableMarketSnapshot:
+    return ExecutableMarketSnapshot(
         snapshot_id=snapshot_id,
         gamma_market_id="gamma-1",
         event_id="event-1",

@@ -135,7 +135,7 @@ sources:
         - "extract subprocess: '51 source data/scripts/extract_open_ens_localday.py' [VERIFIED ecmwf_open_data.py:81]"
         - "ingest: scripts/ingest_grib_to_snapshots.py::ingest_track() [VERIFIED ecmwf_open_data.py:23]"
         - "release calendar: config/source_release_calendar.yaml entries ecmwf_open_data_mx2t6_high / ecmwf_open_data_mn2t6_low [VERIFIED]"
-      target_table: "ensemble_snapshots_v2 (per-cycle, per-member, per-step, per-city, per-local-date)"
+      target_table: "ensemble_snapshots (per-cycle, per-member, per-step, per-city, per-local-date)"
       data_version_pattern:
         HIGH: "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"  # [VERIFIED] ecmwf_open_data.py:28-29; contracts/ensemble_snapshot_provenance.py
         LOW: "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"   # [VERIFIED] ecmwf_open_data.py:29; contracts/ensemble_snapshot_provenance.py
@@ -218,7 +218,7 @@ sources:
         - "extract subprocess: '51 source data/scripts/extract_tigge_(mx|mn)2t6_localday_(max|min).py' [VERIFIED tigge_pipeline.py:73]"
         - "ingest: scripts/ingest_grib_to_snapshots.py::ingest_track() [VERIFIED tigge_pipeline.py:36]"
         - "live stub (dormant): src/data/tigge_client.py — gate: ZEUS_TIGGE_INGEST_ENABLED env flag [VERIFIED tigge_client.py:31]"
-      target_table: "ensemble_snapshots_v2"
+      target_table: "ensemble_snapshots"
       data_version_pattern:
         HIGH: "tigge_mx2t6_local_calendar_day_max_v1"  # [INFERRED from ecmwf_opendata_tigge_equivalence_2026_05_06.yaml code_anchors]
         LOW:  "tigge_mn2t6_local_calendar_day_min_v1"
@@ -699,8 +699,8 @@ sources:
         - "live harvester: src/execution/harvester.py [VERIFIED source_rationale.yaml settlement_write route]"
       target_tables:
         - "settlements_v2 (provenance_json.reconstruction_method='gamma_backfill') [VERIFIED settlement_dual_source_truth_2026_05_07.yaml]"
-        - "market_events_v2 (event metadata, condition_ids)"
-        - "snapshot_repo (ExecutableMarketSnapshotV2) [VERIFIED src/state/snapshot_repo.py]"
+        - "market_events (event metadata, condition_ids)"
+        - "snapshot_repo (ExecutableMarketSnapshot) [VERIFIED src/state/snapshot_repo.py]"
       settlement_authority: >
         CANONICAL settlement source for all markets post-2026-02-21, and all LOW
         markets regardless of date. [VERIFIED settlement_dual_source_truth_2026_05_07.yaml.

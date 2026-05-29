@@ -3,7 +3,7 @@
 #          gate, fallback behavior, TestStoreRoundTrip end-to-end harvester
 #          path (HIGH→v2 after C5 2026-04-24), and decision-group accounting.
 # Reuse: Referenced by regression suite; last touched 2026-04-24 for C5
-#        (harvester HIGH default now writes calibration_pairs_v2, not
+#        (harvester HIGH default now writes calibration_pairs, not
 #        legacy table). _get_test_conn applies v2 schema to support this.
 """Tests for calibration manager: bucket routing, maturity gate, fallback.
 
@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import src.calibration.manager as _mgr_module
 from src.calibration.manager import (
     bucket_key,
     season_from_date,
@@ -48,6 +49,8 @@ from src.calibration.effective_sample_size import (
 from src.calibration.blocked_oos import evaluate_blocked_oos_calibration, recommend_calibration_promotion
 from src.config import City
 from src.state.db import get_connection, init_schema
+from src.state.schema.v2_schema import apply_canonical_schema
+from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
 
 def _ensure_auth_verified(conn) -> None:
@@ -73,9 +76,9 @@ def _decision_group_id(
     city: str,
     target_date: str,
     issue_time: str,
-    source_model_version: str = "test_calibration_manager_v1",
+    forecast_model_id: str = "test_calibration_manager_v1",
 ) -> str:
-    return compute_id(city, target_date, issue_time, source_model_version)
+    return compute_id(city, target_date, issue_time, forecast_model_id)
 
 
 class TestBucketRouting:
@@ -129,30 +132,44 @@ class TestMaturityLevel:
 class TestStoreRoundTrip:
     def _get_test_conn(self, tmp_path):
         """Post-C5 (2026-04-24): apply v2 schema so harvester's HIGH→v2
-        route lands rows in calibration_pairs_v2 (previously the HIGH
+        route lands rows in calibration_pairs (previously the HIGH
         branch wrote to legacy calibration_pairs)."""
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         db_path = tmp_path / "test_cal.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def test_save_and_load_model(self, tmp_path):
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
         conn = self._get_test_conn(tmp_path)
 
         bootstrap = [(1.0, 0.1, -0.5), (0.9, 0.12, -0.48)]
         save_platt_model(
-            conn, "US-Northeast_DJF",
-            A=1.0, B=0.1, C=-0.5,
+            conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster="US-Northeast",
+            season="DJF",
+            data_version=HIGH_LOCALDAY_MAX.data_version,
+            param_A=1.0,
+            param_B=0.1,
+            param_C=-0.5,
             bootstrap_params=bootstrap,
             n_samples=200,
             brier_insample=0.22,
+            input_space="width_normalized_density",
         )
         conn.commit()
 
-        loaded = load_platt_model(conn, "US-Northeast_DJF")
+        loaded = load_platt_model(
+            conn,
+            temperature_metric="high",
+            cluster="US-Northeast",
+            season="DJF",
+            data_version=HIGH_LOCALDAY_MAX.data_version,
+        )
         assert loaded is not None
         assert loaded["A"] == 1.0
         assert loaded["B"] == 0.1
@@ -164,7 +181,12 @@ class TestStoreRoundTrip:
 
     def test_load_nonexistent_returns_none(self, tmp_path):
         conn = self._get_test_conn(tmp_path)
-        assert load_platt_model(conn, "NONEXISTENT_DJF") is None
+        assert load_platt_model(
+            conn,
+            temperature_metric="high",
+            cluster="NONEXISTENT",
+            season="DJF",
+        ) is None
         conn.close()
 
     def test_add_and_get_pairs(self, tmp_path):
@@ -181,6 +203,10 @@ class TestStoreRoundTrip:
                     f"2026-01-{i+1:02d}",
                     "2026-01-01T00:00:00Z",
                 ),
+                metric_identity=HIGH_LOCALDAY_MAX,
+                training_allowed=True,
+                data_version="tigge_test_v1",
+                bin_source="legacy",
                 city_obj=NYC,
             )
         conn.commit()
@@ -208,7 +234,7 @@ class TestStoreRoundTrip:
             p_raw_vector=[0.05 * i for i in range(11)],
             lead_days=3.0,
             forecast_available_at="2026-01-14T00:00:00Z",
-            source_model_version="test_bias_corrected_v1",
+            forecast_model_id="test_bias_corrected_v1",
             forecast_issue_time="2026-01-13T12:00:00Z",
             bias_corrected=True,
         )
@@ -218,7 +244,7 @@ class TestStoreRoundTrip:
         assert n == 11
         # Post-C5 (2026-04-24): HIGH default now routes to v2.
         rows = conn.execute(
-            "SELECT bias_corrected FROM calibration_pairs_v2 WHERE city = 'NYC' AND target_date = '2026-01-15'"
+            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-15'"
         ).fetchall()
         assert len(rows) == 11
         assert all(row["bias_corrected"] == 1 for row in rows), \
@@ -226,7 +252,7 @@ class TestStoreRoundTrip:
 
         # Verify decision_group_id was set on all pairs
         group_rows = conn.execute(
-            "SELECT decision_group_id FROM calibration_pairs_v2 WHERE city = 'NYC' AND target_date = '2026-01-15'"
+            "SELECT decision_group_id FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-15'"
         ).fetchall()
         assert all(row["decision_group_id"] is not None and row["decision_group_id"] != "" for row in group_rows), \
             "All pairs must have decision_group_id set at insert time"
@@ -239,14 +265,14 @@ class TestStoreRoundTrip:
             p_raw_vector=[0.05 * i for i in range(11)],
             lead_days=2.0,
             forecast_available_at="2026-01-15T00:00:00Z",
-            source_model_version="test_bias_corrected_v1",
+            forecast_model_id="test_bias_corrected_v1",
             forecast_issue_time="2026-01-14T12:00:00Z",
             bias_corrected=False,
         )
         conn.commit()
 
         rows2 = conn.execute(
-            "SELECT bias_corrected FROM calibration_pairs_v2 WHERE city = 'NYC' AND target_date = '2026-01-16'"
+            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-01-16'"
         ).fetchall()
         assert len(rows2) == 11
         assert all(row["bias_corrected"] == 0 for row in rows2), \
@@ -270,14 +296,14 @@ class TestStoreRoundTrip:
             p_raw_vector=[0.5, 0.3, 0.2],
             lead_days=2.0,
             forecast_available_at="2026-01-31T00:00:00Z",
-            source_model_version="fallback_test_v1",
+            forecast_model_id="fallback_test_v1",
             forecast_issue_time="2026-01-30T12:00:00Z",
             bias_corrected=None,  # should fall back to settings
         )
         conn.commit()
 
         rows = conn.execute(
-            "SELECT bias_corrected FROM calibration_pairs_v2 WHERE city = 'NYC' AND target_date = '2026-02-01'"
+            "SELECT bias_corrected FROM calibration_pairs WHERE city = 'NYC' AND target_date = '2026-02-01'"
         ).fetchall()
         assert len(rows) == 3
         assert all(row["bias_corrected"] == 1 for row in rows), \
@@ -289,6 +315,7 @@ class TestDecisionGroupAccounting:
     def test_builds_decision_groups_from_pair_rows(self, tmp_path):
         conn = get_connection(tmp_path / "test_groups.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         for target_date, forecast_available_at in [
             ("2026-01-01", "2025-12-30T00:00:00Z"),
             ("2026-01-02", "2025-12-31T00:00:00Z"),
@@ -311,6 +338,10 @@ class TestDecisionGroupAccounting:
                         target_date,
                         forecast_available_at,
                     ),
+                    metric_identity=HIGH_LOCALDAY_MAX,
+                    training_allowed=True,
+                    data_version="tigge_test_v1",
+                    bin_source="legacy",
                     city_obj=NYC,
                 )
         conn.commit()
@@ -354,6 +385,7 @@ class TestDecisionGroupAccounting:
     def test_decision_group_write_is_idempotent(self, tmp_path):
         conn = get_connection(tmp_path / "test_groups.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         add_calibration_pair(
             conn,
             "NYC",
@@ -371,6 +403,10 @@ class TestDecisionGroupAccounting:
                 "2026-01-01",
                 "2025-12-30T00:00:00Z",
             ),
+            metric_identity=HIGH_LOCALDAY_MAX,
+            training_allowed=True,
+            data_version="tigge_test_v1",
+            bin_source="legacy",
             city_obj=NYC,
         )
         _ensure_auth_verified(conn)
@@ -398,6 +434,7 @@ class TestDecisionGroupAccounting:
     def test_build_decision_group_for_key_targets_one_group(self, tmp_path):
         conn = get_connection(tmp_path / "test_one_group.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         add_calibration_pair(
             conn,
             "NYC",
@@ -416,6 +453,10 @@ class TestDecisionGroupAccounting:
                 "2026-01-01",
                 "2025-12-30T00:00:00Z",
             ),
+            metric_identity=HIGH_LOCALDAY_MAX,
+            training_allowed=True,
+            data_version="tigge_test_v1",
+            bin_source="legacy",
             city_obj=NYC,
         )
         _ensure_auth_verified(conn)
@@ -440,6 +481,7 @@ class TestDecisionGroupAccounting:
     def test_decision_groups_split_same_available_at_by_lead_days(self, tmp_path):
         conn = get_connection(tmp_path / "test_groups_by_lead.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         for lead_days in (1.0, 2.0):
             for bin_idx in range(2):
                 add_calibration_pair(
@@ -460,6 +502,10 @@ class TestDecisionGroupAccounting:
                         "2025-12-30T00:00:00Z",
                         f"test_calibration_manager_v1_lead_{lead_days:g}",
                     ),
+                    metric_identity=HIGH_LOCALDAY_MAX,
+                    training_allowed=True,
+                    data_version="tigge_test_v1",
+                    bin_source="legacy",
                     city_obj=NYC,
                 )
 
@@ -499,6 +545,7 @@ class TestDecisionGroupAccounting:
     def test_maturity_shadow_exposes_pair_row_inflation(self, tmp_path):
         conn = get_connection(tmp_path / "test_maturity_shadow.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         for group_idx in range(5):
             for bin_idx in range(11):
                 add_calibration_pair(
@@ -518,6 +565,10 @@ class TestDecisionGroupAccounting:
                         f"2026-01-{group_idx + 1:02d}",
                         f"2025-12-{group_idx + 20:02d}T00:00:00Z",
                     ),
+                    metric_identity=HIGH_LOCALDAY_MAX,
+                    training_allowed=True,
+                    data_version="tigge_test_v1",
+                    bin_source="legacy",
                     city_obj=NYC,
                 )
         _ensure_auth_verified(conn)
@@ -544,6 +595,7 @@ class TestDecisionGroupAccounting:
     def test_decision_group_collision_is_rejected(self, tmp_path):
         conn = get_connection(tmp_path / "test_group_collision.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         group_id = _decision_group_id(
             "NYC",
             "2026-01-01",
@@ -564,6 +616,10 @@ class TestDecisionGroupAccounting:
                 forecast_available_at="2025-12-30T00:00:00Z",
                 settlement_value=40.0,
                 decision_group_id=group_id,
+                metric_identity=HIGH_LOCALDAY_MAX,
+                training_allowed=True,
+                data_version="tigge_test_v1",
+                bin_source="legacy",
                 city_obj=NYC,
             )
         _ensure_auth_verified(conn)
@@ -576,6 +632,7 @@ class TestDecisionGroupAccounting:
 
         conn = get_connection(tmp_path / "test_truncated_canonical.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         for group_idx in range(15):
             add_calibration_pair(
                 conn,
@@ -597,6 +654,9 @@ class TestDecisionGroupAccounting:
                 ),
                 bin_source="canonical_v1",
                 authority="VERIFIED",
+                metric_identity=HIGH_LOCALDAY_MAX,
+                training_allowed=True,
+                data_version="tigge_test_v1",
                 city_obj=NYC,
             )
 
@@ -710,7 +770,7 @@ class TestDecisionGroupAccounting:
             ),
         )
         # Same city/date/time/lead with a distinct source-version group_id is
-        # legal; source_model_version lives inside group_id.
+        # legal; forecast_model_id lives inside group_id.
         conn.execute(
             """
             INSERT INTO calibration_decision_group (
@@ -790,12 +850,17 @@ class TestBlockedOOSCalibration:
                     target_date,
                     forecast_available_at,
                 ),
+                metric_identity=HIGH_LOCALDAY_MAX,
+                training_allowed=True,
+                data_version="tigge_test_v1",
+                bin_source="legacy",
                 city_obj=NYC,
             )
 
     def test_blocked_oos_returns_report_with_metrics(self, tmp_path):
         conn = get_connection(tmp_path / "blocked_oos.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         for day, winning_idx in [("2026-01-01", 4), ("2026-01-02", 5), ("2026-01-03", 6)]:
             self._seed_group(
                 conn,
@@ -834,6 +899,7 @@ class TestBlockedOOSCalibration:
     def test_blocked_oos_falls_back_to_raw_for_immature_bucket(self, tmp_path):
         conn = get_connection(tmp_path / "blocked_oos_fallback.db")
         init_schema(conn)
+        apply_canonical_schema(conn)
         self._seed_group(
             conn,
             target_date="2026-01-01",
@@ -903,6 +969,7 @@ class TestGetCalibrator:
         db_path = tmp_path / "test.db"
         conn = get_connection(db_path)
         init_schema(conn)
+        apply_canonical_schema(conn)
 
         cal, level = get_calibrator(conn, NYC, "2026-01-15")
         assert cal is None
@@ -914,12 +981,22 @@ class TestGetCalibrator:
         db_path = tmp_path / "test.db"
         conn = get_connection(db_path)
         init_schema(conn)
+        apply_canonical_schema(conn)
+        _mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
 
         # Store a pre-fitted model under K3 bucket key (city.name_season)
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        season = season_from_date("2026-01-15", lat=NYC.lat)
         bootstrap = [(1.0, 0.1, -0.5)] * 50
         save_platt_model(
-            conn, "NYC_DJF",
-            A=1.0, B=0.1, C=-0.5,
+            conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster=NYC.cluster,
+            season=season,
+            data_version=HIGH_LOCALDAY_MAX.data_version,
+            param_A=1.0,
+            param_B=0.1,
+            param_C=-0.5,
             bootstrap_params=bootstrap,
             n_samples=200,
             input_space="width_normalized_density",
@@ -941,12 +1018,18 @@ class TestGetCalibrator:
         db_path = tmp_path / "test_stale_raw.db"
         conn = get_connection(db_path)
         init_schema(conn)
+        apply_canonical_schema(conn)
+        from src.types.metric_identity import HIGH_LOCALDAY_MAX
+        season = season_from_date("2026-01-15", lat=NYC.lat)
         save_platt_model(
             conn,
-            "NYC_DJF",
-            A=1.0,
-            B=0.1,
-            C=-0.5,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster=NYC.cluster,
+            season=season,
+            data_version=HIGH_LOCALDAY_MAX.data_version,
+            param_A=1.0,
+            param_B=0.1,
+            param_C=-0.5,
             bootstrap_params=[(1.0, 0.1, -0.5)] * 5,
             n_samples=200,
             input_space="raw_probability",
@@ -967,19 +1050,19 @@ class TestTiggeOpendataBridge:
     """
 
     def _v2_conn(self, tmp_path, name="bridge"):
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         db_path = tmp_path / f"test_{name}.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _save_high_tigge_v2(self, conn, cluster, season):
-        from src.calibration.store import save_platt_model_v2
+        from src.calibration.store import save_platt_model
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=HIGH_LOCALDAY_MAX,
             cluster=cluster,
@@ -1002,6 +1085,7 @@ class TestTiggeOpendataBridge:
         """HIGH + ecmwf_opendata + only TIGGE Platt present → returns the
         TIGGE-keyed calibrator, not None. Reproduces production state today:
         1197 tigge_* rows, 0 ecmwf_opendata_* rows."""
+        _mgr_module._PIN_CONFIG_CACHE = {"frozen_as_of": None, "model_keys": {}}
         conn = self._v2_conn(tmp_path, "high_bridge")
         season = season_from_date("2026-01-15", lat=NYC.lat)
         self._save_high_tigge_v2(conn, NYC.cluster, season)
@@ -1031,14 +1115,14 @@ class TestTiggeOpendataBridge:
         """LOW + ecmwf_opendata + only TIGGE LOW Platt present → returns
         None (no fallback). Purity doctrine ``_low_purity_doctrine_2026_05_07``
         forbids cross-source rescue for LOW."""
-        from src.calibration.store import save_platt_model_v2
+        from src.calibration.store import save_platt_model
         from src.types.metric_identity import LOW_LOCALDAY_MIN
 
         conn = self._v2_conn(tmp_path, "low_no_bridge")
         season = season_from_date("2026-01-15", lat=NYC.lat)
         # Seed a TIGGE-keyed LOW Platt; the bridge MUST NOT serve it to an
         # ecmwf_opendata LOW caller.
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=LOW_LOCALDAY_MIN,
             cluster=NYC.cluster,

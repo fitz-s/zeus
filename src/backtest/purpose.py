@@ -3,7 +3,7 @@
 Three structurally distinct purposes for replaying historical data:
 - SKILL: forecast probability quality (no PnL)
 - ECONOMICS: historical PnL with full parity (PROMOTION-grade — gated on
-  upstream data; tombstoned until market_events_v2 is populated)
+  upstream data; tombstoned until market_events is populated)
 - DIAGNOSTIC: code-vs-history decision divergence (NOT PnL)
 
 Replaces the implicit 3-purpose conflation in src/engine/replay.py with

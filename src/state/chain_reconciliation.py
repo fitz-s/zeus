@@ -55,13 +55,13 @@ FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 
 # Slice A4 (PR #19 finding 8, 2026-04-26): structural anchor for the
 # learning-authority contract previously held only in resolve_rescue_authority's
-# docstring. Any downstream learning consumer that ingests rescue_events_v2
+# docstring. Any downstream learning consumer that ingests rescue_events
 # rows MUST filter on authority = LEARNING_AUTHORITY_REQUIRED to avoid silently
 # misclassifying legacy / placeholder / quarantine-default rows (which are
 # tagged UNVERIFIED + 'position_missing_metric:...') as VERIFIED training
 # evidence. The relationship test in
 # tests/test_authority_strict_learning.py scans the repo for SELECT-side
-# reads of rescue_events_v2 and asserts each carries this filter.
+# reads of rescue_events and asserts each carries this filter.
 #
 # Antibody scope (post-review honesty, code-reviewer fix#4): the scanner is
 # LOOSE — it accepts any `WHERE authority = ?` clause, including hardcoded
@@ -69,7 +69,7 @@ FILL_TRADE_FACT_STATES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 # can satisfy the antibody without importing LEARNING_AUTHORITY_REQUIRED.
 # This is intentional: requiring the import would be a stronger antibody
 # but would also reject legitimate diagnostic / one-off audit reads. Code
-# reviewers reading new SELECT-from-rescue_events_v2 sites should verify
+# reviewers reading new SELECT-from-rescue_events sites should verify
 # the literal matches this constant value.
 LEARNING_AUTHORITY_REQUIRED = "VERIFIED"
 
@@ -127,7 +127,7 @@ def resolve_position_metric(position) -> tuple[str, str, str]:
 
 def resolve_rescue_authority(position) -> tuple[str, str, str]:
     """Resolve (temperature_metric, authority, authority_source) for a
-    rescue_events_v2 row from a Position object.
+    rescue_events row from a Position object.
 
     Slice P2-fix4 (post-review MAJOR #3 from code-reviewer, 2026-04-26):
     delegates to resolve_position_metric. Pre-fix4 had byte-identical
@@ -606,7 +606,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             import json
             from src.state.db import log_rescue_event
             # B063 P1 fix: unify occurred_at across the legacy
-            # CHAIN_RESCUE_AUDIT row and the new rescue_events_v2 row so
+            # CHAIN_RESCUE_AUDIT row and the new rescue_events row so
             # post-mortem JOINs on occurred_at correlate correctly and
             # the v2 UNIQUE(trade_id, occurred_at) key matches whatever
             # the legacy row recorded. Capture once, use twice.
@@ -667,7 +667,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     authority=_authority,
                     authority_source=_authority_source,
                 )
-                # INFO(DT#1): rescue_events_v2 is an authoritative audit
+                # INFO(DT#1): rescue_events is an authoritative audit
                 # record, not a derived export, so durability is allowed here.
                 conn.commit()
             except Exception as e:

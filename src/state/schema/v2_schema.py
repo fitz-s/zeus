@@ -1,6 +1,6 @@
 """Zeus World DB v2 schema migration.
 
-Single public function: apply_v2_schema(conn).
+Single public function: apply_canonical_schema(conn).
 
 Contract:
 - Idempotent (CREATE TABLE IF NOT EXISTS, DROP TABLE IF EXISTS).
@@ -24,10 +24,13 @@ import os
 import sqlite3
 
 
-def _create_settlements_v2(conn: sqlite3.Connection) -> None:
-    """Create settlements_v2 table + indexes. Idempotent. K1 forecast-class table."""
+def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
+    """Create settlement_outcomes table + indexes. Idempotent. K1 forecast-class table.
+
+    B3cont (2026-05-28): collapsed from settlement_outcomes (dead bare settlements shell dropped).
+    """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS settlements_v2 (
+        CREATE TABLE IF NOT EXISTS settlement_outcomes (
             settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -47,20 +50,24 @@ def _create_settlements_v2(conn: sqlite3.Connection) -> None:
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_v2_city_date_metric
-            ON settlements_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_city_date_metric
+            ON settlement_outcomes(city, target_date, temperature_metric)
     """)
     # Architect refinement: index on settled_at for harvest scans
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_v2_settled_at
-            ON settlements_v2(settled_at)
+        CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_settled_at
+            ON settlement_outcomes(settled_at)
     """)
 
 
-def _create_market_events_v2(conn: sqlite3.Connection) -> None:
-    """Create market_events_v2 table + indexes. Idempotent. K1 forecast-class table."""
+def _create_market_events(conn: sqlite3.Connection) -> None:
+    """Create market_events table + indexes. Idempotent. K1 forecast-class table.
+
+    Collapsed from market_events in B3cont (PR3): dead v1 shell on world.db
+    had 0 rows; v2 was the only live table (17,256 rows on zeus-forecasts.db).
+    """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS market_events_v2 (
+        CREATE TABLE IF NOT EXISTS market_events (
             event_id INTEGER PRIMARY KEY AUTOINCREMENT,
             market_slug TEXT NOT NULL,
             city TEXT NOT NULL,
@@ -79,26 +86,26 @@ def _create_market_events_v2(conn: sqlite3.Connection) -> None:
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_market_events_v2_city_date_metric
-            ON market_events_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_market_events_city_date_metric
+            ON market_events(city, target_date, temperature_metric)
     """)
     # Architect refinement: partial index on open markets
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_market_events_v2_open
-            ON market_events_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_market_events_open
+            ON market_events(city, target_date, temperature_metric)
             WHERE outcome IS NULL
     """)
 
 
-def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
-    """Create ensemble_snapshots_v2 table + indexes + ALTERs. Idempotent.
+def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
+    """Create ensemble_snapshots table + indexes + ALTERs. Idempotent.
 
     K1 forecast-class table (moves to zeus-forecasts.db). Contains CREATE,
     4 indexes, and 27 idempotent ALTER TABLE statements for additive columns
     added across schema versions. All ALTERs suppress 'duplicate column' errors.
     """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS ensemble_snapshots_v2 (
+        CREATE TABLE IF NOT EXISTS ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -117,7 +124,7 @@ def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
             spread REAL,
             is_bimodal INTEGER,
             model_version TEXT NOT NULL,
-            data_version TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
             source_id TEXT,
             source_transport TEXT,
             source_run_id TEXT,
@@ -132,7 +139,7 @@ def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
                 CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C')),
             settlement_rounding_policy TEXT,
             bin_grid_id TEXT,
-            bin_schema_version TEXT,
+            bin_schema_id TEXT,
             forecast_window_start_utc TEXT,
             forecast_window_end_utc TEXT,
             forecast_window_start_local TEXT,
@@ -161,55 +168,55 @@ def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
             authority TEXT NOT NULL DEFAULT 'VERIFIED'
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(city, target_date, temperature_metric, issue_time, data_version)
+            UNIQUE(city, target_date, temperature_metric, issue_time, dataset_id)
         )
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_v2_lookup
-            ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
+        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_lookup
+            ON ensemble_snapshots(city, target_date, temperature_metric, available_at)
     """)
     # 4A.2: members_unit / members_precision — idempotent ADD COLUMN
     for alter_sql in [
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_unit TEXT NOT NULL DEFAULT 'degC'",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN members_precision REAL",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN members_unit TEXT NOT NULL DEFAULT 'degC'",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN members_precision REAL",
         # 4.5: R-L provenance fields for local-calendar-day extractor
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN local_day_start_utc TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN step_horizon_hours REAL",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN local_day_start_utc TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN step_horizon_hours REAL",
         # Phase 7A: unit column for metric-aware backfill. Formerly-accompanying
         # contract_version + boundary_min_value columns dropped in P7B (no live
         # consumer; P8 will re-add if needed when shadow-activation consumers land).
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN unit TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN unit TEXT",
         # PLAN_v4 executable forecast-entry linkage. NULL means legacy/shadow-only.
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_id TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_transport TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_run_id TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN release_calendar_key TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_cycle_time TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_release_time TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN source_available_at TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_transport TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_run_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN release_calendar_key TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_cycle_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_release_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN source_available_at TEXT",
         # 2026-05-07 LOW/HIGH alignment recovery: nullable shadow columns for
         # contract-object and explicit forecast-window evidence. These columns
         # only make evidence persistable; they do not relax training_allowed or
         # change live decision authority.
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN city_timezone TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_source_type TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_station_id TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C'))",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN settlement_rounding_policy TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_grid_id TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN bin_schema_version TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_utc TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_utc TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_start_local TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_end_local TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_local_day_overlap_hours REAL",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_attribution_status TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN contributes_to_target_extrema INTEGER CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1))",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN forecast_window_block_reasons_json TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN city_timezone TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_source_type TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_station_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_unit TEXT CHECK (settlement_unit IS NULL OR settlement_unit IN ('F', 'C'))",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN settlement_rounding_policy TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN bin_grid_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN bin_schema_id TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_start_utc TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_end_utc TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_start_local TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_end_local TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_local_day_overlap_hours REAL",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_attribution_status TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN contributes_to_target_extrema INTEGER CHECK (contributes_to_target_extrema IS NULL OR contributes_to_target_extrema IN (0, 1))",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN forecast_window_block_reasons_json TEXT",
         # PR 6 (2026-05-19): alpha-proxy timing chain fields
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN first_member_observed_time TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN run_complete_time TEXT",
-        "ALTER TABLE ensemble_snapshots_v2 ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN first_member_observed_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN run_complete_time TEXT",
+        "ALTER TABLE ensemble_snapshots ADD COLUMN raw_orderbook_hash_transition_delta_ms INTEGER",
     ]:
         try:
             conn.execute(alter_sql)
@@ -218,30 +225,31 @@ def _create_ensemble_snapshots_v2(conn: sqlite3.Connection) -> None:
                 raise
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_v2_source_run
-            ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
+            ON ensemble_snapshots(source_id, source_transport, source_run_id)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_v2_entry_lookup
-            ON ensemble_snapshots_v2(
+            ON ensemble_snapshots(
                 city,
                 target_date,
                 temperature_metric,
                 source_id,
                 source_transport,
-                data_version,
+                dataset_id,
                 source_run_id
             )
     """)
 
 
-def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
-    """Create calibration_pairs_v2 table + indexes + ALTERs. Idempotent.
+def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
+    """Create calibration_pairs table + indexes + ALTERs. Idempotent.
 
     K1 forecast-class table (moves to zeus-forecasts.db). Architect refinement:
     UNIQUE on the full dedup key. Phase 2 ALTERs for cycle/source_id/horizon_profile.
+    Collapsed from calibration_pairs_v2 (B3 rename — bare v2 shell dropped).
     """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
+        CREATE TABLE IF NOT EXISTS calibration_pairs (
             pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -259,12 +267,12 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             settlement_value REAL,
             -- PHASE0-PR4: decision_group_id NOT NULL enforcement is LIVE (PR 4 production).
             -- Canonical enforcement: TRIGGER-mode (default, disk-safe).
-            --   scripts/migrate_calibration_pairs_v2_not_null.py --apply --mode trigger
+            --   scripts/migrate_calibration_pairs_not_null.py --apply --mode trigger
             --   Two BEFORE INSERT + BEFORE UPDATE triggers per table enforce NOT NULL.
             --   Idempotent (CREATE TRIGGER IF NOT EXISTS). Zero disk overhead.
             --   PRAGMA table_info still shows notnull=0 (column DDL unchanged).
             -- Optional canonical DDL rebuild (requires ~50 GiB free disk):
-            --   scripts/migrate_calibration_pairs_v2_not_null.py --apply --mode rebuild
+            --   scripts/migrate_calibration_pairs_not_null.py --apply --mode rebuild
             --   Produces notnull=1 in PRAGMA table_info but requires disk headroom.
             --   BLOCKED at current 22 GiB free — operator-coordinated separately.
             -- Preflight confirmed: 0 NULL rows as of 2026-05-17. See:
@@ -276,8 +284,8 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
                 CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
             bin_source TEXT NOT NULL DEFAULT 'legacy',
-            snapshot_id INTEGER REFERENCES ensemble_snapshots_v2(snapshot_id),
-            data_version TEXT NOT NULL,
+            snapshot_id INTEGER REFERENCES ensemble_snapshots(snapshot_id),
+            dataset_id TEXT NOT NULL,
             training_allowed INTEGER NOT NULL DEFAULT 1
                 CHECK (training_allowed IN (0, 1)),
             causality_status TEXT NOT NULL DEFAULT 'OK',
@@ -286,7 +294,7 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             horizon_profile TEXT NOT NULL DEFAULT 'full',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
-                   forecast_available_at, bin_source, data_version)
+                   forecast_available_at, bin_source, dataset_id)
         )
     """)
     # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
@@ -302,10 +310,10 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
     # cannot ALTER an existing UNIQUE, and a single rebuild scope only ever
     # writes ONE family; the destructive delete is keyed on bin_source.
     for alter_sql in [
-        "ALTER TABLE calibration_pairs_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
-        "ALTER TABLE calibration_pairs_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
-        "ALTER TABLE calibration_pairs_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
-        "ALTER TABLE calibration_pairs_v2 ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
+        "ALTER TABLE calibration_pairs ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
+        "ALTER TABLE calibration_pairs ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
+        "ALTER TABLE calibration_pairs ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+        "ALTER TABLE calibration_pairs ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
     ]:
         try:
             conn.execute(alter_sql)
@@ -313,34 +321,34 @@ def _create_calibration_pairs_v2(conn: sqlite3.Connection) -> None:
             if "duplicate column" not in str(exc).lower():
                 raise
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket
-            ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_bucket
+            ON calibration_pairs(temperature_metric, cluster, season, lead_days)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric
-            ON calibration_pairs_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_city_date_metric
+            ON calibration_pairs(city, target_date, temperature_metric)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
-            ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_refit_core
+            ON calibration_pairs(temperature_metric, dataset_id, training_allowed, authority)
     """)
     # PHASE0-PR4: Install NOT NULL triggers on fresh DBs so the enforcement invariant
     # holds from the first INSERT, not only after the operator runs the migration script.
     # Idempotent (CREATE TRIGGER IF NOT EXISTS).
     conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS calibration_pairs_v2_dgid_not_null_ins
-        BEFORE INSERT ON calibration_pairs_v2
+        CREATE TRIGGER IF NOT EXISTS calibration_pairs_dgid_not_null_ins
+        BEFORE INSERT ON calibration_pairs
         WHEN NEW.decision_group_id IS NULL
         BEGIN
-            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs.decision_group_id');
         END
     """)
     conn.execute("""
-        CREATE TRIGGER IF NOT EXISTS calibration_pairs_v2_dgid_not_null_upd
-        BEFORE UPDATE OF decision_group_id ON calibration_pairs_v2
+        CREATE TRIGGER IF NOT EXISTS calibration_pairs_dgid_not_null_upd
+        BEFORE UPDATE OF decision_group_id ON calibration_pairs
         WHEN NEW.decision_group_id IS NULL
         BEGIN
-            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs.decision_group_id');
         END
     """)
 
@@ -384,7 +392,7 @@ def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
     """)
 
 
-def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
+def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
     """Apply the Zeus World DB v2 schema to *conn*.
 
     Safe to call on both zeus-world.db and zeus_trades.db.
@@ -392,8 +400,8 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
 
     Args:
         forecast_tables: When True (default), create the 4 forecast-class v2
-            tables (settlements_v2, market_events_v2, ensemble_snapshots_v2,
-            calibration_pairs_v2). Set to False for init_schema_world_only so
+            tables (settlement_outcomes, market_events, ensemble_snapshots,
+            calibration_pairs). Set to False for init_schema_world_only so
             world conn does not recreate tables that live on zeus-forecasts.db
             post-K1 migration. K1 split 2026-05-11.
 
@@ -402,7 +410,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
     # handler that sqlite3.connect(timeout=N) installs, so any subsequent
     # conn.execute() on the same connection has no wait budget and fails
     # immediately on lock contention. Restoring busy_timeout here makes
-    # apply_v2_schema robust regardless of what ran on *conn* before it.
+    # apply_canonical_schema robust regardless of what ran on *conn* before it.
     # ZEUS_DB_BUSY_TIMEOUT_MS default matches db.py _db_busy_timeout_s() (30 s).
     """
     _busy_timeout_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
@@ -436,22 +444,24 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
 
         if forecast_tables:
             # ----------------------------------------------------------------
-            # settlements_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # settlement_outcomes  (K1 forecast-class: moves to zeus-forecasts.db)
+            # B3cont (2026-05-28): collapsed from settlement_outcomes.
             # ----------------------------------------------------------------
-            _create_settlements_v2(conn)
-            # Phase 7 T1 — ALTER for existing settlements_v2 rows on migrated DBs.
-            # _create_settlements_v2 adds outcome_type only in CREATE TABLE IF NOT EXISTS;
+            _create_settlement_outcomes(conn)
+            # Phase 7 T1 — ALTER for existing settlement_outcomes rows on migrated DBs.
+            # _create_settlement_outcomes adds outcome_type only in CREATE TABLE IF NOT EXISTS;
             # existing DBs need an explicit ALTER. Guard for duplicate column.
             try:
-                conn.execute("ALTER TABLE settlements_v2 ADD COLUMN outcome_type INTEGER")
+                conn.execute("ALTER TABLE settlement_outcomes ADD COLUMN outcome_type INTEGER")
             except Exception as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
 
             # ----------------------------------------------------------------
-            # market_events_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # market_events  (K1 forecast-class: moves to zeus-forecasts.db)
+            # Collapsed from market_events in B3cont (PR3).
             # ----------------------------------------------------------------
-            _create_market_events_v2(conn)
+            _create_market_events(conn)
 
         # ----------------------------------------------------------------
         # market_price_history
@@ -509,20 +519,20 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
 
         if forecast_tables:
             # ----------------------------------------------------------------
-            # ensemble_snapshots_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # ensemble_snapshots  (K1 forecast-class: moves to zeus-forecasts.db)
             # ----------------------------------------------------------------
-            _create_ensemble_snapshots_v2(conn)
+            _create_ensemble_snapshots(conn)
 
             # ----------------------------------------------------------------
-            # calibration_pairs_v2  (K1 forecast-class: moves to zeus-forecasts.db)
+            # calibration_pairs  (K1 forecast-class: moves to zeus-forecasts.db)
             # ----------------------------------------------------------------
-            _create_calibration_pairs_v2(conn)
+            _create_calibration_pairs(conn)
 
         # ----------------------------------------------------------------
-        # platt_models_v2
+        # platt_models
         # ----------------------------------------------------------------
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS platt_models_v2 (
+            CREATE TABLE IF NOT EXISTS platt_models (
                 model_key TEXT PRIMARY KEY,
                 temperature_metric TEXT NOT NULL
                     CHECK (temperature_metric IN ('high', 'low')),
@@ -555,24 +565,24 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
             )
         """)
         # Phase 2 (2026-05-04): cycle/source_id/horizon_profile stratification —
-        # idempotent ALTER for legacy DBs. Mirror of the calibration_pairs_v2
+        # idempotent ALTER for legacy DBs. Mirror of the calibration_pairs
         # block above; defaults match scripts/migrate_phase2_cycle_stratification.py.
-        # error_model_family (2026-05-24): mirror of the calibration_pairs_v2
+        # error_model_family (2026-05-24): mirror of the calibration_pairs
         # column. A Platt model fit on pairs built under family F MUST advertise
         # F so the live serving guard (assert_bias_state_consistent) can refuse a
         # train/serve mismatch (live bias-correction enabled while the active
         # Platt was fit on a different family's input space). Concatenated into
-        # model_key in save_platt_model_v2. Not in UNIQUE (same rationale as
-        # calibration_pairs_v2): SQLite cannot ALTER an existing UNIQUE.
+        # model_key in save_platt_model. Not in UNIQUE (same rationale as
+        # calibration_pairs): SQLite cannot ALTER an existing UNIQUE.
         for alter_sql in [
-            "ALTER TABLE platt_models_v2 ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
-            "ALTER TABLE platt_models_v2 ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
-            "ALTER TABLE platt_models_v2 ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
-            "ALTER TABLE platt_models_v2 ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
+            "ALTER TABLE platt_models ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
+            "ALTER TABLE platt_models ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
+            "ALTER TABLE platt_models ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+            "ALTER TABLE platt_models ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
             # identity_full_transport_v1 (Zeus #64, 2026-05-25): explicit route for
             # full_transport p_raw when ECE is already low — no Platt transform applied.
             # 'platt' is the default for all existing rows (backward-compatible).
-            "ALTER TABLE platt_models_v2 ADD COLUMN calibration_method TEXT NOT NULL DEFAULT 'platt'",
+            "ALTER TABLE platt_models ADD COLUMN calibration_method TEXT NOT NULL DEFAULT 'platt'",
         ]:
             try:
                 conn.execute(alter_sql)
@@ -580,8 +590,8 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
                 if "duplicate column" not in str(exc).lower():
                     raise
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_platt_models_v2_lookup
-                ON platt_models_v2(temperature_metric, cluster, season, data_version, input_space, is_active)
+            CREATE INDEX IF NOT EXISTS idx_platt_models_lookup
+                ON platt_models(temperature_metric, cluster, season, data_version, input_space, is_active)
         """)
 
         # ----------------------------------------------------------------
@@ -816,44 +826,13 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         """)
 
         # ----------------------------------------------------------------
-        # historical_forecasts_v2
+        # historical_forecasts — DROPPED in B3 (PR3).
+        # No writers existed (no INSERT in src/ as of PR-S4b audit 2026-05-18).
+        # Readers in replay.py / status_summary.py / verify_truth_surfaces.py
+        # are guarded by _table_exists(); they will skip gracefully on live DBs
+        # where the table has not been created. Live DB migration: ALTER/DROP
+        # handled by pr3_b3_live_table_rename.py (operator-run, not committed).
         # ----------------------------------------------------------------
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS historical_forecasts_v2 (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                city TEXT NOT NULL,
-                target_date TEXT NOT NULL,
-                source TEXT NOT NULL,
-                temperature_metric TEXT NOT NULL
-                    CHECK (temperature_metric IN ('high', 'low')),
-                forecast_value REAL NOT NULL,
-                temp_unit TEXT NOT NULL,
-                lead_days INTEGER,
-                available_at TEXT,
-                recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                    CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-                data_version TEXT NOT NULL DEFAULT 'v1',
-                provenance_json TEXT NOT NULL DEFAULT '{}',
-                UNIQUE(city, target_date, source, temperature_metric, lead_days)
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_historical_forecasts_v2_lookup
-                ON historical_forecasts_v2(city, target_date, source, temperature_metric, lead_days)
-        """)
-        # Gate F Step 2: authority + data_version + provenance_json for existing DBs
-        # (idempotent). Pairs with Gap B closure in step1_schema_audit.md.
-        for alter_sql in [
-            "ALTER TABLE historical_forecasts_v2 ADD COLUMN authority TEXT NOT NULL DEFAULT 'UNVERIFIED'",
-            "ALTER TABLE historical_forecasts_v2 ADD COLUMN data_version TEXT NOT NULL DEFAULT 'v1'",
-            "ALTER TABLE historical_forecasts_v2 ADD COLUMN provenance_json TEXT NOT NULL DEFAULT '{}'",
-        ]:
-            try:
-                conn.execute(alter_sql)
-            except Exception as exc:
-                if "duplicate column" not in str(exc).lower():
-                    raise
 
         # ----------------------------------------------------------------
         # day0_metric_fact
@@ -894,7 +873,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         """)
 
         # ----------------------------------------------------------------
-        # rescue_events_v2 — B063: durable audit row for chain-rescue events.
+        # rescue_events — B063: durable audit row for chain-rescue events.
         #
         # `chain_reconciliation._emit_rescue_event` already logs an INFO line
         # and inserts a `CHAIN_RESCUE_AUDIT` row into position_events, but
@@ -918,7 +897,7 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
         # in position_events per chain_reconciliation.py:276-282).
         # ----------------------------------------------------------------
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS rescue_events_v2 (
+            CREATE TABLE IF NOT EXISTS rescue_events (
                 rescue_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 trade_id TEXT NOT NULL,
                 position_id TEXT,
@@ -944,16 +923,16 @@ def apply_v2_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -
             )
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_rescue_events_v2_trade_time
-                ON rescue_events_v2(trade_id, recorded_at)
+            CREATE INDEX IF NOT EXISTS idx_rescue_events_trade_time
+                ON rescue_events(trade_id, recorded_at)
         """)
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_rescue_events_v2_metric_causality
-                ON rescue_events_v2(temperature_metric, causality_status, recorded_at)
+            CREATE INDEX IF NOT EXISTS idx_rescue_events_metric_causality
+                ON rescue_events(temperature_metric, causality_status, recorded_at)
         """)
 
         # Fix D (golden-knitting-wand.md Phase 1): per-bucket failure ledger
-        # for refit_platt_v2.py. Written when per-bucket SAVEPOINT rolls back
+        # for refit_platt.py. Written when per-bucket SAVEPOINT rolls back
         # so the operator can triage which buckets failed without losing
         # the successful buckets' rows. Separate from refit logic so the table
         # is available before the first refit run.

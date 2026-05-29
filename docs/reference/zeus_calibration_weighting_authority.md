@@ -4,7 +4,7 @@
 |---|---|
 | Created | 2026-04-29 |
 | Last reused/audited | 2026-04-29 |
-| Authority class | **Reference / Mathematical Spec** (binds calibration weight semantics for ensemble_snapshots_v2 → calibration_pairs_v2 → platt_models_v2) |
+| Authority class | **Reference / Mathematical Spec** (binds calibration weight semantics for ensemble_snapshots → calibration_pairs_v2 → platt_models_v2) |
 | Status | ACTIVE |
 | Authority basis | Empirical: PoC v4 (`_poc_weighted_platt_2026-04-28/poc_weighted_platt.py`, 1.7M pairs, 60-day OOS, 500-resample bootstrap), PoC v5 (`_poc_weighted_platt_2026-04-28/poc_v5_temp_delta_weighted.py`, same dataset, ΔT-based weights). Theoretical: Fitz Constraint #2 (translation-loss / information-cliff). Physical: ECMWF mesoscale resolution limit at coastal/monsoon cities. |
 | Supersedes | Implicit binary `training_allowed: bool` semantics in `extract_tigge_mn2t6_localday_min.py:328-333` |
@@ -136,7 +136,7 @@ precision_weight = (
 
 with `WEIGHT_FLOOR = 0.05` and `N_MEMBERS = 51` (TIGGE ENS).
 
-Schema migration target: `ensemble_snapshots_v2.precision_weight REAL NOT NULL CHECK (precision_weight >= 0 AND precision_weight <= 1)` and the existing `training_allowed` column either dropped or maintained as a derived view: `training_allowed = (precision_weight > 0)`.
+Schema migration target: `ensemble_snapshots.precision_weight REAL NOT NULL CHECK (precision_weight >= 0 AND precision_weight <= 1)` and the existing `training_allowed` column either dropped or maintained as a derived view: `training_allowed = (precision_weight > 0)`.
 
 ### LAW 2: Per-city eligibility opt-out for coastal/monsoon cities
 
@@ -159,7 +159,7 @@ Encoded in `config/cities.json::cities[].weighted_low_calibration_eligible: bool
 
 **Erratum 2026-04-29:** Earlier draft of this LAW stated `ensemble_n_mc()=10,000` as the production default. Audit of `config/settings.json` (commit `218b8c86`, 2026-04-01) showed the actual setting was `n_mc: 5000`. The 2026-04-29 calibration_pairs_v2 rebuild therefore ran at `n_mc=5000`, not 10,000. The 5000-vs-10000 distinction is mathematically below detection at aggregate fit scale (see derivation below) but is consequential for the **runtime per-trade evaluator** where it dominates per-decision SE. Settings.json was updated 2026-04-29 to `n_mc: 10000` (both `ensemble.n_mc` and `day0.n_mc`) to lift runtime to the LAW 4 preferred precision; the existing calibration_pairs_v2 (built at 5000) is retained for deployment because the math below shows the aggregate Platt fit difference is < 10⁻³ σ — empirically undetectable. A future re-rebuild at n_mc=10000 is queued in the backlog for full pipeline symmetry but is not load-bearing for fit quality.
 
-`rebuild_calibration_pairs_v2.py` defaults `n_mc=ensemble_n_mc()`. This default is mathematically justified for the **live runtime path** (single-snapshot p_raw used to size a single trade decision) but is **mathematically excess for the batch-rebuild path** (aggregate Platt fit across millions of pairs). Two distinct operational contexts have different precision floors.
+`rebuild_calibration_pairs.py` defaults `n_mc=ensemble_n_mc()`. This default is mathematically justified for the **live runtime path** (single-snapshot p_raw used to size a single trade decision) but is **mathematically excess for the batch-rebuild path** (aggregate Platt fit across millions of pairs). Two distinct operational contexts have different precision floors.
 
 #### Math derivation
 
@@ -194,7 +194,7 @@ vs label-noise contribution $\approx 6 \times 10^{-8}$ — **MC noise is 1000× 
 
 #### Production rule
 
-For **batch-rebuild path** (`rebuild_calibration_pairs_v2.py` invoked via cron / operator command / drift-trigger):
+For **batch-rebuild path** (`rebuild_calibration_pairs.py` invoked via cron / operator command / drift-trigger):
 
 ```
 default --n-mc = 1000  (was 10,000)
@@ -212,7 +212,7 @@ These are configured separately. The change applies ONLY to the rebuild script's
 
 ### LAW 5: HIGH/LOW SAVEPOINT separation for rebuild
 
-`rebuild_calibration_pairs_v2.py:38` documents "Entire rebuild runs inside one SAVEPOINT". Empirical impact (rebuild observed 2026-04-29):
+`rebuild_calibration_pairs.py:38` documents "Entire rebuild runs inside one SAVEPOINT". Empirical impact (rebuild observed 2026-04-29):
 
 - HIGH track (342k snapshots) + LOW track (74k eligible) processed serially in one SAVEPOINT
 - WAL grows to 7+ GB before commit
@@ -229,7 +229,7 @@ for spec in METRIC_SPECS:
     # daemon can init_schema and read latest HIGH coefficients while LOW rebuilds
 ```
 
-This requires a ~5-line code change to `rebuild_calibration_pairs_v2.rebuild_all_v2`. Effect:
+This requires a ~5-line code change to `rebuild_calibration_pairs.rebuild_all_v2`. Effect:
 - HIGH commits when HIGH done (daemon picks up HIGH coefficients while LOW continues)
 - LOW commits when LOW done
 - Maximum daemon-blocked window halved
@@ -292,7 +292,7 @@ Each cluster has ≥1k samples — defends against per-city overfitting while al
 **Production rule**:
 
 ```python
-# rebuild_calibration_pairs_v2.py + refit_platt_v2.py
+# rebuild_calibration_pairs.py + refit_platt.py
 def cluster_alpha(climate_zone: str) -> float:
     return CLUSTER_ALPHA_MAP[climate_zone]   # tuned per-cluster, not per-city
 
@@ -319,7 +319,7 @@ CLUSTER_ALPHA_MAP fitted once (e.g., 4-fold OOS CV across cluster cities), then 
 | `tests/test_no_temp_delta_weight_in_production.py` | grep production code for $\Delta T$-magnitude weight forms; fail if any found | TBD |
 | `tests/test_weight_floor_nonzero_for_ambig_only.py` | for any row with boundary_ambiguous=True AND causality_pure=True AND horizon_satisfied=True, assert `precision_weight ≥ WEIGHT_FLOOR` | TBD |
 | `tests/test_high_track_unaffected_by_low_law.py` | HIGH calibration_pairs_v2 rows have precision_weight=1 always | TBD |
-| `tests/test_rebuild_n_mc_default_bounded.py` | `rebuild_calibration_pairs_v2`'s default `n_mc` arg ≤ 2000; CLI override allowed but default reflects LAW 4 | TBD |
+| `tests/test_rebuild_n_mc_default_bounded.py` | `rebuild_calibration_pairs`'s default `n_mc` arg ≤ 2000; CLI override allowed but default reflects LAW 4 | TBD |
 | `tests/test_runtime_n_mc_floor.py` | `evaluator.py` MC paths use n_mc ≥ 5000 (per LAW 4 forbidden move 7) | TBD |
 | `tests/test_rebuild_per_track_savepoint.py` | rebuild emits per-metric `BEGIN`/`COMMIT` (LAW 5); inspectable via mocked conn or git-log of code structure | TBD |
 | `tests/test_no_per_city_alpha_tuning.py` | grep production code for any `cities[name].alpha = ...` or per-city continuous parameter; fail if found (LAW 3 forbidden #8) | TBD |

@@ -284,7 +284,7 @@ FILL_AUTHORITY_RANK = {
 # PR D2 (Finding 9, 2026-05-27): authorities that MAY produce training rows.
 # `is_training_eligible_position(pos)` is the type-boundary that downstream
 # learning/calibration writers must consult before writing a row to
-# `calibration_pairs_v2`. Authorities outside this set carry insufficient
+# `calibration_pairs`. Authorities outside this set carry insufficient
 # causality / fill provenance to support model fitting.
 #
 # References the FILL_AUTHORITY_* constants by name (not bare string literals)
@@ -483,7 +483,7 @@ class Position:
     entry_cost_basis_hash: str = ""
     entry_economics_authority: str = ENTRY_ECONOMICS_LEGACY_UNKNOWN
     fill_authority: str = FILL_AUTHORITY_NONE
-    pricing_semantics_version: str = "legacy_unclassified"
+    pricing_semantics_id: str = "legacy_unclassified"
     execution_cost_basis_version: str = ""
     corrected_executable_economics_eligible: bool = False
     bankroll_at_entry: Optional[float] = None
@@ -609,7 +609,7 @@ class Position:
     pnl: float = 0.0
 
     # Market slug (JSON-only — Phase 2 T5; NO SQL ALTER, NO SCHEMA_VERSION bump).
-    # Populated from market_events_v2 at decision time or via one-shot backfill.
+    # Populated from market_events at decision time or via one-shot backfill.
     # Used by monitor_refresh nowcast wiring to gate write_nowcast_run calls.
     # Default None preserves backward-compat with v1-vintage positions.json.
     market_slug: Optional[str] = None
@@ -2320,7 +2320,7 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "entry_cost_basis_hash": pos.entry_cost_basis_hash,
         "entry_economics_authority": pos.entry_economics_authority,
         "fill_authority": pos.fill_authority,
-        "pricing_semantics_version": pos.pricing_semantics_version,
+        "pricing_semantics_id": pos.pricing_semantics_id,
         "execution_cost_basis_version": pos.execution_cost_basis_version,
         "corrected_executable_economics_eligible": pos.corrected_executable_economics_eligible,
         "p_posterior": pos.p_posterior,
@@ -2694,7 +2694,7 @@ _BUY_NO_SCALING = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2706,7 +2706,7 @@ _BUY_YES_SCALING = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2718,7 +2718,7 @@ _BUY_NO_FLOOR = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2730,7 +2730,7 @@ _BUY_NO_CEILING = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2742,7 +2742,7 @@ _BUY_YES_FLOOR = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2754,7 +2754,7 @@ _BUY_YES_CEILING = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2766,7 +2766,7 @@ _CONSECUTIVE_CONFIRMS = ExpiringAssumption[int](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=365,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2778,7 +2778,7 @@ _NEAR_SETTLEMENT_HOURS = ExpiringAssumption[float](
     verification_source="pr_b_validation_replay",
     max_lifespan_days=365,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team"
 )
 
@@ -2790,7 +2790,7 @@ _DIVERGENCE_SOFT_THRESHOLD = ExpiringAssumption[float](
     verification_source="divergence_threshold_audit",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team",
 )
 
@@ -2802,7 +2802,7 @@ _DIVERGENCE_HARD_THRESHOLD = ExpiringAssumption[float](
     verification_source="divergence_threshold_audit",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team",
 )
 
@@ -2814,7 +2814,7 @@ _DIVERGENCE_VELOCITY_CONFIRM = ExpiringAssumption[float](
     verification_source="divergence_threshold_audit",
     max_lifespan_days=180,
     kill_switch_action="revert_to_fallback",
-    semantic_version="v2",
+    semantic_id="v2",
     owner="risk_team",
 )
 

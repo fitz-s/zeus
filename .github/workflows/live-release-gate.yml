@@ -46,7 +46,7 @@ jobs:
           test "${actual}" = "${expected}"
           test -z "$(git status --porcelain)"
       - name: Schema-plane proof
-        run: python scripts/check_schema_version.py
+        run: python scripts/check_schema_fingerprint.py
       - name: Static semantic proof
         run: python scripts/ci/assert_test_quality.py
       - name: Release verdict

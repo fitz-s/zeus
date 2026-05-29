@@ -39,7 +39,7 @@ from src.calibration.manager import season_from_date
 from src.calibration.platt import calibrate_and_normalize
 # Zeus #64 FT-ship F1 (2026-05-26): full_transport_live entry-path wiring.
 # These imports enable the evaluator to call p_raw_vector_with_error_model and
-# reconstruct a PredictiveErrorModel from model_bias_ens_v2 — mirroring the
+# reconstruct a PredictiveErrorModel from model_bias_ens — mirroring the
 # logic already present in monitor_refresh._resolve_ft_error_model.
 # Cannot import _resolve_ft_error_model directly: monitor_refresh imports evaluator
 # (circular). Logic is inlined below as _resolve_ft_error_model_for_entry().
@@ -160,7 +160,7 @@ from src.contracts.decision_evidence import DecisionEvidence
 from src.contracts.no_trade_reason import NoTradeReason
 from src.observability.counters import increment as _cnt_inc
 from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed, validate_members_unit
-from src.contracts.executable_market_snapshot_v2 import (
+from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_legacy_fee_rate_value,
     canonicalize_fee_details,
@@ -777,7 +777,7 @@ def _read_v2_snapshot_metadata(
 ) -> dict:
     """Phase 9C A4 (DT#7 wire) + P10D S1 (M3 causality wire):
     read boundary_ambiguous, causality_status, and snapshot_id metadata
-    for one (city, target_date, metric) row from ensemble_snapshots_v2.
+    for one (city, target_date, metric) row from ensemble_snapshots.
 
     Pre-Golden-Window-lift: v2 is empty → query returns no rows → returns
     empty dict → boundary_ambiguous_refuses_signal() returns False → no
@@ -822,7 +822,7 @@ def _read_v2_snapshot_metadata(
             row = conn.execute(
                 f"""
                 SELECT boundary_ambiguous, causality_status, snapshot_id, bin_grid_id
-                FROM {sp}ensemble_snapshots_v2
+                FROM {sp}ensemble_snapshots
                 WHERE city = ?
                   AND target_date = ?
                   AND temperature_metric = ?
@@ -840,7 +840,7 @@ def _read_v2_snapshot_metadata(
                     row = conn.execute(
                         f"""
                         SELECT boundary_ambiguous, causality_status, snapshot_id
-                        FROM {sp}ensemble_snapshots_v2
+                        FROM {sp}ensemble_snapshots
                         WHERE city = ?
                           AND target_date = ?
                           AND temperature_metric = ?
@@ -3302,7 +3302,7 @@ def _resolve_ft_error_model_for_entry(
     """Entry-path analogue of monitor_refresh._resolve_ft_error_model.
 
     Zeus #64 FT-ship F1 (2026-05-26): resolves a PredictiveErrorModel from
-    model_bias_ens_v2 for the entry evaluator so the full_transport_live flag
+    model_bias_ens for the entry evaluator so the full_transport_live flag
     drives BOTH the monitor refresh path AND the entry p_raw computation
     symmetrically.
 
@@ -3340,7 +3340,7 @@ def _resolve_ft_error_model_for_entry(
     if row is None:
         import logging as _logging
         _logging.getLogger(__name__).warning(
-            "full_transport_live entry: flag ON but no VERIFIED model_bias_ens_v2 row for "
+            "full_transport_live entry: flag ON but no VERIFIED model_bias_ens row for "
             "city=%r season=%r metric=%r live_data_version=%r family=%r — plain p_raw",
             city.name, season, metric_str, live_data_version, _FT_FAMILY,
         )
@@ -4011,7 +4011,7 @@ def evaluate_candidate(
         # conn=None below: write_nowcast_run acquires its own forecasts connection
         # (INV-37: world conn from evaluate_candidate must not touch forecasts DB).
         # T4 F4: deferred write — stash params here, write after v2_snapshot_meta
-        # is populated so bin_grid_id can be threaded from ensemble_snapshots_v2.
+        # is populated so bin_grid_id can be threaded from ensemble_snapshots.
         if temperature_metric.is_high() and hours_remaining <= 6.0:
             _obs_time_for_nowcast = _day0_observation_field(
                 candidate.observation, "observation_time"
@@ -4106,7 +4106,7 @@ def evaluate_candidate(
             # Attempt to resolve a VERIFIED PredictiveErrorModel; falls back to plain
             # p_raw_vector_from_maxes when flag OFF, model absent, or conn unavailable.
             # GFS crosscheck site (gfs_p = p_raw_vector_from_maxes below) is NOT wired:
-            # model_bias_ens_v2 is trained on TIGGE ENS members; applying it to GFS
+            # model_bias_ens is trained on TIGGE ENS members; applying it to GFS
             # members would be a wrong-error-model regression.
             # Authority: FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
             _ft_model = _resolve_ft_error_model_for_entry(
@@ -4187,7 +4187,7 @@ def evaluate_candidate(
         )]
 
     # Store ENS snapshot AFTER all semantic gates pass (#67 — no write-before-validate).
-    # Executable reader rows already have an audited ensemble_snapshots_v2 id;
+    # Executable reader rows already have an audited ensemble_snapshots id;
     # reuse it instead of writing a second legacy snapshot for the same source run.
     snapshot_persistence_conn = None if use_forecasts_live_snapshot_store else conn
     if using_period_extrema:
@@ -4388,10 +4388,10 @@ def evaluate_candidate(
         pass
     if _phase2_data_version is not None:
         from src.types.metric_identity import (
-            source_family_from_data_version,
+            source_family_from_dataset_id,
             source_family_from_source_id,
         )
-        _dv_family = source_family_from_data_version(_phase2_data_version)
+        _dv_family = source_family_from_dataset_id(_phase2_data_version)
         if _dv_family is None:
             _unknown_src_family_detail = (
                 f"forecast data_version {_phase2_data_version!r} does not "
@@ -6128,7 +6128,7 @@ def evaluate_candidate(
             # PR 7 (W1): effective_context=None — bid/ask data for this edge's
             # token is fetched in the p_market loop (evaluator.py:~2795) in a
             # different scope.  This evaluate_candidate loop does not carry the
-            # ExecutableMarketSnapshotV2; microstructure haircut is applied at
+            # ExecutableMarketSnapshot; microstructure haircut is applied at
             # cycle_runtime W2/W3/W4 where the snapshot IS in scope.
             # allow_missing_context=True: sole authorised pre-snapshot path; see
             # _size_at_execution_price_boundary docstring for invariant contract.
@@ -6465,14 +6465,14 @@ def _attached_table_exists(conn, schema: str, table: str) -> bool:
     return row is not None
 
 
-def _ensemble_snapshots_v2_table(conn) -> str:
-    if _attached_table_exists(conn, "forecasts", "ensemble_snapshots_v2"):
-        return "forecasts.ensemble_snapshots_v2"
-    if _attached_table_exists(conn, "world", "ensemble_snapshots_v2"):
-        return "world.ensemble_snapshots_v2"
+def _ensemble_snapshots_table(conn) -> str:
+    if _attached_table_exists(conn, "forecasts", "ensemble_snapshots"):
+        return "forecasts.ensemble_snapshots"
+    if _attached_table_exists(conn, "world", "ensemble_snapshots"):
+        return "world.ensemble_snapshots"
     try:
         row = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots_v2'"
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ensemble_snapshots'"
         ).fetchone()
     except sqlite3.OperationalError as exc:
         if _sqlite_operational_error_is_lock(exc):
@@ -6482,7 +6482,7 @@ def _ensemble_snapshots_v2_table(conn) -> str:
         raise
     except Exception:
         return ""
-    return "ensemble_snapshots_v2" if row is not None else ""
+    return "ensemble_snapshots" if row is not None else ""
 
 
 def _sqlite_operational_error_is_lock(exc: sqlite3.OperationalError) -> bool:
@@ -6542,7 +6542,7 @@ def _snapshot_identity_matches(
         and row["city"] == city.name
         and row["target_date"] == target_date
         and row["temperature_metric"] == temperature_metric
-        and row["data_version"] == data_version
+        and row["dataset_id"] == data_version
         and row["model_version"] == model_version
         and row["issue_time"] == issue_time
         and row["valid_time"] == valid_time
@@ -6556,7 +6556,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
 
     with _snapshot_forecasts_live_write_connection(conn) as conn:
       try:
-        v2_table = _ensemble_snapshots_v2_table(conn)
+        v2_table = _ensemble_snapshots_table(conn)
         issue_time_value = _snapshot_issue_time_value(ens_result)
         valid_time_value = _snapshot_valid_time_value(target_date, ens_result)
         fetch_time_value = _snapshot_time_value(ens_result.get("fetch_time"))
@@ -6645,12 +6645,12 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
                 INSERT INTO {v2_table}
                 (city, target_date, temperature_metric, physical_quantity, observation_field,
                  issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
-                 spread, is_bimodal, model_version, data_version, training_allowed,
+                 spread, is_bimodal, model_version, dataset_id, training_allowed,
                  causality_status, boundary_ambiguous, provenance_json, authority,
                  members_unit, unit,
                  first_member_observed_time, run_complete_time, raw_orderbook_hash_transition_delta_ms)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(city, target_date, temperature_metric, issue_time, data_version)
+                ON CONFLICT(city, target_date, temperature_metric, issue_time, dataset_id)
                 DO UPDATE SET
                     physical_quantity = excluded.physical_quantity,
                     observation_field = excluded.observation_field,
@@ -6704,7 +6704,7 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
                 WHERE city = ?
                   AND target_date = ?
                   AND temperature_metric = ?
-                  AND data_version = ?
+                  AND dataset_id = ?
                   AND model_version = ?
                   AND available_at = ?
                   AND fetch_time = ?
@@ -6728,13 +6728,13 @@ def _store_ens_snapshot(conn, city, target_date, ens, ens_result) -> str:
             snapshot_id = str(row["snapshot_id"]) if row is not None else ""
             if not snapshot_id:
                 raise ValueError(
-                    "canonical ensemble_snapshots_v2 insert/lookup failed"
+                    "canonical ensemble_snapshots insert/lookup failed"
                 )
         else:
-            # v1.F20: ensemble_snapshots_v2 is the only accepted writer target.
+            # v1.F20: ensemble_snapshots is the only accepted writer target.
             # No legacy ensemble_snapshots fallback; fail closed if v2 is absent.
             raise ValueError(
-                "_store_ens_snapshot requires ensemble_snapshots_v2 to be "
+                "_store_ens_snapshot requires ensemble_snapshots to be "
                 "available (v1.F20: legacy ensemble_snapshots removed)"
             )
         conn.commit()
@@ -6848,16 +6848,16 @@ def _store_snapshot_p_raw(
                     raise ValueError(
                         "p_raw_topology fusion status does not match executable_mask"
                     )
-        v2_table = _ensemble_snapshots_v2_table(conn)
+        v2_table = _ensemble_snapshots_table(conn)
         if not v2_table:
             # v1.F20: legacy ensemble_snapshots removed; fail closed if v2 absent.
             raise ValueError(
-                "_store_snapshot_p_raw requires ensemble_snapshots_v2 to be "
+                "_store_snapshot_p_raw requires ensemble_snapshots to be "
                 "available (v1.F20: legacy ensemble_snapshots removed)"
             )
         v2_row = conn.execute(f"""
             SELECT city, target_date, issue_time, valid_time, available_at,
-                   fetch_time, model_version, data_version, temperature_metric,
+                   fetch_time, model_version, dataset_id, temperature_metric,
                    provenance_json
             FROM {v2_table}
             WHERE snapshot_id = ?
@@ -6865,11 +6865,11 @@ def _store_snapshot_p_raw(
         if v2_row is None:
             if topology_payload and bool(topology_payload.get("requires_atomic_topology")):
                 raise ValueError(
-                    "canonical p_raw_topology persistence requires ensemble_snapshots_v2 "
+                    "canonical p_raw_topology persistence requires ensemble_snapshots "
                     f"for partial-executable support snapshot_id {snapshot_id}"
                 )
             raise ValueError(
-                f"ensemble_snapshots_v2 row not found for snapshot_id {snapshot_id}; "
+                f"ensemble_snapshots row not found for snapshot_id {snapshot_id}; "
                 "cannot persist p_raw (v1.F20: no legacy fallback)"
             )
         if topology_payload is not None:
@@ -6892,7 +6892,7 @@ def _store_snapshot_p_raw(
             )
         if result.rowcount != 1:
             raise ValueError(
-                "canonical ensemble_snapshots_v2 p_raw update affected "
+                "canonical ensemble_snapshots p_raw update affected "
                 f"{result.rowcount} rows for snapshot_id {snapshot_id}"
             )
         conn.commit()

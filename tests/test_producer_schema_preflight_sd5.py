@@ -1,7 +1,7 @@
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-28
 # Authority basis: Operator pre-MC review Blocker G / Preflight P0 (SD5). The producer must
-#   REFUSE to run if model_bias_ens_v2 cannot hold a full canonical row, because
+#   REFUSE to run if model_bias_ens cannot hold a full canonical row, because
 #   write_bias_model silently skips missing columns (backward-compat) and would otherwise
 #   'succeed' while dropping gate_set_hash / coverage / scale.
 """Relationship test for SD5: producer schema preflight fails closed.

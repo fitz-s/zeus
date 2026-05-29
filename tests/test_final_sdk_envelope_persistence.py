@@ -72,7 +72,7 @@ def _bypass_guards(monkeypatch):
 
 
 def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> str:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
 
     snapshot_id = snapshot_id or f"snap-{token_id}"
@@ -80,7 +80,7 @@ def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> 
         return snapshot_id
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-t1g",
             event_id="event-t1g",

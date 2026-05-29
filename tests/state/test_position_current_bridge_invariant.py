@@ -324,8 +324,16 @@ class TestTriggerMigration:
 class TestLogTradeEntryRaisesOnFailure:
     """log_trade_entry propagates exceptions instead of swallowing them."""
 
-    def test_log_trade_entry_raises_on_bad_field(self):
-        """If the INSERT fails, exception must propagate."""
+    def test_log_trade_entry_is_noop_audit_demotion_does_not_raise(self):
+        """F5 (PR3, 2026-05-28): trade_decisions demoted to audit-only export.
+
+        log_trade_entry no longer writes to trade_decisions (or any table) — canonical
+        entry truth lives in position_events / position_current. The function is now an
+        inert no-op, so even a malformed Position must NOT raise and must NOT create or
+        populate a trade_decisions row. Pre-F5 this path INSERTed into trade_decisions and
+        raised on a NOT NULL violation; that atomicity guarantee now lives entirely in the
+        position_current / position_events write path (see the SAVEPOINT test below).
+        """
         from src.state.db import log_trade_entry
 
         conn = sqlite3.connect(":memory:")
@@ -333,45 +341,19 @@ class TestLogTradeEntryRaisesOnFailure:
         conn.commit()
 
         class BadPos:
-            market_id = "mkt1"
+            market_id = None  # mangled NOT NULL field — pre-F5 this forced a raise
             bin_label = "label1"
             direction = "buy_yes"
             size_usd = 1.0
             entry_price = 0.5
             p_posterior = 0.6
-            p_raw = 0.6
-            edge = 0.1
-            entry_ci_width = 0.4
-            kelly_fraction = 0.1
-            edge_source = "ens"
-            trade_id = str(uuid.uuid4())
-            order_id = "ord1"
-            order_status = "pending"
-            order_posted_at = "2026-01-01"
-            entered_at = "2026-01-01"
-            chain_state = ""
-            strategy = "opening_inertia"
-            discovery_mode = "opening_hunt"
-            market_hours_open = 0.0
-            fill_quality = 0.0
-            entry_method = "ens_member_counting"
-            selected_method = "ens_member_counting"
-            applied_validations = []
-            settlement_semantics_json = None
-            epistemic_context_json = None
-            edge_context_json = None
-            state = "pending_tracked"
-            decision_snapshot_id = None
-            calibration_version = None
-            env = "test"
 
-        pos = BadPos()
-        # Remove a required NOT NULL field to force constraint failure
-        # by mangling market_id to None
-        pos.market_id = None  # type: ignore
+        # F5: no write, no raise — inert audit demotion.
+        log_trade_entry(conn, BadPos())
 
-        with pytest.raises(Exception):
-            log_trade_entry(conn, pos)
+        # trade_decisions must remain empty (log_trade_entry no longer writes it).
+        count = conn.execute("SELECT COUNT(*) FROM trade_decisions").fetchone()[0]
+        assert count == 0, "F5: log_trade_entry must not write trade_decisions (audit-only demotion)"
 
     def test_outer_savepoint_rolls_back_position_current_on_log_trade_entry_failure(self):
         """SAVEPOINT containing log_trade_entry + upsert_position_current

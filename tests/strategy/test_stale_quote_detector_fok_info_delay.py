@@ -34,7 +34,7 @@ import pytest
 
 from src.contracts.decision_natural_key import make_decision_natural_key
 from src.contracts.no_trade_reason import NoTradeReason
-from src.state.db import SCHEMA_VERSION
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 from src.strategy.candidates import (
     CandidateContext,
     StaleQuoteDetector,
@@ -150,7 +150,7 @@ def _make_metrics(**kwargs: Any) -> SimpleNamespace:
         depth_at_best_ask=5,
         polymarket_end_anchor_source="gamma_explicit",
         bin_grid_id=None,
-        bin_schema_version=None,
+        bin_schema_id=None,
         raw_orderbook_hash_transition_delta_ms=None,
         # FOK arb fields
         info_event_observed=False,

@@ -32,7 +32,7 @@ FORBIDDEN_IMPORTS = [
     "src.data.source_health_probe",
     "src.data.ingest_status_writer",
     "src.calibration.drift_detector",
-    "src.calibration.retrain_trigger_v2",
+    "src.calibration.drift_refit_arm",
 ]
 
 # String fragments that must NOT appear anywhere in src/main.py source text

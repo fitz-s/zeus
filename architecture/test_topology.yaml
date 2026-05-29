@@ -113,7 +113,7 @@ test_trust_policy:
     tests/test_entry_forecast_chain_relationship.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_rollout.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_entry_forecast_shadow.py: {created: "2026-05-03", last_used: "2026-05-03"}
-    tests/test_ensemble_snapshots_v2_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
+    tests/test_ensemble_snapshots_executable_schema.py: {created: "2026-05-03", last_used: "2026-05-03"}
     tests/test_ensemble_snapshots_bias_corrected_schema.py: {created: "2026-04-26", last_used: "2026-04-26"}
     # End-to-end sign / window / transport invariant audit for the FT-ship
     # hierarchical bias-correction layer. Authority: operator critique 2026-05-27
@@ -191,7 +191,7 @@ test_trust_policy:
     tests/test_backtest_settlement_value_outcome.py: {created: "2026-04-25", last_used: "2026-04-25"}
     tests/test_bug100_k1_k2_structural.py: {created: "2026-04-21", last_used: "2026-04-21"}
     tests/test_calibration_bins_canonical.py: {created: "2026-04-14", last_used: "2026-04-23"}
-    tests/test_promote_calibration_v2_stage_to_prod.py: {created: "2026-05-12", last_used: "2026-05-18"}
+
     tests/test_promote_pending_trades.py: {created: "2026-05-17", last_used: "2026-05-18"}
     tests/test_canonical_position_current_schema_alignment.py: {created: "2026-04-23", last_used: "2026-04-23"}
     tests/test_center_buy_repair.py: {created: "2026-04-29", last_used: "2026-04-29"}
@@ -207,7 +207,7 @@ test_trust_policy:
     tests/test_dual_track_law_stubs.py: {created: "2026-04-16", last_used: "2026-04-23"}
     tests/test_ensemble_signal.py: {created: "2026-03-30", last_used: "2026-04-23"}
     tests/test_entry_exit_symmetry.py: {created: "2026-04-07", last_used: "2026-04-23"}
-    tests/test_etl_forecasts_v2_from_legacy.py: {created: "2026-04-21", last_used: "2026-04-21"}
+
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-29"}
     tests/test_executor.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-04-29"}
@@ -316,7 +316,7 @@ test_trust_policy:
     tests/test_heartbeat_supervisor.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_v2_adapter.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_collateral_ledger.py: {created: "2026-04-27", last_used: "2026-04-27"}
-    tests/test_executable_market_snapshot_v2.py: {created: "2026-04-27", last_used: "2026-04-29"}
+    tests/test_executable_market_snapshot.py: {created: "2026-04-27", last_used: "2026-04-29"}
     tests/test_provenance_5_projections.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_command_grammar_amendment.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_riskguard_red_durable_cmd.py: {created: "2026-04-27", last_used: "2026-04-27"}
@@ -420,7 +420,7 @@ test_trust_policy:
     tests/test_ecmwf_open_data_hang_antibodies_2026_05_13.py: {created: "2026-05-13", last_used: "2026-05-13"}
     tests/test_ecmwf_open_data_parallel_fetch.py: {created: "2026-05-11", last_used: "2026-05-15"}
     tests/test_ecmwf_open_data_source_failover.py: {created: "2026-05-11", last_used: "2026-05-11"}
-    tests/test_ensemble_snapshots_v2_ingest_backend.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_ensemble_snapshots_ingest_backend.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_entries_block_registry.py: {created: "2026-05-04", last_used: "2026-05-04"}
     tests/test_entry_forecast_shadow_evidence_migration.py: {created: "2026-05-05", last_used: "2026-05-05"}
     tests/test_entry_forecast_shadow_promotion_passthrough.py: {created: "2026-05-05", last_used: "2026-05-05"}
@@ -463,10 +463,10 @@ test_trust_policy:
     tests/test_pre_commit_hook.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_pre_merge_comment_check.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_produce_activation_evidence.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_promote_calibration_pairs_v2_attach_path.py: {created: "2026-05-13", last_used: "2026-05-13"}
-    tests/test_promote_calibration_pairs_v2.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_promote_calibration_attach_path.py: {created: "2026-05-13", last_used: "2026-05-13"}
+    tests/test_promote_calibration.py: {created: "2026-05-12", last_used: "2026-05-12"}
     tests/test_promote_entry_forecast_cli.py: {created: "2026-05-12", last_used: "2026-05-12"}
-    tests/test_promote_platt_models_v2.py: {created: "2026-05-12", last_used: "2026-05-12"}
+    tests/test_promote_platt.py: {created: "2026-05-12", last_used: "2026-05-12"}
     tests/test_redeem_cascade_liveness.py: {created: "2026-05-01", last_used: "2026-05-16"}
     tests/test_rejection_stage_contract.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_replay_correctness_gate.py: {created: "2026-05-06", last_used: "2026-05-06"}
@@ -631,7 +631,7 @@ categories:
     - tests/test_etl_skill_eligibility_filter.py
     - tests/test_calibration_bins_canonical.py
     - tests/test_platt_bootstrap_equivalence.py
-    - tests/test_ensemble_snapshots_v2_executable_schema.py
+    - tests/test_ensemble_snapshots_executable_schema.py
     - tests/test_load_platt_v2_data_version_filter.py
     - tests/test_cities_config_authoritative.py
     - tests/test_config.py
@@ -657,7 +657,7 @@ categories:
     - tests/test_polymarket_v2_adapter_negrisk_redeem.py
     - tests/test_ecmwf_open_data_ingest_metric_independence.py
     - tests/test_collateral_ledger.py
-    - tests/test_executable_market_snapshot_v2.py
+    - tests/test_executable_market_snapshot.py
     - tests/test_provenance_5_projections.py
     - tests/test_command_grammar_amendment.py
     - tests/test_riskguard_red_durable_cmd.py
@@ -857,7 +857,7 @@ categories:
   useful_regression:
     - tests/test_alpha_target_coherence.py
     - tests/test_auto_pause_entries.py
-    - tests/test_b063_rescue_events_v2.py
+    - tests/test_b063_rescue_events.py
     - tests/test_backfill_completeness_guardrails.py
     - tests/test_backfill_openmeteo_previous_runs.py
     - tests/test_bootstrap_symmetry.py
@@ -879,7 +879,6 @@ categories:
     - tests/test_drift.py
     - tests/test_ensemble_client.py
     - tests/test_entry_exit_symmetry.py
-    - tests/test_etl_forecasts_v2_from_legacy.py
     - tests/test_executor.py
     - tests/test_exit_authority.py
     - tests/test_fdr_family_scope.py
@@ -975,7 +974,7 @@ categories:
     - tests/test_ecmwf_open_data_hang_antibodies_2026_05_13.py
     - tests/test_ecmwf_open_data_parallel_fetch.py
     - tests/test_ecmwf_open_data_source_failover.py
-    - tests/test_ensemble_snapshots_v2_ingest_backend.py
+    - tests/test_ensemble_snapshots_ingest_backend.py
     - tests/test_entries_block_registry.py
     - tests/test_entry_forecast_evaluator_cutover.py
     - tests/test_entry_forecast_rollout.py
@@ -1037,11 +1036,10 @@ categories:
     - tests/test_pre_merge_comment_check.py
     - tests/test_produce_activation_evidence.py
     - tests/test_producer_readiness_builder.py
-    - tests/test_promote_calibration_pairs_v2.py
-    - tests/test_promote_calibration_pairs_v2_attach_path.py
-    - tests/test_promote_calibration_v2_stage_to_prod.py
+    - tests/test_promote_calibration.py
+    - tests/test_promote_calibration_attach_path.py
     - tests/test_promote_entry_forecast_cli.py
-    - tests/test_promote_platt_models_v2.py
+    - tests/test_promote_platt.py
     - tests/test_rebuild_live_sentinel.py
     - tests/test_redeem_cascade_liveness.py
     - tests/test_rejection_stage_contract.py
@@ -1746,7 +1744,7 @@ test_metadata:
     law_dependencies:
       - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1C/phase.json
     notes: >
-      Relationship test. Parametrizes over (source_model_version, snapshot_training_allowed).
+      Relationship test. Parametrizes over (forecast_model_id, snapshot_training_allowed).
       Asserts maybe_write_learning_pair() returns 0 and emits
       harvester_learning_write_blocked_total{reason} for: missing smv, training=False,
       live-praw (openmeteo) source. Only tigge/ecmwf_ens with training=True writes pairs.
@@ -1781,12 +1779,12 @@ test_metadata:
       - T1E-REBUILD-SENTINEL-REFUSES
       - T1E-REBUILD-TRANSACTION-SHARDED
     source_under_test:
-      - scripts/rebuild_calibration_pairs_v2.py
+      - scripts/rebuild_calibration_pairs.py
     law_dependencies:
       - docs/operations/task_2026-05-04_zeus_may3_review_remediation/phases/T1E/phase.json
     notes: >
       Tests T1E rebuild sentinel and transaction-sharding invariants.
-      Asserts rebuild_calibration_pairs_v2.py exits non-zero when
+      Asserts rebuild_calibration_pairs.py exits non-zero when
       .zeus/rebuild_lock.do_not_run_during_live exists; sqlite3.connect is
       never called. Asserts rebuild_v2 shards commits per (city, metric)
       bucket: conn.commit() call count >= city_count for a single metric spec.
@@ -1804,8 +1802,8 @@ test_metadata:
     source_under_test:
       - config/cities.json
       - src/config.py
-      - scripts/rebuild_calibration_pairs_v2.py
-      - scripts/refit_platt_v2.py
+      - scripts/rebuild_calibration_pairs.py
+      - scripts/refit_platt.py
       - src/data/calibration_transfer_policy.py
     law_dependencies:
       - docs/reference/zeus_calibration_weighting_authority.md
@@ -2143,34 +2141,6 @@ test_metadata:
     created: 2026-05-19
     last_reused_or_audited: 2026-05-19
 
-  tests/test_calibration_pairs_v2_migration.py:
-    modules: [calibration, state]
-    category: relationship_test
-    profile: phase0_pr4_decision_group_id
-    blocks_commit: true
-    asserted_invariants:
-      - CALIBRATION-PAIRS-V2-TRIGGER-NOT-NULL-INS-BLOCKED
-      - CALIBRATION-PAIRS-V2-TRIGGER-NOT-NULL-UPD-BLOCKED
-      - MIGRATION-SAVEPOINT-ROLLBACK-ON-FAILURE
-      - MIGRATION-ROW-COUNT-INVARIANT
-    source_under_test:
-      - scripts/migrate_calibration_pairs_v2_not_null.py
-      - scripts/audit_calibration_pairs_v2_null_groups.py
-      - src/state/schema/v2_schema.py
-    law_dependencies:
-      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/preflight/migration_dry_runs.json
-      - docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/scaffolds/pr4_scaffold_report.md
-    notes: >
-      R-4.3: One live test (test_trigger_mode_blocks_null_insert_on_synthetic_fixture)
-      validates the trigger SQL template end-to-end on a synthetic fixture DB —
-      NULL INSERT blocked, UPDATE-to-NULL blocked, non-NULL operations succeed.
-      Nine xfail tests cover dry-run, --mode=trigger/rebuild apply, disk guard,
-      SAVEPOINT rollback, and row-count invariant; fixtures return usable tmp_path
-      DB paths (no collection-time raises). Activate post-PR4 implementation once
-      migration scripts have NotImplementedError removed.
-    created: 2026-05-19
-    last_reused_or_audited: 2026-05-19
 
   tests/test_outer_bin_inf_roundtrip.py:
     modules: [calibration]
@@ -3098,7 +3068,7 @@ test_metadata:
     source_under_test:
       - src/state/decision_integrity_quarantine.py
       - src/analysis/evidence_report.py
-      - scripts/refit_platt_v2.py
+      - scripts/refit_platt.py
     law_dependencies:
       - docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md
     notes: >

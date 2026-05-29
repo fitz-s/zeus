@@ -46,7 +46,7 @@ from src.riskguard.risk_level import RiskLevel
 from src.contracts.exceptions import ObservationUnavailableError
 import src.state.db as db_module
 from src.state.db import get_connection, init_schema, query_position_events
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.decision_chain import CycleArtifact, NoTradeCase, query_learning_surface_summary, store_artifact
 from src.state.chain_reconciliation import ChainPosition, reconcile
 from src.state.portfolio import (
@@ -715,13 +715,13 @@ def _insert_executable_snapshot(
     min_tick_size: str = "0.01",
     accepting_orders: bool = True,
 ) -> None:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import insert_snapshot
 
     captured_at = captured_at or datetime.now(timezone.utc)
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-1",
             event_id=event_id,
@@ -2164,6 +2164,11 @@ def test_reconcile_pending_positions_sets_verified_entry_but_keeps_chain_local(m
         entry_price=0.40,
     )
     db_module.log_trade_entry(conn, pending)
+    # log_trade_entry is a no-op (F5); synthesizer reconstructs from position_current.
+    # Seed position_current so synthesize_missing_bridge can find the position.
+    from src.state.projection import upsert_position_current
+    from src.engine.lifecycle_events import build_position_current_projection
+    upsert_position_current(conn, build_position_current_projection(pending))
     conn.commit()
     conn.close()
 
@@ -3456,7 +3461,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.commit()
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
     summary = {"candidates": 0, "no_trades": 0}
@@ -3488,7 +3493,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     def _evaluate_before_forward_flush(candidate, conn_arg, *args, **kwargs):
         del candidate, args, kwargs
         observed["same_conn_events_during_eval"] = conn_arg.execute(
-            "SELECT COUNT(*) FROM market_events_v2"
+            "SELECT COUNT(*) FROM market_events"
         ).fetchone()[0]
         observed["same_conn_prices_during_eval"] = conn_arg.execute(
             "SELECT COUNT(*) FROM market_price_history"
@@ -3496,7 +3501,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
         read_conn = get_connection(db_path)
         try:
             observed["external_events_during_eval"] = read_conn.execute(
-                "SELECT COUNT(*) FROM market_events_v2"
+                "SELECT COUNT(*) FROM market_events"
             ).fetchone()[0]
             observed["external_prices_during_eval"] = read_conn.execute(
                 "SELECT COUNT(*) FROM market_price_history"
@@ -3532,7 +3537,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     )
 
     observed["same_conn_events_after_flush"] = conn.execute(
-        "SELECT COUNT(*) FROM market_events_v2"
+        "SELECT COUNT(*) FROM market_events"
     ).fetchone()[0]
     observed["same_conn_prices_after_flush"] = conn.execute(
         "SELECT COUNT(*) FROM market_price_history"
@@ -3540,7 +3545,7 @@ def test_discovery_phase_buffers_forward_market_substrate_until_after_evaluator(
     read_conn = get_connection(db_path)
     try:
         observed["external_events_before_commit"] = read_conn.execute(
-            "SELECT COUNT(*) FROM market_events_v2"
+            "SELECT COUNT(*) FROM market_events"
         ).fetchone()[0]
         observed["external_prices_before_commit"] = read_conn.execute(
             "SELECT COUNT(*) FROM market_price_history"
@@ -3620,7 +3625,7 @@ def test_discovery_phase_forward_market_substrate_invalid_schema_degrades(monkey
     db_path = tmp_path / "forward-substrate-invalid-schema.db"
     monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
     conn = get_connection(db_path)
-    conn.execute("CREATE TABLE market_events_v2 (market_slug TEXT)")
+    conn.execute("CREATE TABLE market_events (market_slug TEXT)")
     conn.execute("CREATE TABLE market_price_history (token_id TEXT)")
     conn.commit()
     artifact = CycleArtifact(mode=DiscoveryMode.OPENING_HUNT.value, started_at="2026-04-03T00:00:00Z")
@@ -6891,7 +6896,7 @@ def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data
         "entry_forecast_config",
         lambda: types.SimpleNamespace(
             source_id="ecmwf_open_data",
-            source_transport=types.SimpleNamespace(value="ensemble_snapshots_v2_db_reader"),
+            source_transport=types.SimpleNamespace(value="ensemble_snapshots_db_reader"),
             high_track="mx2t6_high_full_horizon",
             low_track="mn2t6_low_full_horizon",
         ),
@@ -6906,7 +6911,7 @@ def test_monitor_ens_refresh_uses_executable_forecast_reader_for_ecmwf_open_data
                 "times": ["2026-04-01"],
                 "n_members": 51,
                 "source_id": "ecmwf_open_data",
-                "source_transport": "ensemble_snapshots_v2_db_reader",
+                "source_transport": "ensemble_snapshots_db_reader",
                 "source_run_id": "source-run-1",
                 "forecast_source_role": "entry_primary",
                 "degradation_level": "OK",
@@ -7002,7 +7007,7 @@ def test_monitor_ens_refresh_blocks_legacy_fallback_when_executable_reader_block
         "entry_forecast_config",
         lambda: types.SimpleNamespace(
             source_id="ecmwf_open_data",
-            source_transport=types.SimpleNamespace(value="ensemble_snapshots_v2_db_reader"),
+            source_transport=types.SimpleNamespace(value="ensemble_snapshots_db_reader"),
             high_track="mx2t6_high_full_horizon",
             low_track="mn2t6_low_full_horizon",
         ),
@@ -8184,12 +8189,12 @@ def _insert_runtime_transfer_sigma_row(
             ]
             conn.executemany(
                 """
-                INSERT OR IGNORE INTO calibration_pairs_v2 (
+                INSERT OR IGNORE INTO calibration_pairs (
                     pair_id,
                     city, target_date, decision_group_id,
                     temperature_metric, observation_field, range_label,
                     p_raw, outcome, lead_days, season, cluster,
-                    forecast_available_at, data_version,
+                    forecast_available_at, dataset_id,
                     source_id, cycle, horizon_profile,
                     training_allowed, authority, causality_status, recorded_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -8240,7 +8245,7 @@ def _insert_runtime_transfer_sigma_row(
                 )
     conn.execute(
         """
-        INSERT OR REPLACE INTO platt_models_v2 (
+        INSERT OR REPLACE INTO platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, param_A, param_B, param_C,
             bootstrap_params_json, n_samples, brier_insample,
@@ -8352,7 +8357,7 @@ def _runtime_transfer_sigma(
 def test_transfer_sigma_requires_nonempty_platt_model_key() -> None:
     """Empty Platt keys are not wildcards for validated transfer evidence."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     _insert_runtime_transfer_sigma_row(conn, platt_model_key="")
 
     sigma = _runtime_transfer_sigma(conn, platt_model_key="")
@@ -8363,7 +8368,7 @@ def test_transfer_sigma_requires_nonempty_platt_model_key() -> None:
 def test_transfer_sigma_uses_fully_scoped_live_evidence() -> None:
     """Positive transfer sigma requires policy, route, model key, and finite economics."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     _insert_runtime_transfer_sigma_row(conn)
 
     sigma = _runtime_transfer_sigma(conn)
@@ -8405,7 +8410,7 @@ def test_transfer_sigma_rejects_wrong_or_invalid_evidence(
 ) -> None:
     """Legacy, stale, or non-finite rows cannot widen live decision uncertainty."""
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     _insert_runtime_transfer_sigma_row(conn, **row_kwargs)
 
     sigma = _runtime_transfer_sigma(conn, **call_kwargs)
@@ -12438,7 +12443,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     # Slice A3 follow-up (PR #19 review fix, 2026-04-26): the writer requires
@@ -12477,9 +12482,9 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
         """
         SELECT issue_time, valid_time, available_at, fetch_time, p_raw_json,
                temperature_metric, physical_quantity, observation_field,
-               data_version, training_allowed, causality_status, authority,
+               dataset_id, training_allowed, causality_status, authority,
                members_unit, unit
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE snapshot_id = ? AND city = ? AND target_date = ?
         """,
         (snapshot_id, NYC.name, "2026-01-15"),
@@ -12496,7 +12501,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
     assert v2_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
     assert v2_row["physical_quantity"] == HIGH_LOCALDAY_MAX.physical_quantity
     assert v2_row["observation_field"] == HIGH_LOCALDAY_MAX.observation_field
-    assert v2_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert v2_row["dataset_id"] == HIGH_LOCALDAY_MAX.data_version
     assert v2_row["training_allowed"] == 0
     assert v2_row["causality_status"] == "UNKNOWN"
     assert v2_row["authority"] == "VERIFIED"
@@ -12506,7 +12511,7 @@ def test_store_ens_snapshot_links_openmeteo_valid_time_without_faking_issue_time
 
 
 def _seed_p_raw_snapshot(conn) -> str:
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     fetch_time = datetime(2026, 1, 14, 6, 5, tzinfo=timezone.utc)
     ens = type(
         "DummyEns",
@@ -12574,7 +12579,7 @@ def test_store_snapshot_p_raw_persists_support_topology_in_v2_provenance(tmp_pat
     row = conn.execute(
         """
         SELECT p_raw_json, provenance_json
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE snapshot_id = ?
         """,
         (snapshot_id,),
@@ -12640,7 +12645,7 @@ def test_store_snapshot_p_raw_rejects_invalid_support_topology(tmp_path, mutate)
         p_raw_topology=topology,
     )
     row = conn.execute(
-        "SELECT p_raw_json FROM ensemble_snapshots_v2 WHERE snapshot_id = ?",
+        "SELECT p_raw_json FROM ensemble_snapshots WHERE snapshot_id = ?",
         (snapshot_id,),
     ).fetchone()
     conn.close()
@@ -12653,11 +12658,11 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     world_db = tmp_path / "zeus-world.db"
     trade_conn = get_connection(trade_db)
     init_schema(trade_conn)
-    apply_v2_schema(trade_conn)
+    apply_canonical_schema(trade_conn)
     trade_conn.close()
     world_conn = get_connection(world_db)
     init_schema(world_conn)
-    apply_v2_schema(world_conn)
+    apply_canonical_schema(world_conn)
     world_conn.close()
 
     conn = get_connection(trade_db)
@@ -12695,14 +12700,14 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
         "SELECT COUNT(*) FROM main.ensemble_snapshots WHERE city = 'NYC'"
     ).fetchone()[0]
     main_v2_count = conn.execute(
-        "SELECT COUNT(*) FROM main.ensemble_snapshots_v2 WHERE city = 'NYC'"
+        "SELECT COUNT(*) FROM main.ensemble_snapshots WHERE city = 'NYC'"
     ).fetchone()[0]
     world_v2_row = conn.execute(
         """
-        SELECT p_raw_json, data_version, training_allowed, causality_status,
+        SELECT p_raw_json, dataset_id, training_allowed, causality_status,
                temperature_metric, physical_quantity, observation_field,
                members_unit, unit
-        FROM world.ensemble_snapshots_v2
+        FROM world.ensemble_snapshots
         WHERE snapshot_id = ? AND city = 'NYC'
         """,
         (snapshot_id,),
@@ -12714,7 +12719,7 @@ def test_store_ens_snapshot_routes_to_attached_world_db(tmp_path):
     assert main_v2_count == 0
     assert world_v2_row is not None
     assert json.loads(world_v2_row["p_raw_json"]) == [0.2, 0.3, 0.5]
-    assert world_v2_row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert world_v2_row["dataset_id"] == HIGH_LOCALDAY_MAX.data_version
     assert world_v2_row["training_allowed"] == 1
     assert world_v2_row["causality_status"] == "OK"
     assert world_v2_row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
@@ -12736,7 +12741,7 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     # Legacy table still exists (DROP migration is operator-invoked); pre-populate
     # an unrelated row to confirm the writer doesn't touch or break it.
     conn.execute(
@@ -12744,8 +12749,9 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at,
          fetch_time, lead_hours, members_json, spread, is_bimodal,
-         model_version, data_version, authority, temperature_metric)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         model_version, dataset_id, authority, temperature_metric,
+         physical_quantity, observation_field)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             1,
@@ -12763,6 +12769,8 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
             HIGH_LOCALDAY_MAX.data_version,
             "VERIFIED",
             HIGH_LOCALDAY_MAX.temperature_metric,
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
         ),
     )
     conn.commit()
@@ -12792,7 +12800,7 @@ def test_store_ens_snapshot_writes_v2_independent_of_legacy_table_contents(tmp_p
         ens_result,
     )
     v2_count = conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = 'NYC'"
+        "SELECT COUNT(*) FROM ensemble_snapshots WHERE city = 'NYC'"
     ).fetchone()[0]
     conn.close()
 
@@ -12805,15 +12813,15 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     issue_time = "2026-01-14T00:00:00+00:00"
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
         (city, target_date, temperature_metric, physical_quantity,
          observation_field, issue_time, valid_time, available_at, fetch_time,
          lead_hours, members_json, spread, is_bimodal, model_version,
-         data_version, training_allowed, causality_status, boundary_ambiguous,
+         dataset_id, training_allowed, causality_status, boundary_ambiguous,
          provenance_json, authority, members_unit, unit)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
@@ -12871,7 +12879,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
     v2_rows = conn.execute(
         """
         SELECT snapshot_id, valid_time, available_at, fetch_time, model_version
-          FROM ensemble_snapshots_v2
+          FROM ensemble_snapshots
          WHERE city = ?
         """,
         (NYC.name,),
@@ -12891,7 +12899,7 @@ def test_store_ens_snapshot_reuses_v2_conflict_without_legacy_fallback(tmp_path)
 @pytest.mark.skip(
     reason=(
         "2026-05-01 structural rewrite: collect_open_ens_cycle now writes to "
-        "ensemble_snapshots_v2 (not legacy ensemble_snapshots) with data_version "
+        "ensemble_snapshots (not legacy ensemble_snapshots) with data_version "
         "ecmwf_opendata_mx2t6_local_calendar_day_max_v1 (and _min_v1). The new "
         "antibody tests/test_opendata_writes_v2_table.py covers the replacement "
         "behavior. This legacy test asserted the v1 path that is now retired."
@@ -12935,8 +12943,8 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
     # v1.F20: legacy ensemble_snapshots removed; query v2 instead.
     rows = conn.execute(
         """
-        SELECT city, target_date, data_version, model_version, p_raw_json, authority
-        FROM ensemble_snapshots_v2
+        SELECT city, target_date, dataset_id, model_version, p_raw_json, authority
+        FROM ensemble_snapshots
         ORDER BY target_date
         """
     ).fetchall()
@@ -12948,7 +12956,7 @@ def test_ecmwf_open_data_collector_marks_rows_unverified_non_executable(monkeypa
     assert result["degradation_level"] == "DIAGNOSTIC_NON_EXECUTABLE"
     assert result["authority"] == "UNVERIFIED"
     assert [row["target_date"] for row in rows] == ["2026-03-31", "2026-04-01"]
-    assert all(row["data_version"] == DATA_VERSION for row in rows)
+    assert all(row["dataset_id"] == DATA_VERSION for row in rows)
     assert all(row["p_raw_json"] is None for row in rows)
     assert all(row["authority"] == "UNVERIFIED" for row in rows)
     with pytest.raises(SourceNotEnabled, match="entry_primary"):
@@ -15157,6 +15165,7 @@ def test_discovery_phase_buffers_telemetry_before_candidate_external_io(tmp_path
 
 
 def test_live_discovery_phase_truncates_candidate_evaluation_on_backpressure(monkeypatch, tmp_path):
+    monkeypatch.setenv("ZEUS_LIVE_MARKET_SUBSTRATE_READER", "0")
     conn = get_connection(tmp_path / "discovery-backpressure.db")
     init_schema(conn)
     conn.commit()
@@ -15494,7 +15503,7 @@ def test_settlement_economics_rejects_corrected_marker_without_fill_authority():
         submitted_notional_usd=11.0,
         entry_price_submitted=0.55,
         shares_submitted=20.0,
-        pricing_semantics_version=CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
+        pricing_semantics_id=CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,
         corrected_executable_economics_eligible=True,
         entry_cost_basis_hash="a" * 64,
         execution_cost_basis_version=CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION,

@@ -554,8 +554,10 @@ def test_run_mode_records_success_business_liveness(monkeypatch):
         events.append((job_name, kwargs))
 
     monkeypatch.setattr(main, "_write_scheduler_health", _record)
+    # run_cycle moved to src.engine.cycle_runner (imported inline in _run_mode).
+    import src.engine.cycle_runner as cycle_runner_module
     monkeypatch.setattr(
-        main,
+        cycle_runner_module,
         "run_cycle",
         lambda _mode: {
             "candidates": 0,
@@ -596,7 +598,9 @@ def test_run_mode_records_mode_specific_failure(monkeypatch):
         events.append((job_name, kwargs))
 
     monkeypatch.setattr(main, "_write_scheduler_health", _record)
-    monkeypatch.setattr(main, "run_cycle", lambda _mode: (_ for _ in ()).throw(RuntimeError("boom")))
+    # run_cycle moved to src.engine.cycle_runner (imported inline in _run_mode).
+    import src.engine.cycle_runner as cycle_runner_module
+    monkeypatch.setattr(cycle_runner_module, "run_cycle", lambda _mode: (_ for _ in ()).throw(RuntimeError("boom")))
 
     main._run_mode(DiscoveryMode.OPENING_HUNT)
 
@@ -1191,11 +1195,14 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
 
     calls: list[tuple[str, object]] = []
 
-    def fake_find_slug_pattern_weather_markets(*, min_hours_to_resolution):
+    def fake_find_weather_markets(*, min_hours_to_resolution, **_kwargs):
         calls.append(("find", min_hours_to_resolution))
         return [{"slug": "weather-event", "outcomes": [{"condition_id": "cond-1", "executable": True}]}]
 
     class FakePolymarketClient:
+        def __init__(self, **_kwargs):
+            pass
+
         def __enter__(self):
             calls.append(("clob_enter", self))
             return self
@@ -1217,15 +1224,11 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
         calls.append(("refresh", (conn, markets, isinstance(clob, FakePolymarketClient), scan_authority)))
         return {"attempted": 1, "inserted": 1, "skipped": 0, "failed": 0, "truncated": 0}
 
-    monkeypatch.setattr(
-        market_scanner,
-        "find_slug_pattern_weather_markets",
-        fake_find_slug_pattern_weather_markets,
-    )
+    # find_slug_pattern_weather_markets was renamed to find_weather_markets (B3 rename).
     monkeypatch.setattr(
         market_scanner,
         "find_weather_markets",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("market_discovery must not run full tag scan")),
+        fake_find_weather_markets,
     )
     monkeypatch.setattr(market_scanner, "refresh_executable_market_substrate_snapshots", fake_refresh)
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
@@ -1253,9 +1256,10 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
     import src.state.db as state_db
 
     calls: list[str] = []
+    # find_slug_pattern_weather_markets was renamed to find_weather_markets (B3 rename).
     monkeypatch.setattr(
         market_scanner,
-        "find_slug_pattern_weather_markets",
+        "find_weather_markets",
         lambda **_kwargs: calls.append("find") or [],
     )
     monkeypatch.setattr(
@@ -1271,6 +1275,9 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
     )
 
     class FakePolymarketClient:
+        def __init__(self, **_kwargs):
+            pass
+
         def __enter__(self):
             return self
 
@@ -1318,7 +1325,7 @@ def test_user_channel_auto_derive_prefers_persisted_ids_and_skips_boot_gamma_sca
     import src.data.market_scanner as market_scanner
 
     monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
-    monkeypatch.setattr(main, "_market_events_v2_user_channel_condition_ids", lambda now=None: ["cond-persisted"])
+    monkeypatch.setattr(main, "_market_events_user_channel_condition_ids", lambda now=None: ["cond-persisted"])
     monkeypatch.setattr(
         market_scanner,
         "find_weather_markets",
@@ -1333,7 +1340,7 @@ def test_user_channel_auto_derive_returns_empty_without_boot_gamma_opt_in(monkey
     import src.data.market_scanner as market_scanner
 
     monkeypatch.delenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", raising=False)
-    monkeypatch.setattr(main, "_market_events_v2_user_channel_condition_ids", lambda now=None: [])
+    monkeypatch.setattr(main, "_market_events_user_channel_condition_ids", lambda now=None: [])
     monkeypatch.setattr(
         market_scanner,
         "find_weather_markets",

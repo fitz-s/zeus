@@ -9,7 +9,7 @@ falls back from v2 to legacy models.
 
 Pre-fix: src/calibration/manager.py:172 (primary bucket fallback) and
 :232 (season-only fallback) executed `load_platt_model(conn, bk)` (legacy
-read) silently when `load_platt_model_v2` returned None. Operators
+read) silently when `load_platt_model` returned None. Operators
 monitoring calibration health had no signal that v2 coverage was
 incomplete for some (cluster, season).
 
@@ -40,6 +40,7 @@ from src.calibration import manager as mgr_module
 from src.calibration.manager import get_calibrator
 from src.config import City
 from src.state.db import init_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def _city() -> City:
@@ -74,19 +75,20 @@ def _populated_legacy_model() -> dict:
 
 
 def test_v2_miss_with_legacy_hit_logs_fallback_warning(monkeypatch, caplog):
-    """Primary path: v2 returns None → legacy returns a model → WARNING fires."""
+    """B3cont: legacy fallback path removed from get_calibrator.
+    _emit_v2_legacy_fallback_warning is defined at manager.py:262 but has no
+    callers — the call sites were removed as part of the canonical-only migration.
+    When v2 misses, no legacy lookup fires and no fallback warning emits.
+    This test now asserts the canonical-only behavior: v2 miss → no warning."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
-        lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
-    )
-    monkeypatch.setattr(
         mgr_module, "load_platt_model",
-        lambda conn, bk: _populated_legacy_model(),
+        lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
 
     with caplog.at_level(logging.WARNING, logger="src.calibration.manager"):
@@ -95,14 +97,11 @@ def test_v2_miss_with_legacy_hit_logs_fallback_warning(monkeypatch, caplog):
         r for r in caplog.records
         if "v2_to_legacy_fallback" in r.message
     ]
-    assert fallback_warnings, (
-        "P3.4 antibody: v2-miss-then-legacy-hit must emit a WARNING. "
-        "Pre-fix this fallback executed silently; operators had no signal "
-        "v2 coverage was incomplete."
+    assert not fallback_warnings, (
+        "B3cont: legacy fallback call sites removed (manager.py:262 tombstone). "
+        "No v2_to_legacy_fallback warning should fire on v2 miss — canonical path "
+        "returns None calibrator without attempting legacy lookup."
     )
-    msg = fallback_warnings[0].message
-    assert "cluster=US-Northeast" in msg
-    assert "metric=high" in msg
 
 
 def test_v2_hit_does_not_log_fallback_warning(monkeypatch, caplog):
@@ -113,7 +112,7 @@ def test_v2_hit_does_not_log_fallback_warning(monkeypatch, caplog):
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
+        mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: _populated_legacy_model(),
     )
 
@@ -133,15 +132,12 @@ def test_both_v2_and_legacy_miss_no_fallback_warning(monkeypatch, caplog):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
-        lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
-    )
-    monkeypatch.setattr(
         mgr_module, "load_platt_model",
-        lambda conn, bk: None,
+        lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
 
     with caplog.at_level(logging.WARNING, logger="src.calibration.manager"):
@@ -157,28 +153,23 @@ def test_both_v2_and_legacy_miss_no_fallback_warning(monkeypatch, caplog):
 
 
 def test_repeated_fallback_for_same_bucket_logs_only_once(monkeypatch, caplog):
-    """Slice P3-fix2: per-(path,cluster,season,metric) dedup. First fallback
-    emits WARNING; subsequent identical fallbacks suppress. Avoids log
-    spam when v2 coverage is sparse and many cycles hit the same bucket.
-
-    NOTE: this test runs after other tests in the same file that
-    populate _V2_FALLBACK_SEEN — clear it first for hermeticity.
-    """
+    """B3cont: legacy fallback call sites removed (manager.py:262 tombstone).
+    _V2_FALLBACK_SEEN dedup set exists but is never populated since no caller
+    invokes _emit_v2_legacy_fallback_warning. Running 3 cycles with v2 miss
+    produces zero fallback warnings — canonical-only path returns None calibrator
+    without touching legacy lookup or dedup set."""
     from src.calibration.manager import _V2_FALLBACK_SEEN
     _V2_FALLBACK_SEEN.clear()
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
-        lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
-    )
-    monkeypatch.setattr(
         mgr_module, "load_platt_model",
-        lambda conn, bk: _populated_legacy_model(),
+        lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
 
     with caplog.at_level(logging.WARNING, logger="src.calibration.manager"):
@@ -189,10 +180,10 @@ def test_repeated_fallback_for_same_bucket_logs_only_once(monkeypatch, caplog):
         r for r in caplog.records
         if "v2_to_legacy_fallback" in r.message
     ]
-    assert len(fallback_warnings) == 1, (
-        f"P3-fix2 dedup antibody: 3 cycles for same (cluster, season, metric) "
-        f"bucket must emit exactly 1 WARNING (got {len(fallback_warnings)}). "
-        "Without dedup, sparse v2 coverage → log spam every cycle."
+    assert len(fallback_warnings) == 0, (
+        f"B3cont: no legacy fallback call sites remain in manager.py. "
+        f"3 cycles must emit 0 v2_to_legacy_fallback warnings (got {len(fallback_warnings)}). "
+        "Canonical-only path: v2 miss → None calibrator, no legacy lookup."
     )
 
 
@@ -202,15 +193,16 @@ def test_low_metric_does_not_attempt_legacy_fallback(monkeypatch, caplog):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    apply_canonical_schema(conn)
     city = _city()
 
     monkeypatch.setattr(
-        mgr_module, "load_platt_model_v2",
+        mgr_module, "load_platt_model",
         lambda conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs: None,
     )
     legacy_calls: list[str] = []
-    def _record_legacy(conn, bk):
-        legacy_calls.append(bk)
+    def _record_legacy(conn, *, temperature_metric, cluster, season, data_version=None, **_kwargs):
+        legacy_calls.append(cluster)
         return None
     monkeypatch.setattr(mgr_module, "load_platt_model", _record_legacy)
 

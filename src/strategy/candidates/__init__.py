@@ -320,7 +320,7 @@ def write_candidate_no_trade_row(
     mode. Live promotion of any candidate must route through the canonical
     write_no_trade_event writer with a real world-DB connection.
     """
-    from src.state.db import SCHEMA_VERSION
+    SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
     from src.state.decision_events import allocate_decision_seq
 
     market_slug, temperature_metric, target_date, observation_time, _ = context.natural_key

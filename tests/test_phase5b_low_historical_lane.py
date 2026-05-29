@@ -1,10 +1,10 @@
 # Lifecycle: created=2026-04-17; last_reviewed=2026-04-17; last_reused=never
 # Purpose: Phase 5B R-AF..R-AM invariants: low historical lane ingest gating + rebuild/refit metric isolation
-# Reuse: Anchors on zeus_dual_track_refactor_package_v2_2026-04-16/04_CODE_SNIPPETS/ingest_snapshot_contract.py + 08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3-§5 + rebuild_calibration_pairs_v2.py. Confirms Phase 5B contract; fails RED until 5B lands.
+# Reuse: Anchors on zeus_dual_track_refactor_package_v2_2026-04-16/04_CODE_SNIPPETS/ingest_snapshot_contract.py + 08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3-§5 + rebuild_calibration_pairs.py. Confirms Phase 5B contract; fails RED until 5B lands.
 """Phase 5B low historical lane tests: R-AF, R-AG, R-AH, R-AI, R-AJ, R-AK, R-AL, R-AM
 
 Tests anchored to SPEC semantics from the DT v2 package (ingest_snapshot_contract.py,
-08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3-§5, rebuild_calibration_pairs_v2.py) and the
+08_TIGGE_DUAL_TRACK_INTEGRATION_zh.md §3-§5, rebuild_calibration_pairs.py) and the
 Phase 5B opening brief. Tests are spec-anchored and MUST fail RED until exec-dan/exec-emma
 implement Phase 5B.
 
@@ -27,7 +27,7 @@ R-AJ (causality first-class): low extractor emits causality_status as a first-cl
     in the extracted JSON — never defaulted-absent. Absent causality_status fails contract.
 
 R-AK (METRIC_SPECS tuple covers both tracks): CalibrationMetricSpec + METRIC_SPECS are
-    importable from scripts.rebuild_calibration_pairs_v2 and include both HIGH_LOCALDAY_MAX
+    importable from scripts.rebuild_calibration_pairs and include both HIGH_LOCALDAY_MAX
     and LOW_LOCALDAY_MIN entries.
 
 R-AL (iter_training_snapshots metric isolation): iter_training_snapshots filters by
@@ -353,27 +353,27 @@ class TestMetricSpecsTupleCoversLow:
     The DT v2 package specifies METRIC_SPECS as a 2-tuple: one entry per track.
     No --track CLI flag. The tuple drives rebuild/refit iteration.
 
-    Import target: scripts.rebuild_calibration_pairs_v2 (does not exist yet — ImportError = RED)
+    Import target: scripts.rebuild_calibration_pairs (does not exist yet — ImportError = RED)
     """
 
     def test_calibration_metric_spec_is_importable(self):
         """R-AK (acceptance): CalibrationMetricSpec must be importable from rebuild script."""
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec  # noqa: F401
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec  # noqa: F401
 
     def test_metric_specs_tuple_is_importable(self):
         """R-AK (acceptance): METRIC_SPECS must be importable from rebuild script."""
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS  # noqa: F401
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS  # noqa: F401
 
     def test_metric_specs_contains_exactly_two_entries(self):
         """R-AK (acceptance): METRIC_SPECS must have exactly 2 entries (one per track)."""
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS
 
         assert len(METRIC_SPECS) == 2
 
     def test_metric_specs_covers_high_track(self):
         """R-AK (acceptance): METRIC_SPECS must include a HIGH_LOCALDAY_MAX entry."""
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS
 
         high_specs = [s for s in METRIC_SPECS if s.identity.temperature_metric == "high"]
         assert len(high_specs) == 1
@@ -382,7 +382,7 @@ class TestMetricSpecsTupleCoversLow:
     def test_metric_specs_covers_low_track(self):
         """R-AK (acceptance): METRIC_SPECS must include a LOW_LOCALDAY_MIN entry."""
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS
 
         low_specs = [s for s in METRIC_SPECS if s.identity.temperature_metric == "low"]
         assert len(low_specs) == 1
@@ -391,7 +391,7 @@ class TestMetricSpecsTupleCoversLow:
     def test_low_metric_spec_allowed_data_version_matches_identity(self):
         """R-AK (acceptance): low CalibrationMetricSpec.allowed_data_version must match LOW_LOCALDAY_MIN.data_version."""
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.rebuild_calibration_pairs_v2 import METRIC_SPECS
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS
 
         low_spec = next(s for s in METRIC_SPECS if s.identity.temperature_metric == "low")
         assert low_spec.allowed_data_version == LOW_LOCALDAY_MIN.data_version
@@ -408,7 +408,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
     Cross-contamination — a high snapshot appearing in a low calibration family or vice versa —
     would silently corrupt Platt models and downstream posteriors.
 
-    Import target: scripts.rebuild_calibration_pairs_v2 (does not exist yet — ImportError = RED)
+    Import target: scripts.rebuild_calibration_pairs (does not exist yet — ImportError = RED)
     """
 
     def _make_db_with_mixed_snapshots(self, tmp_path):
@@ -416,7 +416,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
         db.row_factory = sqlite3.Row
         db.executescript(
             """
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 snapshot_id TEXT PRIMARY KEY,
                 city TEXT,
                 target_date TEXT,
@@ -424,7 +424,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
                 lead_hours REAL,
                 temperature_metric TEXT,
                 physical_quantity TEXT,
-                data_version TEXT,
+                dataset_id TEXT,
                 members_json TEXT,
                 training_allowed INTEGER DEFAULT 1,
                 causality_status TEXT DEFAULT 'OK',
@@ -435,7 +435,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
         # Insert one high and one low snapshot, both training_allowed=1
         db.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -447,7 +447,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
         )
         db.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
@@ -463,7 +463,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
     def test_iter_training_snapshots_low_spec_returns_only_low_rows(self, tmp_path):
         """R-AL (acceptance): iter_training_snapshots with low spec must return only low-metric rows."""
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec, iter_training_snapshots
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec, iter_training_snapshots
 
         db = self._make_db_with_mixed_snapshots(tmp_path)
         low_spec = CalibrationMetricSpec(
@@ -480,7 +480,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
     def test_iter_training_snapshots_high_spec_returns_only_high_rows(self, tmp_path):
         """R-AL (acceptance): iter_training_snapshots with high spec must return only high-metric rows."""
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec, iter_training_snapshots
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec, iter_training_snapshots
 
         db = self._make_db_with_mixed_snapshots(tmp_path)
         high_spec = CalibrationMetricSpec(
@@ -497,7 +497,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
     def test_low_and_high_iter_results_are_disjoint(self, tmp_path):
         """R-AL (acceptance): snapshot_ids returned by low spec and high spec must not overlap."""
         from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
-        from scripts.rebuild_calibration_pairs_v2 import CalibrationMetricSpec, iter_training_snapshots
+        from scripts.rebuild_calibration_pairs import CalibrationMetricSpec, iter_training_snapshots
 
         db = self._make_db_with_mixed_snapshots(tmp_path)
         high_spec = CalibrationMetricSpec(HIGH_LOCALDAY_MAX, HIGH_LOCALDAY_MAX.data_version)
@@ -745,18 +745,18 @@ class TestB078LowLaneTruthFilesRegistry:
 
 
 # ---------------------------------------------------------------------------
-# R-AO: refit_platt_v2 low-metric isolation
+# R-AO: refit_platt low-metric isolation
 # ---------------------------------------------------------------------------
 
 
 class TestRefitPlattV2LowMetricIsolation:
-    """R-AO: refit_platt_v2 must be metric-aware; low-track refit must not emit high: bucket keys
+    """R-AO: refit_platt must be metric-aware; low-track refit must not emit high: bucket keys
     or call save/deactivate with HIGH_LOCALDAY_MAX.
 
     The current script hardcodes 'high:' bucket keys and HIGH_LOCALDAY_MAX throughout.
     Phase 5B parametrizes via METRIC_SPECS iteration. These tests anchor that contract.
 
-    Target: scripts.refit_platt_v2 — refit_v2() + _fit_bucket() (exists but hardcoded — RED)
+    Target: scripts.refit_platt — refit_v2() + _fit_bucket() (exists but hardcoded — RED)
     """
 
     def _make_calibration_db(self, tmp_path, temperature_metric: str, data_version: str):
@@ -767,7 +767,7 @@ class TestRefitPlattV2LowMetricIsolation:
         db.row_factory = _sqlite3.Row
         db.executescript(
             """
-            CREATE TABLE calibration_pairs_v2 (
+            CREATE TABLE calibration_pairs (
                 city TEXT,
                 target_date TEXT,
                 temperature_metric TEXT,
@@ -778,7 +778,7 @@ class TestRefitPlattV2LowMetricIsolation:
                 lead_days REAL,
                 forecast_available_at TEXT,
                 snapshot_id TEXT,
-                data_version TEXT,
+                dataset_id TEXT,
                 training_allowed INTEGER DEFAULT 1,
                 authority TEXT DEFAULT 'VERIFIED',
                 cluster TEXT,
@@ -788,7 +788,7 @@ class TestRefitPlattV2LowMetricIsolation:
                 source_id TEXT DEFAULT 'tigge_mars',
                 horizon_profile TEXT DEFAULT 'full'
             );
-            CREATE TABLE platt_models_v2 (
+            CREATE TABLE platt_models (
                 model_id TEXT PRIMARY KEY,
                 temperature_metric TEXT,
                 cluster TEXT,
@@ -810,11 +810,11 @@ class TestRefitPlattV2LowMetricIsolation:
         return db
 
     def test_refit_platt_low_bucket_key_prefix(self, tmp_path):
-        """R-AO (acceptance): refit_platt_v2 running for low-track spec must emit
+        """R-AO (acceptance): refit_platt running for low-track spec must emit
         bucket_keys prefixed 'low:', never 'high:'."""
         from unittest.mock import patch, MagicMock
         from src.types.metric_identity import LOW_LOCALDAY_MIN
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         db = self._make_calibration_db(
             tmp_path,
@@ -827,8 +827,8 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, cluster, season, data_version, **kwargs):
             captured_keys.append(f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}")
 
-        with patch("scripts.refit_platt_v2.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt_v2.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model", return_value=0):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_keys = [k for k in captured_keys if k.startswith("high:")]
@@ -838,11 +838,11 @@ class TestRefitPlattV2LowMetricIsolation:
         )
 
     def test_refit_platt_low_calls_deactivate_with_low_metric_identity(self, tmp_path):
-        """R-AO (acceptance): deactivate_model_v2 must be called with metric_identity=LOW_LOCALDAY_MIN
+        """R-AO (acceptance): deactivate_model must be called with metric_identity=LOW_LOCALDAY_MIN
         during a low-track refit, never with HIGH_LOCALDAY_MAX."""
         from unittest.mock import patch, call
         from src.types.metric_identity import LOW_LOCALDAY_MIN, HIGH_LOCALDAY_MAX
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         db = self._make_calibration_db(
             tmp_path,
@@ -856,22 +856,22 @@ class TestRefitPlattV2LowMetricIsolation:
             deactivate_calls.append(metric_identity)
             return 0
 
-        with patch("scripts.refit_platt_v2.deactivate_model_v2", side_effect=fake_deactivate), \
-             patch("scripts.refit_platt_v2.save_platt_model_v2", return_value=None):
+        with patch("scripts.refit_platt.deactivate_model", side_effect=fake_deactivate), \
+             patch("scripts.refit_platt.save_platt_model", return_value=None):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_calls = [m for m in deactivate_calls if m == HIGH_LOCALDAY_MAX]
         assert not high_calls, (
-            f"deactivate_model_v2 was called with HIGH_LOCALDAY_MAX during low-track refit. "
+            f"deactivate_model was called with HIGH_LOCALDAY_MAX during low-track refit. "
             f"All deactivate calls: {deactivate_calls}"
         )
 
     def test_refit_platt_low_calls_save_with_low_metric_identity(self, tmp_path):
-        """R-AO (acceptance): save_platt_model_v2 must be called with metric_identity=LOW_LOCALDAY_MIN
+        """R-AO (acceptance): save_platt_model must be called with metric_identity=LOW_LOCALDAY_MIN
         during a low-track refit, never with HIGH_LOCALDAY_MAX."""
         from unittest.mock import patch
         from src.types.metric_identity import LOW_LOCALDAY_MIN, HIGH_LOCALDAY_MAX
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         db = self._make_calibration_db(
             tmp_path,
@@ -884,13 +884,13 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, **kwargs):
             save_calls.append(metric_identity)
 
-        with patch("scripts.refit_platt_v2.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt_v2.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model", return_value=0):
             refit_v2(db, metric_identity=LOW_LOCALDAY_MIN, dry_run=False, force=True)
 
         high_calls = [m for m in save_calls if m == HIGH_LOCALDAY_MAX]
         assert not high_calls, (
-            f"save_platt_model_v2 was called with HIGH_LOCALDAY_MAX during low-track refit. "
+            f"save_platt_model was called with HIGH_LOCALDAY_MAX during low-track refit. "
             f"All save calls: {save_calls}"
         )
 
@@ -901,7 +901,7 @@ class TestRefitPlattV2LowMetricIsolation:
         """
         from unittest.mock import patch
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         db = self._make_calibration_db(
             tmp_path,
@@ -916,8 +916,8 @@ class TestRefitPlattV2LowMetricIsolation:
         def fake_save(conn, *, metric_identity, cluster, season, data_version, **kwargs):
             captured_keys.append(f"{metric_identity.temperature_metric}:{cluster}:{season}:{data_version}")
 
-        with patch("scripts.refit_platt_v2.save_platt_model_v2", side_effect=fake_save), \
-             patch("scripts.refit_platt_v2.deactivate_model_v2", return_value=0):
+        with patch("scripts.refit_platt.save_platt_model", side_effect=fake_save), \
+             patch("scripts.refit_platt.deactivate_model", return_value=0):
             refit_v2(db, metric_identity=HIGH_LOCALDAY_MAX, dry_run=False, force=True)
 
         low_keys = [k for k in captured_keys if k.startswith("low:")]
@@ -933,7 +933,7 @@ class TestRefitPlattV2LowMetricIsolation:
         Phase 5B adds it. This test fails RED until exec-emma adds the param.
         """
         import inspect
-        from scripts.refit_platt_v2 import refit_v2
+        from scripts.refit_platt import refit_v2
 
         sig = inspect.signature(refit_v2)
         assert "metric_identity" in sig.parameters, (

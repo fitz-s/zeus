@@ -60,9 +60,9 @@ REQUIRED_STEP_IDS = {
     "calibration_pairs",
     # new OBTAINABLE-NOW steps
     "obs_instants_v2",      # backfill observation_instants_v2
-    "ens_backfill_v2",      # ensemble_snapshots_v2 backfill
-    "platt_training",       # refit_platt_v2 → promote
-    "fit_ens_bias_v2",      # model_bias_ens_v2 population
+    "ens_backfill_v2",      # ensemble_snapshots backfill
+    "platt_training",       # refit_platt → promote
+    "fit_ens_bias_v2",      # model_bias_ens population
     "monthly_bounds",       # city_monthly_bounds.json generation
     "compute_ddd_floor",    # v2_city_floors.json entry
 }
@@ -104,9 +104,9 @@ def test_calibration_pairs_not_optional():
 
 V2_REQUIRED_TABLES = {
     "observation_instants_v2",
-    "calibration_pairs_v2",
-    "ensemble_snapshots_v2",
-    "model_bias_ens_v2",
+    "calibration_pairs",
+    "ensemble_snapshots",
+    "model_bias_ens",
 }
 
 V1_BANNED_TABLES = {
@@ -246,7 +246,7 @@ def test_platt_training_step_uses_forecasts_db():
 # ──────────────────────────────────────────────────────────────────────────────
 
 def test_platt_promote_step_or_inline():
-    """Pipeline must call promote_platt_models_v2 after refit (stage→world)."""
+    """Pipeline must call promote_platt after refit (stage→world)."""
     ids = _step_ids()
     # Either a separate 'platt_promote' step exists, OR 'platt_training'
     # runs both refit+promote inline (type='python').

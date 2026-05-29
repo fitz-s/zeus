@@ -1603,7 +1603,7 @@ def _dedupe_user_channel_condition_ids(values) -> list[str]:
     return result
 
 
-def _market_events_v2_fallback_max_age_hours() -> float:
+def _market_events_fallback_max_age_hours() -> float:
     raw = os.environ.get("ZEUS_USER_CHANNEL_WS_MARKET_EVENTS_FALLBACK_MAX_AGE_HOURS", "36")
     try:
         value = float(raw)
@@ -1624,17 +1624,17 @@ def _market_events_v2_fallback_max_age_hours() -> float:
     return value
 
 
-def _market_events_v2_user_channel_condition_ids(
+def _market_events_user_channel_condition_ids(
     *,
     now: datetime | None = None,
 ) -> list[str]:
-    """Read fresh condition_ids from canonical market_events_v2."""
+    """Read fresh condition_ids from canonical market_events."""
 
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     current = current.astimezone(timezone.utc)
-    max_age_hours = _market_events_v2_fallback_max_age_hours()
+    max_age_hours = _market_events_fallback_max_age_hours()
     cutoff = current - timedelta(hours=max_age_hours)
     try:
         from src.state.db import get_forecasts_connection
@@ -1644,7 +1644,7 @@ def _market_events_v2_user_channel_condition_ids(
             rows = conn.execute(
                 """
                 SELECT condition_id, target_date, recorded_at
-                  FROM market_events_v2
+                  FROM market_events
                  WHERE condition_id IS NOT NULL
                    AND TRIM(condition_id) != ''
                    AND target_date >= ?
@@ -1656,7 +1656,7 @@ def _market_events_v2_user_channel_condition_ids(
         finally:
             conn.close()
     except Exception as exc:
-        logger.warning("user-channel WS market_events_v2 fallback failed: %s", exc)
+        logger.warning("user-channel WS market_events fallback failed: %s", exc)
         return []
 
     fresh_ids: list[str] = []
@@ -1674,7 +1674,7 @@ def _auto_derive_user_channel_condition_ids(
 ) -> list[str]:
     """Derive the user-channel WS subscription set.
 
-    Fresh persisted ``market_events_v2`` rows are primary. When those rows are
+    Fresh persisted ``market_events`` rows are primary. When those rows are
     missing at boot, Gamma scanning is enabled by default so the one-shot
     user-channel starter does not latch to an empty subscription set for the
     lifetime of the live process. Operators can disable this fallback by setting
@@ -1683,7 +1683,7 @@ def _auto_derive_user_channel_condition_ids(
     Total failure still returns [] rather than raising; the daemon then stays in
     the fail-closed WS posture recorded by the gap guard.
     """
-    persisted_ids = _market_events_v2_user_channel_condition_ids(now=now)
+    persisted_ids = _market_events_user_channel_condition_ids(now=now)
     if persisted_ids:
         return persisted_ids
     if os.getenv("ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN", "1").strip().lower() not in {
@@ -1693,7 +1693,7 @@ def _auto_derive_user_channel_condition_ids(
         "on",
     }:
         logger.warning(
-            "user-channel WS found no fresh market_events_v2 condition_ids; "
+            "user-channel WS found no fresh market_events condition_ids; "
             "boot Gamma scan disabled by ZEUS_USER_CHANNEL_BOOT_GAMMA_SCAN=0"
         )
         return []
@@ -2432,26 +2432,22 @@ def _startup_world_db_schema_prepare() -> str:
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
 
+    # B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Run idempotent init_schema()
+    # unconditionally as a preparatory step; PRAGMA user_version is set by init_schema
+    # to the frozen value 43 and is used for logging only.
     conn = db_module.get_world_connection(write_class="live")
     try:
         row = conn.execute("PRAGMA user_version").fetchone()
         current_version = int(row[0]) if row and row[0] is not None else 0
-        expected_version = int(db_module.SCHEMA_VERSION)
-        if current_version == expected_version:
+        if current_version == 43:
             return str(current_version)
-        if current_version > expected_version:
-            raise RuntimeError(
-                f"world DB user_version={current_version} exceeds code SCHEMA_VERSION={expected_version}"
-            )
 
         logger.warning(
-            "world DB schema stale at live boot: user_version=%s expected=%s — running idempotent init_schema()",
+            "world DB schema stale at live boot: user_version=%s — running idempotent init_schema()",
             current_version,
-            expected_version,
         )
         db_module.init_schema(conn)
         conn.commit()
-        db_module.assert_schema_current(conn)
         row = conn.execute("PRAGMA user_version").fetchone()
         prepared_version = int(row[0]) if row and row[0] is not None else 0
         logger.info("world DB schema prepared at live boot: user_version=%s", prepared_version)

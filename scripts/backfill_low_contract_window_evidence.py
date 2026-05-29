@@ -7,7 +7,7 @@ Default mode is a read-only dry run.  Apply mode is intentionally explicit:
 ``--apply --force`` is required before this script inserts rows.  The script
 does not mutate old LOW rows.  It copies matched legacy LOW snapshots into a
 new contract-window data_version and attaches the evidence needed by
-``rebuild_calibration_pairs_v2.py``.
+``rebuild_calibration_pairs.py``.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 )
 from src.contracts.tigge_snapshot_payload import ProvenanceViolation, TiggeSnapshotPayload
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import LOW_LOCALDAY_MIN
 
 def _default_fifty_one_raw_root() -> Path:
@@ -200,12 +200,12 @@ def _row_exists(
         conn.execute(
             """
             SELECT 1
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE city = ?
               AND target_date = ?
               AND temperature_metric = 'low'
               AND issue_time = ?
-              AND data_version = ?
+              AND dataset_id = ?
             LIMIT 1
             """,
             (city, target_date, issue_time, data_version),
@@ -225,12 +225,12 @@ def _source_snapshot_row(
     return conn.execute(
         """
         SELECT *
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE city = ?
           AND target_date = ?
           AND temperature_metric = 'low'
           AND issue_time = ?
-          AND data_version = ?
+          AND dataset_id = ?
         LIMIT 1
         """,
         (city, target_date, issue_time, data_version),
@@ -333,7 +333,7 @@ def _build_recovery_row(
     payload_path: Path,
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
-    columns = [row["name"] for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")]
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")]
     source_keys = set(source_row.keys())
     row = {
         column: (source_row[column] if column in source_keys else None)
@@ -348,7 +348,7 @@ def _build_recovery_row(
     )
     boundary_ambiguous = _recovery_boundary_ambiguous(evidence=evidence, payload=payload)
     row.update({
-        "data_version": source.recovery_data_version,
+        "dataset_id": source.recovery_data_version,
         "observation_field": LOW_LOCALDAY_MIN.observation_field,
         "physical_quantity": LOW_LOCALDAY_MIN.physical_quantity,
         "source_id": row.get("source_id") or source.source_id,
@@ -378,7 +378,7 @@ def _insert_recovery_row(conn: sqlite3.Connection, row: dict[str, Any]) -> int:
     columns = list(row.keys())
     placeholders = ", ".join(f":{column}" for column in columns)
     sql = (
-        f"INSERT OR IGNORE INTO ensemble_snapshots_v2 "
+        f"INSERT OR IGNORE INTO ensemble_snapshots "
         f"({', '.join(columns)}) VALUES ({placeholders})"
     )
     before = conn.total_changes
@@ -540,7 +540,7 @@ def main() -> int:
 
         try:
             if not dry_run:
-                apply_v2_schema(conn)
+                apply_canonical_schema(conn)
             per_source = run_backfill(
                 conn=conn,
                 json_root=Path(args.json_root),

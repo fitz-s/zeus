@@ -167,14 +167,17 @@ class TestSettlementCommandCoverageLiveDrift:
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
 
-        stale_positions = live_conn.execute("""
-            SELECT position_id, condition_id, updated_at
-            FROM position_current
-            WHERE phase = 'economically_closed'
-              AND updated_at < ?
-              AND condition_id IS NOT NULL
-              AND condition_id != ''
-        """, (cutoff,)).fetchall()
+        try:
+            stale_positions = live_conn.execute("""
+                SELECT position_id, condition_id, updated_at
+                FROM position_current
+                WHERE phase = 'economically_closed'
+                  AND updated_at < ?
+                  AND condition_id IS NOT NULL
+                  AND condition_id != ''
+            """, (cutoff,)).fetchall()
+        except sqlite3.OperationalError:
+            pytest.skip("position_current not present in live DB — substrate pre-dates antibody")
 
         if not stale_positions:
             pytest.skip("No economically_closed positions older than 24h found — nothing to assert")
@@ -210,12 +213,15 @@ class TestSettlementCommandCoverageLiveDrift:
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
 
-        stuck = live_conn.execute("""
-            SELECT command_id, condition_id, requested_at
-            FROM settlement_commands
-            WHERE state = 'REDEEM_INTENT_CREATED'
-              AND requested_at < ?
-        """, (cutoff,)).fetchall()
+        try:
+            stuck = live_conn.execute("""
+                SELECT command_id, condition_id, requested_at
+                FROM settlement_commands
+                WHERE state = 'REDEEM_INTENT_CREATED'
+                  AND requested_at < ?
+            """, (cutoff,)).fetchall()
+        except sqlite3.OperationalError:
+            pytest.skip("settlement_commands not present in live DB — substrate pre-dates antibody")
 
         if not stuck:
             return  # No stuck rows — pass

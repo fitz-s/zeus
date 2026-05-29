@@ -136,7 +136,7 @@ class MetricIdentity:
 
 # Phase 2.6: source-family → data_version registry.
 # Adding a new source family = add an entry here AND ensure ingest pipeline
-# writes ensemble_snapshots_v2.data_version with the matching string.
+# writes ensemble_snapshots.data_version with the matching string.
 _HIGH_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
     "tigge": "tigge_mx2t6_local_calendar_day_max_v1",
     "ecmwf_opendata": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
@@ -159,7 +159,7 @@ _LOW_PHYSICAL_QUANTITY_BY_SOURCE_FAMILY: dict[str, str] = {
 }
 
 
-def source_family_from_data_version(data_version: str) -> str | None:
+def source_family_from_dataset_id(data_version: str) -> str | None:
     """Reverse-lookup helper: data_version → source_family.
 
     Returns None if the data_version doesn't match any registered source.
@@ -191,7 +191,7 @@ def physical_quantity_for_data_version(
     accumulation params; callers that pinned physical_quantity to
     spec.identity (TIGGE-canonical) silently rejected all OpenData rows.
     """
-    sf = source_family_from_data_version(data_version)
+    sf = source_family_from_dataset_id(data_version)
     if sf is None:
         return None
     if temperature_metric == "high":

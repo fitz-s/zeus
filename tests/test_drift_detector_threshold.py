@@ -63,7 +63,7 @@ def _make_in_memory_db() -> sqlite3.Connection:
             temperature_metric TEXT NOT NULL DEFAULT 'high'
         );
 
-        CREATE TABLE platt_models_v2 (
+        CREATE TABLE platt_models (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             season TEXT NOT NULL,
@@ -316,7 +316,7 @@ class TestDriftReportFields:
 class TestCheckAndArmRefit:
     def test_writes_refit_armed_json(self, tmp_path):
         """check_and_arm_refit writes refit_armed.json with correct structure."""
-        from src.calibration.retrain_trigger_v2 import check_and_arm_refit
+        from src.calibration.drift_refit_arm import check_and_arm_refit
 
         conn = _make_in_memory_db()
         _insert_calibration_pairs(conn, "London", 3, p_raw=0.5, outcome=1)
@@ -333,7 +333,7 @@ class TestCheckAndArmRefit:
 
     def test_returns_summary_dict(self, tmp_path):
         """check_and_arm_refit returns a summary dict."""
-        from src.calibration.retrain_trigger_v2 import check_and_arm_refit
+        from src.calibration.drift_refit_arm import check_and_arm_refit
 
         conn = _make_in_memory_db()
         result = check_and_arm_refit(conn, state_dir=tmp_path)

@@ -25,7 +25,7 @@ from src.config import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CITIES_JSON = PROJECT_ROOT / "config" / "cities.json"
-REBUILD_V2 = PROJECT_ROOT / "scripts" / "rebuild_calibration_pairs_v2.py"
+REBUILD_V2 = PROJECT_ROOT / "scripts" / "rebuild_calibration_pairs.py"
 
 LAW2_WEIGHTED_LOW_OPT_OUT_CITIES = {
     "Jakarta",
@@ -39,8 +39,8 @@ LAW2_WEIGHTED_LOW_OPT_OUT_CITIES = {
 }
 
 PRODUCTION_WEIGHTING_SOURCES = (
-    PROJECT_ROOT / "scripts" / "rebuild_calibration_pairs_v2.py",
-    PROJECT_ROOT / "scripts" / "refit_platt_v2.py",
+    PROJECT_ROOT / "scripts" / "rebuild_calibration_pairs.py",
+    PROJECT_ROOT / "scripts" / "refit_platt.py",
     PROJECT_ROOT / "src" / "calibration" / "manager.py",
     PROJECT_ROOT / "src" / "calibration" / "platt.py",
     PROJECT_ROOT / "src" / "calibration" / "store.py",

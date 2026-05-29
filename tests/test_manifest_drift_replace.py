@@ -1,12 +1,12 @@
 # Created: 2026-05-07
 # Last reused or audited: 2026-05-07
 # Authority basis: TIGGE spec v3 §3 Phase 0 #8 / critic v2 D1+D3 BLOCKER
-"""D1 + D3: manifest_sha drift triggers REPLACE on ensemble_snapshots_v2 ingest.
+"""D1 + D3: manifest_sha drift triggers REPLACE on ensemble_snapshots ingest.
 
 Critic v2 D1+D3 BLOCKER:
 - D1: when an incoming snapshot payload's manifest_sha256 differs from the row
   already in the DB for the same (city, target_date, temperature_metric,
-  issue_time, data_version) tuple, the row was produced under a different
+  issue_time, dataset_id) tuple, the row was produced under a different
   manifest (city set / coordinate drift / spec change) and MUST be REPLACED,
   not skipped. Pure same-manifest repeats keep the legacy IGNORE behaviour so
   re-ingest stays idempotent.
@@ -32,7 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.schema.v2_schema import apply_v2_schema  # noqa: E402
+from src.state.schema.v2_schema import apply_canonical_schema  # noqa: E402
 from src.types.metric_identity import HIGH_LOCALDAY_MAX  # noqa: E402
 
 
@@ -71,17 +71,17 @@ def ingest_env():
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn, ingest_mod
 
 
 def _row_count(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM ensemble_snapshots_v2").fetchone()[0]
+    return conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
 
 
 def _stored_manifest_sha(conn: sqlite3.Connection) -> str:
     row = conn.execute(
-        "SELECT provenance_json FROM ensemble_snapshots_v2 LIMIT 1"
+        "SELECT provenance_json FROM ensemble_snapshots LIMIT 1"
     ).fetchone()
     if not row:
         return ""
@@ -91,7 +91,7 @@ def _stored_manifest_sha(conn: sqlite3.Connection) -> str:
 
 def _stored_member0(conn: sqlite3.Connection) -> float:
     row = conn.execute(
-        "SELECT members_json FROM ensemble_snapshots_v2 LIMIT 1"
+        "SELECT members_json FROM ensemble_snapshots LIMIT 1"
     ).fetchone()
     members = json.loads(row["members_json"])
     return float(members[0])

@@ -20,7 +20,7 @@ threading of `boundary_ambiguous` and a new per-city oracle-isolation
 field; land together when monitor_refresh LOW wiring activates.
 
 Pre-P9B state: `boundary_ambiguous` field exists in
-snapshot_ingest_contract.py + ensemble_snapshots_v2 schema (training-time
+snapshot_ingest_contract.py + ensemble_snapshots schema (training-time
 quarantine gate); ZERO runtime consumer in evaluator.py. P9B closes the
 contract gap; P9C closes the enforcement gap.
 """
@@ -36,7 +36,7 @@ def boundary_ambiguous_refuses_signal(snapshot_dict: dict[str, Any]) -> bool:
 
     Args:
         snapshot_dict: A dict carrying the snapshot payload. Typically the
-            ensemble_snapshots_v2 row dict or the ingest-time payload from
+            ensemble_snapshots row dict or the ingest-time payload from
             snapshot_ingest_contract.py. The function reads only the
             `boundary_ambiguous` key; other fields are ignored.
 

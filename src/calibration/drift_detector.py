@@ -70,7 +70,7 @@ def _get_last_refit_at(world_conn, *, city: str, season: str, metric_identity: M
     try:
         cur = world_conn.execute(
             """
-            SELECT fitted_at FROM platt_models_v2
+            SELECT fitted_at FROM platt_models
             WHERE city = ? AND season = ? AND temperature_metric = ? AND active = 1
             ORDER BY fitted_at DESC LIMIT 1
             """,
@@ -82,21 +82,7 @@ def _get_last_refit_at(world_conn, *, city: str, season: str, metric_identity: M
     except Exception:
         pass
 
-    # Fallback: try platt_models (v1)
-    try:
-        cur = world_conn.execute(
-            """
-            SELECT fitted_at FROM platt_models
-            WHERE city = ? AND season = ? AND active = 1
-            ORDER BY fitted_at DESC LIMIT 1
-            """,
-            (city, season),
-        )
-        row = cur.fetchone()
-        if row:
-            return row[0]
-    except Exception:
-        pass
+    # B3cont (2026-05-28): bare platt_models (v1) fallback removed — legacy table dropped.
 
     return None
 

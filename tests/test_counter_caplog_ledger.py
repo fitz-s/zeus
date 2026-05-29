@@ -146,11 +146,11 @@ def _make_city(name: str = "testcity"):
 
 def _make_db_conn():
     from src.state.db import init_schema
-    from src.state.schema.v2_schema import apply_v2_schema
+    from src.state.schema.v2_schema import apply_canonical_schema
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.commit()
     return conn
 
@@ -489,12 +489,12 @@ class TestCostBasisChainMutationBlockedTotal:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("reason,smv,training_allowed,learning_ready,forecast_source", [
-    # missing smv -> reason=missing_source_model_version_or_lineage
-    ("missing_source_model_version_or_lineage", None, True, False, "tigge"),
-    # empty smv -> reason=missing_source_model_version_or_lineage
-    ("missing_source_model_version_or_lineage", "", True, False, "tigge"),
-    # both training booleans False -> reason=missing_source_model_version_or_lineage
-    ("missing_source_model_version_or_lineage", "tigge_ens_v3", False, False, "tigge"),
+    # missing smv -> reason=missing_forecast_model_id_or_lineage
+    ("missing_forecast_model_id_or_lineage", None, True, False, "tigge"),
+    # empty smv -> reason=missing_forecast_model_id_or_lineage
+    ("missing_forecast_model_id_or_lineage", "", True, False, "tigge"),
+    # both training booleans False -> reason=missing_forecast_model_id_or_lineage
+    ("missing_forecast_model_id_or_lineage", "tigge_ens_v3", False, False, "tigge"),
     # non-training source -> reason=live_praw_no_training_lineage
     ("live_praw_no_training_lineage", "openmeteo_live", True, True, "openmeteo"),
 ])
@@ -503,7 +503,7 @@ class TestHarvesterLearningWriteBlockedTotal:
 
     def _make_context(self, smv, training_allowed, learning_ready, forecast_source):
         return {
-            "source_model_version": smv,
+            "forecast_model_id": smv,
             "snapshot_training_allowed": training_allowed,
             "snapshot_learning_ready": learning_ready,
             "temperature_metric": "high",
@@ -575,7 +575,7 @@ class TestHarvesterMissingIssueTimeCounter:
                 p_raw_vector=[0.2, 0.5, 0.3],
                 forecast_issue_time=None,  # missing — triggers counter
                 forecast_available_at="2026-05-01T06:00:00Z",
-                source_model_version="tigge_ens_v3",
+                forecast_model_id="tigge_ens_v3",
                 lead_days=3.0,
                 temperature_metric="high",
             )
@@ -602,7 +602,7 @@ class TestHarvesterMissingIssueTimeCounter:
                     p_raw_vector=[0.2, 0.5, 0.3],
                     forecast_issue_time=None,
                     forecast_available_at="2026-05-01T06:00:00Z",
-                    source_model_version="tigge_ens_v3",
+                    forecast_model_id="tigge_ens_v3",
                     lead_days=3.0,
                     temperature_metric="high",
                 )

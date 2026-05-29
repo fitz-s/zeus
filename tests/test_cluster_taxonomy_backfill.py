@@ -3,24 +3,35 @@ from pathlib import Path
 
 import scripts.backfill_cluster_taxonomy as backfill
 from src.state.db import get_connection, init_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 def test_backfill_calibration_pairs_updates_cluster_and_clears_models(tmp_path, monkeypatch):
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    apply_canonical_schema(conn)
     conn.execute(
         """
         INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster, forecast_available_at, settlement_value)
-        VALUES ('Paris', '2026-04-03', '12°C', 1.0, 1, 1.0, 'MAM', 'Europe', '2026-04-02T08:00:00Z', 12.0)
+        (city, target_date, temperature_metric, observation_field,
+         range_label, p_raw, outcome, lead_days, season, cluster,
+         forecast_available_at, settlement_value, dataset_id, decision_group_id)
+        VALUES ('Paris', '2026-04-03', 'high', 'high_temp',
+                '12C', 1.0, 1, 1.0, 'MAM', 'Europe',
+                '2026-04-02T08:00:00Z', 12.0,
+                'tigge_mx2t6_local_calendar_day_max_v1', 'dg_Paris_0')
         """
     )
     conn.execute(
         """
         INSERT INTO platt_models
-        (bucket_key, param_A, param_B, param_C, bootstrap_params_json, n_samples, brier_insample, fitted_at, is_active, input_space)
-        VALUES ('Europe_MAM', 1.0, 0.0, 0.0, '[]', 20, 0.1, '2026-04-01T00:00:00Z', 1, 'raw_probability')
+        (model_key, temperature_metric, cluster, season, data_version,
+         bucket_key, param_A, param_B, param_C, bootstrap_params_json,
+         n_samples, brier_insample, fitted_at, is_active, input_space)
+        VALUES ('high:Europe:MAM:tigge_mx2t6_local_calendar_day_max_v1:00:tigge_mars:full:raw_probability',
+                'high', 'Europe', 'MAM', 'tigge_mx2t6_local_calendar_day_max_v1',
+                'Europe_MAM', 1.0, 0.0, 0.0, '[]', 20, 0.1, '2026-04-01T00:00:00Z', 1, 'raw_probability')
         """
     )
     conn.commit()

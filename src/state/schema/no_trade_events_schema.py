@@ -52,11 +52,10 @@ import re
 import sqlite3
 
 from src.contracts.no_trade_reason import NoTradeReason
-from src.state.db import SCHEMA_VERSION  # single canonical authority
+SCHEMA_VERSION = 55  # B2: frozen row-provenance value at #358 main bump; db.SCHEMA_VERSION counter cancelled
 
 # Enum CHECK: every valid NoTradeReason value, joined for SQL IN clause.
 _REASON_VALUES_SQL = ", ".join(f"'{r.value}'" for r in NoTradeReason)
-_SCHEMA_VERSION_VALUES_SQL = ", ".join(str(v) for v in range(14, SCHEMA_VERSION + 1))
 
 CREATE_TABLE_SQL = f"""
 CREATE TABLE IF NOT EXISTS no_trade_events (
@@ -71,7 +70,7 @@ CREATE TABLE IF NOT EXISTS no_trade_events (
     event_source        TEXT,
     shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN ({_SCHEMA_VERSION_VALUES_SQL})),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -91,7 +90,7 @@ CREATE TABLE no_trade_events_new (
     event_source        TEXT,
     shadow_runtime      INTEGER NOT NULL DEFAULT 0 CHECK (shadow_runtime IN (0, 1)),
     observed_at         TEXT NOT NULL,
-    schema_version      INTEGER NOT NULL CHECK (schema_version IN ({_SCHEMA_VERSION_VALUES_SQL})),
+    schema_version      INTEGER NOT NULL CHECK (schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42)),
     schema_compatibility TEXT NOT NULL DEFAULT 'current'
         CHECK (schema_compatibility IN ('current', 'degraded')),
     PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, decision_seq)
@@ -212,7 +211,7 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
     _pre_count = conn.execute("SELECT COUNT(*) FROM no_trade_events").fetchone()[0]
 
     conn.execute(
-        f"""
+        """
         INSERT OR IGNORE INTO no_trade_events_new (
             market_slug, temperature_metric, target_date,
             observation_time, decision_seq,
@@ -230,8 +229,8 @@ def _rebuild_stale_no_trade_events_table(conn: sqlite3.Connection) -> None:
             shadow_runtime,
             observed_at,
             CASE
-                WHEN schema_version IN ({_SCHEMA_VERSION_VALUES_SQL}) THEN schema_version
-                ELSE {SCHEMA_VERSION}
+                WHEN schema_version IN (14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42) THEN schema_version
+                ELSE 36
             END,
             schema_compatibility
         FROM no_trade_events

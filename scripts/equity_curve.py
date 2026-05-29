@@ -79,7 +79,7 @@ def _required_number(value, field: str) -> float:
 
 def _exit_economics_cohort(row: dict) -> str:
     corrected = (
-        row.get("pricing_semantics_version")
+        row.get("pricing_semantics_id")
         == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
         or row.get("corrected_executable_economics_eligible") is True
     )

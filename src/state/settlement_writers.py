@@ -2,13 +2,13 @@
 # Last reused or audited: 2026-05-19
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
 #                  docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
-#                  architecture/db_table_ownership.yaml:settlements_v2 (line 1515, db: forecasts)
+#                  architecture/db_table_ownership.yaml:settlement_outcomes (line 1515, db: forecasts)
 #                  architecture/db_table_ownership.yaml:uma_resolution (line 1614, db: world)
 """
 Consolidated settlement writer with era provenance.
 
 DESIGN CONTRACT:
-    This module is the SINGLE write path for settlements_v2 in Phase 0+.
+    This module is the SINGLE write path for settlement_outcomes in Phase 0+.
     Both historical write paths (harvester.py L2 and harvester_truth_writer.py L4)
     are consolidated here. After PR 1 implementation:
       - src/execution/harvester.py calls write_settlement_v2_with_era_provenance()
@@ -16,7 +16,7 @@ DESIGN CONTRACT:
     Neither site may write harvester_live_uma_vote provenance directly.
 
 INV-37 CONSTRAINT (EXPLICIT):
-    ALL writes involving settlements_v2 (forecasts.db) AND uma_resolution or
+    ALL writes involving settlement_outcomes (forecasts.db) AND uma_resolution or
     era_watermark (world.db) MUST go through get_forecasts_connection_with_world()
     at src/state/db.py:205. No bare sqlite3.connect() of either DB in this module.
 
@@ -125,7 +125,7 @@ def write_settlement_v2_with_era_provenance(
     *,
     conn: Any | None = None,
 ) -> dict[str, Any]:
-    """Write a settlement row to settlements_v2 with typed era provenance.
+    """Write a settlement row to settlement_outcomes with typed era provenance.
 
     This is the CONSOLIDATED write path for all settlement writes. Both
     src/execution/harvester.py and src/ingest/harvester_truth_writer.py
@@ -140,7 +140,7 @@ def write_settlement_v2_with_era_provenance(
 
     Args:
         settlement: Dict containing at minimum city, target_date, temperature_metric,
-            market_slug, and all fields required by settlements_v2 schema.
+            market_slug, and all fields required by settlement_outcomes schema.
         era_basis: The EraAuthorityBasis for this settlement. Use
             dispatch_era_basis(settled_at_utc) to obtain it.
         conn: Optional pre-established connection (for testing with monkey-patched
@@ -223,7 +223,7 @@ def _build_era_provenance(
     """Build the provenance_json dict for a settlement row.
 
     The returned dict is merged into the caller's provenance dict and
-    serialised as provenance_json TEXT in settlements_v2.
+    serialised as provenance_json TEXT in settlement_outcomes.
 
     NOTE: The string 'harvester_live_uma_vote' MUST NOT appear in any
     provenance_json written after PR 1 merge. Post-PR-1 antibody test

@@ -61,7 +61,7 @@ def _write_coverage(
         coverage_id=coverage_id,
         source_run_id=source_run_id,
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         release_calendar_key=release_calendar_key,
         track="mx2t6_high_full_horizon",
         city_id=scope.city_id,
@@ -95,7 +95,7 @@ def test_complete_live_coverage_writes_live_eligible_producer_readiness() -> Non
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         track="mx2t6_high_full_horizon",
         computed_at=_utc(2026, 5, 3, 10),
     )
@@ -110,7 +110,7 @@ def test_complete_live_coverage_writes_live_eligible_producer_readiness() -> Non
     assert row["expires_at"] == "2026-05-03T12:00:00+00:00"
     dependency = json.loads(row["dependency_json"])
     assert dependency["coverage_id"] == "coverage-live-1"
-    assert dependency["source_transport"] == "ensemble_snapshots_v2_db_reader"
+    assert dependency["source_transport"] == "ensemble_snapshots_db_reader"
 
 
 def test_release_calendar_key_keeps_same_track_coverage_from_crossing_profiles() -> None:
@@ -129,7 +129,7 @@ def test_release_calendar_key_keeps_same_track_coverage_from_crossing_profiles()
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         track="mx2t6_high_full_horizon",
         computed_at=_utc(2026, 5, 3, 11),
         release_calendar_key="ecmwf_open_data:mx2t6_high:full",
@@ -146,7 +146,7 @@ def test_missing_future_target_coverage_writes_blocked_producer_readiness() -> N
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         track="mx2t6_high_full_horizon",
         computed_at=_utc(2026, 5, 3, 10),
     )
@@ -176,7 +176,7 @@ def test_partial_coverage_overwrites_producer_readiness_to_blocked() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         track="mx2t6_high_full_horizon",
         computed_at=_utc(2026, 5, 3, 10),
     )
@@ -203,7 +203,7 @@ def test_shadow_only_coverage_is_not_live_eligible() -> None:
         conn,
         scope=_scope(),
         source_id="ecmwf_open_data",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         track="mx2t6_high_full_horizon",
         computed_at=_utc(2026, 5, 3, 10),
     )

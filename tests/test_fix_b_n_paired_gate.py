@@ -41,15 +41,15 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute(
-        """CREATE TABLE ensemble_snapshots_v2(
-            city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
+        """CREATE TABLE ensemble_snapshots(
+            city TEXT, target_date TEXT, temperature_metric TEXT, dataset_id TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
             contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
             training_allowed INTEGER, causality_status TEXT, authority TEXT,
             issue_time TEXT)"""
     )
     c.execute(
-        """CREATE TABLE settlements_v2(
+        """CREATE TABLE settlement_outcomes(
             city TEXT, target_date TEXT, temperature_metric TEXT,
             settlement_value REAL, authority TEXT)"""
     )
@@ -59,7 +59,7 @@ def conn():
 def _snap(conn, city, date, members, dv, *, unit="degC", metric="high",
           contributes=1, authority="VERIFIED", issue_time=None):
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (city, date, metric, dv, json.dumps(members), unit, 24.0,
          f"{date}T00:00:00Z", contributes, 0, 1, "OK", authority, issue_time),
     )
@@ -67,7 +67,7 @@ def _snap(conn, city, date, members, dv, *, unit="degC", metric="high",
 
 def _settle(conn, city, date, value, *, metric="high", authority="VERIFIED"):
     conn.execute(
-        "INSERT INTO settlements_v2 VALUES (?,?,?,?,?)",
+        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)",
         (city, date, metric, value, authority),
     )
 

@@ -5,7 +5,7 @@
 
 Live cycles use a trade DB connection with the world DB attached as ``world``.
 Legacy bootstrap left empty calibration tables in the trade DB, so unqualified
-``FROM platt_models_v2`` reads can silently miss authoritative world rows.
+``FROM platt_models`` reads can silently miss authoritative world rows.
 """
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ import json
 import sqlite3
 
 from src.calibration.manager import get_calibrator
-from src.calibration.store import load_platt_model_v2
+from src.calibration.store import load_platt_model
 from src.config import City
 
 
 PLATT_V2_SCHEMA = """
-CREATE TABLE {schema}platt_models_v2 (
+CREATE TABLE {schema}platt_models (
     model_key TEXT PRIMARY KEY,
     temperature_metric TEXT NOT NULL,
     cluster TEXT NOT NULL,
@@ -51,7 +51,7 @@ def _attached_trade_conn(tmp_path) -> sqlite3.Connection:
     conn.execute(PLATT_V2_SCHEMA.format(schema="world."))
     conn.execute(
         """
-        INSERT INTO world.platt_models_v2 (
+        INSERT INTO world.platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, param_A, param_B, param_C, bootstrap_params_json,
             n_samples, brier_insample, fitted_at, is_active, authority
@@ -78,10 +78,10 @@ def _attached_trade_conn(tmp_path) -> sqlite3.Connection:
     return conn
 
 
-def test_load_platt_model_v2_prefers_attached_world_over_empty_trade_shadow(tmp_path):
+def test_load_platt_model_prefers_attached_world_over_empty_trade_shadow(tmp_path):
     conn = _attached_trade_conn(tmp_path)
 
-    loaded = load_platt_model_v2(
+    loaded = load_platt_model(
         conn,
         temperature_metric="low",
         cluster="London",

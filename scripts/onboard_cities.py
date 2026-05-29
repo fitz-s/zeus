@@ -368,7 +368,7 @@ PIPELINE_STEPS = [
     {
         "id": "obs_instants_v2",
         "name": "Backfill observation_instants_v2 (≥365d, data_version=v1.wu-native)",
-        "script": "backfill_obs_v2.py",
+        "script": "backfill_obs.py",
         "city_flag": "--cities",
         # --start / --end / --data-version injected dynamically via extra_args_factory
         "extra_args_factory": "_obs_instants_v2_extra_args",
@@ -378,16 +378,16 @@ PIPELINE_STEPS = [
         "name": "Backfill ENS snapshots v1 from OpenMeteo (legacy p_raw lane)",
         "script": "backfill_ens.py",
         # VESTIGIAL/BLOCKED: backfill_ens.py writes to ensemble_snapshots (unsuffixed,
-        # does not exist post-K1-split). Canonical is ensemble_snapshots_v2 in
+        # does not exist post-K1-split). Canonical is ensemble_snapshots in
         # zeus-forecasts.db with ~40 columns; pre-K1 INSERT shape is incompatible.
-        # The live daemon is the canonical writer to ensemble_snapshots_v2 and will
+        # The live daemon is the canonical writer to ensemble_snapshots and will
         # populate new cities on next operator-initiated daemon restart.
         # Marked optional so pipeline failure here is logged but non-fatal.
         "optional": True,
     },
     {
         "id": "ens_backfill_v2",
-        "name": "Backfill ensemble_snapshots_v2 from GRIB/TIGGE archive",
+        "name": "Backfill ensemble_snapshots from GRIB/TIGGE archive",
         "script": "ingest_grib_to_snapshots.py",
         "city_flag": "--cities",
         # --date-from injected via extra_args_factory
@@ -402,16 +402,16 @@ PIPELINE_STEPS = [
     },
     {
         "id": "platt_training",
-        "name": "Refit Platt v2 models (refit_platt_v2 → promote to world.db)",
+        "name": "Refit Platt v2 models (refit_platt → promote to world.db)",
         "type": "python",
-        # Inline Python step: calls refit_platt_v2 + promote_platt_models_v2.
-        # Uses zeus-forecasts.db (refuses zeus-world.db per refit_platt_v2 safety gate).
+        # Inline Python step: calls refit_platt + promote_platt.
+        # Uses zeus-forecasts.db (refuses zeus-world.db per refit_platt safety gate).
         "uses_forecasts_db": True,
         "db_source": "zeus-forecasts.db",
     },
     {
         "id": "fit_ens_bias_v2",
-        "name": "Fit model_bias_ens_v2 per city (inline ens_bias_repo)",
+        "name": "Fit model_bias_ens per city (inline ens_bias_repo)",
         "type": "python",
     },
     {
@@ -695,7 +695,7 @@ _OBS_V2_BACKFILL_DAYS = 400
 
 
 def _obs_instants_v2_extra_args() -> list[str]:
-    """Dynamic args for backfill_obs_v2.py: --start, --end, --data-version."""
+    """Dynamic args for backfill_obs.py: --start, --end, --data-version."""
     end_date = date.today()
     start_date = end_date - timedelta(days=_OBS_V2_BACKFILL_DAYS)
     return [
@@ -934,7 +934,7 @@ def _verification_tables() -> tuple[list[str], list[str]]:
     world-class: observations, observation_instants_v2, solar_daily,
                  temp_persistence, diurnal_curves, forecasts,
                  forecast_skill, model_bias, asos_wu_offsets
-    forecast-class: settlements_v2, market_events_v2, ensemble_snapshots_v2,
+    forecast-class: settlements_v2, market_events_v2, ensemble_snapshots,
                     calibration_pairs_v2
 
     Removed vestigial: historical_forecasts (0 rows), model_skill (table gone).
@@ -953,7 +953,7 @@ def _verification_tables() -> tuple[list[str], list[str]]:
     forecast_tables = [
         "settlements_v2",
         "market_events_v2",
-        "ensemble_snapshots_v2",
+        "ensemble_snapshots",
         "calibration_pairs_v2",
     ]
     return world_tables, forecast_tables
@@ -964,19 +964,19 @@ def _verification_tables() -> tuple[list[str], list[str]]:
 # ─────────────────────────────────────────────────────────────
 
 def _run_platt_training(city_names: list[str], dry_run: bool = False) -> None:
-    """Run refit_platt_v2.py (write to forecasts.db) then promote to world.db.
+    """Run refit_platt.py (write to forecasts.db) then promote to world.db.
 
     Two-stage:
-      1. refit_platt_v2.py --db <forecasts.db> --no-dry-run --force
+      1. refit_platt.py --db <forecasts.db> --no-dry-run --force
          Reads calibration_pairs_v2 from zeus-forecasts.db.
          Refuses zeus-world.db (safety gate in the script).
-      2. promote_platt_models_v2.py promote
+      2. promote_platt.py promote
            --stage-db <forecasts.db> --prod-db <world.db> --commit
     """
     from src.state.db import ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH
 
-    refit_script = PROJECT_ROOT / "scripts" / "refit_platt_v2.py"
-    promote_script = PROJECT_ROOT / "scripts" / "promote_platt_models_v2.py"
+    refit_script = PROJECT_ROOT / "scripts" / "refit_platt.py"
+    promote_script = PROJECT_ROOT / "scripts" / "promote_platt.py"
 
     for script in (refit_script, promote_script):
         if not script.exists():
@@ -1002,7 +1002,7 @@ def _run_platt_training(city_names: list[str], dry_run: bool = False) -> None:
         logger.info("  [DRY RUN] Would run: %s", " ".join(promote_cmd[-4:]))
         return
 
-    for cmd, label in [(refit_cmd, "refit_platt_v2"), (promote_cmd, "promote_platt_models_v2")]:
+    for cmd, label in [(refit_cmd, "refit_platt"), (promote_cmd, "promote_platt")]:
         logger.info("  Running: %s", label)
         try:
             result = subprocess_run_with_write_class(
@@ -1039,15 +1039,15 @@ _ENS_SEASONS: tuple[tuple[str, tuple[int, ...]], ...] = (
 
 
 def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[str]:
-    """Fit model_bias_ens_v2 for each city/season/metric using ens_bias_repo.
+    """Fit model_bias_ens for each city/season/metric using ens_bias_repo.
 
     Calls fit_city_predictive_error() (from ens_error_model) per (city, season,
-    metric) bucket, then writes the posterior to model_bias_ens_v2 via
+    metric) bucket, then writes the posterior to model_bias_ens via
     write_bias_model().  init_ens_bias_schema() is called defensively so the
     table is created even if it did not exist yet in zeus-forecasts.db.
     """
     if dry_run:
-        logger.info("  [DRY RUN] Would fit model_bias_ens_v2 for: %s", city_names)
+        logger.info("  [DRY RUN] Would fit model_bias_ens for: %s", city_names)
         return set()
 
     try:
@@ -1124,7 +1124,7 @@ def _run_fit_ens_bias_v2(city_names: list[str], dry_run: bool = False) -> set[st
         if zero_coverage_cities:
             logger.warning(
                 "  fit_ens_bias_v2: ZERO buckets fitted for %s — likely no "
-                "TIGGE/GRIB coverage yet.  model_bias_ens_v2 is empty for "
+                "TIGGE/GRIB coverage yet.  model_bias_ens is empty for "
                 "these cities; recording as PENDING in deferred sidecar.",
                 sorted(zero_coverage_cities),
             )
@@ -1301,7 +1301,7 @@ def _record_deferred_artifacts(
 
     ``ens_bias_no_coverage``: set of city names where fit_ens_bias_v2
     produced zero fitted buckets (no TIGGE/GRIB coverage).  These cities
-    get an additional model_bias_ens_v2=PENDING entry in their sidecar.
+    get an additional model_bias_ens=PENDING entry in their sidecar.
 
     Written to: data/onboarding_pending/<city_slug>.json
     """
@@ -1316,7 +1316,7 @@ def _record_deferred_artifacts(
             for artifact, reason in DEFERRED_ARTIFACTS.items()
         }
         if city_name in ens_bias_no_coverage:
-            deferred["model_bias_ens_v2"] = {
+            deferred["model_bias_ens"] = {
                 "status": "PENDING",
                 "reason": (
                     "fit_ens_bias_v2 produced 0 fitted buckets — "

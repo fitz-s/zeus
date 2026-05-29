@@ -263,7 +263,7 @@ class TestDecisionSeqAutoIncrement:
         )
         dsc = _minimal_dsc()
 
-        from src.state.db import SCHEMA_VERSION
+        SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
         def _fake_get_world_conn(**_kwargs) -> sqlite3.Connection:
             c = sqlite3.connect(str(world_db_path))
@@ -273,7 +273,6 @@ class TestDecisionSeqAutoIncrement:
         with (
             patch("src.state.db.get_world_connection", side_effect=_fake_get_world_conn),
             patch("src.state.db_writer_lock.db_writer_lock", _noop_lock),
-            patch("src.state.db.SCHEMA_VERSION", SCHEMA_VERSION),
             patch("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path),
         ):
             write_decision_event(

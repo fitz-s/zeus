@@ -25,7 +25,6 @@ from src.calibration.store import (
     get_pairs_for_bucket,
     get_decision_group_count,
     load_platt_model,
-    load_platt_model_v2,
     save_platt_model,
 )
 from src.config import City, calibration_clusters, calibration_maturity_thresholds
@@ -606,7 +605,7 @@ def get_calibration_authority_result(
             season=season,
             input_space="width_normalized_density",
         )
-        primary_model = load_platt_model_v2(
+        primary_model = load_platt_model(
             conn,
             temperature_metric=temperature_metric,
             cluster=cluster,
@@ -775,15 +774,15 @@ def get_calibrator(
     blind and read exclusively from legacy `platt_models` table — a LOW
     candidate would silently receive a HIGH Platt model. Post-P9C:
 
-      1. Try platt_models_v2 filtered by (temperature_metric, cluster, season,
+      1. Try platt_models filtered by (temperature_metric, cluster, season,
          data_version, cycle, source_id, horizon_profile)
       2. If v2 miss, fall back to legacy platt_models (HIGH historical continuity)
       3. Remaining hierarchical fallback (pool clusters / seasons / global) is
          preserved; v2 lookup is tried first at each tier.
 
     Law: docs/authority/zeus_dual_track_architecture.md §4 (World DB v2 table
-    family keyed on temperature_metric). Writes to platt_models_v2 landed
-    Phase 5 (save_platt_model_v2 + refit_platt_v2.py); reads were unwired
+    family keyed on temperature_metric). Writes to platt_models landed
+    Phase 5 (save_platt_model_v2 + refit_platt.py); reads were unwired
     until Phase 9C.
 
     Implements hierarchical fallback (spec §3.4):
@@ -850,7 +849,7 @@ def get_calibrator(
             lookup_cycle, lookup_source_id, lookup_horizon = "00", "tigge_mars", "full"
         else:
             lookup_cycle, lookup_source_id, lookup_horizon = cycle, source_id, horizon_profile
-        model_data = load_platt_model_v2(
+        model_data = load_platt_model(
             conn,
             temperature_metric=temperature_metric,
             cluster=cluster,
@@ -878,18 +877,7 @@ def get_calibrator(
             season=season,
             data_version_used=tigge_rescue_data_version,
         )
-    if model_data is None and temperature_metric == "high":
-        # Legacy fallback only for HIGH — LOW has never existed in legacy
-        bk = bucket_key(cluster, season)
-        model_data = load_platt_model(conn, bk)
-        # Slice P3.4 + P3-fix2 (post-review MAJOR from both reviewers,
-        # 2026-04-26): operator-visible WARNING when v2 misses and legacy
-        # fills, deduplicated per-(path,cluster,season,metric) for the
-        # process lifetime. v2 coverage may be sparse → first cycle alerts
-        # operator; subsequent cycles for the same bucket suppress to
-        # avoid log spam (one fact, one alert).
-        if model_data is not None:
-            _emit_v2_legacy_fallback_warning("primary", cluster, season, "high")
+    # B3cont: legacy platt_models bare-table fallback removed (0 rows, table dropped).
     if model_data is not None:
         if model_data.get("input_space") != "width_normalized_density":
             refit = _fit_from_pairs(
@@ -988,7 +976,7 @@ def get_calibrator(
                 lookup_cycle, lookup_source_id, lookup_horizon = "00", "tigge_mars", "full"
             else:
                 lookup_cycle, lookup_source_id, lookup_horizon = cycle, source_id, horizon_profile
-            model_data = load_platt_model_v2(
+            model_data = load_platt_model(
                 conn,
                 temperature_metric=temperature_metric,
                 cluster=fallback_cluster,
@@ -1016,14 +1004,7 @@ def get_calibrator(
                 season=season,
                 data_version_used=season_pool_tigge_rescue_dv,
             )
-        if model_data is None and temperature_metric == "high":
-            bk_fb = bucket_key(fallback_cluster, season)
-            model_data = load_platt_model(conn, bk_fb)
-            # Slice P3.4 + P3-fix2: twin-site dedup per-bucket WARNING.
-            if model_data is not None:
-                _emit_v2_legacy_fallback_warning(
-                    "season-pool", fallback_cluster, season, "high",
-                )
+        # B3cont: legacy platt_models bare-table fallback removed (0 rows, table dropped).
         if model_data is not None and model_data["n_samples"] >= level3:
             if model_data.get("input_space") != "width_normalized_density":
                 logger.warning(
@@ -1098,7 +1079,7 @@ def _fit_from_pairs(
     violation (write-side twin of the L3 read-side fix).
 
     LOW refits must land via the dedicated v2 pipeline
-    (scripts/refit_platt_v2.py → save_platt_model_v2), which is
+    (scripts/refit_platt.py → save_platt_model_v2), which is
     Golden-Window-gated. Fast-path on-the-fly refit is unsafe for LOW
     until a metric-aware on-the-fly-to-v2 writer is added (post-dual-
     track cleanup packet).
@@ -1107,7 +1088,7 @@ def _fit_from_pairs(
         logger.debug(
             "_fit_from_pairs skipped for %s_%s (temperature_metric=%s): "
             "on-the-fly refit is HIGH-only per Phase 9C.1 two-seam law. "
-            "LOW refits must use scripts/refit_platt_v2.py.",
+            "LOW refits must use scripts/refit_platt.py.",
             cluster, season, temperature_metric,
         )
         return None
@@ -1125,7 +1106,7 @@ def _fit_from_pairs(
     # PHASE0-PR4-SCAFFOLD typing seam: decision_group_ids are raw str from DB.
     # Post-PR4 production: cast to DecisionGroupId via decision_group_id_v1_hash
     # OR load typed via a typed accessor that returns DecisionGroupId (not raw str).
-    # The NOT NULL constraint on calibration_pairs_v2.decision_group_id will land
+    # The NOT NULL constraint on calibration_pairs.decision_group_id will land
     # in the PR 4 implementation phase; until then, the None-guard below is live.
     # INV-group-id-type: callers of ExtendedPlattCalibrator.fit() must supply
     # DecisionGroupId-typed arrays once the NewType is wired end-to-end.
@@ -1187,14 +1168,22 @@ def _fit_from_pairs(
         f":{_eff_dv}:{_eff_cycle}:{_eff_source_id}:{_eff_horizon}:{cal.input_space}"
     )
 
-    # Save to DB for future use
-    bk = bucket_key(cluster, season)
+    # Save to DB for future use (B3cont: canonical save_platt_model — HIGH-only, v2 kwargs)
     save_platt_model(
-        conn, bk,
-        cal.A, cal.B, cal.C,
-        cal.bootstrap_params,
-        cal.n_samples,
+        conn,
+        metric_identity=HIGH_LOCALDAY_MAX,
+        cluster=cluster,
+        season=season,
+        data_version=_eff_dv,
+        param_A=cal.A,
+        param_B=cal.B,
+        param_C=cal.C,
+        bootstrap_params=cal.bootstrap_params,
+        n_samples=cal.n_samples,
         input_space=cal.input_space,
+        cycle=_eff_cycle,
+        source_id=_eff_source_id,
+        horizon_profile=_eff_horizon,
     )
     conn.commit()
 

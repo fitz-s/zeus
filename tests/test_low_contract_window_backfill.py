@@ -17,7 +17,7 @@ from scripts.backfill_low_contract_window_evidence import (
 import scripts.backfill_low_contract_window_evidence as backfill_module
 from scripts.ingest_grib_to_snapshots import _contract_evidence_fields
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import LOW_LOCALDAY_MIN
 
 
@@ -102,13 +102,13 @@ def _make_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity, observation_field,
             issue_time, valid_time, available_at, fetch_time, lead_hours,
-            members_json, model_version, data_version, training_allowed,
+            members_json, model_version, dataset_id, training_allowed,
             causality_status, authority, members_unit, provenance_json
         ) VALUES (?, ?, 'low', ?, 'low_temp', ?, ?, ?, ?, ?, ?, 'ENS', ?, ?, ?, 'VERIFIED', 'degF', ?)
         """,
@@ -135,7 +135,7 @@ def _make_db() -> sqlite3.Connection:
 def _recovery_count(conn: sqlite3.Connection) -> int:
     source = LOW_RECOVERY_SOURCES["tigge_mars"]
     return conn.execute(
-        "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE data_version = ?",
+        "SELECT COUNT(*) FROM ensemble_snapshots WHERE dataset_id = ?",
         (source.recovery_data_version,),
     ).fetchone()[0]
 
@@ -226,11 +226,11 @@ def test_low_contract_window_backfill_apply_inserts_recovery_row(tmp_path: Path)
     assert reports["tigge_mars"].inserted == 1
     row = conn.execute(
         """
-        SELECT data_version, training_allowed, causality_status,
+        SELECT dataset_id, training_allowed, causality_status,
                forecast_window_attribution_status, contributes_to_target_extrema,
                forecast_window_block_reasons_json, provenance_json
-        FROM ensemble_snapshots_v2
-        WHERE data_version = ?
+        FROM ensemble_snapshots
+        WHERE dataset_id = ?
         """,
         (source.recovery_data_version,),
     ).fetchone()
@@ -377,8 +377,8 @@ def test_low_contract_window_backfill_preserves_non_boundary_block_reason(tmp_pa
         """
         SELECT training_allowed, causality_status, boundary_ambiguous,
                forecast_window_attribution_status, forecast_window_block_reasons_json
-        FROM ensemble_snapshots_v2
-        WHERE data_version = ?
+        FROM ensemble_snapshots
+        WHERE dataset_id = ?
         """,
         (source.recovery_data_version,),
     ).fetchone()
@@ -409,8 +409,8 @@ def test_low_contract_window_backfill_ambiguous_window_stays_blocked(tmp_path: P
         """
         SELECT training_allowed, causality_status, forecast_window_attribution_status,
                forecast_window_block_reasons_json
-        FROM ensemble_snapshots_v2
-        WHERE data_version = ?
+        FROM ensemble_snapshots
+        WHERE dataset_id = ?
         """,
         (source.recovery_data_version,),
     ).fetchone()

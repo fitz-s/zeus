@@ -4,7 +4,7 @@
 """Tests: legacy mx2t6/mn2t6 data_version keys map to same tigge calibration target.
 
 Covers the 2026-05-07 bridge added to _TRANSFER_SOURCE_BY_OPENDATA_VERSION so that
-1,568 stale ensemble_snapshots_v2 rows and 477 LIVE_ELIGIBLE readiness rows (tagged
+1,568 stale ensemble_snapshots rows and 477 LIVE_ELIGIBLE readiness rows (tagged
 with legacy versions) still resolve a Platt during the mx2t3/mn2t3 transition.
 """
 

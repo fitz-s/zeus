@@ -6,7 +6,7 @@
 
 ## The Two Sides of the Contract
 
-### WRITER side — `scripts/rebuild_calibration_pairs_v2.py`
+### WRITER side — `scripts/rebuild_calibration_pairs.py`
 
 `_rebuild_sentinel_payload()` at L438-474 emits the following JSON shape
 when a full-scope rebuild finishes:
@@ -49,7 +49,7 @@ in the key, `null` in `scope.data_version` in the payload.
 
 ---
 
-### READER side — `scripts/promote_platt_models_v2.py`
+### READER side — `scripts/promote_platt.py`
 
 `_sentinel_status_for_metrics()` at L165-240 applies three sequential
 filters. The decisive filter is the **"full_complete"** check at L221-228:
@@ -150,7 +150,7 @@ can never be satisfied by the writer's natural output.
 
 ## Minimal Correct Fix
 
-**Fix the READER** (`promote_platt_models_v2.py`), not the writer.
+**Fix the READER** (`promote_platt.py`), not the writer.
 
 **Rationale:**
 
@@ -160,7 +160,7 @@ can never be satisfied by the writer's natural output.
    the rebuild itself is not scoped to that version.
 2. The writer's sentinel schema is consumed by multiple callers
    (`assert_rebuild_complete_sentinel`, `assert_no_overlapping_incomplete_rebuild_sentinel`,
-   `refit_platt_v2.py`). Changing the writer's output format would require
+   `refit_platt.py`). Changing the writer's output format would require
    auditing all consumers.
 3. The reader is the narrower surface with one semantic correction needed.
 
@@ -213,8 +213,8 @@ represented in the final fallback check at L233-237.
 
 | File | Role |
 |------|------|
-| `scripts/rebuild_calibration_pairs_v2.py` L438-474 | Writer: emits sentinel payload with `status`, `completed`, `scope.data_version=null` |
-| `scripts/rebuild_calibration_pairs_v2.py` L244-272 | Writer: encodes `null` data_version as `"all"` in the key |
-| `scripts/promote_platt_models_v2.py` L221-228 | Reader: `full_complete` filter — the bug is here |
-| `scripts/promote_platt_models_v2.py` L196-202 | Reader: `relevant` filter — correctly accepts `"all"` |
+| `scripts/rebuild_calibration_pairs.py` L438-474 | Writer: emits sentinel payload with `status`, `completed`, `scope.data_version=null` |
+| `scripts/rebuild_calibration_pairs.py` L244-272 | Writer: encodes `null` data_version as `"all"` in the key |
+| `scripts/promote_platt.py` L221-228 | Reader: `full_complete` filter — the bug is here |
+| `scripts/promote_platt.py` L196-202 | Reader: `relevant` filter — correctly accepts `"all"` |
 | `/private/tmp/ens_refit/full.db` zeus_meta | Ground truth: two sentinels, both `data_version=all` in key, `null` in payload scope |

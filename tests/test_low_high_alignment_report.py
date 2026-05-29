@@ -18,19 +18,19 @@ def _make_conn() -> sqlite3.Connection:
     _connect_for_tests(conn)
     conn.executescript(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT,
             target_date TEXT,
             issue_time TEXT,
             source_id TEXT,
             temperature_metric TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             training_allowed INTEGER,
             causality_status TEXT
         );
 
-        CREATE TABLE platt_models_v2 (
+        CREATE TABLE platt_models (
             model_key TEXT PRIMARY KEY,
             temperature_metric TEXT,
             cluster TEXT,
@@ -53,9 +53,9 @@ def _make_conn() -> sqlite3.Connection:
 def test_report_marks_fresh_v2_schema_contract_outcome_ready() -> None:
     conn = sqlite3.connect(":memory:")
     _connect_for_tests(conn)
-    from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+    from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
 
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
 
     report = build_report(
         conn,
@@ -76,9 +76,9 @@ def test_report_marks_fresh_v2_schema_contract_outcome_ready() -> None:
 def test_report_counts_persisted_low_window_evidence_classes() -> None:
     conn = sqlite3.connect(":memory:")
     _connect_for_tests(conn)
-    from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+    from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
 
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     rows = [
         (
             "FULLY_INSIDE_TARGET_LOCAL_DAY",
@@ -105,13 +105,13 @@ def test_report_counts_persisted_low_window_evidence_classes() -> None:
     for idx, (status, contributes, reasons, start_local, end_local) in enumerate(rows, start=10):
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity, observation_field,
                 issue_time, available_at, fetch_time, lead_hours, members_json,
-                model_version, data_version, training_allowed, causality_status,
+                model_version, dataset_id, training_allowed, causality_status,
                 authority, members_unit, city_timezone, settlement_source_type,
                 settlement_station_id, settlement_unit, settlement_rounding_policy,
-                bin_grid_id, bin_schema_version, forecast_window_start_utc,
+                bin_grid_id, bin_schema_id, forecast_window_start_utc,
                 forecast_window_end_utc, forecast_window_start_local,
                 forecast_window_end_local, forecast_window_local_day_overlap_hours,
                 forecast_window_attribution_status, contributes_to_target_extrema,
@@ -152,8 +152,8 @@ def test_report_quantifies_low_boundary_recovery_upper_bound() -> None:
     conn = _make_conn()
     conn.executemany(
         """
-        INSERT INTO ensemble_snapshots_v2 (
-            city, target_date, temperature_metric, data_version,
+        INSERT INTO ensemble_snapshots (
+            city, target_date, temperature_metric, dataset_id,
             training_allowed, causality_status
         ) VALUES (?, ?, ?, ?, ?, ?)
         """,
@@ -168,7 +168,7 @@ def test_report_quantifies_low_boundary_recovery_upper_bound() -> None:
     )
     conn.executemany(
         """
-        INSERT INTO platt_models_v2 (
+        INSERT INTO platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, n_samples, authority, is_active, param_A,
             cycle, source_id, horizon_profile
@@ -212,15 +212,15 @@ def test_report_exposes_quarantined_negative_a_and_no_regression_gates() -> None
     conn = _make_conn()
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
-            city, target_date, temperature_metric, data_version,
+        INSERT INTO ensemble_snapshots (
+            city, target_date, temperature_metric, dataset_id,
             training_allowed, causality_status
         ) VALUES ('Jakarta', '2026-06-10', 'low', 'tigge_mn2t6_v1', 0, 'REJECTED_BOUNDARY_AMBIGUOUS')
         """
     )
     conn.execute(
         """
-        INSERT INTO platt_models_v2 (
+        INSERT INTO platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, n_samples, authority, is_active, param_A,
             cycle, source_id, horizon_profile

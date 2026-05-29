@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from src.state.db import get_connection, init_schema
+from src.state.db import get_connection, init_schema, init_schema_forecasts
 
 
 def _create_opportunity_fact_table(conn):
@@ -245,6 +245,7 @@ def test_init_schema_creates_all_tables():
 
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
 
     cursor = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
@@ -342,7 +343,8 @@ def test_init_schema_idempotent():
 def test_log_opportunity_fact_preserves_missing_snapshot_without_latest_fallback(tmp_path):
     from src.state.db import log_opportunity_fact
 
-    conn = get_connection(tmp_path / "test.db")
+    # INV-37: function verifies conn path == zeus_trades.db; use that name.
+    conn = get_connection(tmp_path / "zeus_trades.db")
     init_schema(conn)
     _create_opportunity_fact_table(conn)
 
@@ -464,8 +466,12 @@ def test_log_opportunity_fact_preserves_day0_nowcast_no_trade_strategy_key(tmp_p
 def test_log_opportunity_fact_skips_missing_table_explicitly(tmp_path):
     from src.state.db import log_opportunity_fact
 
-    conn = get_connection(tmp_path / "test.db")
+    # INV-37: function verifies conn path == zeus_trades.db; use that name.
+    # Drop opportunity_fact after init_schema to simulate missing-table condition.
+    conn = get_connection(tmp_path / "zeus_trades.db")
     init_schema(conn)
+    conn.execute("DROP TABLE IF EXISTS opportunity_fact")
+    conn.commit()
 
     candidate = types.SimpleNamespace(
         city=types.SimpleNamespace(name="NYC"),
@@ -494,15 +500,22 @@ def test_log_opportunity_fact_skips_missing_table_explicitly(tmp_path):
     rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'opportunity_fact'").fetchone()
     conn.close()
 
-    assert result == {"status": "written", "table": "opportunity_fact"}
-    assert rows["n"] == 1
+    # opportunity_fact not created by init_schema → function skips durable write
+    assert result == {"status": "skipped_missing_table", "table": "opportunity_fact"}
+    assert rows["n"] == 0
 
 
-def test_log_probability_trace_fact_writes_complete_vector_trace(tmp_path):
+def test_log_probability_trace_fact_writes_complete_vector_trace(tmp_path, monkeypatch):
+    import src.state.db as db_module
     from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
 
-    conn = get_connection(tmp_path / "test.db")
-    init_schema(conn)
+    # INV-37: function ignores passed conn; opens own world connection.
+    # Monkeypatch ZEUS_WORLD_DB_PATH so writes land in tmp_path.
+    world_db = tmp_path / "zeus-world.db"
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
+    world_conn = get_connection(world_db)
+    init_schema(world_conn)
+    world_conn.close()
 
     candidate = types.SimpleNamespace(
         city=types.SimpleNamespace(name="NYC"),
@@ -536,13 +549,15 @@ def test_log_probability_trace_fact_writes_complete_vector_trace(tmp_path):
     )
 
     result = log_probability_trace_fact(
-        conn,
+        None,  # ignored per INV-37
         candidate=candidate,
         decision=decision,
         recorded_at="2026-04-03T00:00:00Z",
         mode="opening_hunt",
     )
-    row = conn.execute(
+    # Read results from world_db directly
+    world_conn = get_connection(world_db)
+    row = world_conn.execute(
         """
         SELECT decision_id, candidate_id, trace_status, p_raw_json, p_cal_json,
                p_market_json, p_posterior_json, p_posterior, bin_labels_json
@@ -550,8 +565,8 @@ def test_log_probability_trace_fact_writes_complete_vector_trace(tmp_path):
         WHERE decision_id = 'pt-dec-1'
         """
     ).fetchone()
-    completeness = query_probability_trace_completeness(conn)
-    conn.close()
+    completeness = query_probability_trace_completeness(world_conn)
+    world_conn.close()
 
     assert result == {
         "status": "written",
@@ -573,11 +588,17 @@ def test_log_probability_trace_fact_writes_complete_vector_trace(tmp_path):
     assert completeness["with_p_market_json"] == 1
 
 
-def test_log_probability_trace_fact_marks_pre_vector_unavailable(tmp_path):
+def test_log_probability_trace_fact_marks_pre_vector_unavailable(tmp_path, monkeypatch):
+    import src.state.db as db_module
     from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
 
-    conn = get_connection(tmp_path / "test.db")
-    init_schema(conn)
+    # INV-37: function ignores passed conn; patch ZEUS_WORLD_DB_PATH.
+    world_db = tmp_path / "zeus-world.db"
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
+    world_conn = get_connection(world_db)
+    init_schema(world_conn)
+    world_conn.close()
+
     candidate = types.SimpleNamespace(
         city=types.SimpleNamespace(name="NYC"),
         target_date="2026-04-01",
@@ -596,21 +617,22 @@ def test_log_probability_trace_fact_marks_pre_vector_unavailable(tmp_path):
     )
 
     result = log_probability_trace_fact(
-        conn,
+        None,  # ignored per INV-37
         candidate=candidate,
         decision=decision,
         recorded_at="2026-04-03T00:00:00Z",
         mode="day0_capture",
     )
-    row = conn.execute(
+    world_conn = get_connection(world_db)
+    row = world_conn.execute(
         """
         SELECT trace_status, missing_reason_json, p_raw_json, p_cal_json, p_market_json
         FROM probability_trace_fact
         WHERE decision_id = 'pt-dec-2'
         """
     ).fetchone()
-    completeness = query_probability_trace_completeness(conn)
-    conn.close()
+    completeness = query_probability_trace_completeness(world_conn)
+    world_conn.close()
 
     missing = json.loads(row["missing_reason_json"])
     assert result["trace_status"] == "pre_vector_unavailable"
@@ -650,11 +672,17 @@ def test_probability_trace_completeness_does_not_count_empty_vectors(tmp_path):
     assert completeness["with_p_market_json"] == 0
 
 
-def test_log_probability_trace_fact_does_not_scalar_backfill_vectors(tmp_path):
+def test_log_probability_trace_fact_does_not_scalar_backfill_vectors(tmp_path, monkeypatch):
+    import src.state.db as db_module
     from src.state.db import log_probability_trace_fact
 
-    conn = get_connection(tmp_path / "test.db")
-    init_schema(conn)
+    # INV-37: function ignores passed conn; patch ZEUS_WORLD_DB_PATH.
+    world_db = tmp_path / "zeus-world.db"
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
+    world_conn = get_connection(world_db)
+    init_schema(world_conn)
+    world_conn.close()
+
     candidate = types.SimpleNamespace(
         city=types.SimpleNamespace(name="NYC"),
         target_date="2026-04-01",
@@ -680,20 +708,21 @@ def test_log_probability_trace_fact_does_not_scalar_backfill_vectors(tmp_path):
     )
 
     result = log_probability_trace_fact(
-        conn,
+        None,  # ignored per INV-37
         candidate=candidate,
         decision=decision,
         recorded_at="2026-04-03T00:00:00Z",
         mode="opening_hunt",
     )
-    row = conn.execute(
+    world_conn = get_connection(world_db)
+    row = world_conn.execute(
         """
         SELECT trace_status, p_raw_json, p_cal_json, p_market_json, p_posterior
         FROM probability_trace_fact
         WHERE decision_id = 'pt-dec-3'
         """
     ).fetchone()
-    conn.close()
+    world_conn.close()
 
     assert result["trace_status"] == "pre_vector_unavailable"
     assert row["trace_status"] == "pre_vector_unavailable"
@@ -703,11 +732,17 @@ def test_log_probability_trace_fact_does_not_scalar_backfill_vectors(tmp_path):
     assert row["p_posterior"] == pytest.approx(0.58)
 
 
-def test_log_probability_trace_fact_degrades_unavailable_decision_context(tmp_path):
+def test_log_probability_trace_fact_degrades_unavailable_decision_context(tmp_path, monkeypatch):
+    import src.state.db as db_module
     from src.state.db import log_probability_trace_fact, query_probability_trace_completeness
 
-    conn = get_connection(tmp_path / "test.db")
-    init_schema(conn)
+    # INV-37: function ignores passed conn; patch ZEUS_WORLD_DB_PATH.
+    world_db = tmp_path / "zeus-world.db"
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
+    world_conn = get_connection(world_db)
+    init_schema(world_conn)
+    world_conn.close()
+
     candidate = types.SimpleNamespace(
         city=types.SimpleNamespace(name="NYC"),
         target_date="2026-04-01",
@@ -735,17 +770,18 @@ def test_log_probability_trace_fact_degrades_unavailable_decision_context(tmp_pa
     )
 
     result = log_probability_trace_fact(
-        conn,
+        None,  # ignored per INV-37
         candidate=candidate,
         decision=decision,
         recorded_at="2026-04-03T00:00:00Z",
         mode="opening_hunt",
     )
-    row = conn.execute(
+    world_conn = get_connection(world_db)
+    row = world_conn.execute(
         "SELECT trace_status FROM probability_trace_fact WHERE decision_id = 'pt-dec-4'"
     ).fetchone()
-    completeness = query_probability_trace_completeness(conn)
-    conn.close()
+    completeness = query_probability_trace_completeness(world_conn)
+    world_conn.close()
 
     assert result["trace_status"] == "degraded_decision_context"
     assert row["trace_status"] == "degraded_decision_context"
@@ -897,14 +933,20 @@ def test_query_data_improvement_inventory_reports_substrate_tables(tmp_path):
         assert inventory["tables"][table] == {"exists": True, "rows": 0}
 
 
-def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):
+def test_log_availability_fact_skips_missing_table_explicitly(tmp_path, monkeypatch):
+    import src.state.db as db_module
     from src.state.db import log_availability_fact
 
-    conn = get_connection(tmp_path / "test.db")
-    init_schema(conn)
+    # INV-37: function ignores passed conn; opens own world connection.
+    # Monkeypatch ZEUS_WORLD_DB_PATH so writes land in tmp_path.
+    world_db = tmp_path / "zeus-world.db"
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", world_db)
+    world_conn = get_connection(world_db)
+    init_schema(world_conn)  # creates availability_fact in world_db
+    world_conn.close()
 
     result = log_availability_fact(
-        conn,
+        None,  # ignored per INV-37
         availability_id="avail-1",
         scope_type="city_target",
         scope_key="NYC:2026-04-01",
@@ -914,11 +956,18 @@ def test_log_availability_fact_skips_missing_table_explicitly(tmp_path):
         impact="skip",
         details={"availability_status": "RATE_LIMITED"},
     )
-    rows = conn.execute("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'availability_fact'").fetchone()
-    conn.close()
+    world_conn = get_connection(world_db)
+    rows = world_conn.execute(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'availability_fact'"
+    ).fetchone()
+    row_count = world_conn.execute(
+        "SELECT COUNT(*) AS n FROM availability_fact WHERE availability_id = 'avail-1'"
+    ).fetchone()
+    world_conn.close()
 
     assert result == {"status": "written", "table": "availability_fact"}
     assert rows["n"] == 1
+    assert row_count["n"] == 1
 
 
 def test_log_execution_fact_skips_missing_table_explicitly(tmp_path):
@@ -959,7 +1008,8 @@ def test_log_outcome_fact_skips_missing_table_explicitly(tmp_path):
     assert rows["n"] == 1
 
 
-def test_query_p4_fact_smoke_summary_separates_layers(tmp_path):
+def test_query_p4_fact_smoke_summary_separates_layers(tmp_path, monkeypatch):
+    import src.state.db as db_module
     from src.state.db import (
         log_availability_fact,
         log_execution_fact,
@@ -968,7 +1018,13 @@ def test_query_p4_fact_smoke_summary_separates_layers(tmp_path):
         query_p4_fact_smoke_summary,
     )
 
-    conn = get_connection(tmp_path / "test.db")
+    # INV-37: log_opportunity_fact routes to zeus_trades.db (verified trade conn),
+    # log_availability_fact routes to zeus-world.db (ignores passed conn).
+    # Use single file for both so query_p4_fact_smoke_summary can query all tables.
+    shared_db = tmp_path / "zeus_trades.db"
+    monkeypatch.setattr(db_module, "ZEUS_WORLD_DB_PATH", shared_db)
+    monkeypatch.setattr(db_module, "_zeus_trade_db_path", lambda: shared_db)
+    conn = get_connection(shared_db)
     init_schema(conn)
     _create_opportunity_fact_table(conn)
     _create_availability_fact_table(conn)
@@ -1057,6 +1113,10 @@ def test_query_p4_fact_smoke_summary_separates_layers(tmp_path):
         rejection_reasons=["small edge"],
         recorded_at="2026-04-04T00:00:00Z",
     )
+    # INV-37: log_availability_fact ignores passed conn and opens its own write
+    # connection to ZEUS_WORLD_DB_PATH (monkeypatched to shared_db).  Commit here
+    # so the first connection releases its write lock before the second opens.
+    conn.commit()
     log_availability_fact(
         conn,
         availability_id="avail-1",
@@ -1205,6 +1265,7 @@ def test_ensemble_snapshots_unique_constraint():
 
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
 
     row = {
         "city": "NYC", "target_date": "2026-01-15",
@@ -1221,9 +1282,11 @@ def test_ensemble_snapshots_unique_constraint():
     conn.execute("""
         INSERT INTO ensemble_snapshots
         (city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, data_version, temperature_metric)
+         lead_hours, members_json, model_version, dataset_id, temperature_metric,
+         physical_quantity, observation_field)
         VALUES (:city, :target_date, :issue_time, :valid_time, :available_at,
-                :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high')
+                :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
     """, row)
     conn.commit()
 
@@ -1232,9 +1295,11 @@ def test_ensemble_snapshots_unique_constraint():
         conn.execute("""
             INSERT INTO ensemble_snapshots
             (city, target_date, issue_time, valid_time, available_at, fetch_time,
-             lead_hours, members_json, model_version, data_version, temperature_metric)
+             lead_hours, members_json, model_version, dataset_id, temperature_metric,
+             physical_quantity, observation_field)
             VALUES (:city, :target_date, :issue_time, :valid_time, :available_at,
-                    :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high')
+                    :fetch_time, :lead_hours, :members_json, :model_version, :data_version, 'high',
+                    'mx2t6_local_calendar_day_max', 'high_temp')
         """, row)
 
     conn.close()
@@ -1976,13 +2041,16 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
     db_path = tmp_path / "test.db"
     conn = get_connection(db_path)
     init_schema(conn)
+    init_schema_forecasts(conn)
     conn.execute(
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, data_version, temperature_metric)
+         lead_hours, members_json, model_version, dataset_id, temperature_metric,
+         physical_quantity, observation_field)
         VALUES (123, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
-                '2026-03-31T01:00:00Z', '2026-03-31T01:00:00Z', 24.0, '[40.0]', 'ecmwf_ifs025', 'test', 'high')
+                '2026-03-31T01:00:00Z', '2026-03-31T01:00:00Z', 24.0, '[40.0]', 'ecmwf_ifs025', 'test', 'high',
+                'mx2t6_local_calendar_day_max', 'high_temp')
         """
     )
 
@@ -2020,31 +2088,16 @@ def test_log_trade_entry_persists_replay_critical_fields(tmp_path):
     log_trade_entry(conn, pos)
     conn.commit()
 
-    row = conn.execute(
-        """
-        SELECT forecast_snapshot_id, calibration_model_version, strategy, edge_source,
-               discovery_mode, market_hours_open, fill_quality, entry_method,
-               selected_method, applied_validations_json,
-               settlement_semantics_json, epistemic_context_json, edge_context_json
-        FROM trade_decisions
-        ORDER BY trade_id DESC LIMIT 1
-        """
-    ).fetchone()
+    # F5 demotion (src/state/db.py:7598-7605): log_trade_entry is now a no-op tombstone.
+    # trade_decisions is audit-only legacy export; canonical truth lives in
+    # position_events / position_current. Assert zero rows written.
+    count = conn.execute("SELECT COUNT(*) FROM trade_decisions").fetchone()[0]
     conn.close()
 
-    assert row["forecast_snapshot_id"] == 123
-    assert row["calibration_model_version"] == "platt_v1"
-    assert row["strategy"] == "center_buy"
-    assert row["edge_source"] == "center_buy"
-    assert row["discovery_mode"] == "opening_hunt"
-    assert row["market_hours_open"] == pytest.approx(2.5)
-    assert row["fill_quality"] == pytest.approx(0.01)
-    assert row["entry_method"] == "ens_member_counting"
-    assert row["selected_method"] == "ens_member_counting"
-    assert "platt_calibration" in row["applied_validations_json"]
-    assert row["settlement_semantics_json"] == '{"measurement_unit":"F"}'
-    assert row["epistemic_context_json"] == '{"decision_time_utc":"2026-04-01T01:00:00Z"}'
-    assert row["edge_context_json"] == '{"forward_edge":0.2}'
+    assert count == 0, (
+        "F5 demotion: log_trade_entry (db.py:7598) is a tombstone — no write to "
+        "trade_decisions. Canonical truth is position_events/position_current."
+    )
 
 
 def test_log_trade_entry_tolerates_forecast_class_snapshot_ids(tmp_path):
@@ -2086,20 +2139,15 @@ def test_log_trade_entry_tolerates_forecast_class_snapshot_ids(tmp_path):
     log_trade_entry(conn, pos)
     conn.commit()
 
-    row = conn.execute(
-        """
-        SELECT forecast_snapshot_id, runtime_trade_id, order_id, status
-        FROM trade_decisions
-        ORDER BY trade_id DESC LIMIT 1
-        """
-    ).fetchone()
+    # F5 demotion (src/state/db.py:7598-7605): log_trade_entry is a no-op tombstone.
+    # Non-integer decision_snapshot_id no longer needs tolerance; function writes nothing.
+    count = conn.execute("SELECT COUNT(*) FROM trade_decisions").fetchone()[0]
     conn.close()
 
-    assert row is not None
-    assert row["forecast_snapshot_id"] is None
-    assert row["runtime_trade_id"] == "t-k1"
-    assert row["order_id"] == "0xlive-order"
-    assert row["status"] == "pending_tracked"
+    assert count == 0, (
+        "F5 demotion: log_trade_entry (db.py:7598) is a tombstone — no write to "
+        "trade_decisions regardless of forecast_class snapshot_id format."
+    )
 
 
 @pytest.mark.skip(reason="P9: legacy position_events write path eliminated")
@@ -2164,7 +2212,7 @@ def test_log_trade_exit_persists_exit_reason_and_strategy(tmp_path):
         """
         INSERT INTO ensemble_snapshots
         (snapshot_id, city, target_date, issue_time, valid_time, available_at, fetch_time,
-         lead_hours, members_json, model_version, data_version, temperature_metric)
+         lead_hours, members_json, model_version, dataset_id, temperature_metric)
         VALUES (456, 'NYC', '2026-04-01', '2026-03-31T00:00:00Z', '2026-04-01T00:00:00Z',
                 '2026-03-31T01:00:00Z', '2026-03-31T01:00:00Z', 24.0, '[40.0]', 'ecmwf_ifs025', 'test', 'high')
         """
@@ -3360,6 +3408,14 @@ def test_append_many_and_project_rejects_missing_env_for_non_settlement_events(t
         "order_status": None,
         "updated_at": "2026-05-07T00:00:00Z",
         "temperature_metric": "high",
+        # PR D0b / F1 required authority columns (src/state/projection.py:50-61)
+        "fill_authority": None,
+        "recovery_authority": None,
+        "chain_shares": None,
+        "chain_avg_price": None,
+        "chain_cost_basis_usd": None,
+        "chain_seen_at": None,
+        "chain_absence_at": None,
     }
 
     with pytest.raises(ValueError, match="canonical position event missing env"):
@@ -4767,25 +4823,15 @@ def test_log_trade_entry_persists_pending_lifecycle_state(tmp_path):
     log_trade_entry(conn, pos)
     conn.commit()
 
-    row = conn.execute(
-        """
-        SELECT status, timestamp, runtime_trade_id, order_id, order_status_text,
-               order_posted_at, entered_at_ts, chain_state, fill_price
-        FROM trade_decisions
-        ORDER BY trade_id DESC LIMIT 1
-        """
-    ).fetchone()
+    # F5 demotion (src/state/db.py:7598-7605): log_trade_entry is a no-op tombstone.
+    # Pending lifecycle state tracking moved to position_events/position_current.
+    count = conn.execute("SELECT COUNT(*) FROM trade_decisions").fetchone()[0]
     conn.close()
 
-    assert row["status"] == "pending_tracked"
-    assert row["timestamp"] == "2026-04-01T01:00:00Z"
-    assert row["runtime_trade_id"] == "runtime-t1"
-    assert row["order_id"] == "order-123"
-    assert row["order_status_text"] == "pending"
-    assert row["order_posted_at"] == "2026-04-01T01:00:00Z"
-    assert row["entered_at_ts"] == ""
-    assert row["chain_state"] == "local_only"
-    assert row["fill_price"] is None
+    assert count == 0, (
+        "F5 demotion: log_trade_entry (db.py:7598) is a tombstone — no write to "
+        "trade_decisions. pending_tracked state lives in position_events."
+    )
 
 
 def test_update_trade_lifecycle_promotes_pending_row_to_entered(tmp_path):
@@ -4815,7 +4861,23 @@ def test_update_trade_lifecycle_promotes_pending_row_to_entered(tmp_path):
         order_posted_at="2026-04-01T01:00:00Z",
         chain_state="local_only",
     )
-    log_trade_entry(conn, pos)
+    # F5 demotion: log_trade_entry (db.py:7598) is a no-op tombstone.
+    # Insert the trade_decisions seed row directly so update_trade_lifecycle
+    # can find it and exercise the lifecycle-update path.
+    conn.execute(
+        """
+        INSERT INTO trade_decisions
+        (market_id, bin_label, direction, size_usd, price, timestamp,
+         p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+         status, runtime_trade_id, order_id, order_status_text,
+         order_posted_at, chain_state)
+        VALUES ('m_pending', '39-40°F', 'buy_yes', 10.0, 0.40,
+                '2026-04-01T01:00:00Z', 0.40, 0.60, 0.20, 0.35, 0.45, 0.1,
+                'pending_tracked', 'runtime-t2', 'order-234', 'pending',
+                '2026-04-01T01:00:00Z', 'local_only')
+        """
+    )
+    conn.commit()
 
     pos.state = "entered"
     pos.entry_price = 0.41

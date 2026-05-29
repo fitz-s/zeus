@@ -96,13 +96,6 @@ def registry_scheduler_active() -> bool:
     return data_collection_mode() == REGISTRY_MODE
 
 
-def scheduler_registry_enabled() -> bool:
-    """DEPRECATED back-compat shim (PR #329 A): the registry scheduler is now the DEFAULT, so this
-    returns True unless the operator opted into legacy mode. The old ZEUS_SCHEDULER_REGISTRY_ENABLED
-    flag is retained only for the mutual-exclusivity guard; it no longer gates activation."""
-    return registry_scheduler_active()
-
-
 def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
     """Assign an executor class by job intent. writes_db jobs ALWAYS get a *_db class."""
     if not spec.writes_db:

@@ -208,7 +208,7 @@ _SRC_MAIN: tuple[SourceJobSpec, ...] = (
     SourceJobSpec("user_ws_ingestor", "main", "live", "default", True,
                   source_id="polymarket_user_ws", callable_ref="_start_user_channel_ingestor_if_enabled",
                   dispatch_kind="long_running", family="venue_user_ws",
-                  notes="long-running THREAD (not add_job): user-channel WS -> market_events_v2 order/trade facts"),
+                  notes="long-running THREAD (not add_job): user-channel WS -> market_events order/trade facts"),
 )
 
 JOB_REGISTRY: dict[str, SourceJobSpec] = {

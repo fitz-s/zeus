@@ -62,12 +62,12 @@ def _404_result(label: str, *, no_index: bool = False) -> dict:
 def _make_conn():
     """In-memory SQLite connection with Zeus schema — used for retry-success tests."""
     from src.state.db import init_schema
-    from src.state.schema.v2_schema import apply_v2_schema
+    from src.state.schema.v2_schema import apply_canonical_schema
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 

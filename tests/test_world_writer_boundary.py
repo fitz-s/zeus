@@ -67,7 +67,7 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # Backfill and rebuild scripts (operator-run offline)
         "scripts/backfill_wu_daily_all.py",
         "scripts/rebuild_calibration_pairs_canonical.py",
-        "scripts/rebuild_calibration_pairs_v2.py",
+        "scripts/rebuild_calibration_pairs.py",
         "scripts/rebuild_settlements.py",
         "scripts/migrate_add_authority_column.py",
         # Calibration producers (trading-side read-only target per Q2; writers here
@@ -100,13 +100,24 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # ---------------------------------------------------------------------------
         "scripts/backfill_london_f_to_c_2026_05_08.py",
         "scripts/evaluate_calibration_transfer_oos.py",
-        "scripts/migrate_phase2_cycle_stratification.py",
+        # scripts/migrate_phase2_cycle_stratification.py removed — file deleted (B3 cleanup)
         "scripts/migrations/202605_add_redeem_operator_required_state.py",
-        "scripts/promote_calibration_pairs_v2.py",
-        "scripts/promote_calibration_v2_stage_to_prod.py",
-        "scripts/promote_platt_models_v2.py",
-        "scripts/refit_platt_v2.py",
+        "scripts/promote_calibration.py",
+        "scripts/promote_platt.py",
+        "scripts/refit_platt.py",
         "src/data/ecmwf_open_data.py",
+        # ---------------------------------------------------------------------------
+        # B3 (2026-05-28): new allowlist entries triggered by table renames.
+        # Post-B3 'forecasts' is both a schema prefix AND a world table name;
+        # these files use 'forecasts' as schema prefix only (not world-table DML).
+        # Also: calibration/staging scripts that write forecast-class tables via
+        # ATTACH to zeus-forecasts.db (not world-DB writes).
+        # ---------------------------------------------------------------------------
+        "scripts/build_ft_staging_db.py",
+        "scripts/migrate_no_trade_events_rebuild_phase3_t2.py",
+        "scripts/seed_isolated_calibration_db.py",
+        "src/calibration/ens_bias_repo.py",
+        "src/contracts/settlement_capture_verifier.py",
         # ---------------------------------------------------------------------------
         # T2 Day0Nowcast writer — forecasts-DB only (2026-05-19)
         # INV-37: writes only to zeus-forecasts.db, no world-DB DML.
@@ -119,13 +130,14 @@ ALLOWLISTED_WRITE_MODULES: frozenset[str] = frozenset(
         # or calibration-DB only; 'forecasts' keyword is db-alias, not world table)
         # ---------------------------------------------------------------------------
         "scripts/backfill_decision_events_from_artifact_json.py",
-        "scripts/migrate_calibration_pairs_v2_not_null.py",
         "scripts/migrations/__init__.py",
-        "scripts/rollback_calibration_pairs_v2_not_null.py",
     }
 )
 
 # World-DB table names that must not be written outside the allowlist.
+# B3 (2026-05-28): ensemble_snapshots, calibration_pairs, platt_models removed —
+# these are forecast-class tables (zeus-forecasts.db) post-K1/B3 rename and are no
+# longer world-DB tables.  The duplicate ensemble_snapshots entry also removed.
 WORLD_DB_TABLES: tuple[str, ...] = (
     "observations",
     "observation_instants_v2",
@@ -133,10 +145,6 @@ WORLD_DB_TABLES: tuple[str, ...] = (
     "solar_daily",
     "data_coverage",
     "settlements",
-    "ensemble_snapshots",
-    "ensemble_snapshots_v2",
-    "calibration_pairs_v2",
-    "platt_models_v2",
     "model_bias",
     "forecast_skill",
 )

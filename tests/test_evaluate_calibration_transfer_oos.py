@@ -3,7 +3,7 @@
 # Lifecycle: created=2026-05-05; last_reviewed=2026-05-18; last_reused=2026-05-18
 # Authority basis: architecture/calibration_transfer_oos_design_2026-05-05.md Phase X.2
 # Purpose: Lock OOS calibration-transfer evidence eligibility and non-promotion behavior.
-# Reuse: Run when calibration_pairs_v2 eligibility, validated_calibration_transfers, or OOS transfer policy evidence changes.
+# Reuse: Run when calibration_pairs eligibility, validated_calibration_transfers, or OOS transfer policy evidence changes.
 """Tests for scripts/evaluate_calibration_transfer_oos.py (Phase X.2)."""
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from src.data.calibration_transfer_policy import (
     CANONICAL_CALIBRATION_PAIR_BIN_SOURCE,
     _rebuild_complete_sentinel_key_for_transfer_evidence,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from scripts.evaluate_calibration_transfer_oos import (
     DEFAULT_BRIER_DIFF_THRESHOLD,
     DEFAULT_POLICY_ID,
@@ -34,9 +34,9 @@ from scripts.evaluate_calibration_transfer_oos import (
 
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     conn.execute("ATTACH DATABASE ':memory:' AS world")
-    _clone_main_table_to_world(conn, "platt_models_v2")
+    _clone_main_table_to_world(conn, "platt_models")
     _clone_main_table_to_world(conn, "validated_calibration_transfers")
     return conn
 
@@ -128,7 +128,7 @@ def _insert_platt_model(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO world.platt_models_v2 (
+        INSERT INTO world.platt_models (
             model_key, temperature_metric, cluster, season, data_version,
             input_space, param_A, param_B, param_C,
             bootstrap_params_json, n_samples, brier_insample,
@@ -149,7 +149,7 @@ def _insert_platt_model(
     )
     if input_space != "raw_probability":
         conn.execute(
-            "UPDATE world.platt_models_v2 SET input_space = ? WHERE model_key = ?",
+            "UPDATE world.platt_models SET input_space = ? WHERE model_key = ?",
             (input_space, model_key),
         )
     conn.commit()
@@ -178,7 +178,7 @@ def _insert_pairs(
     """Insert n pairs with deterministic pair_ids starting at start_pair_id.
 
     The latest 20% of decision groups are held out chronologically for OOS.
-    Uses real calibration_pairs_v2 column names: temperature_metric, target_date.
+    Uses real calibration_pairs column names: temperature_metric, target_date.
     """
     base_target_date = date.fromisoformat(target_date)
     rows = [
@@ -208,11 +208,11 @@ def _insert_pairs(
     ]
     conn.executemany(
         """
-        INSERT INTO calibration_pairs_v2 (
+        INSERT INTO calibration_pairs (
             pair_id,
             city, target_date, temperature_metric, observation_field, range_label,
             p_raw, outcome, lead_days, season, cluster,
-            forecast_available_at, decision_group_id, data_version,
+            forecast_available_at, decision_group_id, dataset_id,
             source_id, cycle, horizon_profile,
             training_allowed, authority, causality_status
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -437,7 +437,7 @@ def test_missing_decision_group_cannot_write_transfer_evidence() -> None:
         season="summer", cluster="cl_a", metric="high",
         n=1000, p_raw=0.7, outcome=1,
     )
-    conn.execute("UPDATE calibration_pairs_v2 SET decision_group_id = NULL")
+    conn.execute("UPDATE calibration_pairs SET decision_group_id = NULL")
 
     summary = run_oos_evaluation(conn, now=_NOW)
 

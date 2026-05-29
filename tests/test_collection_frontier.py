@@ -202,10 +202,10 @@ def test_frontier_contains_weather_market_venue_and_observation_sources() -> Non
     # add the probeable family tables (empty is fine — families still appear; probed ones can
     # report event presence when populated):
     c.execute("CREATE TABLE observations (city TEXT, target_date TEXT, source TEXT, fetched_at TEXT)")
-    c.execute("CREATE TABLE market_events_v2 (condition_id TEXT, created_at TEXT)")
+    c.execute("CREATE TABLE market_events (condition_id TEXT, created_at TEXT)")
     c.execute("CREATE TABLE settlements (city TEXT, target_date TEXT, settled_at TEXT, settlement_source TEXT)")
     c.execute("INSERT INTO observations VALUES ('chicago','2026-05-24','wu_icao_history','2026-05-24T11:00:00Z')")
-    c.execute("INSERT INTO market_events_v2 VALUES ('0xabc','2026-05-24T10:00:00Z')")
+    c.execute("INSERT INTO market_events VALUES ('0xabc','2026-05-24T10:00:00Z')")
 
     from src.data.collection_frontier import compute_frontier
 

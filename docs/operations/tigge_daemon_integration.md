@@ -31,7 +31,7 @@ backfill workflow. Wholesale migration would balloon the change and create a
 duplicate maintenance surface for ~6 scripts. They keep their lifecycle.
 
 The ingester is in-process because (a) it must run inside the zeus venv where
-`TiggeSnapshotPayload` and `apply_v2_schema` live, and (b) `ingest_track` is a
+`TiggeSnapshotPayload` and `apply_canonical_schema` live, and (b) `ingest_track` is a
 clean importable function that already enforces the canonical-write contract.
 
 ## Source role: backfill, not live trading
@@ -50,7 +50,7 @@ patched):
 | Live trading (same-day forecasts) | ECMWF Open Data ENS (`mx2t6` / `mn2t6`) | ~6-8 hours | Decision-time ensemble vectors, calendar-day high/low markets |
 | Training / backfill (T-2 issue date and older) | TIGGE archive (`mx2t6` / `mn2t6`, 50 pf + 1 cf) | 48-hour embargo | Platt training set, historical audit trail |
 
-Both lanes write to `ensemble_snapshots_v2` with distinct `data_version`
+Both lanes write to `ensemble_snapshots` with distinct `data_version`
 values; the schema's `UNIQUE(city, target_date, temperature_metric,
 issue_time, data_version)` constraint allows both rows to coexist for the
 same (city, target_date, metric). Readers prefer the freshest source via
@@ -76,7 +76,7 @@ Four scheduler jobs are registered in `src/ingest_main.py::main()` (post 2026-05
 | `ingest_opendata_daily_mn2t6` | cron `hour=7, minute=35` UTC | Daily fetch of today's 00Z run from Open Data, LOW track (`mn2t6`). 5-minute offset spaces out downloads. |
 | `ingest_tigge_archive_backfill` | cron `hour=14, minute=0` UTC | Daily backfill of (today − 2)'s 00Z run from TIGGE archive, both tracks. Targets a date the 48-hour embargo has already lifted. |
 | `ingest_opendata_startup_catch_up` | `date` (fires once at boot) | Pulls the freshest available run for both tracks at daemon start so a fresh ingest does not wait until the next cron tick. |
-| `ingest_tigge_startup_catch_up` | `date` (fires once at boot) | Fills any missed TIGGE archive issue dates between `MAX(issue_time)` in `ensemble_snapshots_v2` and yesterday, capped at `MAX_LOOKBACK_DAYS=7`. |
+| `ingest_tigge_startup_catch_up` | `date` (fires once at boot) | Fills any missed TIGGE archive issue dates between `MAX(issue_time)` in `ensemble_snapshots` and yesterday, capped at `MAX_LOOKBACK_DAYS=7`. |
 
 Both jobs are wrapped in `@_scheduler_job` so any exception is logged + recorded
 in `scheduler_jobs_health.json` without crashing the daemon.
@@ -161,7 +161,7 @@ This invocation:
   same in-process ingest as the daemon's daily tick.
 - Skips already-ingested rows via the `UNIQUE(city, target_date,
   temperature_metric, issue_time, data_version)` constraint on
-  `ensemble_snapshots_v2`. Re-runs are safe.
+  `ensemble_snapshots`. Re-runs are safe.
 
 For multi-day backfills outside the 7-day cap, loop over the dates in shell —
 the function takes a single ISO date.
@@ -188,7 +188,7 @@ from the credentials being present + the daily cycle's recorded outcome.
 | Stale TIGGE while ingest "healthy" | `_probe_tigge_mars` now treats FAILED `ingest_tigge_daily` as source-degradation, surfacing in `source_health.json`. |
 | Schema drift between extract and ingest | `TiggeSnapshotPayload` (antibody #16). Frozen by this change; we don't touch the contract. |
 | Runaway 30-day backfill on long outage | `MAX_LOOKBACK_DAYS=7` cap in `determine_catch_up_dates`. Tested in `tests/test_tigge_daily_ingest.py::test_determine_catch_up_dates_caps_at_max_lookback`. |
-| Re-run inserts duplicates | `UNIQUE(city, target_date, temperature_metric, issue_time, data_version)` already enforced by `ensemble_snapshots_v2`. Tested in `tests/test_tigge_daily_ingest.py::test_run_cycle_idempotent_re_run`. |
+| Re-run inserts duplicates | `UNIQUE(city, target_date, temperature_metric, issue_time, data_version)` already enforced by `ensemble_snapshots`. Tested in `tests/test_tigge_daily_ingest.py::test_run_cycle_idempotent_re_run`. |
 
 ## Future work (out of scope here)
 

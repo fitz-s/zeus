@@ -195,10 +195,10 @@ def get_forecasts_connection(
 ) -> sqlite3.Connection:
     """Forecast/harvester-truth co-transactional class DB (zeus-forecasts.db).
 
-    Owns: ensemble_snapshots_v2, source_run, source_run_coverage,
+    Owns: ensemble_snapshots, source_run, source_run_coverage,
           producer readiness_state, job_run for forecast-live work,
-          observations, settlements, settlements_v2, market_events_v2,
-          calibration_pairs_v2.
+          observations, settlement_outcomes, market_events,
+          calibration_pairs.
     Lock files: state/zeus-forecasts.db.writer-lock.{bulk,live}.
 
     K1 split 2026-05-11: physically separate flock from zeus-world.db so
@@ -328,7 +328,7 @@ def get_trade_connection_with_world_optional(
         except sqlite3.OperationalError as exc:
             logger.warning("ATTACH world failed (non-fatal): %r", exc)
     # K1 (2026-05-11): also ATTACH forecasts DB so cross-DB joins on
-    # ensemble_snapshots_v2 / settlements / settlements_v2 / market_events_v2
+    # ensemble_snapshots / settlements / settlement_outcomes / market_events
     # remain possible from trade-conn query paths (evaluator, replay).
     if "forecasts" not in attached:
         try:
@@ -887,14 +887,11 @@ def get_connection(
     return conn
 
 
-# Last reused or audited: 2026-05-11
-# Authority basis: PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md
-# Schema currency sentinel. Bump on EVERY DDL change in this file OR in
-# init_provenance_projection_schema (:1729) OR apply_v2_schema (:2222).
-# CI hook scripts/check_schema_version.py diffs the sqlite_master hash of
-# a fresh-init DB against tests/state/_schema_pinned_hash.txt and fails
-# the PR if SCHEMA_VERSION did not change in lockstep.
-SCHEMA_VERSION = 55  # 2026-05-28 PR358 domain-canonicality antibody: model_bias_ens_v2 gains gate_set_hash + coverage_months. Prior: 54 = F1 position_current chain cols (rebased onto main post-#355).
+# B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Schema drift is now detected via
+# content-hash fingerprint in scripts/check_schema_fingerprint.py + architecture/_schema_fingerprint.txt.
+# Row-level provenance columns (decision_events.schema_version etc.) retain their current
+# CHECK constraints and new rows write the last-frozen value (55, post-#358) permanently.
+# Per-table schema constants in src/state/schema/* are B2-followup (out of scope here).
 
 
 def init_schema(
@@ -908,7 +905,7 @@ def init_schema(
     architecture/db_table_ownership.yaml. The ghost copies are safe to drop
     after the D2 90-day retain window (2026-08-09) via drop_world_ghost_tables.py.
     New forecast-class tables are created by init_schema_forecasts on zeus-forecasts.db.
-    The _v2_forecast_tables kwarg is RETIRED in P2; apply_v2_schema is always
+    The _v2_forecast_tables kwarg is RETIRED in P2; apply_canonical_schema is always
     called with forecast_tables=False here (P2 DDL refactor, 2026-05-14).
 
     # Fix (task #200, 2026-05-10): PRAGMA busy_timeout must be re-applied at the
@@ -917,7 +914,7 @@ def init_schema(
     # running its SQL. Every executescript() call in this function (there are ~6)
     # wipes the timeout, leaving subsequent conn.execute() calls with no wait budget.
     # Re-applying PRAGMA busy_timeout here covers the entire init_schema call including
-    # apply_v2_schema. Source: ZEUS_DB_BUSY_TIMEOUT_MS env var (ms), default 30 s.
+    # apply_canonical_schema. Source: ZEUS_DB_BUSY_TIMEOUT_MS env var (ms), default 30 s.
     """
     own_conn = conn is None
     if own_conn:
@@ -928,7 +925,7 @@ def init_schema(
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     conn.executescript("""
-        -- Inherited from legacy predecessor: settlement outcomes
+        -- Inherited from legacy predecessor: settlement outcomes (world-class authoritative table)
         CREATE TABLE IF NOT EXISTS settlements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
@@ -1029,21 +1026,9 @@ def init_schema(
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        -- Inherited: market structure and token IDs
-        CREATE TABLE IF NOT EXISTS market_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_slug TEXT NOT NULL,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            condition_id TEXT,
-            token_id TEXT,
-            range_label TEXT,
-            range_low REAL,
-            range_high REAL,
-            outcome TEXT,
-            created_at TEXT,
-            UNIQUE(market_slug, condition_id)
-        );
+        -- market_events DDL removed in B3cont (PR3): dead v1 shell (0 rows).
+        -- Canonical table is market_events on zeus-forecasts.db (collapsed from market_events).
+        -- Live DB migration: pr3_b3_live_table_rename.py (operator-run, not committed).
 
         -- Inherited: historical prices for baseline backtesting
         -- city/target_date/range_label carried over from legacy predecessor for bin mapping
@@ -1063,29 +1048,13 @@ def init_schema(
         );
 
         -- v1.F20 (2026-05-18): ensemble_snapshots (legacy world-class) removed.
-        -- Canonical table is ensemble_snapshots_v2 in zeus-forecasts.db (K1 split).
+        -- Canonical table is ensemble_snapshots in zeus-forecasts.db (K1 split).
         -- DROP migration: scripts/migrations/202605_drop_ensemble_snapshots_legacy.py
         -- DDL removed here to prevent recreating the table on every boot after
         -- the operator runs the DROP migration.
 
-        -- Calibration: raw → calibrated probability pairs
-        CREATE TABLE IF NOT EXISTS calibration_pairs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            range_label TEXT NOT NULL,
-            p_raw REAL NOT NULL,
-            outcome INTEGER NOT NULL,
-            lead_days REAL NOT NULL,
-            season TEXT NOT NULL,
-            cluster TEXT NOT NULL,
-            forecast_available_at TEXT NOT NULL,
-            settlement_value REAL,
-            decision_group_id TEXT,
-            bias_corrected INTEGER NOT NULL DEFAULT 0 CHECK (bias_corrected IN (0, 1)),
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-            bin_source TEXT NOT NULL DEFAULT 'legacy'
-        );
+        -- calibration_pairs bare shell dropped (B3 rename: table now owned by
+        -- apply_canonical_schema/_create_calibration_pairs with canonical v2 schema).
 
         -- Independent forecast-event units derived from calibration_pairs.
         -- Behavior-neutral substrate: active Platt routing still uses existing
@@ -1108,21 +1077,7 @@ def init_schema(
         CREATE INDEX IF NOT EXISTS idx_calibration_decision_group_bucket
             ON calibration_decision_group(cluster, season, lead_days);
 
-        -- Platt model parameters per bucket
-        CREATE TABLE IF NOT EXISTS platt_models (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bucket_key TEXT NOT NULL UNIQUE,
-            param_A REAL NOT NULL,
-            param_B REAL NOT NULL,
-            param_C REAL NOT NULL DEFAULT 0.0,
-            bootstrap_params_json TEXT NOT NULL,
-            n_samples INTEGER NOT NULL,
-            brier_insample REAL,
-            fitted_at TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1,
-            input_space TEXT NOT NULL DEFAULT 'raw_probability',
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED' CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED'))
-        );
+        -- B3cont: bare platt_models DDL removed (0 rows; canonical table is platt_models in zeus-forecasts.db via v2_schema.py)
 
         -- Trade decisions with full audit trail
         CREATE TABLE IF NOT EXISTS trade_decisions (
@@ -1133,7 +1088,7 @@ def init_schema(
             size_usd REAL NOT NULL,
             price REAL NOT NULL,
             timestamp TEXT NOT NULL,
-            forecast_snapshot_id INTEGER,  -- v1.F20: soft ref to ensemble_snapshots_v2.snapshot_id (cross-DB, no FK constraint)
+            forecast_snapshot_id INTEGER,  -- v1.F20: soft ref to ensemble_snapshots.snapshot_id (cross-DB, no FK constraint)
             calibration_model_version TEXT,
             p_raw REAL NOT NULL,
             p_calibrated REAL,
@@ -1577,11 +1532,9 @@ def init_schema(
             ON observation_instants(source, city, target_date);
         CREATE INDEX IF NOT EXISTS idx_token_price_token
             ON token_price_log(token_id, timestamp);
-        CREATE INDEX IF NOT EXISTS idx_market_events_slug
-            ON market_events(market_slug);
+        -- idx_market_events_slug removed in B3cont (PR3): bare market_events shell dropped.
         -- v1.F20: idx_ensemble_city_date removed (ensemble_snapshots table dropped).
-        CREATE INDEX IF NOT EXISTS idx_calibration_bucket
-            ON calibration_pairs(cluster, season);
+        -- idx_calibration_bucket removed in B3 (PR3): bare calibration_pairs shell dropped.
 
         -- K2 data-coverage index — the immune system's memory for live data ingestion.
         -- One row per expected (data_table × city × data_source × target_date × sub_key);
@@ -1683,7 +1636,7 @@ def init_schema(
             temperature_metric TEXT CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
             physical_quantity TEXT,
             observation_field TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             expected_members INTEGER,
             observed_members INTEGER,
             expected_steps_json TEXT NOT NULL DEFAULT '[]',
@@ -1706,7 +1659,7 @@ def init_schema(
         CREATE INDEX IF NOT EXISTS idx_source_run_source_cycle
             ON source_run(source_id, track, source_cycle_time);
         CREATE INDEX IF NOT EXISTS idx_source_run_scope
-            ON source_run(city_id, city_timezone, target_local_date, temperature_metric, data_version);
+            ON source_run(city_id, city_timezone, target_local_date, temperature_metric, dataset_id);
         CREATE INDEX IF NOT EXISTS idx_source_run_status
             ON source_run(status, completeness_status, source_cycle_time);
 
@@ -2036,8 +1989,8 @@ def init_schema(
 
     # task #200 (2026-05-10): executescript() resets the C-level busy handler.
     # Re-apply after the last executescript() so all subsequent conn.execute()
-    # calls (ALTER loops, apply_v2_schema) wait under contention instead of
-    # failing immediately. apply_v2_schema also sets this independently as a
+    # calls (ALTER loops, apply_canonical_schema) wait under contention instead of
+    # failing immediately. apply_canonical_schema also sets this independently as a
     # belt-and-suspenders guard for callers that bypass init_schema.
     conn.execute(f"PRAGMA busy_timeout = {int(os.environ.get('ZEUS_DB_BUSY_TIMEOUT_MS', '30000'))}")
 
@@ -2189,10 +2142,7 @@ def init_schema(
         pass
     conn.execute("CREATE INDEX IF NOT EXISTS idx_venue_commands_snapshot ON venue_commands(snapshot_id);")
 
-    try:
-        conn.execute("ALTER TABLE platt_models ADD COLUMN input_space TEXT NOT NULL DEFAULT 'raw_probability';")
-    except sqlite3.OperationalError:
-        pass
+    # B3cont: ALTER TABLE platt_models (bare) removed — table dropped.
 
     # Provenance: env column on trade-facing tables (Decision 2).
     # Existing non-event rows default to 'live' for legacy compatibility.
@@ -2248,22 +2198,8 @@ def init_schema(
     except sqlite3.OperationalError:
         pass
 
-    for ddl in [
-        "ALTER TABLE calibration_pairs ADD COLUMN decision_group_id TEXT;",
-        "ALTER TABLE calibration_pairs ADD COLUMN bias_corrected INTEGER NOT NULL DEFAULT 0;",
-        # 2026-04-14 refactor: bin_source discriminator separates canonical-grid
-        # training pairs from legacy market-derived pairs so the destructive
-        # DELETE path in rebuild_calibration_pairs_canonical.py can target
-        # WHERE bin_source='canonical_v1' without LIKE blast radius.
-        "ALTER TABLE calibration_pairs ADD COLUMN bin_source TEXT NOT NULL DEFAULT 'legacy';",
-        # v1.F20 (2026-05-18): ALTER TABLE ensemble_snapshots ADD COLUMN bias_corrected removed.
-        # ensemble_snapshots table dropped; migration no longer applicable.
-    ]:
-        try:
-            conn.execute(ddl)
-        except sqlite3.OperationalError as exc:
-            if "duplicate column" not in str(exc).lower():
-                raise
+    # calibration_pairs bare ALTER TABLE blocks removed in B3 (PR3):
+    # bare calibration_pairs shell dropped; v2 schema owns the table.
 
     # P-B (2026-04-23): INV-14 identity spine + provenance vehicle on settlements.
     # Plan: docs/operations/task_2026-04-23_data_readiness_remediation/evidence/pb_schema_plan.md
@@ -2305,6 +2241,9 @@ def init_schema(
     # lossless on 1,561 rows + preserves authority groups (1469 VERIFIED + 92
     # QUARANTINED) + unlocks dual-track. Migration runs BEFORE trigger DROP+
     # CREATE blocks below so triggers install against the rebuilt table.
+    #
+    # B3cont (2026-05-28): this migration applies to world.db (authoritative settlements).
+    # The bare settlements shell on forecasts.db has been dropped.
     try:
         settlements_sql_row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE name='settlements' AND type='table'"
@@ -2487,17 +2426,9 @@ def init_schema(
     except sqlite3.OperationalError:
         pass
 
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_decision_group ON calibration_pairs(decision_group_id)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup "
-        "ON calibration_pairs(city, target_date, forecast_available_at)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_group_lookup_lead "
-        "ON calibration_pairs(city, target_date, forecast_available_at, lead_days)"
-    )
+    # idx_calibration_pairs_decision_group, idx_calibration_pairs_group_lookup,
+    # idx_calibration_pairs_group_lookup_lead removed in B3 (PR3):
+    # bare calibration_pairs shell dropped; indexes now owned by apply_canonical_schema.
     _ensure_calibration_decision_group_lead_key(conn)
 
     _ensure_runtime_bootstrap_support_tables(conn)
@@ -2618,17 +2549,17 @@ def init_schema(
     _ensure_phase6_evidence_tables(conn)
 
     # Phase 2: apply v2 schema (idempotent — safe to run on every boot).
-    from src.state.schema.v2_schema import apply_v2_schema as _apply_v2_schema
-    _apply_v2_schema(conn, forecast_tables=False)
+    from src.state.schema.v2_schema import apply_canonical_schema as _apply_canonical_schema
+    _apply_canonical_schema(conn, forecast_tables=False)
 
-    # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens_v2 exists on every
+    # Zeus #64 FT-ship F2 (2026-05-26): ensure model_bias_ens exists on every
     # init_schema target so monitor_refresh + evaluator can read FT models at runtime
     # without crashing on "no such table". Idempotent CREATE TABLE IF NOT EXISTS.
     # Authority: docs/operations/FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F2.
     from src.calibration.ens_bias_repo import init_ens_bias_schema as _init_ens_bias_schema
     _init_ens_bias_schema(conn)
 
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.execute("PRAGMA user_version = 43")
 
     # db_chunk_boundary_events — K2 live-contention event log (Cluster B fix 2026-05-18)
     conn.execute("""
@@ -2662,14 +2593,13 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
         "unknown_legacy" in table_sql
         and "shadow_decision" in table_sql
         and "12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28" in table_sql
-        and str(SCHEMA_VERSION) in table_sql
     ):
         conn.execute("DROP TABLE IF EXISTS decision_events_new")
         return
 
     conn.execute("DROP TABLE IF EXISTS decision_events_new")
     conn.execute(
-        f"""
+        """
         CREATE TABLE decision_events_new (
             market_slug         TEXT NOT NULL,
             temperature_metric  TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
@@ -2740,7 +2670,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
             CASE
                 WHEN schema_version IN (12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)
                     THEN schema_version
-                ELSE 51
+                ELSE 36
             END,
             CASE
                 WHEN source IN ('phase0_backfill', 'live_decision', 'shadow_decision')
@@ -2784,7 +2714,7 @@ def _migrate_decision_events_schema(conn: sqlite3.Connection) -> None:
 
 
 class SchemaOutOfDateError(RuntimeError):
-    """PRAGMA user_version != SCHEMA_VERSION."""
+    """Raised when PRAGMA user_version does not match the expected frozen value."""
 
 
 class BridgeAbsentError(RuntimeError):
@@ -2797,65 +2727,21 @@ class BridgeAbsentError(RuntimeError):
 
 
 def assert_schema_current(conn: sqlite3.Connection) -> None:
-    """O(1) currency check (page-1 metadata).
-    Boot: trade DB src/main.py:692, world DB src/ingest_main.py:1035."""
-    v = conn.execute("PRAGMA user_version").fetchone()[0]
-    if v != SCHEMA_VERSION:
-        raise SchemaOutOfDateError(
-            f"PRAGMA user_version={v}, SCHEMA_VERSION={SCHEMA_VERSION}; "
-            "boot init_schema did not run, or migration missing."
-        )
+    """B2 (2026-05-28): SCHEMA_VERSION counter cancelled; this check is now a no-op.
+    Schema drift is detected via content-hash fingerprint (scripts/check_schema_fingerprint.py).
+    Retained for call-site compatibility."""
 
 
 # ---------------------------------------------------------------------------
 # K1 forecast DB split — 2026-05-11
 # ---------------------------------------------------------------------------
-# SCHEMA_FORECASTS_VERSION: bumped whenever forecast-authority DDL changes.
-# Owned tables include the 7 K1 forecast-class tables, the live source
-# authority chain tables, producer readiness_state, and forecast-live job_run.
-SCHEMA_FORECASTS_VERSION: int = 7  # Data Temporal Kernel PR #329 D: source_time_frontier persisted authority (2026-05-24)
-# DEPLOY LANDMINE (PR #329 D): bumping this halts the live ingest/forecast daemon on restart
-# (assert_schema_current_forecasts raises until the forecasts DB is migrated). Runbook:
-#   stop daemons -> init_schema_forecasts(get_forecasts_connection()) + commit -> restart.
-# Pull+restart WITHOUT the migration step = SystemExit, all forecast collection halts.
+# B2 (2026-05-28): SCHEMA_FORECASTS_VERSION counter cancelled alongside SCHEMA_VERSION.
+# Forecast schema drift is detected via content-hash fingerprint.
+# Frozen value 7 is stamped as PRAGMA user_version by init_schema_forecasts.
 
 
-def _create_settlements(conn: sqlite3.Connection) -> None:
-    """Create settlements table + indexes + ALTERs. Idempotent.
-
-    K1 forecast-class table. DDL mirrors the executescript block in init_schema;
-    uses conn.execute() so it can run standalone on zeus-forecasts.db.
-    """
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS settlements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            city TEXT NOT NULL,
-            target_date TEXT NOT NULL,
-            market_slug TEXT,
-            winning_bin TEXT,
-            settlement_value REAL,
-            settlement_source TEXT,
-            settled_at TEXT,
-            authority TEXT NOT NULL DEFAULT 'UNVERIFIED'
-                CHECK (authority IN ('VERIFIED', 'UNVERIFIED', 'QUARANTINED')),
-            pm_bin_lo REAL,
-            pm_bin_hi REAL,
-            unit TEXT,
-            settlement_source_type TEXT,
-            temperature_metric TEXT
-                CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
-            physical_quantity TEXT,
-            observation_field TEXT
-                CHECK (observation_field IS NULL OR observation_field IN ('high_temp','low_temp')),
-            data_version TEXT,
-            provenance_json TEXT,
-            UNIQUE(city, target_date, temperature_metric)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_city_date
-            ON settlements(city, target_date)
-    """)
+# B3cont (2026-05-28): _create_settlements removed — bare world-class settlements shell dropped.
+# Canonical table is settlement_outcomes in zeus-forecasts.db (_create_settlement_outcomes).
 
 
 def _create_observations(conn: sqlite3.Connection) -> None:
@@ -2939,7 +2825,7 @@ def _create_source_run(conn: sqlite3.Connection) -> None:
                 CHECK (temperature_metric IS NULL OR temperature_metric IN ('high','low')),
             physical_quantity TEXT,
             observation_field TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             expected_members INTEGER,
             observed_members INTEGER,
             expected_steps_json TEXT NOT NULL DEFAULT '[]',
@@ -2967,7 +2853,7 @@ def _create_source_run(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_source_run_scope
             ON source_run(city_id, city_timezone, target_local_date,
-                          temperature_metric, data_version)
+                          temperature_metric, dataset_id)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_source_run_status
@@ -3228,16 +3114,16 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
 
 
 _FORECAST_TABLES = (
-    "ensemble_snapshots_v2",
+    "ensemble_snapshots",
     "source_run",
     "job_run",
     "source_run_coverage",
     "readiness_state",
     "observations",
-    "settlements",
-    "calibration_pairs_v2",
-    "settlements_v2",
-    "market_events_v2",
+    # B3cont (2026-05-28): bare "settlements" world-class shell dropped; removed from forecast tuple
+    "calibration_pairs",
+    "settlement_outcomes",
+    "market_events",
     # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19)
     "day0_horizon_platt_fits",
     "day0_nowcast_runs",
@@ -3266,61 +3152,62 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
     here must match those helpers byte-for-byte. If a new v2 forecast-class
     index is added to v2_schema.py, mirror it here in the same PR.
 
-    Tables covered: ensemble_snapshots_v2, calibration_pairs_v2,
-    settlements_v2, market_events_v2.
+    Tables covered: ensemble_snapshots, calibration_pairs,
+    settlement_outcomes, market_events.
     """
-    # settlements_v2 (mirror src/state/schema/v2_schema.py:49-56)
+    # settlement_outcomes (mirror src/state/schema/v2_schema.py — _create_settlement_outcomes)
+    # B3cont (2026-05-28): renamed from settlement_outcomes.
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_v2_city_date_metric
-            ON settlements_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_city_date_metric
+            ON settlement_outcomes(city, target_date, temperature_metric)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_settlements_v2_settled_at
-            ON settlements_v2(settled_at)
+        CREATE INDEX IF NOT EXISTS idx_settlement_outcomes_settled_at
+            ON settlement_outcomes(settled_at)
     """)
-    # market_events_v2 (mirror src/state/schema/v2_schema.py:80-89)
+    # market_events (mirror src/state/schema/v2_schema.py:80-89)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_market_events_v2_city_date_metric
-            ON market_events_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_market_events_city_date_metric
+            ON market_events(city, target_date, temperature_metric)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_market_events_v2_open
-            ON market_events_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_market_events_open
+            ON market_events(city, target_date, temperature_metric)
             WHERE outcome IS NULL
     """)
-    # ensemble_snapshots_v2 (mirror src/state/schema/v2_schema.py:166-229)
+    # ensemble_snapshots (mirror src/state/schema/v2_schema.py:166-229)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_v2_lookup
-            ON ensemble_snapshots_v2(city, target_date, temperature_metric, available_at)
+        CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_lookup
+            ON ensemble_snapshots(city, target_date, temperature_metric, available_at)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_v2_source_run
-            ON ensemble_snapshots_v2(source_id, source_transport, source_run_id)
+            ON ensemble_snapshots(source_id, source_transport, source_run_id)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_v2_entry_lookup
-            ON ensemble_snapshots_v2(
+            ON ensemble_snapshots(
                 city,
                 target_date,
                 temperature_metric,
                 source_id,
                 source_transport,
-                data_version,
+                dataset_id,
                 source_run_id
             )
     """)
-    # calibration_pairs_v2 (mirror src/state/schema/v2_schema.py:288-299)
+    # calibration_pairs (mirror src/state/schema/v2_schema.py — _create_calibration_pairs)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket
-            ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_bucket
+            ON calibration_pairs(temperature_metric, cluster, season, lead_days)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric
-            ON calibration_pairs_v2(city, target_date, temperature_metric)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_city_date_metric
+            ON calibration_pairs(city, target_date, temperature_metric)
     """)
     conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core
-            ON calibration_pairs_v2(temperature_metric, data_version, training_allowed, authority)
+        CREATE INDEX IF NOT EXISTS idx_calibration_pairs_refit_core
+            ON calibration_pairs(temperature_metric, dataset_id, training_allowed, authority)
     """)
 
 
@@ -3430,7 +3317,7 @@ def _create_market_microstructure_snapshots(conn: sqlite3.Connection) -> None:
             depth_at_best_ask               INTEGER NOT NULL DEFAULT 0,
             polymarket_end_anchor_source    TEXT NOT NULL DEFAULT 'unknown_legacy',
             bin_grid_id                     TEXT,
-            bin_schema_version              TEXT,
+            bin_schema_id              TEXT,
             schema_version                  INTEGER NOT NULL DEFAULT 5
                 CHECK (schema_version IN (5)),
             recorded_at                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
@@ -3590,9 +3477,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
     Tables owned by this DB after the live data-daemon authority split
     (derived from registry P2):
-      ensemble_snapshots_v2, source_run, source_run_coverage,
+      ensemble_snapshots, source_run, source_run_coverage,
       producer readiness_state, job_run, observations, settlements,
-      calibration_pairs_v2, settlements_v2, market_events_v2
+      calibration_pairs, settlement_outcomes, market_events
 
     Sets PRAGMA user_version = SCHEMA_FORECASTS_VERSION as the final step.
 
@@ -3667,19 +3554,18 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             ).fetchone()
         }
         if _missing_on_fc:
-            _create_settlements(conn)
             _create_observations(conn)
             _create_source_run(conn)
             from src.state.schema.v2_schema import (
-                _create_settlements_v2,
-                _create_market_events_v2,
-                _create_ensemble_snapshots_v2,
-                _create_calibration_pairs_v2,
+                _create_settlement_outcomes,
+                _create_market_events,
+                _create_ensemble_snapshots,
+                _create_calibration_pairs,
             )
-            _create_settlements_v2(conn)
-            _create_market_events_v2(conn)
-            _create_ensemble_snapshots_v2(conn)
-            _create_calibration_pairs_v2(conn)
+            _create_settlement_outcomes(conn)
+            _create_market_events(conn)
+            _create_ensemble_snapshots(conn)
+            _create_calibration_pairs(conn)
     else:
         # --- Fresh-deploy fallback: static helpers (must stay in sync manually) ---
         import logging as _logging
@@ -3689,7 +3575,6 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             "production world.db if ALTER TABLE migrations were not applied.",
             world_path,
         )
-        _create_settlements(conn)
         _create_observations(conn)
         _create_source_run(conn)
         _create_job_run(conn)
@@ -3697,15 +3582,15 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         _create_readiness_state(conn)
 
         from src.state.schema.v2_schema import (
-            _create_settlements_v2,
-            _create_market_events_v2,
-            _create_ensemble_snapshots_v2,
-            _create_calibration_pairs_v2,
+            _create_settlement_outcomes,
+            _create_market_events,
+            _create_ensemble_snapshots,
+            _create_calibration_pairs,
         )
-        _create_settlements_v2(conn)
-        _create_market_events_v2(conn)
-        _create_ensemble_snapshots_v2(conn)
-        _create_calibration_pairs_v2(conn)
+        _create_settlement_outcomes(conn)
+        _create_market_events(conn)
+        _create_ensemble_snapshots(conn)
+        _create_calibration_pairs(conn)
 
     # Forecast authority post-condition: older world.db schemas or partial K1
     # copies can omit the live source-chain tables. These helpers are
@@ -3735,7 +3620,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # Guard pattern: swallow "duplicate column" on already-migrated DBs.
     for _alter_sql in (
         "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_grid_id TEXT",
-        "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_schema_version TEXT",
+        "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_schema_id TEXT",
     ):
         try:
             conn.execute(_alter_sql)
@@ -3746,9 +3631,10 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     _create_market_microstructure_snapshots(conn)
 
     # Phase 7 T1 — SCHEMA_FORECASTS_VERSION 6 (2026-05-21).
-    # Add outcome_type column to settlements_v2; guard for already-migrated DBs.
+    # Add outcome_type column to settlement_outcomes; guard for already-migrated DBs.
+    # B3cont (2026-05-28): table renamed from settlement_outcomes.
     try:
-        conn.execute("ALTER TABLE settlements_v2 ADD COLUMN outcome_type INTEGER")
+        conn.execute("ALTER TABLE settlement_outcomes ADD COLUMN outcome_type INTEGER")
     except sqlite3.OperationalError as _exc:
         if "duplicate column" not in str(_exc).lower():
             raise
@@ -3764,7 +3650,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     _create_source_time_frontier(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
-    conn.execute(f"PRAGMA user_version = {SCHEMA_FORECASTS_VERSION}")
+    conn.execute("PRAGMA user_version = 7")
     conn.commit()
 
 
@@ -4385,21 +4271,9 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
 
 def assert_schema_current_forecasts(conn: sqlite3.Connection) -> None:
-    """O(1) currency check for zeus-forecasts.db.
-
-    Mirrors assert_schema_current for the forecast DB. Called at boot by
-    ingest daemon after init_schema_forecasts completes, and by hot-path
-    callers (calibration, observation writer, etc.) as a ≤1 ms guard.
-
-    K1 split 2026-05-11.
-    """
-    v = conn.execute("PRAGMA user_version").fetchone()[0]
-    if v != SCHEMA_FORECASTS_VERSION:
-        raise SchemaOutOfDateError(
-            f"forecasts user_version={v}, "
-            f"SCHEMA_FORECASTS_VERSION={SCHEMA_FORECASTS_VERSION}; "
-            "init_schema_forecasts did not run at boot, or migration missing."
-        )
+    """B2 (2026-05-28): SCHEMA_FORECASTS_VERSION counter cancelled; this check is now a no-op.
+    Schema drift is detected via content-hash fingerprint (scripts/check_schema_fingerprint.py).
+    Retained for call-site compatibility."""
 
 
 _CALIBRATION_DECISION_GROUP_DDL = """
@@ -4654,30 +4528,6 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
-    if schema not in {"world", "forecasts"}:
-        return False
-    row = conn.execute(
-        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
-        (table,),
-    ).fetchone()
-    return row is not None
-
-
-def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | None:
-    if table not in {"selection_family_fact", "selection_hypothesis_fact"}:
-        return None
-    try:
-        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
-        if "world" in attached and _attached_table_exists(conn, "world", table):
-            return f"world.{table}"
-    except sqlite3.Error:
-        pass
-    if _table_exists(conn, table):
-        return table
-    return None
-
-
 def _table_has_unique_key(
     conn: sqlite3.Connection,
     table: str,
@@ -4761,7 +4611,7 @@ _FULL_LINKAGE_PRICE_REQUIRED_COLUMNS = (
     "condition_id",
 )
 _FORWARD_MARKET_REQUIRED_TABLES = (
-    "market_events_v2",
+    "market_events",
     "market_price_history",
 )
 _MARKET_SOURCE_CONTRACT_TOPOLOGY_TABLES = ("market_topology_state",)
@@ -4853,7 +4703,7 @@ _SETTLEMENT_V2_COLUMNS = (
 )
 _MARKET_EVENT_OUTCOME_VALUES = frozenset({"YES", "NO"})
 _MARKET_EVENT_OUTCOME_UPDATE_SQL = """
-    UPDATE market_events_v2
+    UPDATE market_events
     SET outcome = ?
     WHERE market_slug = ?
       AND condition_id = ?
@@ -4937,7 +4787,7 @@ def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
         SELECT market_slug, city, target_date, temperature_metric, condition_id,
                token_id, range_label, range_low, range_high, outcome, created_at,
                recorded_at
-        FROM market_events_v2
+        FROM market_events
         WHERE market_slug = ? AND condition_id = ?
         """,
         (values["market_slug"], values["condition_id"]),
@@ -4955,7 +4805,7 @@ def _insert_forward_market_event(conn: sqlite3.Connection, values: dict) -> str:
 
     conn.execute(
         """
-        INSERT INTO market_events_v2 (
+        INSERT INTO market_events (
             market_slug, city, target_date, temperature_metric, condition_id,
             token_id, range_label, range_low, range_high, outcome, created_at,
             recorded_at
@@ -5161,7 +5011,7 @@ def log_forward_market_substrate(
 
     K1-A fix (2026-05-17): opens its own forecasts connection rather than
     accepting an opaque conn from callers. Callers that passed the cycle
-    trades-rooted conn were silently writing market_events_v2 rows to
+    trades-rooted conn were silently writing market_events rows to
     zeus_trades.db (MAIN) instead of zeus-forecasts.db. Decision A2.
 
     _db_path: override for testing; defaults to ZEUS_FORECASTS_DB_PATH.
@@ -5193,7 +5043,7 @@ def log_forward_market_substrate(
             }
 
         required_columns = {
-            "market_events_v2": set(_FORWARD_MARKET_EVENT_COLUMNS),
+            "market_events": set(_FORWARD_MARKET_EVENT_COLUMNS),
             "market_price_history": set(_FORWARD_PRICE_HISTORY_COLUMNS),
         }
         missing_columns = {
@@ -5698,13 +5548,14 @@ def log_settlement_v2(
     provenance: dict | None = None,
     recorded_at: str | None = None,
 ) -> dict:
-    """Mirror harvester settlement truth into settlements_v2.
+    """Mirror harvester settlement truth into settlement_outcomes.
 
+    B3cont (2026-05-28): table renamed from settlement_outcomes.
     The helper is intentionally substrate-only: it never opens a default DB,
     never creates/migrates tables, never commits, and never infers missing
     market identity.
     """
-    table = "settlements_v2"
+    table = "settlement_outcomes"
     if conn is None:
         return {"status": "skipped_no_connection", "table": table}
     if not _table_exists(conn, table):
@@ -5761,7 +5612,7 @@ def log_settlement_v2(
     try:
         conn.execute(
             """
-            INSERT INTO settlements_v2 (
+            INSERT INTO settlement_outcomes (
                 city, target_date, temperature_metric, market_slug, winning_bin,
                 settlement_value, settlement_source, settled_at, authority,
                 provenance_json, recorded_at
@@ -5805,7 +5656,7 @@ def _market_event_outcome_public_result(result: dict) -> dict:
     return {key: value for key, value in result.items() if key != "update_values"}
 
 
-def _prepare_market_event_outcome_v2_update(
+def _prepare_market_event_outcome_update(
     conn: sqlite3.Connection | None,
     *,
     market_slug: str | None,
@@ -5816,7 +5667,7 @@ def _prepare_market_event_outcome_v2_update(
     token_id: str | None,
     outcome: str,
 ) -> dict:
-    table = "market_events_v2"
+    table = "market_events"
     if conn is None:
         return {"status": "skipped_no_connection", "table": table}
     if not _table_exists(conn, table):
@@ -5873,7 +5724,7 @@ def _prepare_market_event_outcome_v2_update(
         row = conn.execute(
             """
             SELECT city, target_date, temperature_metric, token_id, outcome
-            FROM market_events_v2
+            FROM market_events
             WHERE market_slug = ? AND condition_id = ?
             """,
             (clean_market_slug, clean_condition_id),
@@ -5938,7 +5789,7 @@ def _prepare_market_event_outcome_v2_update(
     }
 
 
-def log_market_event_outcome_v2(
+def log_market_event_outcome(
     conn: sqlite3.Connection | None,
     *,
     market_slug: str | None,
@@ -5949,13 +5800,13 @@ def log_market_event_outcome_v2(
     token_id: str | None,
     outcome: str,
 ) -> dict:
-    """Write a resolved child-market outcome onto existing market_events_v2 substrate.
+    """Write a resolved child-market outcome onto existing market_events substrate.
 
     This helper updates only an exact scanner-produced row. It never creates
     tables, inserts missing market identities, opens a default DB, commits, or
     overwrites a conflicting resolved outcome.
     """
-    prepared = _prepare_market_event_outcome_v2_update(
+    prepared = _prepare_market_event_outcome_update(
         conn,
         market_slug=market_slug,
         city=city,
@@ -5976,13 +5827,13 @@ def log_market_event_outcome_v2(
     except sqlite3.OperationalError as exc:
         return {
             "status": "skipped_invalid_schema",
-            "table": "market_events_v2",
+            "table": "market_events",
             "schema_error": str(exc),
         }
-    return {"status": "written", "table": "market_events_v2"}
+    return {"status": "written", "table": "market_events"}
 
 
-def log_market_event_outcomes_v2(
+def log_market_event_outcomes(
     conn: sqlite3.Connection | None,
     *,
     market_slug: str | None,
@@ -5991,8 +5842,8 @@ def log_market_event_outcomes_v2(
     temperature_metric: str,
     outcomes: Iterable[dict],
 ) -> dict:
-    """Batch-update market_events_v2 outcomes using exact child identities."""
-    table = "market_events_v2"
+    """Batch-update market_events outcomes using exact child identities."""
+    table = "market_events"
     counts = {
         "written": 0,
         "unchanged": 0,
@@ -6015,7 +5866,7 @@ def log_market_event_outcomes_v2(
                 "missing_fields": ("outcome",),
             }
         else:
-            result = _prepare_market_event_outcome_v2_update(
+            result = _prepare_market_event_outcome_update(
                 conn,
                 market_slug=market_slug,
                 city=city,
@@ -6061,17 +5912,17 @@ def log_market_event_outcomes_v2(
 
     if prepared_updates:
         try:
-            conn.execute("SAVEPOINT market_events_v2_outcome_batch")
+            conn.execute("SAVEPOINT market_events_outcome_batch")
             for result in prepared_updates:
                 conn.execute(
                     _MARKET_EVENT_OUTCOME_UPDATE_SQL,
                     result["update_values"],
                 )
-            conn.execute("RELEASE SAVEPOINT market_events_v2_outcome_batch")
+            conn.execute("RELEASE SAVEPOINT market_events_outcome_batch")
         except sqlite3.OperationalError as exc:
             try:
-                conn.execute("ROLLBACK TO SAVEPOINT market_events_v2_outcome_batch")
-                conn.execute("RELEASE SAVEPOINT market_events_v2_outcome_batch")
+                conn.execute("ROLLBACK TO SAVEPOINT market_events_outcome_batch")
+                conn.execute("RELEASE SAVEPOINT market_events_outcome_batch")
             except sqlite3.OperationalError:
                 pass
             counts["skipped_invalid_schema"] += 1
@@ -6134,7 +5985,7 @@ def log_rescue_event(
 ) -> None:
     """B063: append a durable audit row for a chain-rescue event.
 
-    Writes to `rescue_events_v2` (Phase 2 schema). Unlike the existing
+    Writes to `rescue_events` (Phase 2 schema). Unlike the existing
     CHAIN_RESCUE_AUDIT row in position_events, this row carries the
     temperature_metric, causality_status, and provenance authority
     needed to distinguish a legitimate low-lane N/A_CAUSAL skip from
@@ -6162,13 +6013,13 @@ def log_rescue_event(
     _logger = logging.getLogger(__name__)
     if conn is None:
         _logger.warning(
-            "log_rescue_event: conn is None, skipping rescue_events_v2 write for trade_id=%s",
+            "log_rescue_event: conn is None, skipping rescue_events write for trade_id=%s",
             trade_id,
         )
         return
     if temperature_metric not in ("high", "low"):
         _logger.error(
-            "log_rescue_event: invalid temperature_metric=%r for trade_id=%s; skipping rescue_events_v2 write",
+            "log_rescue_event: invalid temperature_metric=%r for trade_id=%s; skipping rescue_events write",
             temperature_metric,
             trade_id,
         )
@@ -6176,7 +6027,7 @@ def log_rescue_event(
     try:
         conn.execute(
             """
-            INSERT INTO rescue_events_v2
+            INSERT INTO rescue_events
                 (trade_id, position_id, decision_snapshot_id,
                  temperature_metric, causality_status,
                  authority, authority_source,
@@ -6198,7 +6049,7 @@ def log_rescue_event(
         )
     except sqlite3.OperationalError as exc:
         _logger.warning(
-            "log_rescue_event: rescue_events_v2 write failed for trade_id=%s: %s",
+            "log_rescue_event: rescue_events write failed for trade_id=%s: %s",
             trade_id,
             exc,
         )
@@ -6271,10 +6122,10 @@ def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
     """Resolve a snapshot id reference for trade_decisions.forecast_snapshot_id.
 
     v1.F20 (2026-05-18): the legacy ensemble_snapshots table was dropped. The
-    canonical table is ensemble_snapshots_v2 in zeus-forecasts.db, which is
+    canonical table is ensemble_snapshots in zeus-forecasts.db, which is
     ATTACHed as 'forecasts' by get_trade_connection_with_world().
 
-    Validates existence in forecasts.ensemble_snapshots_v2 when available;
+    Validates existence in forecasts.ensemble_snapshots when available;
     falls back to trusting the coerced id when the ATTACH is absent (e.g.
     non-trade connections in tests). Returns None only when value is absent
     or the snapshot row genuinely does not exist.
@@ -6301,12 +6152,12 @@ def _local_legacy_snapshot_fk(conn: sqlite3.Connection, value) -> Optional[int]:
             return snapshot_id if row is not None else None
         except sqlite3.OperationalError:
             return None
-    # Primary path: validate against forecasts.ensemble_snapshots_v2 (K1 canonical).
+    # Primary path: validate against forecasts.ensemble_snapshots (K1 canonical).
     # Use try/except rather than _table_exists() because that helper only queries
     # sqlite_master in the *main* schema, not in ATTACHed schemas (forecasts.*).
     try:
         row = conn.execute(
-            "SELECT 1 FROM forecasts.ensemble_snapshots_v2 WHERE snapshot_id = ? LIMIT 1",
+            "SELECT 1 FROM forecasts.ensemble_snapshots WHERE snapshot_id = ? LIMIT 1",
             (snapshot_id,),
         ).fetchone()
         return snapshot_id if row is not None else None
@@ -6818,6 +6669,33 @@ def query_probability_trace_completeness(conn: sqlite3.Connection | None) -> dic
         "pre_vector_rows": int(row["pre_vector_rows"] or 0),
     }
 
+
+
+def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    if schema not in {"world", "forecasts"}:
+        return False
+    row = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _selection_fact_table_ref(conn: sqlite3.Connection, table: str) -> str | None:
+    # B-series restore: selection_family_fact / selection_hypothesis_fact are
+    # world_class (db_table_ownership.yaml) — writes MUST route to world.<table>
+    # when world.db is ATTACHed, else they land in the wrong DB (INV-37/K1).
+    if table not in {"selection_family_fact", "selection_hypothesis_fact"}:
+        return None
+    try:
+        attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "world" in attached and _attached_table_exists(conn, "world", table):
+            return f"world.{table}"
+    except sqlite3.Error:
+        pass
+    if _table_exists(conn, table):
+        return table
+    return None
 
 
 def log_selection_family_fact(
@@ -7747,79 +7625,13 @@ def log_outcome_fact(
     return {"status": "written", "table": "outcome_fact"}
 
 def log_trade_entry(conn: sqlite3.Connection, pos) -> None:
-    """Evidence spine: Log explicitly at entry for replay reconstruction."""
+    """Evidence spine: Log explicitly at entry for replay reconstruction.
+
+    F5 demotion (2026-05-28): trade_decisions is audit-only legacy export.
+    The live entry path no longer writes to trade_decisions; canonical
+    truth lives in position_events / position_current.
+    """
     if False: _ = pos.entry_method; _ = pos.selected_method  # Semantic Provenance Guard
-    env = getattr(pos, "env", "unknown_env") or "unknown_env"
-    status = "pending_tracked" if getattr(pos, "state", "") == "pending_tracked" else "entered"
-    timestamp = getattr(pos, "order_posted_at", "") if status == "pending_tracked" else getattr(pos, "entered_at", "")
-    filled_at = getattr(pos, "entered_at", None) if status == "entered" else None
-    fill_price = getattr(pos, "entry_price", None) if status == "entered" else None
-    if _table_exists(conn, "trade_decisions"):
-        try:
-            snapshot_fk = _local_legacy_snapshot_fk(
-                conn,
-                getattr(pos, "decision_snapshot_id", None),
-            )
-            values = (
-                pos.market_id,
-                pos.bin_label,
-                pos.direction,
-                pos.size_usd,
-                pos.entry_price,
-                timestamp,
-                snapshot_fk,
-                getattr(pos, "calibration_version", "") or None,
-                pos.p_posterior,
-                pos.p_posterior,
-                pos.edge,
-                pos.p_posterior - (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
-                pos.p_posterior + (pos.entry_ci_width / 2) if pos.entry_ci_width else 0.0,
-                0.0,
-                status,
-                filled_at,
-                fill_price,
-                getattr(pos, "trade_id", ""),
-                getattr(pos, "order_id", ""),
-                getattr(pos, "order_status", ""),
-                getattr(pos, "order_posted_at", ""),
-                getattr(pos, "entered_at", ""),
-                getattr(pos, "chain_state", ""),
-                getattr(pos, "strategy", ""),
-                pos.edge_source,
-                _bin_type_for_label(pos.bin_label),
-                env,
-                getattr(pos, "discovery_mode", ""),
-                getattr(pos, "market_hours_open", 0.0),
-                getattr(pos, "fill_quality", 0.0),
-                getattr(pos, "entry_method", ""),
-                getattr(pos, "selected_method", ""),
-                json.dumps(getattr(pos, "applied_validations", []) or []),
-                getattr(pos, "settlement_semantics_json", None),
-                getattr(pos, "epistemic_context_json", None),
-                getattr(pos, "edge_context_json", None),
-            )
-            placeholders = ", ".join(["?"] * len(values))
-            conn.execute(f"""
-                INSERT INTO trade_decisions (
-                    market_id, bin_label, direction, size_usd, price, timestamp,
-                    forecast_snapshot_id, calibration_model_version,
-                    p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
-                    status, filled_at, fill_price, runtime_trade_id, order_id, order_status_text, order_posted_at, entered_at_ts, chain_state,
-                    strategy, edge_source, bin_type, env, discovery_mode, market_hours_open,
-                    fill_quality, entry_method, selected_method, applied_validations_json,
-                    settlement_semantics_json, epistemic_context_json, edge_context_json
-                )
-                VALUES ({placeholders})
-            """, values)
-        except Exception as e:
-            import logging as _logging
-            _logging.getLogger(__name__).error(
-                "[LOG_TRADE_ENTRY_FAILED] position_id=%s err=%r — bridge write is mandatory; "
-                "propagating to outer SAVEPOINT for rollback",
-                getattr(pos, "trade_id", "?"),
-                e,
-            )
-            raise
 
 
 

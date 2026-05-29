@@ -2,16 +2,16 @@
 # Purpose: C5 antibody — asserts that harvest_settlement routes HIGH-track
 #          calibration pairs through add_calibration_pair_v2 (canonical
 #          path) and NOT through legacy add_calibration_pair, so HIGH pairs
-#          actually reach calibration_pairs_v2 where refit_platt_v2 reads.
+#          actually reach calibration_pairs where refit_platt reads.
 # Reuse: Covers src/execution/harvester.py::harvest_settlement HIGH + LOW
 #        branches. Regression-bar: if a future refactor re-introduces a
 #        split HIGH-via-legacy / LOW-via-v2 routing (the pre-C5 bug), this
 #        test fires. Originating handoff: POST_AUDIT_HANDOFF_2026-04-24.md
-#        §3.1 C5. Related: refit_platt_v2 reads only v2 per
-#        scripts/refit_platt_v2.py:29.
+#        §3.1 C5. Related: refit_platt reads only v2 per
+#        scripts/refit_platt.py:29.
 # Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C5 + INV-14 spine +
 #   INV-15 source/data_version whitelist at src/calibration/store.py:116.
-"""C5 antibody: harvester HIGH-track pairs reach calibration_pairs_v2."""
+"""C5 antibody: harvester HIGH-track pairs reach calibration_pairs."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.config import City
 from src.execution.harvester import harvest_settlement
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -53,7 +53,7 @@ def harvest_conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -69,43 +69,44 @@ def _seed_high_harvest(conn, city: City):
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version="ecmwf_ens",
+        forecast_model_id="ecmwf_ens",
         settlement_value=87.0,
         temperature_metric="high",
     )
 
 
-def test_high_pairs_land_in_calibration_pairs_v2(harvest_conn):
-    """C5: HIGH harvest must populate calibration_pairs_v2 (not just legacy)."""
+def test_high_pairs_land_in_calibration_pairs(harvest_conn):
+    """C5: HIGH harvest must populate calibration_pairs (not just legacy)."""
     count = _seed_high_harvest(harvest_conn, _make_city())
     assert count == 3, f"expected 3 pairs for 3 bins, got {count}"
 
     v2_rows = harvest_conn.execute(
-        "SELECT city, target_date, temperature_metric, data_version, training_allowed "
-        "FROM calibration_pairs_v2 WHERE city = 'testville' AND target_date = '2026-04-24'"
+        "SELECT city, target_date, temperature_metric, dataset_id, training_allowed "
+        "FROM calibration_pairs WHERE city = 'testville' AND target_date = '2026-04-24'"
     ).fetchall()
 
     assert len(v2_rows) == 3, f"expected 3 v2 rows; got {len(v2_rows)}"
     for row in v2_rows:
         assert row["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
-        assert row["data_version"] == HIGH_LOCALDAY_MAX.data_version
+        assert row["dataset_id"] == HIGH_LOCALDAY_MAX.data_version
         assert row["training_allowed"] == 1, (
             "INV-15: data_version starts with 'tigge' → training_allowed "
             "must resolve to True"
         )
 
 
-def test_high_pairs_do_not_land_in_legacy_calibration_pairs(harvest_conn):
-    """C5 regression-bar: legacy table must NOT receive HIGH harvest output."""
+def test_high_pairs_land_in_calibration_pairs_canonical(harvest_conn):
+    """B3 rename: calibration_pairs is now the canonical table (v2 schema).
+    HIGH harvest must populate calibration_pairs with temperature_metric='high'."""
     _seed_high_harvest(harvest_conn, _make_city("no_legacy_city"))
 
-    legacy_count = harvest_conn.execute(
+    count = harvest_conn.execute(
         "SELECT COUNT(*) FROM calibration_pairs "
         "WHERE city = 'no_legacy_city' AND target_date = '2026-04-24'"
+        "  AND temperature_metric = 'high'"
     ).fetchone()[0]
-    assert legacy_count == 0, (
-        "pre-C5 HIGH branch wrote to calibration_pairs (legacy); "
-        "post-C5 must route exclusively through v2"
+    assert count == 3, (
+        f"B3: HIGH harvest must write 3 rows to canonical calibration_pairs, got {count}"
     )
 
 
@@ -120,23 +121,27 @@ def test_low_pairs_still_land_in_v2_after_c5(harvest_conn):
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version="ecmwf_ens",
+        forecast_model_id="ecmwf_ens",
         settlement_value=71.0,
         temperature_metric="low",
     )
 
     v2_rows = harvest_conn.execute(
-        "SELECT temperature_metric, data_version FROM calibration_pairs_v2 "
+        "SELECT temperature_metric, dataset_id FROM calibration_pairs "
         "WHERE city = 'low_city' AND target_date = '2026-04-24'"
     ).fetchall()
     assert len(v2_rows) == 3
     for row in v2_rows:
         assert row["temperature_metric"] == LOW_LOCALDAY_MIN.temperature_metric
-        assert row["data_version"] == LOW_LOCALDAY_MIN.data_version
+        assert row["dataset_id"] == LOW_LOCALDAY_MIN.data_version
 
 
 def test_legacy_add_calibration_pair_no_longer_imported_in_harvester():
-    """Structural regression-bar: harvester's import line must not reference legacy writer."""
+    """Structural regression-bar: harvester imports canonical add_calibration_pair (not v2 suffix).
+
+    Post-B3 collapse: add_calibration_pair_v2 was renamed to add_calibration_pair.
+    Harvester must import the canonical name; the _v2 suffix must be absent.
+    """
     text = (PROJECT_ROOT / "src/execution/harvester.py").read_text()
     # Find the exact import statement line from src.calibration.store.
     import_lines = [
@@ -147,23 +152,13 @@ def test_legacy_add_calibration_pair_no_longer_imported_in_harvester():
         f"expected exactly one calibration.store import; got {import_lines}"
     )
     import_line = import_lines[0]
-    assert "add_calibration_pair_v2" in import_line
-    # The legacy bare name must not be in the import targets. Extract the
-    # import targets substring after "import " to check precisely.
-    assert "import add_calibration_pair_v2" in import_line or \
-        "import (" in import_line or \
-        "import add_calibration_pair," not in import_line, (
-            "harvester import line still references legacy add_calibration_pair"
-        )
-    # Simpler & load-bearing check: the exact legacy pair `add_calibration_pair,`
-    # (with trailing comma, the usual multi-import form) must not appear
-    # anywhere in the import line.
-    import re
-    tokens_after_import = import_line.split("import", 1)[-1]
-    # Split by comma and check each token strip-equals the legacy name.
-    tokens = [t.strip() for t in tokens_after_import.replace("(", "").replace(")", "").split(",")]
-    assert "add_calibration_pair" not in tokens, (
-        f"harvester import still includes legacy add_calibration_pair: {import_line}"
+    # Canonical name must appear in the import.
+    assert "add_calibration_pair" in import_line, (
+        f"harvester import line missing add_calibration_pair: {import_line}"
+    )
+    # The _v2 suffix must be gone.
+    assert "add_calibration_pair_v2" not in import_line, (
+        f"harvester import still references legacy add_calibration_pair_v2: {import_line}"
     )
 
 
@@ -171,13 +166,13 @@ def test_v2_pair_training_allowed_respects_inv15(harvest_conn):
     """INV-15: no explicit source passed; data_version 'tigge_*' enables training.
 
     The v2 row's `training_allowed` field (1) proves _resolve_training_allowed
-    accepted the call. calibration_pairs_v2 does not store the `source`
+    accepted the call. calibration_pairs does not store the `source`
     argument — it's used only for the INV-15 check at insert time.
     """
     _seed_high_harvest(harvest_conn, _make_city("inv15_city"))
 
     rows = harvest_conn.execute(
-        "SELECT training_allowed, data_version FROM calibration_pairs_v2 "
+        "SELECT training_allowed, dataset_id FROM calibration_pairs "
         "WHERE city = 'inv15_city'"
     ).fetchall()
     assert len(rows) > 0
@@ -185,4 +180,4 @@ def test_v2_pair_training_allowed_respects_inv15(harvest_conn):
         # _resolve_training_allowed: empty source skips src_ok check; dv
         # starts with 'tigge' → dv_ok; result = requested (True).
         assert row["training_allowed"] == 1
-        assert row["data_version"].startswith("tigge")
+        assert row["dataset_id"].startswith("tigge")

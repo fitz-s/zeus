@@ -76,7 +76,6 @@ Data does not set durable law, but it is the place where semantic category error
 - tests/test_cities_config_authoritative.py
 - tests/test_ensemble_client.py
 - tests/test_backfill_openmeteo_previous_runs.py
-- tests/test_etl_forecasts_v2_from_legacy.py
 - tests/test_backfill_scripts_match_live_config.py
 - tests/test_tier_resolver.py
 - tests/test_obs_v2_writer.py
@@ -122,7 +121,7 @@ Data does not set durable law, but it is the place where semantic category error
 ## 17. Planning-lock triggers
 - Any change to source routing, settlement provider mapping, fallback order, observation/forecast writers, or current-fact surfaces that gate data work.
 - Any addition/removal of a city/provider/station mapping.
-- Any change to observation_instants_v2 / historical_forecasts_v2 write contracts.
+- Any change to observation_instants_v2 / historical_forecasts write contracts.
 
 ## 18. Common false assumptions
 - A 200 response means the source is correct.
@@ -142,8 +141,8 @@ Data does not set durable law, but it is the place where semantic category error
 ```bash
 pytest -q tests/test_audit_city_data_readiness.py tests/test_cities_config_authoritative.py tests/test_backfill_scripts_match_live_config.py
 pytest -q tests/test_tier_resolver.py tests/test_obs_v2_writer.py tests/test_hk_rejects_vhhh_source.py tests/test_hourly_clients_parse.py
-pytest -q tests/test_ensemble_client.py tests/test_etl_forecasts_v2_from_legacy.py
-python -m py_compile src/data/*.py scripts/backfill_obs_v2.py scripts/audit_observation_instants_v2.py
+pytest -q tests/test_ensemble_client.py
+python -m py_compile src/data/*.py scripts/backfill_obs.py scripts/audit_observation_instants.py
 ```
 
 ## 21. Rollback strategy

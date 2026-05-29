@@ -61,11 +61,11 @@ def _make_edge(p_value: float, *, low: float = 40, high: float = 41) -> BinEdge:
     )
 
 
-def _seed_ensemble_snapshots_v2_row(
+def _seed_ensemble_snapshots_row(
     conn, *, city: str, target_date: str, metric: str = "high",
     boundary_ambiguous: int = 0, causality_status: str = "OK",
 ) -> str:
-    """S1.3 / T2.g helper: INSERT a minimal valid ensemble_snapshots_v2 row.
+    """S1.3 / T2.g helper: INSERT a minimal valid ensemble_snapshots row.
 
     Closes the "natural-empty-v2 bypass" in T2.d/e/f tests — when v2 is
     empty, `_read_v2_snapshot_metadata` returns {} and
@@ -84,10 +84,10 @@ def _seed_ensemble_snapshots_v2_row(
     """
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, available_at, fetch_time, lead_hours,
-            members_json, model_version, data_version,
+            members_json, model_version, dataset_id,
             boundary_ambiguous, causality_status
         ) VALUES (
             ?, ?, ?, 'mx2t6_local_calendar_day_max',
@@ -103,7 +103,7 @@ def _seed_ensemble_snapshots_v2_row(
     row = conn.execute(
         """
         SELECT snapshot_id
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE city = ? AND target_date = ? AND temperature_metric = ?
         ORDER BY snapshot_id DESC
         LIMIT 1
@@ -193,7 +193,7 @@ class TestFDRFilter:
 
 class TestDT7ScemaPathActuallyRuns:
     """S1.3 / T2.g antibody — the DT7 gate `boundary_ambiguous_refuses_signal`
-    actually fires against REAL ensemble_snapshots_v2 rows, not just via the
+    actually fires against REAL ensemble_snapshots rows, not just via the
     trivial empty-table short-circuit.
 
     Without these two tests, a future refactor that silently breaks
@@ -210,7 +210,7 @@ class TestDT7ScemaPathActuallyRuns:
         from src.engine.evaluator import _read_v2_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_zero.db")
         _init_schema_with_forecast_authority(conn)
-        snapshot_id = _seed_ensemble_snapshots_v2_row(
+        snapshot_id = _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=0,
         )
@@ -233,7 +233,7 @@ class TestDT7ScemaPathActuallyRuns:
         from src.engine.evaluator import _read_v2_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_bambig_one.db")
         _init_schema_with_forecast_authority(conn)
-        snapshot_id = _seed_ensemble_snapshots_v2_row(
+        snapshot_id = _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
         )
@@ -256,7 +256,7 @@ class TestDT7ScemaPathActuallyRuns:
         from src.engine.evaluator import _read_v2_snapshot_metadata
         conn = get_connection(tmp_path / "t2g_exact_only.db")
         _init_schema_with_forecast_authority(conn)
-        _seed_ensemble_snapshots_v2_row(
+        _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
             boundary_ambiguous=1, causality_status="REJECTED_BOUNDARY_AMBIGUOUS",
         )
@@ -816,7 +816,7 @@ class TestSelectionFamilySubstrate:
         assert sorted(hypothesis_strategy_keys) == ["", "center_buy"]
 
     def test_evaluate_candidate_materializes_selection_facts(self, tmp_path, monkeypatch):
-        # T2.g CLOSED 2026-04-24: explicit ensemble_snapshots_v2 fixture row
+        # T2.g CLOSED 2026-04-24: explicit ensemble_snapshots fixture row
         # with boundary_ambiguous=0 replaces the prior natural-empty-v2
         # bypass. DT7 gate now runs against the real populated schema path
         # (reads the row, sees boundary_ambiguous=0, correctly returns False
@@ -824,7 +824,7 @@ class TestSelectionFamilySubstrate:
         # shaped state, not just via a trivial short-circuit on empty table.
         conn = get_connection(tmp_path / "selection_eval_path.db")
         _init_schema_with_forecast_authority(conn)
-        _seed_ensemble_snapshots_v2_row(
+        _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
         now = datetime.now(timezone.utc)
@@ -1085,10 +1085,10 @@ class TestSelectionFamilySubstrate:
 
     def test_evaluate_candidate_fails_closed_when_full_family_scan_unavailable(self, tmp_path, monkeypatch):
         # T2.g CLOSED 2026-04-24: explicit v2 fixture row with
-        # boundary_ambiguous=0 (see _seed_ensemble_snapshots_v2_row helper).
+        # boundary_ambiguous=0 (see _seed_ensemble_snapshots_row helper).
         conn = get_connection(tmp_path / "selection_fail_closed.db")
         _init_schema_with_forecast_authority(conn)
-        _seed_ensemble_snapshots_v2_row(
+        _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
         now = datetime.now(timezone.utc)
@@ -1203,8 +1203,8 @@ class TestSelectionFamilySubstrate:
         # FakeDay0Signal and wrap the route lambda to dispatch on
         # inputs.temperature_metric.is_low().
         #
-        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_v2_schema which creates
-        # empty ensemble_snapshots_v2; _read_v2_snapshot_metadata on empty
+        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_canonical_schema which creates
+        # empty ensemble_snapshots; _read_v2_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
         # WILL replace this natural bypass with a real v2 fixture row
@@ -1309,10 +1309,10 @@ class TestSelectionFamilySubstrate:
         and set fdr_fallback_fired=True so observability surfaces the anomaly.
         """
         # T2.g CLOSED 2026-04-24: explicit v2 fixture row with
-        # boundary_ambiguous=0 (see _seed_ensemble_snapshots_v2_row helper).
+        # boundary_ambiguous=0 (see _seed_ensemble_snapshots_row helper).
         conn = get_connection(tmp_path / "selection_empty_family.db")
         _init_schema_with_forecast_authority(conn)
-        _seed_ensemble_snapshots_v2_row(
+        _seed_ensemble_snapshots_row(
             conn, city="Dallas", target_date="2026-04-12", metric="high",
         )
         now = datetime.now(timezone.utc)
@@ -1427,8 +1427,8 @@ class TestSelectionFamilySubstrate:
         # FakeDay0Signal and wrap the route lambda to dispatch on
         # inputs.temperature_metric.is_low().
         #
-        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_v2_schema which creates
-        # empty ensemble_snapshots_v2; _read_v2_snapshot_metadata on empty
+        # DT7 gate: _init_schema_with_forecast_authority(conn) calls apply_canonical_schema which creates
+        # empty ensemble_snapshots; _read_v2_snapshot_metadata on empty
         # table naturally returns {} → boundary_ambiguous_refuses_signal
         # returns False → gate passes WITHOUT stubbing. T2.g (plan row)
         # WILL replace this natural bypass with a real v2 fixture row

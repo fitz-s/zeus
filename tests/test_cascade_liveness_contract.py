@@ -312,7 +312,7 @@ def test_no_operator_required_row_exceeds_max_age():
     """
     contract = _load_contract()
     db_path = REPO_ROOT / "state" / "zeus_trades.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
         for sm in contract["state_machines"]:

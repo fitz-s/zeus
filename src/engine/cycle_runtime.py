@@ -742,7 +742,7 @@ def _attach_corrected_pricing_authority(
         )
         setattr(decision, "final_execution_intent", final_intent)
     payload = {
-        "pricing_semantics_version": cost_basis.pricing_semantics_version,
+        "pricing_semantics_id": cost_basis.pricing_semantics_id,
         "shadow_only": final_intent is None,
         "live_submit_authority": final_intent is not None,
         "field_semantics": (
@@ -865,7 +865,7 @@ def _ensure_fresh_executable_snapshot(
       primitive and return it.
     - stale + no client → raise ``executable_snapshot_stale`` (safety gate preserved).
     """
-    from src.contracts.executable_market_snapshot_v2 import is_fresh
+    from src.contracts.executable_market_snapshot import is_fresh
     from src.state.snapshot_repo import get_snapshot
 
     snapshot = get_snapshot(conn, snapshot_id)
@@ -1035,7 +1035,7 @@ def _reprice_decision_from_executable_snapshot(
     snapshot = get_snapshot(conn, snapshot_id)
     if snapshot is None:
         raise ValueError(f"EXECUTABLE_SNAPSHOT_UNAVAILABLE: {snapshot_id}")
-    from src.contracts.executable_market_snapshot_v2 import is_fresh
+    from src.contracts.executable_market_snapshot import is_fresh
 
     _now_reprice = datetime.now(timezone.utc)
     if not is_fresh(snapshot, _now_reprice):
@@ -1156,7 +1156,7 @@ def _reprice_decision_from_executable_snapshot(
     # any exception is caught and logged — the live decision is never affected.
     # Natural key params threaded from outer execute_discovery_phase loop via
     # _shadow_market_slug / _shadow_temperature_metric / _shadow_target_date /
-    # _shadow_observation_time — ExecutableMarketSnapshotV2 does NOT carry them.
+    # _shadow_observation_time — ExecutableMarketSnapshot does NOT carry them.
     # ---------------------------------------------------------------------------
     _vnext_metrics_computed = locals().get("_vnext_metrics")
     try:
@@ -2440,8 +2440,8 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         )
     except AttributeError:
         corrected_shadow = {}
-    pricing_semantics_version = str(
-        corrected_shadow.get("pricing_semantics_version")
+    pricing_semantics_id = str(
+        corrected_shadow.get("pricing_semantics_id")
         or "legacy_unclassified"
     )
     command_state = str(getattr(result, "command_state", "") or "")
@@ -2482,7 +2482,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         entry_economics_authority = ENTRY_ECONOMICS_AVG_FILL_PRICE
         fill_authority = FILL_AUTHORITY_VENUE_CONFIRMED_FULL
         corrected_executable_economics_eligible = (
-            pricing_semantics_version == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
+            pricing_semantics_id == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
         )
     else:
         entry_price = 0.0
@@ -2533,7 +2533,7 @@ def materialize_position(candidate, decision, result, portfolio, city, mode, *, 
         entry_cost_basis_hash=str(corrected_shadow.get("cost_basis_hash") or ""),
         entry_economics_authority=entry_economics_authority,
         fill_authority=fill_authority,
-        pricing_semantics_version=pricing_semantics_version,
+        pricing_semantics_id=pricing_semantics_id,
         execution_cost_basis_version=str(
             corrected_shadow.get("execution_cost_basis_version")
             or corrected_shadow.get("cost_basis_id")
@@ -4215,7 +4215,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
         return _execution_snapshot_fields(decision.tokens), ""
 
     def _execution_snapshot_is_stale(conn, snapshot_id: str) -> bool:
-        from src.contracts.executable_market_snapshot_v2 import is_fresh
+        from src.contracts.executable_market_snapshot import is_fresh
         from src.state.snapshot_repo import get_snapshot
 
         snapshot = get_snapshot(conn, snapshot_id)
@@ -5989,21 +5989,9 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                                 deps=deps,
                                 decision_evidence=getattr(d, "decision_evidence", None),
                             )
-                            # Bridge assertion: trade_decisions row must exist for
-                            # pos.trade_id before RELEASE.  If log_trade_entry
-                            # succeeded but the row is somehow absent (schema
-                            # mismatch, wrong conn), roll back atomically.
-                            _trade_id = getattr(pos, "trade_id", None)
-                            if _trade_id:
-                                _bridge_row = conn.execute(
-                                    "SELECT 1 FROM trade_decisions WHERE runtime_trade_id = ?",
-                                    (_trade_id,),
-                                ).fetchone()
-                                if _bridge_row is None:
-                                    raise RuntimeError(
-                                        f"Bridge assertion failed: trade_decisions has no row "
-                                        f"for runtime_trade_id={_trade_id!r} after log_trade_entry"
-                                    )
+                            # F5 (2026-05-28): trade_decisions bridge assertion removed.
+                            # log_trade_entry no longer writes to trade_decisions;
+                            # canonical entry truth is in position_events/position_current.
                             conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                         except Exception:
                             conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")

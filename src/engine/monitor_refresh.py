@@ -243,7 +243,7 @@ def _read_monitor_executable_forecast(
     """Read monitor probability from the same executable forecast authority as entry.
 
     Live ecmwf_open_data entry uses producer/source-run readiness plus
-    ensemble_snapshots_v2.  A held-position monitor must not fall back to the
+    ensemble_snapshots.  A held-position monitor must not fall back to the
     legacy Open-Meteo ``fetch_ensemble`` adapter for that source, because that
     path cannot prove the executable forecast reader contract.  Non-real sqlite
     connections return ``(None, None)`` so legacy unit tests and diagnostic
@@ -399,13 +399,13 @@ def _load_ft_error_model(
     # to avoid loading a legacy/wrong-family row when multiple families coexist
     # per (city, season, metric, live_data_version, month=0).
     row = conn.execute(
-        "SELECT * FROM model_bias_ens_v2 WHERE city=? AND season=? AND metric=? "
+        "SELECT * FROM model_bias_ens WHERE city=? AND season=? AND metric=? "
         "AND live_data_version=? AND month=0 AND error_model_family=?",
         (city_name, season, metric, live_data_version, "full_transport_v1"),
     ).fetchone()
     if row is None:
         logger.warning(
-            "full_transport_live: flag ON but no model_bias_ens_v2 row for "
+            "full_transport_live: flag ON but no model_bias_ens row for "
             "city=%r season=%r metric=%r live_data_version=%r family='full_transport_v1' "
             "— falling back to plain p_raw",
             city_name, season, metric, live_data_version,
@@ -418,7 +418,7 @@ def _load_ft_error_model(
     _missing = [c for c in _required_cols if row[c] is None]
     if _missing:
         logger.warning(
-            "full_transport_live: model_bias_ens_v2 row for city=%r season=%r metric=%r "
+            "full_transport_live: model_bias_ens row for city=%r season=%r metric=%r "
             "has NULL canonical cols %s — pre-migration DB? Falling back to plain p_raw.",
             city_name, season, metric, _missing,
         )
@@ -1306,7 +1306,7 @@ def _check_persistence_anomaly(
 
     LOW metric gate: legacy settlements has no metric column; LOW lookups would
     cross-compare against HIGH historical values. Defer to metric-aware query
-    when settlements_v2 populated (P10D).
+    when settlement_outcomes populated (P10D).
     """
     if temperature_metric is not None:
         is_low = (
@@ -1335,7 +1335,7 @@ def _check_persistence_anomaly(
             # (city, target_date) would silently match and produce a cross-
             # metric delta anyway.
             row = conn.execute(
-                "SELECT settlement_value FROM forecasts.settlements_v2 "
+                "SELECT settlement_value FROM forecasts.settlement_outcomes "
                 "WHERE city = ? AND target_date = ? "
                 "AND temperature_metric = 'high' "
                 "AND authority = 'VERIFIED' LIMIT 1",
@@ -1351,7 +1351,7 @@ def _check_persistence_anomaly(
         if not deltas:
             logger.warning(
                 "PERSISTENCE_FALLBACK_TRIGGERED: all 3 recent settlement days NULL "
-                "in forecasts.settlements_v2 for %s/%s — returning 1.0 (no discount)",
+                "in forecasts.settlement_outcomes for %s/%s — returning 1.0 (no discount)",
                 city_name, target_date,
             )
             return 1.0

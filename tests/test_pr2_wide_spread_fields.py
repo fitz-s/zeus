@@ -1,6 +1,6 @@
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: PR 2 antibody tests — wide_spread_display_substitution and depth_at_best_ask fields
-# Reuse: Run when executable_market_snapshot_v2.py, snapshot_repo.py, or market_scanner.py change.
+# Reuse: Run when executable_market_snapshot.py, snapshot_repo.py, or market_scanner.py change.
 """R-EE.5 and R-EE.6 tests for PR 2 microstructure transparency fields.
 
 R-EE.5: wide_spread_display_substitution and depth_at_best_ask roundtrip through snapshot_repo
@@ -15,8 +15,8 @@ from decimal import Decimal
 
 import pytest
 
-from src.contracts.executable_market_snapshot_v2 import (
-    ExecutableMarketSnapshotV2,
+from src.contracts.executable_market_snapshot import (
+    ExecutableMarketSnapshot,
     WIDE_SPREAD_THRESHOLD_USD,
 )
 from src.state.db import init_schema
@@ -56,7 +56,7 @@ def _make_snapshot(
     orderbook_top_ask: Decimal | None = Decimal("0.51"),
     orderbook_depth_jsonb: str = '{"asks":[{"price":"0.51","size":"50"}],"bids":[{"price":"0.49","size":"100"}]}',
     **overrides,
-) -> ExecutableMarketSnapshotV2:
+) -> ExecutableMarketSnapshot:
     """Minimal snapshot factory with PR2 fields."""
     kwargs = dict(
         snapshot_id=snapshot_id,
@@ -97,7 +97,7 @@ def _make_snapshot(
         depth_at_best_ask=depth,
     )
     kwargs.update(overrides)
-    return ExecutableMarketSnapshotV2(**kwargs)
+    return ExecutableMarketSnapshot(**kwargs)
 
 
 # ── R-EE.5: roundtrip test ───────────────────────────────────────────────────

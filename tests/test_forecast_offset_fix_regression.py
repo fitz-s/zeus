@@ -50,19 +50,19 @@ from src.data.executable_forecast_reader import _snapshot_query_sql  # type: ign
 # ---------------------------------------------------------------------------
 
 _COMMON_COLS = (
-    "snapshot_id, city, target_date, temperature_metric, data_version, "
+    "snapshot_id, city, target_date, temperature_metric, dataset_id, "
     "source_id, source_transport, source_cycle_time, available_at, "
     "contributes_to_target_extrema, forecast_window_attribution_status, "
     "boundary_ambiguous, members_json"
 )
 
 _CREATE_TABLE = """
-CREATE TABLE ensemble_snapshots_v2 (
+CREATE TABLE ensemble_snapshots (
     snapshot_id INTEGER PRIMARY KEY,
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
     temperature_metric TEXT NOT NULL,
-    data_version TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
     source_id TEXT NOT NULL,
     source_transport TEXT NOT NULL,
     source_cycle_time TEXT NOT NULL,
@@ -76,13 +76,13 @@ CREATE TABLE ensemble_snapshots_v2 (
 
 _DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
 _SOURCE_ID = "ecmwf_open_data"
-_SOURCE_TRANSPORT = "ensemble_snapshots_v2_db_reader"
+_SOURCE_TRANSPORT = "ensemble_snapshots_db_reader"
 _TARGET_DATE = "2026-05-22"
 _METRIC = "high"
 
 
 def _mem_db() -> sqlite3.Connection:
-    """Return an in-memory connection with ensemble_snapshots_v2 created."""
+    """Return an in-memory connection with ensemble_snapshots created."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(_CREATE_TABLE)
@@ -103,7 +103,7 @@ def _insert_snapshot(
     members: list[float],
 ) -> None:
     conn.execute(
-        f"INSERT INTO ensemble_snapshots_v2 ({_COMMON_COLS}) VALUES "
+        f"INSERT INTO ensemble_snapshots ({_COMMON_COLS}) VALUES "
         "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             snapshot_id,
@@ -129,11 +129,11 @@ def _select_via_production_sql(
 ) -> sqlite3.Row | None:
     """Execute the production snapshot-selection SQL against the fixture DB.
 
-    Uses table="ensemble_snapshots_v2" (unqualified) so the SQL references
+    Uses table="ensemble_snapshots" (unqualified) so the SQL references
     the plain table in the :memory: connection with no ATTACH prefix.
     source_run_id_present=False matches the no-source-run-filter variant.
     """
-    sql = _snapshot_query_sql("ensemble_snapshots_v2", source_run_id_present=False)
+    sql = _snapshot_query_sql("ensemble_snapshots", source_run_id_present=False)
     # Parameters: city, target_date, temperature_metric, data_version,
     #             source_id, source_transport  (6 positional, no source_run_id)
     return conn.execute(

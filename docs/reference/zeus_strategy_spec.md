@@ -39,7 +39,7 @@ Zeus must not classify strategies by names such as `center_buy` or `stale_quote_
 
    for NO buys.
 
-The current Zeus repo already contains much of the scaffolding for these proofs: `StrategyProfile`, `EvidenceTier`, `EvidenceReport`, `PromotionReadinessValidator`, `ShoulderStrategyVNext`, `MarketAnalysisVNext`, `ExecutableMarketSnapshotV2`, candidate strategy files, `decision_events`, `no_trade_events`, `shadow_experiments`, and `regret_decompositions`. The current gap is that multiple strategy implementations still write placeholder edge values or return scaffold no-trade classifications instead of producing theorem-backed decision records.
+The current Zeus repo already contains much of the scaffolding for these proofs: `StrategyProfile`, `EvidenceTier`, `EvidenceReport`, `PromotionReadinessValidator`, `ShoulderStrategyVNext`, `MarketAnalysisVNext`, `ExecutableMarketSnapshot`, candidate strategy files, `decision_events`, `no_trade_events`, `shadow_experiments`, and `regret_decompositions`. The current gap is that multiple strategy implementations still write placeholder edge values or return scaffold no-trade classifications instead of producing theorem-backed decision records.
 
 The strongest actionable strategy family is **deterministic/vector payoff arbitrage**, especially `neg_risk_basket` and YES/NO parity baskets. The strongest existing live family is **settlement/observation deterministic capture**, especially `settlement_capture` and the proposed production form of `resolution_window_maker`. The strongest forecast family remains **calibrated finite-bin center trading**. The weakest original thesis is **ex-ante `shoulder_sell` as retail-lottery short-tail**; it is refuted in sign by the supplied shoulder proof and must be replaced by a physical impossible-tail capture theorem.
 
@@ -91,7 +91,7 @@ This packet uses the following code/document surfaces as implementation ground t
 - `src/analysis/promotion_readiness.py`: read-only validator.
 - `src/contracts/shoulder_strategy_vnext.py`: shoulder dataclass and current scaffold classifier.
 - `src/analysis/market_analysis_vnext.py`: `MicrostructureMetrics` and current missing field state.
-- `src/contracts/executable_market_snapshot_v2.py`: executable snapshot fields.
+- `src/contracts/executable_market_snapshot.py`: executable snapshot fields.
 - `src/contracts/execution_intent.py`: execution order types and depth status vocabulary.
 - `src/strategy/candidates/*.py`: candidate strategy current behavior.
 - `src/backtest/shadow_replay_harness.py`: current replay scaffold status.

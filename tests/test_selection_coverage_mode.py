@@ -29,7 +29,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
 
     conn.executescript("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY,
             city TEXT,
             target_date TEXT,
@@ -46,7 +46,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
             data_version TEXT,
             temperature_metric TEXT
         );
-        CREATE TABLE calibration_pairs_v2 (
+        CREATE TABLE calibration_pairs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT,
             target_date TEXT,
@@ -61,7 +61,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
             bias_corrected INTEGER,
             temperature_metric TEXT DEFAULT 'high'
         );
-        CREATE TABLE settlements_v2 (
+        CREATE TABLE settlement_outcomes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT,
             target_date TEXT,
@@ -83,7 +83,7 @@ def _make_in_memory_db(cities: list[dict]) -> sqlite3.Connection:
 
 def _insert_settlement(conn, city, target_date, settlement_value, winning_bin, metric="high"):
     conn.execute(
-        "INSERT INTO settlements_v2 (city, target_date, settlement_value, winning_bin, temperature_metric, authority) VALUES (?, ?, ?, ?, ?, 'VERIFIED')",
+        "INSERT INTO settlement_outcomes (city, target_date, settlement_value, winning_bin, temperature_metric, authority) VALUES (?, ?, ?, ?, ?, 'VERIFIED')",
         (city, target_date, settlement_value, winning_bin, metric),
     )
 
@@ -95,7 +95,7 @@ def _insert_snapshot(conn, city, target_date, snapshot_id, p_raw, lead_hours=72.
     # Use (target_date - 1 day) at 12:00Z as the available_at value.
     prev_date = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
     conn.execute(
-        """INSERT INTO ensemble_snapshots_v2
+        """INSERT INTO ensemble_snapshots
            (snapshot_id, city, target_date, available_at, fetch_time, issue_time, valid_time,
             lead_hours, spread, is_bimodal, model_version, members_json, p_raw_json, data_version, temperature_metric)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -115,7 +115,7 @@ def _insert_snapshot(conn, city, target_date, snapshot_id, p_raw, lead_hours=72.
 
 def _insert_calibration_pair(conn, city, target_date, range_label, p_raw, outcome, lead_days=3.0, metric="high"):
     conn.execute(
-        """INSERT INTO calibration_pairs_v2
+        """INSERT INTO calibration_pairs
            (city, target_date, range_label, p_raw, outcome, lead_days, season, cluster,
             forecast_available_at, decision_group_id, bias_corrected, temperature_metric)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -200,7 +200,7 @@ class TestT1Dispatch:
         forecasts = sqlite3.connect(str(forecasts_db))
         forecasts.executescript(
             """
-            CREATE TABLE ensemble_snapshots_v2 (
+            CREATE TABLE ensemble_snapshots (
                 snapshot_id INTEGER PRIMARY KEY,
                 city TEXT,
                 target_date TEXT,
@@ -217,7 +217,7 @@ class TestT1Dispatch:
                 data_version TEXT,
                 temperature_metric TEXT
             );
-            CREATE TABLE calibration_pairs_v2 (
+            CREATE TABLE calibration_pairs (
                 pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 city TEXT,
                 target_date TEXT,
@@ -232,7 +232,7 @@ class TestT1Dispatch:
                 bias_corrected INTEGER,
                 temperature_metric TEXT
             );
-            CREATE TABLE settlements_v2 (
+            CREATE TABLE settlement_outcomes (
                 settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 city TEXT,
                 target_date TEXT,
@@ -245,7 +245,7 @@ class TestT1Dispatch:
         )
         forecasts.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
             (snapshot_id, city, target_date, available_at, fetch_time, issue_time,
              valid_time, lead_hours, spread, is_bimodal, model_version, members_json,
              p_raw_json, data_version, temperature_metric)
@@ -259,7 +259,7 @@ class TestT1Dispatch:
         for label in _REAL_LABELS[:3]:
             forecasts.execute(
                 """
-                INSERT INTO calibration_pairs_v2
+                INSERT INTO calibration_pairs
                 (city, target_date, range_label, p_raw, outcome, lead_days, season,
                  cluster, forecast_available_at, decision_group_id, bias_corrected,
                  temperature_metric)
@@ -270,7 +270,7 @@ class TestT1Dispatch:
             )
         forecasts.execute(
             """
-            INSERT INTO settlements_v2
+            INSERT INTO settlement_outcomes
             (city, target_date, settlement_value, winning_bin, temperature_metric, authority)
             VALUES ('Amsterdam', '2025-06-01', 22.0, ?, 'high', 'VERIFIED')
             """,
@@ -282,12 +282,12 @@ class TestT1Dispatch:
         world = sqlite3.connect(str(world_db))
         world.executescript(
             """
-            CREATE TABLE calibration_pairs_v2 (range_label TEXT);
-            CREATE TABLE settlements_v2 (winning_bin TEXT);
-            CREATE TABLE ensemble_snapshots_v2 (snapshot_id INTEGER);
+            CREATE TABLE calibration_pairs (range_label TEXT);
+            CREATE TABLE settlement_outcomes (winning_bin TEXT);
+            CREATE TABLE ensemble_snapshots (snapshot_id INTEGER);
             """
         )
-        world.execute("INSERT INTO calibration_pairs_v2 VALUES ('99°C')")
+        world.execute("INSERT INTO calibration_pairs VALUES ('99°C')")
         world.commit()
         world.close()
 

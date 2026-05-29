@@ -8,7 +8,7 @@ Relationship test R-1.4: INV-37 ATTACH+SAVEPOINT compliance.
 
 RELATIONSHIP INVARIANT (cross-module):
     When write_settlement_v2_with_era_provenance() writes a settlement involving
-    both forecasts.db (settlements_v2) and world.db (uma_resolution / era_watermark),
+    both forecasts.db (settlement_outcomes) and world.db (uma_resolution / era_watermark),
     it MUST:
       1. Obtain the connection via get_forecasts_connection_with_world() — which
          executes ATTACH DATABASE 'zeus-world.db' AS world

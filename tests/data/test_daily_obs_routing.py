@@ -39,7 +39,7 @@ def _make_forecasts_mem_conn() -> sqlite3.Connection:
     daily_obs_append.daily_tick.
 
     We do NOT call init_schema_forecasts() here because that function has a
-    pre-existing test-env failure (no world.db → static helpers → settlements_v2
+    pre-existing test-env failure (no world.db → static helpers → settlement_outcomes
     index error — tracked as pre-existing failure in test_forecast_db_split_invariant).
 
     Instead we create the minimal schema that daily_obs_append.daily_tick needs:

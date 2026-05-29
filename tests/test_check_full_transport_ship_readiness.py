@@ -164,11 +164,11 @@ class TestPairsComplete:
         db = str(tmp_path / "w.db")
         conn = sqlite3.connect(db)
         conn.execute(
-            "CREATE TABLE calibration_pairs_v2 "
+            "CREATE TABLE calibration_pairs "
             "(pair_id INTEGER PRIMARY KEY, error_model_family TEXT)"
         )
         conn.execute(
-            "INSERT INTO calibration_pairs_v2 VALUES (1, 'none')"
+            "INSERT INTO calibration_pairs VALUES (1, 'none')"
         )
         conn.commit()
         conn.close()
@@ -180,11 +180,11 @@ class TestPairsComplete:
         db = str(tmp_path / "w.db")
         conn = sqlite3.connect(db)
         conn.execute(
-            "CREATE TABLE calibration_pairs_v2 "
+            "CREATE TABLE calibration_pairs "
             "(pair_id INTEGER PRIMARY KEY, error_model_family TEXT)"
         )
         conn.execute(
-            "INSERT INTO calibration_pairs_v2 VALUES (1, 'full_transport_v1')"
+            "INSERT INTO calibration_pairs VALUES (1, 'full_transport_v1')"
         )
         conn.commit()
         conn.close()

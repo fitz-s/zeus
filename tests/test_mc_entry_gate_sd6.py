@@ -18,7 +18,7 @@ def _make_world_db(path, migrated: bool):
         init_ens_bias_schema(conn)
     else:
         # base table only — no canonical columns -> P0 must fail
-        conn.execute("CREATE TABLE model_bias_ens_v2 (city TEXT, season TEXT, metric TEXT)")
+        conn.execute("CREATE TABLE model_bias_ens (city TEXT, season TEXT, metric TEXT)")
         conn.commit()
     conn.close()
 

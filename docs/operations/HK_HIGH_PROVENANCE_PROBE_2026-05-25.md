@@ -53,7 +53,7 @@ station siting: HKO HQ is an urban-core observatory; RJTT/RKSI are exposed airpo
 
 ### 3. Where the +6.3°C lives: FORECAST side, introduced by transport — NOT the OBS side
 
-**Raw ENS member mass-center − daily-high OBS** (refit `ensemble_snapshots_v2.members_json`
+**Raw ENS member mass-center − daily-high OBS** (refit `ensemble_snapshots.members_json`
 joined to `observations`, units degC throughout):
 
 | City | n | raw ENS−OBS mean | (°F) |
@@ -164,7 +164,7 @@ The defect has **two independent compounding layers**, both traceable to exact f
 
 `src/calibration/ens_bias_repo.py:140-163` — `load_bucket_residuals` builds the TIGGE prior
 by taking the **freshest-per-date snapshot** (`latest available_at`) among all
-`ensemble_snapshots_v2` rows with `lead_hours <= 48`.
+`ensemble_snapshots` rows with `lead_hours <= 48`.
 
 For the TIGGE archive, every target date has **two lead=0h snapshots**:
 
@@ -192,7 +192,7 @@ bad prior is overridden; for HK it is not.
 
 `src/calibration/ens_error_model.py:216-220` — `fit_city_predictive_error` calls
 `fit_bucket(tig, [], ...)` for the prior, then builds a `LiveResidual` only if
-`len(opd) >= min_live_n` (min_live_n=5 at `scripts/rebuild_calibration_pairs_v2.py:177`).
+`len(opd) >= min_live_n` (min_live_n=5 at `scripts/rebuild_calibration_pairs.py:177`).
 
 **For HK HIGH:**
 - OpenData (`ecmwf_opendata_mx2t3_local_calendar_day_max_v1`) date range: 2026-05-06 onward.

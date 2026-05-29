@@ -17,7 +17,7 @@ entries:
     expected_step_rule: local_day_6h_windows_up_to_282h
     partial_policy: BLOCK_LIVE
     live_authorization: true
-    source_transport_required: ensemble_snapshots_v2_db_reader
+    source_transport_required: ensemble_snapshots_db_reader
     authority_tier: DERIVED_FROM_DISSEMINATION
     authority_url: https://confluence.ecmwf.int/display/DAC/Dissemination+schedule
     backfill_only: false
@@ -57,7 +57,7 @@ entries:
     expected_step_rule: local_day_6h_windows_up_to_282h
     partial_policy: BLOCK_LIVE
     live_authorization: true
-    source_transport_required: ensemble_snapshots_v2_db_reader
+    source_transport_required: ensemble_snapshots_db_reader
     authority_tier: DERIVED_FROM_DISSEMINATION
     authority_url: https://confluence.ecmwf.int/display/DAC/Dissemination+schedule
     backfill_only: false

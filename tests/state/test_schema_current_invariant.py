@@ -9,11 +9,13 @@ import time
 import pytest
 
 from src.state.db import (
-    SCHEMA_VERSION,
     SchemaOutOfDateError,
     assert_schema_current,
     init_schema,
 )
+
+# B2 (2026-05-28): SCHEMA_VERSION counter cancelled. Frozen literal used in tests.
+SCHEMA_VERSION = 43  # frozen: the last value written by init_schema to PRAGMA user_version
 
 
 # ---------------------------------------------------------------------------
@@ -68,20 +70,20 @@ def test_rel1_no_hot_path_init_schema():
 # ---------------------------------------------------------------------------
 
 def test_rel2_pragma_unchanged_on_partial_init_failure(monkeypatch):
-    """If _apply_v2_schema raises, user_version must remain 0 (PRAGMA not yet set)."""
+    """If _apply_canonical_schema raises, user_version must remain 0 (PRAGMA not yet set)."""
     import src.state.db as _db
 
     conn = sqlite3.connect(":memory:")
 
     def _boom(c, **kwargs):
-        raise RuntimeError("simulated _apply_v2_schema failure")
+        raise RuntimeError("simulated _apply_canonical_schema failure")
 
-    monkeypatch.setattr(_db, "_apply_v2_schema", _boom, raising=False)
-    # _apply_v2_schema is imported locally inside init_schema — patch via module attr
+    monkeypatch.setattr(_db, "_apply_canonical_schema", _boom, raising=False)
+    # _apply_canonical_schema is imported locally inside init_schema — patch via module attr
     # The local import aliases it; we need to patch the module it's imported FROM.
     # Patch at the schema.v2_schema level instead.
     import src.state.schema.v2_schema as _v2
-    monkeypatch.setattr(_v2, "apply_v2_schema", _boom)
+    monkeypatch.setattr(_v2, "apply_canonical_schema", _boom)
 
     with pytest.raises(RuntimeError, match="simulated"):
         init_schema(conn)
@@ -89,7 +91,7 @@ def test_rel2_pragma_unchanged_on_partial_init_failure(monkeypatch):
     v = conn.execute("PRAGMA user_version").fetchone()[0]
     assert v == 0, (
         f"PRAGMA user_version={v} after failed init_schema; expected 0. "
-        "PRAGMA write must be placed AFTER _apply_v2_schema (§5.2 anchor)."
+        "PRAGMA write must be placed AFTER _apply_canonical_schema (§5.2 anchor)."
     )
 
 
@@ -167,14 +169,11 @@ def test_rel3b_legacy_idempotent_post_reopen2():
 
 # ---------------------------------------------------------------------------
 # REL-4: assert_schema_current is O(1) — 1000 calls < 2 s
+# B2: assert_schema_current is now a no-op; test verifies it still completes quickly.
 # ---------------------------------------------------------------------------
 
 def test_rel4_assert_schema_current_o1():
-    """1000 assert_schema_current calls complete in < 2 s."""
-    assert sqlite3.sqlite_version_info >= (3, 37, 0), (
-        f"SQLite {sqlite3.sqlite_version} < 3.37.0; PRAGMA user_version page-1 "
-        "guarantee may not hold."
-    )
+    """1000 assert_schema_current calls complete in < 2 s (B2: no-op, trivially fast)."""
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
     t0 = time.perf_counter()
@@ -182,8 +181,7 @@ def test_rel4_assert_schema_current_o1():
         assert_schema_current(conn)
     elapsed_ms = (time.perf_counter() - t0) * 1000
     assert elapsed_ms < 2000, (
-        f"assert_schema_current 1000x took {elapsed_ms:.1f} ms (limit 2000 ms). "
-        "PRAGMA user_version must be O(1) page-1 read."
+        f"assert_schema_current 1000x took {elapsed_ms:.1f} ms (limit 2000 ms)."
     )
 
 
@@ -217,13 +215,13 @@ def test_rel6_fixed_point():
 
 
 # ---------------------------------------------------------------------------
-# assert_schema_current raises on mismatch
+# assert_schema_current is a no-op (B2: counter cancelled)
 # ---------------------------------------------------------------------------
 
-def test_assert_raises_on_mismatch():
-    """assert_schema_current raises SchemaOutOfDateError when user_version != SCHEMA_VERSION."""
+def test_assert_schema_current_is_noop():
+    """B2: assert_schema_current is a no-op; does not raise regardless of user_version."""
     conn = sqlite3.connect(":memory:")
-    init_schema(conn)
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
-    with pytest.raises(SchemaOutOfDateError):
-        assert_schema_current(conn)
+    # Should not raise even without init_schema (user_version=0)
+    assert_schema_current(conn)  # no-op
+    conn.execute("PRAGMA user_version = 1")
+    assert_schema_current(conn)  # still no-op

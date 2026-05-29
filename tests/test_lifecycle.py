@@ -2,7 +2,7 @@
 # Lifecycle: created=2025-10-01; last_reviewed=2026-05-08; last_reused=2026-05-08
 # Purpose: Exit-trigger + harvester lifecycle regression tests — covers
 #          position exit detection, harvest_settlement default-HIGH routing
-#          through calibration_pairs_v2 after C5 (2026-04-24), and p_raw
+#          through calibration_pairs after C5 (2026-04-24), and p_raw
 #          skip behavior when ensemble signal is absent.
 # Reuse: Referenced by regression suite; last touched 2026-05-08 for Wave28
 #        (HIGH→v2 route). Apply v2 schema in test fixtures when asserting
@@ -600,14 +600,14 @@ class TestMonitorWhaleToxicity:
 class TestHarvester:
     def test_harvest_creates_pairs(self, tmp_path):
         """Post-C5 (2026-04-24): harvest_settlement default-HIGH path now
-        writes to calibration_pairs_v2 (previously legacy calibration_pairs).
+        writes to calibration_pairs (previously legacy calibration_pairs).
         """
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
 
         db_path = tmp_path / "test.db"
         conn = get_connection(db_path)
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         bin_labels = ["32 or below", "33-34", "35-36", "37-38", "39-40",
                       "41-42", "43-44", "45-46", "47-48", "49-50", "51 or higher"]
@@ -620,15 +620,15 @@ class TestHarvester:
             p_raw_vector=p_raw,
             lead_days=3.0,
             forecast_issue_time="2026-01-12T00:00:00Z",
-            source_model_version="test_lifecycle_v1",
+            forecast_model_id="test_lifecycle_v1",
         )
         conn.commit()
 
         assert count == 11
 
-        # Post-C5: HIGH default routes to calibration_pairs_v2.
+        # Post-C5: HIGH default routes to calibration_pairs.
         rows = conn.execute(
-            "SELECT outcome, COUNT(*) FROM calibration_pairs_v2 GROUP BY outcome"
+            "SELECT outcome, COUNT(*) FROM calibration_pairs GROUP BY outcome"
         ).fetchall()
         outcome_counts = {r[0]: r[1] for r in rows}
         assert outcome_counts[1] == 1

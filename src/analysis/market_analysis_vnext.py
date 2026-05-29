@@ -6,7 +6,7 @@
 Phase 2 T4 production surface:
   - MarketAnalysisVNext(snapshot, history) -> MicrostructureMetrics
   - T4_MERGE_DATE constant (updated at merge time: git log --format=%cI -1 origin/main)
-  - spread_observed_window_ms field plumbed from ExecutableMarketSnapshotV2
+  - spread_observed_window_ms field plumbed from ExecutableMarketSnapshot
     (deferred from PR 2 path-a; verify defer comment at snapshot_repo.py:78)
 
 Storage: market_microstructure_snapshots table on forecasts DB
@@ -21,7 +21,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.strategy.candidates import FamilyOrderBookSnapshot
 
 # T4_MERGE_DATE: placeholder. Production pass overwrites with the merge commit
@@ -66,9 +66,9 @@ class MicrostructureMetrics:
     p_after_lower_bound: Optional[Decimal] = None  # post-event posterior lower bound p1
     stale_quote_price: Optional[Decimal] = None    # executable stale ask a0
 
-    # bin_grid_id propagated from ensemble_snapshots_v2 (F4 retrofit)
+    # bin_grid_id propagated from ensemble_snapshots (F4 retrofit)
     bin_grid_id: Optional[str] = None
-    bin_schema_version: Optional[str] = None
+    bin_schema_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -94,24 +94,24 @@ class MarketAnalysisVNext:
 
     def __init__(
         self,
-        snapshot: "ExecutableMarketSnapshotV2",
+        snapshot: "ExecutableMarketSnapshot",
         history: list[dict],
         *,
         polymarket_end_anchor_source: str = "",
         bin_grid_id: Optional[str] = None,
-        bin_schema_version: Optional[str] = None,
+        bin_schema_id: Optional[str] = None,
         family_book_snapshot: "Optional[FamilyOrderBookSnapshot]" = None,
     ) -> None:
         """
         Args:
-            snapshot: ExecutableMarketSnapshotV2 captured before order submission.
+            snapshot: ExecutableMarketSnapshot captured before order submission.
             history: Recent market_price_history rows (world DB) for this market.
                      Used for windowed spread observation (spread_observed_window_ms).
             polymarket_end_anchor_source: Derived by caller via market_end_anchor_source(market).
                      'gamma_explicit' | 'f1_12z_fallback'.
-            bin_grid_id: From ensemble_snapshots_v2.bin_grid_id for this snapshot's
+            bin_grid_id: From ensemble_snapshots.bin_grid_id for this snapshot's
                      triggering cycle (F4 retrofit).
-            bin_schema_version: Companion to bin_grid_id.
+            bin_schema_id: Companion to bin_grid_id.
             family_book_snapshot: Optional caller-injected neg-risk family order-book
                      snapshot. When present, neg_risk_basket.evaluate() reads per-leg
                      depth for exact sweep-cost / profit calculation (§11.5-11.8).
@@ -120,7 +120,7 @@ class MarketAnalysisVNext:
         self._history = history
         self._polymarket_end_anchor_source = polymarket_end_anchor_source
         self._bin_grid_id = bin_grid_id
-        self._bin_schema_version = bin_schema_version
+        self._bin_schema_id = bin_schema_id
         self._family_book_snapshot = family_book_snapshot
 
     @property
@@ -137,7 +137,7 @@ class MarketAnalysisVNext:
 
         Spread threshold: WIDE_SPREAD_THRESHOLD_USD = 0.10 USD.
         """
-        from src.contracts.executable_market_snapshot_v2 import WIDE_SPREAD_THRESHOLD_USD
+        from src.contracts.executable_market_snapshot import WIDE_SPREAD_THRESHOLD_USD
 
         snapshot = self._snapshot
         bid = snapshot.orderbook_top_bid
@@ -175,7 +175,7 @@ class MarketAnalysisVNext:
             p_after_lower_bound=p_after_lower_bound,
             stale_quote_price=stale_quote_price,
             bin_grid_id=self._bin_grid_id,
-            bin_schema_version=self._bin_schema_version,
+            bin_schema_id=self._bin_schema_id,
         )
 
 
@@ -199,7 +199,7 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return None
 
 
-def _queue_depth_ahead(snapshot: "ExecutableMarketSnapshotV2", quote_price: Decimal) -> Decimal | None:
+def _queue_depth_ahead(snapshot: "ExecutableMarketSnapshot", quote_price: Decimal) -> Decimal | None:
     try:
         orderbook = json.loads(snapshot.orderbook_depth_jsonb)
     except Exception:
@@ -222,7 +222,7 @@ def _queue_depth_ahead(snapshot: "ExecutableMarketSnapshotV2", quote_price: Deci
 
 def estimate_passive_maker_execution(
     conn: Any,
-    snapshot: "ExecutableMarketSnapshotV2",
+    snapshot: "ExecutableMarketSnapshot",
     *,
     quote_price: Decimal,
 ) -> PassiveMakerExecutionEstimate | None:

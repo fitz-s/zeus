@@ -19,7 +19,7 @@ on:
       - "tests/test_pre_existing_failure_registry.py"
       - "tests/test_monitor_refresh_nowcast_wiring.py"
       - "tests/test_strategy_profile_registry.py"
-      - "tests/test_executable_market_snapshot_v2.py"
+      - "tests/test_executable_market_snapshot.py"
       - "tests/test_market_scanner_negrisk.py"
       - "tests/test_decision_seq_cross_table_no_collision.py"
       - "tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py"
@@ -40,7 +40,7 @@ on:
       - "tests/test_pre_existing_failure_registry.py"
       - "tests/test_monitor_refresh_nowcast_wiring.py"
       - "tests/test_strategy_profile_registry.py"
-      - "tests/test_executable_market_snapshot_v2.py"
+      - "tests/test_executable_market_snapshot.py"
       - "tests/test_market_scanner_negrisk.py"
       - "tests/test_decision_seq_cross_table_no_collision.py"
       - "tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py"
@@ -87,13 +87,13 @@ jobs:
           echo "review_condition=${GATE_REVIEW_CONDITION}"
 
       - name: Check pinned schema contract
-        run: python scripts/check_schema_version.py
+        run: python scripts/check_schema_fingerprint.py
 
       - name: Run required money-path antibodies
         run: |
           pytest -q \
             tests/test_live_release_gate.py \
-            tests/test_executable_market_snapshot_v2.py \
+            tests/test_executable_market_snapshot.py \
             tests/test_market_scanner_negrisk.py \
             tests/test_decision_seq_cross_table_no_collision.py \
             tests/test_no_trade_events_check_accepts_all_shoulder_reasons.py \

@@ -8,7 +8,7 @@
 # Reuse: Run after run_offline_calibration_rebuild.py completes.
 """Offline driver: run refit_all_v2() against an ISOLATED staging DB.
 
-Mirrors run_offline_calibration_rebuild.py. `refit_platt_v2.py main()` wraps the
+Mirrors run_offline_calibration_rebuild.py. `refit_platt.py main()` wraps the
 refit in an operator promotion preflight that guards the SHARED world DB. This
 driver calls `refit_all_v2` directly against an explicit isolated DB (refusing
 the canonical world DB). The in-function rebuild-complete sentinel gate
@@ -33,7 +33,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Offline isolated platt_models_v2 refit.")
+    ap = argparse.ArgumentParser(description="Offline isolated platt_models refit.")
     ap.add_argument("--db", required=True)
     ap.add_argument("--temperature-metric", default="all", choices=("high", "low", "all"))
     ap.add_argument("--data-version", default=None)
@@ -44,12 +44,12 @@ def main() -> int:
     ap.add_argument("--error-model", default="none")
     args = ap.parse_args()
 
-    from scripts.refit_platt_v2 import refit_all_v2  # noqa: PLC0415
-    from scripts.rebuild_calibration_pairs_v2 import (  # noqa: PLC0415
+    from scripts.refit_platt import refit_all_v2  # noqa: PLC0415
+    from scripts.rebuild_calibration_pairs import (  # noqa: PLC0415
         _resolve_isolated_calibration_write_db_path,
     )
     from src.state.db import init_schema  # noqa: PLC0415
-    from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+    from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
 
     write_db_path = _resolve_isolated_calibration_write_db_path(
         args.db, script_name="run_offline_platt_refit.py"
@@ -59,7 +59,7 @@ def main() -> int:
     conn.execute("PRAGMA busy_timeout = 600000")
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     try:
         per_metric = refit_all_v2(
             conn,

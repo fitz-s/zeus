@@ -137,7 +137,7 @@ def _attach_world_overlay(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_snapshot(conn: sqlite3.Connection) -> str:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 
     snapshot_id = "snap-entry"
     if get_snapshot(conn, snapshot_id) is not None:
@@ -145,7 +145,7 @@ def _ensure_snapshot(conn: sqlite3.Connection) -> str:
     captured_at = datetime.now(timezone.utc)
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-live",
             event_id="event-live",

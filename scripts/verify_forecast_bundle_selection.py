@@ -58,7 +58,7 @@ SQL_ALL_CYCLES = """
     SELECT snapshot_id, source_run_id, source_cycle_time, available_at,
            contributes_to_target_extrema, forecast_window_attribution_status,
            boundary_ambiguous, members_json, data_version
-    FROM ensemble_snapshots_v2
+    FROM ensemble_snapshots
     WHERE city = ?
       AND target_date = ?
       AND temperature_metric = ?

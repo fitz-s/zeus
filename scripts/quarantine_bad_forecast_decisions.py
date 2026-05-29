@@ -16,7 +16,7 @@ K1 DB split routing:
   - opportunity_fact, decision_events, probability_trace_fact,
     selection_family_fact, selection_hypothesis_fact  → world DB
     (ATTACHes forecasts as 'forecasts'; writes into trade.decision_integrity_quarantine)
-  - calibration_pairs_v2 → forecasts DB
+  - calibration_pairs → forecasts DB
     (ATTACHes trade as 'trade'; writes into trade.decision_integrity_quarantine)
 
 Safety:
@@ -44,7 +44,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.state.db import ZEUS_FORECASTS_DB_PATH, ZEUS_WORLD_DB_PATH, _zeus_trade_db_path  # noqa: E402
 from src.state.decision_integrity_quarantine import (  # noqa: E402
-    quarantine_calibration_pairs_v2_for_noncontributing_forecast,
+    quarantine_calibration_pairs_for_noncontributing_forecast,
     quarantine_decision_events_for_noncontributing_forecast,
     quarantine_decisions_for_noncontributing_forecast,
     quarantine_probability_trace_fact_for_noncontributing_forecast,
@@ -156,9 +156,9 @@ def _run_forecasts_tables(
     *,
     dry_run: bool,
 ) -> dict:
-    """Quarantine forecasts-side tables: calibration_pairs_v2.
+    """Quarantine forecasts-side tables: calibration_pairs.
 
-    Opens forecasts DB as main (ensemble_snapshots_v2 co-located);
+    Opens forecasts DB as main (ensemble_snapshots co-located);
     ATTACHes trade as 'trade' for writing decision_integrity_quarantine.
     """
     conn = _connect_rw(forecasts_db)
@@ -188,12 +188,12 @@ def _run_forecasts_tables(
                     trade.idx_decision_integrity_quarantine_reason
                     ON decision_integrity_quarantine(reason_code, recorded_at)
             """)
-        result = quarantine_calibration_pairs_v2_for_noncontributing_forecast(conn, dry_run=dry_run)
+        result = quarantine_calibration_pairs_for_noncontributing_forecast(conn, dry_run=dry_run)
         if dry_run is False:
             conn.commit()
     finally:
         conn.close()
-    return {"calibration_pairs_v2": result}
+    return {"calibration_pairs": result}
 
 
 def main() -> None:

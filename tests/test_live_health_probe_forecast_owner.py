@@ -44,7 +44,7 @@ def test_live_probe_loaded_code_surface_includes_recovery_and_m5_paths():
     daemon_paths = set(module.PROCESS_CODE_SURFACES["daemon"])
 
     assert "src/engine/evaluator.py" in daemon_paths
-    assert "src/contracts/executable_market_snapshot_v2.py" in daemon_paths
+    assert "src/contracts/executable_market_snapshot.py" in daemon_paths
     assert "src/contracts/execution_intent.py" in daemon_paths
     assert "src/data/market_scanner.py" in daemon_paths
     assert "src/control/ws_gap_guard.py" in daemon_paths
@@ -421,7 +421,7 @@ def test_forecast_ready_uses_latest_safe_cycle_not_arbitrary_latest_blocked_row(
         "INSERT INTO source_run_coverage VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             "ecmwf_open_data",
-            "ensemble_snapshots_v2_db_reader",
+            "ensemble_snapshots_db_reader",
             source_run_id,
             "mx2t6_high_full_horizon",
             "high",

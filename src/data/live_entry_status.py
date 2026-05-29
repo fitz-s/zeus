@@ -63,19 +63,19 @@ def _is_live_readiness_current(row: sqlite3.Row, *, now_utc: datetime) -> bool:
 
 
 def count_executable_opendata_rows(conn: sqlite3.Connection, *, config: EntryForecastConfig) -> int:
-    if not _table_exists(conn, "ensemble_snapshots_v2"):
+    if not _table_exists(conn, "ensemble_snapshots"):
         return 0
     row = conn.execute(
         """
         SELECT COUNT(*) AS count
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE source_id = ?
           AND source_transport = ?
           AND source_run_id IS NOT NULL
           AND release_calendar_key IS NOT NULL
           AND source_cycle_time IS NOT NULL
           AND source_release_time IS NOT NULL
-          AND data_version IN (?, ?, ?, ?)
+          AND dataset_id IN (?, ?, ?, ?)
         """,
         (
             config.source_id,

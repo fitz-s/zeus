@@ -1,7 +1,7 @@
 # Created: 2026-04-24
 # Last reused/audited: 2026-05-18
 # Lifecycle: created=2026-04-24; last_reviewed=2026-05-18; last_reused=2026-05-18
-# Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C6; task_2026-04-29 Phase 1B F08 learning guard; task_2026-04-29 Phase 5C.4 settlements_v2 producer; task_2026-04-29 Phase 5C.5 market_events_v2 outcome producer
+# Authority basis: POST_AUDIT_HANDOFF_2026-04-24 §3.1 C6; task_2026-04-29 Phase 1B F08 learning guard; task_2026-04-29 Phase 5C.4 settlement_outcomes producer; task_2026-04-29 Phase 5C.5 market_events outcome producer
 # Purpose: INV-14 identity spine antibody for harvester settlement writes —
 #          pins temperature_metric / physical_quantity / observation_field to
 #          canonical HIGH_LOCALDAY_MAX.* so regression to the legacy literal
@@ -66,14 +66,14 @@ except ModuleNotFoundError:
 from src.backtest.economics import check_economics_readiness
 from src.config import City
 from src.execution import harvester as harvester_mod
-from src.state.db import init_schema, log_market_event_outcome_v2, log_settlement_v2
+from src.state.db import init_schema, log_market_event_outcome, log_settlement_v2
 from src.state.portfolio import (
     ENTRY_ECONOMICS_OPTIMISTIC_MATCH_PRICE,
     FILL_AUTHORITY_OPTIMISTIC_SUBMITTED,
     PortfolioState,
     Position,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -108,7 +108,7 @@ def _insert_market_event_v2(
 ) -> None:
     conn.execute(
         """
-        INSERT INTO market_events_v2 (
+        INSERT INTO market_events (
             market_slug, city, target_date, temperature_metric,
             condition_id, token_id, range_label, range_low, range_high,
             outcome, created_at, recorded_at
@@ -138,7 +138,7 @@ def harvester_conn():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -210,7 +210,7 @@ def test_harvester_low_settlement_uses_canonical_low_identity(harvester_conn):
     v2_row = harvester_conn.execute(
         """
         SELECT temperature_metric, settlement_value
-        FROM settlements_v2
+        FROM settlement_outcomes
         WHERE city = ? AND target_date = ? AND temperature_metric = 'low'
         """,
         (city.name, "2026-04-24"),
@@ -372,7 +372,7 @@ def test_harvester_imports_high_localday_max():
     assert "from src.types.metric_identity" in text
 
 
-def test_harvester_settlement_mirrors_verified_to_settlements_v2(harvester_conn):
+def test_harvester_settlement_mirrors_verified_to_settlement_outcomes(harvester_conn):
     """Phase 5C.4: harvester writes v2 settlement substrate in the same transaction."""
     city = _make_city("v2_verified")
     result = harvester_mod._write_settlement_truth(
@@ -397,7 +397,7 @@ def test_harvester_settlement_mirrors_verified_to_settlements_v2(harvester_conn)
         SELECT city, target_date, temperature_metric, market_slug, winning_bin,
                settlement_value, settlement_source, settled_at, authority,
                provenance_json
-        FROM settlements_v2
+        FROM settlement_outcomes
         WHERE city = ? AND target_date = ? AND temperature_metric = 'high'
         """,
         (city.name, "2026-04-24"),
@@ -424,7 +424,7 @@ def test_harvester_settlement_mirrors_verified_to_settlements_v2(harvester_conn)
 
     readiness = check_economics_readiness(harvester_conn)
     assert readiness.ready is False
-    assert "empty_table:settlements_v2" not in readiness.blockers
+    assert "empty_table:settlement_outcomes" not in readiness.blockers
     assert "economics_engine_not_implemented" in readiness.blockers
 
 
@@ -515,7 +515,7 @@ def test_resolved_gamma_child_identity_requires_exactly_one_winner():
     assert harvester_mod._find_winning_bin(event) == (None, None)
 
 
-def test_harvester_verified_settlement_updates_market_events_v2_by_identity(harvester_conn):
+def test_harvester_verified_settlement_updates_market_events_by_identity(harvester_conn):
     """Phase 5C.5: VERIFIED settlement writes YES/NO outcomes by exact child id."""
     city = _make_city("v2_outcome_city")
     market_slug = "highest-temperature-in-v2-outcome-city-on-april-24-2026"
@@ -574,14 +574,14 @@ def test_harvester_verified_settlement_updates_market_events_v2_by_identity(harv
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["market_events_v2"]["status"] == "written"
-    assert result["market_events_v2"]["written"] == 2
+    assert result["market_events"]["status"] == "written"
+    assert result["market_events"]["written"] == 2
     rows = {
         row["condition_id"]: row["outcome"]
         for row in harvester_conn.execute(
             """
             SELECT condition_id, outcome
-            FROM market_events_v2
+            FROM market_events
             WHERE market_slug = ?
             """,
             (market_slug,),
@@ -594,7 +594,7 @@ def test_harvester_verified_settlement_updates_market_events_v2_by_identity(harv
     assert "economics_engine_not_implemented" in readiness.blockers
 
 
-def test_harvester_market_events_v2_update_requires_existing_child_identity(harvester_conn):
+def test_harvester_market_events_update_requires_existing_child_identity(harvester_conn):
     """The outcome producer does not insert missing child markets by label."""
     city = _make_city("v2_outcome_missing")
     market_slug = "highest-temperature-in-v2-outcome-missing-on-april-24-2026"
@@ -625,15 +625,15 @@ def test_harvester_market_events_v2_update_requires_existing_child_identity(harv
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["market_events_v2"]["status"] == "skipped_no_updates"
-    assert result["market_events_v2"]["skipped_missing_market_event"] == 1
+    assert result["market_events"]["status"] == "skipped_no_updates"
+    assert result["market_events"]["skipped_missing_market_event"] == 1
     assert harvester_conn.execute(
-        "SELECT COUNT(*) FROM market_events_v2 WHERE market_slug = ?",
+        "SELECT COUNT(*) FROM market_events WHERE market_slug = ?",
         (market_slug,),
     ).fetchone()[0] == 0
 
 
-def test_harvester_market_events_v2_batch_is_all_or_nothing(harvester_conn):
+def test_harvester_market_events_batch_is_all_or_nothing(harvester_conn):
     """One bad child identity must not leave a partially resolved market family."""
     city = _make_city("v2_outcome_atomic")
     market_slug = "highest-temperature-in-v2-outcome-atomic-on-april-24-2026"
@@ -679,13 +679,13 @@ def test_harvester_market_events_v2_batch_is_all_or_nothing(harvester_conn):
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["market_events_v2"]["status"] == "skipped_no_updates"
-    assert result["market_events_v2"]["written"] == 0
-    assert result["market_events_v2"]["skipped_missing_market_event"] == 1
+    assert result["market_events"]["status"] == "skipped_no_updates"
+    assert result["market_events"]["written"] == 0
+    assert result["market_events"]["skipped_missing_market_event"] == 1
     outcome = harvester_conn.execute(
         """
         SELECT outcome
-        FROM market_events_v2
+        FROM market_events
         WHERE market_slug = ? AND condition_id = ?
         """,
         (market_slug, "cond-present"),
@@ -693,11 +693,11 @@ def test_harvester_market_events_v2_batch_is_all_or_nothing(harvester_conn):
     assert outcome is None
 
 
-def test_log_market_event_outcome_v2_skips_missing_table_without_creating_schema():
+def test_log_market_event_outcome_skips_missing_table_without_creating_schema():
     """Capability-absent path is explicit and has no DDL side effect."""
     conn = sqlite3.connect(":memory:")
 
-    result = log_market_event_outcome_v2(
+    result = log_market_event_outcome(
         conn,
         market_slug="market-slug",
         city="NoSchema",
@@ -708,13 +708,13 @@ def test_log_market_event_outcome_v2_skips_missing_table_without_creating_schema
         outcome="YES",
     )
 
-    assert result == {"status": "skipped_missing_table", "table": "market_events_v2"}
+    assert result == {"status": "skipped_missing_table", "table": "market_events"}
     assert conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0] == 0
 
 
-def test_harvester_market_events_v2_update_refuses_token_mismatch(harvester_conn):
+def test_harvester_market_events_update_refuses_token_mismatch(harvester_conn):
     """condition_id alone is insufficient; YES token identity must also match."""
     city = _make_city("v2_outcome_mismatch")
     market_slug = "highest-temperature-in-v2-outcome-mismatch-on-april-24-2026"
@@ -752,12 +752,12 @@ def test_harvester_market_events_v2_update_refuses_token_mismatch(harvester_conn
     )
 
     assert result["authority"] == "VERIFIED"
-    assert result["market_events_v2"]["status"] == "conflicted"
-    assert result["market_events_v2"]["refused_identity_mismatch"] == 1
+    assert result["market_events"]["status"] == "conflicted"
+    assert result["market_events"]["refused_identity_mismatch"] == 1
     outcome = harvester_conn.execute(
         """
         SELECT outcome
-        FROM market_events_v2
+        FROM market_events
         WHERE market_slug = ? AND condition_id = ?
         """,
         (market_slug, "cond-winner"),
@@ -765,8 +765,8 @@ def test_harvester_market_events_v2_update_refuses_token_mismatch(harvester_conn
     assert outcome is None
 
 
-def test_harvester_quarantined_settlement_does_not_write_market_events_v2_outcome(harvester_conn):
-    """market_events_v2 has no authority column, so quarantined settlement cannot resolve it."""
+def test_harvester_quarantined_settlement_does_not_write_market_events_outcome(harvester_conn):
+    """market_events has no authority column, so quarantined settlement cannot resolve it."""
     city = _make_city("v2_outcome_quarantine")
     market_slug = "highest-temperature-in-v2-outcome-quarantine-on-april-24-2026"
     _insert_market_event_v2(
@@ -803,11 +803,11 @@ def test_harvester_quarantined_settlement_does_not_write_market_events_v2_outcom
     )
 
     assert result["authority"] == "QUARANTINED"
-    assert result["market_events_v2"]["status"] == "skipped_unverified_settlement"
+    assert result["market_events"]["status"] == "skipped_unverified_settlement"
     outcome = harvester_conn.execute(
         """
         SELECT outcome
-        FROM market_events_v2
+        FROM market_events
         WHERE market_slug = ? AND condition_id = ?
         """,
         (market_slug, "cond-winner"),
@@ -815,7 +815,7 @@ def test_harvester_quarantined_settlement_does_not_write_market_events_v2_outcom
     assert outcome is None
 
 
-def test_harvester_settlement_without_market_slug_skips_settlements_v2(harvester_conn):
+def test_harvester_settlement_without_market_slug_skips_settlement_outcomes(harvester_conn):
     """v2 settlement rows require market identity; legacy compatibility may still write."""
     city = _make_city("v2_missing_slug")
 
@@ -842,14 +842,14 @@ def test_harvester_settlement_without_market_slug_skips_settlements_v2(harvester
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     v2_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM settlements_v2 WHERE city = ? AND target_date = ?",
+        "SELECT COUNT(*) FROM settlement_outcomes WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     assert legacy_count == 1
     assert v2_count == 0
 
 
-def test_harvester_settlement_mirrors_quarantine_to_settlements_v2(harvester_conn):
+def test_harvester_settlement_mirrors_quarantine_to_settlement_outcomes(harvester_conn):
     """Quarantined legacy settlements do not get promoted to VERIFIED in v2."""
     city = _make_city("v2_quarantined")
 
@@ -872,7 +872,7 @@ def test_harvester_settlement_mirrors_quarantine_to_settlements_v2(harvester_con
     row = harvester_conn.execute(
         """
         SELECT authority, settlement_value, winning_bin, provenance_json
-        FROM settlements_v2
+        FROM settlement_outcomes
         WHERE city = ? AND target_date = ?
         """,
         (city.name, "2026-04-24"),
@@ -886,7 +886,7 @@ def test_harvester_settlement_mirrors_quarantine_to_settlements_v2(harvester_con
     assert provenance["quarantine_reason"] == "harvester_live_obs_outside_bin"
 
 
-def test_harvester_settlements_v2_mirror_is_idempotent(harvester_conn):
+def test_harvester_settlement_outcomes_mirror_is_idempotent(harvester_conn):
     """v2 uses ON CONFLICT update, not INSERT OR REPLACE duplicate rows."""
     city = _make_city("v2_idempotent")
     kwargs = {
@@ -919,11 +919,11 @@ def test_harvester_settlements_v2_mirror_is_idempotent(harvester_conn):
     )
 
     count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM settlements_v2 WHERE city = ? AND target_date = ?",
+        "SELECT COUNT(*) FROM settlement_outcomes WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     row = harvester_conn.execute(
-        "SELECT provenance_json FROM settlements_v2 WHERE city = ? AND target_date = ?",
+        "SELECT provenance_json FROM settlement_outcomes WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
     ).fetchone()
     provenance = json.loads(row["provenance_json"])
@@ -951,7 +951,7 @@ def test_log_settlement_v2_skips_missing_table_without_creating_schema():
         recorded_at="2026-04-24T23:00:00Z",
     )
 
-    assert result == {"status": "skipped_missing_table", "table": "settlements_v2"}
+    assert result == {"status": "skipped_missing_table", "table": "settlement_outcomes"}
     assert conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0] == 0
@@ -960,10 +960,10 @@ def test_log_settlement_v2_skips_missing_table_without_creating_schema():
 def test_harvester_settlement_v2_missing_unique_key_does_not_abort_legacy_write(harvester_conn):
     """Malformed v2 schema cannot block the legacy settlement truth write."""
     city = _make_city("v2_bad_unique")
-    harvester_conn.execute("DROP TABLE settlements_v2")
+    harvester_conn.execute("DROP TABLE settlement_outcomes")
     harvester_conn.execute(
         """
-        CREATE TABLE settlements_v2 (
+        CREATE TABLE settlement_outcomes (
             settlement_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT,
             target_date TEXT,
@@ -1007,7 +1007,7 @@ def test_harvester_settlement_v2_missing_unique_key_does_not_abort_legacy_write(
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     v2_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM settlements_v2 WHERE city = ? AND target_date = ?",
+        "SELECT COUNT(*) FROM settlement_outcomes WHERE city = ? AND target_date = ?",
         (city.name, "2026-04-24"),
     ).fetchone()[0]
     assert legacy_count == 1
@@ -1083,7 +1083,7 @@ def test_lookup_settlement_obs_rejects_unverified_or_wrong_station_rows(harveste
 
 def test_missing_forecast_issue_time_does_not_create_training_pairs(harvester_conn):
     """F08: runtime-only snapshots without issue time must not enter training."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("openmeteo_audit_only")
 
     count = harvester_mod.harvest_settlement(
@@ -1096,21 +1096,21 @@ def test_missing_forecast_issue_time_does_not_create_training_pairs(harvester_co
         lead_days=1.0,
         forecast_issue_time=None,
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
     )
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
 
 
 def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_conn):
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("openmeteo_lineage")
 
     count = harvester_mod.harvest_settlement(
@@ -1123,7 +1123,7 @@ def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_co
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version="openmeteo_ecmwf_ifs025_live_v1",
+        forecast_model_id="openmeteo_ecmwf_ifs025_live_v1",
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_id="123",
@@ -1132,16 +1132,16 @@ def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_co
     assert count == 3
     rows = harvester_conn.execute(
         """
-        SELECT data_version, training_allowed, causality_status, snapshot_id,
+        SELECT dataset_id, training_allowed, causality_status, snapshot_id,
                cycle, source_id, horizon_profile
-        FROM calibration_pairs_v2
+        FROM calibration_pairs
         WHERE city = ?
         """,
         (city.name,),
     ).fetchall()
     assert len(rows) == 3
     for row in rows:
-        assert row["data_version"] == "openmeteo_ecmwf_ifs025_live_v1"
+        assert row["dataset_id"] == "openmeteo_ecmwf_ifs025_live_v1"
         assert row["training_allowed"] == 0
         assert row["snapshot_id"] == 123
         assert row["cycle"] == "00"
@@ -1150,7 +1150,7 @@ def test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair(harvester_co
 
 
 def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harvester_conn):
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("malformed_issue_time")
 
     count = harvester_mod.harvest_settlement(
@@ -1163,7 +1163,7 @@ def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harveste
         lead_days=1.0,
         forecast_issue_time="not-a-forecast-cycle",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_id="130",
@@ -1171,7 +1171,7 @@ def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harveste
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1179,7 +1179,7 @@ def test_malformed_forecast_issue_time_does_not_default_to_tigge_bucket(harveste
 
 def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn):
     """An explicit not-training snapshot cannot become calibration-pair truth."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("snapshot_training_disallowed")
 
     count = harvester_mod.harvest_settlement(
@@ -1192,7 +1192,7 @@ def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_training_allowed=False,
@@ -1201,7 +1201,7 @@ def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1209,10 +1209,10 @@ def test_snapshot_training_disallowed_blocks_direct_harvest_pairs(harvester_conn
 
 def test_context_explicit_training_disallow_overrides_learning_ready(harvester_conn):
     """Wrapper must preserve explicit training disallow over readiness fallback."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("context_training_disallowed")
     context = {
-        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
         "snapshot_training_allowed": False,
         "snapshot_learning_ready": True,
         "p_raw_vector": [0.2, 0.5, 0.3],
@@ -1236,7 +1236,7 @@ def test_context_explicit_training_disallow_overrides_learning_ready(harvester_c
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1244,7 +1244,7 @@ def test_context_explicit_training_disallow_overrides_learning_ready(harvester_c
 
 def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
     """Runtime/fallback snapshot causality cannot become training truth."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("snapshot_causality_blocked")
 
     count = harvester_mod.harvest_settlement(
@@ -1257,7 +1257,7 @@ def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_training_allowed=True,
@@ -1267,7 +1267,7 @@ def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1275,10 +1275,10 @@ def test_snapshot_causality_not_ok_blocks_direct_harvest_pairs(harvester_conn):
 
 def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
     """Wrapper must treat non-OK causality as non-training evidence."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city("context_causality_blocked")
     context = {
-        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
         "snapshot_training_allowed": True,
         "snapshot_learning_ready": True,
         "p_raw_vector": [0.2, 0.5, 0.3],
@@ -1302,7 +1302,7 @@ def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1311,7 +1311,7 @@ def test_context_causality_not_ok_blocks_learning_pairs(harvester_conn):
 @pytest.mark.parametrize("flag_value", ["False", "0", "true"])
 def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn, flag_value):
     """Serialized flags are not authoritative training permission."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city(f"serialized_direct_{flag_value}")
 
     count = harvester_mod.harvest_settlement(
@@ -1324,7 +1324,7 @@ def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn
         lead_days=1.0,
         forecast_issue_time="2026-04-23T00:00:00Z",
         forecast_available_at="2026-04-23T00:00:00Z",
-        source_model_version=HIGH_LOCALDAY_MAX.data_version,
+        forecast_model_id=HIGH_LOCALDAY_MAX.data_version,
         settlement_value=87.0,
         temperature_metric="high",
         snapshot_training_allowed=flag_value,
@@ -1333,7 +1333,7 @@ def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1342,10 +1342,10 @@ def test_serialized_training_disallow_blocks_direct_harvest_pairs(harvester_conn
 @pytest.mark.parametrize("flag_value", ["False", "0", "true"])
 def test_serialized_context_training_disallow_blocks_learning_pairs(harvester_conn, flag_value):
     """Serialized context flags cannot override the fail-closed training gate."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     city = _make_city(f"serialized_context_{flag_value}")
     context = {
-        "source_model_version": HIGH_LOCALDAY_MAX.data_version,
+        "forecast_model_id": HIGH_LOCALDAY_MAX.data_version,
         "snapshot_training_allowed": flag_value,
         "snapshot_learning_ready": True,
         "p_raw_vector": [0.2, 0.5, 0.3],
@@ -1369,7 +1369,7 @@ def test_serialized_context_training_disallow_blocks_learning_pairs(harvester_co
 
     assert count == 0
     pair_count = harvester_conn.execute(
-        "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE city = ?",
+        "SELECT COUNT(*) FROM calibration_pairs WHERE city = ?",
         (city.name,),
     ).fetchone()[0]
     assert pair_count == 0
@@ -1382,9 +1382,10 @@ def test_snapshot_context_missing_issue_time_is_audit_only(harvester_conn):
         INSERT INTO ensemble_snapshots (
             city, target_date, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, p_raw_json, spread, is_bimodal,
-            model_version, data_version, authority, temperature_metric
+            model_version, dataset_id, authority, temperature_metric,
+            physical_quantity, observation_field
         )
-        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "NYC",
@@ -1401,6 +1402,8 @@ def test_snapshot_context_missing_issue_time_is_audit_only(harvester_conn):
             "live_v1",
             "VERIFIED",
             "high",
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
         ),
     )
     snapshot_id = str(cur.lastrowid)
@@ -1431,44 +1434,18 @@ def test_snapshot_context_missing_issue_time_is_audit_only(harvester_conn):
 
 
 def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_conn):
-    """DSA-13: harvester learning context reads canonical v2 before legacy."""
-    apply_v2_schema(harvester_conn)
+    """DSA-13: canonical ensemble_snapshots row with training_allowed=0 is not learning-ready."""
+    apply_canonical_schema(harvester_conn)
+    # B3 (2026-05-28): snapshot_id is PRIMARY KEY — only one canonical row per id.
+    # Test now inserts a single canonical v2 row with training_allowed=0 to verify
+    # snapshot_learning_ready=False is reported correctly.
     harvester_conn.execute(
         """
         INSERT INTO ensemble_snapshots (
-            snapshot_id, city, target_date, issue_time, valid_time,
-            available_at, fetch_time, lead_hours, members_json, p_raw_json,
-            spread, is_bimodal, model_version, data_version, authority,
-            temperature_metric
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            501,
-            "NYC",
-            "2026-04-24",
-            "2026-04-23T00:00:00Z",
-            "2026-04-24T00:00:00Z",
-            "2026-04-23T00:05:00Z",
-            "2026-04-23T00:05:00Z",
-            24.0,
-            "[70,71,72]",
-            "[0.1,0.8,0.1]",
-            2.0,
-            0,
-            "legacy_model",
-            "legacy_v1",
-            "VERIFIED",
-            "high",
-        ),
-    )
-    harvester_conn.execute(
-        """
-        INSERT INTO ensemble_snapshots_v2 (
             snapshot_id, city, target_date, temperature_metric,
             physical_quantity, observation_field, issue_time, valid_time,
             available_at, fetch_time, lead_hours, members_json, p_raw_json,
-            spread, is_bimodal, model_version, data_version, training_allowed,
+            spread, is_bimodal, model_version, dataset_id, training_allowed,
             causality_status, boundary_ambiguous, provenance_json, authority,
             members_unit, unit
         )
@@ -1506,8 +1483,8 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
     p_raw = harvester_mod.get_snapshot_p_raw(harvester_conn, "501")
 
     assert context is not None
-    assert context["snapshot_source"] == "ensemble_snapshots_v2"
-    assert context["source_model_version"] == HIGH_LOCALDAY_MAX.data_version
+    assert context["snapshot_source"] == "ensemble_snapshots"
+    assert context["forecast_model_id"] == HIGH_LOCALDAY_MAX.data_version
     assert context["p_raw_vector"] == [0.2, 0.5, 0.3]
     assert context["snapshot_learning_ready"] is False
     assert context["learning_blocked_reason"] == "snapshot_training_not_allowed"
@@ -1517,15 +1494,16 @@ def test_snapshot_context_prefers_v2_and_respects_training_allowed(harvester_con
 
 def test_snapshot_context_preserves_legacy_fallback_when_no_v2_row(harvester_conn):
     """DSA-13: legacy diagnostic snapshot rows remain readable if v2 has no id."""
-    apply_v2_schema(harvester_conn)
+    apply_canonical_schema(harvester_conn)
     cur = harvester_conn.execute(
         """
         INSERT INTO ensemble_snapshots (
             city, target_date, issue_time, valid_time, available_at, fetch_time,
             lead_hours, members_json, p_raw_json, spread, is_bimodal,
-            model_version, data_version, authority, temperature_metric
+            model_version, dataset_id, authority, temperature_metric,
+            physical_quantity, observation_field
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "NYC",
@@ -1543,6 +1521,8 @@ def test_snapshot_context_preserves_legacy_fallback_when_no_v2_row(harvester_con
             "legacy_v1",
             "VERIFIED",
             "high",
+            HIGH_LOCALDAY_MAX.physical_quantity,
+            HIGH_LOCALDAY_MAX.observation_field,
         ),
     )
     snapshot_id = str(cur.lastrowid)
@@ -1552,24 +1532,28 @@ def test_snapshot_context_preserves_legacy_fallback_when_no_v2_row(harvester_con
 
     assert context is not None
     assert context["snapshot_source"] == "ensemble_snapshots"
-    assert context["source_model_version"] == "legacy_v1"
+    assert context["forecast_model_id"] == "legacy_v1"
     assert context["snapshot_learning_ready"] is True
     assert context["learning_blocked_reason"] == ""
     assert p_raw == [0.2, 0.5, 0.3]
 
 
 def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(harvester_conn):
-    """DSA-13: legacy snapshot ids must not bind to unrelated v2 rows."""
-    apply_v2_schema(harvester_conn)
+    """DSA-13: snapshot identity predicates (city/date/metric) filter to the correct row."""
+    apply_canonical_schema(harvester_conn)
+    # B3 (2026-05-28): snapshot_id is PRIMARY KEY — only one canonical row per id.
+    # Test now inserts one canonical row with city=NYC, verifies identity predicates
+    # return the correct row and that a query with wrong identity returns None (tested
+    # by the correct-city assertion on the result).
     harvester_conn.execute(
         """
         INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, issue_time, valid_time,
             available_at, fetch_time, lead_hours, members_json, p_raw_json,
-            spread, is_bimodal, model_version, data_version, authority,
-            temperature_metric
+            spread, is_bimodal, model_version, dataset_id, authority,
+            temperature_metric, physical_quantity, observation_field
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             777,
@@ -1588,45 +1572,8 @@ def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(har
             "legacy_v1",
             "VERIFIED",
             "high",
-        ),
-    )
-    harvester_conn.execute(
-        """
-        INSERT INTO ensemble_snapshots_v2 (
-            snapshot_id, city, target_date, temperature_metric,
-            physical_quantity, observation_field, issue_time, valid_time,
-            available_at, fetch_time, lead_hours, members_json, p_raw_json,
-            spread, is_bimodal, model_version, data_version, training_allowed,
-            causality_status, boundary_ambiguous, provenance_json, authority,
-            members_unit, unit
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            777,
-            "LA",
-            "2026-04-25",
-            HIGH_LOCALDAY_MAX.temperature_metric,
             HIGH_LOCALDAY_MAX.physical_quantity,
             HIGH_LOCALDAY_MAX.observation_field,
-            "2026-04-23T00:00:00Z",
-            "2026-04-24T00:00:00Z",
-            "2026-04-23T00:05:00Z",
-            "2026-04-23T00:05:00Z",
-            24.0,
-            "[90,91,92]",
-            "[0.9,0.1,0.0]",
-            2.0,
-            0,
-            "wrong_v2",
-            HIGH_LOCALDAY_MAX.data_version,
-            1,
-            "OK",
-            0,
-            "{}",
-            "VERIFIED",
-            "degF",
-            "F",
         ),
     )
 
@@ -1653,7 +1600,7 @@ def test_snapshot_context_rejects_unrelated_v2_id_collision_for_row_identity(har
 
     assert context is not None
     assert context["snapshot_source"] == "ensemble_snapshots"
-    assert context["source_model_version"] == "legacy_v1"
+    assert context["forecast_model_id"] == "legacy_v1"
     assert context["p_raw_vector"] == [0.2, 0.5, 0.3]
     assert dropped_rows == []
     assert len(contexts) == 1

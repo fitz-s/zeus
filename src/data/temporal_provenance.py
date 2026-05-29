@@ -46,7 +46,7 @@ OBSERVATION_INSTANT_V2_PROVENANCE: frozenset[str] = frozenset({
 })
 # Back-compat alias: bare "observation" = daily observation.
 OBSERVATION_LIVE_PROVENANCE: frozenset[str] = DAILY_OBSERVATION_PROVENANCE
-# Polymarket market-topology rows (Gamma / market_events_v2) — uses created_at, not captured_at.
+# Polymarket market-topology rows (Gamma / market_events) — uses created_at, not captured_at.
 MARKET_TOPOLOGY_PROVENANCE: frozenset[str] = frozenset({
     "condition_id", "created_at",
 })

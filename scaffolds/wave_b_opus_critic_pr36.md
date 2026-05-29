@@ -15,7 +15,7 @@
 
 **Fix paths (pick one)**:
 - **(a) Relocate cache**: move `_prev_orderbook_hash_by_market` cache to `src/data/market_scanner.py::capture_executable_market_snapshot` (alongside line 1949 where hash is computed). Read prior entry on entry; write current after computation.
-- **(b) Derived-field approach**: make `raw_orderbook_hash_transition_delta_ms` a derived field computed at `ExecutableMarketSnapshotV2` construction time, by looking up most-recent prior snapshot for same `condition_id` from world.db before insert.
+- **(b) Derived-field approach**: make `raw_orderbook_hash_transition_delta_ms` a derived field computed at `ExecutableMarketSnapshot` construction time, by looking up most-recent prior snapshot for same `condition_id` from world.db before insert.
 
 **Orchestrator recommendation: (a)**. Process-local cache is faster + simpler; (b) adds an extra DB read per snapshot. Either is correct; (a) matches your original intent.
 

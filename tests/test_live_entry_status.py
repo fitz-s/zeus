@@ -15,7 +15,7 @@ from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_HIGH_DATA_
 from src.data.live_entry_status import build_live_entry_forecast_status
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 UTC = timezone.utc
 
@@ -24,7 +24,7 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -35,10 +35,10 @@ def _utc(year: int, month: int, day: int, hour: int = 0) -> datetime:
 def _insert_snapshot(conn: sqlite3.Connection, *, linked: bool) -> None:
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
-            lead_hours, members_json, model_version, data_version,
+            lead_hours, members_json, model_version, dataset_id,
             source_id, source_transport, source_run_id, release_calendar_key,
             source_cycle_time, source_release_time, source_available_at,
             training_allowed, causality_status, boundary_ambiguous,
@@ -59,7 +59,7 @@ def _insert_snapshot(conn: sqlite3.Connection, *, linked: bool) -> None:
             "members_json": json.dumps([18.0] * 51),
             "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
             "source_id": "ecmwf_open_data" if linked else None,
-            "source_transport": "ensemble_snapshots_v2_db_reader" if linked else None,
+            "source_transport": "ensemble_snapshots_db_reader" if linked else None,
             "source_run_id": "source-run-1" if linked else None,
             "release_calendar_key": "ecmwf_open_data:mx2t6_high:full" if linked else None,
             "source_cycle_time": "2026-05-03T00:00:00+00:00" if linked else None,

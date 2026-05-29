@@ -96,9 +96,6 @@ class StrategyMetrics:
     def __init__(self) -> None:
         self.trades: list[dict] = []
 
-    def record(self, trade: dict) -> None:  # pragma: no cover - deprecated no-op
-        logger.debug("StrategyMetrics.record is a no-op post-K1; ignored")
-
     def cumulative_pnl(self) -> float:
         return 0.0
 
@@ -138,23 +135,6 @@ class StrategyTracker:
             s: StrategyMetrics() for s in STRATEGIES
         }
         self.accounting: dict[str, Any] = _default_accounting()
-
-    # -- write path (all no-ops post-K1) -------------------------------------
-
-    def record_trade(self, trade: dict) -> None:  # pragma: no cover - deprecated no-op
-        logger.debug("StrategyTracker.record_trade is a no-op post-K1; position_events is the ledger")
-
-    def record_entry(self, position: Any) -> None:  # pragma: no cover - deprecated no-op
-        logger.debug("StrategyTracker.record_entry is a no-op post-K1")
-
-    def record_exit(self, position: Any) -> None:  # pragma: no cover - deprecated no-op
-        logger.debug("StrategyTracker.record_exit is a no-op post-K1")
-
-    def record_settlement(self, position: Any) -> None:  # pragma: no cover - deprecated no-op
-        logger.debug("StrategyTracker.record_settlement is a no-op post-K1")
-
-    def record_chronicle_event(self, event_type: str, details: dict) -> None:  # pragma: no cover - deprecated no-op
-        logger.debug("StrategyTracker.record_chronicle_event is a no-op post-K1")
 
     # -- read path (projection from position_events) -------------------------
 
@@ -240,15 +220,6 @@ class StrategyTracker:
         strategy_signal_level stays GREEN unless other signals fire.
         """
         return []
-
-    def set_accounting_metadata(
-        self,
-        *,
-        current_regime_started_at: str = "",
-        includes_legacy_history: bool = False,
-        history_archive_path: str = "",
-    ) -> None:  # pragma: no cover - deprecated no-op
-        logger.debug("StrategyTracker.set_accounting_metadata is a no-op post-K1")
 
     def to_dict(self) -> dict:
         return {

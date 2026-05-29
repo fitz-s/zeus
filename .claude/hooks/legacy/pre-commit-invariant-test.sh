@@ -328,7 +328,7 @@ TEST_FILES="tests/test_architecture_contracts.py tests/test_settlement_semantics
 #     canonical schema lacked cycle/source_id/horizon_profile while
 #     save_platt_model_v2 unconditionally inserted them. v2_schema.py now
 #     adds the columns + idempotent ALTER for legacy DBs (mirror of the
-#     ensemble_snapshots_v2 pattern). 11 hardcoded model_keys in tests
+#     ensemble_snapshots pattern). 11 hardcoded model_keys in tests
 #     bumped from 5-part to 8-part Phase 2 format.
 #   - Cluster C (test debt): production fetch_ensemble grew a kw-only
 #     temperature_metric param; 8 lambda/def mocks added **kwargs.

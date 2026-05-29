@@ -71,17 +71,17 @@ def _fetch_rows(
     rows = conn.execute(
         """
         SELECT
-            id, city, target_date, range_label, p_raw, outcome, lead_days,
+            pair_id, city, target_date, range_label, p_raw, outcome, lead_days,
             season, cluster, forecast_available_at
         FROM calibration_pairs
         WHERE target_date >= ? AND target_date <= ? AND authority = ?
-        ORDER BY cluster, season, target_date, city, id
+        ORDER BY cluster, season, target_date, city, pair_id
         """,
         (start, end, authority_filter),
     ).fetchall()
     return [
         CalibrationEvalRow(
-            pair_id=int(row["id"]),
+            pair_id=int(row["pair_id"]),
             city=str(row["city"]),
             target_date=str(row["target_date"]),
             range_label=str(row["range_label"]),
@@ -153,7 +153,7 @@ def evaluate_blocked_oos_calibration(
     test_end: str,
     run_id: str | None = None,
     model_name: str = "extended_platt",
-    model_version: str = "blocked_oos_v1",
+    model_artifact_id: str = "blocked_oos_v1",
     write: bool = True,  # retained for API compat; no longer writes to DB
     created_at: str | None = None,
 ) -> dict:
@@ -216,7 +216,7 @@ def evaluate_blocked_oos_calibration(
         "shadow_only": True,
         "run_id": run_id,
         "model_name": model_name,
-        "model_version": model_version,
+        "model_version": model_artifact_id,
         "train_start": train_start,
         "train_end": train_end,
         "test_start": test_start,

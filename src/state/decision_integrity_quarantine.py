@@ -9,12 +9,12 @@ contributes_to_target_extrema=0 OR forecast_window_attribution_status='UNKNOWN'
 with reason QUARANTINED_NON_CONTRIBUTING_FORECAST_EXTREMA.
 
 Tables quarantined (all via forecast-snapshot linkage):
-  - opportunity_fact           — direct: snapshot_id TEXT → ensemble_snapshots_v2
-  - calibration_pairs_v2       — direct: snapshot_id INTEGER → ensemble_snapshots_v2
-  - probability_trace_fact     — direct: decision_snapshot_id TEXT (CAST) → ensemble_snapshots_v2
-  - selection_family_fact      — direct: decision_snapshot_id TEXT (CAST) → ensemble_snapshots_v2
-  - selection_hypothesis_fact  — indirect: family_id → selection_family_fact → ensemble_snapshots_v2
-  - decision_events            — indirect: decision_event_id → opportunity_fact → ensemble_snapshots_v2
+  - opportunity_fact           — direct: snapshot_id TEXT → ensemble_snapshots
+  - calibration_pairs       — direct: snapshot_id INTEGER → ensemble_snapshots
+  - probability_trace_fact     — direct: decision_snapshot_id TEXT (CAST) → ensemble_snapshots
+  - selection_family_fact      — direct: decision_snapshot_id TEXT (CAST) → ensemble_snapshots
+  - selection_hypothesis_fact  — indirect: family_id → selection_family_fact → ensemble_snapshots
+  - decision_events            — indirect: decision_event_id → opportunity_fact → ensemble_snapshots
 
 Tables intentionally SKIPPED (no forecast snapshot linkage):
   - no_trade_events    — composite PK only, no single row_id column usable as quarantine key
@@ -60,7 +60,7 @@ def quarantine_decisions_for_noncontributing_forecast(
     Args:
         conn: Trade DB connection with zeus-forecasts.db ATTACHed as 'forecasts'.
               In test contexts, 'forecasts.' schema can be a second ATTACH or the
-              same in-memory DB when ensemble_snapshots_v2 is co-located.
+              same in-memory DB when ensemble_snapshots is co-located.
         dry_run: If True, return counts without writing anything.
 
     Returns:
@@ -73,24 +73,24 @@ def quarantine_decisions_for_noncontributing_forecast(
     INV-37: caller supplies conn; never auto-opens.
 
     Note on the cross-DB join:
-        In production the query uses 'forecasts.ensemble_snapshots_v2', which requires
+        In production the query uses 'forecasts.ensemble_snapshots', which requires
         the forecasts DB to be ATTACHed as alias 'forecasts'.  When 'forecasts' is not
         attached (detected via PRAGMA database_list), the query falls back to the
-        unqualified 'ensemble_snapshots_v2' — this supports in-memory test DBs that
+        unqualified 'ensemble_snapshots' — this supports in-memory test DBs that
         carry the table without an ATTACH.
         See tests/test_decision_integrity_quarantine.py for the test fixture pattern.
     """
     recorded_at = datetime.now(timezone.utc).isoformat()
 
-    # Determine which ensemble_snapshots_v2 prefix to use.
-    # In production: 'forecasts.ensemble_snapshots_v2' (ATTACHed forecasts DB).
-    # In tests using a single in-memory DB: 'ensemble_snapshots_v2' (no ATTACH needed).
+    # Determine which ensemble_snapshots prefix to use.
+    # In production: 'forecasts.ensemble_snapshots' (ATTACHed forecasts DB).
+    # In tests using a single in-memory DB: 'ensemble_snapshots' (no ATTACH needed).
     attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
-    snap_ref = "forecasts.ensemble_snapshots_v2" if "forecasts" in attached else "ensemble_snapshots_v2"
+    snap_ref = "forecasts.ensemble_snapshots" if "forecasts" in attached else "ensemble_snapshots"
 
     # Find qualifying opportunity_fact rows.
     # A snapshot qualifies if contributes_to_target_extrema != 1 OR attribution is UNKNOWN.
-    # snapshot_id in opportunity_fact is TEXT; snapshot_id in ensemble_snapshots_v2 is INTEGER.
+    # snapshot_id in opportunity_fact is TEXT; snapshot_id in ensemble_snapshots is INTEGER.
     find_sql = f"""
         SELECT
             of.decision_id,
@@ -297,24 +297,24 @@ def _quarantine_table_via_snapshot(
 
 
 def _snap_ref(conn: sqlite3.Connection) -> str:
-    """Return qualified or unqualified ensemble_snapshots_v2 reference."""
+    """Return qualified or unqualified ensemble_snapshots reference."""
     attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
-    return "forecasts.ensemble_snapshots_v2" if "forecasts" in attached else "ensemble_snapshots_v2"
+    return "forecasts.ensemble_snapshots" if "forecasts" in attached else "ensemble_snapshots"
 
 
 # ---------------------------------------------------------------------------
 # Per-table quarantine entry points
 # ---------------------------------------------------------------------------
 
-def quarantine_calibration_pairs_v2_for_noncontributing_forecast(
+def quarantine_calibration_pairs_for_noncontributing_forecast(
     conn: sqlite3.Connection,
     *,
     dry_run: bool = False,
 ) -> dict:
-    """Tag calibration_pairs_v2 rows whose forecast snapshot is non-contributing.
+    """Tag calibration_pairs rows whose forecast snapshot is non-contributing.
 
-    calibration_pairs_v2 lives in zeus-forecasts.db; in production, conn must be a
-    forecasts connection (or have forecasts as 'main'). ensemble_snapshots_v2 is
+    calibration_pairs lives in zeus-forecasts.db; in production, conn must be a
+    forecasts connection (or have forecasts as 'main'). ensemble_snapshots is
     in the same forecasts DB, so no ATTACH is needed for this table.
 
     row_id = str(pair_id)  (INTEGER PK, stored as TEXT in quarantine).
@@ -328,7 +328,7 @@ def quarantine_calibration_pairs_v2_for_noncontributing_forecast(
             CAST(cp2.pair_id AS TEXT) AS row_id,
             cp2.snapshot_id           AS snapshot_id,
             esv.source_run_id         AS source_run_id
-        FROM calibration_pairs_v2 cp2
+        FROM calibration_pairs cp2
         JOIN {snap_ref} esv ON cp2.snapshot_id = esv.snapshot_id
         WHERE cp2.snapshot_id IS NOT NULL
           AND esv.contributes_to_target_extrema IS NOT NULL
@@ -340,7 +340,7 @@ def quarantine_calibration_pairs_v2_for_noncontributing_forecast(
     """
     return _quarantine_table_via_snapshot(
         conn,
-        target_table="calibration_pairs_v2",
+        target_table="calibration_pairs",
         find_sql=find_sql,
         dry_run=dry_run,
     )
@@ -427,7 +427,7 @@ def quarantine_selection_hypothesis_fact_for_noncontributing_forecast(
 ) -> dict:
     """Tag selection_hypothesis_fact rows whose backing family has a non-contributing snapshot.
 
-    Joins: selection_hypothesis_fact → selection_family_fact → ensemble_snapshots_v2.
+    Joins: selection_hypothesis_fact → selection_family_fact → ensemble_snapshots.
     row_id = shf.hypothesis_id (TEXT PK).
 
     INV-37: caller supplies conn; never auto-opens.
@@ -486,7 +486,7 @@ def quarantine_decision_events_for_noncontributing_forecast(
     """Tag decision_events rows whose backing opportunity_fact snapshot is non-contributing.
 
     Joins: decision_events → opportunity_fact (via decision_event_id = decision_id)
-           → ensemble_snapshots_v2.
+           → ensemble_snapshots.
 
     row_id = _de_natural_pk_hash(market_slug, temperature_metric, target_date,
                                   observation_time, decision_seq)
@@ -628,7 +628,7 @@ def quarantine_all_tables_for_noncontributing_forecast(
     ATTACHed (or be an in-memory test DB with all tables co-located).
 
     IMPORTANT — K1 DB-split production usage:
-        calibration_pairs_v2 lives in zeus-forecasts.db (forecasts DB).
+        calibration_pairs lives in zeus-forecasts.db (forecasts DB).
         decision_integrity_quarantine lives in zeus_trades.db (trade DB).
         World tables (opportunity_fact, decision_events, probability_trace_fact,
         selection_family_fact, selection_hypothesis_fact) live in zeus-world.db.
@@ -638,28 +638,28 @@ def quarantine_all_tables_for_noncontributing_forecast(
         intended for in-memory integration tests and operator one-shots where
         all tables are co-located.
 
-    Raises ValueError if 'forecasts' is not attached/present (calibration_pairs_v2
+    Raises ValueError if 'forecasts' is not attached/present (calibration_pairs
     cannot be quarantined without it and would silently no-op).
 
     INV-37: caller supplies conn; never auto-opens.
     """
     # Verify forecasts tables are reachable before starting any writes.
     try:
-        conn.execute("SELECT 1 FROM ensemble_snapshots_v2 LIMIT 0")
+        conn.execute("SELECT 1 FROM ensemble_snapshots LIMIT 0")
     except sqlite3.OperationalError:
         # Try forecasts-qualified name.
         try:
-            conn.execute("SELECT 1 FROM forecasts.ensemble_snapshots_v2 LIMIT 0")
+            conn.execute("SELECT 1 FROM forecasts.ensemble_snapshots LIMIT 0")
         except sqlite3.OperationalError:
             raise ValueError(
                 "quarantine_all_tables_for_noncontributing_forecast: "
-                "ensemble_snapshots_v2 not found — ensure the forecasts DB is "
+                "ensemble_snapshots not found — ensure the forecasts DB is "
                 "ATTACHed as 'forecasts' OR all tables are co-located (in-memory test)."
             )
     # Mapping from function to the table name it quarantines.
     fn_table_pairs = [
         (quarantine_decisions_for_noncontributing_forecast, "opportunity_fact"),
-        (quarantine_calibration_pairs_v2_for_noncontributing_forecast, "calibration_pairs_v2"),
+        (quarantine_calibration_pairs_for_noncontributing_forecast, "calibration_pairs"),
         (quarantine_probability_trace_fact_for_noncontributing_forecast, "probability_trace_fact"),
         (quarantine_selection_family_fact_for_noncontributing_forecast, "selection_family_fact"),
         (quarantine_selection_hypothesis_fact_for_noncontributing_forecast, "selection_hypothesis_fact"),

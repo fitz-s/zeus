@@ -74,17 +74,17 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 # ── Check 1: pairs_complete ────────────────────────────────────────────────────
 
 def check_pairs_complete(world_db: str) -> CheckResult:
-    """calibration_pairs_v2 has rows with error_model_family='full_transport_v1'."""
+    """calibration_pairs has rows with error_model_family='full_transport_v1'."""
     name = "pairs_complete"
     try:
         conn = _conn(world_db)
     except (FileNotFoundError, ValueError) as exc:
         return CheckResult(name, FAIL, f"world_db unavailable: {exc}")
     try:
-        if not _table_exists(conn, "calibration_pairs_v2"):
-            return CheckResult(name, FAIL, "calibration_pairs_v2 table not found")
+        if not _table_exists(conn, "calibration_pairs"):
+            return CheckResult(name, FAIL, "calibration_pairs table not found")
         count = conn.execute(
-            "SELECT COUNT(*) FROM calibration_pairs_v2 WHERE error_model_family='full_transport_v1'",
+            "SELECT COUNT(*) FROM calibration_pairs WHERE error_model_family='full_transport_v1'",
         ).fetchone()[0]
         if count == 0:
             return CheckResult(name, FAIL, "no rows with error_model_family='full_transport_v1' — not yet produced")
@@ -95,7 +95,7 @@ def check_pairs_complete(world_db: str) -> CheckResult:
 
 # ── Check 2: error_models_persisted ──────────────────────────────────────────
 
-_ERROR_MODEL_TABLES = ("ens_error_model_v1", "model_bias_ens_v2")
+_ERROR_MODEL_TABLES = ("ens_error_model_v1", "model_bias_ens")
 # Required fields per spec §Phase 1 step 1
 _REQUIRED_FIELDS = {
     "error_model_key", "bias_c", "residual_sd_c", "heterogeneity_var_c2",
@@ -119,10 +119,10 @@ def check_error_models_persisted(world_db: str) -> CheckResult:
                         name, FAIL,
                         f"{table} exists but missing fields: {sorted(missing)}"
                     )
-                # Bug 4 fix (Zeus #64 PR #342): for the canonical model_bias_ens_v2 table,
+                # Bug 4 fix (Zeus #64 PR #342): for the canonical model_bias_ens table,
                 # require full_transport_v1 posteriors specifically (not just any rows).
                 # Legacy ens_error_model_v1 lacks error_model_family — check row count only.
-                if table == "model_bias_ens_v2" and "error_model_family" in cols:
+                if table == "model_bias_ens" and "error_model_family" in cols:
                     count = conn.execute(
                         f"SELECT COUNT(*) FROM {table} WHERE error_model_family='full_transport_v1'"
                     ).fetchone()[0]
@@ -173,34 +173,34 @@ def check_p_raw_replay_equivalence_pass(stage_db: str) -> CheckResult:
 # ── Check 4: platt_or_identity_coverage_complete ─────────────────────────────
 
 def check_platt_or_identity_coverage_complete(world_db: str) -> CheckResult:
-    """Every full_transport_v1 bucket in platt_models_v2 has an explicit route."""
+    """Every full_transport_v1 bucket in platt_models has an explicit route."""
     name = "platt_or_identity_coverage_complete"
     try:
         conn = _conn(world_db)
     except (FileNotFoundError, ValueError) as exc:
         return CheckResult(name, FAIL, f"world_db unavailable: {exc}")
     try:
-        if not _table_exists(conn, "platt_models_v2"):
-            return CheckResult(name, FAIL, "platt_models_v2 table not found")
+        if not _table_exists(conn, "platt_models"):
+            return CheckResult(name, FAIL, "platt_models table not found")
         # Count ft rows with an explicit calibration_method set
         has_col = any(
             r[1] == "calibration_method"
-            for r in conn.execute("PRAGMA table_info(platt_models_v2)")
+            for r in conn.execute("PRAGMA table_info(platt_models)")
         )
         if not has_col:
             # calibration_method column not yet added — Phase 1 incomplete
             return CheckResult(
                 name, FAIL,
-                "platt_models_v2 lacks calibration_method column (Phase 1 schema not landed) — not yet produced"
+                "platt_models lacks calibration_method column (Phase 1 schema not landed) — not yet produced"
             )
         total_ft = conn.execute(
-            "SELECT COUNT(*) FROM platt_models_v2 WHERE error_model_family='full_transport_v1'"
+            "SELECT COUNT(*) FROM platt_models WHERE error_model_family='full_transport_v1'"
         ).fetchone()[0]
         if total_ft == 0:
             return CheckResult(name, FAIL, "no full_transport_v1 Platt/identity rows — not yet produced")
         uncovered = conn.execute(
             """
-            SELECT COUNT(*) FROM platt_models_v2
+            SELECT COUNT(*) FROM platt_models
             WHERE error_model_family='full_transport_v1'
               AND (calibration_method IS NULL OR calibration_method = '')
             """

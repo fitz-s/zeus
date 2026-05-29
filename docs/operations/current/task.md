@@ -29,9 +29,9 @@ Live must continuously refresh source/forecast/settlement/evaluator/sizing/venue
 - F: submit or recovery frontier.
 
 ## 5. Full-analysis contract proof map
-- TradabilityAuthority / active=false: covered by `tests/test_executable_market_snapshot_v2.py` and `tests/test_market_scanner_negrisk.py`; current code uses acceptingOrders + enableOrderBook + CLOB archived/orderbook, not child active.
+- TradabilityAuthority / active=false: covered by `tests/test_executable_market_snapshot.py` and `tests/test_market_scanner_negrisk.py`; current code uses acceptingOrders + enableOrderBook + CLOB archived/orderbook, not child active.
 - EntryBookSemantics / ask-only BUY: covered by `tests/test_runtime_guards.py::{test_buy_entry_ask_only_snapshot_reprices_without_bid_midpoint,test_ask_only_book_never_builds_passive_maker_vwmp_intent}`.
-- PassiveMakerAuthority / fill-adjusted EV: covered by `tests/test_executable_market_snapshot_v2.py` and `tests/test_runtime_guards.py::{test_passive_economic_floor_uses_fill_adjusted_expected_profit,test_passive_economic_floor_passes_positive_fill_adjusted_net_ev}`.
+- PassiveMakerAuthority / fill-adjusted EV: covered by `tests/test_executable_market_snapshot.py` and `tests/test_runtime_guards.py::{test_passive_economic_floor_uses_fill_adjusted_expected_profit,test_passive_economic_floor_passes_positive_fill_adjusted_net_ev}`.
 - FamilySelectionAuthority / command-only exposure: covered by `tests/test_inv_family_exclusive_sizing.py::{test_trade_db_family_exposure_blocks_command_without_position_projection,test_weather_family_exposure_resolver_merges_trade_truth_and_portfolio_projection}`.
 - CanonicalOrderTruth: covered by `tests/test_command_recovery.py` partial-entry/exit weaker-fact tests and `tests/test_exchange_reconcile.py::test_local_order_open_uses_canonical_order_truth_over_later_weaker_fact`.
 - Runtime schema safety: covered by `tests/test_decision_seq_cross_table_no_collision.py::TestDecisionSeqCrossTableNoCollision::test_runtime_ensure_table_does_not_rebuild_stale_no_trade_schema` plus the new decision-events ghost cleanup test.

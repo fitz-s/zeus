@@ -115,7 +115,7 @@ class TickResult:
 
 
 # ---------------------------------------------------------------------------
-# Row construction helpers (mirrors backfill_obs_v2._hourly_obs_to_v2_row)
+# Row construction helpers (mirrors backfill_obs._hourly_obs_to_v2_row)
 # ---------------------------------------------------------------------------
 
 def _sha256_json(payload: dict) -> str:
@@ -124,7 +124,7 @@ def _sha256_json(payload: dict) -> str:
 
 
 def _source_url_for_obs(obs: HourlyObservation, *, source_tag: str) -> str:
-    """Build a source_url string for A1 provenance (mirrors backfill_obs_v2)."""
+    """Build a source_url string for A1 provenance (mirrors backfill_obs)."""
     city = cities_by_name[obs.city]
     if source_tag == "wu_icao_history":
         unit_code = "m" if city.settlement_unit == "C" else "e"
@@ -147,7 +147,7 @@ def _hourly_obs_to_v2_row(
     imported_at: str,
     tier_name: str,
 ) -> ObsV2Row:
-    """Build ObsV2Row from HourlyObservation. Mirrors backfill_obs_v2 semantics.
+    """Build ObsV2Row from HourlyObservation. Mirrors backfill_obs semantics.
 
     M1: temp_current=None — forces consumers to use running_max/running_min
     for track-aware queries. Do NOT set to hour_max_temp.

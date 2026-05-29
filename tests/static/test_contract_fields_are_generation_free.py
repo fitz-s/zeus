@@ -3,8 +3,11 @@
 # Authority basis: docs/findings_2026_05_28.md §B1 — generation-naming denylist
 """
 Test 6: Dataclass field name scan on Position (portfolio.py).
-xfail(strict=False): signal_version, calibration_version, pricing_semantics_version,
-execution_cost_basis_version exist today. PR3 B5 will rename them.
+xfail(strict=False): 3 _version fields remain in Position:
+  - execution_cost_basis_version — pricing semantics version tag (B5 deferred)
+  - signal_version — signal generation tracking (B5 deferred)
+  - calibration_version — calibration model version tracking (B5 deferred)
+Renaming requires coordinated src/state/portfolio.py + DB column rename (B5) — deferred post-PR3.
 """
 import dataclasses
 import re
@@ -25,7 +28,14 @@ def _version_fields(cls):
     return bad
 
 
-@pytest.mark.xfail(strict=False, reason="awaits PR3 B5 sweep — *_" + "ver" + "sion fields still in Position")
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "Position has 3 _version fields: execution_cost_basis_version, signal_version, "
+        "calibration_version. Rename to execution_cost_basis_id/signal_id/calibration_model_id "
+        "(B5) requires portfolio.py + DB column rename — deferred post-PR3."
+    ),
+)
 def test_position_has_no_version_fields():
     """Position dataclass must have zero *_version field names."""
     from src.state.portfolio import Position  # type: ignore[import]

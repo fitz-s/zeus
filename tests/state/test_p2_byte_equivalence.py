@@ -75,7 +75,7 @@ class TestP2ByteEquivalence:
     unexpected schema drift will be detected here before reaching production.
 
     ALLOWED delta (explicitly listed per PLAN §2):
-      - Forecast-class tables (observations, settlements, calibration_pairs_v2,
+      - Forecast-class tables (observations, settlements, calibration_pairs,
         etc.) appear on world.db as legacy_archived ghost copies (per
         architecture/db_table_ownership.yaml) and also on forecasts.db as
         the canonical FORECAST_CLASS copy. This is by design.
@@ -146,8 +146,8 @@ class TestP2ByteEquivalence:
     def test_v2_forecast_tables_not_created_by_world_init(self):
         """init_schema_world_only must NOT create v2 forecast-class tables.
 
-        The v2 tables (calibration_pairs_v2, ensemble_snapshots_v2,
-        market_events_v2, settlements_v2) have no legacy_archived ghost copies
+        The v2 tables (calibration_pairs, ensemble_snapshots,
+        market_events, settlement_outcomes) have no legacy_archived ghost copies
         on world.db. If world init accidentally creates them, that is K1-split
         contamination (they belong exclusively on forecasts.db).
 
@@ -199,12 +199,13 @@ class TestInitSchemaForecasts0ByteGuard:
 
     EXPECTED_FORECAST_TABLES = {
         "observations",
-        "settlements",
+        # B3 (PR3, 2026-05-28): bare `settlements` dropped; settlement_outcomes is canonical
+        # (renamed from settlement_outcomes). Static-fallback DDL creates settlement_outcomes only.
         "source_run",
-        "settlements_v2",
-        "market_events_v2",
-        "ensemble_snapshots_v2",
-        "calibration_pairs_v2",
+        "settlement_outcomes",
+        "market_events",
+        "ensemble_snapshots",
+        "calibration_pairs",
     }
 
     def test_zero_byte_stub_takes_static_fallback(self, tmp_path, caplog):

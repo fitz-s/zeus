@@ -95,8 +95,8 @@ if ! python scripts/verify_truth_surfaces.py --mode platt-refit-preflight --json
     exit 6
 fi
 
-log "stage7: refit_platt_v2 --no-dry-run --force"
-if ! python scripts/refit_platt_v2.py --no-dry-run --force --temperature-metric all >>"$LOG" 2>&1; then
+log "stage7: refit_platt --no-dry-run --force"
+if ! python scripts/refit_platt.py --no-dry-run --force --temperature-metric all >>"$LOG" 2>&1; then
     emit aborted_refit_partial
     exit 7
 fi

@@ -6,7 +6,7 @@
 Background
 ----------
 D1 added legacy mx2t6/mn2t6 keys to _TRANSFER_SOURCE_BY_OPENDATA_VERSION so that
-ensemble_snapshots_v2 rows written before 2026-05-07 still resolve a Platt calibration
+ensemble_snapshots rows written before 2026-05-07 still resolve a Platt calibration
 during the mx2t3/mn2t3 transition.
 
 The 100 BLOCKED rows in readiness_state as of 2026-05-07 carry reason_code

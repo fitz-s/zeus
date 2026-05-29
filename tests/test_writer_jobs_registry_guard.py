@@ -50,7 +50,7 @@ def test_guard_still_detects_a_genuinely_unwired_writer() -> None:
 
 
 def test_market_scan_tick_reports_persistence_failure_to_scheduler_health(monkeypatch) -> None:
-    """market_events_v2 write failure must make the scheduler health entry FAILED."""
+    """market_events write failure must make the scheduler health entry FAILED."""
 
     written: list[tuple[str, bool, str | None]] = []
 
@@ -71,7 +71,7 @@ def test_market_scan_tick_reports_persistence_failure_to_scheduler_health(monkey
             status="failed",
             inserted=0,
             event_count=1,
-            error="OperationalError: no such table: market_events_v2",
+            error="OperationalError: no such table: market_events",
         ),
     )
 
@@ -82,7 +82,7 @@ def test_market_scan_tick_reports_persistence_failure_to_scheduler_health(monkey
         (
             "ingest_market_scan",
             True,
-            "market_events_persistence_failed: OperationalError: no such table: market_events_v2",
+            "market_events_persistence_failed: OperationalError: no such table: market_events",
         )
     ]
 

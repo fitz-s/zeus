@@ -44,7 +44,7 @@ from src.state.db import (
     init_schema_forecasts,
 )
 from src.state.readiness_repo import write_readiness_state
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 UTC = timezone.utc
 NOW = datetime(2026, 5, 14, 9, 30, tzinfo=UTC)
@@ -54,7 +54,7 @@ CITY_ID = "LONDON"
 CITY_NAME = "London"
 CITY_TIMEZONE = "Europe/London"
 SOURCE_ID = "ecmwf_open_data"
-SOURCE_TRANSPORT = "ensemble_snapshots_v2_db_reader"
+SOURCE_TRANSPORT = "ensemble_snapshots_db_reader"
 
 
 @dataclass(frozen=True)
@@ -382,7 +382,7 @@ def _run_in_work_dir(work_dir: Path, *, keep_artifacts: bool) -> SmokeReport:
     try:
         init_schema_forecasts(forecasts_conn)
         init_schema(trade_conn)
-        apply_v2_schema(trade_conn)
+        apply_canonical_schema(trade_conn)
         timings["schema_init"] = _seconds(stage_start, time.perf_counter())
 
         original_root = None

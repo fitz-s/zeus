@@ -272,7 +272,7 @@ class ForecastSnapshotReadyTrigger:
                 s.members_json AS snapshot_members_json
             FROM source_run_coverage c
             JOIN source_run sr ON sr.source_run_id = c.source_run_id
-            JOIN ensemble_snapshots_v2 s
+            JOIN ensemble_snapshots s
               ON s.source_run_id = c.source_run_id
              AND s.city = c.city
              AND s.target_date = c.target_local_date
@@ -416,7 +416,7 @@ def _int_value(value: Any) -> int:
     return int(value)
 
 
-_FORECAST_TABLES = ("source_run", "source_run_coverage", "ensemble_snapshots_v2")
+_FORECAST_TABLES = ("source_run", "source_run_coverage", "ensemble_snapshots")
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:

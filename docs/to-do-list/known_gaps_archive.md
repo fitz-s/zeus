@@ -116,7 +116,7 @@ Archive cutover: 2026-04-26.
 3. `get_snapshot_context()` returns `bias_corrected` from snapshot
 4. Production caller passes snapshot's `bias_corrected` to `harvest_settlement()`
 5. `harvest_settlement()` also accepts explicit `bias_corrected` param; falls back to `settings.bias_correction_enabled` when None (for pre-migration snapshots without the column)
-6. `decision_group_id` computed upfront from `source_model_version` + `forecast_issue_time` (also from snapshot)
+6. `decision_group_id` computed upfront from `forecast_model_id` + `forecast_issue_time` (also from snapshot)
 Tests: `test_bias_corrected_persisted_through_harvest`, `test_bias_corrected_fallback_reads_settings`
 
 ---
@@ -511,7 +511,7 @@ multi-bin native-NO trades.
 edge materialization, evaluator quote acquisition, snapshot capture, and
 selected-token runtime routing; live enablement remains default-off.
 **Evidence:** `tests/test_fdr.py`, `tests/test_runtime_guards.py`,
-`tests/test_executable_market_snapshot_v2.py`, `tests/test_bootstrap_symmetry.py`,
+`tests/test_executable_market_snapshot.py`, `tests/test_bootstrap_symmetry.py`,
 `tests/test_executor.py`, and `tests/test_exit_safety.py` coverage named in the
 original closeout.
 **Residual:** This does not promote Shoulder Bin Sell to live alpha or prove P&L;
@@ -753,7 +753,7 @@ DAY0_CAPTURE has `max_hours_to_resolution` → `min_hours_to_resolution=0` is pa
 **Location:** `src/execution/harvester.py::maybe_write_learning_pair`,
 `src/execution/harvester.py::harvest_settlement`.
 **Original problem:** Live decision p_raw could be stored as TIGGE training rows via source rebranding.
-**Structural closure:** T1C wraps `harvest_settlement()` in `maybe_write_learning_pair()` wrapper with T1C-LEARNING-AUTHORITY-GATE: gate refuses unless `snapshot_training_allowed=True`. Live p_raw (source_model_version='live_v1') cannot pass the wrapper. Caller must explicitly set training flag; default-False semantics prevent silent rebranding.
+**Structural closure:** T1C wraps `harvest_settlement()` in `maybe_write_learning_pair()` wrapper with T1C-LEARNING-AUTHORITY-GATE: gate refuses unless `snapshot_training_allowed=True`. Live p_raw (forecast_model_id='live_v1') cannot pass the wrapper. Caller must explicitly set training flag; default-False semantics prevent silent rebranding.
 **Resolved by:** T1C (commit 72e58e3a); closure verified via test_openmeteo_p_raw_lineage_does_not_write_tigge_training_pair.
 
 ---
@@ -941,8 +941,8 @@ carry it in Zeus `known_gaps.md`.
 
 ### [CLOSED — 2026-05-08] T1E rebuilt calibration scope now carries an exact completion sentinel
 
-**Original active heading:** `T1E C-3 — rebuild_calibration_pairs_v2 partial-commit semantic (LOW)`.
-**Original problem:** `scripts/rebuild_calibration_pairs_v2.py` commits each
+**Original active heading:** `T1E C-3 — rebuild_calibration_pairs partial-commit semantic (LOW)`.
+**Original problem:** `scripts/rebuild_calibration_pairs.py` commits each
 `(city, metric)` bucket independently. An interrupted rebuild could leave
 already-committed buckets beside missing buckets, and a downstream opener had no
 authoritative exact-scope marker distinguishing complete from partial rebuilt DB
@@ -951,7 +951,7 @@ state.
 scope in `zeus_meta` to `in_progress` before the first bucket commit and mark it
 `complete` only after all post-write gates pass. `assert_rebuild_complete_sentinel()`
 fails closed when the exact-scope sentinel is absent or still in-progress.
-Live `refit_platt_v2.py` checks that sentinel before it can promote
+Live `refit_platt.py` checks that sentinel before it can promote
 `calibration_pairs_v2` rows into `platt_models_v2`; dry-run remains
 non-promoting inspection. Narrow refit scopes may use a covering all-scope
 complete sentinel, but any overlapping `in_progress` sentinel blocks promotion
@@ -967,8 +967,8 @@ existing `validated_calibration_transfers` row into `LIVE_ELIGIBLE` unless the
 target cohort's `calibration_pairs_v2` source is still covered by a complete
 rebuild sentinel. Any overlapping in-progress sentinel fails closed so an old
 covering complete row cannot mask a current partial rebuild.
-**Evidence:** `scripts/rebuild_calibration_pairs_v2.py` sentinel helpers,
-`scripts/refit_platt_v2.py` live-refit gate, and
+**Evidence:** `scripts/rebuild_calibration_pairs.py` sentinel helpers,
+`scripts/refit_platt.py` live-refit gate, and
 `tests/test_rebuild_live_sentinel.py` relationship tests prove
 in-progress-before-bucket, no complete marker after validation failure,
 fail-closed consumer behavior, resolved `n_mc` provenance, covering-scope

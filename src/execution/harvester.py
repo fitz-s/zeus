@@ -24,7 +24,7 @@ import httpx
 from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.decision_group import compute_id
-from src.calibration.store import add_calibration_pair_v2
+from src.calibration.store import add_calibration_pair
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
 from src.config import City, cities_by_name, get_mode
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -41,7 +41,7 @@ from src.state.db import (
     get_forecasts_connection,
     get_trade_connection,
     get_world_connection,
-    log_market_event_outcomes_v2,
+    log_market_event_outcomes,
     log_settlement_event,
     log_settlement_v2,
     query_authoritative_settlement_rows,
@@ -90,7 +90,7 @@ def _settlement_economics_for_position(pos) -> tuple[float, float]:
     authority = str(getattr(pos, "entry_economics_authority", "") or "")
     corrected_marked = (
         bool(getattr(pos, "corrected_executable_economics_eligible", False))
-        or str(getattr(pos, "pricing_semantics_version", "") or "")
+        or str(getattr(pos, "pricing_semantics_id", "") or "")
         == CORRECTED_EXECUTABLE_PRICING_SEMANTICS_VERSION
         or bool(str(getattr(pos, "entry_cost_basis_hash", "") or "").strip())
         or bool(str(getattr(pos, "execution_cost_basis_version", "") or "").strip())
@@ -179,8 +179,8 @@ _HARVESTER_STAGE2_SHARED_TABLES = (
     # K1 (2026-05-11): shared_conn is now forecasts_conn; check v2 tables that
     # live on forecasts.db. Legacy v1 (ensemble_snapshots removed by v1.F20; calibration_pairs)
     # remain on world.db and are not checked here post-migration.
-    "ensemble_snapshots_v2",
-    "calibration_pairs_v2",
+    "ensemble_snapshots",
+    "calibration_pairs",
 )
 
 _TRAINING_FORECAST_SOURCES = frozenset({"tigge", "ecmwf_ens"})
@@ -201,8 +201,8 @@ def _metric_identity_for(temperature_metric: str | MetricIdentity) -> MetricIden
     return MetricIdentity.from_raw(temperature_metric)
 
 
-def _forecast_source_from_version(source_model_version: str | None) -> str:
-    version = str(source_model_version or "").strip().lower()
+def _forecast_source_from_version(forecast_model_id: str | None) -> str:
+    version = str(forecast_model_id or "").strip().lower()
     if not version:
         return ""
     if version.startswith("ecmwf_ens"):
@@ -214,8 +214,8 @@ def _forecast_source_from_version(source_model_version: str | None) -> str:
     return version.split("_", 1)[0]
 
 
-def _is_training_forecast_source(source_model_version: str | None) -> bool:
-    return _forecast_source_from_version(source_model_version) in _TRAINING_FORECAST_SOURCES
+def _is_training_forecast_source(forecast_model_id: str | None) -> bool:
+    return _forecast_source_from_version(forecast_model_id) in _TRAINING_FORECAST_SOURCES
 
 
 def _emit_learning_write_blocked(reason: str) -> None:
@@ -755,7 +755,7 @@ def maybe_write_learning_pair(
     """Authority-gated wrapper for harvest_settlement().
 
     T1C-LEARNING-AUTHORITY-GATE: refuses to write calibration pairs unless:
-      - context provides a non-empty source_model_version, AND
+      - context provides a non-empty forecast_model_id, AND
       - context provides snapshot_training_allowed=True (or snapshot_learning_ready=True)
 
     T1C-LIVE-PRAW-NOT-TRAINING-DATA: also refuses if the snapshot's source is
@@ -764,20 +764,20 @@ def maybe_write_learning_pair(
     Emits harvester_learning_write_blocked_total{reason} on each block.
     Returns the number of pairs written (0 on any block).
     """
-    source_model_version = context.get("source_model_version") or ""
+    forecast_model_id = context.get("forecast_model_id") or ""
     snapshot_training_allowed = _context_training_allowed(context)
 
     # Pre-screen: missing authority — harvest_settlement will also check, but
     # we emit the counter here so the caller's log captures the rejection.
-    if not str(source_model_version).strip() or not snapshot_training_allowed:
-        _emit_learning_write_blocked("missing_source_model_version_or_lineage")
+    if not str(forecast_model_id).strip() or not snapshot_training_allowed:
+        _emit_learning_write_blocked("missing_forecast_model_id_or_lineage")
         return 0
     if not _causality_allows_learning(context.get("snapshot_causality_status")):
         _emit_learning_write_blocked("snapshot_causality_not_ok")
         return 0
 
     # Pre-screen: live/non-training source.
-    if not _is_training_forecast_source(source_model_version):
+    if not _is_training_forecast_source(forecast_model_id):
         _emit_learning_write_blocked("live_praw_no_training_lineage")
         return 0
 
@@ -790,7 +790,7 @@ def maybe_write_learning_pair(
     # PR #352 (Part-3 audit, bot #5 on PR #351, 2026-05-27): position_current is
     # canonically owned by zeus_trades.db (the world.db copy is a ghost shell).
     # The harvester runtime passes the *forecasts* connection (which owns
-    # calibration_pairs_v2) as `conn`; querying position_current on it raises
+    # calibration_pairs) as `conn`; querying position_current on it raises
     # "no such table", is swallowed by the gate's fail-closed except, and would
     # silently block EVERY calibration write in production. Acquire a read-only
     # trades connection for the per-position authority join. INV-37: this is a
@@ -824,12 +824,12 @@ def maybe_write_learning_pair(
         lead_days=context["lead_days"],
         forecast_issue_time=context["issue_time"],
         forecast_available_at=context["available_at"],
-        source_model_version=source_model_version,
+        forecast_model_id=forecast_model_id,
         temperature_metric=temperature_metric,
         snapshot_id=context.get("decision_snapshot_id"),
         snapshot_training_allowed=snapshot_training_allowed,
         forecast_source=context.get("forecast_source", ""),
-        pair_data_version=context.get("source_model_version"),
+        pair_data_version=context.get("forecast_model_id"),
         causality_status=context.get("snapshot_causality_status") or "OK",
     )
 
@@ -986,7 +986,7 @@ def run_harvester() -> dict:
             all_labels = _extract_all_bin_labels(event)
             learning_contexts = []
             if stage2_ready:
-                # shared_conn: _snapshot_contexts_for_market reads ensemble_snapshots_v2 (shared)
+                # shared_conn: _snapshot_contexts_for_market reads ensemble_snapshots (shared)
                 # and position_events via query_settlement_events — pass trade_conn for event
                 # spine queries, shared_conn for snapshot lookups.
                 snapshot_contexts, dropped_rows = _snapshot_contexts_for_market(
@@ -1210,7 +1210,7 @@ def _extract_resolved_market_outcomes(event: dict) -> list[ResolvedMarketOutcome
 
     Settled Gamma events are no longer tradable, so this intentionally does not
     call the active-market tradability filter from market_scanner. Each returned
-    row is keyed by the YES token, because market_events_v2 stores one row per
+    row is keyed by the YES token, because market_events stores one row per
     temperature bin with the YES token as `token_id`.
     """
     resolved: list[ResolvedMarketOutcome] = []
@@ -1435,7 +1435,7 @@ def _write_settlement_truth(
     _SOURCE_TYPE_MAP = {"wu_icao": "WU", "hko": "HKO", "noaa": "NOAA", "cwa_station": "CWA"}
     db_source_type = _SOURCE_TYPE_MAP.get(city.settlement_source_type, city.settlement_source_type.upper())
     data_version = _HARVESTER_LIVE_DATA_VERSION.get(
-        city.settlement_source_type, "unknown_v0"
+        city.settlement_source_type, "unknown"
     )
     metric_identity = _metric_identity_for(temperature_metric)
     settled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1583,7 +1583,7 @@ def _write_settlement_truth(
                 recorded_at=settled_at,
             )
         if authority == "VERIFIED" and resolved_market_outcomes:
-            market_events_v2_result = log_market_event_outcomes_v2(
+            market_events_result = log_market_event_outcomes(
                 conn,
                 market_slug=event_slug or None,
                 city=city.name,
@@ -1595,20 +1595,20 @@ def _write_settlement_truth(
                 ],
             )
         elif resolved_market_outcomes:
-            market_events_v2_result = {
+            market_events_result = {
                 "status": "skipped_unverified_settlement",
-                "table": "market_events_v2",
+                "table": "market_events",
                 "authority": authority,
             }
         else:
-            market_events_v2_result = {
+            market_events_result = {
                 "status": "skipped_no_resolved_market_identity",
-                "table": "market_events_v2",
+                "table": "market_events",
             }
         logger.info(
-            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s settlements_v2=%s market_events_v2=%s",
+            "harvester_live write: %s %s → authority=%s settlement_value=%s winning_bin=%s reason=%s settlement_outcomes=%s market_events=%s",
             city.name, target_date, authority, settlement_value, winning_bin, reason,
-            settlement_v2_result.get("status"), market_events_v2_result.get("status"),
+            settlement_v2_result.get("status"), market_events_result.get("status"),
         )
     except Exception as exc:
         logger.warning(
@@ -1622,7 +1622,7 @@ def _write_settlement_truth(
         "winning_bin": winning_bin,
         "reason": reason,
         "settlement_v2": settlement_v2_result,
-        "market_events_v2": market_events_v2_result,
+        "market_events": market_events_result,
     }
 
 
@@ -1685,7 +1685,7 @@ def _snapshot_identity_predicates(
         if "temperature_metric" in columns:
             predicates.append("temperature_metric = ?")
             params.append(expected_temperature_metric)
-        elif source == "ensemble_snapshots_v2":
+        elif source == "ensemble_snapshots":
             return "", (), False
     if not predicates:
         return "", (), True
@@ -1705,7 +1705,7 @@ def _snapshot_row_by_id(
     expected_temperature_metric: Optional[str] = None,
 ):
     for table, source in (
-        (_first_snapshot_table(conn, "ensemble_snapshots_v2"), "ensemble_snapshots_v2"),
+        (_first_snapshot_table(conn, "ensemble_snapshots"), "ensemble_snapshots"),
     ):
         if not table:
             continue
@@ -1722,10 +1722,15 @@ def _snapshot_row_by_id(
         training_expr = _snapshot_select_expr(columns, "training_allowed", "NULL")
         causality_expr = _snapshot_select_expr(columns, "causality_status", "NULL")
         metric_expr = _snapshot_select_expr(columns, "temperature_metric", "'high'")
+        # B5 (PR3): ensemble_snapshots renamed data_version -> dataset_id. Expose a
+        # stable `data_version` read key whether the table is canonical or legacy.
+        model_version_expr = _snapshot_select_expr(columns, "model_version", "NULL")
+        data_version_expr = ("dataset_id AS data_version" if "dataset_id" in columns
+                             else _snapshot_select_expr(columns, "data_version", "NULL"))
         row = conn.execute(
             f"""
             SELECT p_raw_json, lead_hours, issue_time, available_at,
-                   model_version, data_version, snapshot_id,
+                   {model_version_expr}, {data_version_expr}, snapshot_id,
                    {training_expr},
                    {causality_expr},
                    {metric_expr},
@@ -1750,7 +1755,7 @@ def _latest_snapshot_row(
     temperature_metric: Optional[str] = None,
 ):
     for table, source in (
-        (_first_snapshot_table(conn, "ensemble_snapshots_v2"), "ensemble_snapshots_v2"),
+        (_first_snapshot_table(conn, "ensemble_snapshots"), "ensemble_snapshots"),
     ):
         if not table:
             continue
@@ -1765,10 +1770,15 @@ def _latest_snapshot_row(
         training_expr = _snapshot_select_expr(columns, "training_allowed", "NULL")
         causality_expr = _snapshot_select_expr(columns, "causality_status", "NULL")
         metric_expr = _snapshot_select_expr(columns, "temperature_metric", "'high'")
+        # B5 (PR3): ensemble_snapshots renamed data_version -> dataset_id. Expose a
+        # stable `data_version` read key whether the table is canonical or legacy.
+        model_version_expr = _snapshot_select_expr(columns, "model_version", "NULL")
+        data_version_expr = ("dataset_id AS data_version" if "dataset_id" in columns
+                             else _snapshot_select_expr(columns, "data_version", "NULL"))
         row = conn.execute(
             f"""
             SELECT p_raw_json, lead_hours, issue_time, available_at,
-                   model_version, data_version, snapshot_id,
+                   {model_version_expr}, {data_version_expr}, snapshot_id,
                    {training_expr},
                    {causality_expr},
                    {metric_expr},
@@ -1862,8 +1872,8 @@ def get_snapshot_context(
     )
     if row is None or not row["p_raw_json"]:
         return None
-    source_model_version = row["data_version"] or row["model_version"]
-    if not source_model_version:
+    forecast_model_id = row["data_version"] or row["model_version"]
+    if not forecast_model_id:
         return None
     issue_time = row["issue_time"]
     training_allowed = row["training_allowed"]
@@ -1884,9 +1894,9 @@ def get_snapshot_context(
             "lead_days": float(row["lead_hours"]) / 24.0,
             "issue_time": issue_time,
             "available_at": row["available_at"],
-            "source_model_version": source_model_version,
+            "forecast_model_id": forecast_model_id,
             "temperature_metric": str(row["temperature_metric"] or "high"),
-            "forecast_source": _forecast_source_from_version(source_model_version),
+            "forecast_source": _forecast_source_from_version(forecast_model_id),
             "snapshot_learning_ready": learning_snapshot_ready,
             "learning_blocked_reason": learning_blocked_reason,
             "snapshot_source": row["snapshot_source"],
@@ -1906,7 +1916,7 @@ def _snapshot_contexts_for_market(
     """Resolve decision-time snapshots, preferring durable settlement truth over open portfolio.
 
     trade_conn: for event-spine queries (position_events, decision_log).
-    shared_conn: for snapshot lookups (ensemble_snapshots_v2).
+    shared_conn: for snapshot lookups (ensemble_snapshots).
     """
     stage_events = query_settlement_events(
         trade_conn,
@@ -2080,7 +2090,7 @@ def harvest_settlement(
     lead_days: float = 3.0,
     forecast_issue_time: Optional[str] = None,
     forecast_available_at: Optional[str] = None,
-    source_model_version: Optional[str] = None,
+    forecast_model_id: Optional[str] = None,
     settlement_value: Optional[float] = None,
     bias_corrected: Optional[bool] = None,
     temperature_metric: str = "high",
@@ -2114,13 +2124,13 @@ def harvest_settlement(
             bias_corrected = settings.bias_correction_enabled
         except Exception:
             bias_corrected = False
-    if p_raw_vector and not source_model_version:
+    if p_raw_vector and not forecast_model_id:
         raise ValueError(
-            "source_model_version is required when harvesting calibration pairs"
+            "forecast_model_id is required when harvesting calibration pairs"
         )
     coerced_snapshot_training_allowed = _coerce_training_allowed_flag(snapshot_training_allowed)
     if p_raw_vector and coerced_snapshot_training_allowed is False:
-        _emit_learning_write_blocked("missing_source_model_version_or_lineage")
+        _emit_learning_write_blocked("missing_forecast_model_id_or_lineage")
         return 0
     if p_raw_vector and not _causality_allows_learning(causality_status):
         _emit_learning_write_blocked("snapshot_causality_not_ok")
@@ -2130,14 +2140,14 @@ def harvest_settlement(
         if getattr(city, "temperature_metric", temperature_metric) == "low" or temperature_metric == "low"
         else temperature_metric
     )
-    resolved_forecast_source = forecast_source or _forecast_source_from_version(source_model_version)
+    resolved_forecast_source = forecast_source or _forecast_source_from_version(forecast_model_id)
     resolved_pair_data_version = (
         str(pair_data_version).strip()
         if pair_data_version not in (None, "")
         else (
             metric_identity.data_version
-            if _is_training_forecast_source(source_model_version)
-            else str(source_model_version or "").strip()
+            if _is_training_forecast_source(forecast_model_id)
+            else str(forecast_model_id or "").strip()
         )
     )
     if not resolved_pair_data_version:
@@ -2145,12 +2155,12 @@ def harvest_settlement(
     training_requested = (
         coerced_snapshot_training_allowed
         if coerced_snapshot_training_allowed is not None
-        else _is_training_forecast_source(source_model_version)
+        else _is_training_forecast_source(forecast_model_id)
     )
     resolved_snapshot_id = _coerce_snapshot_id(snapshot_id)
 
     # Phase 2.6 (2026-05-04): derive cycle/source_id/horizon_profile from the
-    # forecast issue_time + data_version so calibration_pairs_v2 rows land in
+    # forecast issue_time + data_version so calibration_pairs rows land in
     # the correct stratified bucket.
     #
     # Object-meaning invariant (Wave7): schema/helper defaults are not source
@@ -2211,12 +2221,12 @@ def harvest_settlement(
             city.name,
             target_date,
             issue_time,
-            source_model_version or "",
+            forecast_model_id or "",
         )
-        # C5 routes both tracks through add_calibration_pair_v2. The row also
+        # C5 routes both tracks through add_calibration_pair. The row also
         # preserves forecast-source lineage so runtime/fallback p_raw cannot be
         # rebranded as canonical TIGGE training data.
-        add_calibration_pair_v2(
+        add_calibration_pair(
             conn, city=city.name, target_date=target_date,
             range_label=label, p_raw=p_raw, outcome=outcome,
             lead_days=lead_days, season=season, cluster=city.cluster,
@@ -2234,6 +2244,7 @@ def harvest_settlement(
             cycle=_phase2_cycle,
             source_id=_phase2_source_id_field,
             horizon_profile=_phase2_horizon_profile,
+            bin_source="legacy",
         )
         count += 1
 

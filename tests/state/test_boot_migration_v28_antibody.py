@@ -22,7 +22,7 @@ import sqlite3
 import pytest
 
 from src.contracts.no_trade_reason import NoTradeReason
-from src.state.db import SCHEMA_VERSION
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 from src.state.schema.no_trade_events_schema import (
     _schema_version_in_list,
     migrate_no_trade_events_schema,

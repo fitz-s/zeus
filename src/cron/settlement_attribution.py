@@ -6,7 +6,7 @@
 
 Offline job (never imported by live daemon paths).  Matches
 ``WORLD.decision_events(source='shadow_decision', outcome='shadow_enter')``
-to ``FCST.settlements_v2`` by
+to ``FCST.settlement_outcomes`` by
   (market_slug, target_date, temperature_metric)
 and writes the corresponding ``shadow_experiments`` + ``regret_decompositions``
 rows to WORLD so that EvidenceReport gains settled-outcome evidence (n_settled,
@@ -15,7 +15,7 @@ n_wins, CI).
 Design constraints
 ------------------
 - Offline only: zero import of cycle_runtime / evaluator live paths.
-- Read-only on FCST settlements_v2 (ATTACH-only; never opened writable).
+- Read-only on FCST settlement_outcomes (ATTACH-only; never opened writable).
 - Idempotent: rows in regret_decompositions already keyed to a
   decision_event_id are skipped — never double-written.
 - INV-37: cross-DB read (FCST) + write (WORLD) uses WORLD-as-main with
@@ -84,7 +84,7 @@ def compute_realized_pnl(
     _side_raw = (side or "").upper()
     side_upper = _side_raw.removeprefix("BUY_")  # 'BUY_YES' → 'YES', 'YES' → 'YES'
 
-    # winning_bin from settlements_v2 is the bin-label that won (e.g. "above_67F").
+    # winning_bin from settlement_outcomes is the bin-label that won (e.g. "above_67F").
     # For YES tokens the outcome is binary: the token wins if it resolves 1.0.
     # For shadow_decision rows, `side` is the direction of the would-be position.
     # We interpret: WIN iff the side matches the resolution direction.
@@ -95,11 +95,11 @@ def compute_realized_pnl(
     # as the position direction.  The resolution mapping is:
     #   side='YES' → win when winning_bin does NOT start with 'no_' prefix (YES won)
     #   side='NO'  → win when winning_bin starts with 'no_' (NO won)
-    # This is a thin v1 approximation; callers should refine once market_events_v2
+    # This is a thin v1 approximation; callers should refine once market_events
     # range labels are wired.
 
     # For Track L-2 v1 we use a simpler convention: the settlement_value field
-    # in settlements_v2 gives the actual recorded temperature.  winning_bin is the
+    # in settlement_outcomes gives the actual recorded temperature.  winning_bin is the
     # text label for the winner.  We do not have the bin-to-direction mapping here,
     # so we use a direct outcome field if available, else treat winning_bin IS NOT NULL
     # as "resolved" and use the side to determine win/loss.
@@ -113,7 +113,7 @@ def compute_realized_pnl(
     # Without a reliable mapping, v1 uses a POSITIVE=WIN direction:
     #   For 'YES' positions: settled_payoff = 1.0 if we assume market went in our favour.
     # Since we cannot know from winning_bin alone which direction won without the full
-    # market_events_v2 join, we implement the minimal correct v1:
+    # market_events join, we implement the minimal correct v1:
     #   - If winning_bin is None → skip (market not yet settled)
     #   - Realised payoff for YES: 1.0 if winning_bin does NOT contain 'no' as first word
     #   - Realised payoff for NO: 1.0 if winning_bin starts with 'no'
@@ -163,7 +163,7 @@ def run_attribution(
 ) -> dict:
     """Attribute shadow decisions to settlement outcomes.
 
-    Reads ``WORLD.decision_events`` + ``forecasts.settlements_v2`` (ATTACHed).
+    Reads ``WORLD.decision_events`` + ``forecasts.settlement_outcomes`` (ATTACHed).
     Writes to ``WORLD.shadow_experiments`` + ``WORLD.regret_decompositions``.
 
     Parameters
@@ -218,8 +218,8 @@ def run_attribution(
             logger.info("Registered experiment %s for strategy %s", exp_id[:12], sk)
         return _experiment_ids[sk]
 
-    # Query: shadow_decision rows with outcome='shadow_enter', joined to settlements_v2.
-    # settlements_v2 lives in the ATTACHed 'forecasts' schema.
+    # Query: shadow_decision rows with outcome='shadow_enter', joined to settlement_outcomes.
+    # settlement_outcomes lives in the ATTACHed 'forecasts' schema.
     strategy_filter = ""
     params: list = []
     if strategy_key is not None:
@@ -241,7 +241,7 @@ def run_attribution(
             sv.winning_bin,
             sv.settlement_value
         FROM decision_events de
-        LEFT JOIN forecasts.settlements_v2 sv
+        LEFT JOIN forecasts.settlement_outcomes sv
             ON  sv.market_slug = de.market_slug
             AND sv.target_date  = de.target_date
             AND sv.temperature_metric = de.temperature_metric
@@ -409,7 +409,7 @@ def open_world_with_forecasts(write_class: str = "bulk"):
 def _cli() -> None:
     parser = argparse.ArgumentParser(
         description="Track L-2 settlement-attribution cron: joins shadow "
-                    "decision_events to settlements_v2, writes regret_decompositions.",
+                    "decision_events to settlement_outcomes, writes regret_decompositions.",
     )
     parser.add_argument(
         "--strategy",

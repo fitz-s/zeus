@@ -13,8 +13,8 @@ RELATIONSHIP INVARIANT (cross-module):
       - src/execution/harvester.py
       - src/ingest/harvester_truth_writer.py
     The string is only permitted to appear in:
-      - scripts/backfill_settlements_v2_era_provenance.py (compatibility shim comments)
-      - scripts/audit_settlements_v2_era_provenance.py (query string)
+      - scripts/backfill_settlement_outcomes_era_provenance.py (compatibility shim comments)
+      - scripts/audit_settlement_outcomes_era_provenance.py (query string)
       - tests/test_inv_era_provenance_post_cutover_count.py (antibody query)
 
     This is an AST/text audit test, not a runtime test. It statically verifies
@@ -28,7 +28,7 @@ R-1.3 (AST audit — no 'harvester_live_uma_vote' in source paths post-consolida
       - src/ingest/harvester_truth_writer.py
     Assert that the literal string 'harvester_live_uma_vote' does NOT appear
     in either file. Permitted locations (not checked by this test):
-      - scripts/backfill_settlements_v2_era_provenance.py
+      - scripts/backfill_settlement_outcomes_era_provenance.py
       - tests/test_inv_era_provenance_post_cutover_count.py
 
     NOTE: This test is expected to FAIL before PR 1 implementation (the

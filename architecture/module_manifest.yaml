@@ -75,7 +75,7 @@ modules:
       - tests/test_chronicle_dedup.py
       - tests/test_cross_module_invariants.py
       - tests/test_collateral_ledger.py
-      - tests/test_executable_market_snapshot_v2.py
+      - tests/test_executable_market_snapshot.py
       - tests/test_command_bus_types.py
       - tests/test_command_grammar_amendment.py
       - tests/test_riskguard_red_durable_cmd.py
@@ -240,7 +240,6 @@ modules:
       - tests/test_cities_config_authoritative.py
       - tests/test_ensemble_client.py
       - tests/test_backfill_openmeteo_previous_runs.py
-      - tests/test_etl_forecasts_v2_from_legacy.py
       - tests/test_forecast_source_registry.py
       - tests/test_tigge_ingest.py
       - tests/test_backfill_scripts_match_live_config.py
@@ -524,7 +523,7 @@ modules:
       - src/contracts/calibration_bins.py
       - src/contracts/execution_price.py
       - src/contracts/execution_intent.py
-      - src/contracts/executable_market_snapshot_v2.py
+      - src/contracts/executable_market_snapshot.py
       - src/contracts/venue_submission_envelope.py
       - src/contracts/fx_classification.py
       - src/contracts/provenance_registry.py
@@ -532,7 +531,7 @@ modules:
     public_entry_files:
       - src/contracts/settlement_semantics.py
       - src/contracts/calibration_bins.py
-      - src/contracts/executable_market_snapshot_v2.py
+      - src/contracts/executable_market_snapshot.py
       - src/contracts/venue_submission_envelope.py
       - src/contracts/fx_classification.py
       - src/contracts/semantic_types.py
@@ -548,7 +547,7 @@ modules:
       - tests/test_calibration_bins_canonical.py
       - tests/test_reality_contracts.py
       - tests/test_collateral_ledger.py
-      - tests/test_executable_market_snapshot_v2.py
+      - tests/test_executable_market_snapshot.py
       - tests/test_risk_allocator.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
@@ -682,12 +681,12 @@ modules:
     authority_role: operator_script_surface
     high_risk_files:
       - scripts/topology_doctor.py
-      - scripts/backfill_obs_v2.py
+      - scripts/backfill_obs.py
       - scripts/rebuild_calibration_pairs_canonical.py
       - scripts/check_daemon_heartbeat.py
     public_entry_files:
       - scripts/topology_doctor.py
-      - scripts/backfill_obs_v2.py
+      - scripts/backfill_obs.py
     law_dependencies:
       - docs/authority/zeus_current_delivery.md
       - architecture/script_manifest.yaml

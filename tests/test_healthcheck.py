@@ -113,6 +113,27 @@ def _mock_settlement_truth_status(monkeypatch):
             "issue": None,
         },
     )
+    # run_validation reads state/assumptions.json which doesn't exist in CI/test
+    # environments. Patch it so assumption mismatch never blocks healthy predicate
+    # in tests that exercise check() holistically.
+    import scripts.validate_assumptions as _va
+    monkeypatch.setattr(
+        _va,
+        "run_validation",
+        lambda: {"valid": True, "checks": ["mocked"], "mismatches": []},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_scheduler_business_liveness_status(monkeypatch):
+    # _scheduler_business_liveness_status reads scheduler_health.json from disk.
+    # Missing file → ok=False → healthy=False for all tests calling check().
+    # Mock to "ok" so the predicate does not gate healthy in the test harness.
+    monkeypatch.setattr(
+        healthcheck,
+        "_scheduler_business_liveness_status",
+        lambda: {"ok": True, "modes": {}, "issue": None},
+    )
 
 
 def _write_risk_state(path, *, checked_at=None, details=None):
@@ -780,7 +801,7 @@ def test_live_process_loaded_code_surface_includes_recovery_and_m5_paths():
     live_paths = set(healthcheck.PROCESS_CODE_SURFACES["live_trading"])
 
     assert "src/engine/evaluator.py" in live_paths
-    assert "src/contracts/executable_market_snapshot_v2.py" in live_paths
+    assert "src/contracts/executable_market_snapshot.py" in live_paths
     assert "src/contracts/execution_intent.py" in live_paths
     assert "src/data/market_scanner.py" in live_paths
     assert "src/data/polymarket_client.py" in live_paths
@@ -800,10 +821,10 @@ def test_settlement_truth_status_rejects_stale_settled_at(tmp_path):
     db_path = tmp_path / "zeus-forecasts.db"
     conn = sqlite3.connect(str(db_path))
     conn.execute(
-        "CREATE TABLE settlements_v2 (settlement_id INTEGER PRIMARY KEY, settled_at TEXT, recorded_at TEXT)"
+        "CREATE TABLE settlement_outcomes (settlement_id INTEGER PRIMARY KEY, settled_at TEXT, recorded_at TEXT)"
     )
     conn.execute(
-        "INSERT INTO settlements_v2 (settled_at, recorded_at) VALUES (?, ?)",
+        "INSERT INTO settlement_outcomes (settled_at, recorded_at) VALUES (?, ?)",
         ("2026-05-11T19:59:13+00:00", "2026-05-11T19:59:13+00:00"),
     )
     conn.commit()

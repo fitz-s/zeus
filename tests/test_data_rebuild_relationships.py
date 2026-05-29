@@ -192,7 +192,7 @@ def test_r2_canonical_rebuild_refuses_unaudited_with_nonzero_status():
         """
         INSERT INTO ensemble_snapshots (
             city, target_date, issue_time, valid_time, available_at,
-            fetch_time, lead_hours, members_json, model_version, data_version,
+            fetch_time, lead_hours, members_json, model_version, dataset_id,
             authority, temperature_metric
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -275,7 +275,7 @@ def test_r2_canonical_rebuild_refuses_partial_live_replacement():
             """
             INSERT INTO ensemble_snapshots (
                 city, target_date, issue_time, valid_time, available_at,
-                fetch_time, lead_hours, members_json, model_version, data_version,
+                fetch_time, lead_hours, members_json, model_version, dataset_id,
                 authority, temperature_metric
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -362,7 +362,7 @@ def test_r3_compute_id_exists_and_rejects_naive_datetime():
             city="NYC",
             target_date=date(2024, 1, 15),
             issue_time=datetime(2024, 1, 15, 0, 0),  # naive: no tzinfo
-            source_model_version="tigge_v1",
+            forecast_model_id="tigge_v1",
         )
 
 

@@ -37,7 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
 
@@ -74,7 +74,7 @@ def ingest_env(tmp_path, monkeypatch):
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn, ingest_mod
 
 
@@ -102,8 +102,8 @@ def test_absent_causality_field_is_rejected_by_ingest(ingest_env, tmp_path):
         "contract_rejected: PROVENANCE_VIOLATION",
     ), status
 
-    count = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots_v2").fetchone()[0]
-    assert count == 0, "rejected payload must not write to ensemble_snapshots_v2"
+    count = conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0]
+    assert count == 0, "rejected payload must not write to ensemble_snapshots"
 
 
 def test_present_causality_field_survives_ingest_contract(ingest_env, tmp_path):
@@ -146,7 +146,7 @@ def test_present_causality_field_survives_ingest_contract(ingest_env, tmp_path):
 # Empirically verified 2026-04-24 via direct call to
 # validate_snapshot_contract: all three return accepted=True,
 # training_allowed=True, and the ingest path writes to
-# ensemble_snapshots_v2 (or would, once the write-path wiring is
+# ensemble_snapshots (or would, once the write-path wiring is
 # complete).
 #
 # These tests PIN CURRENT BEHAVIOR so an operator can see the gap is

@@ -44,7 +44,7 @@ def three_dbs(tmp_path):
     """Create separate world, trade, forecasts SQLite DBs in a temp dir.
 
     world DB: opportunity_fact, decision_events
-    forecasts DB: ensemble_snapshots_v2
+    forecasts DB: ensemble_snapshots
     trade DB: decision_integrity_quarantine (empty initially)
 
     Returns (world_path, trade_path, forecasts_path).
@@ -56,7 +56,7 @@ def three_dbs(tmp_path):
     # --- forecasts DB ---
     fconn = sqlite3.connect(str(forecasts_path))
     fconn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -67,7 +67,7 @@ def three_dbs(tmp_path):
         )
     """)
     snap_cur = fconn.execute(
-        "INSERT INTO ensemble_snapshots_v2 "
+        "INSERT INTO ensemble_snapshots "
         "(city, target_date, temperature_metric, contributes_to_target_extrema, "
         " forecast_window_attribution_status, source_run_id) "
         "VALUES ('Bangkok', '2026-05-22', 'high', 0, 'OK', 'run-xdb-1')"

@@ -172,7 +172,7 @@ def _load_paired_groups(conn: sqlite3.Connection, metric: str) -> tuple[list[dic
     tig_snaps = conn.execute("""
         SELECT snapshot_id, city, target_date, ROUND(lead_hours/24.0) as lead_d,
                members_json
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE data_version = ?
           AND temperature_metric = ?
           AND members_json IS NOT NULL
@@ -182,7 +182,7 @@ def _load_paired_groups(conn: sqlite3.Connection, metric: str) -> tuple[list[dic
     opd_snaps = conn.execute("""
         SELECT city, target_date, ROUND(lead_hours/24.0) as lead_d,
                members_json
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE data_version = ?
           AND temperature_metric = ?
           AND members_json IS NOT NULL

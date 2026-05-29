@@ -69,7 +69,7 @@ def test_provenance_required_fields_are_family_specific() -> None:
         {"condition_id", "captured_at", "freshness_deadline", "authority_tier"},
         "executable_snapshot",
     ) == []
-    # market topology row uses REAL market_events_v2 column created_at (not captured_at):
+    # market topology row uses REAL market_events column created_at (not captured_at):
     assert missing_live_provenance({"condition_id", "created_at"}, "market") == []
     assert "created_at" in missing_live_provenance({"condition_id", "captured_at"}, "market")
     # observation uses REAL observations columns (source/station_id/target_date/fetched_at):

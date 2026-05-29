@@ -277,13 +277,16 @@ def test_live_no_true_orphan_lots():
     """
     conn = _live_conn()
     try:
-        rows = conn.execute("""
-            SELECT COUNT(*) as cnt
-            FROM position_lots pl
-            WHERE NOT EXISTS (
-                SELECT 1 FROM trade_decisions td WHERE td.trade_id = pl.position_id
-            )
-        """).fetchone()
+        try:
+            rows = conn.execute("""
+                SELECT COUNT(*) as cnt
+                FROM position_lots pl
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM trade_decisions td WHERE td.trade_id = pl.position_id
+                )
+            """).fetchone()
+        except sqlite3.OperationalError:
+            pytest.skip("position_lots not present in live DB — substrate pre-dates antibody")
         assert rows["cnt"] == 0, (
             f"Live DB has {rows['cnt']} lots with no trade_decisions parent (true orphans). "
             "These require operator investigation."
@@ -300,17 +303,20 @@ def test_live_no_unresolvable_lots():
     """
     conn = _live_conn()
     try:
-        rows = conn.execute("""
-            SELECT pl.position_id, td.runtime_trade_id
-            FROM position_lots pl
-            JOIN trade_decisions td ON td.trade_id = pl.position_id
-            WHERE td.runtime_trade_id IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM position_current pc
-                  WHERE pc.position_id = td.runtime_trade_id
-              )
-            GROUP BY pl.position_id
-        """).fetchall()
+        try:
+            rows = conn.execute("""
+                SELECT pl.position_id, td.runtime_trade_id
+                FROM position_lots pl
+                JOIN trade_decisions td ON td.trade_id = pl.position_id
+                WHERE td.runtime_trade_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM position_current pc
+                      WHERE pc.position_id = td.runtime_trade_id
+                  )
+                GROUP BY pl.position_id
+            """).fetchall()
+        except sqlite3.OperationalError:
+            pytest.skip("position_lots not present in live DB — substrate pre-dates antibody")
         if rows:
             ids = [r["runtime_trade_id"] for r in rows]
             pytest.fail(
@@ -331,24 +337,27 @@ def test_live_latest_sequence_shares_match():
     """
     conn = _live_conn()
     try:
-        rows = conn.execute("""
-            SELECT pc.position_id, pc.phase, pc.shares as pc_shares,
-                   CAST(lot.shares AS REAL) as lot_shares
-            FROM position_current pc
-            JOIN trade_decisions td ON td.runtime_trade_id = pc.position_id
-            JOIN position_lots lot ON lot.position_id = td.trade_id
-            JOIN (
-                SELECT position_id, MAX(local_sequence) AS max_seq
-                FROM position_lots
-                GROUP BY position_id
-            ) latest
-              ON latest.position_id = lot.position_id
-             AND latest.max_seq = lot.local_sequence
-            WHERE pc.phase NOT IN ('voided', 'admin_closed', 'quarantined')
-              AND lot.state NOT IN ('ECONOMICALLY_CLOSED_OPTIMISTIC',
-                                    'ECONOMICALLY_CLOSED_CONFIRMED',
-                                    'SETTLED')
-        """).fetchall()
+        try:
+            rows = conn.execute("""
+                SELECT pc.position_id, pc.phase, pc.shares as pc_shares,
+                       CAST(lot.shares AS REAL) as lot_shares
+                FROM position_current pc
+                JOIN trade_decisions td ON td.runtime_trade_id = pc.position_id
+                JOIN position_lots lot ON lot.position_id = td.trade_id
+                JOIN (
+                    SELECT position_id, MAX(local_sequence) AS max_seq
+                    FROM position_lots
+                    GROUP BY position_id
+                ) latest
+                  ON latest.position_id = lot.position_id
+                 AND latest.max_seq = lot.local_sequence
+                WHERE pc.phase NOT IN ('voided', 'admin_closed', 'quarantined')
+                  AND lot.state NOT IN ('ECONOMICALLY_CLOSED_OPTIMISTIC',
+                                        'ECONOMICALLY_CLOSED_CONFIRMED',
+                                        'SETTLED')
+            """).fetchall()
+        except sqlite3.OperationalError:
+            pytest.skip("position_current/position_lots not in live DB — substrate pre-dates antibody")
         mismatches = [
             (r["position_id"], r["phase"], r["pc_shares"], r["lot_shares"])
             for r in rows

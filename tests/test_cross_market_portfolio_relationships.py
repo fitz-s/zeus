@@ -33,7 +33,8 @@ import pytest
 from src.contracts.decision_natural_key import make_decision_natural_key
 from src.contracts.no_trade_reason import NoTradeReason
 from src.contracts.weather_regime_tag import WeatherRegimeTag
-from src.state.db import SCHEMA_VERSION, init_schema
+SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
+from src.state.db import init_schema
 from src.strategy.candidates import CandidateContext
 from src.strategy.candidates.cross_market_correlation_hedge import (
     CrossMarketCorrelationHedge,
@@ -59,11 +60,11 @@ def _world_conn() -> sqlite3.Connection:
 
 
 def _conn_with_market_events(city: str = "NYC") -> sqlite3.Connection:
-    """World DB with market_events_v2 row for NYC."""
+    """World DB with market_events row for NYC."""
     conn = _world_conn()
     try:
         conn.execute(
-            "INSERT INTO market_events_v2 (market_slug, city) VALUES (?, ?)",
+            "INSERT INTO market_events (market_slug, city) VALUES (?, ?)",
             ("test-mkt-NYC-high-2026-06-15", city),
         )
         conn.commit()
@@ -91,7 +92,7 @@ def _minimal_conn(city: str = "NYC") -> sqlite3.Connection:
     """Minimal in-memory DB with only the tables the candidate needs."""
     conn = sqlite3.connect(":memory:")
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS market_events_v2 (
+        CREATE TABLE IF NOT EXISTS market_events (
             market_slug TEXT PRIMARY KEY,
             city TEXT NOT NULL
         )
@@ -150,7 +151,7 @@ def _minimal_conn(city: str = "NYC") -> sqlite3.Connection:
     conn.execute(_regime_cache_ddl())
     if city:
         conn.execute(
-            "INSERT INTO market_events_v2 (market_slug, city) VALUES (?, ?)",
+            "INSERT INTO market_events (market_slug, city) VALUES (?, ?)",
             ("test-mkt-NYC-high-2026-06-15", city),
         )
     conn.commit()

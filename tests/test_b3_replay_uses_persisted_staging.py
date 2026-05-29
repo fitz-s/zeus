@@ -68,7 +68,7 @@ def test_run_replay_for_a_cohorts_passes_db_mode_to_evaluate_cohort(monkeypatch,
 def test_load_error_model_from_db_uses_canonical_contract(monkeypatch):
     """Per-snapshot error model load MUST go through `read_bias_model` with all
     four canonical filters (family, authority='STAGING' for replay, gate_set_hash,
-    target_month). Raw SELECT against model_bias_ens_v2 without these filters can
+    target_month). Raw SELECT against model_bias_ens without these filters can
     return stale-gate / off-month / VERIFIED-leaked rows.
 
     Pre-fix: replay_equivalence_full_transport._load_error_model_from_db (line 271)

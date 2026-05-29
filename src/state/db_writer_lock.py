@@ -660,33 +660,31 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
-        "scripts/promote_calibration_v2_stage_to_prod.py",  # RO inspect/verify; RW only with --commit
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
         # the original single-script design. Each handles RO inspect/verify;
         # RW only with --commit, gated by BEGIN IMMEDIATE + rollback semantics.
-        "scripts/promote_platt_models_v2.py",       # RO inspect/verify; RW only with --commit (zeus-world.db)
-        "scripts/promote_calibration_pairs_v2.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
+        "scripts/promote_platt.py",       # RO inspect/verify; RW only with --commit (zeus-world.db)
+        "scripts/promote_calibration.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
         "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
         "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
         "scripts/audit_realtime_pnl.py",                # read_only (PR #86)
         "scripts/bridge_oracle_to_calibration.py",      # read_only (PR #86)
         "scripts/build_correlation_matrix.py",          # read_only (PR #86)
-        "scripts/compare_diurnal_v1_v2.py",             # read_only (PR #86)
+
         "scripts/deep_heartbeat.py",                    # read_only (PR #86)
         "scripts/healthcheck.py",                       # read_only (PR #86)
         "scripts/replay_parity.py",                     # read_only (PR #86)
         "scripts/venus_sensing_report.py",              # read_only (PR #86)
         # --- additional read-only / ro-URI scripts ---
-        "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
+        "scripts/audit_observation_instants.py",         # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
         "scripts/calibration_observation_weekly.py",    # read_only_ro_uri
-        "scripts/ddd_v1_v2_replay.py",                  # read_only_ro_uri
         "scripts/diagnose_low_high_alignment.py",       # read_only (SELECT-only)
         "scripts/diagnose_truth_surfaces.py",           # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
         "scripts/edge_observation_weekly.py",           # read_only_ro_uri
         "scripts/generate_monthly_bounds.py",           # read_only_ro_uri
         "scripts/learning_loop_observation_weekly.py",  # read_only_ro_uri
-        "scripts/check_schema_version.py",              # in_memory_only (":memory:" only — schema drift CI gate)
+        "scripts/check_schema_fingerprint.py",          # in_memory_only (":memory:" only — schema drift CI gate; B2 replaces check_schema_version.py)
         "scripts/check_data_pipeline_live_e2e.py",      # read_only_ro_uri (live E2E verifier; mode=ro only)
         "scripts/check_forecast_live_ready.py",         # read_only_ro_uri (forecast-live authority-chain verifier; mode=ro + query_only)
         "scripts/live_health_probe.py",                 # read_only_ro_uri (live health verifier; settlement truth SELECT-only)
@@ -723,24 +721,22 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_forecast_issue_time.py",          # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
         "scripts/backfill_london_f_to_c_2026_05_08.py",     # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_low_contract_window_evidence.py", # already_guarded: writes under db_writer_lock(BULK) when not dry_run
-        "scripts/backfill_obs_v2.py",                       # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_obs.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_ogimet_metar.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_outcome_fact.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_tigge_snapshot_p_raw_v2.py",      # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_wu_daily_all.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/cleanup_ghost_positions.py",               # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/etl_forecasts_v2_from_legacy.py",          # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/fill_obs_v2_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run
-        "scripts/fill_obs_v2_meteostat.py",                 # already_guarded: writes under db_writer_lock(BULK) when not dry_run
+        "scripts/fill_obs_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run
         "scripts/force_cycle_with_healthy_gates.py",        # already_guarded: writes under db_writer_lock(BULK)
         "scripts/hko_ingest_tick.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/ingest_grib_to_snapshots.py",              # already_guarded: writes under db_writer_lock(BULK)
         "scripts/nuke_rebuild_projections.py",              # already_guarded: writes under db_writer_lock(BULK)
         "scripts/obs_v2_live_tick.py",                      # already_guarded: writes under db_writer_lock(BULK) when not dry_run
         "scripts/rebuild_calibration_pairs_canonical.py",   # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/rebuild_calibration_pairs_v2.py",          # already_guarded: writes under bulk_lock_with_chunker (K3 retrofit)
+        "scripts/rebuild_calibration_pairs.py",          # already_guarded: writes under bulk_lock_with_chunker (K3 retrofit)
         "scripts/rebuild_settlements.py",                   # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/refit_platt_v2.py",                        # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
+        "scripts/refit_platt.py",                           # already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
         # --- ENS full_transport_v1 offline staging tools (2026-05-24): isolated --db only,
         #     refuse the shared world DB via _resolve_isolated_calibration_write_db_path;
         #     single-process offline operator runs, never the live daemon path ---
@@ -751,7 +747,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- already_guarded operator migration scripts ---
         "scripts/migrate_add_authority_column.py",          # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
         "scripts/migrate_b070_control_overrides_to_history.py",  # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
-        "scripts/migrate_ensemble_snapshots_v2_add_ingest_backend.py",  # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
+        "scripts/migrate_ensemble_snapshots_add_ingest_backend.py",  # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
         "scripts/migrate_forecasts_availability_provenance.py",   # operator_invoked + already_guarded: reads mode=ro; writes under db_writer_lock(BULK)
         "scripts/migrate_observations_k1.py",               # operator_invoked + already_guarded: writes under db_writer_lock(BULK)
         # --- retrofitted migration script (F26 cleanup: lock wrap added 2026-05-18) ---
@@ -760,18 +756,12 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/reevaluate_readiness_2026_05_07.py",       # operator_invoked: one-shot idempotent readiness repair (ran 2026-05-07, expected 0 updates)
         # --- QUARANTINED resolved: verify_truth_surfaces is read_only (0 writes) ---
         "scripts/verify_truth_surfaces.py",                 # read_only: all connects are mode=ro or SELECT-only; 0 INSERT/UPDATE/DELETE
-        # --- phase0-pr4: NOT NULL migration scripts ---
-        "scripts/audit_calibration_pairs_v2_null_groups.py",    # read_only: mode=ro preflight audit; 0 writes
-        "scripts/migrate_calibration_pairs_v2_not_null.py",     # operator_invoked: DDL-only schema migration (CREATE TRIGGER / REBUILD)
-        "scripts/rollback_calibration_pairs_v2_not_null.py",    # operator_invoked: DDL-only rollback (DROP TRIGGER / REBUILD)
         # --- PR 1 era-provenance scripts ---
-        "scripts/audit_settlements_v2_era_provenance.py",       # read_only: SELECT-only, no writes
-        "scripts/backfill_settlements_v2_era_provenance.py",    # operator_invoked: --apply required; writes under SAVEPOINT
-        "scripts/rollback_settlements_v2_era_provenance.py",    # operator_invoked: --apply required; snapshot-based restoration
+        "scripts/audit_settlements_era_provenance.py",       # read_only: SELECT-only, no writes
         "scripts/migrate_settlement_commands_in_flight_at_era_flip.py",  # operator_invoked: quarantine DDL + SAVEPOINT
         # --- PR 3+6 (2026-05-19) migration scripts ---
         "scripts/migrate_settlement_commands_polymarket_anchor.py",  # operator_invoked: DDL-only idempotent ADD COLUMN for PR3+PR6 columns
-        "scripts/migrate_ensemble_snapshots_v2_alpha_proxy.py",     # operator_invoked: DDL-only idempotent ADD COLUMN for PR6 timing chain
+        "scripts/migrate_ensemble_snapshots_alpha_proxy.py",     # operator_invoked: DDL-only idempotent ADD COLUMN for PR6 timing chain
         # --- one-shot operator-local market injection (2026-05-19) ---
         # Untracked utility (ran 2026-05-19, 0 callers). Bare sqlite3.connect() at
         # lines 210/236/512/513 not wrapped in db_writer_lock(BULK). Allowlisted to
@@ -794,7 +784,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/shoulder_shadow_readiness_report.py",   # read_only: SELECT-only aggregate; NEVER mutates live_status; operator promotion gate
         "scripts/rollback_phase3_t3.py",                 # operator_invoked: SCAFFOLD stub; run() raises NotImplementedError until T3 production pass
         # --- Phase 7 T4 (2026-05-21) ---
-        "scripts/backfill_settlement_outcome_type.py",   # operator_invoked: backfills settlements_v2.outcome_type; writes under SAVEPOINT chunks when not --dry-run
+        "scripts/backfill_settlement_outcome_type.py",   # operator_invoked: backfills settlement_outcomes.outcome_type; writes under SAVEPOINT chunks when not --dry-run
         # --- Track R-1a: shadow replay harness + promotion readiness job (2026-05-22) ---
         "src/backtest/shadow_replay_harness.py",   # read_only_immutable_uri: opens live FCST+WORLD DBs via immutable=1 uri; writes only to caller-supplied temp_world_path (never live zeus-world.db); sentinel guard enforced
         "src/analysis/promotion_readiness_job.py", # read_only_ro_uri: CLI opens world-db with mode=ro; pure-compute adjudicate (conn=None); no tier writes
@@ -804,10 +794,10 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/verify_forecast_bundle_selection.py",  # read_only_ro_uri: opens forecasts+world DBs via file:...?mode=ro uri; SELECT-only; never writes
         # --- Zeus #64 matched-date eval tool (2026-05-25) ---
         "scripts/audit_matched_date_proper_scores.py",  # read_only_ro_uri: opens isolated staging DB via file:...?mode=ro uri; SELECT-only; never writes
-        # --- Zeus #64 Phase 1a: model_bias_ens_v2 residual-cols migration (2026-05-25) ---
-        "scripts/migrate_model_bias_ens_v2_add_residual_cols.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN; --commit gated; targets zeus-forecasts.db; never daemon path
-        "scripts/migrate_model_bias_ens_v2_canonical_fields.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN per-column; --commit gated dry-run default; targets staging/copy only; Zeus #64/#68/#69
-        "scripts/fit_full_transport_error_models.py",  # operator_invoked: INSERT OR REPLACE into model_bias_ens_v2; --commit gated dry-run default; --db must be staging/copy; Zeus #64/#69
+        # --- Zeus #64 Phase 1a: model_bias_ens residual-cols migration (2026-05-25) ---
+        "scripts/migrate_model_bias_ens_add_residual_cols.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN; --commit gated; targets zeus-forecasts.db; never daemon path
+        "scripts/migrate_model_bias_ens_canonical_fields.py",  # operator_invoked: idempotent ALTER TABLE ADD COLUMN per-column; --commit gated dry-run default; targets staging/copy only; Zeus #64/#68/#69
+        "scripts/fit_full_transport_error_models.py",  # operator_invoked: INSERT OR REPLACE into model_bias_ens; --commit gated dry-run default; --db must be staging/copy; Zeus #64/#69
         # --- Zeus #64 pre-existing analysis scripts (read-only, mode=ro) ---
         "scripts/audit_refit_proper_scores.py",         # read_only_ro_uri: mode=ro SELECT-only; operator diagnostic; never daemon path
         "scripts/experiment_route6_transport_beta.py",  # read_only_ro_uri: mode=ro SELECT-only; operator experiment; never daemon path

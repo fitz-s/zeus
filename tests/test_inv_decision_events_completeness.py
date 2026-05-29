@@ -5,19 +5,19 @@
 """
 Antibody test: INV-decision-events-completeness (natural-key, no ATTACH)
 
-Invariant: for every decision-tagged forecast in the last 7 days (ensemble_snapshots_v2
+Invariant: for every decision-tagged forecast in the last 7 days (ensemble_snapshots
 WHERE causality_status='OK'), decision_events must carry at least one row keyed by
 the matching natural tuple (market_slug, temperature_metric, target_date).
 
 v3 changes from v2:
 - Join key is market_slug (NOT market_id or condition_id).
-  condition_id excluded because market_events_v2.condition_id is nullable
+  condition_id excluded because market_events.condition_id is nullable
   (pre-discovery markets) — SQL "= NULL" would be silent failure.
 - Uses get_world_connection_read_only() and get_forecasts_connection_read_only()
   thin wrappers added in PR-T1-A (= get_*_connection(write_class=None)).
 
 Cross-module relationship test (Fitz §3 invariant pattern):
-  forecasts.ensemble_snapshots_v2 → forecasts.market_events_v2 (city→market_slug)
+  forecasts.ensemble_snapshots → forecasts.market_events (city→market_slug)
   → world.decision_events (natural-key lookup by market_slug)
 
 Independent read connections — INV-37 trivially honored (no ATTACH path).
@@ -40,12 +40,12 @@ from src.state.db import (
 
 def test_inv_decision_events_completeness_natural_key() -> None:
     """Cross-module: every decision-tagged forecast (7d, causality_status='OK')
-    in ensemble_snapshots_v2 must have >= 1 decision_events row keyed by
+    in ensemble_snapshots must have >= 1 decision_events row keyed by
     (market_slug, temperature_metric, target_date).
 
     market_slug join (NOT condition_id — per ultraplan v3 §4.4 critic-round-2 SEV-1).
     Independent read connections (INV-37 trivially honored — no ATTACH).
-    city→market_slug resolved Python-side via market_events_v2.
+    city→market_slug resolved Python-side via market_events.
     pytest.skip (not fail) if no candidates in 7d window.
 
     See PHASE_1_ULTRAPLAN.md §4.4 for full pseudocode.
@@ -66,13 +66,13 @@ def test_inv_decision_events_completeness_natural_key() -> None:
         candidates = forecasts.execute(
             """
             SELECT DISTINCT city, target_date, temperature_metric, available_at
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE recorded_at >= datetime('now', '-7 days')
               AND causality_status = 'OK'
             """
         ).fetchall()
 
-        # Resolve (city, target_date, metric) → market_slug via market_events_v2.
+        # Resolve (city, target_date, metric) → market_slug via market_events.
         # market_slug is the durable non-null identifier. condition_id is nullable
         # (pre-discovery markets) — excluded from join key (critic round 2 SEV-1).
         slug_map = {
@@ -80,7 +80,7 @@ def test_inv_decision_events_completeness_natural_key() -> None:
             for r in forecasts.execute(
                 """
                 SELECT city, target_date, temperature_metric, market_slug
-                FROM market_events_v2
+                FROM market_events
                 WHERE market_slug IS NOT NULL
                 """
             ).fetchall()

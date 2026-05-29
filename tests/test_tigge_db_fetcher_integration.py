@@ -53,7 +53,7 @@ def staged_world_db(tmp_path: Path, monkeypatch):
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -70,7 +70,7 @@ def staged_world_db(tmp_path: Path, monkeypatch):
             spread REAL,
             is_bimodal INTEGER,
             model_version TEXT,
-            data_version TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
             training_allowed INTEGER NOT NULL DEFAULT 1,
             causality_status TEXT NOT NULL DEFAULT 'OK',
             boundary_ambiguous INTEGER NOT NULL DEFAULT 0,
@@ -107,10 +107,10 @@ def staged_world_db(tmp_path: Path, monkeypatch):
         ),
     ):
         conn.execute(
-            """INSERT INTO ensemble_snapshots_v2
+            """INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
-             data_version, causality_status, authority, recorded_at, members_unit)
+             dataset_id, causality_status, authority, recorded_at, members_unit)
             VALUES (?, ?, ?, ?, ?, ?, '2026-05-03T00:00:00+00:00', ?, ?, 72.0, ?,
                     ?, 'OK', 'VERIFIED', ?, 'degC')""",
             (
@@ -168,7 +168,7 @@ def test_db_payload_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
     conn = sqlite3.connect(str(db_path))
     conn.executescript(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -179,7 +179,7 @@ def test_db_payload_returns_none_when_no_rows(fake_city, tmp_path, monkeypatch):
             members_json TEXT NOT NULL,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             causality_status TEXT NOT NULL DEFAULT 'OK',
-            data_version TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
             recorded_at TEXT NOT NULL,
             members_unit TEXT NOT NULL DEFAULT 'degC'
         );

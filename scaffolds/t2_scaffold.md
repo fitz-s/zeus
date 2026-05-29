@@ -4,7 +4,7 @@
 
 # T2 SCAFFOLD v3.1 — Day0HighNowcastSignal + one-hot daypart + fit_run_id (bin_grid_id deferred)
 
-**Status**: SCAFFOLD v3.1 (bin_grid_id/bin_schema_version deferred to Phase 2; proceeding to production)
+**Status**: SCAFFOLD v3.1 (bin_grid_id/bin_schema_id deferred to Phase 2; proceeding to production)
 **Author**: sonnet executor, worktree `phase1-t2-day0-nowcast-20260520`
 **Entry SHA**: origin/main = `649f73d865` (PR-T1-B merged; T1 complete)
 
@@ -122,8 +122,8 @@ run_seq, fit_run_id, hours_remaining, daypart, schema_version, source — 10 tot
 only during the ≤6h nowcast applicability window (the subset of the 24h Day0 market lifecycle
 where the horizon guard permits writes). Within that 6h write window, bin re-list is rare.
 The broader 24h Day0 lifecycle bin evolution is already covered by
-`ensemble_snapshots_v2.bin_grid_id` (the upstream ensemble snapshot that triggers the Day0
-cycle). The propagation path (`bin_grid_id` on `ensemble_snapshots_v2` and
+`ensemble_snapshots.bin_grid_id` (the upstream ensemble snapshot that triggers the Day0
+cycle). The propagation path (`bin_grid_id` on `ensemble_snapshots` and
 `ContractOutcomeDomain`) does not reach `evaluator.py:2363` or `monitor_refresh.py:838`
 — the `bins` list at those sites is built inline from market `outcomes` (Bin type has no
 `bin_grid_id` field). Plumbing it requires new architectural surface not in T2 scope.
@@ -159,13 +159,13 @@ CREATE INDEX IF NOT EXISTS idx_day0_nowcast_runs_event_id
 Coefficients change rarely. Storing per nowcast_run row = waste.
 Separate table: one row per fit execution, referenced via `fit_run_id`.
 
-`fit_version` is stable across re-runs of the same algorithm ("hpf_v1").
+`fit_artifact_id` is stable across re-runs of the same algorithm ("hpf_v1").
 `fit_run_id` is a per-execution UUID4 (non-deterministic = better: no hash stability issues).
 
 ```sql
 CREATE TABLE IF NOT EXISTS day0_horizon_platt_fits (
     fit_run_id          TEXT PRIMARY KEY,          -- uuid4 per fit execution
-    fit_version         TEXT NOT NULL,             -- semantic version, e.g. "hpf_v1"
+    fit_artifact_id         TEXT NOT NULL,             -- semantic version, e.g. "hpf_v1"
     alpha               REAL NOT NULL,
     beta                REAL NOT NULL,
     -- One-hot daypart (pre_sunrise is reference category, no coefficient)
@@ -312,13 +312,13 @@ CHECK constraint widened to `IN (3, 4)` during migration window (Fix 3).
 ## §13. Decisions locked in SCAFFOLD v3.1 (no further critic round)
 
 **#1 resolved**: Storage writer = `src/state/day0_nowcast_store.py` (mirrors T1 pattern).
-**#2 REVISED (v3.1)**: bin_grid_id/bin_schema_version DEFERRED to Phase 2.
+**#2 REVISED (v3.1)**: bin_grid_id/bin_schema_id DEFERRED to Phase 2.
   Original v3 claim ("propagated from cycle_runtime.bins") was a phantom — no propagation
   path exists at evaluator.py:2363 or monitor_refresh.py:838. bins list is built inline
   from market outcomes; Bin type has no bin_grid_id field. NOT NULL count corrected to 10.
   Correct rationale: nowcast writes happen only during the ≤6h applicability window (subset
   of the 24h Day0 lifecycle). Bin re-list within that 6h window is rare. The upstream
-  ensemble_snapshots_v2.bin_grid_id covers the 24h lifecycle bin evolution. Phase 2 retrofit
+  ensemble_snapshots.bin_grid_id covers the 24h lifecycle bin evolution. Phase 2 retrofit
   will plumb bin_grid_id from the triggering ensemble row once propagation path lands.
 **#3 resolved**: Caller-site wiring, not router side-effect (Option c per critic round-2).
 **#4 resolved**: One-hot daypart encoding (3 columns: γ_morning, γ_afternoon, γ_post_peak;

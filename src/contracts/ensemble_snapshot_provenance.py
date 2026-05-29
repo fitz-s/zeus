@@ -66,7 +66,7 @@ from typing import Iterable
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 # 2026-05-01: Open Data ENS data_versions added so the ingest daemon can
-# write same-day forecasts to ensemble_snapshots_v2 alongside the TIGGE archive
+# write same-day forecasts to ensemble_snapshots alongside the TIGGE archive
 # (which has a 48h public embargo and serves only as a 2-day-lagged training
 # backfill). These data_versions are written by src/data/ecmwf_open_data.py.
 #
@@ -78,7 +78,7 @@ ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_
 ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
 
 # Legacy versions (mx2t6 era, written before 2026-05-07). Kept in the
-# allow-list so historical rows in ensemble_snapshots_v2 remain readable.
+# allow-list so historical rows in ensemble_snapshots remain readable.
 _ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
 _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
 
@@ -114,7 +114,7 @@ CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
 })
 
 # M3 (2026-04-24): deprecation alias. The historical name
-# ``CANONICAL_DATA_VERSIONS`` applied only to ``ensemble_snapshots_v2``
+# ``CANONICAL_DATA_VERSIONS`` applied only to ``ensemble_snapshots``
 # writers/readers — it was never observation-level or settlement-level.
 # The rename makes the domain explicit and leaves space for parallel
 # observation/settlement allowlists below. Keep the alias for one
@@ -256,7 +256,7 @@ def assert_data_version_allowed(data_version: str | None, *, context: str = "") 
         raise DataVersionQuarantinedError(
             f"ensemble_snapshots write refused: data_version={data_version!r} "
             f"is not in the canonical allowlist {sorted(CANONICAL_ENSEMBLE_DATA_VERSIONS)}. "
-            f"Only canonical dual-track versions are permitted in ensemble_snapshots_v2.{ctx}"
+            f"Only canonical dual-track versions are permitted in ensemble_snapshots.{ctx}"
         )
 
 
@@ -276,17 +276,17 @@ def validate_members_unit(members_unit: str | None, *, context: str = "") -> Non
     """Raise MembersUnitInvalidError if members_unit is not valid.
 
     Valid values: "degC", "degF". Rejects None, empty string, and "K".
-    Call from every writer of ensemble_snapshots_v2 before INSERT.
+    Call from every writer of ensemble_snapshots before INSERT.
     """
     ctx = f" (context={context})" if context else ""
     if not members_unit:
         raise MembersUnitInvalidError(
-            f"ensemble_snapshots_v2 write refused: members_unit is missing or "
+            f"ensemble_snapshots write refused: members_unit is missing or "
             f"empty. Must be one of {sorted(_VALID_MEMBERS_UNITS)}.{ctx}"
         )
     if members_unit not in _VALID_MEMBERS_UNITS:
         raise MembersUnitInvalidError(
-            f"ensemble_snapshots_v2 write refused: members_unit={members_unit!r} "
+            f"ensemble_snapshots write refused: members_unit={members_unit!r} "
             f"is not a valid temperature unit. Must be one of "
             f"{sorted(_VALID_MEMBERS_UNITS)}. Note: 'K' (Kelvin) is rejected "
             f"— convert GRIB Kelvin to degC before storing.{ctx}"

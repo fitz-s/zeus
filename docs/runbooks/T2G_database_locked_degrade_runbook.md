@@ -25,7 +25,7 @@ trade-DB connection acquisition (`src/engine/cycle_runner.py`, the
 `get_connection()` call inside `cycle.run()`) propagated **uncaught** through
 `cycle.run()` and **crashed the live daemon** — or surfaced up to launchd's
 restart loop, producing a tight respawn window during contention with a
-concurrent `rebuild_calibration_pairs_v2.py` or other writer.
+concurrent `rebuild_calibration_pairs.py` or other writer.
 
 **Observable symptoms (pre-T2G)**:
 - Daemon crash / launchd respawn counter increments
@@ -106,10 +106,10 @@ When `db_write_lock_timeout_total` is non-zero or ALERT lines appear in
 
 Lock contention at the trade DB most commonly originates from:
 
-1. **`rebuild_calibration_pairs_v2.py`** — runs a long write transaction
+1. **`rebuild_calibration_pairs.py`** — runs a long write transaction
    per city. Check if a rebuild job is running or recently ran:
    ```bash
-   pgrep -af rebuild_calibration_pairs_v2
+   pgrep -af rebuild_calibration_pairs
    ```
 2. **`riskguard` write activity** — riskguard has its own write path to the
    DB. Check riskguard log for concurrent write windows:

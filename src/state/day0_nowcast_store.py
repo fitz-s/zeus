@@ -77,11 +77,11 @@ def write_platt_fit(
     Idempotent: INSERT OR IGNORE on fit_run_id PK.
     """
     from src.state.db import (
-        SCHEMA_FORECASTS_VERSION,
         ZEUS_FORECASTS_DB_PATH,
         get_forecasts_connection,
     )
     from src.state.db_writer_lock import WriteClass, db_writer_lock
+    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen row-provenance value; counter cancelled
 
     own_conn = conn is None
     if own_conn:
@@ -92,7 +92,7 @@ def write_platt_fit(
             conn.execute(
                 """
                 INSERT OR IGNORE INTO day0_horizon_platt_fits (
-                    fit_run_id, fit_version,
+                    fit_run_id, fit_artifact_id,
                     alpha, beta,
                     gamma_morning, gamma_afternoon, gamma_post_peak,
                     delta, epsilon,
@@ -104,7 +104,7 @@ def write_platt_fit(
                 )
                 """,
                 (
-                    fit.fit_run_id, fit.fit_version,
+                    fit.fit_run_id, fit.fit_artifact_id,
                     float(fit.alpha), float(fit.beta),
                     float(fit.gamma_morning), float(fit.gamma_afternoon), float(fit.gamma_post_peak),
                     float(fit.delta), float(fit.epsilon),
@@ -132,7 +132,7 @@ def write_nowcast_run(
     daypart: str,
     source: str = "live_nowcast",
     bin_grid_id: Optional[str] = None,
-    bin_schema_version: Optional[str] = None,
+    bin_schema_id: Optional[str] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> str:
     """Write a day0_nowcast_runs row. Returns the nowcast_event_id (nei_v1_ hash).
@@ -143,15 +143,15 @@ def write_nowcast_run(
     conn=None -> get_forecasts_connection(write_class=WriteClass.LIVE).
 
     p_nowcast, p_now_raw: np.ndarray or None; stored as JSON arrays.
-    bin_grid_id, bin_schema_version: propagated from ensemble_snapshots_v2
+    bin_grid_id, bin_schema_id: propagated from ensemble_snapshots
         (F4 retrofit — SCHEMA_FORECASTS_VERSION 5, T4 2026-05-21).
     """
     from src.state.db import (
-        SCHEMA_FORECASTS_VERSION,
         ZEUS_FORECASTS_DB_PATH,
         get_forecasts_connection,
     )
     from src.state.db_writer_lock import WriteClass, db_writer_lock
+    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen row-provenance value; counter cancelled
 
     _valid_dayparts = frozenset({"pre_sunrise", "morning", "afternoon", "post_peak"})
     if daypart not in _valid_dayparts:
@@ -195,7 +195,7 @@ def write_nowcast_run(
                     p_nowcast_json, p_now_raw_json,
                     hours_remaining, daypart,
                     schema_version, source,
-                    bin_grid_id, bin_schema_version
+                    bin_grid_id, bin_schema_id
                 ) VALUES (
                     ?,?,  ?,?,?,  ?,?,  ?,?,  ?,?,  ?,?,  ?,?
                 )
@@ -207,7 +207,7 @@ def write_nowcast_run(
                     p_nowcast_json, p_now_raw_json,
                     float(hours_remaining), daypart,
                     SCHEMA_FORECASTS_VERSION, source,
-                    bin_grid_id, bin_schema_version,
+                    bin_grid_id, bin_schema_id,
                 ),
             )
             conn.commit()
@@ -219,10 +219,10 @@ def write_nowcast_run(
 
 def read_latest_platt_fit(
     *,
-    fit_version: str = "hpf_v1",
+    fit_artifact_id: str = "hpf_v1",
     conn: Optional[sqlite3.Connection] = None,
 ):
-    """Return the most-recently written HorizonPlattFit for the given fit_version.
+    """Return the most-recently written HorizonPlattFit for the given fit_artifact_id.
 
     Returns None when no fit row exists (e.g. before first calibration run).
     conn=None -> get_forecasts_connection_read_only().
@@ -239,10 +239,10 @@ def read_latest_platt_fit(
         row = conn.execute(
             """
             SELECT * FROM day0_horizon_platt_fits
-            WHERE fit_version = ?
+            WHERE fit_artifact_id = ?
             ORDER BY rowid DESC LIMIT 1
             """,
-            (fit_version,),
+            (fit_artifact_id,),
         ).fetchone()
         if row is None:
             return None
@@ -255,7 +255,7 @@ def read_latest_platt_fit(
             gamma_post_peak=float(r["gamma_post_peak"]),
             delta=float(r["delta"]),
             epsilon=float(r["epsilon"]),
-            fit_version=r.get("fit_version", fit_version),
+            fit_artifact_id=r.get("fit_artifact_id", fit_artifact_id),
             fit_run_id=r["fit_run_id"],
             fit_date=r.get("fit_date") or None,
             n_obs=r.get("n_obs"),

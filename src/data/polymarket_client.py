@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 import httpx
 
-from src.contracts.executable_market_snapshot_v2 import (
+from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
     fee_rate_fraction_from_details,

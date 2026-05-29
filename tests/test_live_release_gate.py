@@ -24,11 +24,11 @@ from scripts.check_live_release_gate import (
     parse_args,
 )
 from src.state.db import (
-    SCHEMA_FORECASTS_VERSION,
-    SCHEMA_VERSION,
     init_schema,
     init_schema_forecasts,
 )
+SCHEMA_VERSION = 43          # B2: frozen PRAGMA user_version written by init_schema
+SCHEMA_FORECASTS_VERSION = 7  # B2: frozen PRAGMA user_version written by init_schema_forecasts
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:

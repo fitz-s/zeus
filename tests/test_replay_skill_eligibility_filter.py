@@ -24,7 +24,7 @@ def db_with_mixed_provenance():
     conn.row_factory = sqlite3.Row
 
     # Mirror the v2 path failure (table exists but query fails) by NOT
-    # creating historical_forecasts_v2; replay's _forecast_rows_for falls
+    # creating historical_forecasts; replay's _forecast_rows_for falls
     # through to legacy `forecasts` query.
 
     conn.execute("""

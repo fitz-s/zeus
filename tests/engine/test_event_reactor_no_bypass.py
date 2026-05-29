@@ -107,7 +107,7 @@ def _convert_fixture_to_low_extrema(conn: sqlite3.Connection) -> None:
     low_members = [50.5] * 41 + [49.5] * 10
     conn.execute(
         """
-        UPDATE market_events_v2
+        UPDATE market_events
         SET temperature_metric = 'low',
             market_slug = replace(market_slug, 'high', 'low'),
             range_label = replace(range_label, '70', '50'),
@@ -149,7 +149,7 @@ def _convert_fixture_to_low_extrema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        UPDATE ensemble_snapshots_v2
+        UPDATE ensemble_snapshots
         SET temperature_metric = 'low',
             members_json = ?,
             p_raw_json = ?,
@@ -166,7 +166,7 @@ def _convert_fixture_to_low_extrema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
-        UPDATE platt_models_v2
+        UPDATE platt_models
         SET temperature_metric = 'low',
             data_version = ?,
             source_id = 'tigge_mars'
@@ -309,7 +309,7 @@ def _trade_conn_with_snapshot(
         )
     conn.execute(
         """
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             city TEXT,
             target_date TEXT,
             temperature_metric TEXT,
@@ -340,7 +340,7 @@ def _trade_conn_with_snapshot(
         )
     conn.executemany(
         """
-        INSERT INTO market_events_v2 VALUES (
+        INSERT INTO market_events VALUES (
             'Chicago', '2026-05-25', 'high', ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
@@ -348,7 +348,7 @@ def _trade_conn_with_snapshot(
     )
     conn.execute(
         """
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id TEXT PRIMARY KEY,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -395,7 +395,7 @@ def _trade_conn_with_snapshot(
     )
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 VALUES (
+        INSERT INTO ensemble_snapshots VALUES (
             '1',
             'Chicago',
             '2026-05-25',
@@ -412,7 +412,7 @@ def _trade_conn_with_snapshot(
             'degF',
             'F',
             'ecmwf_open_data',
-            'ensemble_snapshots_v2_db_reader',
+            'ensemble_snapshots_db_reader',
             'run-1',
             'ecmwf_open_data',
             '2026-05-24T00:00:00+00:00',
@@ -692,7 +692,7 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             target_window_end_utc, completeness_status, readiness_status, reason_code,
             computed_at, expires_at
         ) VALUES (
-            'coverage-1', 'run-1', 'ecmwf_open_data', 'ensemble_snapshots_v2_db_reader',
+            'coverage-1', 'run-1', 'ecmwf_open_data', 'ensemble_snapshots_db_reader',
             'ecmwf_open_data', 'operational', 'Chicago', 'Chicago', 'America/Chicago',
             '2026-05-25', 'high', 'temperature', 'high_temp',
             'ecmwf_opendata_mx2t3_local_calendar_day_max_v1', 51, 51, '[0,3,6]', '[0,3,6]',
@@ -714,7 +714,7 @@ def _calibration_conn_with_platt_model() -> sqlite3.Connection:
 def _insert_platt_model(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS platt_models_v2 (
+        CREATE TABLE IF NOT EXISTS platt_models (
             model_key TEXT PRIMARY KEY,
             temperature_metric TEXT NOT NULL,
             cluster TEXT NOT NULL,
@@ -737,10 +737,10 @@ def _insert_platt_model(conn: sqlite3.Connection) -> None:
         )
         """
     )
-    conn.execute("DELETE FROM platt_models_v2 WHERE model_key = 'platt-world-1'")
+    conn.execute("DELETE FROM platt_models WHERE model_key = 'platt-world-1'")
     conn.execute(
         """
-        INSERT INTO platt_models_v2 VALUES (
+        INSERT INTO platt_models VALUES (
             'platt-world-1', 'high', 'Chicago', 'MAM',
             'tigge_mx2t6_local_calendar_day_max_v1',
             'width_normalized_density',
@@ -898,7 +898,7 @@ def test_certificate_rejects_calibration_artifact_available_after_decision():
     conn = _trade_conn_with_snapshot()
     conn.execute(
         """
-        UPDATE platt_models_v2
+        UPDATE platt_models
         SET recorded_at = '2026-05-24T08:13:00+00:00',
             fitted_at = '2026-05-24T08:13:00+00:00'
         WHERE model_key = 'platt-world-1'
@@ -921,7 +921,7 @@ def test_certificate_rejects_calibration_artifact_available_after_decision():
 def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE market_events_v2 SET created_at = '2026-05-24T08:11:00+00:00'")
+    conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -935,7 +935,7 @@ def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
 def test_topology_persisted_after_decision_blocks_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE market_events_v2 SET created_at = '2026-05-24T08:13:00+00:00'")
+    conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:13:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
     result = DecisionCompiler().compile_no_submit(
@@ -953,7 +953,7 @@ def test_topology_persisted_after_decision_blocks_certificate():
 def test_topology_clock_missing_blocks_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE market_events_v2 SET created_at = NULL")
+    conn.execute("UPDATE market_events SET created_at = NULL")
 
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
         _receipt(event, conn, decision_time=DECISION_TIME)
@@ -975,19 +975,19 @@ def test_adapter_source_truth_status_comes_from_forecast_authority():
     assert receipt.decision_proof_bundle.source_truth.payload["derived_from_reader_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
 
 
-def test_market_events_v2_authority_rows_have_topology_clock_fields():
+def test_market_events_authority_rows_have_topology_clock_fields():
     conn = sqlite3.connect(":memory:")
     init_schema_forecasts(conn)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(market_events_v2)").fetchall()}
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(market_events)").fetchall()}
 
     assert "created_at" in columns
 
 
 @pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
-def test_no_submit_receipt_succeeds_with_production_market_events_v2_clock_shape():
+def test_no_submit_receipt_succeeds_with_production_market_events_clock_shape():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE market_events_v2 SET created_at = '2026-05-24T08:11:00+00:00'")
+    conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1000,7 +1000,7 @@ def test_no_submit_receipt_succeeds_with_production_market_events_v2_clock_shape
 def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE market_events_v2 SET created_at = NULL")
+    conn.execute("UPDATE market_events SET created_at = NULL")
 
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
         _receipt(event, conn, decision_time=DECISION_TIME)
@@ -1029,7 +1029,7 @@ def test_forecast_certificate_records_members_json_hash_and_window_authority():
     assert receipt.decision_proof_bundle is not None
     forecast = receipt.decision_proof_bundle.forecast_authority.payload
     belief = receipt.decision_proof_bundle.belief.payload
-    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
     assert forecast["members_json_hash"] == _snapshot_members_json_hash(snapshot)
     assert belief["members_json_hash"] == forecast["members_json_hash"]
     assert forecast["members_extrema_transform"] == "daily_max"
@@ -1050,9 +1050,9 @@ def test_high_forecast_snapshot_members_json_is_daily_max_extrema():
     assert forecast["temperature_metric"] == "high"
     assert forecast["members_extrema_metric_identity"] == "high"
     assert forecast["members_extrema_transform"] == "daily_max"
-    assert forecast["members_json_source"] == "ensemble_snapshots_v2.daily_extrema"
+    assert forecast["members_json_source"] == "ensemble_snapshots.daily_extrema"
     assert forecast["members_json_hash"] == _snapshot_members_json_hash(
-        dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+        dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
     )
 
 
@@ -1069,9 +1069,9 @@ def test_low_forecast_snapshot_members_json_is_daily_min_extrema():
     assert forecast["temperature_metric"] == "low"
     assert forecast["members_extrema_metric_identity"] == "low"
     assert forecast["members_extrema_transform"] == "daily_min"
-    assert forecast["members_json_source"] == "ensemble_snapshots_v2.daily_extrema"
+    assert forecast["members_json_source"] == "ensemble_snapshots.daily_extrema"
     assert forecast["members_json_hash"] == _snapshot_members_json_hash(
-        dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+        dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
     )
 
 
@@ -1085,7 +1085,7 @@ def test_event_bound_low_uses_low_extrema_members_not_raw_hourly_or_max_members(
 
     assert receipt.decision_proof_bundle is not None
     forecast = receipt.decision_proof_bundle.forecast_authority.payload
-    low_snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+    low_snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
     high_like_snapshot = {**low_snapshot, "members_json": json.dumps([70.5] * 41 + [71.5] * 10, separators=(",", ":"))}
     assert forecast["members_extrema_transform"] == "daily_min"
     assert forecast["members_json_hash"] == _snapshot_members_json_hash(low_snapshot)
@@ -1131,7 +1131,7 @@ def test_adapter_rejects_empty_reader_applied_validations(monkeypatch):
     evidence = SimpleNamespace(
         forecast_source_id="ecmwf_open_data",
         forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         source_cycle_time="2026-05-24T00:00:00+00:00",
         source_issue_time="2026-05-24T00:00:00+00:00",
         source_run_id="run-1",
@@ -1174,7 +1174,7 @@ def test_adapter_rejects_empty_reader_applied_validations(monkeypatch):
 def test_family_closure_clock_missing_blocks_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE market_events_v2 SET created_at = ''")
+    conn.execute("UPDATE market_events SET created_at = ''")
 
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
         _receipt(event, conn, decision_time=DECISION_TIME)
@@ -1183,7 +1183,7 @@ def test_family_closure_clock_missing_blocks_certificate():
 def test_topology_db_read_fallback_requires_db_state_read_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("DELETE FROM market_events_v2")
+    conn.execute("DELETE FROM market_events")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1274,7 +1274,7 @@ def test_edli_p_cal_matches_existing_evaluator_platt_path_for_same_snapshot_and_
     from src.data.forecast_source_registry import calibration_source_id_for_lookup
 
     conn = _trade_conn_with_snapshot()
-    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots_v2 WHERE snapshot_id = '1'").fetchone())
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
     family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
     bins = [Bin(70, 71, "F", "70-71°F"), Bin(71, 72, "F", "71-72°F")]
     members = np.asarray(json.loads(snapshot["members_json"]), dtype=float)
@@ -1324,7 +1324,7 @@ def test_family_candidates_use_market_event_range_bounds_not_payload_default():
 def test_missing_market_topology_range_blocks_no_submit_receipt():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE market_events_v2 SET range_low = NULL, range_high = NULL")
+    conn.execute("UPDATE market_events SET range_low = NULL, range_high = NULL")
 
     receipt = _receipt(event, conn)
 
@@ -1420,8 +1420,8 @@ def test_forecast_receipt_uses_separate_forecast_authority_connection():
     trade_conn = _trade_conn_with_snapshot()
     forecast_conn = _trade_conn_with_snapshot()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
-    trade_conn.execute("DROP TABLE ensemble_snapshots_v2")
-    trade_conn.execute("DROP TABLE market_events_v2")
+    trade_conn.execute("DROP TABLE ensemble_snapshots")
+    trade_conn.execute("DROP TABLE market_events")
     trade_conn.execute("DROP TABLE source_run")
     trade_conn.execute("DROP TABLE source_run_coverage")
 
@@ -1438,7 +1438,7 @@ def test_executable_snapshot_gate_uses_forecast_topology_authority_connection():
     trade_conn = _trade_conn_with_snapshot()
     forecast_conn = _trade_conn_with_snapshot()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
-    trade_conn.execute("DROP TABLE market_events_v2")
+    trade_conn.execute("DROP TABLE market_events")
     gate = executable_snapshot_gate_from_trade_conn(trade_conn, topology_conn=forecast_conn)
 
     assert gate(event, DECISION_TIME) is True
@@ -1449,7 +1449,7 @@ def test_executable_snapshot_gate_uses_reactor_decision_time_not_construction_cl
     trade_conn = _trade_conn_with_snapshot()
     forecast_conn = _trade_conn_with_snapshot()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
-    trade_conn.execute("DROP TABLE market_events_v2")
+    trade_conn.execute("DROP TABLE market_events")
     trade_conn.execute("UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:12:30+00:00'")
     gate = executable_snapshot_gate_from_trade_conn(
         trade_conn,
@@ -1507,7 +1507,7 @@ def test_receipt_requires_explicit_forecast_and_topology_authority_connections()
 def test_missing_calibration_authority_blocks_receipt():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_json = NULL")
+    conn.execute("UPDATE ensemble_snapshots SET p_cal_json = NULL")
 
     receipt = _receipt(event, conn, calibration_conn=sqlite3.connect(":memory:"))
 
@@ -1522,11 +1522,11 @@ def test_receipt_uses_world_calibration_authority_not_forecast_conn():
     forecast_conn = _trade_conn_with_snapshot()
     calibration_conn = _calibration_conn_with_platt_model()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
-    trade_conn.execute("DROP TABLE ensemble_snapshots_v2")
-    trade_conn.execute("DROP TABLE market_events_v2")
+    trade_conn.execute("DROP TABLE ensemble_snapshots")
+    trade_conn.execute("DROP TABLE market_events")
     trade_conn.execute("DROP TABLE source_run")
     trade_conn.execute("DROP TABLE source_run_coverage")
-    forecast_conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_json = NULL")
+    forecast_conn.execute("UPDATE ensemble_snapshots SET p_cal_json = NULL")
 
     receipt = _receipt(
         event,
@@ -1547,11 +1547,11 @@ def test_forecast_conn_fake_platt_model_is_not_calibration_authority():
     trade_conn = _trade_conn_with_snapshot()
     forecast_conn = _trade_conn_with_snapshot()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
-    trade_conn.execute("DROP TABLE ensemble_snapshots_v2")
-    trade_conn.execute("DROP TABLE market_events_v2")
+    trade_conn.execute("DROP TABLE ensemble_snapshots")
+    trade_conn.execute("DROP TABLE market_events")
     trade_conn.execute("DROP TABLE source_run")
     trade_conn.execute("DROP TABLE source_run_coverage")
-    forecast_conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_json = NULL")
+    forecast_conn.execute("UPDATE ensemble_snapshots SET p_cal_json = NULL")
     _insert_platt_model(forecast_conn)
 
     receipt = _receipt(
@@ -1570,7 +1570,7 @@ def test_forecast_conn_fake_platt_model_is_not_calibration_authority():
 def test_p_cal_json_without_authority_does_not_authorize_without_calibrator():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_authority = NULL")
+    conn.execute("UPDATE ensemble_snapshots SET p_cal_authority = NULL")
 
     receipt = _receipt(event, conn, calibration_conn=sqlite3.connect(":memory:"))
 
@@ -1582,7 +1582,7 @@ def test_p_cal_json_without_authority_does_not_authorize_without_calibrator():
 def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_exists():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots_v2 SET p_cal_available_at = '2026-05-24T08:11:00+00:00'")
+    conn.execute("UPDATE ensemble_snapshots SET p_cal_available_at = '2026-05-24T08:11:00+00:00'")
 
     receipt = _receipt(event, conn)
 
@@ -1670,7 +1670,7 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
     evidence = SimpleNamespace(
         forecast_source_id="ecmwf_open_data",
         forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-        source_transport="ensemble_snapshots_v2_db_reader",
+        source_transport="ensemble_snapshots_db_reader",
         source_cycle_time="2026-05-24T00:00:00+00:00",
         source_issue_time="2026-05-24T00:00:00+00:00",
         source_run_id="run-1",
@@ -1841,15 +1841,15 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch)
 def test_forecast_receipt_uses_attached_forecasts_market_topology():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("ALTER TABLE market_events_v2 RENAME TO attached_market_events_v2")
+    conn.execute("ALTER TABLE market_events RENAME TO attached_market_events")
     conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
-    conn.execute("CREATE TABLE forecasts.ensemble_snapshots_v2 AS SELECT * FROM ensemble_snapshots_v2")
+    conn.execute("CREATE TABLE forecasts.ensemble_snapshots AS SELECT * FROM ensemble_snapshots")
     conn.execute("CREATE TABLE forecasts.source_run AS SELECT * FROM source_run")
     conn.execute("CREATE TABLE forecasts.source_run_coverage AS SELECT * FROM source_run_coverage")
     conn.execute("CREATE TABLE forecasts.readiness_state AS SELECT * FROM readiness_state")
     conn.execute(
         """
-        CREATE TABLE forecasts.market_events_v2 (
+        CREATE TABLE forecasts.market_events (
             city TEXT,
             target_date TEXT,
             temperature_metric TEXT,
@@ -1866,7 +1866,7 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
     )
     conn.executemany(
         """
-        INSERT INTO forecasts.market_events_v2 VALUES (
+        INSERT INTO forecasts.market_events VALUES (
             'Chicago', '2026-05-25', 'high', ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
@@ -1886,7 +1886,7 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
 def test_forecast_receipt_rejects_source_snapshot_available_after_decision_time():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots_v2 SET available_at = '2026-05-24T08:12:00+00:00'")
+    conn.execute("UPDATE ensemble_snapshots SET available_at = '2026-05-24T08:12:00+00:00'")
 
     receipt = _receipt(event, conn)
 
@@ -1898,7 +1898,7 @@ def test_forecast_receipt_rejects_source_snapshot_available_after_decision_time(
 def test_forecast_receipt_requires_exact_causal_snapshot_from_source_data():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots_v2 SET snapshot_id = 'other-snapshot'")
+    conn.execute("UPDATE ensemble_snapshots SET snapshot_id = 'other-snapshot'")
 
     receipt = _receipt(event, conn)
 
@@ -1910,7 +1910,7 @@ def test_forecast_receipt_requires_exact_causal_snapshot_from_source_data():
 def test_forecast_receipt_requires_metric_match_in_source_snapshot():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE ensemble_snapshots_v2 SET temperature_metric = 'low'")
+    conn.execute("UPDATE ensemble_snapshots SET temperature_metric = 'low'")
 
     receipt = _receipt(event, conn)
 

@@ -183,7 +183,7 @@ chains:
     required_context_packs: [execution_fresh_submit]
     required_tests:
       - tests/test_exec_freshness_recapture.py
-      - tests/test_executable_market_snapshot_v2.py
+      - tests/test_executable_market_snapshot.py
     required_static_gates:
       - tier0_paired_relationship_test_gate
       - workflow_refs_exist

@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-04-26
 # Authority basis: docs/operations/task_2026-04-26_full_data_midstream_fix_plan/plan.md
 #                  slice A4 (authority-strict learning consumers + structural
-#                  anchor for the rescue_events_v2 learning contract)
+#                  anchor for the rescue_events learning contract)
 """Slice A4 relationship + future-proofing antibody tests.
 
 PR #19 workbook F8: legacy position metric fallback returns
@@ -13,7 +13,7 @@ stale JSON reconstructions / legacy rows do not silently become training
 evidence.
 
 A4 audit (2026-04-26): there are currently NO src/ or scripts/ readers
-of `rescue_events_v2` at the SELECT seam — only writers via
+of `rescue_events` at the SELECT seam — only writers via
 `log_rescue_event`. The F8 risk is therefore future-proofing: any future
 consumer that adds a SELECT-side read in a learning context must
 respect the authority-VERIFIED contract.
@@ -26,7 +26,7 @@ This test pins that contract structurally:
    missing/invalid temperature_metric MUST be tagged UNVERIFIED with a
    concrete authority_source. Positions with valid metric MUST be
    tagged VERIFIED.
-3. Repo-wide source scan: every SELECT-side read of `rescue_events_v2`
+3. Repo-wide source scan: every SELECT-side read of `rescue_events`
    must carry an authority filter. Today the count is 0 (trivially
    passes); future readers must conform.
 """
@@ -49,10 +49,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def test_learning_authority_required_constant_exists_and_is_verified():
-    """The structural anchor for the rescue_events_v2 learning contract."""
+    """The structural anchor for the rescue_events learning contract."""
     from src.state.chain_reconciliation import LEARNING_AUTHORITY_REQUIRED
     assert LEARNING_AUTHORITY_REQUIRED == "VERIFIED", (
-        "Slice A4 contract: rescue_events_v2 learning consumers must filter "
+        "Slice A4 contract: rescue_events learning consumers must filter "
         "on authority='VERIFIED'. Changing this constant silently breaks the "
         "antibody set in tests/test_authority_strict_learning.py."
     )
@@ -136,8 +136,8 @@ def _list_python_sources() -> list[Path]:
     return out
 
 
-def test_no_rescue_events_v2_select_lacks_authority_filter():
-    """Repo-wide antibody: every SELECT-side rescue_events_v2 read must carry
+def test_no_rescue_events_select_lacks_authority_filter():
+    """Repo-wide antibody: every SELECT-side rescue_events read must carry
     a `WHERE ... authority` clause (= "VERIFIED" or routed through
     LEARNING_AUTHORITY_REQUIRED).
 
@@ -146,15 +146,15 @@ def test_no_rescue_events_v2_select_lacks_authority_filter():
     any future consumer that adds a SELECT must include the authority filter
     or this test fails with a useful diagnostic.
 
-    The test is intentionally strict (any rescue_events_v2 SELECT must
+    The test is intentionally strict (any rescue_events SELECT must
     filter authority, not just learning-flagged ones). If a legitimate
     non-learning read is added later, route it through a wrapper that
     documents the exemption rather than weakening this antibody.
     """
-    # Require SELECT...FROM rescue_events_v2 SQL form. Excludes Python
-    # `from src.state.db import ... rescue_events_v2` comment matches.
+    # Require SELECT...FROM rescue_events SQL form. Excludes Python
+    # `from src.state.db import ... rescue_events` comment matches.
     select_pattern = re.compile(
-        r"(?is)\bSELECT\b[^;]{0,500}\bFROM\s+rescue_events_v2\b[^;]{0,500}"
+        r"(?is)\bSELECT\b[^;]{0,500}\bFROM\s+rescue_events\b[^;]{0,500}"
     )
     offenders: list[tuple[Path, str]] = []
     for src_file in _list_python_sources():
@@ -162,17 +162,17 @@ def test_no_rescue_events_v2_select_lacks_authority_filter():
         for match in select_pattern.finditer(text):
             snippet = match.group(0)
             # Exclude clearly write-only contexts where the regex caught a
-            # comment or a string referencing rescue_events_v2 in an INSERT
+            # comment or a string referencing rescue_events in an INSERT
             # template. We only flag SELECT-side reads.
             if not re.search(r"\bSELECT\b", snippet, re.IGNORECASE):
                 continue
-            # Strip trailing INSERT continuations: SELECT-from-rescue_events_v2
+            # Strip trailing INSERT continuations: SELECT-from-rescue_events
             # used as a subquery for INSERT INTO calibration_pairs etc.
             if not re.search(r"\bauthority\b", snippet, re.IGNORECASE):
                 offenders.append((src_file, snippet[:200]))
     assert not offenders, (
         "Slice A4 antibody violation: every SELECT-side read of "
-        "rescue_events_v2 must filter on authority (use "
+        "rescue_events must filter on authority (use "
         "LEARNING_AUTHORITY_REQUIRED from src.state.chain_reconciliation). "
         f"Found {len(offenders)} unfiltered read(s):\n"
         + "\n".join(f"  {p}: {s!r}" for p, s in offenders)
@@ -187,19 +187,19 @@ def test_source_scanner_actually_finds_violations():
     sample_bad = """
     rows = conn.execute('''
         SELECT trade_id, temperature_metric
-        FROM rescue_events_v2
+        FROM rescue_events
         WHERE city = ?
     ''', (city,)).fetchall()
     """
     sample_good = """
     rows = conn.execute('''
         SELECT trade_id, temperature_metric
-        FROM rescue_events_v2
+        FROM rescue_events
         WHERE city = ? AND authority = 'VERIFIED'
     ''', (city,)).fetchall()
     """
     pat = re.compile(
-        r"(?is)\bSELECT\b[^;]{0,500}\bFROM\s+rescue_events_v2\b[^;]{0,500}"
+        r"(?is)\bSELECT\b[^;]{0,500}\bFROM\s+rescue_events\b[^;]{0,500}"
     )
     bad_match = pat.search(sample_bad)
     good_match = pat.search(sample_good)

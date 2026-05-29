@@ -89,7 +89,7 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install PyYAML
       - name: Schema smoke
-        run: python scripts/check_schema_version.py
+        run: python scripts/check_schema_fingerprint.py
       - name: Money-path test quality metadata
         run: python scripts/ci/assert_test_quality.py
 

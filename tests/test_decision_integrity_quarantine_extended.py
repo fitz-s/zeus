@@ -3,9 +3,9 @@
 # Authority basis: docs/operations/P0_FORECAST_EXTREMA_AUTHORITY_2026-05-22.md §PR-E
 # Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
 # Purpose: Unit tests for extended quarantine functions (PR-E) and downstream
-#          exclusion filters in evidence_report + refit_platt_v2.
+#          exclusion filters in evidence_report + refit_platt.
 # Reuse: Run when any per-table quarantine function, evidence_report.py exclusion,
-#        or refit_platt_v2 exclusion changes.
+#        or refit_platt exclusion changes.
 
 """PR-E — Extended quarantine + downstream exclusion tests.
 
@@ -15,7 +15,7 @@ Coverage:
   2. test_promotion_readiness_excludes_quarantined_decisions: build_evidence_report
      excludes decision_events rows tagged in decision_integrity_quarantine.
   3. test_calibration_rebuild_excludes_quarantined_pairs: _fetch_pairs_for_bucket
-     (via refit_platt_v2) excludes calibration_pairs_v2 rows tagged in quarantine.
+     (via refit_platt) excludes calibration_pairs rows tagged in quarantine.
   4. test_regret_decomposition_excludes_quarantined_rows: build_evidence_report
      excludes regret_decompositions rows whose decision_event_id is quarantined.
   5. quarantine_all_tables_for_noncontributing_forecast aggregates per-table results.
@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-# Add scripts/ to path so we can import refit_platt_v2 helpers.
+# Add scripts/ to path so we can import refit_platt helpers.
 _SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
@@ -39,7 +39,7 @@ from src.state.decision_integrity_quarantine import (
     REASON_NON_CONTRIBUTING,
     _de_natural_pk_hash,
     quarantine_all_tables_for_noncontributing_forecast,
-    quarantine_calibration_pairs_v2_for_noncontributing_forecast,
+    quarantine_calibration_pairs_for_noncontributing_forecast,
     quarantine_decision_events_for_noncontributing_forecast,
     quarantine_decisions_for_noncontributing_forecast,
     quarantine_probability_trace_fact_for_noncontributing_forecast,
@@ -54,11 +54,11 @@ from src.state.schema.decision_integrity_quarantine_schema import ensure_table
 # ---------------------------------------------------------------------------
 
 def _make_db() -> sqlite3.Connection:
-    """In-memory DB with ensemble_snapshots_v2 + quarantine table."""
+    """In-memory DB with ensemble_snapshots + quarantine table."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
-        CREATE TABLE ensemble_snapshots_v2 (
+        CREATE TABLE ensemble_snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -75,7 +75,7 @@ def _make_db() -> sqlite3.Connection:
 
 def _snap(conn, *, contributes, attribution="OK", source_run_id=None) -> int:
     cur = conn.execute(
-        """INSERT INTO ensemble_snapshots_v2
+        """INSERT INTO ensemble_snapshots
            (city, target_date, temperature_metric,
             contributes_to_target_extrema, forecast_window_attribution_status, source_run_id)
            VALUES ('Bangkok', '2026-05-22', 'high', ?, ?, ?)""",
@@ -101,14 +101,14 @@ def _quarantined_ids(conn, table_name: str) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Tag-coverage: calibration_pairs_v2
+# Tag-coverage: calibration_pairs
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
 def cp2_db():
     conn = _make_db()
     conn.execute("""
-        CREATE TABLE calibration_pairs_v2 (
+        CREATE TABLE calibration_pairs (
             pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -121,7 +121,7 @@ def cp2_db():
             cluster TEXT NOT NULL DEFAULT 'C1',
             forecast_available_at TEXT NOT NULL DEFAULT '2026-05-22T00:00:00',
             decision_group_id TEXT NOT NULL DEFAULT 'dg-1',
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            dataset_id TEXT NOT NULL DEFAULT 'v1',
             training_allowed INTEGER NOT NULL DEFAULT 1,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             bin_source TEXT NOT NULL DEFAULT 'legacy',
@@ -135,7 +135,7 @@ def cp2_db():
 
 def _cp2_insert(conn, *, snapshot_id) -> int:
     cur = conn.execute(
-        "INSERT INTO calibration_pairs_v2 (city, target_date, temperature_metric, snapshot_id) "
+        "INSERT INTO calibration_pairs (city, target_date, temperature_metric, snapshot_id) "
         "VALUES ('Bangkok', '2026-05-22', 'high', ?)",
         (snapshot_id,),
     )
@@ -143,45 +143,45 @@ def _cp2_insert(conn, *, snapshot_id) -> int:
     return cur.lastrowid
 
 
-def test_calibration_pairs_v2_contributes_zero_quarantined(cp2_db):
+def test_calibration_pairs_contributes_zero_quarantined(cp2_db):
     snap_id = _snap(cp2_db, contributes=0)
     pair_id = _cp2_insert(cp2_db, snapshot_id=snap_id)
-    result = quarantine_calibration_pairs_v2_for_noncontributing_forecast(cp2_db)
+    result = quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db)
     assert result["newly_quarantined"] == 1
-    assert str(pair_id) in _quarantined_ids(cp2_db, "calibration_pairs_v2")
+    assert str(pair_id) in _quarantined_ids(cp2_db, "calibration_pairs")
 
 
-def test_calibration_pairs_v2_contributes_one_skipped(cp2_db):
+def test_calibration_pairs_contributes_one_skipped(cp2_db):
     snap_id = _snap(cp2_db, contributes=1)
     _cp2_insert(cp2_db, snapshot_id=snap_id)
-    result = quarantine_calibration_pairs_v2_for_noncontributing_forecast(cp2_db)
+    result = quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db)
     assert result["candidates_found"] == 0
-    assert _quarantine_count(cp2_db, "calibration_pairs_v2") == 0
+    assert _quarantine_count(cp2_db, "calibration_pairs") == 0
 
 
-def test_calibration_pairs_v2_null_contributes_not_quarantined(cp2_db):
+def test_calibration_pairs_null_contributes_not_quarantined(cp2_db):
     snap_id = _snap(cp2_db, contributes=None)
     _cp2_insert(cp2_db, snapshot_id=snap_id)
-    result = quarantine_calibration_pairs_v2_for_noncontributing_forecast(cp2_db)
+    result = quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db)
     assert result["candidates_found"] == 0
 
 
-def test_calibration_pairs_v2_dry_run(cp2_db):
+def test_calibration_pairs_dry_run(cp2_db):
     snap_id = _snap(cp2_db, contributes=0)
     _cp2_insert(cp2_db, snapshot_id=snap_id)
-    result = quarantine_calibration_pairs_v2_for_noncontributing_forecast(cp2_db, dry_run=True)
+    result = quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db, dry_run=True)
     assert result["dry_run"] is True
     assert result["candidates_found"] == 1
-    assert _quarantine_count(cp2_db, "calibration_pairs_v2") == 0
+    assert _quarantine_count(cp2_db, "calibration_pairs") == 0
 
 
-def test_calibration_pairs_v2_source_run_id_in_meta(cp2_db):
+def test_calibration_pairs_source_run_id_in_meta(cp2_db):
     snap_id = _snap(cp2_db, contributes=0, source_run_id="run-abc")
     _cp2_insert(cp2_db, snapshot_id=snap_id)
-    quarantine_calibration_pairs_v2_for_noncontributing_forecast(cp2_db)
+    quarantine_calibration_pairs_for_noncontributing_forecast(cp2_db)
     import json
     meta_json = cp2_db.execute(
-        "SELECT meta_json FROM decision_integrity_quarantine WHERE table_name='calibration_pairs_v2'"
+        "SELECT meta_json FROM decision_integrity_quarantine WHERE table_name='calibration_pairs'"
     ).fetchone()[0]
     meta = json.loads(meta_json)
     assert meta.get("source_run_id") == "run-abc"
@@ -609,11 +609,11 @@ def test_regret_decomposition_excludes_quarantined_rows():
 # ---------------------------------------------------------------------------
 
 def _make_platt_db() -> sqlite3.Connection:
-    """In-memory DB with calibration_pairs_v2 + decision_integrity_quarantine."""
+    """In-memory DB with calibration_pairs + decision_integrity_quarantine."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("""
-        CREATE TABLE calibration_pairs_v2 (
+        CREATE TABLE calibration_pairs (
             pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -626,7 +626,7 @@ def _make_platt_db() -> sqlite3.Connection:
             cluster TEXT NOT NULL DEFAULT 'C1',
             forecast_available_at TEXT NOT NULL DEFAULT '2026-05-22T00:00:00',
             decision_group_id TEXT NOT NULL DEFAULT 'dg-1',
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            dataset_id TEXT NOT NULL DEFAULT 'v1',
             training_allowed INTEGER NOT NULL DEFAULT 1,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             bin_source TEXT NOT NULL DEFAULT 'legacy',
@@ -636,7 +636,7 @@ def _make_platt_db() -> sqlite3.Connection:
             range_label TEXT NOT NULL DEFAULT '>=30',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
-                   forecast_available_at, bin_source, data_version)
+                   forecast_available_at, bin_source, dataset_id)
         )
     """)
     ensure_table(conn)
@@ -645,8 +645,8 @@ def _make_platt_db() -> sqlite3.Connection:
 
 
 def test_calibration_rebuild_excludes_quarantined_pairs():
-    """_fetch_pairs_for_bucket excludes calibration_pairs_v2 rows tagged in quarantine."""
-    import refit_platt_v2 as rp2
+    """_fetch_pairs_for_bucket excludes calibration_pairs rows tagged in quarantine."""
+    import refit_platt as rp2
 
     from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
@@ -657,9 +657,9 @@ def test_calibration_rebuild_excludes_quarantined_pairs():
     dv = HIGH_LOCALDAY_MAX.data_version
     for i in range(1, 3):
         conn.execute(
-            """INSERT INTO calibration_pairs_v2
+            """INSERT INTO calibration_pairs
                (city, target_date, temperature_metric, p_raw, outcome, lead_days,
-                season, cluster, forecast_available_at, decision_group_id, data_version,
+                season, cluster, forecast_available_at, decision_group_id, dataset_id,
                 range_label)
                VALUES ('Bangkok', ?, 'high', 0.6, 1, ?, 'winter', 'C1',
                        '2026-05-22T00:00:00', 'dg-1', ?, '>=30')""",
@@ -680,7 +680,7 @@ def test_calibration_rebuild_excludes_quarantined_pairs():
     conn.execute(
         """INSERT INTO decision_integrity_quarantine
            (table_name, row_id, reason_code, forecast_snapshot_id, recorded_at, meta_json)
-           VALUES ('calibration_pairs_v2', '1', ?, NULL, ?, '{}')""",
+           VALUES ('calibration_pairs', '1', ?, NULL, ?, '{}')""",
         (REASON_NON_CONTRIBUTING, now),
     )
     conn.commit()
@@ -711,9 +711,9 @@ def all_tables_db():
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # calibration_pairs_v2
+    # calibration_pairs
     conn.execute("""
-        CREATE TABLE calibration_pairs_v2 (
+        CREATE TABLE calibration_pairs (
             pair_id INTEGER PRIMARY KEY AUTOINCREMENT,
             city TEXT NOT NULL DEFAULT 'x',
             target_date TEXT NOT NULL DEFAULT '2026-05-22',
@@ -726,7 +726,7 @@ def all_tables_db():
             cluster TEXT NOT NULL DEFAULT 'C1',
             forecast_available_at TEXT NOT NULL DEFAULT '2026-05-22',
             decision_group_id TEXT NOT NULL DEFAULT 'dg1',
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            dataset_id TEXT NOT NULL DEFAULT 'v1',
             training_allowed INTEGER NOT NULL DEFAULT 1,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             bin_source TEXT NOT NULL DEFAULT 'legacy',
@@ -802,7 +802,7 @@ def test_quarantine_all_tables_aggregates(all_tables_db):
         (str(snap_id),),
     )
     all_tables_db.execute(
-        "INSERT INTO calibration_pairs_v2 (snapshot_id) VALUES (?)",
+        "INSERT INTO calibration_pairs (snapshot_id) VALUES (?)",
         (snap_id,),
     )
     all_tables_db.execute(
@@ -826,11 +826,11 @@ def test_quarantine_all_tables_aggregates(all_tables_db):
     all_tables_db.commit()
 
     result = quarantine_all_tables_for_noncontributing_forecast(all_tables_db)
-    # 6 tables: opportunity_fact, calibration_pairs_v2, probability_trace_fact,
+    # 6 tables: opportunity_fact, calibration_pairs, probability_trace_fact,
     # selection_family_fact, selection_hypothesis_fact, decision_events.
     assert result["newly_quarantined"] == 6
     assert result["per_table"]["opportunity_fact"]["newly_quarantined"] == 1
-    assert result["per_table"]["calibration_pairs_v2"]["newly_quarantined"] == 1
+    assert result["per_table"]["calibration_pairs"]["newly_quarantined"] == 1
     assert result["per_table"]["probability_trace_fact"]["newly_quarantined"] == 1
     assert result["per_table"]["selection_family_fact"]["newly_quarantined"] == 1
     assert result["per_table"]["selection_hypothesis_fact"]["newly_quarantined"] == 1

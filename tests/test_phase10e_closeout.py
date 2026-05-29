@@ -170,7 +170,7 @@ def test_r_de_1_ast_add_calibration_pair_callers_pass_city_obj():
                     func_name = func.id
                 elif isinstance(func, ast.Attribute):
                     func_name = func.attr
-                if func_name not in ("add_calibration_pair", "add_calibration_pair_v2"):
+                if func_name not in ("add_calibration_pair",):
                     continue
                 kwarg_names = {kw.arg for kw in node.keywords}
                 if "city_obj" not in kwarg_names:

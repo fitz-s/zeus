@@ -416,11 +416,11 @@ def _get_risk_details() -> dict:
 
 
 _V2_TABLES = (
-    "platt_models_v2",
-    "calibration_pairs_v2",
-    "ensemble_snapshots_v2",
-    "historical_forecasts_v2",
-    "settlements_v2",
+    "platt_models",
+    "calibration_pairs",
+    "ensemble_snapshots",
+    "historical_forecasts",
+    "settlement_outcomes",
 )
 
 # Canonical schema preference lives in v2_table_schema_preference.py so this

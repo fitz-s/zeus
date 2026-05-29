@@ -120,11 +120,11 @@ def _fake_ens_with_metric(metric_value: str | None = "high"):
 
 
 def _snapshot_row_count(conn, city: str = "NYC") -> int:
-    """Count rows currently in ensemble_snapshots_v2 for a city (v1.F20: legacy removed)."""
+    """Count rows currently in ensemble_snapshots for a city (v1.F20: legacy removed)."""
     import sqlite3
     try:
         return conn.execute(
-            "SELECT COUNT(*) FROM ensemble_snapshots_v2 WHERE city = ?", (city,)
+            "SELECT COUNT(*) FROM ensemble_snapshots WHERE city = ?", (city,)
         ).fetchone()[0]
     except sqlite3.OperationalError:
         # Only swallow "no such table" — other errors (SQL typo, schema mismatch)
@@ -136,13 +136,13 @@ def _make_test_conn():
     """Return an in-memory connection with world + v2 forecast schema tables."""
     import sqlite3
     from src.state.db import init_schema
-    from src.state.schema.v2_schema import _create_ensemble_snapshots_v2
+    from src.state.schema.v2_schema import _create_ensemble_snapshots
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    # K1 split: ensemble_snapshots_v2 lives in zeus-forecasts.db; create it in
+    # K1 split: ensemble_snapshots lives in zeus-forecasts.db; create it in
     # the monolithic test conn so _store_ens_snapshot has a v2 target.
-    _create_ensemble_snapshots_v2(conn)
+    _create_ensemble_snapshots(conn)
     return conn
 
 

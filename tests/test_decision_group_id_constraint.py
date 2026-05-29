@@ -51,30 +51,30 @@ def test_decision_group_id_v1_hash_raises_value_error_on_zero_lead_days():
 
 
 def _make_trigger_db(tmp_path):
-    """Create a minimal calibration_pairs_v2 fixture with NOT NULL triggers."""
+    """Create a minimal calibration_pairs fixture with NOT NULL triggers."""
     db = tmp_path / "fixture.db"
     conn = sqlite3.connect(str(db))
     conn.execute("""
-        CREATE TABLE calibration_pairs_v2 (
+        CREATE TABLE calibration_pairs (
             id INTEGER PRIMARY KEY,
             city TEXT NOT NULL,
             decision_group_id TEXT
         )
     """)
     conn.execute("""
-        CREATE TRIGGER calibration_pairs_v2_dgid_not_null_ins
-        BEFORE INSERT ON calibration_pairs_v2
+        CREATE TRIGGER calibration_pairs_dgid_not_null_ins
+        BEFORE INSERT ON calibration_pairs
         WHEN NEW.decision_group_id IS NULL
         BEGIN
-            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs.decision_group_id');
         END
     """)
     conn.execute("""
-        CREATE TRIGGER calibration_pairs_v2_dgid_not_null_upd
-        BEFORE UPDATE OF decision_group_id ON calibration_pairs_v2
+        CREATE TRIGGER calibration_pairs_dgid_not_null_upd
+        BEFORE UPDATE OF decision_group_id ON calibration_pairs
         WHEN NEW.decision_group_id IS NULL
         BEGIN
-            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs_v2.decision_group_id');
+            SELECT RAISE(ABORT, 'NOT NULL: calibration_pairs.decision_group_id');
         END
     """)
     conn.commit()
@@ -86,7 +86,7 @@ def test_not_null_constraint_rejects_null_decision_group_id(tmp_path):
     conn = _make_trigger_db(tmp_path)
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO calibration_pairs_v2 (city, decision_group_id) VALUES (?, ?)",
+            "INSERT INTO calibration_pairs (city, decision_group_id) VALUES (?, ?)",
             ("Chicago", None),
         )
     conn.close()
@@ -96,11 +96,11 @@ def test_not_null_constraint_allows_empty_string(tmp_path):
     """T2: Empty-string decision_group_id is NOT NULL — must succeed."""
     conn = _make_trigger_db(tmp_path)
     conn.execute(
-        "INSERT INTO calibration_pairs_v2 (city, decision_group_id) VALUES (?, ?)",
+        "INSERT INTO calibration_pairs (city, decision_group_id) VALUES (?, ?)",
         ("Chicago", ""),
     )
     conn.commit()
-    row = conn.execute("SELECT decision_group_id FROM calibration_pairs_v2").fetchone()
+    row = conn.execute("SELECT decision_group_id FROM calibration_pairs").fetchone()
     assert row[0] == ""
     conn.close()
 

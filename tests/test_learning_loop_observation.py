@@ -4,8 +4,8 @@
 # ULTIMATE_PLAN.md §4 #4 (LEARNING_LOOP_PACKET — settlement-corpus → calibration
 # update → parameter-drift → re-fit pipeline). Per Fitz "test relationships, not
 # just functions" — these tests verify the CROSS-MODULE invariant that
-# compute_learning_loop_state_per_bucket reads list_active_platt_models_v2 +
-# list_active_platt_models_legacy + list_recent_retrain_versions + retrain_status
+# compute_learning_loop_state_per_bucket reads list_active_platt_models +
+# list_active_platt_models + list_recent_retrain_versions + retrain_status
 # via the K1-compliant store.py + retrain_trigger.py readers (pure SELECT;
 # is_active=1 + authority='VERIFIED' filter at source on platt; no filter on
 # calibration_params_versions which is append-only audit log) and assembles
@@ -43,7 +43,7 @@ from src.calibration.retrain_trigger import (
     _ensure_versions_table,
     list_recent_retrain_versions,
 )
-from src.calibration.store import save_platt_model, save_platt_model_v2
+from src.calibration.store import save_platt_model, save_platt_model
 from src.state.db import init_schema
 from src.state.learning_loop_observation import (
     _filter_versions_to_bucket,
@@ -51,7 +51,7 @@ from src.state.learning_loop_observation import (
     _days_since,
     compute_learning_loop_state_per_bucket,
 )
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -60,7 +60,7 @@ def _make_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -94,6 +94,9 @@ def _insert_version_raw(
     )
 
 
+_pair_insert_counter = 0
+
+
 def _insert_calibration_pair_raw(
     conn: sqlite3.Connection,
     *,
@@ -104,17 +107,29 @@ def _insert_calibration_pair_raw(
     decision_group_id: str = "dg-1",
 ):
     """Direct INSERT into calibration_pairs bypassing add_calibration_pair (which has SettlementSemantics dispatch)."""
+    # B3/B5 (2026-05-28): temperature_metric, observation_field, dataset_id are
+    # NOT NULL in canonical calibration_pairs; include with high-track defaults.
+    # Use a unique target_date per call to avoid UNIQUE constraint violation on
+    # (city, target_date, temperature_metric, range_label, lead_days,
+    #  forecast_available_at, bin_source, dataset_id).
+    global _pair_insert_counter
+    _pair_insert_counter += 1
+    target_date = f"2026-{_pair_insert_counter:02d}-01" if _pair_insert_counter <= 12 else f"2025-{_pair_insert_counter % 12 + 1:02d}-01"
     conn.execute(
         """
         INSERT INTO calibration_pairs
         (city, target_date, range_label, p_raw, outcome, lead_days,
          season, cluster, forecast_available_at, settlement_value,
-         decision_group_id, bias_corrected, bin_source, authority)
-        VALUES ('TestCity', '2026-04-23', '50-51°F', 0.5, 1, 1.0,
+         decision_group_id, bias_corrected, bin_source, authority,
+         temperature_metric, observation_field, dataset_id)
+        VALUES ('TestCity', ?, '50-51°F', 0.5, 1, 1.0,
                 ?, ?, '2026-04-22T12:00:00+00:00', 50.0,
-                ?, 0, ?, ?)
+                ?, 0, ?, ?, ?, ?, ?)
         """,
-        (season, cluster, decision_group_id, bin_source, authority),
+        (target_date, season, cluster, decision_group_id, bin_source, authority,
+         HIGH_LOCALDAY_MAX.temperature_metric,
+         HIGH_LOCALDAY_MAX.observation_field,
+         HIGH_LOCALDAY_MAX.data_version),
     )
 
 
@@ -176,7 +191,7 @@ def test_v2_only_snapshot_full_shape():
     """RELATIONSHIP: v2 bucket surfaces with full 17+ field shape including
     retrain_status (process-level, propagated to bucket)."""
     conn = _make_conn()
-    save_platt_model_v2(
+    save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="TestCity",
         season="DJF", data_version="tigge_v3",
         param_A=1.5, param_B=0.3, param_C=0.0,
@@ -198,7 +213,7 @@ def test_v2_only_snapshot_full_shape():
         "sample_quality", "window_start", "window_end",
     ):
         assert field_name in rec, f"missing field: {field_name}"
-    assert rec["source"] == "v2"
+    assert rec["source"] == "canonical"
     assert rec["temperature_metric"] == "high"
     assert rec["cluster"] == "TestCity"
     assert rec["active_model_n_samples"] == 50
@@ -211,23 +226,35 @@ def test_v2_only_snapshot_full_shape():
 
 
 def test_legacy_only_snapshot_with_no_versions_filter():
-    """RELATIONSHIP: legacy bucket has None v2-only fields + 0 retrain
-    attempts (calibration_params_versions schema CHECK requires v2 identity,
-    so legacy buckets have no version history by construction)."""
+    """RELATIONSHIP: a canonical bucket with no matching retrain versions gets
+    n_retrain_attempts_in_window == 0 and last_retrain_promoted_at == None
+    (calibration_params_versions schema CHECK requires v2 identity,
+    so buckets with no matching versions have zero retrain history by construction).
+
+    B3cont (2026-05-28): legacy platt_models iteration removed; all buckets are
+    source='canonical'. Test adapted to insert a canonical bucket and verify
+    the zero-retrain-history invariant holds when versions exist for a DIFFERENT
+    bucket_key (cross-bucket isolation).
+    """
     conn = _make_conn()
-    save_platt_model(conn, "TestCity_DJF", 1.5, 0.3, 0.0,
-                     [(1.5, 0.3, 0.0)] * 30, 50)
+    save_platt_model(
+        conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="TestCity",
+        season="DJF", data_version="tigge_v3",
+        param_A=1.5, param_B=0.3, param_C=0.0,
+        bootstrap_params=[(1.5, 0.3, 0.0)] * 30, n_samples=50,
+    )
+    bucket_key = "high:TestCity:DJF:tigge_v3:00:tigge_mars:full:raw_probability"
     snapshot = compute_learning_loop_state_per_bucket(conn)
-    assert "TestCity_DJF" in snapshot
-    rec = snapshot["TestCity_DJF"]
-    assert rec["source"] == "legacy"
-    assert rec["temperature_metric"] is None
-    assert rec["data_version"] is None
-    # Legacy bucket gets zero retrain attempts even when versions exist for v2:
+    assert bucket_key in snapshot
+    rec = snapshot[bucket_key]
+    assert rec["source"] == "canonical"
+    assert rec["temperature_metric"] == "high"
+    assert rec["data_version"] == "tigge_v3"
+    # Bucket with no retrain versions gets zero retrain attempts even when versions exist for v2:
     _insert_version_raw(conn, fitted_at="2026-04-29T01:00:00+00:00",
                         promoted_at="2026-04-29T01:00:00+00:00")
     snapshot2 = compute_learning_loop_state_per_bucket(conn)
-    legacy_rec = snapshot2["TestCity_DJF"]
+    legacy_rec = snapshot2[bucket_key]
     assert legacy_rec["n_retrain_attempts_in_window"] == 0
     assert legacy_rec["last_retrain_promoted_at"] is None
 
@@ -239,29 +266,35 @@ def test_v2_legacy_dedup_v2_wins():
     precedent — per LOW-CITATION-CALIBRATION-3-1 cite-discipline)."""
     conn = _make_conn()
     # v2 model with model_key 'high:DupCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density'
-    save_platt_model_v2(
+    save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="DupCity",
         season="DJF", data_version="tigge_v3",
         param_A=1.5, param_B=0.3, param_C=0.0,
         bootstrap_params=[(1.5, 0.3, 0.0)] * 10, n_samples=60,
         input_space="width_normalized_density",
     )
-    # Legacy with COLLIDING bucket_key
+    # Legacy row with COLLIDING bucket_key but canonical schema-required fields.
+    # B3 (2026-05-28): temperature_metric NOT NULL — legacy row must have all
+    # required columns. Use a distinct model_key so PRIMARY KEY doesn't collide;
+    # bucket_key is the dedup surface tested by compute_learning_loop_state_per_bucket.
     import json as _json
     conn.execute(
         """
         INSERT INTO platt_models
-        (bucket_key, param_A, param_B, param_C, bootstrap_params_json,
-         n_samples, fitted_at, is_active, input_space, authority)
-        VALUES ('high:DupCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density',
-                99.0, 99.0, 99.0, ?, 999, '2026-04-29T01:00:00+00:00', 1,
-                'raw_probability', 'VERIFIED')
+        (model_key, temperature_metric, cluster, season, data_version,
+         input_space, bucket_key, param_A, param_B, param_C, bootstrap_params_json,
+         n_samples, fitted_at, is_active, authority)
+        VALUES ('legacy:DupCity:DJF:tigge_v3:00:tigge_mars:full:raw_probability',
+                'high', 'DupCity', 'DJF', 'tigge_v3',
+                'raw_probability',
+                'high:DupCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density',
+                99.0, 99.0, 99.0, ?, 999, '2026-04-29T01:00:00+00:00', 1, 'VERIFIED')
         """,
         (_json.dumps([[99, 99, 99]]),),
     )
     snapshot = compute_learning_loop_state_per_bucket(conn)
     rec = snapshot["high:DupCity:DJF:tigge_v3:00:tigge_mars:full:width_normalized_density"]
-    assert rec["source"] == "v2"  # v2 wins
+    assert rec["source"] == "canonical"  # canonical wins
     assert rec["active_model_n_samples"] == 60  # v2 value, not legacy 999
 
 
@@ -269,7 +302,7 @@ def test_per_bucket_retrain_attempts_in_window():
     """RELATIONSHIP: window filter respects [end-window_days, end]; PASS/FAIL
     split correctly; only same-bucket versions counted."""
     conn = _make_conn()
-    save_platt_model_v2(
+    save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="WinTestCity",
         season="DJF", data_version="tigge_v3",
         param_A=1.5, param_B=0.3, param_C=0.0,
@@ -312,7 +345,7 @@ def test_last_retrain_promoted_at_only_promoted_versions():
     """RELATIONSHIP: last_retrain_attempted_at includes both PASS and FAIL;
     last_retrain_promoted_at includes ONLY rows with promoted_at NOT NULL."""
     conn = _make_conn()
-    save_platt_model_v2(
+    save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="PromoTestCity",
         season="DJF", data_version="tigge_v3",
         param_A=1.5, param_B=0.3, param_C=0.0,
@@ -339,7 +372,7 @@ def test_days_since_last_promotion_math():
     """RELATIONSHIP: days_since_last_promotion math uses end_date_dt - fitted_dt.
     Synthetic: promoted 2026-04-22, end 2026-04-29 → 7 days."""
     conn = _make_conn()
-    save_platt_model_v2(
+    save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="DaysTestCity",
         season="DJF", data_version="tigge_v3",
         param_A=1.5, param_B=0.3, param_C=0.0,
@@ -363,7 +396,7 @@ def test_sample_quality_driven_by_canonical_pair_count():
     (NOT active_model_n_samples) — pinned to the LOAD-BEARING input for
     retrain readiness. Boundary at 30."""
     conn = _make_conn()
-    save_platt_model_v2(
+    save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="SampleTestCity",
         season="DJF", data_version="tigge_v3",
         param_A=1.5, param_B=0.3, param_C=0.0,

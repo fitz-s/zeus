@@ -577,7 +577,7 @@ def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp
             selected_outcome_token_id TEXT,
             outcome_label TEXT
         );
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             market_slug TEXT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -597,7 +597,7 @@ def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp
         ("snap-1", "cond-1", "weather-chicago-high", "tok-yes-1", "YES"),
     )
     conn.execute(
-        "INSERT INTO market_events_v2 VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("weather-chicago-high", CITY, TARGET_DATE, METRIC, "cond-1", "tok-yes-1", "20-21°F"),
     )
     conn.execute(
@@ -618,7 +618,7 @@ def test_trade_db_family_exposure_blocks_command_without_position_projection(tmp
 
 
 def test_trade_db_family_exposure_prefers_forecasts_market_events_authority(tmp_path) -> None:
-    """K1: market_events_v2 family identity comes from forecasts when attached."""
+    """K1: market_events family identity comes from forecasts when attached."""
     import sqlite3
 
     db_path = tmp_path / "family-exposure-main.db"
@@ -642,7 +642,7 @@ def test_trade_db_family_exposure_prefers_forecasts_market_events_authority(tmp_
             selected_outcome_token_id TEXT,
             outcome_label TEXT
         );
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             market_slug TEXT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -651,7 +651,7 @@ def test_trade_db_family_exposure_prefers_forecasts_market_events_authority(tmp_
             token_id TEXT,
             range_label TEXT
         );
-        CREATE TABLE forecasts.market_events_v2 (
+        CREATE TABLE forecasts.market_events (
             market_slug TEXT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -667,11 +667,11 @@ def test_trade_db_family_exposure_prefers_forecasts_market_events_authority(tmp_
         ("env-1", "cond-1", "tok-yes-1", "YES"),
     )
     conn.execute(
-        "INSERT INTO market_events_v2 VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("stale-main-copy", "Wrong City", "2099-01-01", "low", "cond-1", "tok-yes-1", "bad"),
     )
     conn.execute(
-        "INSERT INTO forecasts.market_events_v2 VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO forecasts.market_events VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("weather-chicago-high", CITY, TARGET_DATE, METRIC, "cond-1", "tok-yes-1", "20-21°F"),
     )
     conn.execute(
@@ -722,7 +722,7 @@ def test_trade_db_family_exposure_does_not_let_stale_envelope_mask_snapshot_iden
             selected_outcome_token_id TEXT,
             outcome_label TEXT
         );
-        CREATE TABLE market_events_v2 (
+        CREATE TABLE market_events (
             market_slug TEXT,
             city TEXT NOT NULL,
             target_date TEXT NOT NULL,
@@ -742,7 +742,7 @@ def test_trade_db_family_exposure_does_not_let_stale_envelope_mask_snapshot_iden
         ("snap-1", "cond-1", "weather-chicago-high", "tok-yes-1", "YES"),
     )
     conn.execute(
-        "INSERT INTO market_events_v2 VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("weather-chicago-high", CITY, TARGET_DATE, METRIC, "cond-1", "tok-yes-1", "20-21°F"),
     )
     conn.execute(

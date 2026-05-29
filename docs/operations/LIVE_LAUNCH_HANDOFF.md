@@ -16,16 +16,16 @@ If the session compacts and monitors die, restart them from this doc. They are s
 
 **Phase 1 status as of 2026-05-05 17:31Z**:
 - Cloud extract + tar-pipe transfer: ✅ DONE (679MB tarball, 379k JSONs × 2 tracks).
-- Snapshot ingest: ✅ DONE (71,460 NEW rows in `ensemble_snapshots_v2`).
+- Snapshot ingest: ✅ DONE (71,460 NEW rows in `ensemble_snapshots`).
 - Pair build: ⚠️ PARTIAL — only Amsterdam committed (71,400 cycle='12' pairs, 1 of 49 cities). Pair-builder process aborted mid-run before reaching other cities.
 - Refit cycle='12': ❌ NO MODELS LANDED. The 71,400 Amsterdam-only pairs are insufficient to produce stratified models across the 49-city × 4-season × 2-track bucket grid. Refit run at 17:31Z attempted only 206 cycle='00' buckets (all UNIQUE-collided with existing) and 0 cycle='12' buckets — discovery limitation under investigation.
 
 **Recovery recipe to complete Phase 1**:
 1. Pause `com.zeus.data-ingest` daemon.
-2. Run `scripts/rebuild_calibration_pairs_v2.py` with NO `--city` filter (all 49 cities). Date range 2026-02-01..2026-05-02. Should produce ~3.5M cycle='12' pairs (49 cities × ~70k each).
+2. Run `scripts/rebuild_calibration_pairs.py` with NO `--city` filter (all 49 cities). Date range 2026-02-01..2026-05-02. Should produce ~3.5M cycle='12' pairs (49 cities × ~70k each).
 3. Restart daemon.
 4. Verify pair distribution: `SELECT cycle, COUNT(DISTINCT city), COUNT(*) FROM calibration_pairs_v2 GROUP BY cycle;` — expect cycle='12' city count = 49.
-5. Investigate refit discovery: read `scripts/refit_platt_v2.py:240-260` for any WHERE filter excluding cycle='12'. Fix if present.
+5. Investigate refit discovery: read `scripts/refit_platt.py:240-260` for any WHERE filter excluding cycle='12'. Fix if present.
 6. Re-run refit `--no-dry-run --force --temperature-metric all`.
 7. Verify: `SELECT cycle, COUNT(*) FROM platt_models_v2 GROUP BY cycle` — expect cycle='12' > 0.
 8. Run `scripts/evaluate_calibration_transfer_oos.py --no-dry-run` to populate `validated_calibration_transfers` rows.
@@ -40,9 +40,9 @@ Verdict file: `state/post_extract_pipeline_<ts>.json`. Read it after recovery.
    WHERE updated_at > '<watcher_start_ts>'
    GROUP BY cycle, source_id, horizon_profile;
    ```
-2. Confirm `ensemble_snapshots_v2` got 12z rows:
+2. Confirm `ensemble_snapshots` got 12z rows:
    ```sql
-   SELECT cycle, COUNT(*) FROM ensemble_snapshots_v2
+   SELECT cycle, COUNT(*) FROM ensemble_snapshots
    WHERE data_version LIKE 'tigge_%' GROUP BY cycle;
    ```
 3. Run `scripts/evaluate_calibration_transfer_oos.py --no-dry-run` to populate `validated_calibration_transfers` rows for the 90-day window. Until this runs, cross-domain transfers (e.g. `ecmwf_open_data ← tigge_mars`) stay SHADOW_ONLY.
@@ -52,7 +52,7 @@ Verdict file: `state/post_extract_pipeline_<ts>.json`. Read it after recovery.
 - `aborted_pull_failed` — scp retry exhausted; SSH cloud, check disk space + auth; manually scp + restart from stage5
 - `aborted_ingest_errors` — read `logs/post_extract_chain_<ts>.log` for the failing track; usually schema mismatch or duplicate row; fix + re-run `scripts/ingest_grib_to_snapshots.py --track <track>`
 - `aborted_preflight_blocked` — Phase 2 schema migration drift OR precedence-200 lock dropped; verify both, fix, restart from stage6
-- `aborted_refit_partial` — Platt fit refusal for some bucket; read `refit_platt_v2.py` log; usually n_pairs < 200; either lower threshold per-bucket or wait for more data
+- `aborted_refit_partial` — Platt fit refusal for some bucket; read `refit_platt.py` log; usually n_pairs < 200; either lower threshold per-bucket or wait for more data
 - `aborted_phase2_migration_unapplied` — should not fire (migration was applied 2026-05-05); if it does, re-run `scripts/migrate_phase2_cycle_stratification.py` first
 
 ## §B — On `PHASE2_DONE` (all 10 lanes complete; ~7-8 days from 2026-05-05)
@@ -99,7 +99,7 @@ Full procedure: `docs/operations/PLIST_UPDATE_FOR_RELOCK.md`. Summary of the **4
 1. **Plist `EnvironmentVariables`** — add `ZEUS_ENTRY_FORECAST_READINESS_WRITER=1`. **DO NOT** set `ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED` at initial launch — see `docs/operations/PLIST_UPDATE_FOR_RELOCK.md` §1.5 and `architecture/ecmwf_opendata_tigge_equivalence_2026_05_06.yaml` §4. The legacy static-mapping path (flag-OFF) is the correct calibration route at launch; flipping the OOS flag prematurely fails closed to SHADOW_ONLY because no `validated_calibration_transfers` rows exist for ECMWF target_source_id yet (Phase B uplift, ~2-4 weeks post-launch).
 2. **`config/settings.json::entry_forecast.rollout_mode`** — change from `"blocked"` to one of `shadow|canary|live` (enum in `src/config.py:160-164`; "active" is NOT a valid value).
 3. **`state/entry_forecast_promotion_evidence.json`** — must exist and parse via `read_promotion_evidence`. Operator-attestation fields (`operator_approval_id`, `g1_evidence_id`, `canary_success_evidence_id`) require operator audit before live; `status_snapshot.status` must equal `LIVE_ELIGIBLE` for the gate to permit live orders.
-4. **`ensemble_snapshots_v2` row coverage** — populated by §A. The `validated_calibration_transfers` rows are NOT required at launch (legacy mapping path); they become required at Phase B when the OOS flag is flipped.
+4. **`ensemble_snapshots` row coverage** — populated by §A. The `validated_calibration_transfers` rows are NOT required at launch (legacy mapping path); they become required at Phase B when the OOS flag is flipped.
 
 After 1–4, clear the precedence-200 lock:
 ```sql

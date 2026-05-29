@@ -642,7 +642,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
     snapshot_table = "executable_market_snapshots" if _table_exists(conn, "executable_market_snapshots") else None
     market_schema = _first_table_schema(
         conn,
-        "market_events_v2",
+        "market_events",
         preferred=("forecasts", "main", "world"),
     )
     if market_schema is None:
@@ -650,7 +650,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
     vc_cols = _table_columns(conn, "venue_commands")
     env_cols = _table_columns(conn, "venue_submission_envelopes") if envelope_table else set()
     snap_cols = _table_columns(conn, "executable_market_snapshots") if snapshot_table else set()
-    me_cols = _table_columns(conn, "market_events_v2", schema=market_schema)
+    me_cols = _table_columns(conn, "market_events", schema=market_schema)
 
     envelope_join = (
         "LEFT JOIN venue_submission_envelopes env ON env.envelope_id = vc.envelope_id"
@@ -676,7 +676,7 @@ def _weather_family_exposures_from_trade_db_impl(conn: Any) -> list[WeatherFamil
     me_slug = _column_expr(me_cols, "me", "market_slug")
     me_range_label = _column_expr(me_cols, "me", "range_label")
     me_outcome = _column_expr(me_cols, "me", "outcome")
-    market_table = _qualified_table(market_schema, "market_events_v2")
+    market_table = _qualified_table(market_schema, "market_events")
     command_identity_sql = f"""
         SELECT DISTINCT
             me.city,

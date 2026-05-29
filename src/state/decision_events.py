@@ -195,8 +195,10 @@ def write_decision_event(
     first_member_observed_time, run_complete_time, zeus_submit_intent_time,
     venue_ack_time are required for live rows (fail-fast before INSERT).
     """
-    from src.state.db import SCHEMA_VERSION, ZEUS_WORLD_DB_PATH, get_world_connection
+    from src.state.db import ZEUS_WORLD_DB_PATH, get_world_connection
     from src.state.db_writer_lock import WriteClass, db_writer_lock
+    _SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
+    SCHEMA_VERSION = _SCHEMA_VERSION
 
     market_slug, temperature_metric, target_date, observation_time, _ = natural_key
 
@@ -365,8 +367,9 @@ def write_shadow_decision_event(
     as ``unknown_legacy`` instead of fabricating ``gamma_explicit``.
     """
 
-    from src.state.db import SCHEMA_VERSION, ZEUS_WORLD_DB_PATH
+    from src.state.db import ZEUS_WORLD_DB_PATH
     from src.state.db_writer_lock import WriteClass, db_writer_lock
+    SCHEMA_VERSION = 42  # B2: frozen row-provenance value; counter cancelled
 
     market_slug, temperature_metric, target_date, observation_time, _ = natural_key
 

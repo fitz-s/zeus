@@ -78,7 +78,7 @@ paris_station_lfpb_canonical:
       now points at LFPB. Mixing LFPG history with new LFPB ingest into
       the same Platt cluster would contaminate calibration. Downgrade to
       QUARANTINED so:
-        * rebuild_calibration_pairs_v2._fetch_verified_observation skips
+        * rebuild_calibration_pairs._fetch_verified_observation skips
           them (predicate keys on authority='VERIFIED').
         * harvester _lookup_settlement_obs (when authority filter is
           tightened per known_gaps OPEN P1) skips them.
@@ -150,8 +150,8 @@ paris_station_lfpb_canonical:
       with start_date = today-90, end_date = today-2 (WU history publishes
       with ~2-day lag). Confirm rows write station_id='LFPB',
       source='wu_icao_history', authority='VERIFIED'.
-    - 5_refit_platt: Run scripts/rebuild_calibration_pairs_v2.py and
-      scripts/refit_platt_v2.py for the Paris cluster (HIGH and LOW,
+    - 5_refit_platt: Run scripts/rebuild_calibration_pairs.py and
+      scripts/refit_platt.py for the Paris cluster (HIGH and LOW,
       DJF/MAM/JJA/SON). Confirm new platt_models_v2 rows land with
       cluster='Paris', authority='VERIFIED'.
     - 6_verify: Re-run the smoke / source-contract probe; confirm Paris
@@ -169,8 +169,8 @@ paris_station_lfpb_canonical:
     hardcode_audit (recorded), apply_legacy_quarantine (LFPG rows).
     Step 4 completed 2026-05-03: backfill_lfpb 762 LFPB obs rows
     (2024-01-01 to 2026-01-31, with --replace-station-mismatch).
-    Step 5 completed 2026-05-03: rebuild_calibration_pairs_v2 full window
-    + refit_platt_v2 all 8 buckets + rebuild_settlements 1706 rows.
+    Step 5 completed 2026-05-03: rebuild_calibration_pairs full window
+    + refit_platt all 8 buckets + rebuild_settlements 1706 rows.
     Step 6 completed 2026-05-03: verification passed (verify_ready.py,
     source-contract probe zero MISMATCH).
     Step 7 completed 2026-05-03: this YAML marked APPLIED; Paris removed

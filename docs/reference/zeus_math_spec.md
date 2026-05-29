@@ -135,7 +135,7 @@ One row per (city, target_date, issue_time, lead_hours):
 - `members_json`: list of 51 floats in city settlement unit (daily max per member)
 - `authority`: VERIFIED iff row passed the blessed ingestion path
 - `provenance_metadata`: GRIB file(s), extractor version, run_id
-- `source_model_version`: string identifying the TIGGE cycle + model version (used in decision_group; §12.1)
+- `forecast_model_id`: string identifying the TIGGE cycle + model version (used in decision_group; §12.1)
 
 ---
 
@@ -616,7 +616,7 @@ deterministic strategy are governed by the strategy authority docs, not by this 
 The **independent sample unit** for calibration is the decision group, NOT the individual (city, target_date, bin, direction) row. A decision group is:
 
 ```
-g = (city, target_date, forecast_available_at, source_model_version)
+g = (city, target_date, forecast_available_at, forecast_model_id)
 ```
 
 All pair rows from a single ensemble snapshot at a single `issue_time` share the same underlying forecast and are NOT independent. The per-row observations differ only in which bin they test, not in the underlying physics.
@@ -630,7 +630,7 @@ All pair rows from a single ensemble snapshot at a single `issue_time` share the
 
 **Per-row sample weight**: when fitting Platt (§6.4), each pair row gets `w_pair = 1 / (#rows in its decision_group)`. This ensures a market with 10 bins and a market with 3 bins contribute equally per decision_group regardless of bin count.
 
-**Persistence**: `calibration_pairs.decision_group_id` is the column that ties rows to groups. Every pair insert must populate this column with a stable group key (hash of `(city, target_date, forecast_available_at, source_model_version)`).
+**Persistence**: `calibration_pairs.decision_group_id` is the column that ties rows to groups. Every pair insert must populate this column with a stable group key (hash of `(city, target_date, forecast_available_at, forecast_model_id)`).
 
 ### 12.2 Training pair construction (efficient, MC per snapshot)
 
@@ -641,8 +641,8 @@ For each (city, target_date) with a VERIFIED settlement_value:
 
     For each ensemble_snapshot(city=city, target_date=target_date):  // one per (issue_time, lead_hours)
         lead_days = (target_date - snapshot.issue_time.date()).days
-        source_model_version = snapshot.source_model_version
-        decision_group_id = hash(city, target_date, snapshot.issue_time, source_model_version)
+        forecast_model_id = snapshot.forecast_model_id
+        decision_group_id = hash(city, target_date, snapshot.issue_time, forecast_model_id)
 
         members = snapshot.members_json  // 51 values in city settlement unit
 

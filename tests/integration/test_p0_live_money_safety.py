@@ -57,7 +57,7 @@ def _submit(fake, *, token_id: str = "yes-token", price: float = 0.50, size_usd:
 
 
 def _persist_submit_journal_shape(result, *, prefix: str) -> dict[str, object]:
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.db import init_schema
     from src.state.snapshot_repo import insert_snapshot
     from src.state.venue_command_repo import append_event, insert_command, insert_submission_envelope, list_events
@@ -70,7 +70,7 @@ def _persist_submit_journal_shape(result, *, prefix: str) -> dict[str, object]:
     snapshot_id = f"snap-{prefix}"
     insert_snapshot(
         conn,
-        ExecutableMarketSnapshotV2(
+        ExecutableMarketSnapshot(
             snapshot_id=snapshot_id,
             gamma_market_id="gamma-p0",
             event_id="event-p0",

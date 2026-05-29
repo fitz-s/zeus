@@ -162,7 +162,7 @@ class EntryForecastRolloutMode(StrEnum):
 
 
 class EntryForecastSourceTransport(StrEnum):
-    ENSEMBLE_SNAPSHOTS_V2_DB_READER = "ensemble_snapshots_v2_db_reader"
+    ENSEMBLE_SNAPSHOTS_V2_DB_READER = "ensemble_snapshots_db_reader"
 
 
 class EntryForecastCalibrationPolicyId(StrEnum):

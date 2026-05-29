@@ -22,7 +22,7 @@ from src.data.forecast_extrema_authority import (
 )
 from src.data.forecast_target_contract import build_forecast_target_scope
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 
 
 UTC_SUFFIX = "+00:00"
@@ -37,7 +37,7 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -72,10 +72,10 @@ def _insert_snapshot_row(
     scope = _scope(city)
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
-            lead_hours, members_json, model_version, data_version,
+            lead_hours, members_json, model_version, dataset_id,
             source_id, source_transport, source_run_id, release_calendar_key,
             source_cycle_time, source_release_time, source_available_at,
             training_allowed, causality_status, boundary_ambiguous,
@@ -109,7 +109,7 @@ def _insert_snapshot_row(
             "model_version": "ecmwf_ens",
             "data_version": data_version or scope.data_version,
             "source_id": "ecmwf_open_data",
-            "source_transport": "ensemble_snapshots_v2_db_reader",
+            "source_transport": "ensemble_snapshots_db_reader",
             "source_run_id": source_run_id,
             "release_calendar_key": "ecmwf_open_data:mx2t6_high:full",
             "source_cycle_time": source_cycle_time,
@@ -187,7 +187,7 @@ class TestClassifyForecastExtremaAuthority:
             "contributes_to_target_extrema": None,
             "forecast_window_attribution_status": None,
             "boundary_ambiguous": 0,
-            "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
+            "dataset_id": ECMWF_OPENDATA_HIGH_DATA_VERSION,
         }
         auth = classify_forecast_extrema_authority(row)
         assert auth.eligibility == ForecastExtremaEligibility.UNKNOWN
@@ -198,7 +198,7 @@ class TestClassifyForecastExtremaAuthority:
             "contributes_to_target_extrema": None,
             "forecast_window_attribution_status": None,
             "boundary_ambiguous": 0,
-            "data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+            "dataset_id": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
         }
         auth = classify_forecast_extrema_authority(row)
         assert auth.eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH
@@ -284,7 +284,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei",
         )
         assert result.ok, f"Expected LIVE_ELIGIBLE, got {result.status}/{result.reason_code}"
@@ -312,7 +312,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-nc",
         )
         assert not result.ok
@@ -336,7 +336,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-unk",
         )
         assert not result.ok
@@ -362,7 +362,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-current-null",
         )
         assert not result.ok
@@ -391,7 +391,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-taipei-legacy",
         )
         assert result.ok, f"Legacy NULL row should pass: {result.reason_code}"
@@ -435,7 +435,7 @@ class TestReaderExtremaPreference:
             conn,
             scope=scope,
             source_id="ecmwf_open_data",
-            source_transport="ensemble_snapshots_v2_db_reader",
+            source_transport="ensemble_snapshots_db_reader",
             source_run_id="run-ams",
         )
         assert result.ok, f"Expected LIVE_ELIGIBLE, got {result.status}/{result.reason_code}"

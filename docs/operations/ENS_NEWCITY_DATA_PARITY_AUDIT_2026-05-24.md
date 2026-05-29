@@ -22,11 +22,11 @@ Legend — **covered for 52?**: "full" = all 52 canonical cities present (or han
 | 4 | `src/oracle/ddd_artifacts/v2_city_floors.json` | `.per_city[city]` | Derived: `max(p05_directional_coverage_train, 0.35)` over 2025 H2 `observation_instants_v2` data. Operator hand-authored per-city entries from offline script (RERUN_PLAN_v2 §C1). Status flags: 4 cities have `NO_TRAIN_DATA` / null floor (Hong Kong, Istanbul, Moscow, Tel Aviv) | partial — 51/52 (Paris present post-workstream-A resync; 4 have NO_TRAIN_DATA status which fail-closes DDD) | **ABSENT** | **ABSENT** |
 | 5 | `src/oracle/ddd_artifacts/v2_nstar.json` | `.per_city_metric[city_high/city_low]` | Derived from `calibration_pairs_v2` ECE analysis (RERUN_PLAN_v2 §C4). N_star = smallest N where ECE std < 0.02 over 100-date sliding window. total_N_dates range: 350–840 across 51 cities (102 entries) | partial — 51/52 (same cities as v2_city_floors) | **ABSENT** | **ABSENT** |
 | 6 | `data/oracle_error_rates.json` | dict key `[city_name][metric]` | Unique writer: `scripts/bridge_oracle_to_calibration.py`. Compares WU ICAO oracle snapshots (`raw/oracle_shadow_snapshots/`) to settled PM bins. Requires raw snapshot files captured at market-resolution time. | partial — 51/52 cities. Qingdao n=23 (CAUTION-threshold: p95=0.117, active). Note: 4 cities (Hong Kong, Istanbul, Moscow, Tel Aviv) have thin n (42–67). | **ABSENT** (status → MISSING, mult=0.5) | **ABSENT** (status → MISSING, mult=0.5) |
-| 7 | `state/zeus-forecasts.db :: platt_models_v2` | keyed by `(metric, city, season, data_version)` | `scripts/refit_platt_v2.py --no-dry-run --force` | **0 rows live** (table empty — platt_models_v2 not yet seeded for any city) | **ABSENT** | **ABSENT** |
+| 7 | `state/zeus-forecasts.db :: platt_models_v2` | keyed by `(metric, city, season, data_version)` | `scripts/refit_platt.py --no-dry-run --force` | **0 rows live** (table empty — platt_models_v2 not yet seeded for any city) | **ABSENT** | **ABSENT** |
 | 8 | `state/zeus-forecasts.db :: calibration_pairs_v2` | `city` column | Archive TIGGE backfill → `scripts/rebuild_calibration_pairs_canonical.py` | full — all 52 cities present. London leads (2.6M rows). Qingdao thin (4,488 rows) | **ABSENT** | **ABSENT** |
 | 9 | `state/zeus-world.db :: model_bias` (v1) | `city` column | Legacy; not on active decision path | partial — 52 cities but only 2/city rows (recent) | **ABSENT** | **ABSENT** |
-| 10 | `model_bias_ens_v2` | DB table in zeus-forecasts.db; `city` column | `src/calibration/ens_bias_repo.py::write_bias_model()` from calibration_pairs_v2 + ensemble_snapshots_v2 | **Table does not exist in live zeus-forecasts.db** (schema not yet migrated; SCHEMA_FORECASTS_VERSION=7) | **ABSENT** | **ABSENT** |
-| 11 | `state/zeus-forecasts.db :: ensemble_snapshots_v2` | `city` column | TIGGE archive backfill (ingest daemon) | full — all 52 cities. Qingdao thin (375 rows). Hong Kong thin (188 rows) | **ABSENT** | **ABSENT** |
+| 10 | `model_bias_ens_v2` | DB table in zeus-forecasts.db; `city` column | `src/calibration/ens_bias_repo.py::write_bias_model()` from calibration_pairs_v2 + ensemble_snapshots | **Table does not exist in live zeus-forecasts.db** (schema not yet migrated; SCHEMA_FORECASTS_VERSION=7) | **ABSENT** | **ABSENT** |
+| 11 | `state/zeus-forecasts.db :: ensemble_snapshots` | `city` column | TIGGE archive backfill (ingest daemon) | full — all 52 cities. Qingdao thin (375 rows). Hong Kong thin (188 rows) | **ABSENT** | **ABSENT** |
 | 12 | `state/zeus-world.db :: observation_instants_v2` | `city` column | WU-daily + OpenMeteo archive backfill | full — all 52 cities. Qingdao thin (522 rows), Hong Kong thin (188 rows) | **ABSENT** | **ABSENT** |
 | 13 | `state/zeus-forecasts.db :: settlements_v2` | `city` column | PM settlement capture (live markets only) | full — all 52 cities present. Range: Lagos 35, London 500. Qingdao 23 (thin) | **ABSENT** | **ABSENT** |
 | 14 | `state/zeus-world.db :: settlements` | `city` column | PM settlement capture (legacy; mirrored from forecasts) | full — all 52 cities | **ABSENT** | **ABSENT** |
@@ -49,10 +49,10 @@ Legend — **covered for 52?**: "full" = all 52 canonical cities present (or han
 | Artifact | Why obtainable | Key source |
 |---|---|---|
 | `observation_instants_v2` | WU-daily + OpenMeteo archive covers years of historical ASOS/METAR data | archive ingest scripts |
-| `ensemble_snapshots_v2` | ECMWF TIGGE archive available for past dates | TIGGE backfill daemon |
-| `calibration_pairs_v2` | Derived from ensemble_snapshots_v2 + settlements_v2 — once settlements exist, pairs build from archive | `rebuild_calibration_pairs_canonical.py` |
-| `model_bias_ens_v2` | Derived from calibration_pairs_v2 + ensemble_snapshots_v2 — computable after calibration_pairs built | `ens_bias_repo.write_bias_model()` |
-| `platt_models_v2` | Derived from calibration_pairs_v2 — computable once pairs exist | `refit_platt_v2.py --no-dry-run --force` |
+| `ensemble_snapshots` | ECMWF TIGGE archive available for past dates | TIGGE backfill daemon |
+| `calibration_pairs_v2` | Derived from ensemble_snapshots + settlements_v2 — once settlements exist, pairs build from archive | `rebuild_calibration_pairs_canonical.py` |
+| `model_bias_ens_v2` | Derived from calibration_pairs_v2 + ensemble_snapshots — computable after calibration_pairs built | `ens_bias_repo.write_bias_model()` |
+| `platt_models_v2` | Derived from calibration_pairs_v2 — computable once pairs exist | `refit_platt.py --no-dry-run --force` |
 | `diurnal_curves` / `temp_persistence` / `solar_daily` / `forecast_skill` | Derived from observation backfill | `onboard_cities.py` steps |
 | `config/city_monthly_bounds.json` | Reads `ensemble_snapshots` — regenerable once backfill complete | `generate_monthly_bounds.py` |
 | `config/city_correlation_matrix.json` | Reads `ensemble_snapshots` — regenerable once backfill complete | `build_correlation_matrix.py` |
@@ -92,7 +92,7 @@ Every row in the matrix above is **ABSENT** for both cities. The most critical g
 | Not in `cities.json` | P0 | Yes — city unknown to entire system |
 | Not in `TIER_SCHEDULE` | P0 | Yes — `UnsupportedTierError` on any tier lookup |
 | No `observation_instants_v2` rows | P0 | Yes — DDD has no coverage data; fails closed |
-| No `ensemble_snapshots_v2` rows | P0 | Yes — no forecast signal |
+| No `ensemble_snapshots` rows | P0 | Yes — no forecast signal |
 | No `calibration_pairs_v2` rows | P0 | Yes — platt/ens_bias/nstar cannot be computed |
 | No `settlements_v2` rows | P0 | Yes — no settled PM market history |
 | No `v2_city_floors` entry | P0 | Yes — DDDFailClosed raised (city missing from floors config) |
@@ -104,7 +104,7 @@ Every row in the matrix above is **ABSENT** for both cities. The most critical g
 
 ## 5. Verdict (≤1 paragraph)
 
-Jinan and Zhengzhou genuinely cannot trade yet, and several of their missing artifacts cannot be obtained by running archive-backfill scripts alone. The archive-obtainable artifacts — observation_instants_v2, ensemble_snapshots_v2, calibration_pairs_v2, model_bias_ens_v2, platt_models_v2, diurnal_curves, v2_city_floors — can be backfilled once the cities are registered in cities.json and tier_resolver, since ECMWF TIGGE and WU archive data exists for both. However, **v2_nstar requires ≥110 settled PM target-dates** (calibration_pairs rows), and **oracle_error_rates requires real-time oracle shadow snapshots** captured at PM resolution time — both accumulate only after live markets are listed and begin settling. Until both cities have ~110 settled markets (roughly 4+ months of active PM trading), v2_nstar will be absent (DDD may fail-closed or use a conservative default) and oracle_error_rates will sit at MISSING (0.5× Kelly penalty). The 14-day BLACKLIST shadow period is the minimum gate; the true parity horizon for full DDD confidence is ~110+ settled markets.
+Jinan and Zhengzhou genuinely cannot trade yet, and several of their missing artifacts cannot be obtained by running archive-backfill scripts alone. The archive-obtainable artifacts — observation_instants_v2, ensemble_snapshots, calibration_pairs_v2, model_bias_ens_v2, platt_models_v2, diurnal_curves, v2_city_floors — can be backfilled once the cities are registered in cities.json and tier_resolver, since ECMWF TIGGE and WU archive data exists for both. However, **v2_nstar requires ≥110 settled PM target-dates** (calibration_pairs rows), and **oracle_error_rates requires real-time oracle shadow snapshots** captured at PM resolution time — both accumulate only after live markets are listed and begin settling. Until both cities have ~110 settled markets (roughly 4+ months of active PM trading), v2_nstar will be absent (DDD may fail-closed or use a conservative default) and oracle_error_rates will sit at MISSING (0.5× Kelly penalty). The 14-day BLACKLIST shadow period is the minimum gate; the true parity horizon for full DDD confidence is ~110+ settled markets.
 
 ---
 

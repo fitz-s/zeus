@@ -4,7 +4,7 @@
 # Purpose: Prove Platt group-bootstrap optimization remains algebraically equivalent to the legacy implementation.
 # Reuse: Run for calibration Platt bootstrap, CI parameter, or optimization changes.
 # Authority basis: docs/reference/zeus_calibration_weighting_authority.md (perf antibody);
-#                  refit_platt_v2 hot-loop optimization 2026-04-29 — replace O(n_eff × N)
+#                  refit_platt hot-loop optimization 2026-04-29 — replace O(n_eff × N)
 #                  object-dtype string equality with O(N) integer code lookup.
 """Equivalence test: ExtendedPlattCalibrator group-bootstrap optimization.
 

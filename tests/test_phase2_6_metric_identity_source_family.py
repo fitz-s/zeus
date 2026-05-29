@@ -11,7 +11,7 @@ Relationship invariants:
       slipping into OpenData paths
     * Unknown source_family raises ValueError at the factory boundary
       (fail-loud, not silent fallback to TIGGE)
-    * source_family_from_data_version is the inverse of the factory's
+    * source_family_from_dataset_id is the inverse of the factory's
       data_version selection
     * Manager.get_calibrator with source_id derives expected_data_version
       via the source_family registry, not via the legacy hardcoded constant
@@ -25,7 +25,7 @@ from src.types.metric_identity import (
     HIGH_LOCALDAY_MAX,
     LOW_LOCALDAY_MIN,
     MetricIdentity,
-    source_family_from_data_version,
+    source_family_from_dataset_id,
 )
 
 
@@ -91,10 +91,10 @@ def test_for_metric_with_source_family_dispatches_correctly():
         MetricIdentity.for_metric_with_source_family("medium", "tigge")
 
 
-def test_source_family_from_data_version_is_inverse_of_factory():
+def test_source_family_from_dataset_id_is_inverse_of_factory():
     """The reverse-lookup helper recovers source_family from any data_version
     the factory could produce. Closes the loop so evaluator can route on
-    data_version strings stored in ensemble_snapshots_v2.
+    data_version strings stored in ensemble_snapshots.
     """
     for family in ("tigge", "ecmwf_opendata"):
         for builder in (
@@ -102,12 +102,12 @@ def test_source_family_from_data_version_is_inverse_of_factory():
             MetricIdentity.for_low_localday_min,
         ):
             mi = builder(family)
-            assert source_family_from_data_version(mi.data_version) == family
+            assert source_family_from_dataset_id(mi.data_version) == family
 
 
-def test_source_family_from_data_version_rejects_unknown():
-    assert source_family_from_data_version("openmeteo_v1") is None
-    assert source_family_from_data_version("gfs_v1") is None
-    assert source_family_from_data_version(None) is None
-    assert source_family_from_data_version("") is None
-    assert source_family_from_data_version(123) is None  # type: ignore[arg-type]
+def test_source_family_from_dataset_id_rejects_unknown():
+    assert source_family_from_dataset_id("openmeteo_v1") is None
+    assert source_family_from_dataset_id("gfs_v1") is None
+    assert source_family_from_dataset_id(None) is None
+    assert source_family_from_dataset_id("") is None
+    assert source_family_from_dataset_id(123) is None  # type: ignore[arg-type]

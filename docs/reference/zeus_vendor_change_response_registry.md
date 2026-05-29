@@ -88,7 +88,7 @@ canary-style probing.
 | `calibration_pairs_v2.training_allowed` | The flip switch when source becomes untrusted |
 | `calibration_pairs_v2.causality_status` | OK / DST_AMBIGUOUS — boundary marker |
 | `platt_models_v2.*` | Trained on bin pairs from a specific source — invalidated on T1 |
-| `ensemble_snapshots_v2` | TIGGE forecast tied to lat/lon |
+| `ensemble_snapshots` | TIGGE forecast tied to lat/lon |
 
 ### Layer 3 — Ingestion (per-vendor clients)
 
@@ -236,9 +236,9 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
 |---|---|
 | `src/ingest/harvester_truth_writer.py` cron job (`ingest_main.py` minute 45 hourly) | Reads PM settlement; gated by `ZEUS_HARVESTER_LIVE_ENABLED` env |
 | Per-vendor backfill scripts (`scripts/backfill_*.py`, ~10 files) | Each scoped to one vendor |
-| `scripts/fill_obs_v2_dst_gaps.py` | Lagos-class fallback decision logic |
+| `scripts/fill_obs_dst_gaps.py` | Lagos-class fallback decision logic |
 | `scripts/fill_obs_v2_meteostat.py` | Bulk fallback runner |
-| `scripts/audit_observation_instants_v2.py` | Daily audit |
+| `scripts/audit_observation_instants.py` | Daily audit |
 | `scripts/source_contract_auto_convert.py` | Source-tag namespace converter |
 | `scripts/onboard_cities.py` | T4 entry point |
 | `data/oracle_error_rates.json` | Sole writer: bridge — co-tenancy contract |
@@ -327,7 +327,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
    2. Layer 5: extend `OGIMET_CITIES` whitelist (line 1019) IF Ogimet is a viable fallback for THAT city's PM-settled station
    3. Layer 5: add fallback source tag to `_build_allowed_sources_by_city()` allowed set
    4. Layer 8: future DDD will activate per `zeus_oracle_density_discount_reference.md` §6 — small-sample multiplier compensates for low Platt samples
-   5. Layer 14: trigger backfill via `fill_obs_v2_dst_gaps.py` or new fallback runner
+   5. Layer 14: trigger backfill via `fill_obs_dst_gaps.py` or new fallback runner
 5. **Verification**:
    - Bridge runs full 90-day window; mismatch + DDD both classified
    - DDD doesn't fire on routine days, fires on outage days
@@ -361,7 +361,7 @@ Pre-commit invariant baseline at `.claude/hooks/pre-commit-invariant-test.sh` �
    3. Layer 1: generate `config/city_monthly_bounds.json` row (may be NULL if <30 samples; lat-band fallback in guard)
    4. Layer 3: ensure clients accept the new ICAO (check OGIMET_CITIES dict at `src/data/daily_obs_append.py:1019` if city needs Ogimet)
    5. Layer 12: extend AST guard TARGETS list if new script written
-   6. Layer 6: run `scripts/onboard_cities.py` pipeline — backfills `observation_instants_v2` (zeus-world.db, SCHEMA_VERSION=35) + `ensemble_snapshots_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7) + triggers `rebuild_calibration_pairs_canonical.py`
+   6. Layer 6: run `scripts/onboard_cities.py` pipeline — backfills `observation_instants_v2` (zeus-world.db, SCHEMA_VERSION=35) + `ensemble_snapshots` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7) + triggers `rebuild_calibration_pairs_canonical.py`
    7. Layer 6b: populate `model_bias_ens_v2` (zeus-forecasts.db, SCHEMA_FORECASTS_VERSION=7, **pending ENS-refit forecasts-schema migration PR #337 — table not yet in production schema**) via `src/calibration/ens_bias_repo.py` — defaults are `contributor_policy='full_contributor_only'`, bias normalized to degC (`members_unit`), `prior_data_version` propagated from ensemble source
    8. Layer 6c: run `scripts/watch_source_contract.py` to validate Gamma settlement-source consistency for new city; address any ALERT before proceeding
    9. Layer 6d: add `SETTLEMENT_SOURCE_<CITY>` entry to `config/reality_contracts/data.yaml` (blocking criticality, appropriate `unit`, `rounding`, `ttl_seconds`, `on_change_handlers`)

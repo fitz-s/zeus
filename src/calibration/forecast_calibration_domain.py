@@ -151,7 +151,7 @@ class ContractOutcomeDomain:
     settlement_unit: SettlementUnit
     settlement_rounding_policy: str
     bin_grid_id: str
-    bin_schema_version: str
+    bin_schema_id: str
     market_id: str | None = None
     condition_id: str | None = None
     token_id_yes: str | None = None
@@ -173,7 +173,7 @@ class ContractOutcomeDomain:
             raise ValueError(f"settlement_unit must be F or C, got {self.settlement_unit!r}")
         _require_nonempty(self.settlement_rounding_policy, "settlement_rounding_policy")
         _require_nonempty(self.bin_grid_id, "bin_grid_id")
-        _require_nonempty(self.bin_schema_version, "bin_schema_version")
+        _require_nonempty(self.bin_schema_id, "bin_schema_id")
 
     @property
     def family_key(self) -> str:
@@ -189,7 +189,7 @@ class ContractOutcomeDomain:
             self.settlement_unit,
             self.settlement_rounding_policy,
             self.bin_grid_id,
-            self.bin_schema_version,
+            self.bin_schema_id,
         ))
 
     def mismatch_fields(self, other: "ContractOutcomeDomain") -> tuple[str, ...]:
@@ -204,7 +204,7 @@ class ContractOutcomeDomain:
             "settlement_unit",
             "settlement_rounding_policy",
             "bin_grid_id",
-            "bin_schema_version",
+            "bin_schema_id",
         )
         return tuple(field for field in fields if getattr(self, field) != getattr(other, field))
 

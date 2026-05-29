@@ -50,7 +50,7 @@ PROCESS_CODE_SURFACES = {
         "src/engine/cycle_runner.py",
         "src/engine/evaluator.py",
         "src/contracts/no_trade_reason.py",
-        "src/contracts/executable_market_snapshot_v2.py",
+        "src/contracts/executable_market_snapshot.py",
         "src/contracts/execution_intent.py",
         "src/control/ws_gap_guard.py",
         "src/data/market_scanner.py",
@@ -131,7 +131,7 @@ def _source_health_path() -> Path:
 
 
 def _world_db_path() -> Path:
-    # K1 split 2026-05-11: ensemble_snapshots_v2 / readiness_state moved to
+    # K1 split 2026-05-11: ensemble_snapshots / readiness_state moved to
     # forecasts.db.  Return ZEUS_FORECASTS_DB_PATH so callers (and monkeypatched
     # tests that stub this function) target the correct physical file.
     return ZEUS_FORECASTS_DB_PATH
@@ -798,7 +798,7 @@ def _settlement_truth_status(db_path: Path | None = None) -> dict:
         conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         row = conn.execute(
             "SELECT COUNT(*) AS count, MAX(settled_at) AS max_settled_at, "
-            "MAX(recorded_at) AS max_recorded_at FROM settlements_v2"
+            "MAX(recorded_at) AS max_recorded_at FROM settlement_outcomes"
         ).fetchone()
         conn.close()
     except Exception as exc:
@@ -1504,7 +1504,7 @@ def check() -> dict:
         except Exception:
             result["recent_no_trade_stage_counts"] = {}
 
-    # K1 split 2026-05-11: ensemble_snapshots_v2 and readiness_state moved to
+    # K1 split 2026-05-11: ensemble_snapshots and readiness_state moved to
     # forecasts.db.  _world_db_path() now returns ZEUS_FORECASTS_DB_PATH so
     # that monkeypatched tests (which stub _world_db_path) continue to exercise
     # the absent-DB branch correctly.

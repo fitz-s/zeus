@@ -9,10 +9,10 @@
 # HongKong was re-evaluated on FRESH refit data (2026-05-27) after the upstream
 # bugs that drove the pre-rebuild +6.32°C over-warm verdict were both fixed:
 #   - #50 timezone daily-max extraction window bug
-#   - #68 model_bias_ens_v2 writer bug (canonical field handling)
+#   - #68 model_bias_ens writer bug (canonical field handling)
 #
 # Fresh HK HIGH evidence (verified 2026-05-27 09:30 CDT):
-#   - model_bias_ens_v2 (MAM): bias_c=-2.108 °C, residual_sd_c=1.356 °C, healthy
+#   - model_bias_ens (MAM): bias_c=-2.108 °C, residual_sd_c=1.356 °C, healthy
 #   - platt_models_v2 MAM 00z: A=+1.799, B=+0.022, C=+1.123, Brier=0.00816, n=1958, VERIFIED
 #   - platt_models_v2 MAM 12z: A=+1.615, B=+0.017, C=+0.764, Brier=0.00818, n=495,  VERIFIED
 #

@@ -3,7 +3,7 @@
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/2026-05-01_live_alpha/evidence/tigge_ingest_decision_2026-05-01.md
 """DB-backed TIGGE ensemble fetcher.
 
-Reads ``ensemble_snapshots_v2`` and assembles a synthetic hourly grid so
+Reads ``ensemble_snapshots`` and assembles a synthetic hourly grid so
 that ``select_hours_for_target_date`` (which requires >= 20 hourly indices
 per day) can select each calendar-day slice.
 
@@ -78,7 +78,7 @@ def fetch_from_db(
     *,
     freshness_hours: int = _FRESHNESS_WINDOW_HOURS,
 ) -> Optional[ForecastBundle]:
-    """Query ensemble_snapshots_v2 and build a ForecastBundle.
+    """Query ensemble_snapshots and build a ForecastBundle.
 
     Parameters
     ----------
@@ -115,23 +115,23 @@ def fetch_from_db(
                 members_json,
                 members_unit,
                 snapshot_id,
-                data_version
-            FROM ensemble_snapshots_v2
+                dataset_id
+            FROM ensemble_snapshots
             WHERE city = ?
               AND temperature_metric = ?
               AND authority = 'VERIFIED'
               AND causality_status = 'OK'
-              AND data_version LIKE ?
+              AND dataset_id LIKE ?
               AND datetime(recorded_at) > datetime(?)
               AND snapshot_id = (
                   SELECT MAX(s2.snapshot_id)
-                  FROM ensemble_snapshots_v2 s2
-                  WHERE s2.city = ensemble_snapshots_v2.city
-                    AND s2.target_date = ensemble_snapshots_v2.target_date
-                    AND s2.temperature_metric = ensemble_snapshots_v2.temperature_metric
+                  FROM ensemble_snapshots s2
+                  WHERE s2.city = ensemble_snapshots.city
+                    AND s2.target_date = ensemble_snapshots.target_date
+                    AND s2.temperature_metric = ensemble_snapshots.temperature_metric
                     AND s2.authority = 'VERIFIED'
                     AND s2.causality_status = 'OK'
-                    AND s2.data_version LIKE ?
+                    AND s2.dataset_id LIKE ?
                     AND datetime(s2.recorded_at) > datetime(?)
               )
             ORDER BY target_date ASC

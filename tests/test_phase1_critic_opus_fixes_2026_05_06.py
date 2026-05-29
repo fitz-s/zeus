@@ -6,10 +6,10 @@
 Covers:
   Fix G — evaluate_calibration_transfer_policy_with_evidence flag-off passes live_promotion_approved=True
   Fix E — _fit_from_pairs sets all 5 _bucket_* attrs
-  Fix B — get_active_platt_model threads cycle/source_id/horizon_profile to load_platt_model_v2
+  Fix B — get_active_platt_model threads cycle/source_id/horizon_profile to load_platt_model
   Fix C — _resolve_pin_for_bucket handles cycle-stratified frozen_as_of dict
   Fix F — OOS evaluator --refresh flag skips fresh rows; writes stale rows
-  Fix D — refit_platt_v2 per-bucket SAVEPOINT isolation; bad bucket rolls back individually
+  Fix D — refit_platt per-bucket SAVEPOINT isolation; bad bucket rolls back individually
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.calibration.manager import _resolve_pin_for_bucket, get_calibrator
 from src.calibration import manager as mgr_module
-from src.calibration.store import save_platt_model_v2, load_platt_model_v2
+from src.calibration.store import save_platt_model, load_platt_model
 from src.config import City, entry_forecast_config
 from src.calibration.store import get_active_platt_model
 from src.contracts.ensemble_snapshot_provenance import (
@@ -38,7 +38,7 @@ from src.data.calibration_transfer_policy import (
     evaluate_calibration_transfer_policy_with_evidence,
 )
 from src.state.db import init_schema
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 
 
@@ -50,7 +50,7 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -69,7 +69,7 @@ def _city(cluster: str = "US-Northeast") -> City:
 def _save_v2(conn, cluster: str = "US-Northeast", season: str = "MAM",
              cycle: str = "00", source_id: str = "tigge_mars",
              n_samples: int = 50) -> None:
-    save_platt_model_v2(
+    save_platt_model(
         conn,
         metric_identity=HIGH_LOCALDAY_MAX,
         cluster=cluster,
@@ -216,13 +216,17 @@ class TestFixE:
                     (city, target_date, cluster, season,
                      p_raw, outcome, lead_days,
                      bin_source, range_label,
-                     forecast_available_at, decision_group_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     forecast_available_at, decision_group_id,
+                     temperature_metric, observation_field, dataset_id,
+                     training_allowed, causality_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 ("TestCity", "2026-01-01", cluster, season,
                  p_raw, outcome, lead_days,
                  "canonical_v1", f"L{i % F_CANONICAL_GRID.n_bins}",
-                 now, group_id),
+                 now, group_id,
+                 "high", "high_temp", HIGH_LOCALDAY_MAX.data_version,
+                 1, "OK"),
             )
         conn.commit()
 
@@ -304,12 +308,12 @@ class TestFixE:
 # ---------------------------------------------------------------------------
 
 class TestFixB:
-    """get_active_platt_model must thread cycle/source_id/horizon_profile to load_platt_model_v2."""
+    """get_active_platt_model must thread cycle/source_id/horizon_profile to load_platt_model."""
 
     def test_world_view_calibration_threads_phase2_keys(self):
-        """Fix B: phase-2 keys passed to get_active_platt_model reach load_platt_model_v2.
+        """Fix B: phase-2 keys passed to get_active_platt_model reach load_platt_model.
 
-        Before Fix B, get_active_platt_model called load_platt_model_v2 without
+        Before Fix B, get_active_platt_model called load_platt_model without
         cycle/source_id/horizon_profile → always resolved schema-default (00z TIGGE full).
         A 12z OpenData call would receive the 00z TIGGE Platt.
         """
@@ -318,7 +322,7 @@ class TestFixB:
         season = "MAM"
 
         # Save a cycle='12' model only — cycle='00' absent
-        save_platt_model_v2(
+        save_platt_model(
             conn,
             metric_identity=HIGH_LOCALDAY_MAX,
             cluster=cluster,
@@ -357,14 +361,14 @@ class TestFixB:
         )
 
     def test_world_view_calibration_backward_compat_no_keys(self):
-        """Fix B: omitting phase-2 keys (backward-compat) returns load_platt_model_v2 default."""
+        """Fix B: omitting phase-2 keys (backward-compat) returns load_platt_model default."""
         conn = _make_conn()
         _save_v2(conn, cycle="00")  # default schema bucket
 
         # Call without the new keys — must still work (keyword defaults = None)
         result = get_active_platt_model(conn, "US-Northeast", "MAM", HIGH_LOCALDAY_MAX)
         # May be None or a model — just must not raise
-        # (None is valid: load_platt_model_v2 with cycle=None hits schema default)
+        # (None is valid: load_platt_model with cycle=None hits schema default)
         # We only assert no exception here
         assert result is None or hasattr(result, "param_A")
 
@@ -432,7 +436,32 @@ class TestFixF:
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
+        conn.execute("ATTACH ':memory:' AS world")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS world.validated_calibration_transfers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                policy_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                target_source_id TEXT NOT NULL,
+                source_cycle TEXT NOT NULL,
+                target_cycle TEXT NOT NULL,
+                horizon_profile TEXT NOT NULL,
+                season TEXT NOT NULL,
+                cluster TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                n_pairs INTEGER NOT NULL,
+                brier_source REAL NOT NULL,
+                brier_target REAL NOT NULL,
+                brier_diff REAL NOT NULL,
+                brier_diff_threshold REAL NOT NULL,
+                status TEXT NOT NULL,
+                evidence_window_start TEXT NOT NULL,
+                evidence_window_end TEXT NOT NULL,
+                platt_model_key TEXT NOT NULL,
+                evaluated_at TEXT NOT NULL
+            )
+        """)
         return conn
 
     def _write_transfer_row(self, conn, model_key: str, target_source_id: str,
@@ -440,7 +469,7 @@ class TestFixF:
                             policy_id: str = "OOS_BRIER_DIFF_v1") -> None:
         conn.execute(
             """
-            INSERT INTO validated_calibration_transfers (
+            INSERT INTO world.validated_calibration_transfers (
                 policy_id, source_id, target_source_id,
                 source_cycle, target_cycle, horizon_profile,
                 season, cluster, metric,
@@ -528,23 +557,23 @@ class TestFixF:
 
 
 # ---------------------------------------------------------------------------
-# Fix D — per-bucket SAVEPOINT isolation in refit_platt_v2
+# Fix D — per-bucket SAVEPOINT isolation in refit_platt
 # ---------------------------------------------------------------------------
 
 class TestFixD:
-    """refit_platt_v2 per-bucket SAVEPOINT: bad bucket rolls back individually."""
+    """refit_platt per-bucket SAVEPOINT: bad bucket rolls back individually."""
 
     def _make_refit_conn(self):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _insert_platt_pairs(self, conn, cluster: str, season: str, n: int = 30) -> None:
-        """Insert minimal calibration_pairs_v2 rows for the bucket.
+        """Insert minimal calibration_pairs rows for the bucket.
 
-        calibration_pairs_v2 columns (from v2_schema.py):
+        calibration_pairs columns (from v2_schema.py):
           city, target_date, temperature_metric, observation_field, range_label,
           p_raw, outcome, lead_days, season, cluster, forecast_available_at,
           decision_group_id, bin_source, data_version, cycle, source_id,
@@ -562,11 +591,11 @@ class TestFixD:
             group_id = f"{cluster}_{season}_{i}"
             conn.execute(
                 """
-                INSERT INTO calibration_pairs_v2
+                INSERT INTO calibration_pairs
                     (city, target_date, temperature_metric, observation_field,
                      range_label, p_raw, outcome, lead_days,
                      season, cluster, forecast_available_at,
-                     bin_source, data_version,
+                     bin_source, dataset_id,
                      cycle, source_id, horizon_profile,
                      decision_group_id, authority, training_allowed,
                      causality_status)
@@ -594,8 +623,8 @@ class TestFixD:
         for the first bucket but succeeds for the second, without fighting the DB
         schema's NOT NULL constraint on p_raw.
         """
-        import scripts.refit_platt_v2 as rfmod
-        from scripts.refit_platt_v2 import refit_v2, RefitStatsV2
+        import scripts.refit_platt as rfmod
+        from scripts.refit_platt import refit_v2, RefitStatsV2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()
@@ -646,8 +675,8 @@ class TestFixD:
         can persist on RELEASE if it began outside an explicit transaction,
         so a dry-run-side INSERT would silently mutate the DB.
         """
-        import scripts.refit_platt_v2 as rfmod
-        from scripts.refit_platt_v2 import refit_v2
+        import scripts.refit_platt as rfmod
+        from scripts.refit_platt import refit_v2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()
@@ -681,8 +710,8 @@ class TestFixD:
 
     def test_refit_strict_mode_raises_on_any_failure(self):
         """Fix D: --strict mode raises RuntimeError and rolls back all if any bucket fails."""
-        import scripts.refit_platt_v2 as rfmod
-        from scripts.refit_platt_v2 import refit_v2
+        import scripts.refit_platt as rfmod
+        from scripts.refit_platt import refit_v2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()
@@ -704,10 +733,10 @@ class TestFixD:
                 )
 
     def test_refit_bucket_failures_table_exists(self):
-        """Fix D: refit_bucket_failures table is created by apply_v2_schema."""
+        """Fix D: refit_bucket_failures table is created by apply_canonical_schema."""
         conn = self._make_refit_conn()
         # Table must exist after schema migration
         row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='refit_bucket_failures'"
         ).fetchone()
-        assert row is not None, "refit_bucket_failures table must exist after apply_v2_schema"
+        assert row is not None, "refit_bucket_failures table must exist after apply_canonical_schema"

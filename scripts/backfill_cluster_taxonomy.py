@@ -36,7 +36,7 @@ def _canonical_cluster(city: str | None) -> str | None:
 def backfill_calibration_pairs() -> dict[str, int]:
     conn = get_connection()
     init_schema(conn)
-    rows = conn.execute("SELECT id, city, cluster FROM calibration_pairs").fetchall()
+    rows = conn.execute("SELECT pair_id, city, cluster FROM calibration_pairs").fetchall()
     updated = 0
     skipped = 0
     for row in rows:
@@ -47,8 +47,8 @@ def backfill_calibration_pairs() -> dict[str, int]:
         if row["cluster"] == cluster:
             continue
         conn.execute(
-            "UPDATE calibration_pairs SET cluster = ? WHERE id = ?",
-            (cluster, row["id"]),
+            "UPDATE calibration_pairs SET cluster = ? WHERE pair_id = ?",
+            (cluster, row["pair_id"]),
         )
         updated += 1
 

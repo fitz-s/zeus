@@ -396,7 +396,7 @@ state_machines:
     states:
       - GATE_REVIEW_CONDITION
   schema_migration_sql_ops:
-    owner: scripts/migrate_model_bias_ens_v2_canonical_fields.py
+    owner: scripts/migrate_model_bias_ens_canonical_fields.py
     description: >
       Raw SQL transaction operations used in schema migration scripts for
       race-safe ALTER TABLE patterns. NOT a money-path state machine — these are
@@ -666,7 +666,7 @@ schema_objects:
     - explicit_verified
   protected_tables:
     world: [markets, positions, position_current, lifecycle_events]
-    forecasts: [observations, settlements, calibration_pairs_v2, ensemble_snapshots_v2, source_run, market_events_v2]
+    forecasts: [observations, settlements, calibration_pairs_v2, ensemble_snapshots, source_run, market_events]
     trades: [venue_commands, venue_order_facts, venue_trade_facts, settlement_commands]
   historical_truth_policy_required_for:
     - scripts/migrations/**
@@ -786,7 +786,7 @@ external_truth_sources:
   clob:
     authority_tier: executable_venue
     endpoint_patterns: [clob.polymarket.com, /book, /orders, /trades]
-    required_tests: [tests/test_executable_market_snapshot_v2.py, tests/test_order_truth_reducer.py]
+    required_tests: [tests/test_executable_market_snapshot.py, tests/test_order_truth_reducer.py]
   ecmwf:
     authority_tier: forecast_source
     endpoint_patterns: [ecmwf, open-data, tigge]

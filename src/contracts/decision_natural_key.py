@@ -94,10 +94,10 @@ def decision_event_id_v1_hash(
 
 
 def from_market_event_row(row: Any) -> Optional[DecisionNaturalKey]:
-    """Extract key from market_events_v2 row (dict or sqlite3.Row).
+    """Extract key from market_events row (dict or sqlite3.Row).
 
-    market_events_v2 columns used: market_slug, temperature_metric, target_date.
-    observation_time is NOT in market_events_v2 — caller must supply it as context.
+    market_events columns used: market_slug, temperature_metric, target_date.
+    observation_time is NOT in market_events — caller must supply it as context.
     decision_seq is not in source row — caller provides context for sequencing.
 
     Returns DecisionNaturalKey with observation_time='' and decision_seq=0 as
@@ -118,11 +118,11 @@ def from_market_event_row(row: Any) -> Optional[DecisionNaturalKey]:
 
 
 def from_ensemble_snapshot_row(row: Any) -> Optional[DecisionNaturalKey]:
-    """Extract partial key from ensemble_snapshots_v2 row.
+    """Extract partial key from ensemble_snapshots row.
 
-    ensemble_snapshots_v2 has city, target_date, temperature_metric, available_at.
+    ensemble_snapshots has city, target_date, temperature_metric, available_at.
     city is NOT market_slug — callers must resolve city → market_slug via
-    market_events_v2 (keyed on city + target_date + temperature_metric).
+    market_events (keyed on city + target_date + temperature_metric).
     Returns None if required fields absent or temperature_metric invalid.
 
     The returned key uses city as a PLACEHOLDER in the market_slug position.
@@ -156,7 +156,7 @@ def from_artifact_json(j: dict) -> Optional[DecisionNaturalKey]:
       - target_date: from "target_date" key directly.
       - observation_time: from "timestamp" key (decision timestamp at cycle time).
       - market_slug: NOT directly available — city is used as PLACEHOLDER.
-        Callers must resolve city → market_slug via market_events_v2 before inserting.
+        Callers must resolve city → market_slug via market_events before inserting.
 
     Returns DecisionNaturalKey with city-as-placeholder in market_slug position,
     decision_seq=0 (backfill caller adjusts seq after DELETE-and-recount).
@@ -192,5 +192,5 @@ def from_artifact_json(j: dict) -> Optional[DecisionNaturalKey]:
     if not city:
         return None
 
-    # city is a placeholder for market_slug; caller resolves via market_events_v2
+    # city is a placeholder for market_slug; caller resolves via market_events
     return DecisionNaturalKey((city, temperature_metric, target_date, observation_time, 0))

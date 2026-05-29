@@ -11,7 +11,7 @@ from src.contracts.semantic_types import Direction
 
 if TYPE_CHECKING:
     from src.contracts.slippage_bps import SlippageBps
-    from src.contracts.executable_market_snapshot_v2 import ExecutableMarketSnapshotV2
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 
 
 CorrectedPricingSemanticsVersion = Literal["corrected_executable_cost_v1"]
@@ -182,7 +182,7 @@ def _outcome_label_for_direction(direction: str) -> OutcomeLabel:
 
 
 def _selected_token_for_direction(
-    snapshot: "ExecutableMarketSnapshotV2",
+    snapshot: "ExecutableMarketSnapshot",
     direction: str,
 ) -> tuple[str, OutcomeLabel]:
     outcome_label = _outcome_label_for_direction(direction)
@@ -451,7 +451,7 @@ def _assert_cost_basis_order_policy_coherent(
             )
 
 
-def _orderbook_levels(snapshot: "ExecutableMarketSnapshotV2", side: SweepBookSide) -> list[tuple[Decimal, Decimal]]:
+def _orderbook_levels(snapshot: "ExecutableMarketSnapshot", side: SweepBookSide) -> list[tuple[Decimal, Decimal]]:
     try:
         orderbook = json.loads(snapshot.orderbook_depth_jsonb)
     except (TypeError, ValueError) as exc:
@@ -504,7 +504,7 @@ class ClobSweepResult:
 
 def simulate_clob_sweep(
     *,
-    snapshot: "ExecutableMarketSnapshotV2",
+    snapshot: "ExecutableMarketSnapshot",
     direction: ExecutionDirection,
     requested_size_kind: OrderSizeKind,
     requested_size_value: Decimal,
@@ -855,7 +855,7 @@ class ExecutionIntent:
     executable_snapshot_hash: str = ""
     executable_cost_basis_id: str = ""
     executable_cost_basis_hash: str = ""
-    pricing_semantics_version: str = ""
+    pricing_semantics_id: str = ""
     executable_snapshot_min_tick_size: Decimal | str | None = None
     executable_snapshot_min_order_size: Decimal | str | None = None
     executable_snapshot_neg_risk: bool | None = None
@@ -1003,7 +1003,7 @@ class ExecutableCostBasis:
     neg_risk: bool
     cost_basis_id: str = ""
     cost_basis_hash: str = ""
-    pricing_semantics_version: CorrectedPricingSemanticsVersion = (
+    pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
 
@@ -1011,7 +1011,7 @@ class ExecutableCostBasis:
     def from_snapshot(
         cls,
         *,
-        snapshot: "ExecutableMarketSnapshotV2",
+        snapshot: "ExecutableMarketSnapshot",
         direction: ExecutionDirection,
         order_policy: OrderPolicy,
         requested_size_kind: OrderSizeKind,
@@ -1025,7 +1025,7 @@ class ExecutableCostBasis:
         min_order_status: Literal["PASS", "FAIL"] = "PASS",
         _allow_depth_pass: bool = False,
     ) -> "ExecutableCostBasis":
-        from src.contracts.executable_market_snapshot_v2 import (
+        from src.contracts.executable_market_snapshot import (
             fee_rate_fraction_from_details,
         )
 
@@ -1106,7 +1106,7 @@ class ExecutableCostBasis:
     def from_snapshot_sweep(
         cls,
         *,
-        snapshot: "ExecutableMarketSnapshotV2",
+        snapshot: "ExecutableMarketSnapshot",
         direction: ExecutionDirection,
         order_policy: OrderPolicy,
         requested_size_kind: OrderSizeKind,
@@ -1157,7 +1157,7 @@ class ExecutableCostBasis:
                 field_name,
                 _as_decimal(getattr(self, field_name), field_name),
             )
-        if self.pricing_semantics_version != CORRECTED_PRICING_SEMANTICS_VERSION:
+        if self.pricing_semantics_id != CORRECTED_PRICING_SEMANTICS_VERSION:
             raise ValueError(
                 "ExecutableCostBasis only supports corrected_executable_cost_v1"
             )
@@ -1277,7 +1277,7 @@ class ExecutableCostBasis:
             "quote_snapshot_id": self.quote_snapshot_id,
             "quote_snapshot_hash": self.quote_snapshot_hash,
             "neg_risk": str(bool(self.neg_risk)),
-            "pricing_semantics_version": self.pricing_semantics_version,
+            "pricing_semantics_id": self.pricing_semantics_id,
         }
 
     def assert_live_safe(self) -> None:
@@ -1345,7 +1345,7 @@ class ExecutableTradeHypothesis:
     order_policy: OrderPolicy
     fdr_family_id: str
     fdr_hypothesis_id: str
-    pricing_semantics_version: CorrectedPricingSemanticsVersion = (
+    pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
 
@@ -1442,7 +1442,7 @@ class ExecutableTradeHypothesis:
             _as_decimal(self.payoff_probability, "payoff_probability"),
         )
         _require_unit_interval_closed(self.payoff_probability, "payoff_probability")
-        if self.pricing_semantics_version != CORRECTED_PRICING_SEMANTICS_VERSION:
+        if self.pricing_semantics_id != CORRECTED_PRICING_SEMANTICS_VERSION:
             raise ValueError(
                 "ExecutableTradeHypothesis only supports corrected_executable_cost_v1"
             )
@@ -1567,7 +1567,7 @@ class FinalExecutionIntent:
     correlation_key: str = ""
     decision_source_context: DecisionSourceContext | None = None
     passive_maker_context: PassiveMakerExecutionContext | None = None
-    pricing_semantics_version: CorrectedPricingSemanticsVersion = (
+    pricing_semantics_id: CorrectedPricingSemanticsVersion = (
         CORRECTED_PRICING_SEMANTICS_VERSION
     )
 
@@ -1645,7 +1645,7 @@ class FinalExecutionIntent:
                 field_name,
                 _as_decimal(getattr(self, field_name), field_name),
             )
-        if self.pricing_semantics_version != CORRECTED_PRICING_SEMANTICS_VERSION:
+        if self.pricing_semantics_id != CORRECTED_PRICING_SEMANTICS_VERSION:
             raise ValueError(
                 "FinalExecutionIntent only supports corrected_executable_cost_v1"
             )

@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-05-20
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
 #                  docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
-"""Append-only persistence for ExecutableMarketSnapshotV2.
+"""Append-only persistence for ExecutableMarketSnapshot.
 
 The executable snapshot table is the U1 bridge from discovery facts to command
 submission.  Rows are immutable: a later market read appends a new snapshot_id;
@@ -17,8 +17,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
 
-from src.contracts.executable_market_snapshot_v2 import (
-    ExecutableMarketSnapshotV2,
+from src.contracts.executable_market_snapshot import (
+    ExecutableMarketSnapshot,
     ExecutableTradeabilityStatus,
 )
 
@@ -98,7 +98,7 @@ def init_snapshot_schema(conn: sqlite3.Connection) -> None:
             )
 
 
-def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshotV2) -> None:
+def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot) -> None:
     """Persist one immutable executable market snapshot."""
 
     conn.execute(
@@ -136,7 +136,7 @@ def insert_snapshot(conn: sqlite3.Connection, snapshot: ExecutableMarketSnapshot
 def get_snapshot(
     conn: sqlite3.Connection,
     snapshot_id: str,
-) -> Optional[ExecutableMarketSnapshotV2]:
+) -> Optional[ExecutableMarketSnapshot]:
     """Return a snapshot by id or None when absent."""
 
     saved = conn.row_factory
@@ -155,7 +155,7 @@ def latest_snapshot_for_market(
     conn: sqlite3.Connection,
     condition_id: str,
     fresh_as_of: datetime,
-) -> Optional[ExecutableMarketSnapshotV2]:
+) -> Optional[ExecutableMarketSnapshot]:
     """Return latest non-expired snapshot for a condition_id."""
 
     saved = conn.row_factory
@@ -176,7 +176,7 @@ def latest_snapshot_for_market(
     return _snapshot_from_row(row) if row is not None else None
 
 
-def _row_from_snapshot(snapshot: ExecutableMarketSnapshotV2) -> dict[str, Any]:
+def _row_from_snapshot(snapshot: ExecutableMarketSnapshot) -> dict[str, Any]:
     return {
         "snapshot_id": snapshot.snapshot_id,
         "gamma_market_id": snapshot.gamma_market_id,
@@ -220,8 +220,8 @@ def _row_from_snapshot(snapshot: ExecutableMarketSnapshotV2) -> dict[str, Any]:
     }
 
 
-def _snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshotV2:
-    return ExecutableMarketSnapshotV2(
+def _snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshot:
+    return ExecutableMarketSnapshot(
         snapshot_id=row["snapshot_id"],
         gamma_market_id=row["gamma_market_id"],
         event_id=row["event_id"],

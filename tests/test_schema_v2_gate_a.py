@@ -15,7 +15,7 @@ These tests MUST FAIL today (2026-04-16) because:
   - The 7 v2 metric-aware tables do not exist in any DB.
 
 First commit that should turn these green: executor Phase 2 implementation commit
-(creates src/state/schema/v2_schema.py with apply_v2_schema() and all DDL).
+(creates src/state/schema/v2_schema.py with apply_canonical_schema() and all DDL).
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ TARGET_DATE = "2026-04-16"
 def _insert_settlements_row(conn: sqlite3.Connection, metric: str) -> None:
     conn.execute(
         """
-        INSERT INTO settlements_v2
+        INSERT INTO settlement_outcomes
             (city, target_date, temperature_metric, authority, provenance_json, recorded_at)
         VALUES (?, ?, ?, 'UNVERIFIED', '{}', '2026-04-16T00:00:00Z')
         """,
@@ -56,7 +56,7 @@ def _insert_settlements_row(conn: sqlite3.Connection, metric: str) -> None:
 def _insert_market_events_row(conn: sqlite3.Connection, metric: str) -> None:
     conn.execute(
         """
-        INSERT INTO market_events_v2
+        INSERT INTO market_events
             (market_slug, city, target_date, temperature_metric, recorded_at)
         VALUES (?, ?, ?, ?, '2026-04-16T00:00:00Z')
         """,
@@ -68,10 +68,10 @@ def _insert_ensemble_snapshots_row(conn: sqlite3.Connection, metric: str) -> Non
     obs_field = "high_temp" if metric == "high" else "low_temp"
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2
+        INSERT INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              available_at, fetch_time, lead_hours, members_json, model_version,
-             data_version, training_allowed, causality_status, boundary_ambiguous,
+             dataset_id, training_allowed, causality_status, boundary_ambiguous,
              ambiguous_member_count, provenance_json, authority, recorded_at)
         VALUES (?, ?, ?, 'mx2t6_v2', ?, '2026-04-16T06:00:00Z', '2026-04-16T06:01:00Z',
                 24.0, '[]', 'v2', 'tigge_v2', 1, 'OK', 0, 0, '{}', 'VERIFIED',
@@ -85,10 +85,10 @@ def _insert_calibration_pairs_row(conn: sqlite3.Connection, metric: str) -> None
     obs_field = "high_temp" if metric == "high" else "low_temp"
     conn.execute(
         """
-        INSERT INTO calibration_pairs_v2
+        INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
-             bias_corrected, authority, bin_source, data_version,
+             bias_corrected, authority, bin_source, dataset_id,
              training_allowed, causality_status, recorded_at)
         VALUES (?, ?, ?, ?, 'bin_A', 0.6, 1, 1.0, 'summer', 'coastal',
                 '2026-04-15T00:00:00Z', 0, 'UNVERIFIED', 'legacy',
@@ -120,7 +120,7 @@ def _insert_platt_models_row(conn: sqlite3.Connection, metric: str) -> None:
 def _insert_historical_forecasts_row(conn: sqlite3.Connection, metric: str) -> None:
     conn.execute(
         """
-        INSERT INTO historical_forecasts_v2
+        INSERT INTO historical_forecasts
             (city, target_date, source, temperature_metric, forecast_value,
              temp_unit, lead_days, recorded_at)
         VALUES (?, ?, 'NWS', ?, 72.5, 'F', 1, '2026-04-16T00:00:00Z')
@@ -144,13 +144,14 @@ def _insert_day0_metric_fact_row(conn: sqlite3.Connection, metric: str) -> None:
 
 
 # Map table name → (high inserter, low inserter with same signature)
+# Note: historical_forecasts removed — DDL dropped in B3 (PR3): no writers
+# existed and _table_exists guards all readers (replay.py, status_summary.py).
 TABLE_INSERTERS = {
-    "settlements_v2": _insert_settlements_row,
-    "market_events_v2": _insert_market_events_row,
-    "ensemble_snapshots_v2": _insert_ensemble_snapshots_row,
-    "calibration_pairs_v2": _insert_calibration_pairs_row,
-    "platt_models_v2": _insert_platt_models_row,
-    "historical_forecasts_v2": _insert_historical_forecasts_row,
+    "settlement_outcomes": _insert_settlements_row,
+    "market_events": _insert_market_events_row,
+    "ensemble_snapshots": _insert_ensemble_snapshots_row,
+    "calibration_pairs": _insert_calibration_pairs_row,
+    "platt_models": _insert_platt_models_row,
     "day0_metric_fact": _insert_day0_metric_fact_row,
 }
 
@@ -172,14 +173,14 @@ def _make_memory_db() -> sqlite3.Connection:
 
 
 def _apply_and_get_conn() -> sqlite3.Connection:
-    """Import apply_v2_schema, apply to fresh :memory: DB, return connection.
+    """Import apply_canonical_schema, apply to fresh :memory: DB, return connection.
 
     If the import fails today, this helper raises ImportError — which causes
     all tests that call it to error (the desired RED state before Phase 2 lands).
     """
-    from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+    from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
     conn = _make_memory_db()
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -190,8 +191,8 @@ def _apply_and_get_conn() -> sqlite3.Connection:
 class TestApplyV2SchemaSmoke(unittest.TestCase):
     """Smoke tests: schema application creates expected tables."""
 
-    def test_apply_v2_schema_creates_all_tables(self):
-        """After apply_v2_schema(conn) on :memory:, all 8 v2 tables exist.
+    def test_apply_canonical_schema_creates_all_tables(self):
+        """After apply_canonical_schema(conn) on :memory:, all 8 v2 tables exist.
 
         Queries sqlite_master for all 8 table names.
         Fails today with ImportError because v2_schema.py does not exist.
@@ -207,7 +208,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             self.assertIn(
                 table,
                 existing,
-                msg=f"Expected v2 table '{table}' not found after apply_v2_schema",
+                msg=f"Expected v2 table '{table}' not found after apply_canonical_schema",
             )
 
     def test_observation_instants_v2_has_running_min(self):
@@ -228,7 +229,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             msg="observation_instants_v2 must have running_min column (v2 schema requirement)",
         )
 
-    def test_apply_v2_schema_creates_market_price_history(self):
+    def test_apply_canonical_schema_creates_market_price_history(self):
         """Phase 5C.2: v2 schema owns forward market price history DDL."""
         conn = _apply_and_get_conn()
         columns = {
@@ -363,12 +364,12 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
         self.assertEqual("cond-1", row[6])
 
     def test_market_price_history_schema_is_idempotent(self):
-        """Repeated apply_v2_schema preserves rows and foreign_keys PRAGMA."""
-        from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+        """Repeated apply_canonical_schema preserves rows and foreign_keys PRAGMA."""
+        from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
 
         conn = _make_memory_db()
         conn.execute("PRAGMA foreign_keys = ON")
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         conn.execute(
             """
             INSERT INTO market_price_history (
@@ -379,7 +380,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
             """
         )
         conn.commit()
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
 
         self.assertEqual(
             1,
@@ -387,15 +388,15 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
         )
         self.assertEqual(1, conn.execute("PRAGMA foreign_keys").fetchone()[0])
 
-    def test_forward_market_substrate_writer_works_after_apply_v2_schema(self):
+    def test_forward_market_substrate_writer_works_after_apply_canonical_schema(self):
         """Schema owner DDL unlocks the substrate writer via _db_path (K1-A fix)."""
-        from src.state.schema.v2_schema import apply_v2_schema  # noqa: PLC0415
+        from src.state.schema.v2_schema import apply_canonical_schema  # noqa: PLC0415
         with tempfile.TemporaryDirectory(prefix="gate_a_test_") as tmp_dir:
             db_path = str(Path(tmp_dir) / "gate_a.db")
             conn = sqlite3.connect(db_path)
             try:
                 conn.row_factory = sqlite3.Row
-                apply_v2_schema(conn)
+                apply_canonical_schema(conn)
                 conn.commit()
 
                 result = log_forward_market_substrate(
@@ -443,7 +444,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
                 conn.close()
 
     def test_dead_tables_dropped_after_apply_v2(self):
-        """After apply_v2_schema, dead tables do NOT exist in sqlite_master.
+        """After apply_canonical_schema, dead tables do NOT exist in sqlite_master.
 
         Dead tables per D2: promotion_registry, model_eval_point,
         model_eval_run, model_skill.
@@ -461,7 +462,7 @@ class TestApplyV2SchemaSmoke(unittest.TestCase):
                 dead,
                 existing,
                 msg=(
-                    f"Dead table '{dead}' must not exist after apply_v2_schema "
+                    f"Dead table '{dead}' must not exist after apply_canonical_schema "
                     "(it should be DROPped as part of the migration)"
                 ),
             )
@@ -485,7 +486,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
             with self.subTest(table=table):
                 inserter(conn, "high")
                 inserter(conn, "low")
-                if table == "platt_models_v2":
+                if table == "platt_models":
                     # Fix C: platt_models_v2 has no city/target_date columns.
                     # Verify 2 distinct temperature_metric values were inserted.
                     (count,) = conn.execute(
@@ -513,19 +514,19 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
                         ),
                     )
 
-    def test_ensemble_snapshots_v2_has_members_unit_and_precision(self):
-        """4A.2: ensemble_snapshots_v2 must have members_unit and members_precision columns."""
+    def test_ensemble_snapshots_has_members_unit_and_precision(self):
+        """4A.2: ensemble_snapshots must have members_unit and members_precision columns."""
         conn = _apply_and_get_conn()
         columns = {
             row[1]
-            for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")
+            for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")
         }
         self.assertIn("members_unit", columns,
-                      msg="ensemble_snapshots_v2 missing members_unit (4A.2 schema migration)")
+                      msg="ensemble_snapshots missing members_unit (4A.2 schema migration)")
         self.assertIn("members_precision", columns,
-                      msg="ensemble_snapshots_v2 missing members_precision (4A.2 schema migration)")
+                      msg="ensemble_snapshots missing members_precision (4A.2 schema migration)")
 
-    def test_ensemble_snapshots_v2_can_hold_contract_window_evidence(self):
+    def test_ensemble_snapshots_can_hold_contract_window_evidence(self):
         """LOW/HIGH recovery requires contract-object and forecast-window evidence.
 
         The columns are nullable shadow evidence only. Their presence must not
@@ -534,7 +535,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         conn = _apply_and_get_conn()
         columns = {
             row[1]
-            for row in conn.execute("PRAGMA table_info(ensemble_snapshots_v2)")
+            for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")
         }
         required_columns = {
             "city_timezone",
@@ -543,7 +544,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
             "settlement_unit",
             "settlement_rounding_policy",
             "bin_grid_id",
-            "bin_schema_version",
+            "bin_schema_id",
             "forecast_window_start_utc",
             "forecast_window_end_utc",
             "forecast_window_start_local",
@@ -555,18 +556,18 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         }
         self.assertTrue(
             required_columns <= columns,
-            msg="ensemble_snapshots_v2 missing LOW/HIGH contract-window evidence columns",
+            msg="ensemble_snapshots missing LOW/HIGH contract-window evidence columns",
         )
 
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2 (
+            INSERT INTO ensemble_snapshots (
                 city, target_date, temperature_metric, physical_quantity,
                 observation_field, available_at, fetch_time, lead_hours,
-                members_json, model_version, data_version,
+                members_json, model_version, dataset_id,
                 city_timezone, settlement_source_type, settlement_station_id,
                 settlement_unit, settlement_rounding_policy, bin_grid_id,
-                bin_schema_version, forecast_window_start_utc,
+                bin_schema_id, forecast_window_start_utc,
                 forecast_window_end_utc, forecast_window_start_local,
                 forecast_window_end_local, forecast_window_local_day_overlap_hours,
                 forecast_window_attribution_status, contributes_to_target_extrema,
@@ -590,7 +591,7 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
             SELECT training_allowed, causality_status, settlement_unit,
                    forecast_window_attribution_status,
                    contributes_to_target_extrema
-            FROM ensemble_snapshots_v2
+            FROM ensemble_snapshots
             WHERE city = 'Kuala Lumpur'
             """
         ).fetchone()
@@ -603,10 +604,10 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             conn.execute(
                 """
-                INSERT INTO ensemble_snapshots_v2 (
+                INSERT INTO ensemble_snapshots (
                     city, target_date, temperature_metric, physical_quantity,
                     observation_field, available_at, fetch_time, lead_hours,
-                    members_json, model_version, data_version, settlement_unit
+                    members_json, model_version, dataset_id, settlement_unit
                 )
                 VALUES (
                     'Kuala Lumpur', '2026-06-11', 'low', 'mn2t6', 'low_temp',
@@ -621,30 +622,18 @@ class TestGateADualMetricCoexistence(unittest.TestCase):
         raises sqlite3.IntegrityError.
 
         Verifies that the UNIQUE constraints in the DDL sketch are present and
-        enforced.  Tests settlements_v2 (simplest UNIQUE) and historical_forecasts_v2.
-        Fails today with ImportError.
+        enforced.  Tests settlement_outcomes (simplest UNIQUE).
+        Note: historical_forecasts removed from this test — DDL dropped in B3 (PR3).
         """
         conn = _apply_and_get_conn()
 
-        # settlements_v2 has UNIQUE(city, target_date, temperature_metric)
+        # settlement_outcomes has UNIQUE(city, target_date, temperature_metric)
         _insert_settlements_row(conn, "high")
         with self.assertRaises(
             sqlite3.IntegrityError,
             msg=(
-                "settlements_v2 must reject a duplicate (city, target_date, "
+                "settlement_outcomes must reject a duplicate (city, target_date, "
                 "temperature_metric='high') row via UNIQUE constraint"
             ),
         ):
             _insert_settlements_row(conn, "high")
-
-        # historical_forecasts_v2 has UNIQUE(city, target_date, source,
-        # temperature_metric, lead_days)
-        _insert_historical_forecasts_row(conn, "low")
-        with self.assertRaises(
-            sqlite3.IntegrityError,
-            msg=(
-                "historical_forecasts_v2 must reject a duplicate "
-                "(city, target_date, source, temperature_metric, lead_days) row"
-            ),
-        ):
-            _insert_historical_forecasts_row(conn, "low")

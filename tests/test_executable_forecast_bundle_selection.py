@@ -30,7 +30,7 @@ from src.data.forecast_target_contract import build_forecast_target_scope
 from src.data.producer_readiness import PRODUCER_READINESS_STRATEGY_KEY
 from src.state.db import init_schema
 from src.state.readiness_repo import write_readiness_state
-from src.state.schema.v2_schema import apply_v2_schema
+from src.state.schema.v2_schema import apply_canonical_schema
 from src.state.source_run_coverage_repo import write_source_run_coverage
 from src.state.source_run_repo import write_source_run
 
@@ -42,7 +42,7 @@ _CITY = "London"
 _CITY_TZ = "Europe/London"
 _TRACK = "mx2t3_high_full_horizon"
 _REL_KEY = "ecmwf_open_data:mx2t3_high:full"
-_TRANSPORT = "ensemble_snapshots_v2_db_reader"
+_TRANSPORT = "ensemble_snapshots_db_reader"
 _SOURCE_ID = "ecmwf_open_data"
 _PHYSQ = "mx2t3_local_calendar_day_max"
 _OBS_FIELD = "high_temp"
@@ -54,7 +54,7 @@ def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
-    apply_v2_schema(conn)
+    apply_canonical_schema(conn)
     return conn
 
 
@@ -93,10 +93,10 @@ def _insert_snapshot(
     scope = _scope()
     conn.execute(
         """
-        INSERT INTO ensemble_snapshots_v2 (
+        INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, issue_time, valid_time, available_at, fetch_time,
-            lead_hours, members_json, model_version, data_version,
+            lead_hours, members_json, model_version, dataset_id,
             source_id, source_transport, source_run_id, release_calendar_key,
             source_cycle_time, source_release_time, source_available_at,
             training_allowed, causality_status, boundary_ambiguous,

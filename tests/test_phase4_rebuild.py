@@ -1,7 +1,7 @@
 """Phase 4 rebuild tests: R-J, R-M
 
 R-J: INV-15 hotfix — non-whitelisted source forces training_allowed=False.
-R-M: calibration_pairs_v2 rows from rebuild have all required identity fields populated.
+R-M: calibration_pairs rows from rebuild have all required identity fields populated.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# R-J: INV-15 — source whitelist gate in add_calibration_pair_v2
+# R-J: INV-15 — source whitelist gate in add_calibration_pair
 # ---------------------------------------------------------------------------
 
 class TestINV15SourceWhitelistGate:
@@ -28,16 +28,16 @@ class TestINV15SourceWhitelistGate:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _write_pair(self, conn, *, decision_group_id: str, data_version: str,
                     training_allowed: bool, target_date: str = "2026-04-16") -> None:
-        from src.calibration.store import add_calibration_pair_v2
+        from src.calibration.store import add_calibration_pair
         from src.config import City
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
         nyc = City(
@@ -45,7 +45,7 @@ class TestINV15SourceWhitelistGate:
             timezone="America/New_York", cluster="NYC",
             settlement_unit="F", wu_station="KLGA",
         )
-        add_calibration_pair_v2(
+        add_calibration_pair(
             conn=conn,
             city="NYC",
             target_date=target_date,
@@ -77,7 +77,7 @@ class TestINV15SourceWhitelistGate:
             training_allowed=True,  # caller intent overridden by INV-15 gate
         )
         (training_allowed,) = conn.execute(
-            "SELECT training_allowed FROM calibration_pairs_v2 WHERE decision_group_id='dg-test-inv15-001'"
+            "SELECT training_allowed FROM calibration_pairs WHERE decision_group_id='dg-test-inv15-001'"
         ).fetchone()
         assert training_allowed == 0, (
             f"INV-15 violated: 'openmeteo_hourly_v1' data_version wrote training_allowed={training_allowed}, "
@@ -94,7 +94,7 @@ class TestINV15SourceWhitelistGate:
             target_date="2026-04-17",
         )
         (training_allowed,) = conn.execute(
-            "SELECT training_allowed FROM calibration_pairs_v2 WHERE decision_group_id='dg-test-inv15-002'"
+            "SELECT training_allowed FROM calibration_pairs WHERE decision_group_id='dg-test-inv15-002'"
         ).fetchone()
         assert training_allowed == 1, (
             f"INV-15 guard incorrectly downgraded canonical 'tigge_*' data_version: "
@@ -111,7 +111,7 @@ class TestINV15SourceWhitelistGate:
             target_date="2026-04-18",
         )
         (training_allowed,) = conn.execute(
-            "SELECT training_allowed FROM calibration_pairs_v2 WHERE decision_group_id='dg-test-inv15-003'"
+            "SELECT training_allowed FROM calibration_pairs WHERE decision_group_id='dg-test-inv15-003'"
         ).fetchone()
         assert training_allowed == 1, (
             f"'ecmwf_ens_*' data_version is whitelisted; training_allowed must be 1, "
@@ -128,7 +128,7 @@ class TestINV15SourceWhitelistGate:
             target_date="2026-04-19",
         )
         (training_allowed,) = conn.execute(
-            "SELECT training_allowed FROM calibration_pairs_v2 WHERE decision_group_id='dg-test-inv15-004'"
+            "SELECT training_allowed FROM calibration_pairs WHERE decision_group_id='dg-test-inv15-004'"
         ).fetchone()
         assert training_allowed == 0, (
             f"INV-15 violated: 'custom_experimental_v1' data_version wrote "
@@ -175,27 +175,27 @@ class TestINV15SourceWhitelistGate:
 
 
 # ---------------------------------------------------------------------------
-# R-M: calibration_pairs_v2 rows from rebuild have correct identity fields
+# R-M: calibration_pairs rows from rebuild have correct identity fields
 # ---------------------------------------------------------------------------
 
 class TestCalibrationPairsV2IdentityFields:
-    """R-M: calibration_pairs_v2 rows from rebuild_calibration_pairs_v2 must have
+    """R-M: calibration_pairs rows from rebuild_calibration_pairs must have
     temperature_metric='high', training_allowed=1, observation_field='high_temp',
     data_version='tigge_mx2t6_local_calendar_day_max_v1'. None defaulted.
     """
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _insert_calibration_pair_v2(self, conn: sqlite3.Connection, **overrides) -> str:
         """Helper: write a v2 calibration pair and return the decision_group_id."""
-        from src.calibration.store import add_calibration_pair_v2
+        from src.calibration.store import add_calibration_pair
         from src.config import City
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
@@ -205,7 +205,7 @@ class TestCalibrationPairsV2IdentityFields:
             settlement_unit="F", wu_station="KLGA",
         )
         dg_id = overrides.pop("decision_group_id", "dg-rm-test-001")
-        add_calibration_pair_v2(
+        add_calibration_pair(
             conn=conn,
             city="NYC",
             target_date="2026-04-16",
@@ -232,7 +232,7 @@ class TestCalibrationPairsV2IdentityFields:
         conn = self._make_conn()
         dg_id = self._insert_calibration_pair_v2(conn)
         (val,) = conn.execute(
-            "SELECT temperature_metric FROM calibration_pairs_v2 WHERE decision_group_id=?",
+            "SELECT temperature_metric FROM calibration_pairs WHERE decision_group_id=?",
             (dg_id,)
         ).fetchone()
         assert val == "high", (
@@ -244,7 +244,7 @@ class TestCalibrationPairsV2IdentityFields:
         conn = self._make_conn()
         dg_id = self._insert_calibration_pair_v2(conn)
         (val,) = conn.execute(
-            "SELECT training_allowed FROM calibration_pairs_v2 WHERE decision_group_id=?",
+            "SELECT training_allowed FROM calibration_pairs WHERE decision_group_id=?",
             (dg_id,)
         ).fetchone()
         assert val == 1, (
@@ -256,7 +256,7 @@ class TestCalibrationPairsV2IdentityFields:
         conn = self._make_conn()
         dg_id = self._insert_calibration_pair_v2(conn)
         (val,) = conn.execute(
-            "SELECT observation_field FROM calibration_pairs_v2 WHERE decision_group_id=?",
+            "SELECT observation_field FROM calibration_pairs WHERE decision_group_id=?",
             (dg_id,)
         ).fetchone()
         assert val == "high_temp", (
@@ -267,12 +267,12 @@ class TestCalibrationPairsV2IdentityFields:
         """R-M: data_version must be 'tigge_mx2t6_local_calendar_day_max_v1'.
 
         The old 'peak_window' tag is quarantined in Phase 4. Any row with the
-        old tag entering calibration_pairs_v2 is a Phase 4 scope violation.
+        old tag entering calibration_pairs is a Phase 4 scope violation.
         """
         conn = self._make_conn()
         dg_id = self._insert_calibration_pair_v2(conn)
         (val,) = conn.execute(
-            "SELECT data_version FROM calibration_pairs_v2 WHERE decision_group_id=?",
+            "SELECT dataset_id FROM calibration_pairs WHERE decision_group_id=?",
             (dg_id,)
         ).fetchone()
         assert val == "tigge_mx2t6_local_calendar_day_max_v1", (
@@ -285,11 +285,11 @@ class TestCalibrationPairsV2IdentityFields:
         conn = self._make_conn()
         dg_id = self._insert_calibration_pair_v2(conn)
         row = conn.execute(
-            """SELECT temperature_metric, observation_field, data_version, training_allowed
-               FROM calibration_pairs_v2 WHERE decision_group_id=?""",
+            """SELECT temperature_metric, observation_field, dataset_id, training_allowed
+               FROM calibration_pairs WHERE decision_group_id=?""",
             (dg_id,)
         ).fetchone()
-        assert row is not None, "Row not found in calibration_pairs_v2 (R-M)"
+        assert row is not None, "Row not found in calibration_pairs (R-M)"
         tm, of, dv, ta = row
         for field_name, val in [
             ("temperature_metric", tm),
@@ -298,7 +298,7 @@ class TestCalibrationPairsV2IdentityFields:
             ("training_allowed", ta),
         ]:
             assert val is not None, (
-                f"{field_name} must not be NULL in calibration_pairs_v2 row (R-M)"
+                f"{field_name} must not be NULL in calibration_pairs row (R-M)"
             )
 
 
@@ -307,11 +307,11 @@ class TestCalibrationPairsV2IdentityFields:
 # ---------------------------------------------------------------------------
 
 class TestRebuildV2PipelineIntegration:
-    """MAJOR-2 antibody: rebuild_v2() must produce calibration_pairs_v2 rows with correct
-    identity fields when called end-to-end (not just add_calibration_pair_v2 in isolation).
+    """MAJOR-2 antibody: rebuild_v2() must produce calibration_pairs rows with correct
+    identity fields when called end-to-end (not just add_calibration_pair in isolation).
 
     This is the test that would have caught CRITICAL-1 (phantom 'source' column in SELECT)
-    before critic-alice's review — direct calls to add_calibration_pair_v2 bypass the
+    before critic-alice's review — direct calls to add_calibration_pair bypass the
     _fetch_eligible_snapshots_v2 SQL path entirely.
     """
 
@@ -324,12 +324,12 @@ class TestRebuildV2PipelineIntegration:
 
     def _make_conn(self) -> sqlite3.Connection:
         from src.state.db import init_schema
-        from src.state.schema.v2_schema import apply_v2_schema
+        from src.state.schema.v2_schema import apply_canonical_schema
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         init_schema(conn)
-        apply_v2_schema(conn)
+        apply_canonical_schema(conn)
         return conn
 
     def _insert_snapshot(self, conn: sqlite3.Connection) -> int:
@@ -338,10 +338,10 @@ class TestRebuildV2PipelineIntegration:
         members = list(np.full(51, self._OBS_TEMP_F).tolist())
         conn.execute(
             """
-            INSERT INTO ensemble_snapshots_v2
+            INSERT INTO ensemble_snapshots
                 (city, target_date, temperature_metric, physical_quantity, observation_field,
                  issue_time, available_at, fetch_time, lead_hours, members_json,
-                 model_version, data_version, training_allowed, causality_status,
+                 model_version, dataset_id, training_allowed, causality_status,
                  authority, members_unit)
             VALUES (?, ?, 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
                     ?, ?, '2025-06-13T06:05:00', 48.0, ?,
@@ -369,7 +369,7 @@ class TestRebuildV2PipelineIntegration:
         conn.commit()
 
     def test_rebuild_v2_writes_high_track_identity_fields(self):
-        """MAJOR-2: rebuild_v2() end-to-end must produce calibration_pairs_v2 rows with
+        """MAJOR-2: rebuild_v2() end-to-end must produce calibration_pairs rows with
         temperature_metric='high', observation_field='high_temp',
         data_version='tigge_mx2t6_local_calendar_day_max_v1', training_allowed=1.
 
@@ -379,7 +379,7 @@ class TestRebuildV2PipelineIntegration:
         import sys
         from pathlib import Path
         sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-        from rebuild_calibration_pairs_v2 import METRIC_SPECS, rebuild_v2
+        from rebuild_calibration_pairs import METRIC_SPECS, rebuild_v2
 
         conn = self._make_conn()
         self._insert_snapshot(conn)
@@ -401,18 +401,18 @@ class TestRebuildV2PipelineIntegration:
         assert not stats.refused, f"rebuild_v2 refused: stats={stats.as_dict()}"
 
         rows = conn.execute(
-            """SELECT temperature_metric, observation_field, data_version, training_allowed
-               FROM calibration_pairs_v2
+            """SELECT temperature_metric, observation_field, dataset_id, training_allowed
+               FROM calibration_pairs
                WHERE city=? AND target_date=?""",
             (self._CITY_NAME, self._TARGET_DATE),
         ).fetchall()
 
         assert len(rows) > 0, (
-            "No calibration_pairs_v2 rows found for Atlanta/2025-06-15 after rebuild_v2 (MAJOR-2)"
+            "No calibration_pairs rows found for Atlanta/2025-06-15 after rebuild_v2 (MAJOR-2)"
         )
 
         for row in rows:
-            tm, of, dv, ta = row["temperature_metric"], row["observation_field"], row["data_version"], row["training_allowed"]
+            tm, of, dv, ta = row["temperature_metric"], row["observation_field"], row["dataset_id"], row["training_allowed"]
             assert tm == "high", f"temperature_metric must be 'high', got {tm!r} (MAJOR-2)"
             assert of == "high_temp", f"observation_field must be 'high_temp', got {of!r} (MAJOR-2)"
             assert dv == self._DATA_VERSION, f"data_version must be {self._DATA_VERSION!r}, got {dv!r} (MAJOR-2)"

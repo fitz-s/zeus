@@ -33,7 +33,7 @@ _TRAINING_ALLOWED_SOURCES = frozenset({"tigge", "ecmwf_ens"})
 _CALIBRATION_READ_TABLES = frozenset({
     "calibration_pairs",
     "platt_models",
-    "platt_models_v2",
+    # platt_models removed B3cont: table renamed to platt_models (canonical).
 })
 
 
@@ -42,8 +42,8 @@ def _qualified_calibration_read_table(conn: sqlite3.Connection, table_name: str)
 
     Live cycle connections are trade DB handles with the world DB attached as
     ``world``. Legacy/bootstrap left empty calibration tables in the trade DB,
-    so unqualified reads can silently hit ``main.platt_models_v2`` and miss
-    the populated authoritative rows in ``world.platt_models_v2``. Prefer the
+    so unqualified reads can silently hit ``main.platt_models`` and miss
+    the populated authoritative rows in ``world.platt_models``. Prefer the
     attached world table whenever it exists; plain world-DB and test
     connections continue to read their main schema.
     """
@@ -86,11 +86,11 @@ def _table_info(conn: sqlite3.Connection, table_ref: str) -> list[sqlite3.Row]:
 
 
 def _v2_table_has_stratification(conn: sqlite3.Connection, table_ref: str) -> bool:
-    """True iff platt_models_v2 has cycle/source_id/horizon_profile columns.
+    """True iff platt_models has cycle/source_id/horizon_profile columns.
 
     Thin wrapper around ``has_columns`` (PROPOSALS_2026-05-04 P2 — moved
     out of inline form during PR #59).  ``table_ref`` may be qualified
-    (``"world.platt_models_v2"``); split into bare-table-name + attached
+    (``"world.platt_models"``); split into bare-table-name + attached
     DB before delegation.
 
     The migration script ``migrate_phase2_cycle_stratification.py``
@@ -111,26 +111,26 @@ def _v2_table_has_stratification(conn: sqlite3.Connection, table_ref: str) -> bo
 
 
 def _v2_pairs_table_has_stratification(conn: sqlite3.Connection) -> bool:
-    """True iff calibration_pairs_v2 has cycle/source_id/horizon_profile columns.
+    """True iff calibration_pairs has cycle/source_id/horizon_profile columns.
 
-    Used by add_calibration_pair_v2 to choose between the migrated INSERT
+    Used by add_calibration_pair to choose between the migrated INSERT
     form (with stratification columns) and the legacy form.  Pre-migration
     fixtures lack the columns so legacy form is the safe fallback.
     """
     return has_columns(
-        conn, "calibration_pairs_v2",
+        conn, "calibration_pairs",
         "cycle", "source_id", "horizon_profile",
     )
 
 
 def _v2_pairs_table_has_error_model_family(conn: sqlite3.Connection) -> bool:
-    """True iff calibration_pairs_v2 has the error_model_family column.
+    """True iff calibration_pairs has the error_model_family column.
 
-    Used by add_calibration_pair_v2 to choose whether to write the predictive-
+    Used by add_calibration_pair to choose whether to write the predictive-
     error provenance tag. Pre-migration fixtures lack the column so callers
     silently fall back to the unstamped INSERT (family is implicitly 'none').
     """
-    return has_columns(conn, "calibration_pairs_v2", "error_model_family")
+    return has_columns(conn, "calibration_pairs", "error_model_family")
 
 
 def infer_bin_width_from_label(range_label: str) -> float | None:
@@ -163,59 +163,6 @@ def infer_bin_width_from_label(range_label: str) -> float | None:
     return None
 
 
-def add_calibration_pair(
-    conn: sqlite3.Connection,
-    city: str,
-    target_date: str,
-    range_label: str,
-    p_raw: float,
-    outcome: int,
-    lead_days: float,
-    season: str,
-    cluster: str,
-    forecast_available_at: str,
-    settlement_value: Optional[float] = None,
-    decision_group_id: Optional[str] = None,
-    bias_corrected: bool = False,
-    *,
-    bin_source: str = "legacy",
-    authority: str = "UNVERIFIED",
-    city_obj: "City",
-) -> None:
-    """Insert a calibration pair (one per bin per settled market).
-
-    Spec §8.1: Harvester generates 11 pairs per settlement (1 outcome=1, 10 outcome=0).
-    settlement_value is stored for audit only — defensive round to integer per contract.
-
-    2026-04-14 refactor: ``bin_source`` defaults to ``"legacy"`` so existing
-    callers (market-bin-derived harvester path, generate_calibration_pairs.py)
-    are unchanged. The new canonical-grid rebuild script passes
-    ``bin_source="canonical_v1"`` to mark rows it owns, which the destructive
-    DELETE path in that script targets by equality match.
-
-    city_obj: City for SettlementSemantics dispatch (HKO oracle_truncate).
-    Required (P10E strict). Use SettlementSemantics.for_city(city_obj).
-    """
-    if settlement_value is not None:
-        from src.contracts.settlement_semantics import SettlementSemantics
-        round_fn = SettlementSemantics.for_city(city_obj).round_values
-        settlement_value = round_fn([float(settlement_value)])[0]
-    if decision_group_id is None or not str(decision_group_id).strip():
-        raise ValueError(
-            "decision_group_id is required; use "
-            "src.calibration.decision_group.compute_id() to generate it"
-        )
-    conn.execute("""
-        INSERT INTO calibration_pairs
-        (city, target_date, range_label, p_raw, outcome, lead_days,
-         season, cluster, forecast_available_at, settlement_value,
-         decision_group_id, bias_corrected, bin_source, authority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (city, target_date, range_label, p_raw, outcome, lead_days,
-          season, cluster, forecast_available_at, settlement_value,
-          decision_group_id, int(bool(bias_corrected)), bin_source, authority))
-
-
 def _resolve_training_allowed(source: str, data_version: str, requested: bool) -> bool:
     """INV-15: enforce source whitelist on training_allowed.
 
@@ -236,7 +183,7 @@ def _resolve_training_allowed(source: str, data_version: str, requested: bool) -
 
 
 @capability("calibration_rebuild")
-def add_calibration_pair_v2(
+def add_calibration_pair(
     conn: sqlite3.Connection,
     city: str,
     target_date: str,
@@ -265,7 +212,7 @@ def add_calibration_pair_v2(
     horizon_profile: Optional[str] = None,
     error_model_family: str = "none",
 ) -> None:
-    """Insert a calibration pair into calibration_pairs_v2.
+    """Insert a calibration pair into calibration_pairs.
 
     Requires metric_identity (4A.3 — no legacy default). INV-15: training_allowed
     is silently forced to False if source is not in the canonical whitelist
@@ -293,7 +240,7 @@ def add_calibration_pair_v2(
     # path.
     #
     # Codex P1 #6 collateral (2026-05-04): degrade gracefully when the
-    # calibration_pairs_v2 schema lacks the cycle/source_id/horizon_profile
+    # calibration_pairs schema lacks the cycle/source_id/horizon_profile
     # columns (test fixtures that build the schema directly).  Pre-fix,
     # passing any non-None stratification kwarg with a pre-migration
     # schema raised OperationalError; now we route to the legacy INSERT
@@ -309,11 +256,11 @@ def add_calibration_pair_v2(
     _emf_val = (error_model_family,) if _has_emf else ()
     if cycle is None and source_id is None and horizon_profile is None or not _has_strat_pairs:
         conn.execute(f"""
-            INSERT INTO calibration_pairs_v2
+            INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              settlement_value, decision_group_id, bias_corrected, authority,
-             bin_source, data_version, training_allowed, causality_status, snapshot_id{_emf_col})
+             bin_source, dataset_id, training_allowed, causality_status, snapshot_id{_emf_col})
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{_emf_ph})
         """, (
             city, target_date,
@@ -326,11 +273,11 @@ def add_calibration_pair_v2(
         ) + _emf_val)
     else:
         conn.execute(f"""
-            INSERT INTO calibration_pairs_v2
+            INSERT INTO calibration_pairs
             (city, target_date, temperature_metric, observation_field, range_label,
              p_raw, outcome, lead_days, season, cluster, forecast_available_at,
              settlement_value, decision_group_id, bias_corrected, authority,
-             bin_source, data_version, training_allowed, causality_status, snapshot_id,
+             bin_source, dataset_id, training_allowed, causality_status, snapshot_id,
              cycle, source_id, horizon_profile{_emf_col})
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?{_emf_ph})
         """, (
@@ -400,7 +347,7 @@ def get_pairs_for_bucket(
         raise NotImplementedError(
             "get_pairs_for_bucket reads legacy `calibration_pairs`, which "
             "is HIGH-only by Phase 9C L3 convention (no temperature_metric "
-            "column). LOW reads must use calibration_pairs_v2 via the v2 "
+            "column). LOW reads must use calibration_pairs via the v2 "
             "lookup API (load_platt_model_v2 / dedicated v2 readers)."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
@@ -469,7 +416,7 @@ def get_pairs_count(
     if metric == "low":
         raise NotImplementedError(
             "get_pairs_count reads legacy `calibration_pairs`, which is "
-            "HIGH-only. For LOW counts use the calibration_pairs_v2 API."
+            "HIGH-only. For LOW counts use the calibration_pairs API."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
     if authority_filter == "any" or not _has_authority_column(conn):
@@ -501,7 +448,7 @@ def get_decision_group_count(
     if metric == "low":
         raise NotImplementedError(
             "get_decision_group_count reads legacy `calibration_pairs`, "
-            "which is HIGH-only. For LOW counts use the calibration_pairs_v2 API."
+            "which is HIGH-only. For LOW counts use the calibration_pairs API."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
     if authority_filter == "any" or not _has_authority_column(conn):
@@ -540,40 +487,13 @@ def canonical_pairs_ready_for_refit(conn: sqlite3.Connection) -> bool:
     return canonical_rows > 0 and unsafe_rows == 0
 
 
-def save_platt_model(
-    conn: sqlite3.Connection,
-    bucket_key: str,
-    A: float,
-    B: float,
-    C: float,
-    bootstrap_params: list[tuple[float, float, float]],
-    n_samples: int,
-    brier_insample: Optional[float] = None,
-    input_space: str = "raw_probability",
-    authority: str = "VERIFIED",
-) -> None:
-    """Save a fitted Platt model.
-
-    Uses INSERT OR REPLACE to handle refits on the UNIQUE(bucket_key) constraint.
-    authority defaults to 'VERIFIED': this function writes a freshly fitted,
-    trusted model. Pass authority='UNVERIFIED' only for diagnostic/test data.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("""
-        INSERT OR REPLACE INTO platt_models
-        (bucket_key, param_A, param_B, param_C, bootstrap_params_json,
-         n_samples, brier_insample, fitted_at, is_active, input_space, authority)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-    """, (
-        bucket_key, A, B, C,
-        json.dumps(bootstrap_params),
-        n_samples, brier_insample, now, input_space, authority
-    ))
+# TOMBSTONE: bare save_platt_model(conn, bucket_key, A, B, C, ...) removed B3cont.
+# Wrote to dead platt_models bare table (0 rows). Canonical fn below.
 
 
 @capability("calibration_persistence_write", lease=True)
 @protects("INV-15", "INV-21")
-def save_platt_model_v2(
+def save_platt_model(
     conn: sqlite3.Connection,
     *,
     metric_identity: "MetricIdentity",
@@ -593,7 +513,7 @@ def save_platt_model_v2(
     horizon_profile: str = "full",
     error_model_family: str = "none",
 ) -> None:
-    """Save a fitted Platt model to platt_models_v2.
+    """Save a fitted Platt model to platt_models (canonical; B3cont rename from platt_models).
 
     Requires metric_identity (4A.4 — no legacy default). Derives model_key
     from (temperature_metric, cluster, season, data_version, cycle, source_id,
@@ -604,7 +524,7 @@ def save_platt_model_v2(
     pair source.
 
     error_model_family (2026-05-24): the predictive-error correction family the
-    source calibration_pairs_v2 rows were built under ('none' = uncorrected).
+    source calibration_pairs rows were built under ('none' = uncorrected).
     Appended to model_key ONLY when != 'none' so legacy/uncorrected model_keys
     stay byte-identical to pre-error-model refits; a corrected model lives under
     a distinct key and never collides with the uncorrected one.
@@ -616,12 +536,12 @@ def save_platt_model_v2(
     if error_model_family and error_model_family != "none":
         model_key = f"{model_key}:emf={error_model_family}"
     now = datetime.now(timezone.utc).isoformat()
-    _has_emf = has_columns(conn, "platt_models_v2", "error_model_family")
+    _has_emf = has_columns(conn, "platt_models", "error_model_family")
     _emf_col = ", error_model_family" if _has_emf else ""
     _emf_ph = ", ?" if _has_emf else ""
     _emf_val = (error_model_family,) if _has_emf else ()
     conn.execute(f"""
-        INSERT INTO platt_models_v2
+        INSERT INTO platt_models
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, authority,
@@ -638,7 +558,7 @@ def save_platt_model_v2(
     ) + _emf_val)
 
 
-def deactivate_model_v2(
+def deactivate_model(
     conn: sqlite3.Connection,
     *,
     metric_identity: "MetricIdentity",
@@ -651,10 +571,10 @@ def deactivate_model_v2(
     horizon_profile: str = "full",
     error_model_family: str = "none",
 ) -> int:
-    """Delete the existing platt_models_v2 row for a bucket before refit.
+    """Delete the existing platt_models row for a bucket before refit (B3cont: renamed from platt_models).
 
-    Returns the number of rows deleted (0 or 1). Called by refit_platt_v2.py
-    before save_platt_model_v2. Deletion (not soft-deactivation) is required
+    Returns the number of rows deleted (0 or 1). Called by refit_platt.py
+    before save_platt_model. Deletion (not soft-deactivation) is required
     because UNIQUE(model_key) means the old row must be removed before the
     new INSERT can succeed with the same key.
 
@@ -686,52 +606,21 @@ def deactivate_model_v2(
         cluster, season, data_version, input_space,
         cycle, source_id, horizon_profile,
     ]
-    if has_columns(conn, "platt_models_v2", "error_model_family"):
+    if has_columns(conn, "platt_models", "error_model_family"):
         where.append("error_model_family = ?")
         params.append(error_model_family)
     result = conn.execute(
-        f"DELETE FROM platt_models_v2 WHERE {' AND '.join(where)}",
+        f"DELETE FROM platt_models WHERE {' AND '.join(where)}",
         tuple(params),
     )
     return result.rowcount
 
 
+# TOMBSTONE: bare load_platt_model(conn, bucket_key) removed B3cont.
+# Read from dead bare platt_models table (0 rows). Canonical fn below.
+
+
 def load_platt_model(
-    conn: sqlite3.Connection,
-    bucket_key: str,
-) -> Optional[dict]:
-    """Load a fitted Platt model. Returns None if not found, inactive, or not VERIFIED."""
-    table = _qualified_calibration_read_table(conn, "platt_models")
-    row = conn.execute(f"""
-        SELECT param_A, param_B, param_C, bootstrap_params_json,
-               n_samples, brier_insample, fitted_at, input_space
-        FROM {table}
-        WHERE bucket_key = ? AND is_active = 1 AND authority = 'VERIFIED'
-    """, (bucket_key,)).fetchone()
-
-    if row is None:
-        return None
-
-    # Legacy table has no Phase 2 stratification columns — bucket_* are
-    # None so evaluator's transfer gate falls back to the cross-domain
-    # rejection path when an OpenData forecast lands here.
-    return {
-        "A": row["param_A"],
-        "B": row["param_B"],
-        "C": row["param_C"],
-        "bootstrap_params": json.loads(row["bootstrap_params_json"]),
-        "n_samples": row["n_samples"],
-        "brier_insample": row["brier_insample"],
-        "fitted_at": row["fitted_at"],
-        "input_space": row["input_space"] or "raw_probability",
-        "bucket_cycle": None,
-        "bucket_source_id": None,
-        "bucket_horizon_profile": None,
-        "bucket_data_version": None,
-    }
-
-
-def load_platt_model_v2(
     conn: sqlite3.Connection,
     *,
     temperature_metric: str,
@@ -745,7 +634,7 @@ def load_platt_model_v2(
     source_id: Optional[str] = None,
     horizon_profile: Optional[str] = None,
 ) -> Optional[dict]:
-    """Load a fitted Platt model from platt_models_v2 (Phase 9C L3 CRITICAL fix).
+    """Load a fitted Platt model from platt_models (Phase 9C L3 CRITICAL fix).
 
     Read-side counterpart to save_platt_model_v2 (P5). Pre-P9C: get_calibrator
     read exclusively from legacy platt_models table, bypassing metric
@@ -753,7 +642,7 @@ def load_platt_model_v2(
     model. This function closes that gap at the read seam.
 
     2026-04-30 (post-architect-audit BLOCKER #1 fix): added explicit
-    ``data_version`` filter. The UNIQUE constraint on platt_models_v2 includes
+    ``data_version`` filter. The UNIQUE constraint on platt_models includes
     data_version (v2_schema.py:302) and save_platt_model_v2 keys on it
     (store.py:445-452), so multiple data_versions per (metric, cluster, season)
     can coexist. Pre-fix, the SELECT picked ``ORDER BY fitted_at DESC LIMIT 1``
@@ -782,7 +671,7 @@ def load_platt_model_v2(
     caller (get_calibrator) falls back to legacy or on-the-fly fit.
 
     Args:
-        conn: SQLite connection (must have platt_models_v2 table applied).
+        conn: SQLite connection (must have platt_models table applied).
         temperature_metric: "high" | "low" — matches CHECK constraint at
             v2_schema.py:229-230.
         cluster: per K3, equals the city name (one-cluster-per-city).
@@ -808,7 +697,7 @@ def load_platt_model_v2(
     Returns:
         Same dict shape as load_platt_model, or None.
     """
-    table = _qualified_calibration_read_table(conn, "platt_models_v2")
+    table = _qualified_calibration_read_table(conn, "platt_models")
 
     # Codex P1 review #6 (2026-05-04): SELECT includes the bucket identity
     # columns (cycle, source_id, horizon_profile, data_version) so callers
@@ -827,7 +716,7 @@ def load_platt_model_v2(
     # interprets a missing bucket_source_id as "fell back to legacy" and
     # still rejects cross-domain.
     _strat_cols = _v2_table_has_stratification(conn, table)
-    _has_cal_method = has_columns(conn, "platt_models_v2", "calibration_method")
+    _has_cal_method = has_columns(conn, "platt_models", "calibration_method")
     _cal_method_col = ", calibration_method" if _has_cal_method else ""
     if _strat_cols:
         _v2_select_cols = (
@@ -980,12 +869,8 @@ def load_platt_model_v2(
     }
 
 
-def deactivate_model(conn: sqlite3.Connection, bucket_key: str) -> None:
-    """Mark a model as inactive (for refit/replacement)."""
-    conn.execute("""
-        UPDATE platt_models SET is_active = 0
-        WHERE bucket_key = ?
-    """, (bucket_key,))
+# TOMBSTONE: bare deactivate_model(conn, bucket_key) removed B3cont.
+# Did UPDATE platt_models SET is_active=0 WHERE bucket_key=? on dead bare table. Canonical fn above.
 
 
 # =====================================================================
@@ -1005,8 +890,8 @@ def deactivate_model(conn: sqlite3.Connection, bucket_key: str) -> None:
 # L18 (persistence module on the active routing path).
 
 
-def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
-    """List all currently-active platt_models_v2 rows.
+def list_active_platt_models(conn: sqlite3.Connection) -> list[dict]:
+    """List all currently-active platt_models rows.
 
     K1-compliant pure-SELECT lister — counterpart to single-bucket
     load_platt_model_v2 (L515). Returns one dict per (temperature_metric,
@@ -1017,7 +902,7 @@ def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
 
     Returns: list of dicts, each carrying the full v2 row shape for
     parameter monitoring. Empty list when no active VERIFIED rows exist
-    (including when the platt_models_v2 table has not yet been created on
+    (including when the platt_models table has not yet been created on
     a pre-migration DB — the SELECT returns 0 rows in either case).
 
     Used by src.state.calibration_observation.compute_platt_parameter_snapshot_per_bucket
@@ -1025,7 +910,7 @@ def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
     trajectories without re-reading the canonical surface row-by-row.
     """
     try:
-        table = _qualified_calibration_read_table(conn, "platt_models_v2")
+        table = _qualified_calibration_read_table(conn, "platt_models")
         rows = conn.execute(
             f"""
             SELECT temperature_metric, cluster, season, data_version,
@@ -1038,7 +923,7 @@ def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
             """
         ).fetchall()
     except sqlite3.OperationalError:
-        # Pre-migration DB without platt_models_v2 — same posture as
+        # Pre-migration DB without platt_models — same posture as
         # _has_authority_column at L197 (graceful empty for missing table).
         return []
     out: list[dict] = []
@@ -1062,56 +947,8 @@ def list_active_platt_models_v2(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
-def list_active_platt_models_legacy(conn: sqlite3.Connection) -> list[dict]:
-    """List all currently-active legacy platt_models rows.
-
-    K1-compliant pure-SELECT lister — counterpart to single-bucket
-    load_platt_model (L488). Returns one dict per bucket_key where
-    is_active=1 AND authority='VERIFIED'. Mirrors load_platt_model's read
-    filter (L497) so what shows up here is what the legacy lookup path
-    would actually serve.
-
-    The legacy table has NO temperature_metric column (per Phase 9C L3
-    convention "LOW has never existed in legacy" cited at get_pairs_for_bucket
-    L228), NO data_version, NO input_space-as-key. bucket_key is
-    `f"{cluster}_{season}"` per src/calibration/manager.py:73 (bucket_key
-    helper). Both legacy and v2 readers exist because manager.py's get_calibrator
-    falls back v2→legacy (L42-62 dedup pattern); both surfaces remain
-    observable to the operator until full cutover.
-
-    Used by src.state.calibration_observation.compute_platt_parameter_snapshot_per_bucket
-    in conjunction with list_active_platt_models_v2 for full coverage.
-    Each result dict carries an explicit `source: 'legacy'` tag downstream.
-    """
-    try:
-        table = _qualified_calibration_read_table(conn, "platt_models")
-        rows = conn.execute(
-            f"""
-            SELECT bucket_key, param_A, param_B, param_C,
-                   bootstrap_params_json, n_samples, brier_insample,
-                   fitted_at, input_space, authority
-            FROM {table}
-            WHERE is_active = 1 AND authority = 'VERIFIED'
-            ORDER BY bucket_key, fitted_at DESC
-            """
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return []
-    out: list[dict] = []
-    for row in rows:
-        out.append({
-            "bucket_key": row["bucket_key"],
-            "param_A": row["param_A"],
-            "param_B": row["param_B"],
-            "param_C": row["param_C"],
-            "bootstrap_params": json.loads(row["bootstrap_params_json"]),
-            "n_samples": row["n_samples"],
-            "brier_insample": row["brier_insample"],
-            "fitted_at": row["fitted_at"],
-            "input_space": row["input_space"] or "raw_probability",
-            "authority": row["authority"],
-        })
-    return out
+# TOMBSTONE: list_active_platt_models_legacy removed B3cont.
+# Read from dead bare platt_models table (bucket_key schema). Table dropped.
 
 
 # ---------------------------------------------------------------------------
@@ -1204,7 +1041,7 @@ def get_active_platt_model(
     data_version = getattr(metric_identity, "data_version", None)
     input_space = getattr(metric_identity, "input_space", "width_normalized_density")
 
-    raw = load_platt_model_v2(
+    raw = load_platt_model(
         world_conn,
         temperature_metric=temperature_metric,
         cluster=city,

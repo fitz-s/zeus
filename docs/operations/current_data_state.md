@@ -26,7 +26,7 @@ law, read `architecture/data_rebuild_topology.yaml`,
 **K1 DB split addendum (2026-05-11 / PR #114):** Zeus now operates two canonical
 SQLite databases. `WORLD_CLASS` tables (markets, positions, lifecycle) live in
 `state/zeus-world.db`; `FORECAST_CLASS` tables (observations, settlements,
-calibration_pairs_v2, ensemble_snapshots_v2, source_run, market_events_v2) live in
+calibration_pairs_v2, ensemble_snapshots, source_run, market_events_v2) live in
 `state/zeus-forecasts.db`. Canonical ownership is machine-checked by
 `architecture/db_table_ownership.yaml` (loader: `src/state/table_registry.py`).
 The sanctioned cross-DB write path is `get_forecasts_connection_with_world()`

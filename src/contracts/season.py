@@ -4,7 +4,7 @@
 #          src.calibration.manager per G10 calibration-fence (con-nyx
 #          NICE-TO-HAVE #4) so the ingest lane (scripts/ingest/*) can call
 #          season helpers without transitively pulling in src.calibration —
-#          which writes to ensemble_snapshots_v2 and platt_models, surfaces
+#          which writes to ensemble_snapshots and platt_models, surfaces
 #          the ingest lane should not depend on.
 # Reuse: This module is in `src.contracts.*` (allowed for both ingest +
 #        engine + calibration lanes). When adding new calendar/season

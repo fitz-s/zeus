@@ -1,13 +1,13 @@
 # Created: 2026-05-18
 # Last reused or audited: 2026-05-18
-# Authority basis: v1.F20 reader migration — all readers migrated to ensemble_snapshots_v2
+# Authority basis: v1.F20 reader migration — all readers migrated to ensemble_snapshots
 #   Run against zeus-world.db (NOT zeus_trades.db, NOT zeus-forecasts.db):
 #     python -m scripts.migrations apply \
 #       --target 202605_drop_ensemble_snapshots_legacy \
 #       --db-path state/zeus-world.db
 #
 # OPERATOR-INVOKED ONLY. Do NOT run against live DB without confirming all
-# readers have been migrated and ensemble_snapshots_v2 is fully populated.
+# readers have been migrated and ensemble_snapshots is fully populated.
 
 
 def up(conn):

@@ -26,8 +26,8 @@ from src.contracts.edge_context import EdgeContext
 from src.contracts.epistemic_context import EpistemicContext
 from src.contracts.fx_classification import FXClassification, FXClassificationPending
 from src.contracts.settlement_semantics import SettlementSemantics
-from src.contracts.executable_market_snapshot_v2 import (
-    ExecutableMarketSnapshotV2,
+from src.contracts.executable_market_snapshot import (
+    ExecutableMarketSnapshot,
     MarketSnapshotError,
     StaleMarketSnapshotError,
 )
@@ -56,7 +56,7 @@ __all__ = [
     "FXClassification",
     "FXClassificationPending",
     "SettlementSemantics",
-    "ExecutableMarketSnapshotV2",
+    "ExecutableMarketSnapshot",
     "MarketSnapshotError",
     "StaleMarketSnapshotError",
 ]

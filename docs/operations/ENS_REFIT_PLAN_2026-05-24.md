@@ -19,14 +19,14 @@ NO live DB writes, NO daemon restart, NO `bias_correction_enabled` flip.
 - `src/calibration/store.py`: thread `error_model_family` through
   `add_calibration_pair_v2` (graceful degrade if column absent) and concat into
   `save_platt_model_v2` model_key.
-- `scripts/rebuild_calibration_pairs_v2.py` + `_rebuild_calibration_pairs_v2_parallel.py`:
+- `scripts/rebuild_calibration_pairs.py` + `_rebuild_calibration_pairs_parallel.py`:
   `--error-model full_transport_v1` CLI flag. When set, fit a bucket
   `PredictiveErrorModel` per (city, season, metric) via
   `fit_city_predictive_error`, convert effective_bias_c / total_residual_sd_c to
   members' native unit (`city.settlement_unit`: ×1.8 for degF), subtract bias
   pre-MC and widen the MC draw by extra sigma. OFF → unchanged code path.
-- `scripts/refit_platt_v2.py`: `--error-model` flag; stamp family into model_key;
-  filter pairs by family. (refit_platt_v2 is the v2 path; refit_platt.py is the
+- `scripts/refit_platt.py`: `--error-model` flag; stamp family into model_key;
+  filter pairs by family. (refit_platt is the v2 path; refit_platt.py is the
   legacy `calibration_pairs`→`platt_models` path and is NOT used.)
 - `src/calibration/ens_bias_model.py::assert_bias_state_consistent`: extend with
   `live_error_model_family` / `active_platt_error_model_family` params so live
@@ -40,7 +40,7 @@ isolated staging DB (`--db <iso.db>`); the live `state/zeus-forecasts.db` and
 current main (proven in STEP 2). No promotion, no merge, no activation in scope.
 
 ## Isolation
-Lean staging DB seeded with `ensemble_snapshots_v2` (+ members_unit),
+Lean staging DB seeded with `ensemble_snapshots` (+ members_unit),
 `observations`, `settlements_v2` copied from the live forecasts DB, plus the v2
 schema write targets. All rebuild reads + error-model fit + Platt refit run
 against this single isolated DB.

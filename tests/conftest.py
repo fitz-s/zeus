@@ -134,7 +134,7 @@ def r3_default_risk_allocator_for_unit_tests():
 # Dual-DB fixture helper — Clusters A + D (G4 cleanup, 2026-05-18)
 # ---------------------------------------------------------------------------
 # make_world_forecasts_pair(tmp_path) creates isolated world + forecasts DBs
-# for tests that INSERT into ensemble_snapshots_v2, settlements_v2, or
+# for tests that INSERT into ensemble_snapshots, settlement_outcomes, or
 # readiness_state — tables that live in init_schema_forecasts, not init_schema.
 #
 # Named make_world_forecasts_pair (not make_dual_db) to avoid confusion with
@@ -154,7 +154,7 @@ def make_world_forecasts_pair(tmp_path):
     Usage::
         world_conn, forecasts_conn = make_world_forecasts_pair(tmp_path)
         world_conn.execute("INSERT INTO ...")
-        forecasts_conn.execute("INSERT INTO settlements_v2 ...")
+        forecasts_conn.execute("INSERT INTO settlement_outcomes ...")
     """
     import sqlite3 as _sqlite3
     import src.state.db as _db_mod
@@ -270,12 +270,12 @@ _WLA_CANONICAL_INFRA_ALLOWLIST = frozenset({
 # 2 daemon src/ sites remain — unresolved pending Track A.6.
 _WLA_RESIDUAL_ALLOWLIST = frozenset({
     # --- src/ daemon sites: pending Track A.6 (#246) ---
-    "src/data/market_scanner.py",       # pending_track_a6: daemon INSERT writes to market_events_v2; no db_writer_lock yet
+    "src/data/market_scanner.py",       # pending_track_a6: daemon INSERT writes to market_events; no db_writer_lock yet
     "src/state/chunk_boundary_events.py",  # pending_track_a6: F11 daemon-thread observability write; intentionally separate conn from BulkChunker's conn to avoid lock-order conflict; failure-silent
     # --- scripts/ utilities: standalone CLI tools, not daemon src/ ---
     "scripts/quarantine_bad_forecast_decisions.py",  # pending_track_a6: standalone quarantine CLI; PR-E work in progress
     "scripts/build_ft_staging_db.py",               # pending_track_a6: Zeus #64 FT-ship operator staging script; one-shot CLI, not daemon src/
-    "scripts/promote_model_bias_ens_v2.py",         # pending_track_a6: Zeus #64 FT-ship F3 promote CLI; --db override path only, not daemon src/
+    "scripts/promote_model_bias_ens.py",         # pending_track_a6: Zeus #64 FT-ship F3 promote CLI; --db override path only, not daemon src/
 })
 
 # Effective allowlist: canonical infra + residual (Track A.6 daemon sites only;
@@ -407,15 +407,14 @@ def pytest_configure(config) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Schema-version drift guard (PLAN §5.6, 2026-05-11)
+# Schema fingerprint drift guard (B2 2026-05-28 — replaces SCHEMA_VERSION counter)
 #
-# Session-scoped autouse fixture that runs scripts/check_schema_version.py
-# once per pytest invocation.  Fails fast if sqlite_master hash of a fresh
-# init_schema DB does not match tests/state/_schema_pinned_hash.txt.
+# Session-scoped autouse fixture that runs scripts/check_schema_fingerprint.py
+# once per pytest invocation.  Fails fast if DDL fingerprint of fresh
+# init_schema + init_schema_forecasts does not match architecture/_schema_fingerprint.txt.
 #
 # Remediation on failure:
-#   1. Bump SCHEMA_VERSION in src/state/db.py.
-#   2. Run:  python scripts/check_schema_version.py --write-pin
+#   python scripts/check_schema_fingerprint.py --write-pin
 # ---------------------------------------------------------------------------
 
 import subprocess as _sv_subprocess
@@ -426,17 +425,16 @@ _SV_REPO_ROOT = _wla_Path(__file__).resolve().parent.parent
 
 @pytest.fixture(scope="session", autouse=True)
 def _enforce_schema_pinned_hash():
-    """Fail the test session if schema hash drifted without bumping SCHEMA_VERSION."""
+    """Fail the test session if schema DDL fingerprint drifted."""
     r = _sv_subprocess.run(
-        [_sv_sys.executable, "scripts/check_schema_version.py"],
+        [_sv_sys.executable, "scripts/check_schema_fingerprint.py"],
         capture_output=True,
         text=True,
         cwd=str(_SV_REPO_ROOT),
     )
     if r.returncode != 0:
         pytest.exit(
-            f"SCHEMA DRIFT — bump SCHEMA_VERSION in src/state/db.py "
-            f"and re-pin with: python scripts/check_schema_version.py --write-pin\n"
+            f"SCHEMA DRIFT — re-pin with: python scripts/check_schema_fingerprint.py --write-pin\n"
             f"{r.stdout}{r.stderr}",
             returncode=1,
         )

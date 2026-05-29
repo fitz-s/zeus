@@ -78,7 +78,12 @@ CALIBRATION_PAIRS_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     # boundary as store.py; routing every internal calibration query through
     # store.py is over-abstraction. Same pattern as blocked_oos / effective_sample_size.
     "drift_detector.py",    # src/calibration/drift_detector.py — K2_struct approved
-    "retrain_trigger_v2.py",  # src/calibration/retrain_trigger_v2.py — K2_struct approved
+    "drift_refit_arm.py",  # src/calibration/drift_refit_arm.py — K2_struct approved
+    # B3 (2026-05-28): calibration_pairs_v2 renamed to calibration_pairs.
+    # Both files queried calibration_pairs_v2 directly (K2 exempt) and now
+    # query the canonical name. Same domain-internal-query rationale as above.
+    "decision_integrity_quarantine.py",  # src/state/decision_integrity_quarantine.py — K2_struct approved
+    "calibration_transfer_policy.py",    # src/data/calibration_transfer_policy.py — K2_struct approved
 })
 
 # H3 (2026-04-24): forbid bare SELECT FROM/JOIN settlements without a
@@ -122,15 +127,15 @@ _SETTLEMENTS_TABLE_REF_RE = re.compile(
 # Slice A1b (PR #19 phase 4 closeout, 2026-04-26): twin pattern for
 # calibration_pairs_v2 — extends the settlements metric-predicate
 # antibody to the dual-track v2 calibration table. Phase 4 audit
-# confirmed all 5 current v2 reader sites (refit_platt_v2.py:92,113;
-# rebuild_calibration_pairs_v2.py:198,205; verify_truth_surfaces.py:1631;
+# confirmed all 5 current v2 reader sites (refit_platt.py:92,113;
+# rebuild_calibration_pairs.py:198,205; verify_truth_surfaces.py:1631;
 # backfill_tigge_snapshot_p_raw_v2.py:132) include WHERE temperature_
 # metric = ?. This lint ensures FUTURE readers conform.
-_CALIBRATION_PAIRS_V2_TABLE_REF_RE = re.compile(
+_CALIBRATION_PAIRS_TABLE_REF_RE = re.compile(
     rf"""
     \b(?P<op>FROM|JOIN)\s+
     (?:(?P<schema>{_SQL_IDENTIFIER_RE})\s*\.\s*)?
-    (?P<table>"calibration_pairs_v2"|`calibration_pairs_v2`|\[calibration_pairs_v2\]|calibration_pairs_v2(?![A-Za-z0-9_$]))
+    (?P<table>"calibration_pairs"|`calibration_pairs`|\[calibration_pairs\]|calibration_pairs(?![A-Za-z0-9_$]))
     (?P<tail>\s+(?:AS\s+)?(?P<alias>[A-Za-z_][A-Za-z0-9_$]*))?
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -138,7 +143,7 @@ _CALIBRATION_PAIRS_V2_TABLE_REF_RE = re.compile(
 # Allowlist for files that legitimately need cross-metric diagnostic
 # reads (typically operator audit scripts). New entries require
 # operator justification at PR review.
-CALIBRATION_PAIRS_V2_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
+CALIBRATION_PAIRS_METRIC_SELECT_ALLOWLIST: frozenset[str] = frozenset({
     # P4-fix3 (post-review critic M1, 2026-04-26): rationale corrected.
     # verify_truth_surfaces.py contains TWO interacting reads:
     #   (a) L200 `_count_params(cur, table, where, params)` helper using
@@ -667,7 +672,7 @@ def _table_aliases_for_re(sql: str, ref_re: re.Pattern[str]) -> list[str | None]
     """Generic table-alias extractor parameterized by the table-ref regex.
 
     Replaces the prior _settlements_table_aliases and
-    _calibration_pairs_v2_table_aliases clones.
+    _calibration_pairs_table_aliases clones.
     """
     aliases: list[str | None] = []
     for match in ref_re.finditer(sql):
@@ -684,7 +689,7 @@ def _has_metric_predicate_for_table(
     """Generic temperature_metric predicate check parameterized by table name.
 
     Replaces the prior _has_settlements_metric_predicate and
-    _has_calibration_pairs_v2_metric_predicate clones.
+    _has_calibration_pairs_metric_predicate clones.
     """
     unqualified = re.compile(
         rf"(?<![A-Za-z0-9_$.])temperature_metric\s*{_METRIC_COMPARISON_OP_RE}",
@@ -717,17 +722,17 @@ def _has_settlements_metric_predicate(sql: str, aliases: list[str | None]) -> bo
     return _has_metric_predicate_for_table(sql, "settlements", aliases)
 
 
-def _calibration_pairs_v2_table_aliases(sql: str) -> list[str | None]:
-    return _table_aliases_for_re(sql, _CALIBRATION_PAIRS_V2_TABLE_REF_RE)
+def _calibration_pairs_table_aliases(sql: str) -> list[str | None]:
+    return _table_aliases_for_re(sql, _CALIBRATION_PAIRS_TABLE_REF_RE)
 
 
-def _has_calibration_pairs_v2_metric_predicate(
+def _has_calibration_pairs_metric_predicate(
     sql: str, aliases: list[str | None]
 ) -> bool:
-    return _has_metric_predicate_for_table(sql, "calibration_pairs_v2", aliases)
+    return _has_metric_predicate_for_table(sql, "calibration_pairs", aliases)
 
 
-def _check_calibration_pairs_v2_metric_filter(
+def _check_calibration_pairs_metric_filter(
     py_file: Path, content: str
 ) -> list[str]:
     """A1b: every calibration_pairs_v2 SELECT/JOIN must filter by metric.
@@ -743,7 +748,7 @@ def _check_calibration_pairs_v2_metric_filter(
         ).as_posix()
     except ValueError:
         repo_relative = py_file.as_posix()
-    if repo_relative in CALIBRATION_PAIRS_V2_METRIC_SELECT_ALLOWLIST:
+    if repo_relative in CALIBRATION_PAIRS_METRIC_SELECT_ALLOWLIST:
         return []
     if "migrations" in py_file.parts or "tests" in py_file.parts:
         return []
@@ -753,8 +758,8 @@ def _check_calibration_pairs_v2_metric_filter(
 
     for start_lineno, end_lineno, sql in _sql_call_literal_args(content):
         normalized_sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
-        aliases = _calibration_pairs_v2_table_aliases(normalized_sql)
-        if aliases and not _has_calibration_pairs_v2_metric_predicate(
+        aliases = _calibration_pairs_table_aliases(normalized_sql)
+        if aliases and not _has_calibration_pairs_metric_predicate(
             normalized_sql, aliases,
         ):
             line = (
@@ -828,7 +833,7 @@ def run_linter(src_path: Path) -> int:
         metric_violations = _check_settlements_metric_filter(py_file, content)
         # Slice A1b (PR #19 phase 4 closeout, 2026-04-26): twin check for
         # calibration_pairs_v2 metric predicate enforcement.
-        cal_v2_metric_violations = _check_calibration_pairs_v2_metric_filter(
+        cal_v2_metric_violations = _check_calibration_pairs_metric_filter(
             py_file, content
         )
         metric_violations = metric_violations + cal_v2_metric_violations

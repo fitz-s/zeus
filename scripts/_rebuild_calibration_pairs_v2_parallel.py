@@ -5,7 +5,7 @@
 # P2 (2026-05-25): DataVersionQuarantinedError caught per-snapshot in parallel path.
 # Purpose: Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs_v2.
 # Authority basis: redesign after city-level multiprocessing failed under SQLite WAL writer-lock contention (2026-05-11).
-# Reuse: imported lazily from scripts/rebuild_calibration_pairs_v2.py rebuild_v2() when --workers>1.
+# Reuse: imported lazily from scripts/rebuild_calibration_pairs.py rebuild_v2() when --workers>1.
 
 """Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs_v2.
 

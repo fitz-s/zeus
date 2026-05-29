@@ -2,7 +2,7 @@
 
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
-# Authority basis: live-DB inspection (state/zeus-world.db, state/zeus-forecasts.db), read of scripts/promote_platt_models_v2.py, src/calibration/manager.py + store.py, and ENS_REFIT_MATH_ROI_2026-05-25.md (opus verdict).
+# Authority basis: live-DB inspection (state/zeus-world.db, state/zeus-forecasts.db), read of scripts/promote_platt.py, src/calibration/manager.py + store.py, and ENS_REFIT_MATH_ROI_2026-05-25.md (opus verdict).
 
 ## TL;DR — "replace the db" is not a DB copy
 Shipping full_transport to live (#64) is a **code + data + config** change, not a table swap. Three hard facts, all verified against the live DBs and the sanctioned tooling:
@@ -28,16 +28,16 @@ Refit staging totals: 160 platt models (136 HIGH + 16 LOW-v1 + 8 LOW-cw) vs live
 **Why partial despite a "complete" sentinel:** full.db `zeus_meta` carries `calibration_pairs_v2_rebuild_complete` for high+low with `{"completed": true, city=all, start=all, end=all}` — but that sentinel attests the **pairs rebuild** (the 10k-MC pairs, complete for all cities), NOT the **Platt fitting** (which only ran for 71 HIGH / 8 LOW buckets). Pairs-complete ≠ Platt-complete.
 
 ## Sanctioned tooling + gotchas
-- `scripts/promote_platt_models_v2.py` (platt → world.db) and `scripts/promote_calibration_pairs_v2.py` (pairs → forecasts.db). Both: dry-run default, gzip backup + rollback, `--commit` to apply.
+- `scripts/promote_platt.py` (platt → world.db) and `scripts/promote_calibration.py` (pairs → forecasts.db). Both: dry-run default, gzip backup + rollback, `--commit` to apply.
 - **Replace semantics:** `cmd_promote` does `DELETE FROM platt_models_v2 WHERE data_version IN (...)` then INSERT stage rows. Filtered by **data_version**, which the refit shares with live → blanket promote orphans uncovered buckets (the table above).
-- **Sentinel gate false-refuse:** `inspect`/`promote` report **NOT READY** for high/low/low_contract because of a writer↔reader schema mismatch — refit writes payload `{"completed": true}` + `data_version=all`; the script's `_sentinel_status_for_metrics` (`promote_platt_models_v2.py:219-228`) requires payload `status=="complete"` AND the *specific* data_version. This is a likely real bug (refit_platt_v2 / rebuild writer vs promote reader), independent of the coverage issue. Do not paper over it with `--allow-incomplete`.
+- **Sentinel gate false-refuse:** `inspect`/`promote` report **NOT READY** for high/low/low_contract because of a writer↔reader schema mismatch — refit writes payload `{"completed": true}` + `data_version=all`; the script's `_sentinel_status_for_metrics` (`promote_platt.py:219-228`) requires payload `status=="complete"` AND the *specific* data_version. This is a likely real bug (refit_platt / rebuild writer vs promote reader), independent of the coverage issue. Do not paper over it with `--allow-incomplete`.
 - **Empty live pin → silent-takeover risk:** `config/settings.json::calibration.pin` is currently `{frozen_as_of: null, model_keys: {}}`. The live loader defaults to "newest is_active=VERIFIED row wins" (`src/calibration/manager.py:47-52`). Inserting the refit's 158 VERIFIED models (fitted today) would let them auto-win for covered buckets with **no explicit blessing** — the exact silent takeover the pin was designed to prevent. The pin must be set explicitly as part of any ship.
 - **model_bias is NOT the ship layer:** `model_bias` is 0 rows in the refit DB. full_transport is baked into `calibration_pairs_v2` (MC run with ft) and the Platt `model_key` suffix `:emf=full_transport_v1` (`src/calibration/store.py:617`). No model_bias migration needed.
 
 ## Recommended staged ship (copy-first; HK HIGH carved out)
 1. **Wire ft into live p_raw** (code): call the predictive-error model in the live p_raw generation path so live emits ft-corrected p_raw matching the trained Platt input space. This is the substance of #64.
 2. **Fix the sentinel writer↔reader mismatch** OR add an explicit blessing path; do not bypass the gate.
-3. **Promote on a COPY of prod first**: clone world.db + forecasts.db, run `promote_calibration_pairs_v2 --commit` + `promote_platt_models_v2 --commit` against the copy, boot a daemon against the copy, confirm it reads ft + bins sane.
+3. **Promote on a COPY of prod first**: clone world.db + forecasts.db, run `promote_calibration --commit` + `promote_platt --commit` against the copy, boot a daemon against the copy, confirm it reads ft + bins sane.
 4. **Selective Platt (ECE-gated):** per ENS_REFIT_MATH_ROI §4.2, apply Platt only where per-cohort ECE>0.005; else p_raw-direct. So the partial Platt coverage is acceptable — most buckets ride the ft p_raw win, not Platt.
 5. **Pin the 44 shipping cohorts** in `calibration.pin.model_keys`; bump `frozen_as_of`. **Carve out HK HIGH** (exclude from pin). Miami HIGH conditional (re-measure on overlapping dates first).
 6. **Schema-bump + coordinated daemon restart** (per schema-migration discipline; daemon checks world schema, retries, else SystemExit).

@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=never
-# Purpose: DB I/O tests: degC unit normalization, authority/contributor/causality/boundary filters, leakage cutoff, LOW metric, model_bias_ens_v2 store, read safety.
+# Purpose: DB I/O tests: degC unit normalization, authority/contributor/causality/boundary filters, leakage cutoff, LOW metric, model_bias_ens store, read safety.
 # Reuse: Inspect ens_bias_repo before reuse.
-"""TDD tests for the ENS bias DB I/O layer (residual loader + model_bias_ens_v2 store).
+"""TDD tests for the ENS bias DB I/O layer (residual loader + model_bias_ens store).
 
 In-memory fixture with the columns the loader reads. Residuals are normalized to
 CANONICAL degC (members + settlement share the city's native unit, read from
@@ -32,15 +32,15 @@ def conn():
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
     c.execute(
-        """CREATE TABLE ensemble_snapshots_v2(
-            city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
+        """CREATE TABLE ensemble_snapshots(
+            city TEXT, target_date TEXT, temperature_metric TEXT, dataset_id TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
             contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
             training_allowed INTEGER, causality_status TEXT, authority TEXT,
             issue_time TEXT)"""
     )
     c.execute(
-        """CREATE TABLE settlements_v2(
+        """CREATE TABLE settlement_outcomes(
             city TEXT, target_date TEXT, temperature_metric TEXT, settlement_value REAL,
             authority TEXT)"""
     )
@@ -51,14 +51,14 @@ def _snap(conn, city, date, members, *, unit="C", dv=OPD, metric="high", lead=24
           avail="2026-05-10T00:00:00Z", contributes=1, boundary=0, training=1,
           causality="OK", authority="VERIFIED", issue_time=None):
     conn.execute(
-        "INSERT INTO ensemble_snapshots_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (city, date, metric, dv, json.dumps(members), unit, lead, avail,
          contributes, boundary, training, causality, authority, issue_time),
     )
 
 
 def _settle(conn, city, date, value, *, metric="high", authority="VERIFIED"):
-    conn.execute("INSERT INTO settlements_v2 VALUES (?,?,?,?,?)",
+    conn.execute("INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)",
                  (city, date, metric, value, authority))
 
 
@@ -157,7 +157,7 @@ def test_low_metric_residual_sign(conn):
 
 # ---- Blocker 3 + 5: store roundtrip with lineage, read safety ----
 
-def test_model_bias_ens_v2_roundtrip_with_lineage(conn):
+def test_model_bias_ens_roundtrip_with_lineage(conn):
     init_ens_bias_schema(conn)
     write_bias_model(
         conn, city="San Francisco", season="MAM", month=5, metric="high",
@@ -276,7 +276,7 @@ def test_write_bias_model_persists_canonical_extension_fields(conn):
     """write_bias_model writes all 13 canonical extension fields when the columns exist."""
     import sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate
+    from scripts.migrate_model_bias_ens_canonical_fields import migrate
     init_ens_bias_schema(conn)
     migrate(conn, dry_run=False)
     conn.commit()
@@ -326,7 +326,7 @@ def test_relationship_unbiased_high_cohort_effective_bias_near_zero(conn):
     """
     import random, sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-    from scripts.migrate_model_bias_ens_v2_canonical_fields import migrate
+    from scripts.migrate_model_bias_ens_canonical_fields import migrate
     from src.calibration.ens_error_model import fit_predictive_error_bucket
     init_ens_bias_schema(conn)
     migrate(conn, dry_run=False)

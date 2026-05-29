@@ -172,7 +172,7 @@ phase_B_uplift:
   earliest_plausible: "2026-05-20"
   cycle_stratified_coverage: "2026-06-01"
   steps: >
-    1. Extend rebuild_calibration_pairs_v2.py for ecmwf_opendata_* data_version.
+    1. Extend rebuild_calibration_pairs.py for ecmwf_opendata_* data_version.
     2. Run OOS evaluator (evaluate_calibration_transfer_oos.py) for cross-domain routes.
     3. Verify physical-object equivalence plus brier_diff near zero before any LIVE_ELIGIBLE row.
     4. Operator flips ZEUS_CALIBRATION_TRANSFER_OOS_EVAL_ENABLED=true in plist.

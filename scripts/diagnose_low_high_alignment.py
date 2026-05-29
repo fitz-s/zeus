@@ -39,8 +39,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-world.db"
 REQUIRED_TABLES = (
-    "ensemble_snapshots_v2",
-    "platt_models_v2",
+    "ensemble_snapshots",
+    "platt_models",
 )
 
 CONTRACT_OBJECT_REQUIRED_FIELDS = (
@@ -53,7 +53,7 @@ CONTRACT_OBJECT_REQUIRED_FIELDS = (
     "settlement_unit",
     "settlement_rounding_policy",
     "bin_grid_id",
-    "bin_schema_version",
+    "bin_schema_id",
     "forecast_source_id",
     "forecast_issue_time",
     "forecast_window_start_utc",
@@ -140,7 +140,7 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
 
 
 def _contract_evidence_schema_gap(conn: sqlite3.Connection) -> dict[str, Any]:
-    columns = _table_columns(conn, "ensemble_snapshots_v2")
+    columns = _table_columns(conn, "ensemble_snapshots")
     aliases = {
         "target_local_date": "target_date",
         "forecast_issue_time": "issue_time",
@@ -160,7 +160,7 @@ def _contract_evidence_schema_gap(conn: sqlite3.Connection) -> dict[str, Any]:
             continue
         missing.append(field)
     return {
-        "table": "ensemble_snapshots_v2",
+        "table": "ensemble_snapshots",
         "present_required_fields": present,
         "missing_required_fields": missing,
         "alias_satisfied_fields": alias_satisfied,
@@ -174,8 +174,8 @@ def _snapshot_eligibility(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         SELECT
             COALESCE(temperature_metric, 'unknown') AS metric,
             CASE
-                WHEN COALESCE(data_version, '') LIKE 'tigge_%' THEN 'tigge_mars'
-                WHEN COALESCE(data_version, '') LIKE 'ecmwf_opendata_%' THEN 'ecmwf_open_data'
+                WHEN COALESCE(dataset_id, '') LIKE 'tigge_%' THEN 'tigge_mars'
+                WHEN COALESCE(dataset_id, '') LIKE 'ecmwf_opendata_%' THEN 'ecmwf_open_data'
                 ELSE 'unknown'
             END AS source_family,
             COUNT(*) AS total_snapshots,
@@ -185,7 +185,7 @@ def _snapshot_eligibility(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 AS boundary_rejected_snapshots,
             SUM(CASE WHEN training_allowed = 0 AND causality_status = 'OK' THEN 1 ELSE 0 END)
                 AS ok_but_not_training_snapshots
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         GROUP BY metric, source_family
         ORDER BY metric, source_family
         """
@@ -212,8 +212,8 @@ def _low_city_boundary_loss(conn: sqlite3.Connection, limit: int) -> list[dict[s
         SELECT
             city,
             CASE
-                WHEN COALESCE(data_version, '') LIKE 'tigge_%' THEN 'tigge_mars'
-                WHEN COALESCE(data_version, '') LIKE 'ecmwf_opendata_%' THEN 'ecmwf_open_data'
+                WHEN COALESCE(dataset_id, '') LIKE 'tigge_%' THEN 'tigge_mars'
+                WHEN COALESCE(dataset_id, '') LIKE 'ecmwf_opendata_%' THEN 'ecmwf_open_data'
                 ELSE 'unknown'
             END AS source_family,
             COUNT(*) AS total_snapshots,
@@ -221,7 +221,7 @@ def _low_city_boundary_loss(conn: sqlite3.Connection, limit: int) -> list[dict[s
                 AS baseline_training_snapshots,
             SUM(CASE WHEN causality_status = 'REJECTED_BOUNDARY_AMBIGUOUS' THEN 1 ELSE 0 END)
                 AS boundary_rejected_snapshots
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE temperature_metric = 'low'
         GROUP BY city, source_family
         HAVING total_snapshots > 0
@@ -263,7 +263,7 @@ def _platt_maturity(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             COUNT(*) AS model_count,
             MIN(COALESCE(n_samples, 0)) AS min_n_samples,
             MAX(COALESCE(n_samples, 0)) AS max_n_samples
-        FROM platt_models_v2
+        FROM platt_models
         GROUP BY metric, authority, is_active, maturity_bucket
         ORDER BY metric, authority, is_active DESC, maturity_bucket
         """
@@ -287,7 +287,7 @@ def _quarantined_negative_a(conn: sqlite3.Connection, limit: int) -> list[dict[s
             param_A,
             authority,
             is_active
-        FROM platt_models_v2
+        FROM platt_models
         WHERE COALESCE(is_active, 0) = 1
           AND authority = 'QUARANTINED'
           AND param_A < 0
@@ -312,7 +312,7 @@ def _active_domain_coverage(conn: sqlite3.Connection) -> dict[str, Any]:
                 COALESCE(data_version, '') AS data_version,
                 COALESCE(input_space, '') AS input_space,
                 temperature_metric
-            FROM platt_models_v2
+            FROM platt_models
             WHERE COALESCE(is_active, 0) = 1
               AND authority = 'VERIFIED'
         ),
@@ -342,7 +342,7 @@ def _active_domain_coverage(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def _persisted_low_window_evidence(conn: sqlite3.Connection) -> dict[str, Any]:
-    columns = _table_columns(conn, "ensemble_snapshots_v2")
+    columns = _table_columns(conn, "ensemble_snapshots")
     required = {
         "forecast_window_attribution_status",
         "contributes_to_target_extrema",
@@ -381,7 +381,7 @@ def _persisted_low_window_evidence(conn: sqlite3.Connection) -> dict[str, Any]:
                   OR forecast_window_attribution_status = ''
                   OR forecast_window_attribution_status = 'UNKNOWN'
                 THEN 1 ELSE 0 END) AS missing_or_unknown_window_evidence
-        FROM ensemble_snapshots_v2
+        FROM ensemble_snapshots
         WHERE temperature_metric = 'low'
         """
     ).fetchone()

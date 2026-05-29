@@ -2,13 +2,13 @@
 # Last reused or audited: 2026-05-19
 # Authority basis: pr36_scaffold.md §7 INV-alpha-provenance antibody
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
-# Purpose: Every ensemble_snapshots_v2 write via PR6 path has non-null raw_orderbook_hash_transition_delta_ms (INV-alpha-provenance antibody).
+# Purpose: Every ensemble_snapshots write via PR6 path has non-null raw_orderbook_hash_transition_delta_ms (INV-alpha-provenance antibody).
 # Reuse: standalone; no shared fixtures with timing-chain tests
 """INV-alpha-provenance antibody: raw_orderbook_hash_transition_delta_ms must be non-null
-on every ensemble_snapshots_v2 row written via the PR6 capture path.
+on every ensemble_snapshots row written via the PR6 capture path.
 
 Background:
-  The raw_orderbook_hash_transition_delta_ms field in ensemble_snapshots_v2 is the
+  The raw_orderbook_hash_transition_delta_ms field in ensemble_snapshots is the
   alpha-proxy signal: it records how long ago the orderbook hash last changed.
   A non-null value is evidence that the PR6 writer path fired correctly.
   NULL values on post-PR6 rows indicate a writer bypass or regression.
@@ -145,7 +145,7 @@ def test_antibody_cache_key_is_condition_id():
 
 
 # ---------------------------------------------------------------------------
-# Antibody: ensemble_snapshots_v2 writer includes delta in return dict
+# Antibody: ensemble_snapshots writer includes delta in return dict
 # ---------------------------------------------------------------------------
 
 def test_antibody_return_dict_contains_delta_key():

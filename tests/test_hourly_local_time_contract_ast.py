@@ -16,9 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 HOURLY_SCRIPT_PATHS = (
-    "scripts/backfill_obs_v2.py",
-    "scripts/fill_obs_v2_dst_gaps.py",
-    "scripts/fill_obs_v2_meteostat.py",
+    "scripts/backfill_obs.py",
+    "scripts/fill_obs_dst_gaps.py",
     "scripts/hko_ingest_tick.py",
 )
 

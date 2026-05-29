@@ -246,7 +246,7 @@ During the PR #64 investigation, the CLOB `/clob-markets/<cid>` response was fou
 `GET /fee-rate?token_id=<yes_token>` returns `{"base_fee": 1000}` (bps). These are numerically different
 (5% fraction ≠ 10% bps), suggesting they measure different fee components (LP/maker schedule vs taker
 base fee). The `fd.r` field is not in `canonicalize_fee_details`'s recognized field list
-(`FEE_RATE_FRACTION_FIELDS` / `FEE_RATE_BPS_FIELDS` in `src/contracts/executable_market_snapshot_v2.py:53`).
+(`FEE_RATE_FRACTION_FIELDS` / `FEE_RATE_BPS_FIELDS` in `src/contracts/executable_market_snapshot.py:53`).
 
 **If Polymarket's protocol documentation confirms that `fd.r` is the same semantic quantity as
 `/fee-rate.base_fee` (just expressed as fraction vs bps), the per-outcome fee call can be eliminated:

@@ -25,7 +25,7 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, Metri
 
 # 2026-05-01: Open Data ENS data_versions accepted alongside the TIGGE archive
 # data_versions. Same temperature_metric / observation_field spec — different
-# source-provenance prefix. Both rows can coexist in ensemble_snapshots_v2 for
+# source-provenance prefix. Both rows can coexist in ensemble_snapshots for
 # the same (city, target_date, metric); readers use
 # data_version_priority_for_metric() to prefer Open Data when present.
 # 2026-05-07: mx2t3/mn2t3 rename. New versions are the active write path.

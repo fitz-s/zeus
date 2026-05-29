@@ -243,14 +243,14 @@ def test_docs_navigation_cleanup_routes_without_settlement_replay_semantic_edit(
 def test_evaluator_script_import_bridge_admits_evaluator_but_not_script_side_effect():
     digest = build_digest(
         "evaluator script import bridge for downstream evaluator import safety",
-        ["src/engine/evaluator.py", "scripts/rebuild_calibration_pairs_v2.py"],
+        ["src/engine/evaluator.py", "scripts/rebuild_calibration_pairs.py"],
         write_intent="edit",
     )
 
     assert digest["profile"] == "evaluator script import bridge"
     assert digest["admission"]["status"] == "scope_expansion_required"
     assert "src/engine/evaluator.py" in digest["admission"]["admitted_files"]
-    assert "scripts/rebuild_calibration_pairs_v2.py" in digest["admission"]["out_of_scope_files"]
+    assert "scripts/rebuild_calibration_pairs.py" in digest["admission"]["out_of_scope_files"]
 
 
 def test_source_watch_venus_sensing_integration_routes_to_script_profile():
@@ -1205,7 +1205,7 @@ def test_phase1k_remediation_rereview_wording_keeps_forbidden_files_out_of_scope
 
 def test_dsa13_canonical_snapshot_authority_routes_to_phase1l_profile():
     digest = build_digest(
-        "DSA-13 canonical snapshot authority ensemble_snapshots_v2 canonical "
+        "DSA-13 canonical snapshot authority ensemble_snapshots canonical "
         "live snapshots legacy ensemble_snapshots projection diagnostic no "
         "production DB mutation no live venue side effects no source routing "
         "no Paris config edit",

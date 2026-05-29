@@ -130,7 +130,7 @@ class TestCrossingDecisionIntegrationFlag:
     ) -> None:
         monkeypatch.setattr("src.state.snapshot_repo.get_snapshot", lambda _conn, _id: snapshot)
         monkeypatch.setattr(
-            "src.contracts.executable_market_snapshot_v2.is_fresh",
+            "src.contracts.executable_market_snapshot.is_fresh",
             lambda *_args, **_kwargs: True,
         )
         monkeypatch.setattr(

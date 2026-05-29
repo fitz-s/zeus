@@ -17,7 +17,7 @@ risk_rules:
     - src/execution/**
     - src/venue/**
     - src/data/market_scanner.py
-    - src/contracts/executable_market_snapshot_v2.py
+    - src/contracts/executable_market_snapshot.py
     - src/state/db.py
     - src/state/schema/**
     - scripts/migrations/**
@@ -34,7 +34,7 @@ invariants:
     tests:
       - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
       - tests/test_market_scanner_negrisk.py
-      - tests/test_executable_market_snapshot_v2.py
+      - tests/test_executable_market_snapshot.py
   MP-MD-002:
     description: "Market identity fields round-trip without label/punctuation inference."
     tests: [tests/test_market_scanner_provenance.py]
@@ -154,13 +154,13 @@ segments:
     invariant_ids: [MP-MD-001, MP-MD-002, MP-MD-003]
     files:
       - src/data/market_scanner.py
-      - src/contracts/executable_market_snapshot_v2.py
+      - src/contracts/executable_market_snapshot.py
       - src/state/snapshot_repo.py
     relationship_tests:
       - tests/money_path/test_001_negrisk_tradeability_snapshot_submit.py
       - tests/test_market_scanner_negrisk.py
       - tests/test_market_scanner_provenance.py
-      - tests/test_executable_market_snapshot_v2.py
+      - tests/test_executable_market_snapshot.py
     future_object_rules:
       new_external_source_id: requires_source_authority_test
       new_market_identity_field: requires_identity_roundtrip_test

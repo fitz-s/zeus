@@ -566,7 +566,7 @@ def _validate_unit_authority(forecast: dict[str, Any], belief: dict[str, Any], f
     unit = forecast.get("unit")
     if unit not in {"F", "C"}:
         raise ValueError("forecast.unit missing or unsupported")
-    if forecast.get("unit_authority_source") not in {"ensemble_snapshots_v2.settlement_unit", "ensemble_snapshots_v2.members_unit"}:
+    if forecast.get("unit_authority_source") not in {"ensemble_snapshots.settlement_unit", "ensemble_snapshots.members_unit"}:
         raise ValueError("forecast.unit_authority_source missing")
     bin_units = tuple(str(item) for item in (family.get("bin_units") or ()))
     if not bin_units:
