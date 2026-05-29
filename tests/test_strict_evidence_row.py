@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import pytest
 
-# Will raise ImportError until _strict_evidence_row is extracted — that's the RED.
 from scripts.build_ens_residual_evidence import _strict_evidence_row
 
 
@@ -94,6 +93,43 @@ def test_opendata_residual_c_is_correct():
     expected = (74.0 - 32.0) * 5.0 / 9.0 - (77.0 - 32.0) * 5.0 / 9.0
     assert abs(row["residual_c"] - round(expected, 3)) < 0.01, (
         f"expected residual_c ~ {expected:.3f} but got {row['residual_c']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (a2) CANONICAL settlement_unit vocabulary {'F','C'} (the DB CHECK vocab).
+# The DB columns store settlement_unit as 'F'/'C' (not degF/degC). residual_celsius
+# must accept that vocabulary on the settlement side or the evidence path crashes on
+# every row whose settlement_unit comes from the canonical column. This is the RED
+# anchor for the residual_value {F,C}-vocab fix — pre-fix it raised ResidualUnitError.
+# ---------------------------------------------------------------------------
+
+def test_settlement_unit_canonical_F_vocab_residual_correct():
+    # members [72,74,76] F -> mean 74F -> 23.333C ; settlement 77 'F' -> 25.0C
+    # residual = -1.667C. Settlement unit is the canonical 'F' (DB CHECK vocab), NOT 'degF'.
+    e = _make_e(members_json="[72.0, 74.0, 76.0]", members_unit="F",
+                settlement_value_c=77.0, settlement_unit="F",
+                data_version="ecmwf_opendata_mx2t3_v1")
+    row = _strict_evidence_row(e, metric=_METRIC, lat=_CHICAGO_LAT)
+    assert row is not None
+    expected = (74.0 - 32.0) * 5.0 / 9.0 - (77.0 - 32.0) * 5.0 / 9.0
+    assert abs(row["residual_c"] - round(expected, 3)) < 0.01, (
+        f"canonical 'F' settlement vocab must produce residual ~{expected:.3f}, "
+        f"got {row['residual_c']} (residual_value must accept {{F,C}}, not only degF/degC)"
+    )
+
+
+def test_mixed_canonical_vocab_C_members_F_settlement():
+    # members [22,24] 'C' -> 23C ; settlement 73.4 'F' -> 23C ; residual ~0C.
+    # Both canonical-vocab AND mixed-unit: proves each side converts by its own unit.
+    e = _make_e(members_json="[22.0, 24.0]", members_unit="C",
+                settlement_value_c=73.4, settlement_unit="F",
+                data_version="ecmwf_opendata_mx2t3_v1")
+    row = _strict_evidence_row(e, metric=_METRIC, lat=_CHICAGO_LAT)
+    assert row is not None
+    assert abs(row["residual_c"]) < 1.0, (
+        f"residual_c={row['residual_c']!r} — canonical mixed vocab (C members / F "
+        f"settlement) must be unit-correct, not the 50C corruption"
     )
 
 

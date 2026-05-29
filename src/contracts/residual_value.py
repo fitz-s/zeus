@@ -18,7 +18,14 @@ from __future__ import annotations
 import statistics
 from collections.abc import Sequence
 
-_VALID_UNITS = frozenset({"degC", "degF"})
+# Two unit vocabularies meet in the residual: ensemble members carry the
+# degC/degF convention; the settlement value carries the schema's settlement_unit
+# vocabulary {'F','C'} (CHECK-enforced on ensemble_snapshots + settlement_outcomes,
+# D-S1). The residual converts EACH side by ITS OWN unit, so BOTH vocabularies must
+# be accepted here — rejecting 'F'/'C' would crash the evidence path on every row
+# whose settlement_unit comes from the canonical column (the bug this module exists
+# to prevent, just one vocabulary over). Kelvin / None are still rejected.
+_VALID_UNITS = frozenset({"degC", "degF", "C", "F"})
 
 
 class ResidualUnitError(ValueError):
@@ -30,14 +37,14 @@ class ResidualUnitError(ValueError):
 
 
 def _to_celsius(value: float, unit: str | None) -> float:
-    if unit not in _VALID_UNITS:
-        raise ResidualUnitError(
-            f"residual refused: temperature unit {unit!r} is not one of "
-            f"{sorted(_VALID_UNITS)}. Convert/declare the unit before forming a residual."
-        )
-    if unit == "degF":
+    if unit in ("degF", "F"):
         return (value - 32.0) * 5.0 / 9.0
-    return value
+    if unit in ("degC", "C"):
+        return value
+    raise ResidualUnitError(
+        f"residual refused: temperature unit {unit!r} is not one of "
+        f"{sorted(_VALID_UNITS)}. Convert/declare the unit before forming a residual."
+    )
 
 
 def residual_celsius(
