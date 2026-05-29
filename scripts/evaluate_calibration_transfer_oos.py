@@ -15,7 +15,7 @@
 """OOS evaluator: writes ``validated_calibration_transfers`` rows.
 
 Phase X.2 of the calibration-transfer evidence pipeline.  Iterates all
-active Platt models in ``platt_models_v2``, skips same-domain routes
+active Platt models in ``platt_models``, skips same-domain routes
 (handled by the fast-path in ``evaluate_calibration_transfer_policy_with_evidence``),
 and for each cross-domain route fetches held-out calibration pairs, applies
 the source-trained Platt, computes the OOS Brier score, and writes/updates
@@ -227,7 +227,7 @@ def _iter_active_platt_models(conn, limit: int | None = None) -> Iterator[dict]:
         SELECT model_key, temperature_metric AS metric, cluster, season,
                data_version, param_A, param_B, param_C, input_space,
                brier_insample, n_samples, cycle, source_id, horizon_profile
-          FROM world.platt_models_v2
+          FROM world.platt_models
          WHERE is_active = 1
            AND authority = 'VERIFIED'
            AND input_space = 'raw_probability'

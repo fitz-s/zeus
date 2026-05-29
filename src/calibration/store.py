@@ -1041,7 +1041,7 @@ def get_active_platt_model(
     data_version = getattr(metric_identity, "data_version", None)
     input_space = getattr(metric_identity, "input_space", "width_normalized_density")
 
-    raw = load_platt_model_v2(
+    raw = load_platt_model(
         world_conn,
         temperature_metric=temperature_metric,
         cluster=city,

@@ -574,7 +574,7 @@ def ingest_json_file(
         existing = conn.execute(
             "SELECT manifest_hash, provenance_json FROM ensemble_snapshots "
             "WHERE city=? AND target_date=? "
-            "AND temperature_metric=? AND issue_time=? AND data_version=?",
+            "AND temperature_metric=? AND issue_time=? AND dataset_id=?",
             (city, target_date, metric.temperature_metric, issue_time, data_version),
         ).fetchone()
         _t_sel_ms = (time.monotonic() - _t_sel0) * 1000
@@ -649,7 +649,7 @@ def ingest_json_file(
         lead_hours=lead_hours,
         members_json=json.dumps(members),
         model_version=model_version,
-        data_version=data_version,
+        dataset_id=data_version,
         source_id=source_run_context.source_id if source_run_context else None,
         source_transport=source_run_context.source_transport if source_run_context else None,
         source_run_id=source_run_context.source_run_id if source_run_context else None,
@@ -717,7 +717,7 @@ def ingest_json_file(
                   AND target_date = :target_date
                   AND temperature_metric = :temperature_metric
                   AND issue_time = :issue_time
-                  AND data_version = :data_version
+                  AND dataset_id = :dataset_id
                 """,
                 row,
             ).rowcount
@@ -729,7 +729,7 @@ def ingest_json_file(
             INSERT OR IGNORE INTO ensemble_snapshots
             (city, target_date, temperature_metric, physical_quantity, observation_field,
              issue_time, valid_time, available_at, fetch_time, lead_hours,
-             members_json, model_version, data_version, source_id, source_transport,
+             members_json, model_version, dataset_id, source_id, source_transport,
              source_run_id, release_calendar_key, source_cycle_time,
              source_release_time, source_available_at, training_allowed, causality_status,
              boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json,
@@ -743,7 +743,7 @@ def ingest_json_file(
             VALUES
             (:city, :target_date, :temperature_metric, :physical_quantity, :observation_field,
              :issue_time, :valid_time, :available_at, :fetch_time, :lead_hours,
-             :members_json, :model_version, :data_version, :source_id, :source_transport,
+             :members_json, :model_version, :dataset_id, :source_id, :source_transport,
              :source_run_id, :release_calendar_key, :source_cycle_time,
              :source_release_time, :source_available_at, :training_allowed, :causality_status,
              :boundary_ambiguous, :ambiguous_member_count, :manifest_hash, :provenance_json,

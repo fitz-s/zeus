@@ -135,7 +135,7 @@ def iter_training_snapshots(conn: sqlite3.Connection, spec: CalibrationMetricSpe
         SELECT *
         FROM ensemble_snapshots
         WHERE temperature_metric = ?
-          AND data_version = ?
+          AND dataset_id = ?
           AND training_allowed = 1
           AND causality_status = 'OK'
           AND authority = 'VERIFIED'
@@ -360,7 +360,7 @@ def _snapshot_source_id_expr(columns: set[str]) -> str:
     )
     return (
         f"COALESCE({source_column}, "
-        "CASE WHEN data_version LIKE 'ecmwf_opendata_%' "
+        "CASE WHEN dataset_id LIKE 'ecmwf_opendata_%' "
         "THEN 'ecmwf_open_data' ELSE 'tigge_mars' END)"
     )
 
@@ -873,7 +873,7 @@ def _low_contract_evidence_rejection(
     if spec.identity.temperature_metric != "low":
         return None
 
-    data_version = str(_row_value(snapshot, "data_version") or "")
+    data_version = str(_row_value(snapshot, "dataset_id") or "")
     evidence_present = any(
         _as_nonempty_text(_row_value(snapshot, field)) is not None
         for field in _LOW_CONTRACT_EVIDENCE_MARKER_FIELDS
@@ -957,7 +957,7 @@ def _fetch_eligible_snapshots_v2(
         where += " AND target_date <= ?"
         params.append(end_date)
     if data_version_filter:
-        where += " AND data_version = ?"
+        where += " AND dataset_id = ?"
         params.append(data_version_filter)
     if cycle_filter:
         where += f" AND {_snapshot_cycle_expr()} = ?"
@@ -1045,7 +1045,7 @@ def _scoped_pair_predicate(
         where_parts.append("target_date <= ?")
         params.append(end_date)
     if data_version_filter:
-        where_parts.append("data_version = ?")
+        where_parts.append("dataset_id = ?")
         params.append(data_version_filter)
     _append_optional_column_filter(
         where_parts, params, column="cycle", value=cycle_filter,
@@ -1198,7 +1198,7 @@ def _pre_compute_snapshot_v2(
     the downstream MC path is byte-identical to the legacy rebuild.
     """
     target_date = snapshot["target_date"]
-    data_version = snapshot["data_version"] or ""
+    data_version = snapshot["dataset_id"] or ""
 
     # Per-spec cross-check: write-time defense against cross-metric contamination (R-AU).
     if not spec.allows_data_version(data_version):
@@ -1314,7 +1314,7 @@ def _write_snapshot_pairs_v2(
     Mirrors the post-MC body of the legacy ``_process_snapshot_v2``.
     """
     target_date = snapshot["target_date"]
-    data_version = snapshot["data_version"] or ""
+    data_version = snapshot["dataset_id"] or ""
     source = ""  # ensemble_snapshots has no source column; INV-15 gates on data_version prefix
 
     grid = grid_for_city(city)
@@ -1490,7 +1490,7 @@ def _dry_run_evaluate_snapshot_v2(
 ) -> None:
     """Evaluate rebuild gates without writing calibration_pairs_v2 rows."""
     target_date = snapshot["target_date"]
-    data_version = snapshot["data_version"] or ""
+    data_version = snapshot["dataset_id"] or ""
 
     if not spec.allows_data_version(data_version):
         raise DataVersionQuarantinedError(
@@ -1617,7 +1617,7 @@ def rebuild_v2(
 
     eligible: list[sqlite3.Row] = []
     for snap in snapshots:
-        dv = snap["data_version"] or ""
+        dv = snap["dataset_id"] or ""
         if is_quarantined(dv):
             stats.snapshots_quarantined += 1
             print(f"  QUARANTINED snapshot_id={snap['snapshot_id']} data_version={dv!r}")
@@ -1668,7 +1668,7 @@ def rebuild_v2(
                 print(
                     f"  SPEC-QUARANTINED (dry-run skip) "
                     f"snapshot_id={snap['snapshot_id']} "
-                    f"data_version={snap['data_version']!r}: {_dve}"
+                    f"data_version={snap['dataset_id']!r}: {_dve}"
                 )
         print()
         print("[dry-run] no DB changes made.")
@@ -1804,7 +1804,7 @@ def rebuild_v2(
                         print(
                             f"  SPEC-QUARANTINED (live skip) "
                             f"snapshot_id={snap['snapshot_id']} "
-                            f"data_version={snap['data_version']!r}: {_dve}"
+                            f"data_version={snap['dataset_id']!r}: {_dve}"
                         )
                     if stats.snapshots_processed % 500 == 0 and stats.snapshots_processed > 0:
                         elapsed = time.monotonic() - start

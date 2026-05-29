@@ -333,7 +333,7 @@ def _fetch_affected_bucket_keys(
         params.append(cluster_filter)
     _append_multi_filter(where, params, "season", season_filter)
     if data_version_filter:
-        where.append("data_version = ?")
+        where.append("dataset_id = ?")
         params.append(data_version_filter)
     _append_optional_dimension_filter(
         where, params, column="cycle", value=cycle_filter, default="00", columns=columns,
@@ -351,19 +351,19 @@ def _fetch_affected_bucket_keys(
     source_expr = _dimension_expr(columns, "source_id", "tigge_mars")
     horizon_expr = _dimension_expr(columns, "horizon_profile", "full")
     rows = conn.execute(f"""
-        SELECT DISTINCT cluster, season, data_version,
+        SELECT DISTINCT cluster, season, dataset_id,
                {cycle_expr} AS cycle,
                {source_expr} AS source_id,
                {horizon_expr} AS horizon_profile
         FROM calibration_pairs
         WHERE {" AND ".join(where)}
-        ORDER BY cluster, season, data_version, cycle, source_id, horizon_profile
+        ORDER BY cluster, season, dataset_id, cycle, source_id, horizon_profile
     """, tuple(params)).fetchall()
     return [
         (
             str(row["cluster"]),
             str(row["season"]),
-            str(row["data_version"]),
+            str(row["dataset_id"]),
             str(row["cycle"]),
             str(row["source_id"]),
             str(row["horizon_profile"]),
@@ -385,7 +385,7 @@ def _append_bucket_key_filter(
         return
     clauses = []
     for cluster, season, data_version, cycle, source_id, horizon_profile in bucket_keys:
-        parts = ["cluster = ?", "season = ?", "data_version = ?"]
+        parts = ["cluster = ?", "season = ?", "dataset_id = ?"]
         values: list[object] = [cluster, season, data_version]
         if "cycle" in columns:
             parts.append("cycle = ?")
@@ -447,7 +447,7 @@ def _fetch_buckets(
         params.append(cluster_filter)
     _append_multi_filter(where, params, "season", season_filter)
     if data_version_filter:
-        where.append("data_version = ?")
+        where.append("dataset_id = ?")
         params.append(data_version_filter)
     _append_optional_dimension_filter(
         where, params, column="cycle", value=cycle_filter, default="00", columns=columns,
@@ -474,14 +474,14 @@ def _fetch_buckets(
     source_expr = _dimension_expr(columns, "source_id", "tigge_mars")
     horizon_expr = _dimension_expr(columns, "horizon_profile", "full")
     return conn.execute(f"""
-        SELECT cluster, season, data_version,
+        SELECT cluster, season, dataset_id,
                {cycle_expr} AS cycle,
                {source_expr} AS source_id,
                {horizon_expr} AS horizon_profile,
                COUNT(DISTINCT decision_group_id) AS n_eff
         FROM calibration_pairs
         WHERE {" AND ".join(where)}
-        GROUP BY cluster, season, data_version, {cycle_expr}, {source_expr}, {horizon_expr}
+        GROUP BY cluster, season, dataset_id, {cycle_expr}, {source_expr}, {horizon_expr}
         HAVING n_eff >= ?
     """, tuple(params)).fetchall()
 
@@ -504,7 +504,7 @@ def _fetch_pairs_for_bucket(
         "authority = 'VERIFIED'",
         "cluster = ?",
         "season = ?",
-        "data_version = ?",
+        "dataset_id = ?",
         "decision_group_id IS NOT NULL",
         "decision_group_id != ''",
         "p_raw IS NOT NULL",
@@ -979,7 +979,7 @@ def refit_v2(
         for bucket_idx, bucket in enumerate(buckets, start=1):
             cluster = bucket["cluster"]
             season = bucket["season"]
-            data_version = bucket["data_version"]
+            data_version = bucket["dataset_id"]
             cycle = bucket["cycle"]
             source_id = bucket["source_id"]
             horizon_profile = bucket["horizon_profile"]

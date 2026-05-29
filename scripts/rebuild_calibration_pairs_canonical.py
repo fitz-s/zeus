@@ -166,7 +166,7 @@ def _fetch_eligible_snapshots(
         params = (MIN_TRAINING_DATE, city_filter)
     sql = f"""
         SELECT snapshot_id, city, target_date, issue_time, lead_hours,
-               available_at, members_json, data_version
+               available_at, members_json, dataset_id
         FROM ensemble_snapshots
         {where}
         ORDER BY city, target_date, lead_hours
@@ -323,7 +323,7 @@ def _process_snapshot(
         city.name,
         target_date,
         snapshot["issue_time"],
-        str(snapshot["data_version"] or ""),
+        str(snapshot["dataset_id"] or ""),
     )
 
     pairs_this_snapshot = 0
@@ -400,7 +400,7 @@ def rebuild(
     unaudited_ids: list[int] = []
     eligible: list[sqlite3.Row] = []
     for snap in snapshots:
-        dv = (snap["data_version"] or "")
+        dv = (snap["dataset_id"] or "")
         if is_quarantined(dv):
             unaudited_ids.append(snap["snapshot_id"])
             if not allow_unaudited_ensemble:

@@ -205,7 +205,7 @@ def _row_exists(
               AND target_date = ?
               AND temperature_metric = 'low'
               AND issue_time = ?
-              AND data_version = ?
+              AND dataset_id = ?
             LIMIT 1
             """,
             (city, target_date, issue_time, data_version),
@@ -230,7 +230,7 @@ def _source_snapshot_row(
           AND target_date = ?
           AND temperature_metric = 'low'
           AND issue_time = ?
-          AND data_version = ?
+          AND dataset_id = ?
         LIMIT 1
         """,
         (city, target_date, issue_time, data_version),
@@ -348,7 +348,7 @@ def _build_recovery_row(
     )
     boundary_ambiguous = _recovery_boundary_ambiguous(evidence=evidence, payload=payload)
     row.update({
-        "data_version": source.recovery_data_version,
+        "dataset_id": source.recovery_data_version,
         "observation_field": LOW_LOCALDAY_MIN.observation_field,
         "physical_quantity": LOW_LOCALDAY_MIN.physical_quantity,
         "source_id": row.get("source_id") or source.source_id,

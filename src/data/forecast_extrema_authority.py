@@ -140,7 +140,7 @@ def classify_forecast_extrema_authority(
     ensemble_snapshots row always carries its own data_version).
     """
     if data_version is None:
-        dv = row.get("data_version")
+        dv = row.get("dataset_id")
         data_version = str(dv) if dv is not None else None
     # Read the contributes flag (0/1/None integer column).
     contributes_raw = row.get("contributes_to_target_extrema")

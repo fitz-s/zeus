@@ -150,7 +150,7 @@ ENSEMBLE_SNAPSHOT_PREFLIGHT_COLUMNS = (
     "fetch_time",
     "lead_hours",
     "members_json",
-    "data_version",
+    "dataset_id",  # B5: renamed from data_version in ensemble_snapshots
     "training_allowed",
     "causality_status",
     "authority",
@@ -169,7 +169,7 @@ CALIBRATION_PAIR_PREFLIGHT_COLUMNS = (
     "lead_days",
     "season",
     "cluster",
-    "data_version",
+    "dataset_id",  # B5: renamed from data_version in calibration_pairs
     "training_allowed",
     "causality_status",
     "authority",
@@ -1044,14 +1044,16 @@ def _add_legacy_settlement_check_result(
         report["blockers"].append({"code": code, "table": table, "count": count})
 
 
-def _settlements_v2_identity_incomplete(cur: sqlite3.Cursor) -> tuple[bool, str]:
-    table = "settlements_v2"
+def _settlement_outcomes_identity_incomplete(cur: sqlite3.Cursor) -> tuple[bool, str]:
+    # B3 (2026-05-28): renamed from _settlements_v2_identity_incomplete; table
+    # settlements_v2 → settlement_outcomes.
+    table = "settlement_outcomes"
     if not _table_exists(cur, table):
-        return True, "settlements_v2 table is missing"
+        return True, "settlement_outcomes table is missing"
 
     row_count = _count(cur, table)
     if row_count == 0:
-        return True, "settlements_v2 rows=0"
+        return True, "settlement_outcomes rows=0"
 
     columns = _columns(cur, table)
     missing_columns = [
@@ -1062,7 +1064,7 @@ def _settlements_v2_identity_incomplete(cur: sqlite3.Cursor) -> tuple[bool, str]
     if missing_columns:
         return (
             True,
-            "settlements_v2 lacks identity columns: " + ", ".join(missing_columns),
+            "settlement_outcomes lacks identity columns: " + ", ".join(missing_columns),
         )
 
     missing_identity = _count(
@@ -1073,10 +1075,10 @@ def _settlements_v2_identity_incomplete(cur: sqlite3.Cursor) -> tuple[bool, str]
     if missing_identity:
         return (
             True,
-            f"settlements_v2 rows with incomplete market identity={missing_identity}",
+            f"settlement_outcomes rows with incomplete market identity={missing_identity}",
         )
 
-    return False, f"settlements_v2 market identity rows={row_count}"
+    return False, f"settlement_outcomes market identity rows={row_count}"
 
 
 def _add_legacy_settlement_evidence_checks(
@@ -1222,7 +1224,7 @@ def _add_legacy_settlement_evidence_checks(
         detail=value_detail,
     )
 
-    v2_incomplete, v2_detail = _settlements_v2_identity_incomplete(cur)
+    v2_incomplete, v2_detail = _settlement_outcomes_identity_incomplete(cur)
     evidence_only_count = row_count if v2_incomplete else 0
     _add_legacy_settlement_check_result(
         report,
@@ -1295,12 +1297,12 @@ def _add_low_contract_evidence_preflight_check(
         _processable_attr_clause = ""
     required_training_where = f"""
         temperature_metric = 'low'
-        AND data_version IN ({placeholders})
+        AND dataset_id IN ({placeholders})
         AND COALESCE(training_allowed, 0) = 1
         AND UPPER(TRIM(CAST(authority AS TEXT))) = 'VERIFIED'
         AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
         {_processable_attr_clause}
-    """
+    """  # B5: dataset_id (renamed from data_version in ensemble_snapshots)
     missing_columns = [
         field for field in _LOW_CONTRACT_EVIDENCE_PREFLIGHT_FIELDS
         if field not in columns
@@ -1574,7 +1576,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             temperature_metric = ?
             AND physical_quantity IN ({pq_placeholders})
             AND observation_field = ?
-            AND data_version IN ({data_version_placeholders})
+            AND dataset_id IN ({data_version_placeholders})
             AND COALESCE(training_allowed, 0) = 1
             AND UPPER(TRIM(CAST(authority AS TEXT))) = 'VERIFIED'
             AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
@@ -1588,7 +1590,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
             AND LOWER(CAST(available_at AS TEXT)) NOT LIKE '%reconstruct%'
             AND LOWER(CAST(fetch_time AS TEXT)) NOT LIKE '%reconstruct%'
             AND members_json IS NOT NULL AND TRIM(CAST(members_json AS TEXT)) != ''
-        """
+        """  # B5: dataset_id (renamed from data_version in ensemble_snapshots)
         eligible_where = eligible_where.format(
             pq_placeholders=pq_placeholders,
             data_version_placeholders=data_version_placeholders,
@@ -1634,7 +1636,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
         unsafe_where = """
             temperature_metric = ?
             AND COALESCE(training_allowed, 0) = 1
-            AND data_version IN ({data_version_placeholders})
+            AND dataset_id IN ({data_version_placeholders})
             AND {processable_attr_sql}
             AND (
                 physical_quantity IS NULL
@@ -1653,7 +1655,7 @@ def _add_rebuild_snapshot_preflight_checks(report: dict, cur: sqlite3.Cursor) ->
                 OR LOWER(CAST(fetch_time AS TEXT)) LIKE '%reconstruct%'
                 OR members_json IS NULL OR TRIM(CAST(members_json AS TEXT)) = ''
             )
-        """
+        """  # B5: dataset_id (renamed from data_version in ensemble_snapshots)
         unsafe_where = unsafe_where.format(
             data_version_placeholders=data_version_placeholders,
             processable_attr_sql=processable_attr_sql,
@@ -1956,7 +1958,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             COALESCE(training_allowed, 0) = 1
             AND authority = 'VERIFIED'
             AND (
-                {_any_blank_sql(('range_label', 'season', 'cluster', 'data_version'))}
+                {_any_blank_sql(('range_label', 'season', 'cluster', 'dataset_id'))}
                 OR lead_days IS NULL
                 OR outcome IS NULL
                 OR outcome NOT IN (0, 1)
@@ -1996,8 +1998,8 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             AND (
                 observation_field IS NULL
                 OR observation_field != ?
-                OR data_version IS NULL
-                OR data_version NOT IN ({dv_placeholders})
+                OR dataset_id IS NULL
+                OR dataset_id NOT IN ({dv_placeholders})
             )
             """,
             (metric, identity.observation_field, *allowed_versions),
@@ -2026,6 +2028,9 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
         # no training-allowed pairs. Refit on metric A must not be blocked by
         # metric B's pair table being empty (cross-metric concurrent rebuild
         # scenario). Identity check above already passes trivially at 0 rows.
+        # B5 (2026-05-28): only skip when the TOTAL table has some pairs
+        # (cross-metric scenario). If ALL metrics have 0 pairs the table is
+        # fully empty — add the blocker so preflight gates empty DBs correctly.
         existing_pair_count = _count_params(
             cur,
             table,
@@ -2033,18 +2038,45 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
             (metric,),
         )
         if existing_pair_count == 0:
+            total_pair_count = _count(cur, table, "COALESCE(training_allowed,0) = 1")
+            if total_pair_count > 0:
+                # Other metrics have pairs; skip only this metric (cross-metric scenario).
+                continue
+            # Fully empty table — fall through to register the empty_platt_refit_bucket blocker.
+            bucket_count = 0
+            bucket_met = False
+            bucket_check_id = f"calibration_pairs.{metric}.mature_bucket_present"
+            report["checks"][bucket_check_id] = _check_entry(
+                check_id=bucket_check_id,
+                status=FAIL,
+                detail=(
+                    f"{metric} Platt-refit buckets with n_eff>="
+                    f"{MIN_PLATT_DECISION_GROUPS}: 0 (table empty)"
+                ),
+                count=0,
+                threshold=1,
+                met=False,
+            )
+            report["blockers"].append(
+                {
+                    "code": "empty_platt_refit_bucket",
+                    "table": table,
+                    "count": 0,
+                    "temperature_metric": metric,
+                }
+            )
             continue
 
         cur.execute(
             f"""
             SELECT COUNT(*)
             FROM (
-                SELECT cluster, season, data_version,
+                SELECT cluster, season, dataset_id,
                        COUNT(DISTINCT decision_group_id) AS n_eff
                 FROM calibration_pairs
                 WHERE temperature_metric = ?
                   AND observation_field = ?
-                  AND data_version IN ({dv_placeholders})
+                  AND dataset_id IN ({dv_placeholders})
                   AND COALESCE(training_allowed, 0) = 1
                   AND authority = 'VERIFIED'
                   AND UPPER(TRIM(CAST(causality_status AS TEXT))) = 'OK'
@@ -2061,7 +2093,7 @@ def _add_platt_pair_preflight_checks(report: dict, cur: sqlite3.Cursor) -> None:
                   AND TRIM(CAST(range_label AS TEXT)) != ''
                   AND lead_days IS NOT NULL
                   AND outcome IN (0, 1)
-                GROUP BY cluster, season, data_version
+                GROUP BY cluster, season, dataset_id
                 HAVING n_eff >= ?
             )
             """,
@@ -2534,30 +2566,30 @@ def build_p4_readiness_report(
             _add_p4_table_populated_check(
                 report,
                 cur,
-                table="market_events_v2",
+                table="market_events",           # B3: renamed from market_events_v2
                 lane="4.6.A",
-                code="p4_market_events_v2_empty",
+                code="p4_market_events_empty",   # B3: renamed from p4_market_events_v2_empty
             )
             _add_p4_identity_check(
                 report,
                 cur,
-                table="market_events_v2",
-                check_id="market_events_v2.p4_market_identity_present",
+                table="market_events",           # B3: renamed from market_events_v2
+                check_id="market_events.p4_market_identity_present",
                 columns=MARKET_EVENTS_V2_MARKET_IDENTITY_COLUMNS,
                 lane="4.6.A",
             )
             _add_p4_table_populated_check(
                 report,
                 cur,
-                table="settlements_v2",
+                table="settlement_outcomes",     # B3: renamed from settlements_v2
                 lane="4.6.A",
-                code="p4_settlements_v2_empty",
+                code="p4_settlement_outcomes_empty",  # B3: renamed from p4_settlements_v2_empty
             )
             _add_p4_identity_check(
                 report,
                 cur,
-                table="settlements_v2",
-                check_id="settlements_v2.p4_market_identity_present",
+                table="settlement_outcomes",     # B3: renamed from settlements_v2
+                check_id="settlement_outcomes.p4_market_identity_present",
                 columns=SETTLEMENTS_V2_MARKET_IDENTITY_COLUMNS,
                 lane="4.6.A",
             )
@@ -2720,9 +2752,9 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
             "ensemble_snapshots",
             "calibration_pairs",
             "platt_models",
-            "market_events_v2",
+            "market_events",          # B3: renamed from market_events_v2
             "market_price_history",
-            "settlements_v2",
+            "settlement_outcomes",    # B3: renamed from settlements_v2
         ):
             _add_count_min_check(report, cur, table=table)
         for table in ("observation_instants_v2", "observations"):
@@ -2744,16 +2776,16 @@ def build_training_readiness_report(world_db: Path = SHARED_DB) -> dict:
         _add_required_identity_check(
             report,
             cur,
-            table="settlements_v2",
-            check_id="settlements_v2.market_identity_present",
+            table="settlement_outcomes",      # B3: renamed from settlements_v2
+            check_id="settlement_outcomes.market_identity_present",
             columns=("city", "target_date", "temperature_metric", "market_slug"),
             empty_code="null_market_slug",
         )
         _add_required_identity_check(
             report,
             cur,
-            table="market_events_v2",
-            check_id="market_events_v2.market_identity_present",
+            table="market_events",            # B3: renamed from market_events_v2
+            check_id="market_events.market_identity_present",
             columns=(
                 "market_slug",
                 "condition_id",

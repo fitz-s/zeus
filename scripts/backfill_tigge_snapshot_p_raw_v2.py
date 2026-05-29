@@ -207,7 +207,7 @@ def backfill_v2(
         params.append(city_filter)
 
     sql = f"""
-        SELECT snapshot_id, city, target_date, members_json, p_raw_json, unit, data_version
+        SELECT snapshot_id, city, target_date, members_json, p_raw_json, unit, dataset_id
         FROM ensemble_snapshots
         WHERE temperature_metric = ?
           AND p_raw_json IS NULL
@@ -229,7 +229,7 @@ def backfill_v2(
         members_json_str = row["members_json"] if hasattr(row, "keys") else row[3]
         snapshot_id = row["snapshot_id"] if hasattr(row, "keys") else row[0]
         unit = row["unit"] if hasattr(row, "keys") else row[5]
-        data_version = row["data_version"] if hasattr(row, "keys") else row[6]
+        data_version = row["dataset_id"] if hasattr(row, "keys") else row[6]
 
         # MAJOR-2 fix: belt-and-suspenders contract gate before any UPDATE.
         # Even though the SELECT filters authority='VERIFIED' + training_allowed=1,

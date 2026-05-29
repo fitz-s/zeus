@@ -706,7 +706,7 @@ def read_executable_forecast_snapshot(
         city=str(row["city"]),
         target_local_date=_parse_date(row["target_date"]),
         temperature_metric=str(row["temperature_metric"]),
-        data_version=str(row["data_version"]),
+        data_version=str(row["dataset_id"]),
         members=_members(row["members_json"]),
         source_id=str(row["source_id"]),
         source_transport=str(row["source_transport"]),

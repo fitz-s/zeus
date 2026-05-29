@@ -40,7 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 DEFAULT_DB_PATH = REPO_ROOT / "state" / "zeus-world.db"
 REQUIRED_TABLES = (
     "ensemble_snapshots",
-    "platt_models_v2",
+    "platt_models",
 )
 
 CONTRACT_OBJECT_REQUIRED_FIELDS = (
@@ -174,8 +174,8 @@ def _snapshot_eligibility(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         SELECT
             COALESCE(temperature_metric, 'unknown') AS metric,
             CASE
-                WHEN COALESCE(data_version, '') LIKE 'tigge_%' THEN 'tigge_mars'
-                WHEN COALESCE(data_version, '') LIKE 'ecmwf_opendata_%' THEN 'ecmwf_open_data'
+                WHEN COALESCE(dataset_id, '') LIKE 'tigge_%' THEN 'tigge_mars'
+                WHEN COALESCE(dataset_id, '') LIKE 'ecmwf_opendata_%' THEN 'ecmwf_open_data'
                 ELSE 'unknown'
             END AS source_family,
             COUNT(*) AS total_snapshots,
@@ -212,8 +212,8 @@ def _low_city_boundary_loss(conn: sqlite3.Connection, limit: int) -> list[dict[s
         SELECT
             city,
             CASE
-                WHEN COALESCE(data_version, '') LIKE 'tigge_%' THEN 'tigge_mars'
-                WHEN COALESCE(data_version, '') LIKE 'ecmwf_opendata_%' THEN 'ecmwf_open_data'
+                WHEN COALESCE(dataset_id, '') LIKE 'tigge_%' THEN 'tigge_mars'
+                WHEN COALESCE(dataset_id, '') LIKE 'ecmwf_opendata_%' THEN 'ecmwf_open_data'
                 ELSE 'unknown'
             END AS source_family,
             COUNT(*) AS total_snapshots,
@@ -263,7 +263,7 @@ def _platt_maturity(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             COUNT(*) AS model_count,
             MIN(COALESCE(n_samples, 0)) AS min_n_samples,
             MAX(COALESCE(n_samples, 0)) AS max_n_samples
-        FROM platt_models_v2
+        FROM platt_models
         GROUP BY metric, authority, is_active, maturity_bucket
         ORDER BY metric, authority, is_active DESC, maturity_bucket
         """
@@ -287,7 +287,7 @@ def _quarantined_negative_a(conn: sqlite3.Connection, limit: int) -> list[dict[s
             param_A,
             authority,
             is_active
-        FROM platt_models_v2
+        FROM platt_models
         WHERE COALESCE(is_active, 0) = 1
           AND authority = 'QUARANTINED'
           AND param_A < 0
@@ -312,7 +312,7 @@ def _active_domain_coverage(conn: sqlite3.Connection) -> dict[str, Any]:
                 COALESCE(data_version, '') AS data_version,
                 COALESCE(input_space, '') AS input_space,
                 temperature_metric
-            FROM platt_models_v2
+            FROM platt_models
             WHERE COALESCE(is_active, 0) = 1
               AND authority = 'VERIFIED'
         ),
