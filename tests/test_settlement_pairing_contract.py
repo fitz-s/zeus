@@ -151,3 +151,66 @@ def test_station_parsed_from_weather_gov_query_param():
         settlement_source="https://www.weather.gov/wrh/timeseries?site=UUWW",
         provenance_json=json.dumps({"data_version": "ogimet_metar_v1"})), claimed_unit="C")
     assert so.target.settlement_station == "UUWW"
+
+
+# --- D-S1: first-class settlement_station / settlement_unit columns -----------------
+# settlement_outcomes gains nullable settlement_station + settlement_unit columns. When
+# present they are the VERIFIED truth (station no longer heuristically parsed from the URL;
+# unit no longer the forecast's unverifiable CLAIM). On NULL/absent the contract falls back
+# to the prior heuristic so un-backfilled legacy rows behave exactly as before (never
+# fail-closed on a missing column).
+
+
+def test_settlement_station_column_overrides_unparseable_url():
+    """D-S1 / Hong Kong un-block: HKO settles via a climat.htm URL with NO parseable station
+    code, so the URL heuristic raises and the residual was dropped. With the first-class
+    settlement_station column populated, the SettlementObject uses it and the unparseable URL
+    is never consulted (settlement_source is no longer REQUIRED when the column is present)."""
+    so = SettlementObject.from_settlement_row(
+        _settlement_row(
+            settlement_station="VHHH",
+            settlement_source="https://www.hko.gov.hk/en/cis/climat.htm",  # no station code
+            provenance_json=json.dumps({"data_version": "hko_daily_api_v1"}),
+        ),
+        claimed_unit="C",
+    )
+    assert so.target.settlement_station == "VHHH"
+
+
+def test_settlement_unit_column_is_verified_truth_detautologizes_pairing():
+    """D-S1 antibody: when settlement_unit is a first-class column it is the VERIFIED settlement
+    unit, INDEPENDENT of the forecast's claim. A forecast claiming F paired to a settlement the
+    column says is C is a degC/degF mis-scale (Cons-SEV-1.C) and MUST be refused — not silently
+    coerced to the forecast's claim (the pre-D-S1 tautology where unit==claimed always matched).
+    RED before from_settlement_row prefers the column over claimed_unit."""
+    fo = ForecastObject.from_snapshot_row(_opendata_row(settlement_unit="F"))
+    so = SettlementObject.from_settlement_row(
+        _settlement_row(settlement_unit="C"), claimed_unit="F")  # column C overrides the F claim
+    assert so.target.settlement_unit == "C"
+    with pytest.raises(ForecastTargetMismatchError):
+        pair_residual(fo, so)
+
+
+def test_settlement_unit_column_agreeing_still_pairs():
+    """A verified settlement_unit column that AGREES with the forecast claim pairs normally."""
+    fo = ForecastObject.from_snapshot_row(_opendata_row(settlement_unit="F"))
+    so = SettlementObject.from_settlement_row(
+        _settlement_row(settlement_unit="F"), claimed_unit="F")
+    rk = pair_residual(fo, so)
+    assert rk.target.settlement_unit == "F"
+
+
+def test_settlement_columns_absent_falls_back_to_heuristic():
+    """D-S1 backward-compat: a settlement row WITHOUT the new columns (the un-backfilled live
+    state) behaves EXACTLY as before — station from the URL, unit from the forecast's claim.
+    The contract must NOT fail-closed on a missing column."""
+    so = SettlementObject.from_settlement_row(_settlement_row(), claimed_unit="F")
+    assert so.target.settlement_station == "KORD"  # parsed from the wunderground URL
+    assert so.target.settlement_unit == "F"  # the forecast's claim (fallback)
+
+
+def test_settlement_station_column_blank_treated_as_absent():
+    """An empty-string station column is absent → URL fallback (no spurious blank station)."""
+    so = SettlementObject.from_settlement_row(
+        _settlement_row(settlement_station=""), claimed_unit="F")
+    assert so.target.settlement_station == "KORD"

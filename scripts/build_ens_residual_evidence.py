@@ -250,6 +250,19 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
         where.append("e.city IN (%s)" % ",".join("?" * len(cities)))
         params.extend(cities)
 
+    # D-S1: the SETTLEMENT-side station/unit are first-class columns when the migration has run.
+    # Select them ONLY if present so the ledger degrades GRACEFULLY on a pre-D-S1 DB (selecting a
+    # nonexistent column would OperationalError); on a NULL/absent column from_settlement_row
+    # falls back to the URL/claim heuristic. s.settlement_unit is aliased (s_settlement_unit) to
+    # avoid colliding with the forecast-side e.settlement_unit dict key.
+    scols = {r[1] for r in conn.execute("PRAGMA table_info(settlement_outcomes)")}
+    has_ds1_settlement_cols = {"settlement_station", "settlement_unit"}.issubset(scols)
+    s_extra = (
+        ", s.settlement_station AS settlement_station, s.settlement_unit AS s_settlement_unit"
+        if has_ds1_settlement_cols
+        else ""
+    )
+
     # Canonical lineage column is `dataset_id` (renamed from data_version, commit dd3d19d00a /
     # B5); alias it back to data_version so the row dict key the contracts + _strict_evidence_row
     # consume is stable. Read by column NAME (dict per row) — no fragile positional unpack.
@@ -261,7 +274,7 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
                e.contributes_to_target_extrema, e.boundary_ambiguous,
                e.forecast_window_start_utc, e.forecast_window_end_utc, e.source_run_id,
                e.settlement_station_id, e.settlement_unit, e.settlement_source_type,
-               s.settlement_id, s.settlement_value, s.settlement_source, s.provenance_json
+               s.settlement_id, s.settlement_value, s.settlement_source, s.provenance_json{s_extra}
         FROM ensemble_snapshots e
         JOIN settlement_outcomes s
           ON s.city = e.city AND s.target_date = e.target_date
@@ -288,18 +301,28 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
         if strict_cycle != "ALL" and hh != strict_cycle:
             rejected_cycle += 1
             continue
-        # Passing the single joined row `r` as BOTH forecast and settlement makes the metric +
-        # unit dims of pair_residual TAUTOLOGICAL here: metric is enforced by the SQL JOIN
-        # (s.temperature_metric = e.temperature_metric) and the settlement unit is the forecast's
-        # CLAIM (D-S1: settlement_outcomes has no unit column). The gate's REAL added coverage
-        # over the loose JOIN is STATION + AUTHORITY identity. Do NOT weaken the JOIN's metric
-        # condition on the assumption the gate re-checks it — it does not.
+        # Build the SETTLEMENT object from the SETTLEMENT-side columns (D-S1), distinct from the
+        # forecast. metric is still enforced by the SQL JOIN (s.temperature_metric =
+        # e.temperature_metric) — do NOT weaken that condition assuming the gate re-checks it.
+        # STATION + AUTHORITY were always real gate coverage; D-S1 adds UNIT: when the settlement
+        # carries a first-class settlement_unit column it is the VERIFIED unit (de-tautologized
+        # from the forecast's claim), so a genuine F/C mis-scale is refused. claimed_unit (the
+        # forecast's e.settlement_unit) is the FALLBACK used only when the column is NULL/absent.
         # Coverage gap (P2 SEV-2, latent): a forecast whose settlement_source_type normalizes to
         # a DIFFERENT authority token than the settlement's provenance data_version (e.g. a
-        # 'noaa'-claimed forecast settled via 'ogimet') drops here. That is the gate working as a
-        # provenance check — but until the source-family vocabulary is reconciled at ingest, it
-        # also drops genuine pairs for non-wu_icao cities. Drops are per-row warned + counted.
-        rkey = _pair_or_drop(r, r, claimed_unit=r.get("settlement_unit"))
+        # 'noaa'-claimed forecast settled via 'ogimet') drops here — the gate working as a
+        # provenance check. Drops are per-row warned + counted.
+        settlement_row = {
+            "city": r["city"],
+            "temperature_metric": r["temperature_metric"],
+            "target_date": r["target_date"],
+            "settlement_value": r["settlement_value"],
+            "settlement_source": r["settlement_source"],
+            "provenance_json": r["provenance_json"],
+            "settlement_station": r.get("settlement_station"),  # D-S1 s-col (NULL -> URL fallback)
+            "settlement_unit": r.get("s_settlement_unit"),      # D-S1 s-col (NULL -> claim fallback)
+        }
+        rkey = _pair_or_drop(r, settlement_row, claimed_unit=r.get("settlement_unit"))
         if rkey is None:
             rejected_pairing += 1
             continue

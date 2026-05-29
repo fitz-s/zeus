@@ -105,11 +105,23 @@ class SettlementObject:
     def from_settlement_row(cls, row: dict, *, claimed_unit: str) -> "SettlementObject":
         """Build a SettlementObject from a settlement_outcomes row dict.
 
-        Derives identity that IS recoverable from the row — city/metric/date (columns),
-        authority (provenance_json.data_version, normalized), station (settlement_source
-        URL). The UNIT is NOT a settlement column (D-S1), so it is supplied as the
-        forecast's claimed_unit; pair_residual matches the verifiable dims and converts
-        with this unit. Raises SettlementIncompleteError on any unrecoverable field.
+        Derives identity from the row: city/metric/date (columns), authority
+        (provenance_json.data_version, normalized), station + unit.
+
+        D-S1: ``settlement_station`` and ``settlement_unit`` are now first-class (nullable)
+        settlement_outcomes columns. When present they are the VERIFIED truth and are used
+        directly. When NULL/absent (an un-backfilled legacy row) the contract FALLS BACK to
+        the prior heuristic — station parsed from the settlement_source URL, unit taken as the
+        forecast's ``claimed_unit`` — so legacy rows behave exactly as before and the contract
+        never fail-closes on a missing column. Two payoffs vs the pure heuristic:
+          - station: a row whose settlement_source URL has no parseable station (HKO's
+            climat.htm) is no longer dropped when the column carries the station;
+          - unit: the settlement unit is no longer tautologically the forecast's own claim, so
+            a genuine degC/degF mis-scale (forecast claims F, settlement verified C) is caught
+            by ``assert_same_target`` instead of silently coerced.
+
+        Raises SettlementIncompleteError on any unrecoverable required field. ``settlement_source``
+        is required ONLY for the station fallback (i.e. when the settlement_station column is NULL).
         """
         def _req(key: str, human: str | None = None):
             v = row.get(key)
@@ -119,6 +131,13 @@ class SettlementObject:
                 )
             return v
 
+        def _opt(key: str) -> str | None:
+            """A nullable D-S1 column: None when absent, NULL, or blank → use the fallback."""
+            v = row.get(key)
+            if v is None or (isinstance(v, str) and v.strip() == ""):
+                return None
+            return str(v).strip()
+
         raw_prov = _req("provenance_json", "provenance_json")
         prov = json.loads(raw_prov) if isinstance(raw_prov, str) else dict(raw_prov)
         data_version = prov.get("data_version")
@@ -127,12 +146,21 @@ class SettlementObject:
                 "settlement refused: provenance_json has no data_version (the authority)."
             )
 
+        station_col = _opt("settlement_station")
+        station = (
+            station_col
+            if station_col is not None
+            else _station_from_settlement_source(str(_req("settlement_source")))
+        )
+        unit_col = _opt("settlement_unit")
+        unit = unit_col if unit_col is not None else str(claimed_unit)
+
         target = ForecastTarget(
             city=str(_req("city")),
             metric=str(_req("temperature_metric", "metric")),
             target_local_date=str(_req("target_date", "target_local_date")),
-            settlement_station=_station_from_settlement_source(str(_req("settlement_source"))),
-            settlement_unit=str(claimed_unit),
+            settlement_station=station,
+            settlement_unit=unit,
             settlement_authority=normalize_settlement_authority(str(data_version)),
         )
         return cls(target=target, settlement_value=float(_req("settlement_value")))

@@ -122,3 +122,46 @@ def test_wrong_station_dropped_end_to_end():
     )
     out = build_evidence(conn, metric="high", lead_max=48.0, cities=None, accept_cycle=None)
     assert out == []  # dropped — never emitted with a collapsed lineage
+
+
+def test_hong_kong_unparseable_url_with_station_column_emitted():
+    """D-S1 end-to-end: HKO settles via a climat.htm URL that carries NO station code. Pre-D-S1
+    the URL parse raised SettlementIncompleteError → the residual was dropped, starving HK's
+    ledger. With the first-class settlement_station column populated on the settlement row,
+    build_evidence reads it (SELECT carries s.settlement_station) and emits the residual."""
+    conn = _conn()
+    _snap(
+        conn, city="Hong Kong", settlement_station_id="VHHH",
+        settlement_source_type="hko", settlement_unit="C",
+        dataset_id="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+    )
+    _settle(
+        conn, city="Hong Kong", settlement_station="VHHH", settlement_unit="C",
+        settlement_source="https://www.hko.gov.hk/en/cis/climat.htm",  # no station in URL
+        provenance_json=json.dumps({"data_version": "hko_daily_api_v1"}),
+    )
+    out = build_evidence(conn, metric="high", lead_max=48.0, cities=None, accept_cycle=None)
+    assert len(out) == 1
+    assert out[0]["city"] == "Hong Kong"
+
+
+def test_settlement_unit_mismatch_dropped_end_to_end():
+    """D-S1 de-tautologization end-to-end: the forecast claims its settlement is in F
+    (ensemble_snapshots.settlement_unit='F'); the settlement row's VERIFIED settlement_unit
+    column says 'C'. That is a degC/degF mis-scale — the gate must DROP it, not silently coerce
+    the settlement to the forecast's claim (the pre-D-S1 tautology emitted a mis-scaled residual)."""
+    conn = _conn()
+    _snap(conn, settlement_unit="F")
+    _settle(conn, settlement_unit="C")  # verified column disagrees with the forecast's F claim
+    out = build_evidence(conn, metric="high", lead_max=48.0, cities=None, accept_cycle=None)
+    assert out == []
+
+
+def test_settlement_unit_column_agreeing_emitted_end_to_end():
+    """Control for the mismatch test: a VERIFIED settlement_unit column that AGREES with the
+    forecast's claim emits normally (the de-tautologization only drops genuine disagreements)."""
+    conn = _conn()
+    _snap(conn, settlement_unit="F")
+    _settle(conn, settlement_unit="F")
+    out = build_evidence(conn, metric="high", lead_max=48.0, cities=None, accept_cycle=None)
+    assert len(out) == 1
