@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused or audited: 2026-05-25
+# Last reused or audited: 2026-05-29
 # Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
 # Purpose: Fit PredictiveErrorModel posteriors for all (city, metric, season) buckets and persist to model_bias_ens.
 # Reuse: Requires isolated staging DB; inspect Fix-A cycle selection commit before reuse.
@@ -7,6 +7,9 @@
 #   Ported from reference: scripts/run_offline_platt_refit.py + onboard_cities.py
 #   _run_fit_ens_bias_v2 logic. Uses Fix A's corrected metric-aware cycle selection
 #   (commit 5260dd2809 on feat/ft-ship-64).
+#   TRIBUNAL Findings 1+5 (2026-05-29): fit_all inner loop now iterates over
+#   (city × season × metric × lead_bucket × cycle); error_model_key includes
+#   lead_bucket and cycle; load_bucket_residuals called with lead_bucket_filter.
 """Fit PredictiveErrorModel posteriors for all (city, metric, season) buckets and
 persist them to ``model_bias_ens`` in an isolated staging / copy DB.
 
@@ -191,6 +194,8 @@ def _fit_signature_hash(
     coverage_months: str,
     tig_residuals: list[float],
     opd_residuals: list[float],
+    lead_bucket: str | None = None,
+    cycle: str | None = None,
 ) -> str:
     """sha256 prefix over the FULL fit identity: filters + gates + coverage + SOURCE ROWS.
 
@@ -200,6 +205,9 @@ def _fit_signature_hash(
     digest, two rows fit under different gate generations (or different underlying data)
     could collide on signature. ``source_digest`` hashes the SORTED, rounded residual values
     so identical inputs map to one signature and any data change maps to a new one.
+
+    TRIBUNAL Findings 1+5 (2026-05-29): ``lead_bucket`` and ``cycle`` added to payload
+    so signatures for different lead/cycle combinations cannot collide.
     """
     source_digest = hashlib.sha256(
         json.dumps(
@@ -216,6 +224,8 @@ def _fit_signature_hash(
             "gate_set_hash": gate_set_hash,
             "coverage_months": coverage_months,
             "source_digest": source_digest,
+            "lead_bucket": lead_bucket,
+            "cycle": cycle,
         },
         sort_keys=True,
     ).encode()
@@ -396,6 +406,7 @@ def fit_all(
     from src.calibration.ens_bias_repo import (  # noqa: PLC0415
         load_bucket_residuals, paired_delta_coverage,
     )
+    from src.calibration.lead_bucket import LEAD_BUCKET_BOUNDS  # noqa: PLC0415
 
     if not dry_run:
         # Both schema helpers write to DB — must not run on the read-only dry-run connection.
@@ -425,6 +436,10 @@ def fit_all(
     rows_written = 0
     zero_coverage_cities: list[str] = []
 
+    # TRIBUNAL Findings 1+5: canonical cycle list — HIGH prefers 00z, LOW prefers 12z.
+    # Both cycles are fitted for each bucket so the reader can select by cycle identity.
+    _ALL_CYCLES = ("00z", "12z")
+
     for city in cities:
         city_fitted = 0
         # B1 / Operator pre-MC re-audit (2026-05-28): iterate seasons HEMISPHERE-AWARE
@@ -433,184 +448,201 @@ def fit_all(
         for season, months in _iter_seasons_for_city(city):
             for metric in metrics:
                 season_months = tuple(months)
-                bucket_label = f"{city}/{metric}/{season}"
                 # Bug fix 2026-05-27: resolve metric-aware data versions
                 # (was using HIGH-only constants → zero LOW coverage).
                 _dv = _ENS_DATA_VERSIONS[metric]
                 _live_dv = _dv["live"]
                 _prior_dv = _dv["prior"]
-                try:
-                    # B6 / Operator pre-MC re-audit (2026-05-28): every fit-side loader
-                    # must read with the SAME cutoff that is written into training_cutoff,
-                    # else the stored cutoff is a label only and two-row reproducibility
-                    # cannot reproduce a row from its declared cutoff. settled_before=today_str
-                    # mirrors the cutoff in every place residuals/coverage are read.
-                    # Probe live residuals to get n counts for signature hash
-                    tig_residuals = load_bucket_residuals(
-                        conn, city=city, data_version=_prior_dv,
-                        metric=metric, season_months=season_months,
-                        require_verified=False,
-                        contributor_policy="legacy_tigge_null_passthrough",
-                        settled_before=today_str,
-                    )
-                    opd_residuals = load_bucket_residuals(
-                        conn, city=city, data_version=_live_dv,
-                        metric=metric, season_months=season_months,
-                        contributor_policy="full_contributor_only",
-                        settled_before=today_str,
-                    )
 
-                    if not tig_residuals:
-                        logger.debug("No TIGGE prior residuals for %s — skipping.", bucket_label)
-                        skipped += 1
-                        continue
+                # TRIBUNAL Findings 1+5: inner loops over lead_bucket × cycle.
+                for _lb_lo, _lb_hi, _lb_label in LEAD_BUCKET_BOUNDS:
+                    for _cycle in _ALL_CYCLES:
+                        bucket_label = f"{city}/{metric}/{season}/{_lb_label}/{_cycle}"
+                        try:
+                            # B6 / Operator pre-MC re-audit (2026-05-28): every fit-side loader
+                            # must read with the SAME cutoff that is written into training_cutoff,
+                            # else the stored cutoff is a label only and two-row reproducibility
+                            # cannot reproduce a row from its declared cutoff. settled_before=today_str
+                            # mirrors the cutoff in every place residuals/coverage are read.
+                            # Probe live residuals to get n counts for signature hash
+                            tig_residuals = load_bucket_residuals(
+                                conn, city=city, data_version=_prior_dv,
+                                metric=metric, season_months=season_months,
+                                require_verified=False,
+                                contributor_policy="legacy_tigge_null_passthrough",
+                                settled_before=today_str,
+                                lead_bucket_filter=_lb_label,
+                            )
+                            opd_residuals = load_bucket_residuals(
+                                conn, city=city, data_version=_live_dv,
+                                metric=metric, season_months=season_months,
+                                contributor_policy="full_contributor_only",
+                                settled_before=today_str,
+                                lead_bucket_filter=_lb_label,
+                            )
 
-                    model = fit_city_predictive_error(
-                        conn,
-                        city=city,
-                        live_data_version=_live_dv,
-                        prior_data_version=_prior_dv,
-                        season_months=season_months,
-                        metric=metric,
-                        kappa=kappa,
-                        settled_before=today_str,
-                    )
+                            if not tig_residuals:
+                                logger.debug("No TIGGE prior residuals for %s — skipping.", bucket_label)
+                                skipped += 1
+                                continue
 
-                    error_model_key = (
-                        f"{city}|{metric}|{season}"
-                        f"|full_transport_v1|{_live_dv}"
-                    )
+                            model = fit_city_predictive_error(
+                                conn,
+                                city=city,
+                                live_data_version=_live_dv,
+                                prior_data_version=_prior_dv,
+                                season_months=season_months,
+                                metric=metric,
+                                kappa=kappa,
+                                settled_before=today_str,
+                            )
 
-                    # Effective coverage = months where the posterior has support from
-                    # EVERY ACTIVE source (SD1 / Blocker D + Stat 4). prior is always active;
-                    # live counts only when n_opd >= DEFAULT_MIN_LIVE_N; paired/transport only
-                    # when n_paired >= MIN_PAIRED_N. settled_before=None matches the fit's
-                    # internal loaders exactly so coverage/activeness cannot drift from the
-                    # data fit_city_predictive_error actually used. A season-labelled row whose
-                    # live/paired evidence covered only one month must declare it so the
-                    # reader's month-scope guard rejects misapplication (COVERAGE_MISLABELED).
-                    # B6: settled_before=today_str (NOT None) so coverage matches the
-                    # cutoff the fit actually consumed AND the cutoff written into the row.
-                    n_paired, paired_cov = paired_delta_coverage(
-                        conn, city=city, live_data_version=_live_dv,
-                        prior_data_version=_prior_dv, metric=metric,
-                        season_months=season_months, settled_before=today_str,
-                    )
-                    coverage_months_csv = _effective_coverage_months(
-                        conn, city=city, metric=metric, season_months=season_months,
-                        prior_dv=_prior_dv, live_dv=_live_dv, settled_before=today_str,
-                        n_opd=len(opd_residuals), min_live_n=DEFAULT_MIN_LIVE_N,
-                        n_paired=n_paired, min_paired_n=MIN_PAIRED_N,
-                        paired_cov=paired_cov,
-                    )
+                            # TRIBUNAL Findings 1+5: error_model_key includes lead_bucket + cycle.
+                            # Format: city|metric|season|family|live_dv|lead_bucket|cycle
+                            error_model_key = (
+                                f"{city}|{metric}|{season}"
+                                f"|full_transport_v1|{_live_dv}"
+                                f"|{_lb_label}|{_cycle}"
+                            )
 
-                    # SD4 / Blocker H: signature is computed AFTER gate_set_hash + coverage so
-                    # the fit identity includes the gate generation, the effective coverage,
-                    # and a digest of the actual source residuals. Two rows differing only in
-                    # gate set or coverage scope no longer collide on signature.
-                    sig_hash = _fit_signature_hash(
-                        city, metric, season,
-                        _live_dv, _prior_dv,
-                        kappa, len(tig_residuals), len(opd_residuals),
-                        gate_set_hash=gate_set_hash,
-                        coverage_months=coverage_months_csv,
-                        tig_residuals=tig_residuals,
-                        opd_residuals=opd_residuals,
-                    )
+                            # Effective coverage = months where the posterior has support from
+                            # EVERY ACTIVE source (SD1 / Blocker D + Stat 4). prior is always active;
+                            # live counts only when n_opd >= DEFAULT_MIN_LIVE_N; paired/transport only
+                            # when n_paired >= MIN_PAIRED_N. settled_before=None matches the fit's
+                            # internal loaders exactly so coverage/activeness cannot drift from the
+                            # data fit_city_predictive_error actually used. A season-labelled row whose
+                            # live/paired evidence covered only one month must declare it so the
+                            # reader's month-scope guard rejects misapplication (COVERAGE_MISLABELED).
+                            # B6: settled_before=today_str (NOT None) so coverage matches the
+                            # cutoff the fit actually consumed AND the cutoff written into the row.
+                            n_paired, paired_cov = paired_delta_coverage(
+                                conn, city=city, live_data_version=_live_dv,
+                                prior_data_version=_prior_dv, metric=metric,
+                                season_months=season_months, settled_before=today_str,
+                                lead_bucket_filter=_lb_label,
+                            )
+                            coverage_months_csv = _effective_coverage_months(
+                                conn, city=city, metric=metric, season_months=season_months,
+                                prior_dv=_prior_dv, live_dv=_live_dv, settled_before=today_str,
+                                n_opd=len(opd_residuals), min_live_n=DEFAULT_MIN_LIVE_N,
+                                n_paired=n_paired, min_paired_n=MIN_PAIRED_N,
+                                paired_cov=paired_cov,
+                            )
 
-                    # C-handler: insufficient prior cannot support a confident learned
-                    # correction (n_prior=1 → Qingdao class). Write an explicit
-                    # identity/no-correction row instead of a confident city bias.
-                    is_identity = len(tig_residuals) < MIN_PRIOR_N
-                    # SD2 / Blocker C: an insufficient-prior identity must serve no
-                    # learned shift AND a CONSERVATIVE-WIDE residual (never the 0.5C
-                    # floor masquerading as confidence). conservative_identity_model
-                    # zeros the correction and floors residual_sd_c/total to the wide
-                    # CONSERVATIVE_RESIDUAL_FLOOR_C. Built once here; written below.
-                    ident = conservative_identity_model(model) if is_identity else None
+                            # SD4 / Blocker H: signature is computed AFTER gate_set_hash + coverage so
+                            # the fit identity includes the gate generation, the effective coverage,
+                            # and a digest of the actual source residuals. Two rows differing only in
+                            # gate set or coverage scope no longer collide on signature.
+                            # TRIBUNAL Findings 1+5: lead_bucket + cycle added to signature.
+                            sig_hash = _fit_signature_hash(
+                                city, metric, season,
+                                _live_dv, _prior_dv,
+                                kappa, len(tig_residuals), len(opd_residuals),
+                                gate_set_hash=gate_set_hash,
+                                coverage_months=coverage_months_csv,
+                                tig_residuals=tig_residuals,
+                                opd_residuals=opd_residuals,
+                                lead_bucket=_lb_label,
+                                cycle=_cycle,
+                            )
 
-                    if dry_run:
-                        logger.info(
-                            "[dry-run] %s: %sbias_c=%.4f  effective_bias_c=%.4f"
-                            "  residual_sd_c=%.4f  correction_strength=%.3f"
-                            "  n_tig=%d  n_opd=%d  coverage=%s",
-                            bucket_label,
-                            "IDENTITY " if is_identity else "",
-                            0.0 if is_identity else model.bias_c,
-                            0.0 if is_identity else model.effective_bias_c,
-                            (ident.residual_sd_c if is_identity else model.residual_sd_c),
-                            0.0 if is_identity else model.correction_strength,
-                            len(tig_residuals), len(opd_residuals), coverage_months_csv,
-                        )
-                    elif is_identity:
-                        # Identity / no-correction: bias forced to 0, correction_strength 0,
-                        # estimator tagged, authority STAGING. Served as "no learned shift",
-                        # never as a confident correction.
-                        write_bias_model(
-                            conn,
-                            city=city, season=season, metric=metric,
-                            live_data_version=_live_dv, prior_data_version=_prior_dv,
-                            posterior_bias_c=ident.bias_c, posterior_sd_c=ident.bias_sd_c,
-                            n_live=len(opd_residuals), n_prior=len(tig_residuals),
-                            weight_live=0.0,
-                            estimator="ens_error_model.identity_insufficient_prior",
-                            training_cutoff=today_str, recorded_at=today_str,
-                            error_model_family="full_transport_v1",
-                            error_model_key=error_model_key,
-                            transport_delta_policy=transport_delta_policy,
-                            bias_c=ident.bias_c, bias_sd_c=ident.bias_sd_c,
-                            residual_sd_c=ident.residual_sd_c,
-                            heterogeneity_var_c2=ident.heterogeneity_var_c2,
-                            correction_strength=ident.correction_strength,
-                            effective_bias_c=ident.effective_bias_c,
-                            total_residual_sd_c=ident.total_residual_sd_c,
-                            code_commit=code_commit, fit_signature_hash=sig_hash,
-                            authority="STAGING",
-                            gate_set_hash=gate_set_hash,
-                            coverage_months=coverage_months_csv,
-                        )
-                        rows_written += 1
-                    else:
-                        write_bias_model(
-                            conn,
-                            city=city,
-                            season=season,
-                            metric=metric,
-                            live_data_version=_live_dv,
-                            prior_data_version=_prior_dv,
-                            posterior_bias_c=model.bias_c,
-                            posterior_sd_c=model.bias_sd_c,
-                            n_live=len(opd_residuals),
-                            n_prior=len(tig_residuals),
-                            weight_live=0.0,  # not directly exposed by PredictiveErrorModel
-                            estimator="ens_error_model.fit_city_predictive_error",
-                            training_cutoff=today_str,
-                            recorded_at=today_str,
-                            # canonical extension fields
-                            error_model_family="full_transport_v1",
-                            error_model_key=error_model_key,
-                            transport_delta_policy=transport_delta_policy,
-                            bias_c=model.bias_c,
-                            bias_sd_c=model.bias_sd_c,
-                            residual_sd_c=model.residual_sd_c,
-                            heterogeneity_var_c2=model.heterogeneity_var_c2,
-                            correction_strength=model.correction_strength,
-                            effective_bias_c=model.effective_bias_c,
-                            total_residual_sd_c=model.total_residual_sd_c,
-                            code_commit=code_commit,
-                            fit_signature_hash=sig_hash,
-                            authority="STAGING",
-                            gate_set_hash=gate_set_hash,
-                            coverage_months=coverage_months_csv,
-                        )
-                        rows_written += 1
+                            # C-handler: insufficient prior cannot support a confident learned
+                            # correction (n_prior=1 → Qingdao class). Write an explicit
+                            # identity/no-correction row instead of a confident city bias.
+                            is_identity = len(tig_residuals) < MIN_PRIOR_N
+                            # SD2 / Blocker C: an insufficient-prior identity must serve no
+                            # learned shift AND a CONSERVATIVE-WIDE residual (never the 0.5C
+                            # floor masquerading as confidence). conservative_identity_model
+                            # zeros the correction and floors residual_sd_c/total to the wide
+                            # CONSERVATIVE_RESIDUAL_FLOOR_C. Built once here; written below.
+                            ident = conservative_identity_model(model) if is_identity else None
 
-                    fitted += 1
-                    city_fitted += 1
+                            if dry_run:
+                                logger.info(
+                                    "[dry-run] %s: %sbias_c=%.4f  effective_bias_c=%.4f"
+                                    "  residual_sd_c=%.4f  correction_strength=%.3f"
+                                    "  n_tig=%d  n_opd=%d  coverage=%s",
+                                    bucket_label,
+                                    "IDENTITY " if is_identity else "",
+                                    0.0 if is_identity else model.bias_c,
+                                    0.0 if is_identity else model.effective_bias_c,
+                                    (ident.residual_sd_c if is_identity else model.residual_sd_c),
+                                    0.0 if is_identity else model.correction_strength,
+                                    len(tig_residuals), len(opd_residuals), coverage_months_csv,
+                                )
+                            elif is_identity:
+                                # Identity / no-correction: bias forced to 0, correction_strength 0,
+                                # estimator tagged, authority STAGING. Served as "no learned shift",
+                                # never as a confident correction.
+                                write_bias_model(
+                                    conn,
+                                    city=city, season=season, metric=metric,
+                                    live_data_version=_live_dv, prior_data_version=_prior_dv,
+                                    posterior_bias_c=ident.bias_c, posterior_sd_c=ident.bias_sd_c,
+                                    n_live=len(opd_residuals), n_prior=len(tig_residuals),
+                                    weight_live=0.0,
+                                    estimator="ens_error_model.identity_insufficient_prior",
+                                    training_cutoff=today_str, recorded_at=today_str,
+                                    error_model_family="full_transport_v1",
+                                    error_model_key=error_model_key,
+                                    transport_delta_policy=transport_delta_policy,
+                                    bias_c=ident.bias_c, bias_sd_c=ident.bias_sd_c,
+                                    residual_sd_c=ident.residual_sd_c,
+                                    heterogeneity_var_c2=ident.heterogeneity_var_c2,
+                                    correction_strength=ident.correction_strength,
+                                    effective_bias_c=ident.effective_bias_c,
+                                    total_residual_sd_c=ident.total_residual_sd_c,
+                                    code_commit=code_commit, fit_signature_hash=sig_hash,
+                                    authority="STAGING",
+                                    gate_set_hash=gate_set_hash,
+                                    coverage_months=coverage_months_csv,
+                                    lead_bucket=_lb_label,
+                                    cycle=_cycle,
+                                )
+                                rows_written += 1
+                            else:
+                                write_bias_model(
+                                    conn,
+                                    city=city,
+                                    season=season,
+                                    metric=metric,
+                                    live_data_version=_live_dv,
+                                    prior_data_version=_prior_dv,
+                                    posterior_bias_c=model.bias_c,
+                                    posterior_sd_c=model.bias_sd_c,
+                                    n_live=len(opd_residuals),
+                                    n_prior=len(tig_residuals),
+                                    weight_live=0.0,  # not directly exposed by PredictiveErrorModel
+                                    estimator="ens_error_model.fit_city_predictive_error",
+                                    training_cutoff=today_str,
+                                    recorded_at=today_str,
+                                    # canonical extension fields
+                                    error_model_family="full_transport_v1",
+                                    error_model_key=error_model_key,
+                                    transport_delta_policy=transport_delta_policy,
+                                    bias_c=model.bias_c,
+                                    bias_sd_c=model.bias_sd_c,
+                                    residual_sd_c=model.residual_sd_c,
+                                    heterogeneity_var_c2=model.heterogeneity_var_c2,
+                                    correction_strength=model.correction_strength,
+                                    effective_bias_c=model.effective_bias_c,
+                                    total_residual_sd_c=model.total_residual_sd_c,
+                                    code_commit=code_commit,
+                                    fit_signature_hash=sig_hash,
+                                    authority="STAGING",
+                                    gate_set_hash=gate_set_hash,
+                                    coverage_months=coverage_months_csv,
+                                    lead_bucket=_lb_label,
+                                    cycle=_cycle,
+                                )
+                                rows_written += 1
 
-                except (ValueError, RuntimeError) as exc:
-                    logger.debug("Skipped %s: %s", bucket_label, exc)
-                    skipped += 1
+                            fitted += 1
+                            city_fitted += 1
+
+                        except (ValueError, RuntimeError) as exc:
+                            logger.debug("Skipped %s: %s", bucket_label, exc)
+                            skipped += 1
 
         if city_fitted == 0:
             zero_coverage_cities.append(city)

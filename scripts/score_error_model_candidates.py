@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Created: 2026-05-28
 # Last reused or audited: 2026-05-29
+# TRIBUNAL Findings 1+5 (2026-05-29): score_bucket keyed by full
+#   (city, product, cycle, lead_bucket) — refuses cross-bucket comparison.
 # Authority basis: HANDOFF_STAT_REFACTOR_2026-05-29 §4 item-1; operator redesign 2026-05-28 — evidence-ledger-backed candidate selection.
 #   Principle 1: raw baseline DOMINATES unless a correction proves OOS improvement.
 #   Principle 2: a bias correction is a candidate, not an entitlement.
@@ -266,8 +268,10 @@ def score_bucket(
     target_product: str,
     *,
     k_folds: int = 5,
+    cycle: str | None = None,
+    lead_bucket: str | None = None,
 ) -> tuple[dict, dict, dict, dict, dict]:
-    """Compute proper-score inputs for choose_candidate for one (city, product) bucket.
+    """Compute proper-score inputs for choose_candidate for one (city, product, cycle, lead_bucket) bucket.
 
     Returns (candidate_metrics, raw_metrics, improvement_lcb, catastrophic, candidate_products).
     candidate_metrics and raw_metrics: name -> {"logloss":, "rps":, "brier":}.
@@ -277,8 +281,18 @@ def score_bucket(
 
     NO TEMPORAL LEAKAGE invariant: each candidate is fit on k-1 folds; scored on fold k.
     UNIT invariant: members_unit must equal city.settlement_unit (hard-assert, fail-closed).
+
+    TRIBUNAL Findings 1+5 (2026-05-29): ``cycle`` and ``lead_bucket`` are part of the
+    bucket identity. Rows passed here MUST already be pre-filtered to the matching
+    cycle and lead_bucket by the caller — this function REFUSES to compare rows across
+    different lead buckets or cycles (cross-bucket comparison is structurally invalid:
+    short-lead L00_24 has sign-flip behaviour relative to L24_48+).
+
+    When ``cycle`` or ``lead_bucket`` are supplied, this function asserts that all rows
+    match (fail-closed on mismatch) so callers cannot silently mix buckets.
     """
     from src.calibration.ens_bias_model import build_candidate_biases, robust_mean
+    from src.calibration.lead_bucket import lead_bucket as _lb_fn  # noqa: PLC0415
     from src.calibration.oos_gate import (
         bh_fdr_accept,
         date_blocked_folds,
@@ -289,6 +303,22 @@ def score_bucket(
 
     if not rows:
         raise ValueError("score_bucket: rows must not be empty")
+
+    # TRIBUNAL Findings 1+5: cross-bucket assertion (fail-closed).
+    # When cycle/lead_bucket are specified, assert ALL rows match — mixing buckets
+    # is structurally invalid (sign-flip across lead buckets, cycle bias mismatch).
+    if lead_bucket is not None:
+        for row in rows:
+            row_lead = row.get("lead_hours")
+            if row_lead is not None:
+                row_bucket = _lb_fn(float(row_lead))
+                if row_bucket != lead_bucket:
+                    raise AssertionError(
+                        f"score_bucket: row lead_hours={row_lead} maps to bucket "
+                        f"{row_bucket!r} but caller specified lead_bucket={lead_bucket!r}. "
+                        f"Cross-bucket scoring is structurally invalid (sign-flip risk). "
+                        f"Pre-filter rows to the target bucket before calling score_bucket."
+                    )
 
     # Hard unit assertion: fail-closed on mismatch
     for row in rows:
@@ -442,13 +472,20 @@ def run_scoring(
     target_product: str,
     *,
     k_folds: int = 5,
+    cycle: str | None = None,
+    lead_bucket: str | None = None,
 ) -> dict:
     """Run full OOS candidate selection for one bucket; return candidate_selection_manifest dict.
 
     Calls score_bucket → choose_candidate → packages result as a JSON-serializable manifest.
+
+    TRIBUNAL Findings 1+5 (2026-05-29): ``cycle`` and ``lead_bucket`` are now part of
+    the bucket identity and threaded through to score_bucket (cross-bucket assertion).
+    The manifest records cycle + lead_bucket for provenance.
     """
     cand_metrics, raw_metrics, imp_lcb, catastrophic, cand_products = score_bucket(
-        evidence_rows, city, target_product, k_folds=k_folds
+        evidence_rows, city, target_product, k_folds=k_folds,
+        cycle=cycle, lead_bucket=lead_bucket,
     )
 
     decision = choose_candidate(
@@ -471,4 +508,6 @@ def run_scoring(
         "candidate_metrics": cand_metrics,
         "improvement_lcb": imp_lcb,
         "candidate_products": cand_products,
+        "cycle": cycle,
+        "lead_bucket": lead_bucket,
     }

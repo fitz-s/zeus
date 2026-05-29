@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-26
+# Last reused/audited: 2026-05-29
 # Authority basis: operator hierarchical-bias adjudication 2026-05-24 §9 + PR #334 pre-check
 #   blockers (unit->degC normalization, authority/contributor/causality/boundary filters,
 #   training-cutoff leakage guard, lineage schema, read-safety).
@@ -11,6 +11,9 @@
 #   AND authority = 'VERIFIED' so STAGING/LEGACY rows can never leak into the
 #   live FT path (no `is_active` column exists; authority + family are the
 #   discriminators per .schema). Authority: FT_SHIP_EXECUTION_LEDGER F4.
+# 2026-05-29 TRIBUNAL Findings 1+5: load_bucket_residuals now keyed by lead_bucket
+#   (replaces coarse lead_max=48 pool). Two new extension columns (lead_bucket, cycle)
+#   added to _CANONICAL_EXTENSION_COLUMNS. error_model_key now includes both.
 """DB I/O for hierarchical ENS bias correction.
 
 - ``load_bucket_residuals``: per-bucket (forecast - actual) residuals for a forecast
@@ -93,6 +96,14 @@ _CANONICAL_EXTENSION_COLUMNS: list[tuple[str, str]] = [
     # season-labelled row cannot be misapplied to a month it never trained on.
     ("gate_set_hash",        "TEXT"),          # sha256(active gate names+thresholds)[:16]
     ("coverage_months",      "TEXT"),          # CSV of months covered, e.g. '3,4,5'
+    # TRIBUNAL Findings 1+5 (2026-05-29): lead/cycle granularity.
+    # lead_bucket: coarse lead-hour segment (L00_24/L24_48/L48_96/L96_plus).
+    #   Short-lead (L00_24) has sign-flip vs long-lead; pooling all ≤48h was wrong.
+    # cycle: issue-time cycle ('00z'/'12z'). HIGH/LOW already had cycle preference
+    #   in snapshot selection; this stamps it explicitly in the row identity so
+    #   the reader can refuse cross-cycle serving.
+    ("lead_bucket",          "TEXT"),          # e.g. 'L00_24', 'L24_48', 'L48_96', 'L96_plus'
+    ("cycle",                "TEXT"),          # e.g. '00z', '12z'
 ]
 
 _POSITIVE_CONTRIBUTOR_SQL = (
@@ -251,7 +262,8 @@ def load_bucket_residuals(
     city: str,
     data_version: str,
     metric: str = "high",
-    lead_max: float = 48.0,
+    lead_bucket_filter: str | None = None,
+    lead_max: float | None = None,
     season_months: tuple[int, ...] | None = None,
     settled_before: str | None = None,
     require_verified: bool = True,
@@ -265,7 +277,21 @@ def load_bucket_residuals(
     coverage). When ``issue_time`` is unavailable, falls back to freshest-by-available_at.
     Rationale: the TIGGE mx2t6 12Z snapshot covers 12Z→12Z (nighttime) and systematically
     misses the afternoon HIGH extremum, producing a -3 to -4 °C cold bias in the prior.
-    Filters: data_version, metric, ``lead_hours <= lead_max``, optional ``season_months``
+
+    TRIBUNAL Findings 1+5 (2026-05-29): lead-hour filtering is now bucket-aware.
+    Pass ``lead_bucket_filter`` (e.g. 'L00_24', 'L24_48') to restrict to a specific
+    lead bucket. The bucket boundaries come from ``LEAD_BUCKET_BOUNDS`` in
+    ``src.calibration.lead_bucket``. DO NOT mix leads across buckets — short-lead
+    (L00_24) has sign-flip behaviour vs long-lead; pooling was wrong.
+
+    ``lead_max`` is DEPRECATED. When both ``lead_bucket_filter`` and ``lead_max`` are
+    supplied, ``lead_bucket_filter`` wins and ``lead_max`` is ignored. When only
+    ``lead_max`` is supplied (legacy callers), the pool filter is ``lead_hours <= lead_max``.
+    When neither is supplied, ALL available leads are returned (no lead filter at all) —
+    call sites that previously relied on the default lead_max=48 MUST now pass an explicit
+    ``lead_bucket_filter`` to avoid pooling.
+
+    Filters: data_version, metric, lead bucket or lead_max, optional ``season_months``
     (month of target_date), ``settled_before`` (target_date strictly before, anti-leakage),
     ``require_verified`` (authority='VERIFIED' on snapshot + settlement), and
     ``contributor_policy``:
@@ -278,8 +304,34 @@ def load_bucket_residuals(
     anti-leakage seam — NOT a settlement-known-time cutoff. For rigorous historical
     rebuilds, prefer a settled_at/fact-known-time cutoff once that column is available.
     """
-    where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
-    params: list[object] = [city, data_version, metric, lead_max]
+    from src.calibration.lead_bucket import LEAD_BUCKET_BOUNDS, lead_bucket as _lb  # noqa: PLC0415
+
+    where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?"]
+    params: list[object] = [city, data_version, metric]
+
+    if lead_bucket_filter is not None:
+        # Find the bounds for this bucket label and add a range filter.
+        lo: float | None = None
+        hi: float | None = None
+        for b_lo, b_hi, b_label in LEAD_BUCKET_BOUNDS:
+            if b_label == lead_bucket_filter:
+                lo, hi = b_lo, b_hi
+                break
+        if lo is None:
+            raise ValueError(
+                f"load_bucket_residuals: unknown lead_bucket_filter={lead_bucket_filter!r}. "
+                f"Valid values: {[b[2] for b in LEAD_BUCKET_BOUNDS]}"
+            )
+        where.append("e.lead_hours >= ?")
+        params.append(lo)
+        if hi != float("inf"):
+            where.append("e.lead_hours < ?")
+            params.append(hi)
+    elif lead_max is not None:
+        # Legacy path: pool all leads up to lead_max (deprecated — callers should migrate
+        # to lead_bucket_filter to avoid short/long lead mixing).
+        where.append("e.lead_hours <= ?")
+        params.append(lead_max)
     if require_verified:
         where.append("e.authority = 'VERIFIED'")
         where.append("s.authority = 'VERIFIED'")
@@ -406,6 +458,9 @@ def write_bias_model(
     authority: str | None = None,
     gate_set_hash: str | None = None,
     coverage_months: str | None = None,
+    # TRIBUNAL Findings 1+5 (2026-05-29): lead/cycle granularity extension columns.
+    lead_bucket: str | None = None,   # 'L00_24' | 'L24_48' | 'L48_96' | 'L96_plus'
+    cycle: str | None = None,         # '00z' | '12z'
 ) -> None:
     """Persist one bias-model row to model_bias_ens.
 
@@ -469,6 +524,13 @@ def write_bias_model(
         if "coverage_months" in _existing:
             ext_cols += ", coverage_months"
             ext_vals.append(coverage_months)
+        # TRIBUNAL Findings 1+5 (2026-05-29): lead_bucket + cycle extension columns.
+        if "lead_bucket" in _existing:
+            ext_cols += ", lead_bucket"
+            ext_vals.append(lead_bucket)
+        if "cycle" in _existing:
+            ext_cols += ", cycle"
+            ext_vals.append(cycle)
         placeholders = ",".join(["?"] * (len(base_vals) + len(ext_vals)))
         conn.execute(
             f"INSERT OR REPLACE INTO model_bias_ens ({base_cols}{ext_cols}) "
@@ -633,14 +695,39 @@ _LEGACY_NULL_CONTRIBUTOR_SQL = (
 def _forecast_means(
     conn, city, data_version, metric, lead_max, season_months, settled_before,
     contributor_sql, require_verified,
+    lead_bucket_filter=None,
 ):
     """Metric-aware-per-date ensemble-mean forecast (degC), no settlement join.
 
     Uses the same cycle preference as load_bucket_residuals: HIGH → 0Z cycle,
     LOW → 12Z cycle. Falls back to freshest-by-available_at when issue_time is NULL.
+
+    ``lead_bucket_filter`` (str | None): when set, restricts to the named bucket's
+    hour bounds from ``LEAD_BUCKET_BOUNDS``. ``lead_max`` is used as legacy fallback
+    when ``lead_bucket_filter`` is None.
     """
-    where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?", "e.lead_hours <= ?"]
-    params: list[object] = [city, data_version, metric, lead_max]
+    from src.calibration.lead_bucket import LEAD_BUCKET_BOUNDS  # noqa: PLC0415
+
+    where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?"]
+    params: list[object] = [city, data_version, metric]
+
+    if lead_bucket_filter is not None:
+        lo: float | None = None
+        hi: float | None = None
+        for b_lo, b_hi, b_label in LEAD_BUCKET_BOUNDS:
+            if b_label == lead_bucket_filter:
+                lo, hi = b_lo, b_hi
+                break
+        if lo is None:
+            raise ValueError(f"_forecast_means: unknown lead_bucket_filter={lead_bucket_filter!r}")
+        where.append("e.lead_hours >= ?")
+        params.append(lo)
+        if hi != float("inf"):
+            where.append("e.lead_hours < ?")
+            params.append(hi)
+    elif lead_max is not None:
+        where.append("e.lead_hours <= ?")
+        params.append(lead_max)
     if require_verified:
         where.append("e.authority = 'VERIFIED'")
     if contributor_sql:
@@ -700,18 +787,24 @@ def load_paired_delta(
     live_data_version: str,
     prior_data_version: str,
     metric: str = "high",
-    lead_max: float = 48.0,
+    lead_max: float | None = None,
+    lead_bucket_filter: str | None = None,
     season_months: tuple[int, ...] | None = None,
     settled_before: str | None = None,
 ) -> list[float]:
     """Δ = F25_mean - F50_mean (degC) for dates where BOTH products have a freshest
     snapshot. Live (F25) uses the full-contributor population; prior (F50/legacy TIGGE)
     uses the NULL-passthrough population. No settlement needed — Δ is a paired-lineage
-    product difference, transported into the bias prior."""
+    product difference, transported into the bias prior.
+
+    TRIBUNAL Findings 1+5 (2026-05-29): ``lead_bucket_filter`` preferred over ``lead_max``.
+    """
     f25 = _forecast_means(conn, city, live_data_version, metric, lead_max, season_months,
-                          settled_before, _POSITIVE_CONTRIBUTOR_SQL, require_verified=True)
+                          settled_before, _POSITIVE_CONTRIBUTOR_SQL, require_verified=True,
+                          lead_bucket_filter=lead_bucket_filter)
     f50 = _forecast_means(conn, city, prior_data_version, metric, lead_max, season_months,
-                          settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False)
+                          settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False,
+                          lead_bucket_filter=lead_bucket_filter)
     return [f25[d] - f50[d] for d in (set(f25) & set(f50))]
 
 
@@ -722,7 +815,8 @@ def paired_delta_coverage(
     live_data_version: str,
     prior_data_version: str,
     metric: str = "high",
-    lead_max: float = 48.0,
+    lead_max: float | None = None,
+    lead_bucket_filter: str | None = None,
     season_months: tuple[int, ...] | None = None,
     settled_before: str | None = None,
 ) -> tuple[int, set[int]]:
@@ -733,10 +827,14 @@ def paired_delta_coverage(
     count drives transport-active (n >= MIN_PAIRED_N); the months feed the effective-coverage
     intersection (SD1 / Blocker D): if transport is active, a row must not be applied to a
     target month its paired evidence never covered.
+
+    TRIBUNAL Findings 1+5 (2026-05-29): ``lead_bucket_filter`` preferred over ``lead_max``.
     """
     f25 = _forecast_means(conn, city, live_data_version, metric, lead_max, season_months,
-                          settled_before, _POSITIVE_CONTRIBUTOR_SQL, require_verified=True)
+                          settled_before, _POSITIVE_CONTRIBUTOR_SQL, require_verified=True,
+                          lead_bucket_filter=lead_bucket_filter)
     f50 = _forecast_means(conn, city, prior_data_version, metric, lead_max, season_months,
-                          settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False)
+                          settled_before, _LEGACY_NULL_CONTRIBUTOR_SQL, require_verified=False,
+                          lead_bucket_filter=lead_bucket_filter)
     paired_dates = set(f25) & set(f50)
     return len(paired_dates), {int(str(d)[5:7]) for d in paired_dates}
