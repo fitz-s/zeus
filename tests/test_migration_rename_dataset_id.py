@@ -183,7 +183,7 @@ def test_rename_preserves_unique_constraint_on_dataset_id() -> None:
 
 
 def test_rename_preserves_dataset_id_index() -> None:
-    """idx_ens_v2_entry_lookup (names dataset_id) must survive the rename and reference
+    """idx_ens_entry_lookup (names dataset_id) must survive the rename and reference
     the renamed column — SQLite ≥3.25 RENAME COLUMN auto-rewrites it."""
     conn = _make_pre_rename_db()
     mig.up(conn)
@@ -192,9 +192,9 @@ def test_rename_preserves_dataset_id_index() -> None:
     # The canonical index that references dataset_id must exist and its DDL must now
     # name dataset_id (not data_version).
     idx = conn.execute(
-        "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_ens_v2_entry_lookup'"
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_ens_entry_lookup'"
     ).fetchone()
-    assert idx is not None, "idx_ens_v2_entry_lookup missing after rename"
+    assert idx is not None, "idx_ens_entry_lookup missing after rename"
     assert "dataset_id" in idx[0], "index still references the old column name"
     assert "data_version" not in idx[0], "index DDL still names data_version"
     conn.close()

@@ -4,7 +4,7 @@
 # Authority basis: Stage-C blocker (#26 / #21 Gap #2). Commit B5 renamed the CANONICAL
 #   ensemble_snapshots column data_version → dataset_id in src/state/schema/v2_schema.py
 #   (_create_ensemble_snapshots now declares `dataset_id TEXT NOT NULL` + the UNIQUE and
-#   idx_ens_v2_entry_lookup reference dataset_id). The LIVE zeus-forecasts.db still carries
+#   idx_ens_entry_lookup reference dataset_id). The LIVE zeus-forecasts.db still carries
 #   the OLD column name `data_version`, and NO migration bridges them. On merge+restart the
 #   daemon's schema-readiness / fingerprint-drift check fails. This migration brings an
 #   EXISTING forecasts DB up to the canonical shape via a single O(1) RENAME COLUMN.
@@ -31,7 +31,7 @@ Migration semantic policy:
   ``ALTER TABLE ... RENAME COLUMN`` auto-rewrites every index, UNIQUE constraint
   and view that referenced the old name (the canonical UNIQUE
   ``UNIQUE(city, target_date, temperature_metric, issue_time, dataset_id)`` and
-  ``idx_ens_v2_entry_lookup`` both name the renamed column), so no index/constraint
+  ``idx_ens_entry_lookup`` both name the renamed column), so no index/constraint
   rebuild is needed. The rename is O(1) (catalog edit), not a table copy.
 
 Idempotency / state machine (do NOT guess on ambiguity — Fitz #4):
@@ -174,7 +174,7 @@ def up(conn: sqlite3.Connection) -> None:
       1. State classification (see module docstring). No-op on ALREADY_MIGRATED;
          raise on TABLE_ABSENT / UNEXPECTED_BOTH / UNEXPECTED_NEITHER.
       2. ALTER TABLE ensemble_snapshots RENAME COLUMN data_version TO dataset_id.
-         SQLite ≥ 3.25 auto-updates the UNIQUE + idx_ens_v2_entry_lookup that name
+         SQLite ≥ 3.25 auto-updates the UNIQUE + idx_ens_entry_lookup that name
          the column; O(1) catalog edit, rows untouched.
       3. Drift guard: the post-rename column set MUST equal a fresh canonical
          ensemble_snapshots. Any extra/missing column → AssertionError (rolled back)
