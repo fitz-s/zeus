@@ -16,6 +16,53 @@ UTC = timezone.utc
 LIVE_ELIGIBLE = "LIVE_ELIGIBLE"
 BLOCKED = "BLOCKED"
 
+# Polymarket weather markets cap at 5 days, so ECMWF Open Data forecast steps
+# beyond 144h are no longer consumed. The OpenData required step set therefore
+# caps at the 3h-dissemination ceiling of 144h. TIGGE (the historical archive)
+# is on its own full range and is NOT capped here.
+OPENDATA_MAX_STEP_HOURS = 144
+
+
+def aggregation_window_hours_for_data_version(data_version: str) -> int:
+    """Map a forecast product (by data_version param token) to its physical
+    temperature-aggregation window in hours. Fail-closed on unknown products.
+
+    This is the single source of truth that makes the *wrong* aggregation window
+    UNCONSTRUCTABLE: the window is keyed on the product token, never on a shared
+    scalar. ECMWF definitions (architecture/data_sources_registry_2026_05_08.yaml
+    :86,91; ECMWF Open Data step144 mn2t3 field verified lengthOfTimeRange=3 on
+    2026-05-29):
+        mx2t3 / mn2t3 -> 3h  (ECMWF Open Data, "min/max 2m temp in the last 3h")
+        mx2t6 / mn2t6 -> 6h  (TIGGE archive,    "min/max 2m temp in the last 6h")
+
+    Note: a data_version *string* carrying a legacy ``mx2t6``/``mn2t6`` token is
+    treated as 6h here; the live Open Data versions are ``ecmwf_opendata_mx2t3_*``
+    / ``ecmwf_opendata_mn2t3_*`` (3h tokens), so the live path resolves to 3h.
+    Token precedence checks the 3h tokens first.
+    """
+    dv = str(data_version)
+    if "mx2t3" in dv or "mn2t3" in dv:
+        return 3
+    if "mx2t6" in dv or "mn2t6" in dv:
+        return 6
+    raise ValueError(
+        f"aggregation_window_hours_for_data_version: unknown product, cannot "
+        f"derive aggregation window from data_version {data_version!r}. "
+        f"Register the product's param token (m[xn]2t3 -> 3h, m[xn]2t6 -> 6h)."
+    )
+
+
+def opendata_step_cap_for_data_version(data_version: str) -> int | None:
+    """Return the max required step (hours) for a product, or None for uncapped.
+
+    ECMWF Open Data products (``ecmwf_opendata_*``) cap at OPENDATA_MAX_STEP_HOURS
+    (144h) because Polymarket markets cap at 5 days. The TIGGE archive is uncapped.
+    """
+    dv = str(data_version)
+    if dv.startswith("ecmwf_opendata_"):
+        return OPENDATA_MAX_STEP_HOURS
+    return None
+
 
 @dataclass(frozen=True)
 class TargetLocalDayWindow:
@@ -74,7 +121,15 @@ def required_period_end_steps(
     target_window_start_utc: datetime,
     target_window_end_utc: datetime,
     period_hours: int = 6,
+    max_step_hours: int | None = None,
 ) -> tuple[int, ...]:
+    """Period-end step set covering the target window.
+
+    ``period_hours`` is the product's aggregation window (3h for OpenData
+    mx2t3/mn2t3, 6h for TIGGE mx2t6/mn2t6). ``max_step_hours``, when set, caps
+    the returned steps (ECMWF Open Data caps at 144h per the Polymarket 5-day
+    market window); None leaves the set uncapped (TIGGE archive).
+    """
     if period_hours <= 0:
         raise ValueError("period_hours must be positive")
     source_cycle_utc = _to_utc(source_cycle_time, "source_cycle_time")
@@ -87,6 +142,8 @@ def required_period_end_steps(
     last_step = max(period_hours, ceil(latest_needed_hours / period_hours) * period_hours + period_hours)
     required_steps: list[int] = []
     for step_hour in range(period_hours, last_step + period_hours, period_hours):
+        if max_step_hours is not None and step_hour > max_step_hours:
+            break
         valid_time = source_cycle_utc + timedelta(hours=step_hour)
         period_start = valid_time - timedelta(hours=period_hours)
         if valid_time > window_start and period_start < window_end:
@@ -112,11 +169,17 @@ def build_forecast_target_scope(
         city_timezone=city_timezone,
         target_local_date=target_local_date,
     )
+    # Aggregation window + horizon cap are PRODUCT-DERIVED: OpenData mx2t3/mn2t3
+    # are 3h products capped at 144h; TIGGE mx2t6/mn2t6 are 6h, uncapped. This
+    # makes the wrong (6h-on-3h-product) window unconstructable.
+    period_hours = aggregation_window_hours_for_data_version(data_version)
+    max_step_hours = opendata_step_cap_for_data_version(data_version)
     required_steps = required_period_end_steps(
         source_cycle_time=source_cycle_utc,
         target_window_start_utc=window.start_utc,
         target_window_end_utc=window.end_utc,
-        period_hours=6,
+        period_hours=period_hours,
+        max_step_hours=max_step_hours,
     )
     return ForecastTargetScope(
         city_id=city_id,
