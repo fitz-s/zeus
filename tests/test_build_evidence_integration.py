@@ -86,6 +86,31 @@ def test_true_pair_emitted_with_product_dim():
     assert row["product"] == "mx2t3"  # ResidualKey dim emitted (step 4)
 
 
+def test_low_equivalent_constructions_dedup_to_one_no_double_count():
+    """Pre-LOW guard. The two live LOW constructions tigge_mn2t6_local_calendar_day_min_v1 and
+    ..._contract_window_v2 are bit-identical (verified 2026-05-29: 334,215 paired live rows,
+    max |Δ| = 0.0000°C — contract_window 'serves the same local-day settlement object', per
+    ensemble_snapshot_provenance). They share (city, target_date, issue_time) and differ only in
+    dataset_id, so the ledger must emit ONE residual per (city, date) — never double-count the
+    duplicate construction (which would inflate n_paired / effective sample size). Also the first
+    LOW-metric (12z cycle, mn2t6 product) path exercise of build_evidence."""
+    conn = _conn()
+    low = dict(
+        temperature_metric="low", observation_field="low_temp",
+        issue_time="2026-05-18T12:00:00+00:00",          # 12z = the LOW-strict cycle
+        source_cycle_time="2026-05-18T12:00:00+00:00",
+        members_json=json.dumps([50.0, 51.0, 52.0]),
+    )
+    _snap(conn, dataset_id="tigge_mn2t6_local_calendar_day_min_v1", **low)
+    _snap(conn, dataset_id="tigge_mn2t6_local_calendar_day_min_contract_window_v2", **low)
+    _settle(conn, temperature_metric="low", settlement_value=52.0)
+
+    out = build_evidence(conn, metric="low", lead_max=48.0, cities=None, accept_cycle=None)
+    assert len(out) == 1, f"expected ONE deduped LOW residual, got {len(out)} (double-count)"
+    assert out[0]["product"] == "mn2t6"
+    assert out[0]["data_version"].startswith("tigge_mn2t6_local_calendar_day_min")
+
+
 def test_wrong_station_dropped_end_to_end():
     """D-J1 on the REAL schema: forecast claims KORD, the city's settlement is KMDW (same
     city/date/metric — the legacy loose JOIN paired them). The gated build_evidence DROPS it."""
