@@ -308,7 +308,7 @@ def _write_quarantined_gamma_row(
     event_slug: str,
 ) -> None:
     """Write a QUARANTINED placeholder row for Gamma events with no local obs."""
-    from src.state.db import log_settlement_v2
+    from src.state.db import log_settlement
     settled_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     provenance = {
         "writer": "backfill_gamma_2026",
@@ -322,7 +322,7 @@ def _write_quarantined_gamma_row(
         "reconstructed_at": settled_at,
         "operator_authorization": "2026-05-07",
     }
-    log_settlement_v2(
+    log_settlement(
         conn,
         city=city.name,
         target_date=target_date,

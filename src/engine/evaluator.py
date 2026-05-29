@@ -4366,7 +4366,7 @@ def evaluate_candidate(
     # Phase 2 (2026-05-04, may4math.md F1 + critic-opus BLOCKER 3): derive
     # cycle/source_id/horizon_profile from forecast provenance (ens_result)
     # for cycle-stratified Platt bucket selection. None defaults preserve
-    # legacy behavior — load_platt_model_v2 hits schema-default bucket
+    # legacy behavior — load_platt_model hits schema-default bucket
     # ('00','tigge_mars','full') when any field is unavailable.
     #
     # Phase 2.6 (2026-05-04, may4math.md F2): if ens_result carries an
