@@ -1,6 +1,6 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p9_authority_inventory_v2/SCAFFOLD.md (rev 1.2)
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p9_authority_inventory/SCAFFOLD.md (rev 1.2)
 """
 Authority Inventory v2 — Cohort 7 Extension.
 
@@ -21,7 +21,7 @@ Deviation from task brief (logged here per deviations_observed):
     00_evidence/AUTHORITY_DOCS_INVENTORY.md is authoritative until mw-daemon
     integration).
   - Output path is a direct file path per --output; the canonical
-    task_<DATE>_authority_inventory_v2_run/ directory is the recommended
+    task_<DATE>_authority_inventory_run/ directory is the recommended
     location for operators but is NOT auto-created by the generator.
 """
 
@@ -113,7 +113,7 @@ def iter_git_surfaces(
             if literal.exists():
                 matches = [literal]
             else:
-                print(f"[authority_inventory_v2] WARNING: pattern '{pattern}' yielded no matches (skipping)", file=sys.stderr)
+                print(f"[authority_inventory] WARNING: pattern '{pattern}' yielded no matches (skipping)", file=sys.stderr)
                 continue
 
         for fpath in matches:
@@ -127,10 +127,10 @@ def iter_git_surfaces(
                     capture_output=True, text=True, timeout=10
                 )
                 if result.returncode != 0:
-                    print(f"[authority_inventory_v2] WARNING: '{rel_str}' not tracked by git (skipping)", file=sys.stderr)
+                    print(f"[authority_inventory] WARNING: '{rel_str}' not tracked by git (skipping)", file=sys.stderr)
                     continue
             except (subprocess.TimeoutExpired, FileNotFoundError):
-                print(f"[authority_inventory_v2] WARNING: git unavailable for '{rel_str}' (skipping)", file=sys.stderr)
+                print(f"[authority_inventory] WARNING: git unavailable for '{rel_str}' (skipping)", file=sys.stderr)
                 continue
 
             last_commit_date = _git_last_commit_date(repo_root, rel_str)
@@ -176,7 +176,7 @@ def iter_glob_surfaces(
         pattern_path = Path(glob_pattern)
         latent_dir = str(pattern_path.parent) + "/"
         print(
-            f"[authority_inventory_v2] WARNING: glob '{glob_pattern}' yielded zero matches "
+            f"[authority_inventory] WARNING: glob '{glob_pattern}' yielded zero matches "
             f"— emitting LATENT_TARGET sentinel for '{latent_dir}'",
             file=sys.stderr
         )
@@ -234,7 +234,7 @@ def iter_fs_surfaces(
     for fpath in paths:
         if not fpath.exists():
             print(
-                f"[authority_inventory_v2] WARNING: fs surface '{fpath}' does not exist (skipping)",
+                f"[authority_inventory] WARNING: fs surface '{fpath}' does not exist (skipping)",
                 file=sys.stderr
             )
             continue
@@ -244,7 +244,7 @@ def iter_fs_surfaces(
             mtime_dt = datetime.fromtimestamp(mtime, tz=timezone.utc)
             mtime_str = mtime_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
         except OSError as e:
-            print(f"[authority_inventory_v2] WARNING: cannot stat '{fpath}': {e} (skipping)", file=sys.stderr)
+            print(f"[authority_inventory] WARNING: cannot stat '{fpath}': {e} (skipping)", file=sys.stderr)
             continue
 
         last_commit_date = f"mtime:{mtime_str}"
@@ -361,7 +361,7 @@ def load_reference_replacement_hits(repo_root: Path) -> set[str]:
     topology_doctor = repo_root / "scripts" / "topology_doctor.py"
     if not topology_doctor.exists():
         print(
-            "[authority_inventory_v2] WARNING: topology_doctor.py not found; "
+            "[authority_inventory] WARNING: topology_doctor.py not found; "
             "reference_replacement_hits will be empty set",
             file=sys.stderr
         )
@@ -374,7 +374,7 @@ def load_reference_replacement_hits(repo_root: Path) -> set[str]:
         )
         if result.returncode != 0:
             print(
-                f"[authority_inventory_v2] WARNING: topology_doctor.py --reference-replacement "
+                f"[authority_inventory] WARNING: topology_doctor.py --reference-replacement "
                 f"exited {result.returncode}; hits will be empty set",
                 file=sys.stderr
             )
@@ -393,7 +393,7 @@ def load_reference_replacement_hits(repo_root: Path) -> set[str]:
 
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
         print(
-            f"[authority_inventory_v2] WARNING: failed to run topology_doctor.py: {e}; "
+            f"[authority_inventory] WARNING: failed to run topology_doctor.py: {e}; "
             "hits will be empty set",
             file=sys.stderr
         )
@@ -415,7 +415,7 @@ def load_invariant_failure_hits(repo_root: Path) -> set[str]:
     conservative (never inflates drift score) and is noted in INVENTORY.md header.
     """
     print(
-        "[authority_inventory_v2] WARNING: load_invariant_failure_hits() is a conservative stub "
+        "[authority_inventory] WARNING: load_invariant_failure_hits() is a conservative stub "
         "(P9.1 implementer gap — see SCAFFOLD.md §3 C2). Invariant weight contributes 0 for all rows.",
         file=sys.stderr
     )
@@ -639,7 +639,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def _run(repo_root: Path, output: Path, as_of: datetime, dry_run: bool, include_v1: bool) -> None:
     if include_v1:
         print(
-            "[authority_inventory_v2] WARNING: --include-v1 is not yet implemented in P9.1. "
+            "[authority_inventory] WARNING: --include-v1 is not yet implemented in P9.1. "
             "Only Cohort 7 rows will be emitted. See SCAFFOLD.md for rationale.",
             file=sys.stderr
         )
@@ -685,7 +685,7 @@ def _run(repo_root: Path, output: Path, as_of: datetime, dry_run: bool, include_
     # Write output
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(output_text, encoding="utf-8")
-    print(f"[authority_inventory_v2] Wrote {len(rows)} rows to {output}", file=sys.stderr)
+    print(f"[authority_inventory] Wrote {len(rows)} rows to {output}", file=sys.stderr)
 
 
 def main() -> None:
@@ -694,7 +694,7 @@ def main() -> None:
 
     repo_root = args.repo_root.resolve()
     if not repo_root.is_dir():
-        print(f"[authority_inventory_v2] ERROR: --repo-root '{repo_root}' is not a directory", file=sys.stderr)
+        print(f"[authority_inventory] ERROR: --repo-root '{repo_root}' is not a directory", file=sys.stderr)
         sys.exit(1)
 
     if args.as_of:
@@ -704,7 +704,7 @@ def main() -> None:
             if as_of.tzinfo is not None:
                 as_of = as_of.replace(tzinfo=None)
         except ValueError as e:
-            print(f"[authority_inventory_v2] ERROR: invalid --as-of value: {e}", file=sys.stderr)
+            print(f"[authority_inventory] ERROR: invalid --as-of value: {e}", file=sys.stderr)
             sys.exit(1)
     else:
         as_of = datetime.utcnow()
