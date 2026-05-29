@@ -6,11 +6,17 @@
 Fee convention (Polymarket taker, per docs.polymarket.com/trading/fees):
     fee_per_share = fee_rate * p * (1 - p)
 
-where p is the AVERAGE FILL PRICE across all consumed levels.  The fee
-is expressed in shares: effective_filled_size = filled_size - fees (i.e.
-the buyer nets fewer shares after fees; the seller nets less proceeds).
-avg_price in SimulatedFill is the GROSS price before fees.  Callers that
-need the all-in cost compute: all_in_price = avg_price + fee_per_share.
+where p is the AVERAGE FILL PRICE across all consumed levels.
+
+Side-asymmetric fee netting (encoded structurally, not just in docs):
+  BUY  — fee is subtracted from the share count the buyer receives.
+         net_shares   = filled_size - fees
+         net_proceeds = None (not applicable to a buyer)
+  SELL — fee is subtracted from the USD proceeds the seller receives.
+         net_proceeds = gross_notional - fees
+         net_shares   = None (not applicable to a seller)
+
+avg_price in SimulatedFill is the GROSS VWAP before fees.
 
 BUY  walks the ASK book ascending (lowest ask first).
 SELL walks the BID book descending (highest bid first).
@@ -66,6 +72,14 @@ class SimulatedFill:
     filled_size: Decimal
     avg_price: Decimal | None
     fees: Decimal
+    # Side-correct net fields — exactly one is populated for a successful fill:
+    #   BUY:  net_shares   = filled_size - fees  (shares after fee deduction)
+    #         net_proceeds = None
+    #   SELL: net_proceeds = gross_notional - fees  (USD after fee deduction)
+    #         net_shares   = None
+    # Both are None when filled_size == 0.
+    net_shares: Decimal | None
+    net_proceeds: Decimal | None
     cancelled_remainder: Decimal
     fill_status: FillStatus
     levels_consumed: int
@@ -199,20 +213,24 @@ def simulate_fill(
             filled_size=Decimal("0"),
             avg_price=None,
             fees=Decimal("0"),
+            net_shares=None,
+            net_proceeds=None,
             cancelled_remainder=Decimal("0"),
             fill_status="REJECTED",
             levels_consumed=0,
             reason=reason,
         )
 
-    def _cancel(reason: str, fill_size: Decimal = Decimal("0")) -> SimulatedFill:
-        """CANCELLED with no fill (FOK) or remaining after limit breach."""
+    def _cancel(reason: str) -> SimulatedFill:
+        """CANCELLED with no fill (FOK full cancel)."""
         return SimulatedFill(
             side=side,
             requested_size=requested,
             filled_size=Decimal("0"),
             avg_price=None,
             fees=Decimal("0"),
+            net_shares=None,
+            net_proceeds=None,
             cancelled_remainder=requested,
             fill_status="CANCELLED",
             levels_consumed=0,
@@ -256,17 +274,34 @@ def simulate_fill(
     if not levels:
         if order_type == "FOK":
             return _cancel("empty_book_fok_cancelled")
-        # FAK / GTC / GTD with empty book
+        if order_type == "FAK":
+            # FAK cancels the unfilled remainder immediately
+            return SimulatedFill(
+                side=side,
+                requested_size=requested,
+                filled_size=Decimal("0"),
+                avg_price=None,
+                fees=Decimal("0"),
+                net_shares=None,
+                net_proceeds=None,
+                cancelled_remainder=requested,
+                fill_status="CANCELLED",
+                levels_consumed=0,
+                reason="empty_book_fak_cancelled",
+            )
+        # GTC / GTD: entire order rests (zero fill, zero cancel)
         return SimulatedFill(
             side=side,
             requested_size=requested,
             filled_size=Decimal("0"),
             avg_price=None,
             fees=Decimal("0"),
-            cancelled_remainder=requested if order_type == "FAK" else Decimal("0"),
-            fill_status="PARTIAL" if order_type == "FAK" else "PARTIAL",
+            net_shares=None,
+            net_proceeds=None,
+            cancelled_remainder=Decimal("0"),
+            fill_status="PARTIAL",
             levels_consumed=0,
-            reason="empty_book",
+            reason="empty_book_resting",
         )
 
     # -- Walk levels -------------------------------------------------------
@@ -294,25 +329,33 @@ def simulate_fill(
             remaining = Decimal("0")
             break
 
-    # -- Compute avg price and fees ----------------------------------------
+    # -- Compute avg price, fees, and side-correct net fields ---------------
     avg_price: Decimal | None
     fees = Decimal("0")
+    net_shares: Decimal | None = None
+    net_proceeds: Decimal | None = None
     if filled_size > Decimal("0"):
         avg_price = gross_notional / filled_size
         fees = _polymarket_fee(avg_price, rate, filled_size)
+        if side == "buy":
+            net_shares = filled_size - fees   # buyer nets fewer shares
+        else:
+            net_proceeds = gross_notional - fees  # seller nets less USD
     else:
         avg_price = None
 
     # -- Apply order type semantics ----------------------------------------
     if order_type == "FOK":
         if remaining > Decimal("0"):
-            # Full fill impossible — cancel everything
+            # Full fill impossible — cancel everything, no partial
             return SimulatedFill(
                 side=side,
                 requested_size=requested,
                 filled_size=Decimal("0"),
                 avg_price=None,
                 fees=Decimal("0"),
+                net_shares=None,
+                net_proceeds=None,
                 cancelled_remainder=requested,
                 fill_status="CANCELLED",
                 levels_consumed=0,
@@ -355,6 +398,8 @@ def simulate_fill(
         filled_size=filled_size,
         avg_price=avg_price,
         fees=fees,
+        net_shares=net_shares,
+        net_proceeds=net_proceeds,
         cancelled_remainder=cancelled_remainder,
         fill_status=fill_status,
         levels_consumed=levels_consumed,

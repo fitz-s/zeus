@@ -225,10 +225,8 @@ class TestFinding2DerivedBinKwarg:
             p_market_source="uniform",
             override_platt=True,  # skip Platt to avoid needing calibration_pairs data
             clim_rows=[],
-            derived_winning_bin="21°C",        # TRUE value-derived label
+            settlement_value=21.0,             # derives to "21°C" within the pick vocabulary
             stored_winning_bin_evidence="29°C",
-            stored_matches_derived=False,
-            truth_source="settlement_value_derived",
         )
 
         assert result.get("derived_winning_bin") == "21°C", (

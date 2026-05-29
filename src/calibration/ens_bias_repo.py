@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS model_bias_ens(
     estimator TEXT NOT NULL,
     training_cutoff TEXT,
     recorded_at TEXT NOT NULL,
-    PRIMARY KEY (city, season, month, metric, live_data_version)
+    lead_bucket TEXT NOT NULL DEFAULT 'LEGACY_POOLED',
+    PRIMARY KEY (city, season, month, metric, live_data_version, lead_bucket)
 )
 """
 
@@ -96,16 +97,14 @@ _CANONICAL_EXTENSION_COLUMNS: list[tuple[str, str]] = [
     # season-labelled row cannot be misapplied to a month it never trained on.
     ("gate_set_hash",        "TEXT"),          # sha256(active gate names+thresholds)[:16]
     ("coverage_months",      "TEXT"),          # CSV of months covered, e.g. '3,4,5'
-    # TRIBUNAL Findings 1+5 (2026-05-29): lead_bucket granularity.
-    # lead_bucket: coarse lead-hour segment (L00_24/L24_48/L48_96/L96_plus).
-    #   Short-lead (L00_24) has sign-flip vs long-lead; pooling all ≤48h was wrong.
-    # cycle NOT added as a separate extension column: load_bucket_residuals already
-    #   implements metric-aware cycle selection internally (HIGH→0z preferred,
-    #   LOW→12z preferred). Adding 'cycle' as a key dim would require filtering at
-    #   the SQL layer to be honest — which would break the metric-preference fallback.
-    #   The metric dimension already encodes cycle preference; a separate cycle key
-    #   would be redundant at best, and dishonest if unenforced. Removed per #363 fix.
-    ("lead_bucket",          "TEXT"),          # e.g. 'L00_24', 'L24_48', 'L48_96', 'L96_plus'
+    # NOTE: lead_bucket is NOT in this extension list. It was promoted to a base
+    # PK column in MODEL_BIAS_ENS_V2_SCHEMA (SEV-1 fix, 2026-05-29): the fit loop
+    # writes 4 rows per (city/season/month/metric/live_dv) with distinct lead_buckets;
+    # without lead_bucket in the PK all 4 writes share the same PK and only the last
+    # (L96_plus) survives. lead_bucket carries NOT NULL DEFAULT 'LEGACY_POOLED' so
+    # legacy/pooled rows have a deterministic bucket identity.
+    # cycle NOT added: load_bucket_residuals implements metric-aware cycle selection
+    # internally; the metric dimension already encodes cycle preference.
 ]
 
 _POSITIVE_CONTRIBUTOR_SQL = (
@@ -132,9 +131,58 @@ def init_ens_bias_schema(conn: sqlite3.Connection) -> None:
     Zeus #64 FT-ship F2 (2026-05-26): unified init so both init_schema (daemon
     boot) and the standalone migration script reach a fully-extended schema via
     a single call.  Re-running on an already-extended DB is a safe no-op.
+
+    SEV-1 fix (2026-05-29): idempotent PK migration for the lead_bucket promotion.
+    The OLD PK was (city, season, month, metric, live_data_version); the NEW PK adds
+    lead_bucket.  SQLite cannot ALTER a PRIMARY KEY, so this migration uses the
+    CREATE…INSERT…DROP…RENAME pattern, preserving all existing rows with
+    lead_bucket COALESCE-defaulted to 'LEGACY_POOLED'.  Idempotent: no-op if the
+    current schema already has lead_bucket in the PK.
     """
-    conn.execute(MODEL_BIAS_ENS_V2_SCHEMA)
-    conn.commit()
+    # --- SEV-1: PK migration (lead_bucket) -----------------------------------
+    # Detect whether the OLD PK (without lead_bucket) is still in place by
+    # inspecting the CREATE TABLE statement stored in sqlite_master.
+    _tbl_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='model_bias_ens'"
+    ).fetchone()
+    if _tbl_row is not None:
+        _old_sql = (_tbl_row[0] or "").lower()
+        # Old PK ends at "live_data_version)" without "lead_bucket"; new PK ends
+        # with "lead_bucket)".  We test for the NEW PK signature to skip migration.
+        _pk_has_lead_bucket = (
+            "lead_bucket" in _old_sql
+            and "primary key" in _old_sql
+            and "live_data_version, lead_bucket" in _old_sql
+        )
+        if not _pk_has_lead_bucket:
+            # Rebuild: new schema → copy rows (COALESCE lead_bucket) → swap.
+            conn.execute(MODEL_BIAS_ENS_V2_SCHEMA.replace(
+                "CREATE TABLE IF NOT EXISTS model_bias_ens",
+                "CREATE TABLE IF NOT EXISTS model_bias_ens__new"
+            ))
+            # Copy all base columns; COALESCE legacy lead_bucket column (may not
+            # exist on very old schemas) to 'LEGACY_POOLED'.
+            _existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens)").fetchall()}
+            if "lead_bucket" in _existing_cols:
+                _lb_expr = "COALESCE(lead_bucket, 'LEGACY_POOLED')"
+            else:
+                _lb_expr = "'LEGACY_POOLED'"
+            conn.execute(
+                f"""INSERT INTO model_bias_ens__new
+                    SELECT city, season, month, metric, live_source_id, live_data_version,
+                           prior_source_id, prior_data_version, contributor_policy, bias_unit,
+                           posterior_bias_c, posterior_sd_c, n_live, n_prior, n_paired,
+                           weight_live, paired_delta_c, v0_c2, vo_c2, estimator,
+                           training_cutoff, recorded_at, {_lb_expr} AS lead_bucket
+                    FROM model_bias_ens"""
+            )
+            conn.execute("DROP TABLE model_bias_ens")
+            conn.execute("ALTER TABLE model_bias_ens__new RENAME TO model_bias_ens")
+            conn.commit()
+    else:
+        # Table doesn't exist yet — CREATE TABLE creates it with the new schema.
+        conn.execute(MODEL_BIAS_ENS_V2_SCHEMA)
+        conn.commit()
 
     # Apply canonical extension columns. SQLite has no ADD COLUMN IF NOT EXISTS,
     # so we use PRAGMA table_info to check before each ALTER.
@@ -372,11 +420,24 @@ def load_bucket_residuals(
     # it wins over any other cycle regardless of available_at order.
     # When issue_time is NULL or unparseable, falls back to freshest-by-available_at.
     _preferred_hour: int = 0 if metric == "high" else 12
+    _lbr_unparseable_count = 0
 
     def _issue_hour(it: object) -> int | None:
+        # S2-5 (2026-05-29): hardened from positional slice to datetime.fromisoformat().
+        # The old `int(str(it)[11:13])` silently sliced garbage on non-ISO strings.
+        if it is None:
+            return None
         try:
-            return int(str(it)[11:13]) if it is not None else None
-        except (ValueError, IndexError):
+            return datetime.fromisoformat(str(it)).hour
+        except (ValueError, TypeError):
+            nonlocal _lbr_unparseable_count
+            _lbr_unparseable_count += 1
+            if _lbr_unparseable_count <= 3:
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "load_bucket_residuals: cycle_unparseable issue_time=%r (count=%d)",
+                    it, _lbr_unparseable_count,
+                )
             return None
 
     # dict value: (av, mj, mu, sv, it) — 5-tuple with issue_time at index 4
@@ -471,17 +532,25 @@ def write_bias_model(
     to the target DB.  When they are NOT supplied the INSERT still works because
     SQLite silently ignores columns not listed in the INSERT column list.
 
+    SEV-1 fix (2026-05-29): lead_bucket is now a base PK column (NOT NULL DEFAULT
+    'LEGACY_POOLED'). It is always written as part of base_cols. When the caller
+    does not supply it, 'LEGACY_POOLED' is written (matches the column DEFAULT so
+    old callers retain their pooled-row identity without overwriting each other).
+
     The writer does NOT call conn.commit() — callers control transaction scope.
     """
-    # Determine which columns are available in this DB (idempotent extension support).
+    # Determine which canonical extension columns are available in this DB.
     _existing = {r[1] for r in conn.execute("PRAGMA table_info(model_bias_ens)").fetchall()}
     _has_canonical = "error_model_family" in _existing
+
+    # lead_bucket is a base PK column; default to 'LEGACY_POOLED' for legacy callers.
+    _lead_bucket_val = lead_bucket if lead_bucket is not None else "LEGACY_POOLED"
 
     base_cols = (
         "city, season, month, metric, live_source_id, live_data_version, "
         "prior_source_id, prior_data_version, contributor_policy, bias_unit, "
         "posterior_bias_c, posterior_sd_c, n_live, n_prior, n_paired, weight_live, "
-        "paired_delta_c, v0_c2, vo_c2, estimator, training_cutoff, recorded_at"
+        "paired_delta_c, v0_c2, vo_c2, estimator, training_cutoff, recorded_at, lead_bucket"
     )
     base_vals: list[object] = [
         city, season, (0 if month is None else int(month)), metric, live_source_id, live_data_version,
@@ -493,6 +562,7 @@ def write_bias_model(
         (float(vo_c2) if vo_c2 is not None else None),
         estimator, training_cutoff,
         recorded_at or datetime.now(timezone.utc).isoformat(),
+        _lead_bucket_val,
     ]
 
     if _has_canonical:
@@ -526,10 +596,6 @@ def write_bias_model(
         if "coverage_months" in _existing:
             ext_cols += ", coverage_months"
             ext_vals.append(coverage_months)
-        # TRIBUNAL Findings 1+5 (2026-05-29): lead_bucket extension column.
-        if "lead_bucket" in _existing:
-            ext_cols += ", lead_bucket"
-            ext_vals.append(lead_bucket)
         placeholders = ",".join(["?"] * (len(base_vals) + len(ext_vals)))
         conn.execute(
             f"INSERT OR REPLACE INTO model_bias_ens ({base_cols}{ext_cols}) "
@@ -558,9 +624,18 @@ def read_bias_model(
     target_month: int | None = None,
     require_coverage_months: bool = False,
     authority: str = "VERIFIED",
+    lead_bucket: str | None = None,
 ) -> sqlite3.Row | None:
     """Read a bias row. ``live_data_version`` is REQUIRED — there is no
     'latest across data versions' fallback (that would serve the wrong product).
+
+    SEV-1 fix (2026-05-29): ``lead_bucket`` param added. When provided, the query
+    adds ``AND lead_bucket = ?`` so callers get the row for the requested bucket.
+    FAIL-CLOSED: when the requested bucket has no matching row, returns None (does
+    NOT silently serve a different bucket — that would apply the wrong-lead bias).
+    Pass ``lead_bucket=None`` to retain the legacy behaviour (no bucket filter;
+    serves whatever single row the old 5-column PK produced, used only by legacy
+    callers on old-schema DBs).
 
     Zeus #64 FT-ship F4 (2026-05-26): when ``error_model_family`` is supplied
     the query also filters ``error_model_family = ?`` AND ``authority = 'VERIFIED'``
@@ -600,11 +675,23 @@ def read_bias_model(
             "— serving the wrong product's bias is a correctness hazard)"
         )
 
-    base_sql = (
-        "SELECT * FROM model_bias_ens WHERE city=? AND season=? AND metric=? "
-        "AND live_data_version=? AND month=?"
-    )
-    base_params: tuple = (city, season, metric, live_data_version, (0 if month is None else int(month)))
+    # SEV-1 fix: include lead_bucket in the query when caller provides it (fail-closed).
+    if lead_bucket is not None:
+        base_sql = (
+            "SELECT * FROM model_bias_ens WHERE city=? AND season=? AND metric=? "
+            "AND live_data_version=? AND month=? AND lead_bucket=?"
+        )
+        base_params: tuple = (
+            city, season, metric, live_data_version,
+            (0 if month is None else int(month)),
+            lead_bucket,
+        )
+    else:
+        base_sql = (
+            "SELECT * FROM model_bias_ens WHERE city=? AND season=? AND metric=? "
+            "AND live_data_version=? AND month=?"
+        )
+        base_params = (city, season, metric, live_data_version, (0 if month is None else int(month)))
 
     if error_model_family is not None:
         # Check canonical columns exist before adding the filter (defensive for DBs
@@ -742,11 +829,23 @@ def _forecast_means(
         params,
     ).fetchall()
     _preferred_hour: int = 0 if metric == "high" else 12
+    _fm_unparseable_count = 0
 
     def _issue_hour(it: object) -> int | None:
+        # S2-5 (2026-05-29): hardened from positional slice to datetime.fromisoformat().
+        if it is None:
+            return None
         try:
-            return int(str(it)[11:13]) if it is not None else None
-        except (ValueError, IndexError):
+            return datetime.fromisoformat(str(it)).hour
+        except (ValueError, TypeError):
+            nonlocal _fm_unparseable_count
+            _fm_unparseable_count += 1
+            if _fm_unparseable_count <= 3:
+                import logging as _logging
+                _logging.getLogger(__name__).debug(
+                    "_forecast_means: cycle_unparseable issue_time=%r (count=%d)",
+                    it, _fm_unparseable_count,
+                )
             return None
 
     # dict value: (av, mj, mu, it) — 4-tuple with issue_time at index 3

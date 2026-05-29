@@ -17,6 +17,10 @@ Coverage
 10. market_resolved=True → REJECTED.
 11. Multi-level walk produces correct volume-weighted avg_price.
 12. GTC partial remainder not counted as cancelled.
+13. GTC/GTD empty-book → resting status (PARTIAL, cancelled_remainder=0, not FAK-cancel).
+14. FAK empty-book → CANCELLED (not PARTIAL).
+15. SELL fill: net_proceeds reflects proceeds-reduction; net_shares is None.
+    BUY fill: net_shares reflects share-cost reduction; net_proceeds is None.
 """
 
 from __future__ import annotations
@@ -363,4 +367,151 @@ def test_gtc_partial_remainder_not_cancelled():
     assert result.filled_size == Decimal("100")
     assert result.cancelled_remainder == Decimal("0"), (
         "GTC remainder rests — it should NOT be marked cancelled"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 13. GTC/GTD empty-book: resting (PARTIAL, cancelled_remainder=0)
+# ---------------------------------------------------------------------------
+
+def test_gtc_empty_book_resting():
+    """GTC against empty ask book: order rests (PARTIAL, no cancel, no fill)."""
+    result = simulate_fill(
+        side="buy",
+        order_type="GTC",
+        limit_price=0.55,
+        requested_size=50,
+        tick_size=0.01,
+        min_order_size=1.0,
+        fee_rate=0.0,
+        bids=BIDS,
+        asks=[],  # empty ask book
+    )
+    assert result.fill_status == "PARTIAL"
+    assert result.filled_size == Decimal("0")
+    assert result.cancelled_remainder == Decimal("0"), (
+        "GTC empty-book: remainder rests, must NOT be cancelled"
+    )
+    assert result.avg_price is None
+    assert "resting" in result.reason
+
+
+def test_gtd_empty_book_resting():
+    """GTD against empty bid book: order rests, not cancelled."""
+    result = simulate_fill(
+        side="sell",
+        order_type="GTD",
+        limit_price=0.45,
+        requested_size=50,
+        tick_size=0.01,
+        min_order_size=1.0,
+        fee_rate=0.0,
+        bids=[],  # empty bid book
+        asks=ASKS,
+    )
+    assert result.fill_status == "PARTIAL"
+    assert result.cancelled_remainder == Decimal("0"), (
+        "GTD empty-book: remainder rests, must NOT be cancelled"
+    )
+    assert "resting" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# 14. FAK empty-book: CANCELLED (not PARTIAL)
+# ---------------------------------------------------------------------------
+
+def test_fak_empty_book_cancelled():
+    """FAK against empty book cancels the full order immediately."""
+    result = simulate_fill(
+        side="buy",
+        order_type="FAK",
+        limit_price=0.55,
+        requested_size=50,
+        tick_size=0.01,
+        min_order_size=1.0,
+        fee_rate=0.0,
+        bids=BIDS,
+        asks=[],  # empty ask book
+    )
+    assert result.fill_status == "CANCELLED", (
+        f"FAK empty-book must be CANCELLED, got {result.fill_status}"
+    )
+    assert result.cancelled_remainder == Decimal("50")
+    assert result.filled_size == Decimal("0")
+
+
+# ---------------------------------------------------------------------------
+# 15. Side-correct net fields: BUY net_shares vs SELL net_proceeds
+# ---------------------------------------------------------------------------
+
+def test_buy_net_shares_populated_net_proceeds_none():
+    """BUY fill: net_shares = filled_size - fees; net_proceeds is None."""
+    result = simulate_fill(
+        side="buy",
+        order_type="GTC",
+        limit_price=0.99,
+        requested_size=100,
+        tick_size=0.01,
+        min_order_size=1.0,
+        fee_rate=0.05,
+        bids=BIDS,
+        asks=ASKS,
+    )
+    assert result.fill_status == "FILLED"
+    assert result.net_proceeds is None, "BUY: net_proceeds must be None"
+    assert result.net_shares is not None, "BUY: net_shares must be set"
+    expected_net = result.filled_size - result.fees
+    assert abs(result.net_shares - expected_net) < Decimal("1e-10"), (
+        f"BUY net_shares={result.net_shares} != filled-fees={expected_net}"
+    )
+    # net_shares < filled_size: fees reduce the share count
+    assert result.net_shares < result.filled_size
+
+
+def test_sell_net_proceeds_populated_net_shares_none():
+    """SELL fill: net_proceeds = gross_notional - fees; net_shares is None."""
+    result = simulate_fill(
+        side="sell",
+        order_type="GTC",
+        limit_price=0.45,
+        requested_size=100,
+        tick_size=0.01,
+        min_order_size=1.0,
+        fee_rate=0.05,
+        bids=BIDS,
+        asks=ASKS,
+    )
+    assert result.fill_status == "FILLED"
+    assert result.net_shares is None, "SELL: net_shares must be None"
+    assert result.net_proceeds is not None, "SELL: net_proceeds must be set"
+    # gross_notional = filled_size * avg_price
+    gross = result.filled_size * result.avg_price
+    expected_net = gross - result.fees
+    assert abs(result.net_proceeds - expected_net) < Decimal("1e-10"), (
+        f"SELL net_proceeds={result.net_proceeds} != gross-fees={expected_net}"
+    )
+    # net_proceeds < gross_notional: fees reduce USD received
+    assert result.net_proceeds < gross
+
+
+def test_sell_fee_not_subtracted_from_shares():
+    """SELL: applying filled_size - fees would be WRONG; net_proceeds is correct."""
+    result = simulate_fill(
+        side="sell",
+        order_type="GTC",
+        limit_price=0.45,
+        requested_size=100,
+        tick_size=0.01,
+        min_order_size=1.0,
+        fee_rate=0.05,
+        bids=BIDS,
+        asks=ASKS,
+    )
+    assert result.fill_status == "FILLED"
+    # The incorrect BUY-style formula (filled_size - fees) must NOT equal
+    # the correct SELL net field (net_proceeds).
+    wrong_buy_formula = result.filled_size - result.fees
+    assert wrong_buy_formula != result.net_proceeds, (
+        "SELL net_proceeds must not equal (filled_size - fees) — that is "
+        "the BUY formula and is semantically wrong for a SELL"
     )
