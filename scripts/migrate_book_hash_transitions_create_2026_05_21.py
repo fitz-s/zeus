@@ -1,6 +1,7 @@
 # Created: 2026-05-20
 # Last reused or audited: 2026-05-20
 # Authority basis: 2026-05-20 live substrate repair; trade-owned executable snapshot substrate
+# WRITER_LOCK_DEFER_REVIEW=2026-05-28
 """Idempotent CREATE TABLE migration for book_hash_transitions (trade DB).
 
 Creates the book_hash_transitions table and its two indexes if they do not

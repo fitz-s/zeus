@@ -1,6 +1,7 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_1_ULTRAPLAN.md §4.2 (Path D natural-key schema, v3)
+# WRITER_LOCK_DEFER_REVIEW=2026-05-28
 # SCAFFOLD: migration script — production execution pending T1 production pass
 """Create decision_events + AFTER INSERT TRIGGER (backstop) + indices on world DB.
 

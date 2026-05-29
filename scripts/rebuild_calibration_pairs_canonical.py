@@ -84,6 +84,7 @@ from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import get_world_connection, init_schema
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 from src.types.market import validate_bin_topology
+from src.types.metric_identity import MetricIdentity
 
 
 CANONICAL_BIN_SOURCE = "canonical_v1"
@@ -164,9 +165,12 @@ def _fetch_eligible_snapshots(
     if city_filter:
         where += " AND city = ?"
         params = (MIN_TRAINING_DATE, city_filter)
+    # B5 (2026-05-28): fetch temperature_metric + training_allowed for MetricIdentity
+    # resolution and add_calibration_pair() required kwargs.
     sql = f"""
         SELECT snapshot_id, city, target_date, issue_time, lead_hours,
-               available_at, members_json, dataset_id
+               available_at, members_json, dataset_id,
+               temperature_metric, training_allowed
         FROM ensemble_snapshots
         {where}
         ORDER BY city, target_date, lead_hours
@@ -326,6 +330,14 @@ def _process_snapshot(
         str(snapshot["dataset_id"] or ""),
     )
 
+    # B5 (2026-05-28): resolve MetricIdentity from snapshot for add_calibration_pair()
+    # required kwargs metric_identity, training_allowed, data_version.
+    metric_identity = MetricIdentity.from_raw(
+        str(snapshot["temperature_metric"] or "high")
+    )
+    snapshot_training_allowed = bool(snapshot["training_allowed"])
+    data_version = str(snapshot["dataset_id"] or "")
+
     pairs_this_snapshot = 0
     for b, p in zip(bins, p_raw_vec):
         outcome = 1 if b is winning_bin else 0
@@ -341,6 +353,9 @@ def _process_snapshot(
             cluster=city.cluster,
             forecast_available_at=available_at,
             settlement_value=settlement_value,
+            metric_identity=metric_identity,
+            training_allowed=snapshot_training_allowed,
+            data_version=data_version,
             decision_group_id=decision_group_id,
             bin_source=CANONICAL_BIN_SOURCE,
             # VERIFIED is safe because both inputs were VERIFIED (enforced

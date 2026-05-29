@@ -96,7 +96,7 @@ def _gate_p2_coverage() -> tuple[bool, str]:
     if empty is not None:
         return False, "canonical read served an EMPTY-coverage row (Blocker E not wired)"
     # good coverage but out-of-scope month
-    conn.execute("DELETE FROM model_bias_ens_v2")
+    conn.execute("DELETE FROM model_bias_ens")
     write_bias_model(conn, **{**common, "coverage_months": "5"})
     oos = read_bias_model(conn, city="GATE", season="MAM", metric="high",
                           live_data_version="dv", error_model_family=_FAMILY,

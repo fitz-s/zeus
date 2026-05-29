@@ -257,7 +257,7 @@ def _merge_calibration_counts(
                 "temperature_metric": str(row["temperature_metric"] or "unknown"),
                 "cluster": str(row["cluster"] or "unknown"),
                 "season": str(row["season"] or "unknown"),
-                "data_version": str(row["data_version"] or "unknown"),
+                "data_version": str(row["dataset_id"] or "unknown"),
                 "cycle": str(row["cycle"] or "unknown"),
                 "source_id": str(row["source_id"] or "unknown"),
                 "forecast_source_id": str(row["source_id"] or "unknown"),

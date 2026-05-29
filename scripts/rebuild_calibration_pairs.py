@@ -116,6 +116,7 @@ from src.contracts.ensemble_snapshot_provenance import (
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.state.db import init_schema, init_schema_forecasts, ZEUS_WORLD_DB_PATH
+_LIVE_WRITE_WORLD_DB = ZEUS_WORLD_DB_PATH  # alias for live-write path (not dry-run)
 from src.state.db_writer_lock import (  # noqa: E402
     BulkChunker,
     bulk_lock_with_chunker,
@@ -2306,7 +2307,7 @@ def main() -> int:
         # If a future BULK caller holds a lock on a DB later in canonical order
         # than zeus-world.db, change closure to Option B (per-BULK DB).
         _event_writer = lambda **kw: emit_event(  # noqa: E731
-            db_path=ZEUS_WORLD_DB_PATH, **kw
+            db_path=_LIVE_WRITE_WORLD_DB, **kw
         )
         with bulk_lock_with_chunker(
             write_db_path,

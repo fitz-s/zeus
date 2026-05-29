@@ -963,10 +963,14 @@ class ReplayContext:
         temperature_metric: Literal["high", "low"] = "high",
     ) -> Optional[dict]:
         """Get settlement outcome for scoring."""
-        if not self._settlements_table:
+        # B3cont: canonical settlement data lives in forecasts.settlement_outcomes;
+        # bare `settlements` is legacy_archived (world ghost only). Prefer the
+        # canonical table, fall back to legacy for pre-B3 replay DBs.
+        table = self._settlement_outcomes_table or self._settlements_table
+        if not table:
             return None
         row = self.conn.execute(
-            f"SELECT settlement_value, winning_bin FROM {self._settlements_table} "
+            f"SELECT settlement_value, winning_bin FROM {table} "
             "WHERE city = ? AND target_date = ? AND temperature_metric = ? "
             "AND authority = 'VERIFIED'",
             (city_name, target_date, temperature_metric),
