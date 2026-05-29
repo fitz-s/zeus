@@ -1,15 +1,15 @@
 # Created: 2026-05-27
 # Last reused or audited: 2026-05-28
 # Lifecycle: created=2026-05-27; last_reviewed=2026-05-28; last_reused=never
-# Purpose: Read-only reproducibility gate — recompute every model_bias_ens_v2 row via current code and classify vs stored.
+# Purpose: Read-only reproducibility gate — recompute every model_bias_ens row via current code and classify vs stored.
 # Reuse: Read-only (both DBs mode=ro). Safe to re-run any time; allowlisted in db_writer_lock.
 # Authority basis: operator audit 2026-05-27 — row reproducibility gate for full_transport_v1
-#   stored rows. Recompute every stored model_bias_ens_v2 row using CURRENT code + CURRENT
+#   stored rows. Recompute every stored model_bias_ens row using CURRENT code + CURRENT
 #   DB and classify each row vs its stored value. Production rows that do not REPRODUCE
 #   are not canonical under current code/gates and must not ship.
-"""Canonical row reproducibility audit for model_bias_ens_v2 (READ-ONLY).
+"""Canonical row reproducibility audit for model_bias_ens (READ-ONLY).
 
-For every stored row in ``model_bias_ens_v2`` (world.db), recompute the canonical fit
+For every stored row in ``model_bias_ens`` (world.db), recompute the canonical fit
 using the **current** ``fit_city_predictive_error`` against the **current** source
 residuals in forecasts.db, then classify the row:
 
@@ -347,7 +347,7 @@ def main() -> int:
         "live_data_version, prior_data_version, training_cutoff, "
         "bias_c, residual_sd_c, n_live, n_prior, n_paired, paired_delta_c, "
         "code_commit, fit_signature_hash, authority "
-        f"FROM model_bias_ens_v2 WHERE {' AND '.join(where)} "
+        f"FROM model_bias_ens WHERE {' AND '.join(where)} "
         "ORDER BY city, season, metric"
     )
     rows = world.execute(sql, params).fetchall()

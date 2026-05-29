@@ -136,7 +136,7 @@ _FORBIDDEN_BASENAMES = {"zeus-world.db", "zeus-forecasts.db", "zeus_trades.db"}
 def _refuse_prod_db(db_path: Path) -> None:
     # BL-E / Blocker 4: the producer may ONLY write an isolated staging DB. Writing the
     # canonical world DB would let an INSERT-OR-REPLACE STAGING row overwrite a same-PK
-    # VERIFIED row (model_bias_ens_v2 PK is city/season/month/metric/live_data_version —
+    # VERIFIED row (model_bias_ens PK is city/season/month/metric/live_data_version —
     # no authority in the key). STAGING→VERIFIED is the promotion script's job, never here.
     if db_path.name in _FORBIDDEN_BASENAMES:
         raise SystemExit(
