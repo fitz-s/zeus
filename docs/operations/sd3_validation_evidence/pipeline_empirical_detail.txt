@@ -1,0 +1,74 @@
+==========================================================================================
+1. INVENTORY: rows per (data_version, cycle, metric), lead range, coverage
+==========================================================================================
+data_version                                  cyc m           n lead_lo lead_hi cities dates  span
+ecmwf_opendata_mn2t3_local_calendar_day_min_v 00  low      4190       0     144     54    20  2026-05-15..2026-06-03
+ecmwf_opendata_mn2t3_local_calendar_day_min_v 12  low      5124       0     144     54    20  2026-05-15..2026-06-03
+ecmwf_opendata_mn2t6_local_calendar_day_min_v 00  low       255     120     240     51     6  2026-05-08..2026-05-13
+ecmwf_opendata_mn2t6_local_calendar_day_min_v 12  low       253     144     240     51     5  2026-05-09..2026-05-13
+ecmwf_opendata_mx2t3_local_calendar_day_max_v 00  high     5930       0     144     54    29  2026-05-06..2026-06-03
+ecmwf_opendata_mx2t3_local_calendar_day_max_v 12  high     5488       0     144     54    24  2026-05-11..2026-06-03
+ecmwf_opendata_mx2t6_local_calendar_day_max_v 00  high     1089     120     240     51    10  2026-05-08..2026-05-17
+ecmwf_opendata_mx2t6_local_calendar_day_max_v 12  high      253     144     240     51     5  2026-05-11..2026-05-15
+tigge_mn2t6_local_calendar_day_min_contract_w 00  low    347082       0     168     51   858  2024-01-01..2026-05-07
+tigge_mn2t6_local_calendar_day_min_contract_w 12  low      1624       0     168     51    11  2026-02-01..2026-02-11
+tigge_mn2t6_local_calendar_day_min_v1         00  low    347256       0     168     52   860  2024-01-01..2026-05-09
+tigge_mn2t6_local_calendar_day_min_v1         12  low     36946       0     168     51    98  2026-02-01..2026-05-09
+tigge_mx2t6_local_calendar_day_max_v1         00  high   348149       0     168     52   868  2024-01-01..2026-05-28
+tigge_mx2t6_local_calendar_day_max_v1         12  high    36990       0     168     52   103  2026-02-01..2026-05-28
+
+==========================================================================================
+2. EMPIRICAL STEP TEST: OpenData mx2t3 (3h) vs mx2t6 (6h) daily-max MEAN, same (city,date)
+   If step handling correct, daily-max should agree (both = peak of the day). Systematic
+   gap = step/window artifact (D1). Overlap window where both products exist.
+==========================================================================================
+
+[high] common (city,date) pairs with both products: 425
+  mx2t3 - mx2t6 daily-max-mean:  mean=-0.564C  median=-0.299C  max|diff|=8.59C  n=425
+  largest disagreements (|3h-6h|, city, date, mx2t3, mx2t6):
+     8.59  Seattle        2026-05-15  3h= 10.72  6h= 19.31
+     8.42  Seattle        2026-05-12  3h= 28.60  6h= 20.18
+     8.41  Busan          2026-05-15  3h= 15.70  6h= 24.12
+     8.34  Chongqing      2026-05-15  3h= 19.69  6h= 28.03
+     8.08  Warsaw         2026-05-12  3h= 12.99  6h= 21.08
+     7.91  Mexico City    2026-05-10  3h= 27.35  6h= 19.44
+
+[low] common (city,date) pairs with both products: 0
+
+==========================================================================================
+3. MULTIPLE LEAD-STEP RESULTS for ONE 2-day-out target (the operator's concern)
+==========================================================================================
+city=Amsterdam target_date=2026-02-08 (HIGH) — every snapshot that forecasts this day:
+  data_version                  cyc  lead ctr mean_max_C  window_utc
+  tigge_mx2t6_local_calendar_da 00    168None        6.5  n/a
+  tigge_mx2t6_local_calendar_da 12    168None       5.48  n/a
+  tigge_mx2t6_local_calendar_da 00    144None       5.14  n/a
+  tigge_mx2t6_local_calendar_da 12    144None       6.93  n/a
+  tigge_mx2t6_local_calendar_da 00    120None       7.56  n/a
+  tigge_mx2t6_local_calendar_da 12    120None       7.56  n/a
+  tigge_mx2t6_local_calendar_da 00     96None       7.49  n/a
+  tigge_mx2t6_local_calendar_da 12     96None       8.12  n/a
+  tigge_mx2t6_local_calendar_da 00     72None       8.04  n/a
+  tigge_mx2t6_local_calendar_da 12     72None       8.06  n/a
+  tigge_mx2t6_local_calendar_da 00     48None       7.86  n/a
+  tigge_mx2t6_local_calendar_da 12     48None       7.37  n/a
+  tigge_mx2t6_local_calendar_da 00     24None       8.57  n/a
+  tigge_mx2t6_local_calendar_da 12     24None        8.8  n/a
+  tigge_mx2t6_local_calendar_da 00      0None        9.3  n/a
+  tigge_mx2t6_local_calendar_da 12      0None       8.48  n/a
+  --> 16 lead-step forecasts span 5.14..9.30 C (range 4.16 C). One is served (freshest FULL_CONTRIBUTOR); rest unused.
+
+==========================================================================================
+4. BIAS-BY-LEAD within (city,season): does pooled 0-48h bias hide a lead gradient?
+   residual = ens_mean - settlement, grouped by lead_days, from calibration_pairs_v2 settled rows
+==========================================================================================
+  San Francisco  MAM: lead_days(groups)= d0:330 d1:331 d1:1 d2:332 d2:1 d3:331 d4:329 d5:329 d6:320 d7:321
+  NYC            DJF: lead_days(groups)= d0:268 d1:266 d2:264 d3:262 d4:260 d5:258 d6:256 d7:254
+  Shanghai       MAM: lead_days(groups)= d0:325 d0:1 d1:335 d1:1 d2:336 d3:337 d4:335 d5:334 d6:335 d7:325
+  London         DJF: lead_days(groups)= d0:268 d1:266 d2:264 d3:262 d4:260 d5:258 d6:256 d7:254
+
+==========================================================================================
+5. UNIT handling per city (members_unit) — HIGH, recent
+==========================================================================================
+  members_unit=degC      cities= 43  rows=312329
+  members_unit=degF      cities= 11  rows=85570

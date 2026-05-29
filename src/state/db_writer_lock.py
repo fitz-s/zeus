@@ -681,6 +681,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/audit_observation_instants_v2.py",     # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
         "scripts/build_ens_residual_evidence.py",        # read_only_ro_uri (T2/T3 residual-evidence ledger; mode=ro + query_only, refuses canonical DBs, writes CSV only)
         "scripts/score_raw_vs_sd3_bins.py",              # read_only_ro_uri (sd3 validation Test B; mode=ro + query_only, SELECT-only, writes CSV only)
+        "scripts/pipeline_empirical_detail.py",          # read_only_ro_uri (pipeline empirical audit; mode=ro + query_only, SELECT-only, writes txt only)
         "scripts/calibration_observation_weekly.py",    # read_only_ro_uri
         "scripts/diagnose_low_high_alignment.py",       # read_only (SELECT-only)
         "scripts/diagnose_truth_surfaces.py",           # read_only (SELECT-only, no INSERT/UPDATE/DELETE)
