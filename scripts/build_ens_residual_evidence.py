@@ -189,8 +189,8 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
                e.contributes_to_target_extrema, e.boundary_ambiguous,
                e.forecast_window_start_utc, e.forecast_window_end_utc, e.source_run_id,
                s.settlement_id, s.settlement_value, e.settlement_unit
-        FROM ensemble_snapshots_v2 e
-        JOIN settlements_v2 s
+        FROM ensemble_snapshots e
+        JOIN settlement_outcomes s
           ON s.city = e.city AND s.target_date = e.target_date
          AND s.temperature_metric = e.temperature_metric
         WHERE {" AND ".join(where)}
