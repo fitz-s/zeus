@@ -536,7 +536,7 @@ class TestRebuildDataVersionAssertion:
     assert_data_version_allowed (quarantine-BLOCK only). The per-spec cross-check
     row["data_version"] == spec.allowed_data_version is ABSENT inside _process_snapshot_v2.
 
-    Without this check, a HIGH_LOCALDAY_MAX snapshot (data_version='tigge_mx2t6_local_calendar_day_max_v1')
+    Without this check, a HIGH_LOCALDAY_MAX snapshot (data_version='tigge_mx2t6_local_calendar_day_max')
     fetched by a LOW_SPEC rebuild run could be processed silently — SQL pre-filter guards against
     this in the normal path, but _process_snapshot_v2 has no write-time assertion.
 

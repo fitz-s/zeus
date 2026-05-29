@@ -138,12 +138,12 @@ class MetricIdentity:
 # Adding a new source family = add an entry here AND ensure ingest pipeline
 # writes ensemble_snapshots.data_version with the matching string.
 _HIGH_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
-    "tigge": "tigge_mx2t6_local_calendar_day_max_v1",
-    "ecmwf_opendata": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+    "tigge": "tigge_mx2t6_local_calendar_day_max",
+    "ecmwf_opendata": "ecmwf_opendata_mx2t3_local_calendar_day_max",
 }
 _LOW_DATA_VERSION_BY_SOURCE_FAMILY: dict[str, str] = {
-    "tigge": "tigge_mn2t6_local_calendar_day_min_v1",
-    "ecmwf_opendata": "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
+    "tigge": "tigge_mn2t6_local_calendar_day_min",
+    "ecmwf_opendata": "ecmwf_opendata_mn2t3_local_calendar_day_min",
 }
 
 # Source-family → physical_quantity registry (PR #85 Copilot: physical_quantity
@@ -232,12 +232,12 @@ HIGH_LOCALDAY_MAX = MetricIdentity(
     temperature_metric="high",
     physical_quantity="mx2t6_local_calendar_day_max",
     observation_field="high_temp",
-    data_version="tigge_mx2t6_local_calendar_day_max_v1",
+    data_version="tigge_mx2t6_local_calendar_day_max",
 )
 
 LOW_LOCALDAY_MIN = MetricIdentity(
     temperature_metric="low",
     physical_quantity="mn2t6_local_calendar_day_min",
     observation_field="low_temp",
-    data_version="tigge_mn2t6_local_calendar_day_min_v1",
+    data_version="tigge_mn2t6_local_calendar_day_min",
 )

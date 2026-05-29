@@ -102,8 +102,8 @@ def _low_bound_forecast_event():
 
 
 def _convert_fixture_to_low_extrema(conn: sqlite3.Connection) -> None:
-    low_data_version = "ecmwf_opendata_mn2t3_local_calendar_day_min_contract_window_v2"
-    low_platt_data_version = "tigge_mn2t6_local_calendar_day_min_contract_window_v2"
+    low_data_version = "ecmwf_opendata_mn2t3_local_calendar_day_min_contract_window"
+    low_platt_data_version = "tigge_mn2t6_local_calendar_day_min_contract_window"
     low_members = [50.5] * 41 + [49.5] * 10
     conn.execute(
         """
@@ -423,7 +423,7 @@ def _trade_conn_with_snapshot(
             '2026-05-24T08:10:00+00:00',
             'hash-manifest',
             32.0,
-            'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
+            'ecmwf_opendata_mx2t3_local_calendar_day_max',
             '2026-05-25T05:00:00+00:00',
             32.0,
             '2026-05-24T07:10:00+00:00',
@@ -652,7 +652,7 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             '2026-05-24T08:10:00+00:00', '2026-05-24T08:10:00+00:00',
             '2026-05-25T05:00:00+00:00', '2026-05-26T05:00:00+00:00',
             '2026-05-25', 'Chicago', 'America/Chicago', 'high',
-            'temperature', 'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
+            'temperature', 'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
             51, 51, '[0,3,6]', '[0,3,6]', 3, 3,
             'COMPLETE', 0, 'hash-raw', 'hash-manifest', 'SUCCESS', NULL
         )
@@ -673,7 +673,7 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             'city_metric',
             'Chicago', 'Chicago', 'America/Chicago',
             '2026-05-25', NULL, 'high', 'temperature',
-            'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
+            'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
             'ecmwf_open_data', 'operational', 'run-1',
             NULL, NULL, NULL, '[]',
             'producer_readiness', 'LIVE_ELIGIBLE', '["READY"]',
@@ -695,7 +695,7 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             'coverage-1', 'run-1', 'ecmwf_open_data', 'ensemble_snapshots_db_reader',
             'ecmwf_open_data', 'operational', 'Chicago', 'Chicago', 'America/Chicago',
             '2026-05-25', 'high', 'temperature', 'high_temp',
-            'ecmwf_opendata_mx2t3_local_calendar_day_max_v1', 51, 51, '[0,3,6]', '[0,3,6]',
+            'ecmwf_opendata_mx2t3_local_calendar_day_max', 51, 51, '[0,3,6]', '[0,3,6]',
             '["1"]', '2026-05-25T05:00:00+00:00', '2026-05-26T05:00:00+00:00',
             'COMPLETE', 'LIVE_ELIGIBLE', NULL, '2026-05-24T08:10:00+00:00',
             '2026-05-25T00:00:00+00:00'
@@ -742,7 +742,7 @@ def _insert_platt_model(conn: sqlite3.Connection) -> None:
         """
         INSERT INTO platt_models VALUES (
             'platt-world-1', 'high', 'Chicago', 'MAM',
-            'tigge_mx2t6_local_calendar_day_max_v1',
+            'tigge_mx2t6_local_calendar_day_max',
             'width_normalized_density',
             1.15, 0.01, 0.02, ?,
             60, 0.12, '2026-05-01T00:00:00+00:00',
@@ -1130,7 +1130,7 @@ def test_adapter_rejects_empty_reader_applied_validations(monkeypatch):
     conn = _trade_conn_with_snapshot()
     evidence = SimpleNamespace(
         forecast_source_id="ecmwf_open_data",
-        forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+        forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
         source_transport="ensemble_snapshots_db_reader",
         source_cycle_time="2026-05-24T00:00:00+00:00",
         source_issue_time="2026-05-24T00:00:00+00:00",
@@ -1669,7 +1669,7 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
     captured = []
     evidence = SimpleNamespace(
         forecast_source_id="ecmwf_open_data",
-        forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+        forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
         source_transport="ensemble_snapshots_db_reader",
         source_cycle_time="2026-05-24T00:00:00+00:00",
         source_issue_time="2026-05-24T00:00:00+00:00",

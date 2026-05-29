@@ -23,8 +23,8 @@ from src.calibration.ens_bias_repo import (
     write_bias_model,
 )
 
-OPD = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-TIG = "tigge_mx2t6_local_calendar_day_max_v1"
+OPD = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+TIG = "tigge_mx2t6_local_calendar_day_max"
 
 
 @pytest.fixture
@@ -210,7 +210,7 @@ def test_to_c_handles_degf_degc_strings():
 def test_legacy_tigge_null_passthrough_includes_null_contributes(conn):
     # legacy TIGGE rows carry contributes_to_target_extrema=NULL; the prior loader
     # must include them under the legacy policy but NOT under full_contributor_only.
-    TIGV = "tigge_mx2t6_local_calendar_day_max_v1"
+    TIGV = "tigge_mx2t6_local_calendar_day_max"
     _snap(conn, "Tokyo", "2026-05-10", [19.0], dv=TIGV, contributes=None, boundary=0,
           avail="2026-05-10T00:00:00Z", issue_time="2026-05-10T00:00:00Z")
     _settle(conn, "Tokyo", "2026-05-10", 20.0)
@@ -228,7 +228,7 @@ def test_legacy_tigge_null_passthrough_includes_null_contributes(conn):
 
 def test_high_metric_prefers_0Z_over_12Z(conn):
     """HIGH prior uses the 0Z snapshot (daytime coverage), not the fresher 12Z (nighttime)."""
-    TIGV = "tigge_mx2t6_local_calendar_day_max_v1"
+    TIGV = "tigge_mx2t6_local_calendar_day_max"
     # 0Z snapshot: daytime coverage → mean=20 (correct for HIGH)
     _snap(conn, "HK", "2026-02-01", [19.0, 20.0, 21.0], dv=TIGV, metric="high", lead=0.0,
           avail="2026-02-01T00:00:00Z", issue_time="2026-02-01T00:00:00Z",
@@ -251,7 +251,7 @@ def test_high_metric_prefers_0Z_over_12Z(conn):
 
 def test_low_metric_prefers_12Z_over_0Z(conn):
     """LOW prior uses the 12Z snapshot (nighttime coverage) — current behavior preserved."""
-    TIGV = "tigge_mn2t6_local_calendar_day_min_v1"
+    TIGV = "tigge_mn2t6_local_calendar_day_min"
     # 0Z snapshot first (earlier)
     _snap(conn, "HK", "2026-02-01", [8.0, 9.0, 10.0], dv=TIGV, metric="low", lead=0.0,
           avail="2026-02-01T00:00:00Z", issue_time="2026-02-01T00:00:00Z",

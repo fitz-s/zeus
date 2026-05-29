@@ -345,7 +345,7 @@ class TestManifestHashStability:
     """
 
     _BASE = {
-        "data_version": "tigge_mx2t6_local_calendar_day_max_v1",
+        "data_version": "tigge_mx2t6_local_calendar_day_max",
         "physical_quantity": "mx2t6_local_calendar_day_max",
         "manifest_sha256": "abcdef1234567890" * 4,
         "issue_time_utc": "2024-01-01T00:00:00+00:00",

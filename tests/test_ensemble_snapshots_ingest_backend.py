@@ -91,7 +91,7 @@ def _build_pre_migration_db() -> sqlite3.Connection:
         "INSERT INTO ensemble_snapshots "
         "(city, target_date, temperature_metric, dataset_id, issue_time) "
         "VALUES (?, ?, ?, ?, ?)",
-        ("Tokyo", "2026-04-01", "high", "tigge_mx2t6_local_calendar_day_max_v1",
+        ("Tokyo", "2026-04-01", "high", "tigge_mx2t6_local_calendar_day_max",
          "2026-04-01T00:00:00+00:00"),
     )
     conn.commit()
@@ -154,7 +154,7 @@ def test_explicit_ingest_backend_values_round_trip() -> None:
              observation_field, available_at, fetch_time, lead_hours,
              members_json, model_version, dataset_id, ingest_backend)
         VALUES (?, ?, 'high', 'temp_max', 'high_temp', ?, ?, 24.0, '[]',
-                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1', ?)
+                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max', ?)
         """,
         ("Tokyo", "2026-05-08",
          "2026-05-07T00:00:00+00:00", "2026-05-07T00:01:00+00:00", "ecds"),
@@ -166,7 +166,7 @@ def test_explicit_ingest_backend_values_round_trip() -> None:
              observation_field, available_at, fetch_time, lead_hours,
              members_json, model_version, dataset_id, ingest_backend)
         VALUES (?, ?, 'high', 'temp_max', 'high_temp', ?, ?, 24.0, '[]',
-                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1', ?)
+                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max', ?)
         """,
         ("Tokyo", "2026-05-09",
          "2026-05-07T00:00:00+00:00", "2026-05-07T00:01:00+00:00", "webapi"),
@@ -194,7 +194,7 @@ def test_default_ingest_backend_when_omitted() -> None:
              observation_field, available_at, fetch_time, lead_hours,
              members_json, model_version, dataset_id)
         VALUES (?, ?, 'high', 'temp_max', 'high_temp', ?, ?, 24.0, '[]',
-                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1')
+                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max')
         """,
         ("Tokyo", "2026-05-10",
          "2026-05-07T00:00:00+00:00", "2026-05-07T00:01:00+00:00"),

@@ -60,7 +60,7 @@ def test_settlements_metric_identity_requires_non_null_and_unique_per_metric():
          physical_quantity, observation_field, data_version)
         VALUES ('NYC', '2026-04-16', 'UNVERIFIED', 'high',
                 'mx2t6_local_calendar_day_max', 'high_temp',
-                'tigge_mx2t6_local_calendar_day_max_v1')
+                'tigge_mx2t6_local_calendar_day_max')
         """
     )
     with pytest.raises(sqlite3.IntegrityError):
@@ -71,7 +71,7 @@ def test_settlements_metric_identity_requires_non_null_and_unique_per_metric():
              physical_quantity, observation_field, data_version)
             VALUES ('NYC', '2026-04-16', 'UNVERIFIED', 'high',
                     'mx2t6_local_calendar_day_max', 'high_temp',
-                    'tigge_mx2t6_local_calendar_day_max_v1')
+                    'tigge_mx2t6_local_calendar_day_max')
             """
         )
 
@@ -82,7 +82,7 @@ def test_settlements_metric_identity_requires_non_null_and_unique_per_metric():
          physical_quantity, observation_field, data_version)
         VALUES ('NYC', '2026-04-16', 'UNVERIFIED', 'low',
                 'mn2t6_local_calendar_day_min', 'low_temp',
-                'tigge_mn2t6_local_calendar_day_min_v1')
+                'tigge_mn2t6_local_calendar_day_min')
         """
     )
 

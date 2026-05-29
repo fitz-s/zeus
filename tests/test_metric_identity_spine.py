@@ -50,7 +50,7 @@ class TestMetricIdentityTypeSafety:
                 temperature_metric="high",
                 physical_quantity="mx2t6_local_calendar_day_max",
                 observation_field="low_temp",  # WRONG: high-track must pair with high_temp
-                data_version="tigge_mx2t6_local_calendar_day_max_v1",
+                data_version="tigge_mx2t6_local_calendar_day_max",
             )
 
     def test_metric_identity_rejects_cross_pairing_low_metric_high_obs(self):
@@ -68,7 +68,7 @@ class TestMetricIdentityTypeSafety:
                 temperature_metric="low",
                 physical_quantity="mn2t6_local_calendar_day_min",
                 observation_field="high_temp",  # WRONG: low-track must pair with low_temp
-                data_version="tigge_mn2t6_local_calendar_day_min_v1",
+                data_version="tigge_mn2t6_local_calendar_day_min",
             )
 
     def test_metric_identity_canonical_instances_exist(self):
@@ -113,7 +113,7 @@ class TestMetricIdentityTypeSafety:
             temperature_metric="high",
             physical_quantity="mx2t6_local_calendar_day_max",
             observation_field="high_temp",
-            data_version="tigge_mx2t6_local_calendar_day_max_v1",
+            data_version="tigge_mx2t6_local_calendar_day_max",
         )
         assert identity.temperature_metric == "high"
         assert identity.observation_field == "high_temp"

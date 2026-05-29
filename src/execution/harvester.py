@@ -1383,10 +1383,10 @@ def _parsed_temperature_bins_equivalent(left: object, right: object) -> Optional
 
 
 _HARVESTER_LIVE_DATA_VERSION = {
-    "wu_icao": "wu_icao_history_v1",
-    "hko": "hko_daily_api_v1",
-    "noaa": "ogimet_metar_v1",
-    "cwa_station": "cwa_no_collector_v0",
+    "wu_icao": "wu_icao_history",
+    "hko": "hko_daily_api",
+    "noaa": "ogimet_metar",
+    "cwa_station": "cwa_no_collector",
 }
 
 

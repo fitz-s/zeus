@@ -38,9 +38,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import promote_calibration as P  # noqa: E402
 
-DV_HIGH = "tigge_mx2t6_local_calendar_day_max_v1"
-DV_LOW = "tigge_mn2t6_local_calendar_day_min_v1"
-DV_LOW_CONTRACT = "tigge_mn2t6_local_calendar_day_min_contract_window_v2"
+DV_HIGH = "tigge_mx2t6_local_calendar_day_max"
+DV_LOW = "tigge_mn2t6_local_calendar_day_min"
+DV_LOW_CONTRACT = "tigge_mn2t6_local_calendar_day_min_contract_window"
 
 PAIRS_SCHEMA = """
 CREATE TABLE calibration_pairs (

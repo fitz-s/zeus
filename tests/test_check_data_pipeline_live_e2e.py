@@ -172,7 +172,7 @@ def test_candidate_snapshot_uses_live_eligible_coverage_not_first_snapshot() -> 
                 city,
                 "2026-05-15",
                 "low",
-                "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
+                "ecmwf_opendata_mn2t3_local_calendar_day_min",
                 status,
             ),
         )
@@ -186,7 +186,7 @@ def test_candidate_snapshot_uses_live_eligible_coverage_not_first_snapshot() -> 
                 city,
                 "2026-05-15",
                 "low",
-                "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
+                "ecmwf_opendata_mn2t3_local_calendar_day_min",
             ),
         )
 
@@ -270,7 +270,7 @@ def test_live_checker_does_not_fallback_to_older_ready_source_run() -> None:
             "London",
             "2026-05-16",
             "high",
-            "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+            "ecmwf_opendata_mx2t3_local_calendar_day_max",
             "LIVE_ELIGIBLE",
         ),
     )
@@ -284,7 +284,7 @@ def test_live_checker_does_not_fallback_to_older_ready_source_run() -> None:
             "London",
             "2026-05-16",
             "high",
-            "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+            "ecmwf_opendata_mx2t3_local_calendar_day_max",
         ),
     )
 
@@ -328,7 +328,7 @@ def test_live_checker_uses_actual_reader_bundle_identity(monkeypatch) -> None:
         "temperature_metric": "high",
         "source_id": "ecmwf_open_data",
         "source_transport": "ensemble_snapshots_db_reader",
-        "data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+        "data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
         "snapshot_id": 99,
     }
     monkeypatch.setattr(

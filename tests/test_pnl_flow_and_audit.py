@@ -504,7 +504,7 @@ def _insert_snapshot(
     p_raw: list[float],
     *,
     issue_time: str = "2026-03-30T00:00:00Z",
-    data_version: str = "tigge_mx2t6_local_calendar_day_max_v1",
+    data_version: str = "tigge_mx2t6_local_calendar_day_max",
     temperature_metric: str = "high",
 ) -> str:
     conn.execute(

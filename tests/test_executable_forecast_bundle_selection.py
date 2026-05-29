@@ -564,7 +564,7 @@ def test_legacy_null_contribution_passes_through_recorded() -> None:
     """6.8 (§2): a LEGACY data_version snapshot with NULL contribution passes
     through (prior behavior), and the passthrough is recorded in the bundle's
     extrema_authority_applied_validations for auditability."""
-    legacy_version = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+    legacy_version = "ecmwf_opendata_mx2t6_local_calendar_day_max"
     conn = _conn()
     _insert_snapshot(
         conn,

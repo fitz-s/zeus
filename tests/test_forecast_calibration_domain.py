@@ -25,7 +25,7 @@ from src.calibration.forecast_calibration_domain import (
 def _domain(**overrides: object) -> ForecastCalibrationDomain:
     values = {
         "source_id": "ecmwf_open_data",
-        "data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        "data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max",
         "source_cycle_hour_utc": 0,
         "horizon_profile": "full",
         "metric": "high",
@@ -99,7 +99,7 @@ def test_forecast_to_bin_evidence_blocks_ambiguous_low_window_from_training() ->
         ForecastToBinEvidence(
             contract_domain=domain,
             forecast_source_id="tigge_mars",
-            data_version="tigge_mn2t6_local_calendar_day_min_v1",
+            data_version="tigge_mn2t6_local_calendar_day_min",
             issue_time_utc=datetime(2026, 6, 9, 0, 0, tzinfo=timezone.utc),
             cycle_hour_utc=0,
             horizon_profile="full",
@@ -126,7 +126,7 @@ def test_fully_attributable_low_window_can_be_marked_training_allowed() -> None:
     evidence = ForecastToBinEvidence(
         contract_domain=domain,
         forecast_source_id="tigge_mars",
-        data_version="tigge_mn2t6_local_calendar_day_min_v1",
+        data_version="tigge_mn2t6_local_calendar_day_min",
         issue_time_utc=datetime(2026, 6, 9, 0, 0, tzinfo=timezone.utc),
         cycle_hour_utc=0,
         horizon_profile="full",
@@ -154,7 +154,7 @@ def test_payload_factory_missing_explicit_window_is_shadow_blocked() -> None:
         _contract_domain(),
         {
             "forecast_source_id": "tigge_mars",
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "issue_time_utc": "2026-06-09T00:00:00+00:00",
             "horizon_profile": "full",
             "physical_quantity": "mn2t6",
@@ -177,7 +177,7 @@ def test_payload_factory_accepts_fully_inside_explicit_window_for_training_shado
         _contract_domain(),
         {
             "forecast_source_id": "tigge_mars",
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "issue_time_utc": "2026-06-09T00:00:00+00:00",
             "cycle_hour_utc": 0,
             "horizon_profile": "full",
@@ -203,7 +203,7 @@ def test_payload_factory_nondict_boundary_policy_does_not_raise() -> None:
         _contract_domain(),
         {
             "forecast_source_id": "tigge_mars",
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "issue_time_utc": "2026-06-09T00:00:00+00:00",
             "cycle_hour_utc": 0,
             "horizon_profile": "full",
@@ -228,7 +228,7 @@ def test_payload_factory_blocks_issue_after_relevant_window() -> None:
         _contract_domain(),
         {
             "forecast_source_id": "tigge_mars",
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "issue_time_utc": "2026-06-09T19:00:00+00:00",
             "cycle_hour_utc": 18,
             "horizon_profile": "full",
@@ -259,7 +259,7 @@ def test_payload_factory_counts_dst_overlap_in_actual_hours() -> None:
         ),
         {
             "forecast_source_id": "tigge_mars",
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "issue_time_utc": "2026-03-08T00:00:00+00:00",
             "cycle_hour_utc": 0,
             "horizon_profile": "full",
@@ -283,7 +283,7 @@ def test_payload_factory_boundary_ambiguous_overrides_window_geometry() -> None:
         _contract_domain(),
         {
             "forecast_source_id": "tigge_mars",
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "issue_time_utc": "2026-06-09T00:00:00+00:00",
             "horizon_profile": "full",
             "physical_quantity": "mn2t6",
@@ -306,7 +306,7 @@ def test_payload_factory_marks_previous_day_window_as_reassignment_candidate() -
         _contract_domain(),
         {
             "forecast_source_id": "tigge_mars",
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "issue_time_utc": "2026-06-09T00:00:00+00:00",
             "horizon_profile": "full",
             "physical_quantity": "mn2t6",
@@ -331,7 +331,7 @@ def test_payload_factory_cross_midnight_window_is_not_reassignment_candidate() -
         _contract_domain(),
         {
             "forecast_source_id": "tigge_mars",
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "issue_time_utc": "2026-06-09T00:00:00+00:00",
             "horizon_profile": "full",
             "physical_quantity": "mn2t6",

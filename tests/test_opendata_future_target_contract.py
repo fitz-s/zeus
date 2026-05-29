@@ -34,7 +34,7 @@ def test_source_cycle_date_is_not_target_local_date() -> None:
         target_local_date=date(2026, 5, 8),
         temperature_metric="high",
         source_cycle_time=_utc(2026, 5, 3),
-        data_version="ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        data_version="ecmwf_opendata_mx2t6_local_calendar_day_max",
         market_refs=("condition-nyc-2026-05-08-high",),
     )
 

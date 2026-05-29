@@ -48,7 +48,7 @@ def test_counterfactual_reports_delayed_and_settlement_pnl(tmp_path, monkeypatch
          physical_quantity, observation_field, data_version)
         VALUES ('Paris', '2026-04-03', '12°C', 12.0, 'high', 'VERIFIED',
                 'mx2t6_local_calendar_day_max', 'high_temp',
-                'tigge_mx2t6_local_calendar_day_max_v1')
+                'tigge_mx2t6_local_calendar_day_max')
         """
     )
     conn.commit()

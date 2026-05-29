@@ -120,7 +120,7 @@ def test_report_counts_persisted_low_window_evidence_classes() -> None:
                 'Kuala Lumpur', ?, 'low', 'mn2t6_local_calendar_day_min', 'low_temp',
                 '2026-06-09T00:00:00+00:00', '2026-06-09T08:00:00+00:00',
                 '2026-06-09T08:05:00+00:00', 48.0, '[24.0, 24.5]',
-                'ENS', 'tigge_mn2t6_local_calendar_day_min_v1', 0, 'OK',
+                'ENS', 'tigge_mn2t6_local_calendar_day_min', 0, 'OK',
                 'VERIFIED', 'degC', 'Asia/Kuala_Lumpur', 'wu_icao',
                 'WMKK', 'C', 'wmo_half_up',
                 'C_canonical_v1', 'canonical_bin_grid_v1',

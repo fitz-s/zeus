@@ -199,7 +199,7 @@ def test_calibration_transfer_defaults_entry_forecast_to_shadow_only(monkeypatch
     assert decision.status == "SHADOW_ONLY"
     assert decision.reason_codes == ("CALIBRATION_TRANSFER_SHADOW_ONLY",)
     assert decision.producer_readiness_id == "producer-readiness-1"
-    assert decision.calibration_data_version == "tigge_mx2t6_local_calendar_day_max_v1"
+    assert decision.calibration_data_version == "tigge_mx2t6_local_calendar_day_max"
 
 
 def test_rollout_blocked_keeps_promoted_calibration_shadow_only(monkeypatch) -> None:

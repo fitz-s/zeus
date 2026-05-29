@@ -77,7 +77,7 @@ def _seed_ensemble_snapshots_row(
     The row uses canonical HIGH-track identity (temperature_metric='high',
     physical_quantity='mx2t6_local_calendar_day_max',
     observation_field='high_temp',
-    data_version='tigge_mx2t6_local_calendar_day_max_v1') per INV-14
+    data_version='tigge_mx2t6_local_calendar_day_max') per INV-14
     identity spine + CANONICAL_ENSEMBLE_DATA_VERSIONS allowlist at
     src/contracts/ensemble_snapshot_provenance.py. Members are a plain
     4-member array matching the test's FakeEns.member_maxes shape.
@@ -93,7 +93,7 @@ def _seed_ensemble_snapshots_row(
             ?, ?, ?, 'mx2t6_local_calendar_day_max',
             'high_temp', '2026-04-12T06:00:00Z', '2026-04-12T06:00:00Z', 12.0,
             '[70.0, 71.0, 72.0, 73.0]', 'test_model_v1',
-            'tigge_mx2t6_local_calendar_day_max_v1',
+            'tigge_mx2t6_local_calendar_day_max',
             ?, ?
         )
         """,

@@ -167,7 +167,7 @@ def test_fetch_n_platt_samples_returns_n(conn):
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
-        ("k1", "high", "NYC", "DJF", "tigge_mx2t6_local_calendar_day_max_v1",
+        ("k1", "high", "NYC", "DJF", "tigge_mx2t6_local_calendar_day_max",
          420, "2026-04-01"),
     )
     n = fetch_n_platt_samples(conn, "NYC", "high", "DJF")
@@ -421,7 +421,7 @@ def test_rail2_discount_when_partial_cov(conn, floors_and_nstar):
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
-        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max_v1",
+        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max",
          500, "2026-04-01"),
     )
     decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
@@ -453,7 +453,7 @@ def test_rail2_zero_discount_when_full_cov(conn, floors_and_nstar):
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
-        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max_v1",
+        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max",
          500, "2026-04-01"),
     )
     decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
@@ -478,7 +478,7 @@ def test_future_target_zero_observation_rows_defer_density_discount(conn, floors
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
-        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max_v1",
+        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max",
          500, "2026-04-01"),
     )
     decision = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
@@ -539,7 +539,7 @@ def test_cycle_source_id_stored_in_diagnostic(conn, floors_and_nstar):
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
-        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max_v1",
+        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max",
          500, "2026-04-01"),
     )
     decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)
@@ -583,7 +583,7 @@ def test_cycle_mismatch_not_silently_swallowed(conn, floors_and_nstar):
            (model_key, temperature_metric, cluster, season, data_version,
             n_samples, fitted_at)
            VALUES (?,?,?,?,?,?,?)""",
-        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max_v1",
+        ("k1", "high", "NYC", "MAM", "tigge_mx2t6_local_calendar_day_max",
          500, "2026-04-01"),
     )
     decision = datetime(2026, 5, 2, 23, 0, tzinfo=timezone.utc)

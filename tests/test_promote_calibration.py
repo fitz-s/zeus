@@ -62,8 +62,8 @@ CREATE TABLE calibration_pairs (
 
 META_SCHEMA = "CREATE TABLE zeus_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
 
-DV_HIGH = "tigge_mx2t6_local_calendar_day_max_v1"
-DV_LOW = "tigge_mn2t6_local_calendar_day_min_v1"
+DV_HIGH = "tigge_mx2t6_local_calendar_day_max"
+DV_LOW = "tigge_mn2t6_local_calendar_day_min"
 
 
 def _build_db(path: Path, *, with_meta: bool = True) -> None:

@@ -72,7 +72,7 @@ def test_load_platt_model_raises_on_opendata_missing_keys():
             temperature_metric="high",
             cluster="London",
             season="winter",
-            data_version="ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+            data_version="ecmwf_opendata_mx2t6_local_calendar_day_max",
             # cycle/source_id/horizon_profile all None — not allowed for OpenData
         )
 
@@ -94,7 +94,7 @@ def test_load_platt_model_tigge_missing_keys_uses_legacy_defaults():
          n_samples, brier_insample, fitted_at, is_active, authority,
          cycle, source_id, horizon_profile)
         VALUES ('mk-1','high','London','winter',
-                'tigge_mx2t6_local_calendar_day_max_v1',
+                'tigge_mx2t6_local_calendar_day_max',
                 'width_normalized_density', 1.0, 0.0, 0.0, '[]',
                 100, 0.2, '2026-05-04', 1, 'VERIFIED',
                 '00','tigge_mars','full')
@@ -105,7 +105,7 @@ def test_load_platt_model_tigge_missing_keys_uses_legacy_defaults():
         temperature_metric="high",
         cluster="London",
         season="winter",
-        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        data_version="tigge_mx2t6_local_calendar_day_max",
         # No cycle/source_id/horizon_profile — should default to 00/tigge_mars/full
     )
     assert result is not None, (
@@ -133,7 +133,7 @@ def test_load_platt_model_returns_bucket_identity():
          n_samples, brier_insample, fitted_at, is_active, authority,
          cycle, source_id, horizon_profile)
         VALUES ('mk-2','high','London','winter',
-                'ecmwf_opendata_mx2t6_local_calendar_day_max_v1',
+                'ecmwf_opendata_mx2t6_local_calendar_day_max',
                 'width_normalized_density', 1.0, 0.0, 0.0, '[]',
                 100, 0.2, '2026-05-04', 1, 'VERIFIED',
                 '12','ecmwf_open_data','full')
@@ -144,7 +144,7 @@ def test_load_platt_model_returns_bucket_identity():
         temperature_metric="high",
         cluster="London",
         season="winter",
-        data_version="ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        data_version="ecmwf_opendata_mx2t6_local_calendar_day_max",
         cycle="12",
         source_id="ecmwf_open_data",
         horizon_profile="full",
@@ -153,7 +153,7 @@ def test_load_platt_model_returns_bucket_identity():
     assert result["bucket_cycle"] == "12"
     assert result["bucket_source_id"] == "ecmwf_open_data"
     assert result["bucket_horizon_profile"] == "full"
-    assert result["bucket_data_version"] == "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+    assert result["bucket_data_version"] == "ecmwf_opendata_mx2t6_local_calendar_day_max"
 
 
 # ---- Copilot review #3 — ensemble_client guard for all roles -------------
@@ -219,14 +219,14 @@ def test_calibrator_object_carries_bucket_attrs():
         "bucket_cycle": "12",
         "bucket_source_id": "ecmwf_open_data",
         "bucket_horizon_profile": "full",
-        "bucket_data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        "bucket_data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max",
     }
     cal = _model_data_to_calibrator(md)
     assert cal._bucket_cycle == "12"
     assert cal._bucket_source_id == "ecmwf_open_data"
     assert cal._bucket_horizon_profile == "full"
     assert cal._bucket_data_version == (
-        "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+        "ecmwf_opendata_mx2t6_local_calendar_day_max"
     )
 
 

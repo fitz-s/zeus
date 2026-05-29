@@ -18,8 +18,8 @@ import pytest
 from src.calibration.ens_bias_repo import load_paired_delta
 from src.calibration.ens_error_model import PredictiveErrorModel, fit_city_predictive_error
 
-OPD = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-TIG = "tigge_mx2t6_local_calendar_day_max_v1"
+OPD = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+TIG = "tigge_mx2t6_local_calendar_day_max"
 
 
 @pytest.fixture

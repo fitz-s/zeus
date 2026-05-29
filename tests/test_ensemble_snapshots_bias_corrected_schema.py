@@ -96,7 +96,7 @@ def test_legacy_db_without_column_gets_migrated():
          members_json, model_version, dataset_id, temperature_metric)
         VALUES ('NYC', '2026-04-15', '2026-04-15T12Z', '2026-04-15T12Z',
                 12, '[]', 'ecmwf_ens',
-                'tigge_mx2t6_local_calendar_day_max_v1', 'high')
+                'tigge_mx2t6_local_calendar_day_max', 'high')
     """)
     init_schema(conn)
     cols = _columns_of(conn, "ensemble_snapshots")
@@ -130,7 +130,7 @@ def test_store_snapshot_p_raw_round_trip_with_fresh_schema():
         (city, target_date, available_at, fetch_time, model_version, dataset_id,
          temperature_metric, provenance_json)
         VALUES ('NYC', '2026-04-15', '2026-04-15T12:00:00Z', '2026-04-15T12:00:00Z',
-                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max_v1', 'high', '{}')
+                'ecmwf_ens', 'tigge_mx2t6_local_calendar_day_max', 'high', '{}')
     """)
     snapshot_id = conn.execute(
         "SELECT snapshot_id FROM forecasts.ensemble_snapshots WHERE city = 'NYC'"
@@ -188,7 +188,7 @@ def test_store_snapshot_p_raw_uses_attached_forecasts_v2_without_legacy_projecti
          model_version, dataset_id, temperature_metric, provenance_json)
         VALUES (777, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
                 '2026-05-15T09:56:00+00:00', 'ecmwf_ens',
-                'ecmwf_opendata_mx2t3_local_calendar_day_max_v1', 'high', '{}')
+                'ecmwf_opendata_mx2t3_local_calendar_day_max', 'high', '{}')
     """)
     conn.commit()
 
@@ -217,7 +217,7 @@ def test_read_v2_snapshot_metadata_prefers_attached_forecasts_schema():
          causality_status)
         VALUES (888, 'London', '2026-05-17', '2026-05-15T09:55:00+00:00',
                 '2026-05-15T09:56:00+00:00', 'ecmwf_ens',
-                'ecmwf_opendata_mx2t3_local_calendar_day_max_v1', 'high',
+                'ecmwf_opendata_mx2t3_local_calendar_day_max', 'high',
                 1, 'BOUNDARY_AMBIGUOUS')
     """)
     conn.commit()

@@ -19,7 +19,7 @@ Reads raw TIGGE ECMWF ensemble GRIB files (param=121.128, mx2t6, 6h max) and
 produces one JSON file per (city, issue_date, target_local_date, lead_day).
 
 Output contract matches ingest_grib_to_snapshots.py:ingest_json_file expectations:
-- data_version  = "tigge_mx2t6_local_calendar_day_max_v1"
+- data_version  = "tigge_mx2t6_local_calendar_day_max"
 - unit          = "C" or "F" (single char; ingest maps C→degC, F→degF)
 - members       = 51 elements, member 0 = control forecast, 1..50 = perturbed
 - training_allowed = True only if all 51 members have non-None value_native_unit

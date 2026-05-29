@@ -74,13 +74,13 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
 # aggregations). The stream now serves mx2t3/mn2t3 (3h native). Constants
 # renamed to reflect the new physical quantity. Old mx2t6 versions kept in
 # the allow-list so the 1568 historical rows remain readable.
-ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
+ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min"
 
 # Legacy versions (mx2t6 era, written before 2026-05-07). Kept in the
 # allow-list so historical rows in ensemble_snapshots remain readable.
-_ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
-_ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
+_ECMWF_OPENDATA_HIGH_DATA_VERSION_LEGACY = "ecmwf_opendata_mx2t6_local_calendar_day_max"
+_ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_day_min"
 
 # LOW recovery rows carry persisted contract-window evidence proving that the
 # mn2t3 construction serves the same local-day settlement object.  They remain
@@ -89,15 +89,15 @@ _ECMWF_OPENDATA_LOW_DATA_VERSION_LEGACY = "ecmwf_opendata_mn2t6_local_calendar_d
 # names remain (PR #85 Copilot: ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION
 # and TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION were defined twice).
 TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION = (
-    "tigge_mn2t6_local_calendar_day_min_contract_window_v2"
+    "tigge_mn2t6_local_calendar_day_min_contract_window"
 )
 ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION = (
-    "ecmwf_opendata_mn2t3_local_calendar_day_min_contract_window_v2"
+    "ecmwf_opendata_mn2t3_local_calendar_day_min_contract_window"
 )
 # Legacy contract-window version (mn2t6 era, written before 2026-05-07).
 # Kept in allow-list so historical recovery rows remain readable.
 _ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION_LEGACY = (
-    "ecmwf_opendata_mn2t6_local_calendar_day_min_contract_window_v2"
+    "ecmwf_opendata_mn2t6_local_calendar_day_min_contract_window"
 )
 
 CANONICAL_ENSEMBLE_DATA_VERSIONS: frozenset[str] = frozenset({
@@ -177,10 +177,10 @@ CANONICAL_OBSERVATION_DATA_VERSIONS: frozenset[str] = frozenset({
 # identity lives in the separate INV-14 columns). Enumerate from the
 # harvester writer's dispatch dict.
 CANONICAL_SETTLEMENT_DATA_VERSIONS: frozenset[str] = frozenset({
-    "wu_icao_history_v1",
-    "hko_daily_api_v1",
-    "ogimet_metar_v1",
-    "cwa_no_collector_v0",
+    "wu_icao_history",
+    "hko_daily_api",
+    "ogimet_metar",
+    "cwa_no_collector",
 })
 
 

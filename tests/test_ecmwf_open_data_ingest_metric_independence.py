@@ -105,9 +105,9 @@ def _make_db(tmp_path: Path, metrics: list[str]) -> Path:
     for metric in metrics:
         base = 20.0 if metric == "high" else 10.0
         dv = (
-            "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
+            "ecmwf_opendata_mx2t3_local_calendar_day_max"
             if metric == "high"
-            else "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
+            else "ecmwf_opendata_mn2t3_local_calendar_day_min"
         )
         conn.execute(
             _INSERT_SQL,

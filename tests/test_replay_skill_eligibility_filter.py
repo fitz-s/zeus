@@ -132,7 +132,7 @@ def test_replay_calibration_lookup_keys_canonicalize_source_bucket() -> None:
     from src.engine.replay import _replay_calibration_lookup_keys
 
     supported, cycle, source_id, horizon = _replay_calibration_lookup_keys({
-        "data_version": "tigge_mx2t6_local_calendar_day_max_v1",
+        "data_version": "tigge_mx2t6_local_calendar_day_max",
         "issue_time": "2026-04-30T12:00:00+00:00",
     })
 

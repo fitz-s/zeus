@@ -21,7 +21,7 @@ BUCKET_SOURCE_ID = "ecmwf_open_data"
 BUCKET_TRACK = "mx2t6_high_full_horizon"
 BUCKET_CITY = "London"
 BUCKET_DATA_VERSION = ECMWF_OPENDATA_HIGH_DATA_VERSION
-TIGGE_HIGH_DATA_VERSION = "tigge_mx2t6_local_calendar_day_max_v1"
+TIGGE_HIGH_DATA_VERSION = "tigge_mx2t6_local_calendar_day_max"
 
 
 def _conn() -> sqlite3.Connection:

@@ -45,7 +45,7 @@ def _insert_quarantined_row(conn: sqlite3.Connection, provenance: dict | None) -
         ) VALUES (
             'paris', '2026-04-23', '15-16', 15.5,
             'test', '2026-04-23T00:00:00', 'QUARANTINED', ?,
-            'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history_v1'
+            'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history'
         )
         """,
         (json.dumps(provenance) if provenance is not None else None,),
@@ -184,7 +184,7 @@ def test_verified_to_unverified_always_rejected():
         ) VALUES (
             'paris', '2026-04-23', '15-16', 15.5,
             'test', '2026-04-23T00:00:00', 'VERIFIED', '{}',
-            'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history_v1'
+            'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history'
         )
         """
     )
@@ -210,7 +210,7 @@ def test_trigger_drop_and_recreate_is_idempotent():
         ) VALUES (
             'paris', '2026-04-23', '15-16', 15.5,
             'test', '2026-04-23T00:00:00', 'QUARANTINED', '{"reactivated_by": false}',
-            'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history_v1'
+            'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history'
         )
         """
     )

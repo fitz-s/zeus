@@ -221,7 +221,7 @@ def test_T5_write_settlement_verified_path(scratch_db):
     assert r["temperature_metric"] == "high"
     assert r["physical_quantity"] == "mx2t6_local_calendar_day_max"
     assert r["observation_field"] == "high_temp"
-    assert r["data_version"] == "wu_icao_history_v1"
+    assert r["data_version"] == "wu_icao_history"
     prov = json.loads(r["provenance_json"])
     assert prov["writer"] == "harvester_live_dr33"
     assert prov["decision_time_snapshot_id"] == "2026-04-15T12:00:00+00:00"

@@ -37,8 +37,8 @@ def test_canonical_allowlist_includes_opendata():
     assert ECMWF_OPENDATA_HIGH_DATA_VERSION in CANONICAL_ENSEMBLE_DATA_VERSIONS
     assert ECMWF_OPENDATA_LOW_DATA_VERSION in CANONICAL_ENSEMBLE_DATA_VERSIONS
     # Both TIGGE archive data_versions remain valid (back-compat).
-    assert "tigge_mx2t6_local_calendar_day_max_v1" in CANONICAL_ENSEMBLE_DATA_VERSIONS
-    assert "tigge_mn2t6_local_calendar_day_min_v1" in CANONICAL_ENSEMBLE_DATA_VERSIONS
+    assert "tigge_mx2t6_local_calendar_day_max" in CANONICAL_ENSEMBLE_DATA_VERSIONS
+    assert "tigge_mn2t6_local_calendar_day_min" in CANONICAL_ENSEMBLE_DATA_VERSIONS
 
 
 def _make_opendata_high_payload(
@@ -584,7 +584,7 @@ def test_collect_open_ens_cycle_clears_prior_same_source_run_rows(tmp_path: Path
         SELECT
             city, '2026-05-08', temperature_metric, 'mx2t6_local_calendar_day_max', observation_field,
             issue_time, '2026-05-08T00:00:00+00:00', available_at, fetch_time, lead_hours, members_json,
-            model_version, 'ecmwf_opendata_mx2t6_local_calendar_day_max_v1', source_id, source_transport,
+            model_version, 'ecmwf_opendata_mx2t6_local_calendar_day_max', source_id, source_transport,
             source_run_id, release_calendar_key, source_cycle_time, source_release_time, source_available_at,
             city_timezone, settlement_unit, manifest_hash, provenance_json, members_unit,
             '2026-05-07T23:00:00+00:00', step_horizon_hours, unit

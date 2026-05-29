@@ -162,11 +162,11 @@ def _load_paired_groups(conn: sqlite3.Connection, metric: str) -> tuple[list[dic
 
     # Identify paired (city, target_date, lead) where BOTH data versions exist
     if metric == "high":
-        tigge_dv = "tigge_mx2t6_local_calendar_day_max_v1"
-        opd_dv = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
+        tigge_dv = "tigge_mx2t6_local_calendar_day_max"
+        opd_dv = "ecmwf_opendata_mx2t3_local_calendar_day_max"
     else:
-        tigge_dv = "tigge_mn2t6_local_calendar_day_min_v1"
-        opd_dv = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
+        tigge_dv = "tigge_mn2t6_local_calendar_day_min"
+        opd_dv = "ecmwf_opendata_mn2t3_local_calendar_day_min"
 
     # Get all TIGGE snapshots with members_json
     tig_snaps = conn.execute("""

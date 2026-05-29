@@ -72,9 +72,9 @@ REBUILD_COMPLETE_META_PREFIX = "calibration_pairs_v2_rebuild_complete"
 
 # Mapping from logical metric label to expected data_version values.
 METRIC_TO_DATA_VERSIONS: dict[str, tuple[str, ...]] = {
-    "high": ("tigge_mx2t6_local_calendar_day_max_v1",),
-    "low": ("tigge_mn2t6_local_calendar_day_min_v1",),
-    "low_contract": ("tigge_mn2t6_local_calendar_day_min_contract_window_v2",),
+    "high": ("tigge_mx2t6_local_calendar_day_max",),
+    "low": ("tigge_mn2t6_local_calendar_day_min",),
+    "low_contract": ("tigge_mn2t6_local_calendar_day_min_contract_window",),
 }
 
 ALL_METRICS: tuple[str, ...] = ("high", "low", "low_contract")

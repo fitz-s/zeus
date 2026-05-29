@@ -20,7 +20,7 @@ R-AH (members_unit explicit): extractor output JSON carries members_unit='K' fie
     missing members_unit fails the ingest contract.
 
 R-AI (data_version correct): low snapshots carry
-    data_version='tigge_mn2t6_local_calendar_day_min_v1'. High data_version on a low
+    data_version='tigge_mn2t6_local_calendar_day_min'. High data_version on a low
     snapshot is rejected.
 
 R-AJ (causality first-class): low extractor emits causality_status as a first-class field
@@ -61,7 +61,7 @@ class TestIngestContractLowGating:
     @staticmethod
     def _good_low_payload(**overrides) -> dict:
         base = {
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "temperature_metric": "low",
             "physical_quantity": "mn2t6_local_calendar_day_min",
             "members": [273.15] * 51,
@@ -121,7 +121,7 @@ class TestIngestContractLowGating:
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = self._good_low_payload(
-            data_version="tigge_mx2t6_local_calendar_day_max_v1",
+            data_version="tigge_mx2t6_local_calendar_day_max",
             temperature_metric="low",
             physical_quantity="mn2t6_local_calendar_day_min",
         )
@@ -139,7 +139,7 @@ class TestIngestContractLowGating:
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = {
-            "data_version": "tigge_mx2t6_local_calendar_day_max_v1",
+            "data_version": "tigge_mx2t6_local_calendar_day_max",
             "temperature_metric": "high",
             "physical_quantity": "mx2t6_local_calendar_day_max",
             "members": [295.0] * 51,
@@ -203,7 +203,7 @@ class TestMembersUnitExplicit:
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = {
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "temperature_metric": "low",
             "physical_quantity": "mn2t6_local_calendar_day_min",
             "members": [273.15] * 51,
@@ -222,7 +222,7 @@ class TestMembersUnitExplicit:
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = {
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "temperature_metric": "low",
             "physical_quantity": "mn2t6_local_calendar_day_min",
             "members": [273.15] * 51,
@@ -242,7 +242,7 @@ class TestMembersUnitExplicit:
 
 
 class TestDataVersionLowIdentity:
-    """R-AI: low track data_version must be 'tigge_mn2t6_local_calendar_day_min_v1'.
+    """R-AI: low track data_version must be 'tigge_mn2t6_local_calendar_day_min'.
 
     The MetricIdentity constant LOW_LOCALDAY_MIN.data_version holds the authoritative string.
     Import target: src.contracts.snapshot_ingest_contract (does not exist yet — ImportError = RED)
@@ -252,14 +252,14 @@ class TestDataVersionLowIdentity:
         """R-AI (acceptance): LOW_LOCALDAY_MIN.data_version equals the canonical string."""
         from src.types.metric_identity import LOW_LOCALDAY_MIN
 
-        assert LOW_LOCALDAY_MIN.data_version == "tigge_mn2t6_local_calendar_day_min_v1"
+        assert LOW_LOCALDAY_MIN.data_version == "tigge_mn2t6_local_calendar_day_min"
 
     def test_high_data_version_with_low_metric_is_rejected(self):
         """R-AI (rejection): high data_version + low temperature_metric must be rejected."""
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = {
-            "data_version": "tigge_mx2t6_local_calendar_day_max_v1",
+            "data_version": "tigge_mx2t6_local_calendar_day_max",
             "temperature_metric": "low",
             "physical_quantity": "mn2t6_local_calendar_day_min",
             "members": [273.15] * 51,
@@ -276,7 +276,7 @@ class TestDataVersionLowIdentity:
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = {
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "temperature_metric": "high",
             "physical_quantity": "mx2t6_local_calendar_day_max",
             "members": [295.0] * 51,
@@ -308,7 +308,7 @@ class TestCausalityFirstClass:
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = {
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "temperature_metric": "low",
             "physical_quantity": "mn2t6_local_calendar_day_min",
             "members": [273.15] * 51,
@@ -327,7 +327,7 @@ class TestCausalityFirstClass:
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = {
-            "data_version": "tigge_mn2t6_local_calendar_day_min_v1",
+            "data_version": "tigge_mn2t6_local_calendar_day_min",
             "temperature_metric": "low",
             "physical_quantity": "mn2t6_local_calendar_day_min",
             "members": [273.15] * 51,
@@ -441,7 +441,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
             (
                 "snap-high-001", "Chicago", "2026-07-08", "2026-07-05T00:00:00+00:00",
                 72.0, "high", "mx2t6_local_calendar_day_max",
-                "tigge_mx2t6_local_calendar_day_max_v1",
+                "tigge_mx2t6_local_calendar_day_max",
                 "[295.0]", 1, "OK", "VERIFIED",
             ),
         )
@@ -453,7 +453,7 @@ class TestIterTrainingSnapshotsMetricIsolation:
             (
                 "snap-low-001", "Chicago", "2026-07-08", "2026-07-05T00:00:00+00:00",
                 72.0, "low", "mn2t6_local_calendar_day_min",
-                "tigge_mn2t6_local_calendar_day_min_v1",
+                "tigge_mn2t6_local_calendar_day_min",
                 "[273.15]", 1, "OK", "VERIFIED",
             ),
         )
@@ -670,14 +670,14 @@ class TestB078LowLaneTruthFilesRegistry:
         result = build_truth_metadata(
             tmp_path / LOW_LANE_PLATT_FILENAME,
             temperature_metric="low",
-            data_version="tigge_mn2t6_local_calendar_day_min_v1",
+            data_version="tigge_mn2t6_local_calendar_day_min",
             authority="VERIFIED",
         )
         assert result.get("temperature_metric") == "low", (
             f"build_truth_metadata did not round-trip temperature_metric='low'. "
             f"Got: {result}"
         )
-        assert result.get("data_version") == "tigge_mn2t6_local_calendar_day_min_v1", (
+        assert result.get("data_version") == "tigge_mn2t6_local_calendar_day_min", (
             f"build_truth_metadata did not round-trip data_version. Got: {result}"
         )
 
@@ -692,7 +692,7 @@ class TestB078LowLaneTruthFilesRegistry:
             tmp_path / LOW_LANE_PLATT_FILENAME,
             authority="VERIFIED",
             temperature_metric="low",
-            data_version="tigge_mn2t6_local_calendar_day_min_v1",
+            data_version="tigge_mn2t6_local_calendar_day_min",
         )
         truth_block = result.get("truth") or result.get("_truth")
         assert truth_block is not None, (
@@ -701,7 +701,7 @@ class TestB078LowLaneTruthFilesRegistry:
         assert truth_block.get("temperature_metric") == "low", (
             f"truth block did not preserve temperature_metric='low'. Got: {truth_block}"
         )
-        assert truth_block.get("data_version") == "tigge_mn2t6_local_calendar_day_min_v1", (
+        assert truth_block.get("data_version") == "tigge_mn2t6_local_calendar_day_min", (
             f"truth block did not preserve data_version. Got: {truth_block}"
         )
 

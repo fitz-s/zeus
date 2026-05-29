@@ -71,7 +71,7 @@ class TestRBZGetCalibratorMetricAware:
             VALUES
                 ('high:NYC:JJA:v1:width_normalized_density',
                  'high', 'NYC', 'JJA',
-                 'tigge_mx2t6_local_calendar_day_max_v1',
+                 'tigge_mx2t6_local_calendar_day_max',
                  'width_normalized_density',
                  1.23, 0.5, 0.0, '[]', 200, 0.10, ?, 1, 'VERIFIED', ?)
             """,
@@ -87,7 +87,7 @@ class TestRBZGetCalibratorMetricAware:
             VALUES
                 ('low:NYC:JJA:v1:width_normalized_density',
                  'low', 'NYC', 'JJA',
-                 'tigge_mn2t6_local_calendar_day_min_v1',
+                 'tigge_mn2t6_local_calendar_day_min',
                  'width_normalized_density',
                  4.56, 0.7, 0.0, '[]', 200, 0.15, ?, 1, 'VERIFIED', ?)
             """,
@@ -662,7 +662,7 @@ class TestRCCBoundaryGateWired:
                 ('NYC', '2026-07-15', 'low',
                  'mn2t6_local_calendar_day_min_v1', 'low_temp',
                  ?, ?, 120.0, '[]',
-                 'v1', 'tigge_mn2t6_local_calendar_day_min_v1',
+                 'v1', 'tigge_mn2t6_local_calendar_day_min',
                  1, 'VERIFIED')
             """,
             (now, now),

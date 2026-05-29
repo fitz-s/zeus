@@ -38,7 +38,7 @@ CREATE TABLE {schema}platt_models (
 """
 
 
-LOW_VERSION = "tigge_mn2t6_local_calendar_day_min_v1"
+LOW_VERSION = "tigge_mn2t6_local_calendar_day_min"
 
 
 def _attached_trade_conn(tmp_path) -> sqlite3.Connection:

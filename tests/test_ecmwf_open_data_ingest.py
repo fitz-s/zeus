@@ -98,8 +98,8 @@ def staged_forecasts_db(tmp_path: Path, monkeypatch):
     low_members = _make_members(10.0)
 
     for metric, data_version, members in (
-        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max_v1", high_members),
-        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min_v1", low_members),
+        ("high", "ecmwf_opendata_mx2t3_local_calendar_day_max", high_members),
+        ("low", "ecmwf_opendata_mn2t3_local_calendar_day_min", low_members),
     ):
         conn.execute(
             """INSERT INTO ensemble_snapshots

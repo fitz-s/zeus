@@ -18,7 +18,7 @@ class TestDataVersionQuarantineGate:
 
     GREEN by design once 4A.1 lands — these are the 4A.1 enforcement tests, not
     pre-existing guardrails. If they go RED again, the quarantine was accidentally
-    removed. The canonical replacement tag 'tigge_mx2t6_local_calendar_day_max_v1'
+    removed. The canonical replacement tag 'tigge_mx2t6_local_calendar_day_max'
     must always pass the guard.
     """
 
@@ -44,7 +44,7 @@ class TestDataVersionQuarantineGate:
 
         # Must not raise — this is the replacement tag all Phase 4 writers must use
         assert_data_version_allowed(
-            "tigge_mx2t6_local_calendar_day_max_v1",
+            "tigge_mx2t6_local_calendar_day_max",
             context="test_phase4_parity_gate",
         )
 
@@ -53,7 +53,7 @@ class TestDataVersionQuarantineGate:
         from src.contracts.ensemble_snapshot_provenance import assert_data_version_allowed
 
         assert_data_version_allowed(
-            "tigge_mn2t6_local_calendar_day_min_v1",
+            "tigge_mn2t6_local_calendar_day_min",
             context="test_phase4_parity_gate",
         )
 
@@ -70,8 +70,8 @@ class TestDataVersionQuarantineGate:
         """R-P complement: is_quarantined() must return False for the canonical replacement tag."""
         from src.contracts.ensemble_snapshot_provenance import is_quarantined
 
-        assert not is_quarantined("tigge_mx2t6_local_calendar_day_max_v1"), (
-            "'tigge_mx2t6_local_calendar_day_max_v1' must NOT be quarantined — "
+        assert not is_quarantined("tigge_mx2t6_local_calendar_day_max"), (
+            "'tigge_mx2t6_local_calendar_day_max' must NOT be quarantined — "
             "it is the canonical Phase 4 replacement (R-P complement)."
         )
 

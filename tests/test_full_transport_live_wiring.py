@@ -41,7 +41,7 @@ from src.types import Bin
 _CITY_NAME = "TestCity"
 _SEASON = "JJA"
 _METRIC = "high"
-_LIVE_DV = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
+_LIVE_DV = "ecmwf_opendata_mx2t3_local_calendar_day_max"
 
 # A simple city mock: unit C, lat 40° N (JJA for target date 2026-07-01)
 def _make_city(settlement_unit: str = "C", lat: float = 40.0):
@@ -104,7 +104,7 @@ def _make_db_with_row():
         season=_SEASON,
         metric=_METRIC,
         live_data_version=_LIVE_DV,
-        prior_data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        prior_data_version="tigge_mx2t6_local_calendar_day_max",
         posterior_bias_c=2.0,    # 2°C cold bias
         posterior_sd_c=0.5,
         n_live=30,

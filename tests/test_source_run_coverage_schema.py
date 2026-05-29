@@ -44,7 +44,7 @@ def _coverage_kwargs(**overrides: object) -> dict[str, object]:
         "temperature_metric": "high",
         "physical_quantity": "temperature_2m",
         "observation_field": "high_temp",
-        "data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        "data_version": "ecmwf_opendata_mx2t6_local_calendar_day_max",
         "expected_members": 51,
         "observed_members": 51,
         "expected_steps_json": [126, 132, 138, 144],
@@ -139,7 +139,7 @@ def test_latest_source_run_coverage_filters_executable_identity() -> None:
         temperature_metric="high",
         source_id="ecmwf_open_data",
         source_transport="ensemble_snapshots_db_reader",
-        data_version="ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+        data_version="ecmwf_opendata_mx2t6_local_calendar_day_max",
         track="mx2t6_high_full_horizon",
         release_calendar_key="ecmwf_open_data_mx2t6_high:00z-full",
     )
@@ -197,7 +197,7 @@ def test_high_and_low_tracks_same_cycle_keep_independent_coverage_rows() -> None
             temperature_metric="low",
             physical_quantity="mn2t6_local_calendar_day_min",
             observation_field="low_temp",
-            data_version="ecmwf_opendata_mn2t6_local_calendar_day_min_v1",
+            data_version="ecmwf_opendata_mn2t6_local_calendar_day_min",
         ),
     )
 

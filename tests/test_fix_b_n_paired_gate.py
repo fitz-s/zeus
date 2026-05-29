@@ -28,8 +28,8 @@ import sqlite3
 
 import pytest
 
-OPD = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-TIG = "tigge_mx2t6_local_calendar_day_max_v1"
+OPD = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+TIG = "tigge_mx2t6_local_calendar_day_max"
 
 
 # ---------------------------------------------------------------------------

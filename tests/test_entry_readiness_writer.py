@@ -114,7 +114,7 @@ def _live_calibration_decision() -> CalibrationTransferDecision:
         reason_codes=("CALIBRATION_TRANSFER_APPROVED",),
         policy_id=EntryForecastCalibrationPolicyId.ECMWF_OPEN_DATA_USES_TIGGE_LOCALDAY_CAL_V1.value,
         forecast_data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
-        calibration_data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        calibration_data_version="tigge_mx2t6_local_calendar_day_max",
         live_promotion_approved=True,
     )
 
@@ -125,7 +125,7 @@ def _shadow_calibration_decision() -> CalibrationTransferDecision:
         reason_codes=("CALIBRATION_TRANSFER_SHADOW_ONLY",),
         policy_id=EntryForecastCalibrationPolicyId.ECMWF_OPEN_DATA_USES_TIGGE_LOCALDAY_CAL_V1.value,
         forecast_data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
-        calibration_data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        calibration_data_version="tigge_mx2t6_local_calendar_day_max",
         live_promotion_approved=False,
     )
 
