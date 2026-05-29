@@ -21,6 +21,7 @@ import pytest
 from src.contracts.forecast_object import ForecastObject
 from src.contracts.forecast_target import (
     ForecastTargetMismatchError,
+    UnknownSettlementAuthorityError,
     normalize_settlement_authority,
 )
 from src.contracts.residual_key import SettlementObject, pair_residual
@@ -55,7 +56,28 @@ def test_normalize_strips_authority_version_suffix():
     assert normalize_settlement_authority("wu_icao_history_v1") == "wu_icao"
     assert normalize_settlement_authority("wu_icao") == "wu_icao"
     assert normalize_settlement_authority("hko_daily_api_v1") == "hko"
-    assert normalize_settlement_authority("ogimet_metar_v1") == "ogimet"
+
+
+def test_normalize_reconciles_collector_vocabulary_to_authority_family():
+    """The forecast tags the city's settlement_source_type (noaa / cwa_station); the harvester
+    records the COLLECTOR (ogimet_metar_v1 / cwa_no_collector_v0). Same observation truth
+    (operator-confirmed 2026-05-29) -> both reduce to ONE canonical authority family so the
+    pairing gate reconciles instead of dropping the city (P2 SEV-2 fix)."""
+    # forecast-side tags
+    assert normalize_settlement_authority("noaa") == "noaa"
+    assert normalize_settlement_authority("cwa_station") == "cwa"
+    # settlement-side collector data_versions reduce to the SAME family
+    assert normalize_settlement_authority("ogimet_metar_v1") == "noaa"   # ogimet collects NWS METAR
+    assert normalize_settlement_authority("cwa_no_collector_v0") == "cwa"
+    # wu / hko already aligned
+    assert normalize_settlement_authority("hko") == "hko"
+
+
+def test_normalize_unknown_authority_raises_loud_not_silent():
+    """An authority token outside the known family registry must RAISE (loud quarantine), never
+    pass through to a silent mismatch/drop that could starve the ledger."""
+    with pytest.raises(UnknownSettlementAuthorityError):
+        normalize_settlement_authority("frobnicate_satellite_v3")
 
 
 def test_from_settlement_row_parses_station_from_wu_url():
@@ -102,3 +124,30 @@ def test_wrong_station_settlement_is_refused():
         claimed_unit="degF")
     with pytest.raises(ForecastTargetMismatchError):
         pair_residual(fo, so)
+
+
+def test_noaa_forecast_reconciles_with_ogimet_settlement_via_query_param_station():
+    """P2 SEV-2 antibody — Istanbul/Moscow/Tel Aviv: the forecast tags settlement_source_type
+    'noaa', the settlement was collected via ogimet (data_version 'ogimet_metar_v1') and its
+    station lives in a weather.gov '?site=' query param (NOT the last path segment). Same
+    airport-METAR truth (operator-confirmed) -> must reconcile to ONE ResidualKey, not drop.
+    RED before the authority registry + query-param station parser; the legacy contract dropped
+    all three of these cities' VERIFIED HIGH residuals."""
+    fo = ForecastObject.from_snapshot_row(_opendata_row(
+        city="Tel Aviv", settlement_station_id="LLBG",
+        settlement_source_type="noaa", settlement_unit="C"))
+    so = SettlementObject.from_settlement_row(_settlement_row(
+        city="Tel Aviv",
+        settlement_source="https://www.weather.gov/wrh/timeseries?site=LLBG",
+        provenance_json=json.dumps({"data_version": "ogimet_metar_v1"})), claimed_unit="C")
+    rk = pair_residual(fo, so)
+    assert rk.target.settlement_authority == "noaa"   # ogimet reconciled to the noaa family
+    assert rk.target.settlement_station == "LLBG"      # parsed from ?site=, not the path tail
+
+
+def test_station_parsed_from_weather_gov_query_param():
+    """The weather.gov timeseries URL carries the station in '?site=XXX', not the path tail."""
+    so = SettlementObject.from_settlement_row(_settlement_row(
+        settlement_source="https://www.weather.gov/wrh/timeseries?site=UUWW",
+        provenance_json=json.dumps({"data_version": "ogimet_metar_v1"})), claimed_unit="C")
+    assert so.target.settlement_station == "UUWW"

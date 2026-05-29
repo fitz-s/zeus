@@ -62,6 +62,9 @@ class SettlementIncompleteError(ValueError):
 
 
 _STATION_RE = re.compile(r"^[A-Za-z0-9]{3,8}$")
+# Some settlement sources carry the station in a query param, not the path tail
+# (weather.gov/wrh/timeseries?site=LLBG — Istanbul/Moscow/Tel Aviv). Check this first.
+_STATION_QUERY_RE = re.compile(r"[?&]site=([A-Za-z0-9]{3,8})", re.IGNORECASE)
 
 
 def _station_from_settlement_source(source: str) -> str:
@@ -75,14 +78,18 @@ def _station_from_settlement_source(source: str) -> str:
     if not source or "/" not in source:
         raise SettlementIncompleteError(
             f"settlement refused: cannot recover station from settlement_source={source!r} "
-            f"(expected a URL whose last path segment is the station code). "
+            f"(expected a URL with a '?site=' param or a station-code last path segment). "
             f"settlement_outcomes lacks a station column (D-S1)."
         )
-    segment = source.rstrip("/").rsplit("/", 1)[-1].strip()
+    qp = _STATION_QUERY_RE.search(source)
+    if qp:
+        return qp.group(1)
+    # Path-tail form (.../chicago/KORD); drop any residual query string defensively.
+    segment = source.rstrip("/").rsplit("/", 1)[-1].strip().split("?", 1)[0]
     if not _STATION_RE.match(segment):
         raise SettlementIncompleteError(
-            f"settlement refused: last path segment {segment!r} of settlement_source is not a "
-            f"plausible station code."
+            f"settlement refused: settlement_source={source!r} yields no plausible station code "
+            f"(no '?site=' param and last path segment {segment!r} is not a station)."
         )
     return segment
 
