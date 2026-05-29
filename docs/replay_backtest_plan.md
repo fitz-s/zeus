@@ -67,27 +67,60 @@ unambiguous, then score SKILL replay as categorical outcome-set scoring.*
    removed (legacy_archived), `venue_order_facts` / `position_events` /
    `position_current` added. Tombstone preserved.
 
-Tests: `test_multiclass_skill_scoring.py`, `test_settlement_resolution_contract.py`,
-`test_selection_coverage_settlement_truth.py` (+ economics fixture updated).
+### Subsequent commits (operator authorized direct execution in the worktree)
 
-## 2. OUT OF SCOPE (the 30h tail — deferred, NOT in this PR)
+6. **PR E — `src/state/db.py::init_backtest_schema`** — persists `replay_runs`,
+   `replay_subjects`, `forecast_probability_vectors`, `settlement_resolution_truth`,
+   `replay_skill_results` in `zeus_backtest.db`. VERIFIED live-restart-safe: the
+   backtest DB is never fingerprinted (boot guard checks only WORLD+TRADE).
+7. **PR C — lead/cycle/product-keyed ENS bias** (`lead_bucket.py`, `ens_bias_repo.py`,
+   `fit_full_transport_error_models.py`, `score_error_model_candidates.py`): stops
+   pooling lead≤48 (short-lead sign-flip); `error_model_key` + candidate buckets now
+   carry lead_bucket+cycle; cross-bucket mixing fail-closed. No gate weakened;
+   production fitter behavior-unchanged (passes `lead_max` explicitly).
+8. **Finding 8 — reader inter-cycle spread** (`executable_forecast_reader.py`):
+   A/B verdict = **ADDITIVE-ONLY** (multi-cycle election not provably superior under
+   the env DB crash). Election byte-identical; 4 diagnostic fields added.
+9. **PR G — `src/backtest/fill_simulator.py`** (new): pure orderbook fill engine
+   (BUY=ask/SELL=bid, FOK/FAK/GTC/GTD, min/tick/fees/hash/resolved). economics.py
+   stays tombstoned — no live consumer yet (market_events lacks the YES/NO token pair).
+10. **PR H — promotion/learning gates** (`purpose.py`): SKILL/DIAGNOSTIC +
+    promotion_authority=True is now UNCONSTRUCTABLE; `assert_promotion_grade` requires
+    ForecastObject + promotion_eligible SettlementResolution; `trade_decisions` refused
+    as an authority source.
 
-- **replay_* schema persistence** (`replay_runs`/`replay_subjects`/
-  `forecast_probability_vectors`/`replay_skill_results`): scoring math needs no
-  persistence layer to be correct; add when a run-store is actually consumed.
-- **ECONOMICS kernel + fill simulator** (parse `orderbook_depth_json`, bid/ask/
-  depth/FOK/FAK/fees/tick parity): stays tombstoned until executable parity exists.
-- **Promotion / learning gates** (TRIBUNAL PR H): `promotion_authority` is hard
-  False everywhere here; wiring the gate is a separate, well-tested slice.
-- **Evidence-ledger provenance lineage** (PR B) and **model_bias_ens lead/cycle/
-  product re-keying** (PR C): PR C touches LIVE calibration — HIGH risk while the
-  live daemon runs in shadow; must not be done casually.
-- **D1 LOW source/window fix** (PR F): needs an operator verdict on whether LOW
-  promotion-grade replay is blocked on it, plus a data rebuild.
+**252 tests pass** across the full surface. All work is in this worktree; the live
+daemon (separate checkout) is unaffected until this branch is deployed.
 
-## 3. Genuine operator decisions still open
+## 2. Already done by the merged PR #361 (plan was stale)
 
-- Finish the `data_version → dataset_id` rename on `platt_models` (vs the freeze
-  taken here), once a calibration-touching slice is scheduled.
-- LOW D1 materiality: is LOW promotion-grade replay blocked on the mx2t3/mn2t3
-  window fix? (PR F gating.)
+- **Finding 6 — evidence-ledger provenance**: `build_ens_residual_evidence.py` already
+  derives `source_kind` via `source_kind_for_data_version` (not hardcoded 'prior').
+- **Finding 7 — analytic p_raw CDF**: `analytic_p_raw_vector_from_maxes` replaces 10k MC.
+- **PR F — D1 LOW window fix**: mx2t3/mn2t3 are already 3h-native. The "LOW blocking"
+  decision is therefore MOOT.
+
+## 3. Genuinely still OUT (true remaining tail)
+
+- **End-to-end replay backfill** (plan §9 Phases 2–4): the PR E tables, the contracts,
+  and the scorer all exist, but the pipeline that BUILDS ForecastObject views →
+  SettlementResolution rows → group results → writes them into `replay_skill_results`
+  is not wired. (Scoring is unit-correct; persistence is empty until a backfill runs.)
+- **ECONOMICS run path**: `fill_simulator` exists but `economics.py` stays tombstoned —
+  blocked by the `market_events` YES/NO token-identity gap, not by this code.
+- **`run_replay.py` CLI** purpose-split report wiring.
+
+## 4. Genuine operator decisions still open
+
+- **Deploy timing**: this branch's PR C changes SERVED calibration once deployed +
+  re-fit. Decide when to deploy/re-fit given the live shadow seam-hunt.
+- Finish the `data_version → dataset_id` rename on `platt_models` (vs the freeze taken
+  here), once a calibration-touching slice is scheduled.
+
+## 5. Known environment issue (pre-existing, not from this work)
+
+`init_schema_forecasts` crashes on a fresh in-memory DB (`no such column:
+temperature_metric` in `_create_market_events`) because the ATTACH path copies an old
+DDL when a live forecasts DB exists on the machine. Baselined identical on clean
+`main@bedff16832`. Tests in this PR use `--noconftest` / direct unit fixtures to avoid
+it. Fixing it is a `--write-pin`-gated DDL task, out of scope here.
