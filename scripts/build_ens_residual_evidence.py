@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # Created: 2026-05-28
-# Last reused or audited: 2026-05-28
+# Last reused or audited: 2026-05-29
+# Authority basis (P2 wiring 2026-05-29): TRIBUNAL P2 step-4 (P2_LEDGER_SEAM_FINDINGS_2026-05-29.md)
+#   — route the forecast↔settlement pairing through residual_key.pair_residual (D-J1 wrong-station
+#   drop) + read the canonical `dataset_id` lineage column (renamed from data_version, B5).
 # Authority basis: operator redesign 2026-05-28 — evidence-ledger-backed candidate selection,
 #   Principle 3 (evidence ledger is part of training data) + Principle 4 (HIGH window validity proof).
 #   Supersedes the trust-the-contributes-flag path: that flag marks contaminated 12z samples as valid
@@ -47,7 +50,16 @@ import statistics
 import sys
 from pathlib import Path
 
-from src.contracts.residual_key import source_kind_for_data_version
+from src.contracts.ensemble_snapshot_provenance import MembersUnitInvalidError
+from src.contracts.forecast_object import ForecastObject, ForecastObjectIncompleteError
+from src.contracts.forecast_target import ForecastTargetMismatchError
+from src.contracts.residual_key import (
+    ResidualKey,
+    SettlementIncompleteError,
+    SettlementObject,
+    pair_residual,
+    source_kind_for_data_version,
+)
 from src.contracts.residual_value import residual_celsius
 
 logger = logging.getLogger(__name__)
@@ -144,6 +156,7 @@ def _strict_evidence_row(e: dict, *, metric: str, lat: dict) -> dict | None:
         "target_date": e["target_date"],
         "source_kind": sk,
         "data_version": e["data_version"],
+        "product": e.get("product"),
         "snapshot_id": e["snapshot_id"],
         "settlement_id": e["settlement_id"],
         "issue_time": e["issue_time"],
@@ -167,6 +180,42 @@ def _strict_evidence_row(e: dict, *, metric: str, lat: dict) -> dict | None:
     }
 
 
+def _pair_or_drop(
+    forecast_row: dict, settlement_row: dict, *, claimed_unit: str
+) -> ResidualKey | None:
+    """Gate one candidate forecast<->settlement pairing through the typed contract.
+
+    Builds a ForecastObject + SettlementObject and routes them through ``pair_residual``,
+    which RAISES unless they describe the same random variable (city / metric / target_date
+    / station / unit / authority). Returns the keyed ``ResidualKey`` on a true pair; returns
+    ``None`` — logged, fail-closed — when the settlement is a different RV than the forecast
+    claims (D-J1: the legacy loose JOIN matched on city+date+metric only and would pair a
+    wrong-station settlement), or when either side is incomplete / carries an unrecognized
+    lineage. A dropped sample is NEVER emitted with a collapsed lineage.
+    """
+    try:
+        forecast = ForecastObject.from_snapshot_row(forecast_row)
+        settlement = SettlementObject.from_settlement_row(
+            settlement_row, claimed_unit=claimed_unit
+        )
+        return pair_residual(forecast, settlement)
+    except (
+        ForecastTargetMismatchError,
+        SettlementIncompleteError,
+        ForecastObjectIncompleteError,
+        MembersUnitInvalidError,
+        ValueError,
+    ) as exc:
+        logger.warning(
+            "dropped pairing city=%s metric=%s date=%s: %s",
+            forecast_row.get("city"),
+            forecast_row.get("temperature_metric"),
+            forecast_row.get("target_date"),
+            exc,
+        )
+        return None
+
+
 def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
                    cities: list[str] | None, accept_cycle: str | None) -> list[dict]:
     """Return one evidence row per (city, target_date) for the accepted cycle.
@@ -182,13 +231,18 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
         where.append("e.city IN (%s)" % ",".join("?" * len(cities)))
         params.extend(cities)
 
-    rows = conn.execute(
+    # Canonical lineage column is `dataset_id` (renamed from data_version, commit dd3d19d00a /
+    # B5); alias it back to data_version so the row dict key the contracts + _strict_evidence_row
+    # consume is stable. Read by column NAME (dict per row) — no fragile positional unpack.
+    cur = conn.execute(
         f"""
-        SELECT e.city, e.target_date, e.snapshot_id, e.issue_time, e.lead_hours,
-               e.available_at, e.members_json, e.members_unit, e.data_version,
+        SELECT e.city, e.target_date, e.temperature_metric, e.snapshot_id, e.issue_time,
+               e.source_cycle_time, e.lead_hours, e.available_at, e.members_json,
+               e.members_unit, e.dataset_id AS data_version,
                e.contributes_to_target_extrema, e.boundary_ambiguous,
                e.forecast_window_start_utc, e.forecast_window_end_utc, e.source_run_id,
-               s.settlement_id, s.settlement_value, e.settlement_unit
+               e.settlement_station_id, e.settlement_unit, e.settlement_source_type,
+               s.settlement_id, s.settlement_value, s.settlement_source, s.provenance_json
         FROM ensemble_snapshots e
         JOIN settlement_outcomes s
           ON s.city = e.city AND s.target_date = e.target_date
@@ -196,39 +250,53 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
         WHERE {" AND ".join(where)}
         """,
         params,
-    ).fetchall()
+    )
+    colnames = [d[0] for d in cur.description]
+    rows = [dict(zip(colnames, raw)) for raw in cur.fetchall()]
 
     strict_cycle = accept_cycle or _cycle_for_metric(metric)
 
     # Group by (city, target_date); within the accepted cycle keep freshest available_at.
+    # Each candidate routes through the typed pairing gate (_pair_or_drop): a wrong-station /
+    # wrong-RV settlement (D-J1: the loose JOIN matched city+date+metric only) is DROPPED,
+    # never emitted with a collapsed lineage.
     best: dict[tuple, dict] = {}
     rejected_cycle = 0
+    rejected_pairing = 0
     for r in rows:
-        (city, td, snap_id, issue, lead, av, mj, mu, dv, contrib, bamb,
-         fw_start, fw_end, src_run,
-         set_id, sv, su) = r
+        issue = r["issue_time"]
         hh = str(issue)[11:13] if issue else "NULL"
         if strict_cycle != "ALL" and hh != strict_cycle:
             rejected_cycle += 1
             continue
-        key = (city, td)
+        rkey = _pair_or_drop(r, r, claimed_unit=r.get("settlement_unit"))
+        if rkey is None:
+            rejected_pairing += 1
+            continue
+        key = (r["city"], r["target_date"])
+        av = r["available_at"]
         prev = best.get(key)
         if prev is None or str(av) > str(prev["available_at"]):
             best[key] = {
-                "city": city, "target_date": td, "snapshot_id": snap_id,
-                "issue_time": issue, "cycle": hh, "lead_hours": lead,
-                "available_at": av, "members_json": mj, "members_unit": mu,
-                "data_version": dv, "contributes_to_target_extrema": contrib,
-                "boundary_ambiguous": bamb,
-                "forecast_window_start_utc": fw_start,
-                "forecast_window_end_utc": fw_end,
-                "source_run_id": src_run,
-                "settlement_id": set_id,
-                "settlement_value_c": float(sv), "settlement_unit": su,
+                "city": r["city"], "target_date": r["target_date"], "snapshot_id": r["snapshot_id"],
+                "issue_time": issue, "cycle": hh, "lead_hours": r["lead_hours"],
+                "available_at": av, "members_json": r["members_json"], "members_unit": r["members_unit"],
+                "data_version": r["data_version"],
+                "contributes_to_target_extrema": r["contributes_to_target_extrema"],
+                "boundary_ambiguous": r["boundary_ambiguous"],
+                "forecast_window_start_utc": r["forecast_window_start_utc"],
+                "forecast_window_end_utc": r["forecast_window_end_utc"],
+                "source_run_id": r["source_run_id"],
+                "settlement_id": r["settlement_id"],
+                "settlement_value_c": float(r["settlement_value"]), "settlement_unit": r["settlement_unit"],
+                "product": rkey.product,
             }
 
-    logger.info("metric=%s cycle=%s: %d candidate rows, %d kept (one per date), %d rejected by cycle",
-                metric, strict_cycle, len(rows), len(best), rejected_cycle)
+    logger.info(
+        "metric=%s cycle=%s: %d candidate rows, %d kept (one per date), %d rejected by cycle, "
+        "%d dropped by pairing gate (wrong-station/incomplete)",
+        metric, strict_cycle, len(rows), len(best), rejected_cycle, rejected_pairing,
+    )
     return list(best.values())
 
 
