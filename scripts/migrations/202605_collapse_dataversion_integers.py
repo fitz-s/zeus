@@ -4,19 +4,15 @@
 # Authority basis: operator directive 2026-05-29 — "version must leave the system";
 #   investigation verdict (metric_specs.py:44-63): v1 is READ (HIGH's only TIGGE source
 #   + a LOW read path), so v1 is NOT droppable → the trailing _vN INTEGER is collapsed
-#   while the SEMANTIC distinction (e.g. _contract_window) is preserved. model_bias_ens
-#   (79 rows) is WIPED per directive: empty → serving falls back to raw (dormant safe path).
-# DB targets:
-#   - zeus-world.db  : WIPE model_bias_ens (DELETE).
+#   while the SEMANTIC distinction (e.g. _contract_window) is preserved.
+# DB target:
 #   - zeus-forecasts.db : rename data_version VALUES (strip trailing _v<int>) in every
-#     table carrying a data_version column.
-#   These are INDEPENDENT DBs — each gets its own db_writer_lock + intra-DB SAVEPOINT.
-#   No cross-DB ATTACH (no single logical txn spans both), so INV-37's ATTACH+SAVEPOINT
-#   rule is satisfied by per-DB SAVEPOINT envelopes.
+#     table carrying a data_version column. db_writer_lock + intra-DB SAVEPOINT (INV-37).
+#   (model_bias_ens was renamed v2→canonical separately on the live world DB — NOT this script.)
 # Runner:
 #   python scripts/migrations/202605_collapse_dataversion_integers.py            # dry-run (default)
 #   python scripts/migrations/202605_collapse_dataversion_integers.py --execute  # apply
-"""Collapse version-integer suffixes out of data_version VALUES + wipe model_bias_ens.
+"""Collapse version-integer suffixes out of data_version VALUES (zeus-forecasts.db).
 
 WHY (Fitz #4 — data provenance over code correctness):
   `data_version` strings are stored provenance on millions of live rows. They MUST NOT
@@ -27,8 +23,6 @@ WHY (Fitz #4 — data provenance over code correctness):
   every lineage stays distinct. A collision guard ABORTS if two distinct old values would
   map to the same new value (that would mean a real lineage merge — operator must decide).
 
-  model_bias_ens (79 rows) is WIPED, not migrated: it is suspect data and an empty table
-  makes the serving layer fall back to raw (the current dormant behavior) — safe.
 
 IDEMPOTENT: a value with no trailing `_v<int>` is left untouched; re-running is a no-op.
 ATOMIC: each DB's writes run inside ONE SAVEPOINT; any error rolls the whole DB back.
@@ -51,7 +45,7 @@ from src.state.db import (  # noqa: E402
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 # SCOPE NOTE: `full_transport_v1` is NOT handled here. It is a CORRECTION-FAMILY tag
-# (_FT_FAMILY in evaluator.py), stored in model_bias_ens (wiped by this script) and in
+# (_FT_FAMILY in evaluator.py), stored in model_bias_ens (renamed v2→canonical separately on live; not touched here) and in
 # the corrected-pairs family column — a DIFFERENT column from data_version. Collapsing
 # that integer is a separate code-constant + family-column migration; out of scope for
 # this data_version-value pass.

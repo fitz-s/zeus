@@ -3163,6 +3163,8 @@ def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_lookup
             ON ensemble_snapshots(city, target_date, temperature_metric, available_at)
     """)
+    conn.execute("DROP INDEX IF EXISTS idx_ens_v2_source_run")
+    conn.execute("DROP INDEX IF EXISTS idx_ens_v2_entry_lookup")
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_source_run
             ON ensemble_snapshots(source_id, source_transport, source_run_id)

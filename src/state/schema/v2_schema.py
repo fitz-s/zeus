@@ -223,6 +223,8 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
         except Exception as exc:
             if "duplicate column" not in str(exc).lower():
                 raise
+    conn.execute("DROP INDEX IF EXISTS idx_ens_v2_source_run")
+    conn.execute("DROP INDEX IF EXISTS idx_ens_v2_entry_lookup")
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ens_source_run
             ON ensemble_snapshots(source_id, source_transport, source_run_id)

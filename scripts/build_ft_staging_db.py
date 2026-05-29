@@ -75,9 +75,9 @@ CREATE TABLE IF NOT EXISTS calibration_pairs_v2 (
 """
 
 CALIBRATION_PAIRS_INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_bucket ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)",
-    "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_city_date_metric ON calibration_pairs_v2(city, target_date, temperature_metric)",
-    "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_refit_core ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days, error_model_family)",
+    "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_bucket ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days)",
+    "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_city_date_metric ON calibration_pairs_v2(city, target_date, temperature_metric)",
+    "CREATE INDEX IF NOT EXISTS idx_calibration_pairs_v2_refit_core ON calibration_pairs_v2(temperature_metric, cluster, season, lead_days, error_model_family)",
 ]
 
 
