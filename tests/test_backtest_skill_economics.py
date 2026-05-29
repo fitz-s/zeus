@@ -321,9 +321,14 @@ def test_economics_readiness_full_substrate_still_blocks_until_engine_implemente
         "min_tick_size TEXT, min_order_size TEXT, fee_details_json TEXT, neg_risk INTEGER, raw_orderbook_hash TEXT)"
     )
     _create_venue_trade_facts_table(conn)
+    # trade_decisions removed from REQUIRED_ECONOMICS_TABLES 2026-05-29 (now
+    # legacy_archived; entry truth is position_events/position_current). The
+    # substrate now creates the canonical entry/lifecycle tables instead.
+    conn.execute("CREATE TABLE venue_order_facts (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE position_events (id INTEGER PRIMARY KEY)")
+    conn.execute("CREATE TABLE position_current (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE position_lots (state TEXT)")
     conn.execute("CREATE TABLE probability_trace_fact (decision_snapshot_id TEXT)")
-    conn.execute("CREATE TABLE trade_decisions (decision_snapshot_id TEXT)")
     conn.execute("CREATE TABLE selection_family_fact (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE selection_hypothesis_fact (selected_post_fdr INTEGER)")
     conn.execute("CREATE TABLE settlement_outcomes (id INTEGER PRIMARY KEY)")
@@ -340,9 +345,11 @@ def test_economics_readiness_full_substrate_still_blocks_until_engine_implemente
         "VALUES ('0.01', '5', '{}', 0, 'hash-orderbook')"
     )
     _insert_confirmed_trade_fact(conn)
+    conn.execute("INSERT INTO venue_order_facts DEFAULT VALUES")
+    conn.execute("INSERT INTO position_events DEFAULT VALUES")
+    conn.execute("INSERT INTO position_current DEFAULT VALUES")
     conn.execute("INSERT INTO position_lots (state) VALUES ('CONFIRMED_EXPOSURE')")
     conn.execute("INSERT INTO probability_trace_fact (decision_snapshot_id) VALUES ('snap-1')")
-    conn.execute("INSERT INTO trade_decisions (decision_snapshot_id) VALUES ('snap-1')")
     conn.execute("INSERT INTO selection_family_fact DEFAULT VALUES")
     conn.execute("INSERT INTO selection_hypothesis_fact (selected_post_fdr) VALUES (1)")
     conn.execute("INSERT INTO settlement_outcomes DEFAULT VALUES")

@@ -19,14 +19,22 @@ from src.backtest.purpose import PurposeContractViolation
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
 
 
+# Canonical entry/fill truth for ECONOMICS replay. `trade_decisions` was REMOVED
+# 2026-05-29: it is `schema_class: legacy_archived` per
+# architecture/db_table_ownership.yaml and `log_trade_entry()` is a no-op stub —
+# canonical entry truth is now `position_events` / `position_current`
+# (TRIBUNAL Finding 3 + §6 "Not canonical: trade_decisions"). `venue_order_facts`
+# is the append-only order-lifecycle truth that pairs with `venue_trade_facts`.
 REQUIRED_ECONOMICS_TABLES: tuple[str, ...] = (
     "market_events",
     "market_price_history",
     "executable_market_snapshots",
+    "venue_order_facts",
     "venue_trade_facts",
+    "position_events",
+    "position_current",
     "position_lots",
     "probability_trace_fact",
-    "trade_decisions",
     "selection_family_fact",
     "selection_hypothesis_fact",
     "settlement_outcomes",

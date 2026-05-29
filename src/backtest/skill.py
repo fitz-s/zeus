@@ -94,3 +94,95 @@ def _economics_fields_in_summary(summary) -> set[str]:
             if key in ECONOMICS_FIELDS:
                 leaked.add(key)
     return leaked
+
+
+def score_forecast_vector(
+    p_vector,
+    ordered_bin_labels,
+    settlement_object,
+    *,
+    top_k: int = 3,
+):
+    """Score one forecast probability vector against a SettlementObject.
+
+    This is the TRIBUNAL §4.4 group-level SKILL result: ONE categorical result
+    per (forecast vector × settlement × bin grid), NOT K independent binary rows.
+    It consumes the value-derived winner from ``settlement_object`` (never the
+    stored ``winning_bin`` string) and emits proper categorical metrics only —
+    NO PnL / win-rate / sharpe (those are ECONOMICS, which stays tombstoned).
+
+    Args:
+        p_vector: forecast probabilities laid out on the same ordered grid as
+            ``settlement_object.ordered_bin_labels``.
+        ordered_bin_labels: the bin labels of ``p_vector`` in order, used to prove
+            the vector and the settlement speak the same grid before scoring.
+        settlement_object: a ``SettlementObject`` (winner derived from value).
+        top_k: k for the top-k hit flag (default 3).
+
+    Returns:
+        dict with ``group_integrity_status`` and, when valid, the metric bundle.
+        ``promotion_authority`` is always False here — promotion gating is a
+        separate, not-yet-wired layer (TRIBUNAL PR H). ``group_exclusion_reason``
+        is set (and metrics are None) when the group fails integrity.
+    """
+    # Imported lazily to keep module import-light and avoid a contracts cycle.
+    from src.calibration import scoring
+    from src.calibration.scoring import ProbabilityGroupError
+
+    labels = tuple(ordered_bin_labels)
+    base = {
+        "group_integrity_status": "valid",
+        "group_exclusion_reason": None,
+        "winner_bin_index": settlement_object.winning_bin_index,
+        "winner_bin_label": settlement_object.winning_bin_label,
+        "truth_source": settlement_object.truth_source,
+        "settlement_resolution_status": settlement_object.resolution_status,
+        "promotion_authority": False,
+        "learning_eligible": settlement_object.learning_eligible,
+    }
+
+    def _excluded(reason: str) -> dict:
+        out = dict(base)
+        out["group_integrity_status"] = "excluded"
+        out["group_exclusion_reason"] = reason
+        for k in (
+            "p_winner",
+            "categorical_log_loss",
+            "multiclass_brier",
+            "ranked_probability_score",
+            "winner_rank",
+            "reciprocal_rank",
+            "top1_hit",
+            f"top{top_k}_hit",
+        ):
+            out[k] = None
+        return out
+
+    if len(p_vector) != len(labels):
+        return _excluded(
+            f"length_mismatch: |p|={len(p_vector)} != |labels|={len(labels)}"
+        )
+    if labels != settlement_object.ordered_bin_labels:
+        return _excluded("bin_grid_mismatch: vector grid != settlement grid")
+    try:
+        scoring.validate_probability_group(p_vector)
+    except ProbabilityGroupError as exc:
+        return _excluded(f"invalid_distribution: {exc}")
+
+    winner = settlement_object.winning_bin_index
+    result = dict(base)
+    result.update(
+        {
+            "p_winner": scoring.p_winner(p_vector, winner),
+            "categorical_log_loss": scoring.categorical_log_loss(p_vector, winner),
+            "multiclass_brier": scoring.multiclass_brier(p_vector, winner),
+            "ranked_probability_score": scoring.ranked_probability_score(
+                p_vector, winner
+            ),
+            "winner_rank": scoring.winner_rank(p_vector, winner),
+            "reciprocal_rank": scoring.reciprocal_rank(p_vector, winner),
+            "top1_hit": scoring.top_k_hit(p_vector, winner, 1),
+            f"top{top_k}_hit": scoring.top_k_hit(p_vector, winner, top_k),
+        }
+    )
+    return result

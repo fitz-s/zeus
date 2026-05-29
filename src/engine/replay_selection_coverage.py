@@ -1,6 +1,6 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-18
-# Authority basis: backtest_v2_port_2026_05_07.md §D2+D3
+# Last reused or audited: 2026-05-29
+# Authority basis: TRIBUNAL Finding 2 (value-derived winning bin)
 #
 # Dynamic SQL safety (PR #87 Copilot reply): all f-string SQL in this module
 # interpolates only module-level table-name constants (sv2_table, cp_table,
@@ -42,6 +42,7 @@ from typing import Literal, Optional
 import numpy as np
 
 from src.config import City, cities_by_name, edge_n_bootstrap, settings
+from src.contracts.calibration_bins import grid_for_city
 from src.contracts.season import season_from_month
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.engine.replay import (
@@ -200,11 +201,21 @@ def _score_one_snapshot(
     p_market_source: Literal["stored", "uniform", "climatology", "frozen_at_decision"],
     override_platt: bool,
     clim_rows: list[dict],
+    derived_winning_bin: Optional[str] = None,
+    stored_winning_bin_evidence: Optional[str] = None,
+    stored_matches_derived: Optional[bool] = None,
+    truth_source: str = "settlement_value_derived",
 ) -> dict:
     """Score one (city, target_date, snapshot_id) against the live FDR path.
 
     Returns a dict with keys: city, target_date, snapshot_id, hit, brier,
-    picked_labels, winning_bin, missing_reason, timezone_class.
+    picked_labels, winning_bin, derived_winning_bin, stored_winning_bin_evidence,
+    stored_matches_derived, truth_source, missing_reason, timezone_class.
+
+    TRIBUNAL Finding 2: hit scoring uses derived_winning_bin (value-derived from
+    settlement_value via grid_for_city) rather than the stored winning_bin string,
+    which can be stale/drifted. The stored string is preserved as
+    stored_winning_bin_evidence for audit only.
     """
     from src.data.market_scanner import _parse_temp_range
     from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
@@ -213,6 +224,10 @@ def _score_one_snapshot(
     _sem = SettlementSemantics.for_city(city)
 
     tz_class = "Asia_star" if city.timezone.startswith("Asia/") else "non_Asia"
+
+    # TRIBUNAL Finding 2: scoring_winning_bin is the value-derived label when available;
+    # fall back to stored winning_bin only if derivation was not attempted (legacy callers).
+    scoring_winning_bin = derived_winning_bin if derived_winning_bin is not None else winning_bin
 
     base_result = {
         "city": city.name,
@@ -224,6 +239,10 @@ def _score_one_snapshot(
         "lead_days": 0.0,
         "picked_labels": [],
         "winning_bin": winning_bin,
+        "derived_winning_bin": derived_winning_bin,
+        "stored_winning_bin_evidence": stored_winning_bin_evidence,
+        "stored_matches_derived": stored_matches_derived,
+        "truth_source": truth_source,
         "missing_reason": "",
         "timezone_class": tz_class,
     }
@@ -452,14 +471,14 @@ def _score_one_snapshot(
         and row.get("direction") == "buy_yes"  # only buy_yes for hit scoring
     ]
 
-    # -- Score hit
-    hit = _score_snapshot_hit(picked_labels, winning_bin)
+    # -- Score hit (TRIBUNAL Finding 2: use value-derived label, not stored string)
+    hit = _score_snapshot_hit(picked_labels, scoring_winning_bin)
 
     # -- Brier score for the winning bin (p_cal vs outcome)
     brier = None
-    if winning_bin:
+    if scoring_winning_bin:
         try:
-            win_idx = labels.index(winning_bin)
+            win_idx = labels.index(scoring_winning_bin)
             brier_scores = []
             for i, p in enumerate(bin_probs_cal):
                 outcome = 1.0 if i == win_idx else 0.0
@@ -605,7 +624,28 @@ def run_selection_coverage(
             continue
 
         target_date = str(row["target_date"])
-        winning_bin = str(row["winning_bin"] or "")
+        stored_winning_bin = str(row["winning_bin"] or "")
+
+        # TRIBUNAL Finding 2: derive the canonical winning bin from settlement_value
+        # via the city's canonical bin grid. This is immune to stale/drifted stored labels.
+        settlement_value = row["settlement_value"]  # guaranteed NOT NULL by query filter
+        derived_winning_bin: Optional[str] = None
+        stored_matches_derived: Optional[bool] = None
+        truth_source = "settlement_value_derived"
+        try:
+            grid = grid_for_city(city)  # calibration_bins.py:306
+            derived_winning_bin = grid.bin_for_value(float(settlement_value)).label
+            if stored_winning_bin:
+                stored_matches_derived = (stored_winning_bin == derived_winning_bin)
+        except Exception as _grid_exc:
+            logger.warning(
+                "grid_for_city failed for %s (settlement_value=%s): %s — skipping row",
+                city.name, settlement_value, _grid_exc,
+            )
+            continue
+
+        # winning_bin variable kept as stored evidence only (not used for scoring)
+        winning_bin = stored_winning_bin
 
         # Resolve snapshot_id: use settlement_outcomes column if present, else latest snapshot
         snap_id = None
@@ -642,6 +682,10 @@ def run_selection_coverage(
             p_market_source=p_market_source,
             override_platt=override_platt,
             clim_rows=clim_rows,
+            derived_winning_bin=derived_winning_bin,
+            stored_winning_bin_evidence=stored_winning_bin or None,
+            stored_matches_derived=stored_matches_derived,
+            truth_source=truth_source,
         )
         snapshot_results.append(result)
         n_replayed += 1
@@ -673,11 +717,14 @@ def run_selection_coverage(
             settlement_value=row["settlement_value"],
             settlement_unit=city.settlement_unit,
             derived_wu_outcome=None if result["hit"] is None else bool(result["hit"]),
-            truth_source="settlement_outcomes.winning_bin",
+            truth_source=result.get("truth_source", "settlement_value_derived"),
             divergence_status=result["missing_reason"] or "scored",
             evidence={
                 "picked_labels": result["picked_labels"],
                 "winning_bin": winning_bin,
+                "derived_winning_bin": result.get("derived_winning_bin"),
+                "stored_winning_bin_evidence": result.get("stored_winning_bin_evidence"),
+                "stored_matches_derived": result.get("stored_matches_derived"),
                 "hit": result["hit"],
                 "brier": result["brier"],
                 "p_market_source": p_market_source,
