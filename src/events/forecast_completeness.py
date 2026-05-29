@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
+from src.data.forecast_target_contract import OPENDATA_MAX_STEP_HOURS
+
 
 ForecastCompletenessStatus = Literal["COMPLETE", "PARTIAL_ALLOWED", "PARTIAL_BLOCKED"]
 
@@ -34,10 +36,16 @@ class ForecastCompletenessResult:
 
 
 def expected_steps_for_cycle(cycle_hour: int) -> tuple[int, ...]:
-    if cycle_hour in {0, 12}:
-        return tuple(list(range(0, 145, 3)) + list(range(150, 361, 6)))
-    if cycle_hour in {6, 18}:
-        return tuple(range(0, 145, 3))
+    """Expected OpenData step grid per cycle, capped at the 5-day fetch horizon.
+
+    5-day cap (2026-05-29): Polymarket retired markets beyond 5 days, so Zeus fetches
+    only the 3h-native grid through OPENDATA_MAX_STEP_HOURS (144h). The former 0/12
+    long tail (150-360h) is no longer fetched, so this fallback must not demand it —
+    otherwise the fallback completeness path would be permanently fail-closed. All
+    four cycles now share the same 0..144h grid.
+    """
+    if cycle_hour in {0, 12, 6, 18}:
+        return tuple(range(0, OPENDATA_MAX_STEP_HOURS + 1, 3))
     raise ValueError(f"unsupported ECMWF cycle_hour {cycle_hour!r}")
 
 
