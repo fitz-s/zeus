@@ -99,30 +99,31 @@ override path in `main()`.
 
 ---
 
-### 6. migrate_no_trade_events_create_2026_05_21.py — Resolution (c)
+### 6. migrate_no_trade_events_create_2026_05_21.py — Resolution (a) [upgraded 2026-05-29]
 
-**Write class:** DDL-only (CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS).
-**Why deferred:** Creates `no_trade_events` table and two indexes in
-`zeus-world.db`. All statements use IF NOT EXISTS — idempotent. No INSERT,
-UPDATE, or DELETE. The daemon writes zeus-world.db, but CREATE IF NOT EXISTS is
-atomic in SQLite and safe if the table already exists. Classified as daemon-DOWN
-one-shot per ops policy; db_writer_lock(BULK) retrofit is lowest priority for
-pure CREATE-only scripts.
-**Daemon-state assumption:** daemon DOWN; one-shot operator run.
+**Write class:** BULK wrap added.
+**Writes:** CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS x2 on zeus-world.db.
+**Why upgraded from (c):** `run()` is called with `dry_run=False` by default in `main()`
+(`args.dry_run` defaults False — no `--dry-run` flag is required). Any `main()` invocation
+writes to the live canonical world DB with no operator gate. Per the live-DB-default
+principle (PR #360 review), this mandates (a) not (c).
+**Change:** top-level import of `db_writer_lock` / `WriteClass` added; the
+`sqlite3.connect(...)` block in `run()` is wrapped in
+`with db_writer_lock(db_path, WriteClass.BULK):`.
 
 ---
 
-### 7. migrate_decision_events_create_2026_05_19.py — Resolution (c)
+### 7. migrate_decision_events_create_2026_05_19.py — Resolution (a) [upgraded 2026-05-29]
 
-**Write class:** DDL-only (CREATE TABLE IF NOT EXISTS, CREATE TRIGGER IF NOT
-EXISTS, CREATE INDEX IF NOT EXISTS x3).
-**Why deferred:** Creates `decision_events` table, a backstop AFTER INSERT
-TRIGGER, and 3 indexes in `zeus-world.db`. All DDL uses IF NOT EXISTS guards —
-idempotent. No INSERT, UPDATE, or DELETE in the migration itself (the trigger
-fires on future inserts by compliant writers, not during migration). Daemon-DOWN
-one-shot per ops policy; db_writer_lock(BULK) retrofit is lowest priority for
-pure CREATE-only scripts.
-**Daemon-state assumption:** daemon DOWN; one-shot operator run.
+**Write class:** BULK wrap added.
+**Writes:** CREATE TABLE IF NOT EXISTS + CREATE TRIGGER IF NOT EXISTS + CREATE INDEX x3 on zeus-world.db.
+**Why upgraded from (c):** `main()` always opens `ZEUS_WORLD_DB_PATH` directly with no
+`--apply` or `--dry-run` gate. Any `main()` invocation writes to the live canonical world DB
+without an operator gate. Per the live-DB-default principle (PR #360 review), this
+mandates (a) not (c).
+**Change:** top-level import of `db_writer_lock` / `WriteClass` moved to module scope;
+the `sqlite3.connect(...)` block in `main()` is wrapped in
+`with db_writer_lock(db_path, WriteClass.BULK):`.
 
 ---
 
@@ -140,15 +141,18 @@ retrofit is lowest priority for pure CREATE-only scripts.
 
 ## Phase 1+ retrofit queue (from defer entries above)
 
-Scripts deferred via (c) that should receive db_writer_lock(BULK) wraps if ever
+Scripts still deferred via (c) that should receive db_writer_lock(BULK) wraps if ever
 run against a shared production DB while the daemon is live:
 
 1. `migrate_model_bias_ens_canonical_fields.py` — ALTER on zeus-forecasts.db
 2. `migrate_ensemble_snapshots_alpha_proxy.py` — ALTER on zeus-forecasts.db (--db path)
 3. `migrate_settlement_commands_polymarket_anchor.py` — ALTER on zeus-world.db (--db path)
-4. `migrate_no_trade_events_create_2026_05_21.py` — CREATE on zeus-world.db
-5. `migrate_decision_events_create_2026_05_19.py` — CREATE on zeus-world.db
-6. `migrate_book_hash_transitions_create_2026_05_21.py` — CREATE on zeus_trades.db
+4. `migrate_book_hash_transitions_create_2026_05_21.py` — CREATE on zeus_trades.db
+
+Scripts upgraded to (a) on 2026-05-29 (PR #360):
+
+- `migrate_no_trade_events_create_2026_05_21.py` — live-DB-default write path; wrapped.
+- `migrate_decision_events_create_2026_05_19.py` — live-DB-default write path; wrapped.
 
 `migrate_settlement_commands_in_flight_at_era_flip.py` requires no retrofit
 (defer marker suppresses a comment-only regex false-positive; no raw connects).

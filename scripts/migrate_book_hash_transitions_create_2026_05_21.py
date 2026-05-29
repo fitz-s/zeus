@@ -1,11 +1,15 @@
 # Created: 2026-05-20
-# Last reused or audited: 2026-05-20
+# Last reused or audited: 2026-05-29
 # Authority basis: 2026-05-20 live substrate repair; trade-owned executable snapshot substrate
 # WRITER_LOCK_DEFER_REVIEW=2026-05-29
-# Justification: Idempotent CREATE TABLE IF NOT EXISTS + 2 indexes on zeus_trades.db; no INSERT/UPDATE/DELETE.
-# Daemon-DOWN operator migration. DDL-only CREATE scripts are lowest priority for db_writer_lock retrofit.
+# Justification: Idempotent DDL-only; dry_run=not args.apply (default dry-run); no live-DB-default write path.
 # Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
-"""Idempotent CREATE TABLE migration for book_hash_transitions (trade DB).
+"""Idempotent schema migration for book_hash_transitions (trade DB).
+
+Migration semantic policy: additive-only / idempotent.
+  - Only CREATE TABLE/INDEX IF NOT EXISTS; no DROP, no DML.
+  - Safe to re-run: all statements guarded by IF NOT EXISTS.
+  - Default mode is dry-run (--apply required to write).
 
 Creates the book_hash_transitions table and its two indexes if they do not
 already exist.  Safe to run on any DB — all statements use IF NOT EXISTS.

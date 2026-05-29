@@ -1,12 +1,14 @@
-# Lifecycle: created=2026-05-20; last_reviewed=2026-05-20; last_reused=never
-# Purpose: Idempotent one-shot migration creating no_trade_events table and indexes in zeus-world.db.
-# Reuse: Verify DDL matches no_trade_events_schema.py and that no_trade_events does not already exist.
+# Created: 2026-05-20
+# Last reused or audited: 2026-05-29
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742); Phase 2 T2 production pass
-# WRITER_LOCK_DEFER_REVIEW=2026-05-29
-# Justification: Idempotent CREATE TABLE IF NOT EXISTS + 2 indexes on zeus-world.db; no INSERT/UPDATE/DELETE.
-# Daemon-DOWN operator migration. DDL-only CREATE scripts are lowest priority for db_writer_lock retrofit.
-# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
-"""Idempotent CREATE TABLE migration for no_trade_events (world DB).
+# Writer-lock: db_writer_lock(BULK) wraps the sqlite3.connect write path (run() opens live
+# zeus-world.db by default with dry_run=False; daemon also writes zeus-world.db).
+"""Idempotent schema migration for no_trade_events (world DB).
+
+Migration semantic policy: additive-only / idempotent.
+  - Only CREATE TABLE/INDEX IF NOT EXISTS; no DROP, no DML.
+  - Safe to re-run: all statements guarded by IF NOT EXISTS.
+  - Runs under db_writer_lock(BULK) to prevent race with live daemon.
 
 Creates the no_trade_events table and its two indexes if they do not
 already exist.  Safe to run on any DB — all statements use IF NOT EXISTS.
@@ -26,7 +28,14 @@ from __future__ import annotations
 import argparse
 import logging
 import sqlite3
+import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +65,15 @@ def run(db_path: Path, dry_run: bool = False) -> None:
         logger.info("dry-run complete — no DB changes made")
         return
 
-    conn = sqlite3.connect(str(db_path))
-    try:
-        for stmt in ddl_statements:
-            conn.execute(stmt)
-        conn.commit()
-        logger.info("no_trade_events migration complete on %s", db_path)
-    finally:
-        conn.close()
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            for stmt in ddl_statements:
+                conn.execute(stmt)
+            conn.commit()
+            logger.info("no_trade_events migration complete on %s", db_path)
+        finally:
+            conn.close()
 
 
 def main() -> None:

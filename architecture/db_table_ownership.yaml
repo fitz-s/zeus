@@ -458,6 +458,18 @@ tables:
     pk_col: null
     notes: Ghost shell on world.db. Authoritative on trade.db. Drop after 2026-08-15.
 
+  - name: settlement_commands_era_quarantine
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "migrate_settlement_commands_in_flight_at_era_flip.py (operator one-shot migration)"
+    pk_col: id
+    notes: >
+      Holds settlement_commands rows quarantined at era-flip transition.
+      Writer: migrate_settlement_commands_in_flight_at_era_flip.py inserts/updates
+      via get_forecasts_connection_with_world() (DML — INSERT + UPDATE settlement_commands
+      SET status='ERA_QUARANTINED'). Catalogued 2026-05-29 (PR #360 db_table_delta_gate fix).
+
   - name: settlement_schema_migrations
     db: world
     schema_class: legacy_archived
@@ -1484,6 +1496,19 @@ tables:
       legacy_archived entries (no expectation that the transient table
       persists). Catalogued 2026-05-27 (PR D0b) when the schema_version
       CHECK list was extended to include 38/39.
+
+  - name: no_trade_events_v2
+    db: world
+    schema_class: legacy_archived
+    schema_version_owner: SCHEMA_VERSION
+    created_by: "migrate_no_trade_events_create_2026_05_21.py (transient rename target)"
+    pk_col: null
+    notes: >
+      Transient rename target used during no_trade_events schema rebuild migration.
+      The migration renames no_trade_events → no_trade_events_v2 before replacing it.
+      Never live outside a migration transaction. Classed legacy_archived: known to
+      check_db_table_delta gate, excluded from assert_db_matches_registry on-disk
+      coherence check. Catalogued 2026-05-29 (PR #360 db_table_delta_gate fix).
 
   - name: evidence_tier_assignments_new
     db: world
