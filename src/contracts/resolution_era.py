@@ -64,7 +64,7 @@ class EraDispatchOutcome(str, Enum):
 
     ERA_RESOLVED:
         The market's settled_at date matched a known era. era_basis is populated.
-        The settlement row is safe to write via write_settlement_v2_with_era_provenance().
+        The settlement row is safe to write via write_settlement_with_era_provenance().
 
     ERA_DEAD:
         No era matches this market — fail-closed, never silent.
@@ -103,7 +103,7 @@ class EraDispatchResult:
         result = dispatch_era_basis(settled_at_utc)
         if result.outcome != EraDispatchOutcome.ERA_RESOLVED:
             raise EraDispatchError(result.reason_code, result.reason_message)
-        write_settlement_v2_with_era_provenance(settlement, result.era_basis)
+        write_settlement_with_era_provenance(settlement, result.era_basis)
     """
 
     outcome: EraDispatchOutcome

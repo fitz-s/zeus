@@ -30,7 +30,7 @@ FIXTURE DB APPROACH:
       - 5 BLEEDING rows (harvester_live_uma_vote in provenance_json)
       - 3 rows with settled_at < 2026-02-21 and harvester_live_uma_vote
         (pre-cutover BLEEDING rows — antibody only covers post-cutover)
-    After running write_settlement_v2_with_era_provenance() on the BLEEDING rows,
+    After running write_settlement_with_era_provenance() on the BLEEDING rows,
     the antibody query must return 0.
 
     The live-DB variant of this test (marked with @pytest.mark.live_db) is
@@ -42,7 +42,7 @@ import pytest
 
 # SCAFFOLD: import will succeed after implementation
 # import sqlite3
-# from src.state.settlement_writers import write_settlement_v2_with_era_provenance
+# from src.state.settlement_writers import write_settlement_with_era_provenance
 # from src.contracts.resolution_era import ERA_CUTOVER_DATE
 
 _PR1_MERGE_DATE = "2026-02-21"  # settlement_outcomes.settled_at >= this date are in scope
@@ -89,7 +89,7 @@ def test_antibody_zero_bleeding_rows_post_cutover_in_live_db():
 
     assert count == 0, (
         f"INV-era-provenance violated: {count} BLEEDING rows post-cutover (settled_at >= {_PR1_MERGE_DATE}). "
-        "Either backfill regressed OR a new write path bypassed write_settlement_v2_with_era_provenance(). "
+        "Either backfill regressed OR a new write path bypassed write_settlement_with_era_provenance(). "
         "Run: python scripts/backfill_settlement_outcomes_era_provenance.py --apply  (idempotent)."
     )
 

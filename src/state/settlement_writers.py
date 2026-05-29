@@ -11,8 +11,8 @@ DESIGN CONTRACT:
     This module is the SINGLE write path for settlement_outcomes in Phase 0+.
     Both historical write paths (harvester.py L2 and harvester_truth_writer.py L4)
     are consolidated here. After PR 1 implementation:
-      - src/execution/harvester.py calls write_settlement_v2_with_era_provenance()
-      - src/ingest/harvester_truth_writer.py calls write_settlement_v2_with_era_provenance()
+      - src/execution/harvester.py calls write_settlement_with_era_provenance()
+      - src/ingest/harvester_truth_writer.py calls write_settlement_with_era_provenance()
     Neither site may write harvester_live_uma_vote provenance directly.
 
 INV-37 CONSTRAINT (EXPLICIT):
@@ -119,7 +119,7 @@ def dispatch_era_basis(settled_at_utc: date) -> EraDispatchResult:
         )
 
 
-def write_settlement_v2_with_era_provenance(
+def write_settlement_with_era_provenance(
     settlement: dict[str, Any],
     era_basis: EraAuthorityBasis,
     *,

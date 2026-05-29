@@ -427,7 +427,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
 
     try:
         if nested_transaction:
-            conn.execute("SAVEPOINT zeus_v2_schema")
+            conn.execute("SAVEPOINT zeus_schema")
         else:
             conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("BEGIN")
@@ -960,15 +960,15 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
         """)
 
         if nested_transaction:
-            conn.execute("RELEASE SAVEPOINT zeus_v2_schema")
+            conn.execute("RELEASE SAVEPOINT zeus_schema")
         else:
             conn.execute("COMMIT")
 
     except Exception:
         try:
             if nested_transaction:
-                conn.execute("rollback to savepoint zeus_v2_schema")
-                conn.execute("release savepoint zeus_v2_schema")
+                conn.execute("rollback to savepoint zeus_schema")
+                conn.execute("release savepoint zeus_schema")
             else:
                 conn.execute("rollback")
         except Exception:
