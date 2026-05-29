@@ -226,7 +226,7 @@ def test_low_contract_window_backfill_apply_inserts_recovery_row(tmp_path: Path)
     assert reports["tigge_mars"].inserted == 1
     row = conn.execute(
         """
-        SELECT data_version, training_allowed, causality_status,
+        SELECT dataset_id, training_allowed, causality_status,
                forecast_window_attribution_status, contributes_to_target_extrema,
                forecast_window_block_reasons_json, provenance_json
         FROM ensemble_snapshots

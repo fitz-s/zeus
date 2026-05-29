@@ -37,23 +37,30 @@ def _column_names(conn: sqlite3.Connection, table: str) -> list[str]:
 
 
 def test_fresh_v2_schema_has_ingest_backend() -> None:
-    """Fresh DBs built from canonical v2_schema.py carry the column."""
+    """Canonical schema does NOT include ingest_backend (B3cont: column removed
+    from apply_canonical_schema; migration script adds it on pre-existing DBs).
+    Migration on a fresh canonical DB is a live operation, not a no-op."""
     conn = sqlite3.connect(":memory:")
     apply_canonical_schema(conn)
+    # canonical schema omits ingest_backend — migration is required to add it
+    assert COLUMN_NAME not in _column_names(conn, TABLE_NAME)
+    result = migrate(conn, dry_run=False)
+    assert result["applied"] is True
     assert COLUMN_NAME in _column_names(conn, TABLE_NAME)
     conn.close()
 
 
 def test_migration_idempotent_on_fresh_db() -> None:
-    """Running migration twice on a fresh DB is a no-op the second time."""
+    """Running migration twice: first call adds column, second call is a no-op.
+    B3cont: canonical schema no longer includes ingest_backend, so first migrate
+    always applies; second invocation sees column_already_present and skips."""
     conn = sqlite3.connect(":memory:")
     apply_canonical_schema(conn)
-    # Fresh schema already has the column → migration is a no-op.
+    # Fresh canonical schema lacks ingest_backend → migration applies.
     result1 = migrate(conn, dry_run=False)
-    assert result1["applied"] is False
-    assert result1["reason"] == "column_already_present"
+    assert result1["applied"] is True
 
-    # Second invocation also a no-op.
+    # Second invocation: column already present → no-op.
     result2 = migrate(conn, dry_run=False)
     assert result2["applied"] is False
     assert result2["reason"] == "column_already_present"

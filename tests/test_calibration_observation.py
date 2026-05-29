@@ -153,16 +153,21 @@ def test_list_active_platt_models_filters_to_active_verified():
     assert clusters == ["A"], f"only A is active+VERIFIED; got {clusters}"
 
 
-def test_list_active_platt_models_filters_to_active_verified():
-    """RELATIONSHIP: legacy reader same filter. Mirror load_platt_model L497."""
+def test_list_active_platt_models_filters_to_active_verified_canonical():
+    """RELATIONSHIP: canonical reader same filter — B3cont: legacy table dropped,
+    list_active_platt_models returns model_key (not bucket_key). Only the
+    is_active=1 + authority='VERIFIED' row from platt_models survives."""
     conn = _make_conn()
     _insert_legacy_raw(conn, bucket_key="A_DJF", is_active=1, authority="VERIFIED")
     _insert_legacy_raw(conn, bucket_key="B_DJF", is_active=0, authority="VERIFIED")
     _insert_legacy_raw(conn, bucket_key="C_DJF", is_active=1, authority="UNVERIFIED")
     _insert_legacy_raw(conn, bucket_key="D_DJF", is_active=1, authority="QUARANTINED")
     rows = list_active_platt_models(conn)
-    keys = sorted(r["bucket_key"] for r in rows)
-    assert keys == ["A_DJF"], f"only A_DJF is active+VERIFIED; got {keys}"
+    # B3cont: rows keyed by model_key (not bucket_key). Only A_DJF is active+VERIFIED.
+    assert len(rows) == 1, f"only A_DJF row is active+VERIFIED; got {len(rows)} rows"
+    assert rows[0]["model_key"] == "high:A:DJF:tigge_hres_v1:raw_probability:1", (
+        f"expected model_key for A_DJF; got {rows[0]['model_key']}"
+    )
 
 
 def test_list_active_platt_models_pre_migration_returns_empty():
@@ -187,15 +192,20 @@ def test_empty_db_safety():
 
 
 def test_legacy_only_snapshot_shape():
-    """RELATIONSHIP: legacy-only model surfaces with source='legacy' + full
-    field shape contract. v2-only fields (temperature_metric, cluster, season,
-    data_version) are None on legacy."""
+    """RELATIONSHIP: B3cont — legacy table dropped; rows inserted via
+    _insert_legacy_raw go into canonical platt_models with model_key PK.
+    source='canonical' (not 'legacy'); temperature_metric/cluster/season/
+    data_version are populated from the canonical row (not None)."""
     conn = _make_conn()
     _insert_legacy_raw(conn, bucket_key="TestCity_DJF", A=1.5, B=0.3, C=0.0,
                        n_samples=50)
     snapshot = compute_platt_parameter_snapshot_per_bucket(conn)
-    assert "TestCity_DJF" in snapshot
-    rec = snapshot["TestCity_DJF"]
+    # B3cont: key is model_key "high:TestCity:DJF:tigge_hres_v1:raw_probability:1"
+    expected_key = "high:TestCity:DJF:tigge_hres_v1:raw_probability:1"
+    assert expected_key in snapshot, (
+        f"snapshot keyed by model_key post-B3cont; got keys={list(snapshot.keys())}"
+    )
+    rec = snapshot[expected_key]
     # Required fields per BATCH 1 spec.
     for field_name in ("bucket_key", "source", "param_A", "param_B", "param_C",
                        "n_samples", "brier_insample", "fitted_at", "input_space",
@@ -206,13 +216,14 @@ def test_legacy_only_snapshot_shape():
                        "bootstrap_C_p95", "temperature_metric", "cluster",
                        "season", "data_version"):
         assert field_name in rec, f"missing field {field_name}"
-    assert rec["source"] == "legacy"
+    # B3cont: source is "canonical" (legacy table dropped)
+    assert rec["source"] == "canonical"
     assert rec["param_A"] == 1.5
     assert rec["n_samples"] == 50
     assert rec["sample_quality"] == "adequate"  # 30 <= 50 < 100
-    # v2-only fields should be None on legacy.
-    assert rec["temperature_metric"] is None
-    assert rec["cluster"] is None
+    # B3cont: canonical rows have temperature_metric/cluster populated
+    assert rec["temperature_metric"] == "high"
+    assert rec["cluster"] == "TestCity"
 
 
 def test_v2_only_snapshot_shape():
@@ -246,41 +257,33 @@ def test_v2_only_snapshot_shape():
 
 
 def test_v2_legacy_dedup_v2_wins():
-    """RELATIONSHIP: when SAME logical bucket appears in both v2 + legacy,
-    v2 entry takes precedence (mirrors manager.py L42-62 v2-then-legacy
-    fallback pattern). Legacy duplicate is silently skipped."""
+    """RELATIONSHIP B3cont: legacy table dropped; both _insert_legacy_raw and
+    save_platt_model write to canonical platt_models with distinct model_keys.
+    Snapshot contains one entry per model_key; all sources are 'canonical'.
+    Dedup is by model_key uniqueness (UNIQUE constraint) — same model_key written
+    twice keeps the first via INSERT OR REPLACE, different model_keys coexist."""
     conn = _make_conn()
-    # Both use bucket_key 'TestCity_DJF' — but the v2 model_key is
-    # 'high:TestCity:DJF:v1:raw_probability', which differs from the legacy
-    # 'TestCity_DJF'. So they will have DIFFERENT keys in the result dict.
-    # This test pins that the dedup is by KEY EQUALITY, not by logical-
-    # bucket-equivalence — that level of dedup is out-of-scope for BATCH 1
-    # (would require model_key↔bucket_key bridge logic that lives in
-    # manager.py, not here).
+    # Two rows with DIFFERENT model_keys — both surfaced, both canonical.
     _insert_legacy_raw(conn, bucket_key="TestCity_DJF", A=1.5, B=0.3, C=0.0,
                        n_samples=50)
+    # model_key from save_platt_model defaults: high:TestCity:DJF:v1:00:tigge_mars:full:raw_probability
     save_platt_model(
         conn, metric_identity=HIGH_LOCALDAY_MAX, cluster="TestCity",
         season="DJF", data_version="v1", param_A=1.6, param_B=0.25, param_C=0.0,
         bootstrap_params=[(1.6, 0.25, 0.0)] * 10, n_samples=60,
     )
     snapshot = compute_platt_parameter_snapshot_per_bucket(conn)
-    # Both entries exist (different keys).
+    # Both entries exist (different model_keys).
     assert len(snapshot) == 2
     sources = sorted(rec["source"] for rec in snapshot.values())
-    assert sources == ["canonical", "legacy"]
-    # Now simulate true dedup: insert raw legacy with bucket_key MATCHING the
-    # v2 model_key string. v2-listed-first should win; legacy duplicate dropped.
-    # Phase 2 (2026-05-04): v2 model_key now includes cycle/source_id/horizon_profile —
-    # for save_platt_model above we relied on defaults (00/tigge_mars/full).
-    _insert_legacy_raw(conn,
-                       bucket_key="high:TestCity:DJF:v1:00:tigge_mars:full:raw_probability",
-                       A=99.0, B=99.0, C=99.0)
-    snapshot2 = compute_platt_parameter_snapshot_per_bucket(conn)
-    rec_collision = snapshot2["high:TestCity:DJF:v1:00:tigge_mars:full:raw_probability"]
-    # v2 entry has param_A=1.6 (NOT 99.0 from the planted legacy collision).
-    assert rec_collision["source"] == "canonical"
-    assert rec_collision["param_A"] == 1.6
+    # B3cont: no legacy table; all rows are canonical.
+    assert sources == ["canonical", "canonical"]
+    # Dedup via model_key: re-inserting an existing model_key updates the row.
+    v2_model_key = "high:TestCity:DJF:v1:00:tigge_mars:full:raw_probability"
+    assert v2_model_key in snapshot
+    rec = snapshot[v2_model_key]
+    assert rec["source"] == "canonical"
+    assert rec["param_A"] == 1.6
 
 
 def test_bootstrap_stats_correctness():
@@ -304,6 +307,14 @@ def test_bootstrap_stats_correctness():
     assert summary["bootstrap_C_std"] == pytest.approx(28.8661 * 0.1, abs=0.001)
 
 
+def _model_key_for_bucket(bucket_key: str, is_active: int = 1) -> str:
+    """Derive the model_key that _insert_legacy_raw produces for a bucket_key."""
+    parts = bucket_key.rsplit("_", 1)
+    cluster = parts[0] if len(parts) == 2 else bucket_key
+    season = parts[1] if len(parts) == 2 else "DJF"
+    return f"high:{cluster}:{season}:tigge_hres_v1:raw_probability:{is_active}"
+
+
 def test_sample_quality_boundaries():
     """RELATIONSHIP: sample_quality boundaries hold at exactly 10, 30, 100
     (LOW-CAVEAT-EO-2-2 lesson — boundary tests pin strict-vs-inclusive).
@@ -313,18 +324,20 @@ def test_sample_quality_boundaries():
       10 <= n < 30 → 'low'
       30 <= n < 100 → 'adequate'
       n >= 100 → 'high'
+
+    B3cont: snapshot keyed by model_key; use _model_key_for_bucket to resolve.
     """
     conn = _make_conn()
     for bucket_key, n in [("b9", 9), ("b10", 10), ("b29", 29), ("b30", 30),
                            ("b99", 99), ("b100", 100)]:
         _insert_legacy_raw(conn, bucket_key=bucket_key, A=1.0, B=0.0, C=0.0, n_samples=n)
     snapshot = compute_platt_parameter_snapshot_per_bucket(conn)
-    assert snapshot["b9"]["sample_quality"] == "insufficient"
-    assert snapshot["b10"]["sample_quality"] == "low"
-    assert snapshot["b29"]["sample_quality"] == "low"
-    assert snapshot["b30"]["sample_quality"] == "adequate"
-    assert snapshot["b99"]["sample_quality"] == "adequate"
-    assert snapshot["b100"]["sample_quality"] == "high"
+    assert snapshot[_model_key_for_bucket("b9")]["sample_quality"] == "insufficient"
+    assert snapshot[_model_key_for_bucket("b10")]["sample_quality"] == "low"
+    assert snapshot[_model_key_for_bucket("b29")]["sample_quality"] == "low"
+    assert snapshot[_model_key_for_bucket("b30")]["sample_quality"] == "adequate"
+    assert snapshot[_model_key_for_bucket("b99")]["sample_quality"] == "adequate"
+    assert snapshot[_model_key_for_bucket("b100")]["sample_quality"] == "high"
 
 
 def test_in_window_flag():
@@ -344,9 +357,10 @@ def test_in_window_flag():
     snapshot = compute_platt_parameter_snapshot_per_bucket(
         conn, window_days=7, end_date="2026-04-29",
     )
-    assert snapshot["b_yest"]["in_window"] is True
-    assert snapshot["b_today"]["in_window"] is True
-    assert snapshot["b_old"]["in_window"] is False
+    # B3cont: lookup by model_key (derived from bucket_key via _model_key_for_bucket)
+    assert snapshot[_model_key_for_bucket("b_yest")]["in_window"] is True
+    assert snapshot[_model_key_for_bucket("b_today")]["in_window"] is True
+    assert snapshot[_model_key_for_bucket("b_old")]["in_window"] is False
 
 
 def test_unverified_quarantined_inactive_all_excluded():
@@ -360,7 +374,11 @@ def test_unverified_quarantined_inactive_all_excluded():
     _insert_legacy_raw(conn, bucket_key="unverified", is_active=1, authority="UNVERIFIED")
     _insert_legacy_raw(conn, bucket_key="quaran",     is_active=1, authority="QUARANTINED")
     snapshot = compute_platt_parameter_snapshot_per_bucket(conn)
-    assert set(snapshot.keys()) == {"ok"}
+    # B3cont: snapshot keyed by model_key, not bucket_key
+    expected_key = _model_key_for_bucket("ok")
+    assert set(snapshot.keys()) == {expected_key}, (
+        f"only 'ok' row is active+VERIFIED; expected key={expected_key}, got {set(snapshot.keys())}"
+    )
 
 
 # --- Unit tests for helpers ------------------------------------------------
