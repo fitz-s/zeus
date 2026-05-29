@@ -169,3 +169,39 @@ def test_unknown_data_version_raises():
                 members_unit="degF", settlement_value_c=77.0, settlement_unit="degF")
     with pytest.raises(ValueError, match="source_kind refused"):
         _strict_evidence_row(e, metric=_METRIC, lat=_CHICAGO_LAT)
+
+
+# ---------------------------------------------------------------------------
+# (d) Forecast-window provenance fields propagated to ledger row (C1b)
+# ---------------------------------------------------------------------------
+
+def _make_e_with_provenance(**kwargs) -> dict:
+    """Make a dict that includes forecast-window provenance fields."""
+    base = _make_e(**kwargs)
+    base["forecast_window_start_utc"] = "2025-07-31T06:00:00"
+    base["forecast_window_end_utc"] = "2025-08-01T06:00:00"
+    base["source_run_id"] = "ecmwf-run-abc123"
+    # available_at already present from _make_e
+    return base
+
+
+def test_provenance_fields_present_in_output_row():
+    """C1b: forecast_window_start/end_utc, source_run_id, available_at must appear
+    in the strict ledger output row."""
+    e = _make_e_with_provenance()
+    row = _strict_evidence_row(e, metric=_METRIC, lat=_CHICAGO_LAT)
+    assert row is not None
+    assert row["forecast_window_start_utc"] == "2025-07-31T06:00:00"
+    assert row["forecast_window_end_utc"] == "2025-08-01T06:00:00"
+    assert row["source_run_id"] == "ecmwf-run-abc123"
+    assert row["available_at"] == "2025-07-30T01:00:00"
+
+
+def test_missing_source_run_id_yields_none_not_keyerror():
+    """C1b: legacy rows without source_run_id must yield None, not KeyError."""
+    e = _make_e()
+    # deliberately omit source_run_id (not in base fixture)
+    assert "source_run_id" not in e
+    row = _strict_evidence_row(e, metric=_METRIC, lat=_CHICAGO_LAT)
+    assert row is not None
+    assert row["source_run_id"] is None

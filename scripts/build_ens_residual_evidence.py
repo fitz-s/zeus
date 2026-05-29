@@ -151,6 +151,10 @@ def _strict_evidence_row(e: dict, *, metric: str, lat: dict) -> dict | None:
         "lead_hours": e["lead_hours"],
         "contributes_to_target_extrema": e["contributes_to_target_extrema"],
         "boundary_ambiguous": e["boundary_ambiguous"],
+        "forecast_window_start_utc": e.get("forecast_window_start_utc"),
+        "forecast_window_end_utc": e.get("forecast_window_end_utc"),
+        "source_run_id": e.get("source_run_id"),
+        "available_at": e["available_at"],
         "members_unit": e["members_unit"],
         "ensemble_mean_c": round(em, 3),
         "settlement_value_c": round(
@@ -183,6 +187,7 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
         SELECT e.city, e.target_date, e.snapshot_id, e.issue_time, e.lead_hours,
                e.available_at, e.members_json, e.members_unit, e.data_version,
                e.contributes_to_target_extrema, e.boundary_ambiguous,
+               e.forecast_window_start_utc, e.forecast_window_end_utc, e.source_run_id,
                s.settlement_id, s.settlement_value, e.settlement_unit
         FROM ensemble_snapshots_v2 e
         JOIN settlements_v2 s
@@ -200,6 +205,7 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
     rejected_cycle = 0
     for r in rows:
         (city, td, snap_id, issue, lead, av, mj, mu, dv, contrib, bamb,
+         fw_start, fw_end, src_run,
          set_id, sv, su) = r
         hh = str(issue)[11:13] if issue else "NULL"
         if strict_cycle != "ALL" and hh != strict_cycle:
@@ -213,7 +219,11 @@ def build_evidence(conn: sqlite3.Connection, *, metric: str, lead_max: float,
                 "issue_time": issue, "cycle": hh, "lead_hours": lead,
                 "available_at": av, "members_json": mj, "members_unit": mu,
                 "data_version": dv, "contributes_to_target_extrema": contrib,
-                "boundary_ambiguous": bamb, "settlement_id": set_id,
+                "boundary_ambiguous": bamb,
+                "forecast_window_start_utc": fw_start,
+                "forecast_window_end_utc": fw_end,
+                "source_run_id": src_run,
+                "settlement_id": set_id,
                 "settlement_value_c": float(sv), "settlement_unit": su,
             }
 
