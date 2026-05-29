@@ -2497,7 +2497,7 @@ class TestSourceContractGate:
                 target_date TEXT,
                 cluster TEXT,
                 season TEXT,
-                data_version TEXT
+                dataset_id TEXT
             )
             """
         )
@@ -2509,7 +2509,7 @@ class TestSourceContractGate:
                     INSERT INTO calibration_pairs (
                         temperature_metric, training_allowed, authority,
                         decision_group_id, p_raw, city, target_date,
-                        cluster, season, data_version
+                        cluster, season, dataset_id
                     ) VALUES ('high', 1, 'VERIFIED', ?, 0.5, ?, ?, 'Europe', ?, ?)
                     """,
                     (f"{city}-{target_date}-{season}-{data_version}-{idx}", city, target_date, season, data_version),

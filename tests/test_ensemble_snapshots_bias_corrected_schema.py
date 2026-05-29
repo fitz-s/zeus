@@ -85,7 +85,7 @@ def test_legacy_db_without_column_gets_migrated():
             spread REAL,
             is_bimodal INTEGER,
             model_version TEXT NOT NULL,
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            dataset_id TEXT NOT NULL DEFAULT 'v1',
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             temperature_metric TEXT NOT NULL DEFAULT 'high'
         )
@@ -93,7 +93,7 @@ def test_legacy_db_without_column_gets_migrated():
     conn.execute("""
         INSERT INTO ensemble_snapshots
         (city, target_date, available_at, fetch_time, lead_hours,
-         members_json, model_version, data_version, temperature_metric)
+         members_json, model_version, dataset_id, temperature_metric)
         VALUES ('NYC', '2026-04-15', '2026-04-15T12Z', '2026-04-15T12Z',
                 12, '[]', 'ecmwf_ens',
                 'tigge_mx2t6_local_calendar_day_max_v1', 'high')

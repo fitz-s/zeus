@@ -62,7 +62,7 @@ CREATE TABLE ensemble_snapshots (
     city TEXT NOT NULL,
     target_date TEXT NOT NULL,
     temperature_metric TEXT NOT NULL,
-    data_version TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
     source_id TEXT NOT NULL,
     source_transport TEXT NOT NULL,
     source_cycle_time TEXT NOT NULL,

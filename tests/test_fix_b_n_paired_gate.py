@@ -42,7 +42,7 @@ def conn():
     c.row_factory = sqlite3.Row
     c.execute(
         """CREATE TABLE ensemble_snapshots(
-            city TEXT, target_date TEXT, temperature_metric TEXT, data_version TEXT,
+            city TEXT, target_date TEXT, temperature_metric TEXT, dataset_id TEXT,
             members_json TEXT, members_unit TEXT, lead_hours REAL, available_at TEXT,
             contributes_to_target_extrema INTEGER, boundary_ambiguous INTEGER,
             training_allowed INTEGER, causality_status TEXT, authority TEXT,

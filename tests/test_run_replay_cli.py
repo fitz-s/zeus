@@ -43,6 +43,15 @@ def _seed_market_events(conn, city: str, target_date: str, labels: tuple[str, ..
 
 def _mark_settlements_verified(conn) -> None:
     conn.execute("UPDATE settlements SET authority = 'VERIFIED'")
+    # B3cont: replay.get_settlement prefers settlement_outcomes over settlements.
+    # Mirror verified rows into settlement_outcomes so scoring succeeds in single-DB tests.
+    conn.execute("""
+        INSERT OR IGNORE INTO settlement_outcomes
+            (city, target_date, temperature_metric, winning_bin, settlement_value, authority)
+        SELECT city, target_date, temperature_metric, winning_bin, settlement_value, 'VERIFIED'
+        FROM settlements
+        WHERE authority = 'VERIFIED'
+    """)
 
 
 def _patch_trade_history_connections(monkeypatch, trade_db, world_db, forecasts_db, backtest_db) -> None:

@@ -121,7 +121,7 @@ def cp2_db():
             cluster TEXT NOT NULL DEFAULT 'C1',
             forecast_available_at TEXT NOT NULL DEFAULT '2026-05-22T00:00:00',
             decision_group_id TEXT NOT NULL DEFAULT 'dg-1',
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            dataset_id TEXT NOT NULL DEFAULT 'v1',
             training_allowed INTEGER NOT NULL DEFAULT 1,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             bin_source TEXT NOT NULL DEFAULT 'legacy',
@@ -626,7 +626,7 @@ def _make_platt_db() -> sqlite3.Connection:
             cluster TEXT NOT NULL DEFAULT 'C1',
             forecast_available_at TEXT NOT NULL DEFAULT '2026-05-22T00:00:00',
             decision_group_id TEXT NOT NULL DEFAULT 'dg-1',
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            dataset_id TEXT NOT NULL DEFAULT 'v1',
             training_allowed INTEGER NOT NULL DEFAULT 1,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             bin_source TEXT NOT NULL DEFAULT 'legacy',
@@ -636,7 +636,7 @@ def _make_platt_db() -> sqlite3.Connection:
             range_label TEXT NOT NULL DEFAULT '>=30',
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(city, target_date, temperature_metric, range_label, lead_days,
-                   forecast_available_at, bin_source, data_version)
+                   forecast_available_at, bin_source, dataset_id)
         )
     """)
     ensure_table(conn)
@@ -659,7 +659,7 @@ def test_calibration_rebuild_excludes_quarantined_pairs():
         conn.execute(
             """INSERT INTO calibration_pairs
                (city, target_date, temperature_metric, p_raw, outcome, lead_days,
-                season, cluster, forecast_available_at, decision_group_id, data_version,
+                season, cluster, forecast_available_at, decision_group_id, dataset_id,
                 range_label)
                VALUES ('Bangkok', ?, 'high', 0.6, 1, ?, 'winter', 'C1',
                        '2026-05-22T00:00:00', 'dg-1', ?, '>=30')""",
@@ -726,7 +726,7 @@ def all_tables_db():
             cluster TEXT NOT NULL DEFAULT 'C1',
             forecast_available_at TEXT NOT NULL DEFAULT '2026-05-22',
             decision_group_id TEXT NOT NULL DEFAULT 'dg1',
-            data_version TEXT NOT NULL DEFAULT 'v1',
+            dataset_id TEXT NOT NULL DEFAULT 'v1',
             training_allowed INTEGER NOT NULL DEFAULT 1,
             authority TEXT NOT NULL DEFAULT 'VERIFIED',
             bin_source TEXT NOT NULL DEFAULT 'legacy',
