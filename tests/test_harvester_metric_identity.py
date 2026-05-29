@@ -155,7 +155,7 @@ def test_harvester_settlement_uses_canonical_high_identity(harvester_conn):
     # Force SettlementSemantics to accept the proxy observation — the semantics
     # layer rounds/asserts via assert_settlement_value, and the observation
     # 88.0°F rounds to 88 which sits inside [85, 89].
-    obs_row = {"high_temp": 88.0, "source": "wu_icao_history_v1", "id": 99, "fetched_at": "2026-04-24T12:00:00Z"}
+    obs_row = {"high_temp": 88.0, "source": "wu_icao_history", "id": 99, "fetched_at": "2026-04-24T12:00:00Z"}
 
     harvester_mod._write_settlement_truth(
         harvester_conn, city, "2026-04-24",
@@ -190,7 +190,7 @@ def test_harvester_low_settlement_uses_canonical_low_identity(harvester_conn):
         obs_row={
             "high_temp": 88.0,
             "low_temp": 64.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 199,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -234,7 +234,7 @@ def test_harvester_high_and_low_same_city_date_do_not_overwrite(harvester_conn):
         pm_bin_lo=85.0,
         pm_bin_hi=89.0,
         event_slug="highest-temperature-in-dual-metric-city-on-april-24-2026",
-        obs_row={"high_temp": 88.0, "low_temp": 64.0, "source": "wu_icao_history_v1", "id": 200},
+        obs_row={"high_temp": 88.0, "low_temp": 64.0, "source": "wu_icao_history", "id": 200},
         temperature_metric="high",
     )
     harvester_mod._write_settlement_truth(
@@ -244,7 +244,7 @@ def test_harvester_high_and_low_same_city_date_do_not_overwrite(harvester_conn):
         pm_bin_lo=62.0,
         pm_bin_hi=65.0,
         event_slug="lowest-temperature-in-dual-metric-city-on-april-24-2026",
-        obs_row={"high_temp": 88.0, "low_temp": 64.0, "source": "wu_icao_history_v1", "id": 201},
+        obs_row={"high_temp": 88.0, "low_temp": 64.0, "source": "wu_icao_history", "id": 201},
         temperature_metric="low",
     )
 
@@ -345,7 +345,7 @@ def test_optimistic_match_price_is_not_settlement_pnl_authority():
 def test_physical_quantity_is_not_legacy_string(harvester_conn):
     """C6 regression-bar: catch re-introduction of the legacy literal."""
     city = _make_city("regression_city")
-    obs_row = {"high_temp": 70.0, "source": "wu_icao_history_v1", "id": 100, "fetched_at": "2026-04-24T12:00:00Z"}
+    obs_row = {"high_temp": 70.0, "source": "wu_icao_history", "id": 100, "fetched_at": "2026-04-24T12:00:00Z"}
 
     harvester_mod._write_settlement_truth(
         harvester_conn, city, "2026-04-24",
@@ -384,7 +384,7 @@ def test_harvester_settlement_mirrors_verified_to_settlement_outcomes(harvester_
         event_slug="highest-temperature-in-v2-verified-on-april-24-2026",
         obs_row={
             "high_temp": 88.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 101,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -420,7 +420,7 @@ def test_harvester_settlement_mirrors_verified_to_settlement_outcomes(harvester_
     assert provenance["temperature_metric"] == HIGH_LOCALDAY_MAX.temperature_metric
     assert provenance["physical_quantity"] == HIGH_LOCALDAY_MAX.physical_quantity
     assert provenance["observation_field"] == HIGH_LOCALDAY_MAX.observation_field
-    assert provenance["data_version"] == "wu_icao_history_v1"
+    assert provenance["data_version"] == "wu_icao_history"
 
     readiness = check_economics_readiness(harvester_conn)
     assert readiness.ready is False
@@ -549,7 +549,7 @@ def test_harvester_verified_settlement_updates_market_events_by_identity(harvest
         event_slug=market_slug,
         obs_row={
             "high_temp": 72.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 401,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -608,7 +608,7 @@ def test_harvester_market_events_update_requires_existing_child_identity(harvest
         event_slug=market_slug,
         obs_row={
             "high_temp": 72.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 402,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -654,7 +654,7 @@ def test_harvester_market_events_batch_is_all_or_nothing(harvester_conn):
         event_slug=market_slug,
         obs_row={
             "high_temp": 70.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 405,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -735,7 +735,7 @@ def test_harvester_market_events_update_refuses_token_mismatch(harvester_conn):
         event_slug=market_slug,
         obs_row={
             "high_temp": 70.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 403,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -786,7 +786,7 @@ def test_harvester_quarantined_settlement_does_not_write_market_events_outcome(h
         event_slug=market_slug,
         obs_row={
             "high_temp": 82.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 404,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -828,7 +828,7 @@ def test_harvester_settlement_without_market_slug_skips_settlement_outcomes(harv
         event_slug="",
         obs_row={
             "high_temp": 70.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 102,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -862,7 +862,7 @@ def test_harvester_settlement_mirrors_quarantine_to_settlement_outcomes(harveste
         event_slug="highest-temperature-in-v2-quarantined-on-april-24-2026",
         obs_row={
             "high_temp": 80.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 103,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -900,7 +900,7 @@ def test_harvester_settlement_outcomes_mirror_is_idempotent(harvester_conn):
         city,
         obs_row={
             "high_temp": 70.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 201,
             "fetched_at": "2026-04-24T12:00:00Z",
         },
@@ -911,7 +911,7 @@ def test_harvester_settlement_outcomes_mirror_is_idempotent(harvester_conn):
         city,
         obs_row={
             "high_temp": 70.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 202,
             "fetched_at": "2026-04-24T18:00:00Z",
         },
@@ -989,7 +989,7 @@ def test_harvester_settlement_missing_unique_key_does_not_abort_legacy_write(har
         event_slug="highest-temperature-in-v2-bad-unique-on-april-24-2026",
         obs_row={
             "high_temp": 70.0,
-            "source": "wu_icao_history_v1",
+            "source": "wu_icao_history",
             "id": 301,
             "fetched_at": "2026-04-24T12:00:00Z",
         },

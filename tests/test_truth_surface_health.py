@@ -384,13 +384,13 @@ def _seed_minimal_ready_training_tables(conn, *, seed_observations=True):
                 "high",
                 "mx2t6_local_calendar_day_max",
                 "high_temp",
-                "tigge_mx2t6_local_calendar_day_max_v1",
+                "tigge_mx2t6_local_calendar_day_max",
             ),
             (
                 "low",
                 "mn2t6_local_calendar_day_min",
                 "low_temp",
-                "tigge_mn2t6_local_calendar_day_min_v1",
+                "tigge_mn2t6_local_calendar_day_min",
             ),
         ],
     )
@@ -467,13 +467,13 @@ def _seed_rebuild_preflight_inputs(conn):
             "high",
             "mx2t6_local_calendar_day_max",
             "high_temp",
-            "tigge_mx2t6_local_calendar_day_max_v1",
+            "tigge_mx2t6_local_calendar_day_max",
         ),
         (
             "low",
             "mn2t6_local_calendar_day_min",
             "low_temp",
-            "tigge_mn2t6_local_calendar_day_min_v1",
+            "tigge_mn2t6_local_calendar_day_min",
         ),
     ]
     for metric, physical_quantity, observation_field, data_version in snapshot_rows:
@@ -518,12 +518,12 @@ def _seed_platt_refit_pairs(conn, *, n_groups=None):
         (
             "high",
             "high_temp",
-            "tigge_mx2t6_local_calendar_day_max_v1",
+            "tigge_mx2t6_local_calendar_day_max",
         ),
         (
             "low",
             "low_temp",
-            "tigge_mn2t6_local_calendar_day_min_v1",
+            "tigge_mn2t6_local_calendar_day_min",
         ),
     ]
     for metric, observation_field, data_version in pair_specs:
@@ -941,7 +941,7 @@ class TestTrainingReadinessP0:
                 '2026-04-22T12:00:00Z', '2026-04-23T12:00:00Z',
                 '2026-04-22T12:10:00Z', '2026-04-22T12:15:00Z',
                 24.0, '[80.0, 81.0, 82.0]', 'ecmwf_opendata',
-                'ecmwf_opendata_mx2t3_local_calendar_day_max_v1',
+                'ecmwf_opendata_mx2t3_local_calendar_day_max',
                 1, 'OK', 'VERIFIED', '{"source":"ecmwf_opendata"}',
                 '2026-04-23T00:00:00Z', '2026-04-23T23:59:59Z',
                 '2026-04-22T20:00:00-04:00', '2026-04-23T19:59:59-04:00',
@@ -994,7 +994,7 @@ class TestTrainingReadinessP0:
                 '2026-04-22T12:00:00Z', '2026-04-23T12:00:00Z',
                 '2026-04-22T12:10:00Z', '2026-04-22T12:15:00Z',
                 24.0, '[78.0, 79.0, 80.0]', 'ecmwf_opendata',
-                'ecmwf_opendata_mx2t6_local_calendar_day_max_v1',
+                'ecmwf_opendata_mx2t6_local_calendar_day_max',
                 1, 'OK', 'VERIFIED', '{"source":"ecmwf_opendata"}',
                 'FULLY_INSIDE_TARGET_LOCAL_DAY', 1, '[]'
             )

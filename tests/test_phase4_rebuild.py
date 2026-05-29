@@ -89,7 +89,7 @@ class TestINV15SourceWhitelistGate:
         conn = self._make_conn()
         self._write_pair(conn,
             decision_group_id="dg-test-inv15-002",
-            data_version="tigge_mx2t6_local_calendar_day_max_v1",
+            data_version="tigge_mx2t6_local_calendar_day_max",
             training_allowed=True,
             target_date="2026-04-17",
         )
@@ -181,7 +181,7 @@ class TestINV15SourceWhitelistGate:
 class TestCalibrationPairsV2IdentityFields:
     """R-M: calibration_pairs rows from rebuild_calibration_pairs must have
     temperature_metric='high', training_allowed=1, observation_field='high_temp',
-    data_version='tigge_mx2t6_local_calendar_day_max_v1'. None defaulted.
+    data_version='tigge_mx2t6_local_calendar_day_max'. None defaulted.
     """
 
     def _make_conn(self) -> sqlite3.Connection:
@@ -264,7 +264,7 @@ class TestCalibrationPairsV2IdentityFields:
         )
 
     def test_data_version_is_canonical_local_calendar_day(self):
-        """R-M: data_version must be 'tigge_mx2t6_local_calendar_day_max_v1'.
+        """R-M: data_version must be 'tigge_mx2t6_local_calendar_day_max'.
 
         The old 'peak_window' tag is quarantined in Phase 4. Any row with the
         old tag entering calibration_pairs is a Phase 4 scope violation.
@@ -275,8 +275,8 @@ class TestCalibrationPairsV2IdentityFields:
             "SELECT dataset_id FROM calibration_pairs WHERE decision_group_id=?",
             (dg_id,)
         ).fetchone()
-        assert val == "tigge_mx2t6_local_calendar_day_max_v1", (
-            f"data_version must be 'tigge_mx2t6_local_calendar_day_max_v1', got {val!r} (R-M). "
+        assert val == "tigge_mx2t6_local_calendar_day_max", (
+            f"data_version must be 'tigge_mx2t6_local_calendar_day_max', got {val!r} (R-M). "
             "The peak_window tag is quarantined and must not appear in v2 calibration pairs."
         )
 
@@ -319,7 +319,7 @@ class TestRebuildV2PipelineIntegration:
     _TARGET_DATE = "2025-06-15"
     _ISSUE_TIME = "2025-06-13T00:00:00Z"
     _AVAILABLE_AT = "2025-06-13T06:00:00Z"
-    _DATA_VERSION = "tigge_mx2t6_local_calendar_day_max_v1"
+    _DATA_VERSION = "tigge_mx2t6_local_calendar_day_max"
     _OBS_TEMP_F = 75.0
 
     def _make_conn(self) -> sqlite3.Connection:
@@ -371,7 +371,7 @@ class TestRebuildV2PipelineIntegration:
     def test_rebuild_v2_writes_high_track_identity_fields(self):
         """MAJOR-2: rebuild_v2() end-to-end must produce calibration_pairs rows with
         temperature_metric='high', observation_field='high_temp',
-        data_version='tigge_mx2t6_local_calendar_day_max_v1', training_allowed=1.
+        data_version='tigge_mx2t6_local_calendar_day_max', training_allowed=1.
 
         This test exercises the _fetch_eligible_snapshots_v2 SQL path, which is where
         CRITICAL-1 (phantom 'source' column) lived. Any regression there fails here.

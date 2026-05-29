@@ -53,7 +53,7 @@ def _insert_sql(*, authority: str, settlement_value, winning_bin) -> tuple[str, 
         ) VALUES (
             'paris', '2026-04-23', ?, ?,
             'test', '2026-04-23T00:00:00', ?, '{"writer": "test"}',
-            'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history_v1'
+            'high', 'daily_maximum_air_temperature', 'high_temp', 'wu_icao_history'
         )
         """,
         (winning_bin, settlement_value, authority),

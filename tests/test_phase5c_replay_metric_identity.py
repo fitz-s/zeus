@@ -102,7 +102,7 @@ def _make_replay_db(*, with_forecast_rows: bool = True, with_trade_decision: boo
                 forecast_available_at, data_version)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, ("Chicago", "2026-06-01", "85-86\u00b0F", 0.4, 1,
-              "2026-05-30T14:00:00Z", "tigge_mx2t6_local_calendar_day_max_v1"))
+              "2026-05-30T14:00:00Z", "tigge_mx2t6_local_calendar_day_max"))
 
     if with_trade_decision:
         conn.execute("""
@@ -286,7 +286,7 @@ class TestForecastRowsMetricConditionalRead:
                     forecast_available_at, data_version)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, ("Chicago", "2026-06-01", label, 0.5, 0,
-                  "2026-05-30T14:00:00Z", "tigge_mx2t6_local_calendar_day_max_v1"))
+                  "2026-05-30T14:00:00Z", "tigge_mx2t6_local_calendar_day_max"))
         conn.commit()
         return conn
 

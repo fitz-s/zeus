@@ -1026,8 +1026,8 @@ def _run_platt_training(city_names: list[str], dry_run: bool = False) -> None:
 
 
 # Canonical data versions for ENS bias fitting (see test_ens_bias_repo.py)
-_ENS_LIVE_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-_ENS_PRIOR_DATA_VERSION = "tigge_mx2t6_local_calendar_day_max_v1"
+_ENS_LIVE_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+_ENS_PRIOR_DATA_VERSION = "tigge_mx2t6_local_calendar_day_max"
 
 # Seasons used for per-season bias estimation
 _ENS_SEASONS: tuple[tuple[str, tuple[int, ...]], ...] = (

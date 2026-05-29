@@ -198,7 +198,7 @@ class TestClassifyForecastExtremaAuthority:
             "contributes_to_target_extrema": None,
             "forecast_window_attribution_status": None,
             "boundary_ambiguous": 0,
-            "dataset_id": "ecmwf_opendata_mx2t6_local_calendar_day_max_v1",
+            "dataset_id": "ecmwf_opendata_mx2t6_local_calendar_day_max",
         }
         auth = classify_forecast_extrema_authority(row)
         assert auth.eligibility == ForecastExtremaEligibility.LEGACY_NULL_PASSTHROUGH
@@ -373,7 +373,7 @@ class TestReaderExtremaPreference:
         through (historical rows remain readable)."""
         import dataclasses
 
-        legacy_version = "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+        legacy_version = "ecmwf_opendata_mx2t6_local_calendar_day_max"
         conn = _conn()
         _insert_snapshot_row(
             conn,

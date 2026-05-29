@@ -424,7 +424,7 @@ class TestR_BN_SchemaRefusesMinimalInsert:
                 ('NYC', '2026-01-15', 'low',
                  '2026-01-14T00:00:00+00:00', '2026-01-14T06:00:00+00:00', 24,
                  '[5.0, 6.0, 7.0, 8.0, 9.0]',
-                 'tigge_mn2t6_local_calendar_day_min_v1',
+                 'tigge_mn2t6_local_calendar_day_min',
                  'VERIFIED', 1, 'OK',
                  'mn2t6_local_calendar_day_min',
                  '2026-01-14T06:05:00+00:00', 'tigge-ens-51')
@@ -444,7 +444,7 @@ class TestR_BN_SchemaRefusesMinimalInsert:
                 ('NYC', '2026-01-15', 'high',
                  '2026-01-14T00:00:00+00:00', '2026-01-14T06:00:00+00:00', 24,
                  '[270.0, 271.0, 272.0]',
-                 'tigge_mx2t6_local_calendar_day_max_v1',
+                 'tigge_mx2t6_local_calendar_day_max',
                  'VERIFIED', 1, 'OK', 'high_temp',
                  '2026-01-14T06:05:00+00:00', 'tigge-ens-51')
                 """

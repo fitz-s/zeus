@@ -6,6 +6,9 @@
 # Authority basis: Zeus #64 / #68 / #69 — canonical error-model schema.
 #   Extends model_bias_ens to the full domain-identity field set per task spec
 #   (FT_SHIP_MASTER_SPEC_2026-05-25 enumerated field list).  Each ALTER is guarded
+# WRITER_LOCK_DEFER_REVIEW=2026-05-29
+# Justification: DDL-only ALTER; --commit gated; staging/copy DB per docstring. Operator-invoked, daemon-down.
+# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 #   by PRAGMA table_info so re-runs are no-ops.
 """Schema migration: add canonical error-model columns to ``model_bias_ens``.
 

@@ -39,8 +39,8 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, Metri
 # legacy 6h MetricIdentity caused PHYSICAL_QUANTITY_MISMATCH on every
 # correctly-tagged 3h row, dropping post-cutover Open Data rows on the
 # floor. Per-quantity MetricIdentity restores 3h identity end-to-end.
-_ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-_ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
+_ECMWF_OPENDATA_HIGH_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+_ECMWF_OPENDATA_LOW_DATA_VERSION = "ecmwf_opendata_mn2t3_local_calendar_day_min"
 # Legacy versions imported from canonical source (ensemble_snapshot_provenance.py:82-83).
 # Local re-definitions removed 2026-05-07; use the imported names above.
 

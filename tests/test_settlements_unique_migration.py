@@ -128,7 +128,7 @@ def _insert_verified_row(
         ) VALUES (?, ?, '15-16', 15.0, 'test', '2026-04-23T00:00:00',
                   'VERIFIED', '{}', ?,
                   'daily_maximum_air_temperature', 'high_temp',
-                  'wu_icao_history_v1')
+                  'wu_icao_history')
         """,
         (city, target_date, metric),
     )
@@ -304,7 +304,7 @@ def test_legacy_new_unique_schema_gets_harvester_live_columns_via_alter():
             VALUES (
                 'london', '2026-04-20', 'VERIFIED', 'high',
                 'mx2t6_local_calendar_day_max', 'high_temp',
-                'wu_icao_history_v1', '{}'
+                'wu_icao_history', '{}'
             )
             """
         )

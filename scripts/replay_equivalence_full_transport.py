@@ -68,10 +68,10 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Constants matching the sub-worktree rebuild (FT_POSTERIOR_SOURCE_PROBE §1)
 # ---------------------------------------------------------------------------
-_LIVE_DV_HIGH = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-_PRIOR_DV_HIGH = "tigge_mx2t6_local_calendar_day_max_v1"
-_LIVE_DV_LOW = "ecmwf_opendata_mn2t3_local_calendar_day_min_v1"
-_PRIOR_DV_LOW = "tigge_mn2t6_local_calendar_day_min_v1"
+_LIVE_DV_HIGH = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+_PRIOR_DV_HIGH = "tigge_mx2t6_local_calendar_day_max"
+_LIVE_DV_LOW = "ecmwf_opendata_mn2t3_local_calendar_day_min"
+_PRIOR_DV_LOW = "tigge_mn2t6_local_calendar_day_min"
 
 # Sub-worktree used min_live_n=5 (FT_POSTERIOR_SOURCE_PROBE §1); we match it.
 _MIN_LIVE_N_RECOMPUTE = 5

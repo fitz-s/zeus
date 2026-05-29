@@ -358,8 +358,8 @@ def test_rel7_attach_read_latency():
 _CRITICAL_V2_INDEXES = frozenset({
     "idx_ensemble_snapshots_lookup",
     "idx_calibration_pairs_city_date_metric",
-    "idx_ens_v2_source_run",
-    "idx_ens_v2_entry_lookup",
+    "idx_ens_source_run",
+    "idx_ens_entry_lookup",
     "idx_calibration_pairs_bucket",
     "idx_calibration_pairs_refit_core",
     "idx_settlement_outcomes_city_date_metric",

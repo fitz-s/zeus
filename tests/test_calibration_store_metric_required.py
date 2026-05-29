@@ -46,13 +46,13 @@ def _seeded_conn() -> sqlite3.Connection:
     rows = [
         ("NYC", "2026-01-05", "high", "high_temp", "30-31°F", 0.42, 1, 1.5,
          "DJF", "US-Northeast", "2026-01-04T12:00:00Z",
-         30.5, "dg1", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max_v1"),
+         30.5, "dg1", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max"),
         ("NYC", "2026-01-12", "high", "high_temp", "32-33°F", 0.55, 0, 1.5,
          "DJF", "US-Northeast", "2026-01-11T12:00:00Z",
-         32.5, "dg2", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max_v1"),
+         32.5, "dg2", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max"),
         ("BOS", "2026-01-20", "high", "high_temp", "28-29°F", 0.48, 1, 1.0,
          "DJF", "US-Northeast", "2026-01-19T12:00:00Z",
-         28.5, "dg3", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max_v1"),
+         28.5, "dg3", 0, "VERIFIED", "canonical_v1", "tigge_mx2t6_local_calendar_day_max"),
     ]
     conn.executemany(
         """

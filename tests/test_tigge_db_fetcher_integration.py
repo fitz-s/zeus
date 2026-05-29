@@ -96,14 +96,14 @@ def staged_world_db(tmp_path: Path, monkeypatch):
             "mx2t6_local_calendar_day_max",
             "high_temp",
             high_members,
-            "tigge_mx2t6_local_calendar_day_max_v1",
+            "tigge_mx2t6_local_calendar_day_max",
         ),
         (
             "low",
             "mn2t6_local_calendar_day_min",
             "low_temp",
             low_members,
-            "tigge_mn2t6_local_calendar_day_min_v1",
+            "tigge_mn2t6_local_calendar_day_min",
         ),
     ):
         conn.execute(

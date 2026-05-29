@@ -71,7 +71,7 @@ Only list durable entry points here; use the manifest for the full catalog.
 | `_rebuild_calibration_pairs_parallel.py` | Compute-in-workers + write-in-main parallel orchestrator for rebuild_calibration_pairs; imported lazily when --workers>1 (created 2026-05-11) |
 | `archive_may_batch_2026-05-16.py` | One-off archival batch script for May 2026 packet cleanup (created 2026-05-16; delete_by: 2026-06-16) |
 | `archive_migration_2026-05-16.py` | One-off archive migration script for 2026-05-16 packet reorganization (created 2026-05-16; delete_by: 2026-06-16) |
-| `authority_inventory_v2.py` | Authority inventory v2 per task_2026-05-15_p9_authority_inventory_v2 SCAFFOLD; diagnostic report writer (created 2026-05-15) |
+| `authority_inventory.py` | Authority inventory v2 per task_2026-05-15_p9_authority_inventory SCAFFOLD; diagnostic report writer (created 2026-05-15) |
 | `backfill_ecmwf_2026_05_04_to_09.py` | Backfill ECMWF observations 2026-05-04 to 2026-05-09; ETL writer (created 2026-05-09) |
 | `backfill_ecmwf_v2_2026_05_06_to_09.py` | Backfill ECMWF v2 observations 2026-05-06 to 2026-05-09; ETL writer (created 2026-05-09) |
 | `backfill_harvester_settlements.py` | Repair: backfill harvester settlement rows per PLAN.md §10, critic v4 ACCEPT 2026-05-11 (dry-run/apply; created 2026-05-11) |

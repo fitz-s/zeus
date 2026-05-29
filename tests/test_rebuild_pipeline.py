@@ -620,7 +620,7 @@ def test_rebuild_settlements_writes_source_family_data_versions(tmp_path):
     conn.execute(
         "INSERT INTO observations "
         "(city, target_date, source, high_temp, low_temp, unit, authority) "
-        "VALUES ('Istanbul', '2025-07-01', 'ogimet_metar_v1', 29.4, 20.0, 'C', 'VERIFIED')"
+        "VALUES ('Istanbul', '2025-07-01', 'ogimet_metar', 29.4, 20.0, 'C', 'VERIFIED')"
     )
     conn.commit()
     conn.close()
@@ -648,12 +648,12 @@ def test_rebuild_settlements_writes_source_family_data_versions(tmp_path):
     by_city = {row["city"]: dict(row) for row in rows}
     assert by_city["Hong Kong"]["settlement_value"] == 28
     assert by_city["Hong Kong"]["winning_bin"] == "28°C"
-    assert by_city["Hong Kong"]["data_version"] == "hko_daily_api_v1"
+    assert by_city["Hong Kong"]["data_version"] == "hko_daily_api"
     assert by_city["Hong Kong"]["settlement_source_type"] == "hko"
     assert by_city["Hong Kong"]["unit"] == "C"
     assert by_city["Istanbul"]["settlement_value"] == 29
     assert by_city["Istanbul"]["winning_bin"] == "29°C"
-    assert by_city["Istanbul"]["data_version"] == "ogimet_metar_v1"
+    assert by_city["Istanbul"]["data_version"] == "ogimet_metar"
     assert by_city["Istanbul"]["settlement_source_type"] == "noaa"
     assert by_city["Istanbul"]["unit"] == "C"
 

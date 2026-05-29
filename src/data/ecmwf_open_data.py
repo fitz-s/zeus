@@ -1708,13 +1708,13 @@ def data_version_priority_for_metric(temperature_metric: str) -> tuple[str, ...]
     priority tuple's first element again.
     """
     if temperature_metric == "high":
-        return (ECMWF_OPENDATA_HIGH_DATA_VERSION, "tigge_mx2t6_local_calendar_day_max_v1")
+        return (ECMWF_OPENDATA_HIGH_DATA_VERSION, "tigge_mx2t6_local_calendar_day_max")
     if temperature_metric == "low":
         return (
             ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
             ECMWF_OPENDATA_LOW_DATA_VERSION,
             TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
-            "tigge_mn2t6_local_calendar_day_min_v1",
+            "tigge_mn2t6_local_calendar_day_min",
         )
     raise ValueError(f"Unknown temperature_metric {temperature_metric!r}; expected 'high' or 'low'.")
 

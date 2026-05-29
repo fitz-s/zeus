@@ -119,7 +119,7 @@ def taipei_day0_db(tmp_path: Path, monkeypatch):
             "Taipei", _TARGET_DATE, "high",
             _AVAILABLE_AT_A, _FETCH_TIME,
             json.dumps(_WARM_DAILY_MAX),
-            "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+            "ecmwf_opendata_mx2t3_local_calendar_day_max",
             _RECORDED_AT_A, _ISSUE_TIME_A,
             "FULLY_INSIDE_TARGET_LOCAL_DAY",  # POSITIVE attribution → FULL_CONTRIBUTOR
             1,  # contributes_to_target_extrema=1
@@ -132,7 +132,7 @@ def taipei_day0_db(tmp_path: Path, monkeypatch):
             "Taipei", _TARGET_DATE, "high",
             _AVAILABLE_AT_B, _FETCH_TIME,
             json.dumps(_COLD_DAILY_MAX),
-            "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+            "ecmwf_opendata_mx2t3_local_calendar_day_max",
             _RECORDED_AT_B, _ISSUE_TIME_B,
             "OUTSIDE_TARGET_LOCAL_DAY",  # NOT in POSITIVE set → NON_CONTRIBUTOR
             0,  # contributes_to_target_extrema=0
@@ -264,7 +264,7 @@ class TestDay0ForecastAuthorityFreshestFullContributor:
                 "Taipei", _TARGET_DATE, "high",
                 _AVAILABLE_AT_A, _FETCH_TIME,
                 json.dumps(_COOL_MEMBERS),
-                "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+                "ecmwf_opendata_mx2t3_local_calendar_day_max",
                 _RECORDED_AT_A, _ISSUE_TIME_A,
                 "FULLY_INSIDE_TARGET_LOCAL_DAY",
                 1,
@@ -277,7 +277,7 @@ class TestDay0ForecastAuthorityFreshestFullContributor:
                 "Taipei", _TARGET_DATE, "high",
                 _AVAILABLE_AT_B, _FETCH_TIME,
                 json.dumps(_FRESH_MEMBERS),
-                "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+                "ecmwf_opendata_mx2t3_local_calendar_day_max",
                 _RECORDED_AT_B, _ISSUE_TIME_B,
                 "FULLY_INSIDE_TARGET_LOCAL_DAY",  # also FULL_CONTRIBUTOR
                 1,
@@ -320,7 +320,7 @@ class TestDay0ForecastAuthorityFailClosed:
                 "Taipei", _TARGET_DATE, "high",
                 _AVAILABLE_AT_B, _FETCH_TIME,
                 json.dumps(_COLD_DAILY_MAX),
-                "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
+                "ecmwf_opendata_mx2t3_local_calendar_day_max",
                 _RECORDED_AT_B, _ISSUE_TIME_B,
                 "OUTSIDE_TARGET_LOCAL_DAY",
                 0,

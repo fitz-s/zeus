@@ -42,7 +42,7 @@ class TestCalibrationPairRequiresMetricIdentity:
                 forecast_available_at="2026-04-14T12:00:00",
                 decision_group_id="dg-test-001",
                 training_allowed=True,
-                data_version="tigge_mx2t6_local_calendar_day_max_v1",
+                data_version="tigge_mx2t6_local_calendar_day_max",
                 # metric_identity intentionally omitted
             )
 
@@ -84,7 +84,7 @@ class TestCalibrationPairRequiresMetricIdentity:
                 forecast_available_at="2026-04-14T12:00:00",
                 decision_group_id="dg-test-001",
                 training_allowed=True,
-                data_version="tigge_mx2t6_local_calendar_day_max_v1",
+                data_version="tigge_mx2t6_local_calendar_day_max",
                 metric_identity=HIGH_LOCALDAY_MAX,
                 city_obj=nyc,
             )
@@ -128,7 +128,7 @@ class TestEnsembleSnapshotsV2MembersUnit:
              available_at, fetch_time, lead_hours, members_json, model_version, dataset_id)
             VALUES ('NYC', '2026-04-16', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
                     '2026-04-14T12:00:00', '2026-04-14T12:00:00', 48.0, '[]', 'ecmwf_ens',
-                    'tigge_mx2t6_local_calendar_day_max_v1')
+                    'tigge_mx2t6_local_calendar_day_max')
         """)
         conn.commit()
         (unit,) = conn.execute(
@@ -149,7 +149,7 @@ class TestEnsembleSnapshotsV2MembersUnit:
                  members_unit)
                 VALUES ('NYC', '2026-04-16', 'high', 'mx2t6_local_calendar_day_max', 'high_temp',
                         '2026-04-14T12:00:00', '2026-04-14T12:00:00', 48.0, '[]', 'ecmwf_ens',
-                        'tigge_mx2t6_local_calendar_day_max_v1', NULL)
+                        'tigge_mx2t6_local_calendar_day_max', NULL)
             """)
 
 
@@ -200,7 +200,7 @@ class TestPlattModelsV2Schema:
             temperature_metric="high",
             cluster="NYC_F_2",
             season="spring",
-            data_version="tigge_mx2t6_local_calendar_day_max_v1",
+            data_version="tigge_mx2t6_local_calendar_day_max",
             input_space="raw_probability",
             param_A=1.0,
             param_B=0.0,

@@ -88,7 +88,7 @@ def test_backfill_typed_bins_match_replay_union_order_for_mixed_sources(tmp_path
          temperature_metric, observation_field, dataset_id, training_allowed, causality_status, decision_group_id)
         VALUES
         ('NYC', '2026-04-03', '39-40°F', 0.0, 1, 1.0, 'MAM', 'US-Northeast', '2026-04-02T08:00:00Z', 40.0,
-         'high', 'high_temp', 'tigge_mx2t6_local_calendar_day_max_v1', 1, 'OK', 'dg-backfill-test-001')
+         'high', 'high_temp', 'tigge_mx2t6_local_calendar_day_max', 1, 'OK', 'dg-backfill-test-001')
         """
     )
     conn.execute(

@@ -1107,7 +1107,7 @@ class TestTiggeOpendataBridge:
         )
         # The loaded model should carry tigge bucket attrs.
         assert getattr(cal, "_bucket_data_version", None) == \
-            "tigge_mx2t6_local_calendar_day_max_v1"
+            "tigge_mx2t6_local_calendar_day_max"
         assert getattr(cal, "_bucket_source_id", None) == "tigge_mars"
         assert isinstance(level, int) and level >= 1
 
@@ -1165,8 +1165,8 @@ class TestTiggeOpendataBridge:
             "high", "ecmwf_open_data"
         )
         assert candidates == (
-            "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-            "tigge_mx2t6_local_calendar_day_max_v1",
+            "ecmwf_opendata_mx2t3_local_calendar_day_max",
+            "tigge_mx2t6_local_calendar_day_max",
         )
 
     def test_candidate_data_versions_low_opendata_no_tigge_fallback(self):

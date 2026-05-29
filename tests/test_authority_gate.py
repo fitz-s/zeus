@@ -90,7 +90,7 @@ def _seed_calibration_pairs(
              season, cluster, forecast_available_at, dataset_id,
              decision_group_id, bias_corrected, authority)
             VALUES (?, ?, 'high', 'high_temp', ?, ?, ?, ?, ?, ?, ?,
-                    'tigge_mx2t6_local_calendar_day_max_v1', ?, 0, ?)
+                    'tigge_mx2t6_local_calendar_day_max', ?, 0, ?)
             """,
             (
                 city,
@@ -639,14 +639,14 @@ def test_save_platt_model_writes_verified(tmp_path):
         temperature_metric="high",
         physical_quantity="high_temp",
         observation_field="high_temp",
-        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        data_version="tigge_mx2t6_local_calendar_day_max",
     )
     save_platt_model(
         conn,
         metric_identity=mi,
         cluster="NYC",
         season="JJA",
-        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        data_version="tigge_mx2t6_local_calendar_day_max",
         param_A=-1.2,
         param_B=0.5,
         param_C=0.0,
@@ -691,7 +691,7 @@ def test_load_platt_model_skips_unverified(tmp_path):
         temperature_metric="high",
         physical_quantity="high_temp",
         observation_field="high_temp",
-        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        data_version="tigge_mx2t6_local_calendar_day_max",
     )
     # Write UNVERIFIED row for NYC/DJF
     save_platt_model(
@@ -699,7 +699,7 @@ def test_load_platt_model_skips_unverified(tmp_path):
         metric_identity=mi_high,
         cluster="NYC",
         season="DJF",
-        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        data_version="tigge_mx2t6_local_calendar_day_max",
         param_A=-1.0,
         param_B=0.4,
         bootstrap_params=[[-1.0, 0.4, 0.0]],
@@ -712,7 +712,7 @@ def test_load_platt_model_skips_unverified(tmp_path):
         metric_identity=mi_high,
         cluster="NYC",
         season="JJA",
-        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        data_version="tigge_mx2t6_local_calendar_day_max",
         param_A=-1.2,
         param_B=0.5,
         bootstrap_params=[[-1.0, 0.4, 0.0]],
@@ -727,7 +727,7 @@ def test_load_platt_model_skips_unverified(tmp_path):
         temperature_metric="high",
         cluster="NYC",
         season="DJF",
-        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        data_version="tigge_mx2t6_local_calendar_day_max",
         input_space="raw_probability",
     )
     assert unverified_result is None, (
@@ -740,7 +740,7 @@ def test_load_platt_model_skips_unverified(tmp_path):
         temperature_metric="high",
         cluster="NYC",
         season="JJA",
-        data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        data_version="tigge_mx2t6_local_calendar_day_max",
         input_space="raw_probability",
     )
     conn.close()

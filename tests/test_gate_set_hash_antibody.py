@@ -27,8 +27,8 @@ from src.calibration.ens_error_model import current_gate_set_hash
 
 
 CITY, SEASON, METRIC = "Shanghai", "MAM", "high"
-LIVE_DV = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
-PRIOR_DV = "tigge_mx2t6_local_calendar_day_max_v1"
+LIVE_DV = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+PRIOR_DV = "tigge_mx2t6_local_calendar_day_max"
 
 
 @pytest.fixture()

@@ -130,8 +130,8 @@ class TestIngestGribWritesFullProvenanceFields:
         (val,) = conn.execute(
             "SELECT dataset_id FROM ensemble_snapshots"
         ).fetchone()
-        assert val == "tigge_mx2t6_local_calendar_day_max_v1", (
-            f"data_version must be 'tigge_mx2t6_local_calendar_day_max_v1', got {val!r} (R-L). "
+        assert val == "tigge_mx2t6_local_calendar_day_max", (
+            f"data_version must be 'tigge_mx2t6_local_calendar_day_max', got {val!r} (R-L). "
             "Peak-window tag is quarantined in Phase 4."
         )
 
@@ -333,7 +333,7 @@ class TestIngestJsonFileIntegration:
         assert temp_metric == "high", f"temperature_metric={temp_metric!r}"
         assert phys_qty == "mx2t6_local_calendar_day_max", f"physical_quantity={phys_qty!r}"
         assert obs_field == "high_temp", f"observation_field={obs_field!r}"
-        assert dv == "tigge_mx2t6_local_calendar_day_max_v1", f"data_version={dv!r}"
+        assert dv == "tigge_mx2t6_local_calendar_day_max", f"data_version={dv!r}"
         assert ta in (0, 1), f"training_allowed={ta!r}"
         assert cs and cs.strip(), f"causality_status is empty: {cs!r}"
         assert ba in (0, 1), f"boundary_ambiguous={ba!r}"

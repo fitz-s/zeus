@@ -29,7 +29,7 @@ from src.data.ecmwf_open_data import data_version_priority_for_metric
 def test_priority_order_high():
     priority = data_version_priority_for_metric("high")
     assert priority[0] == ECMWF_OPENDATA_HIGH_DATA_VERSION
-    assert priority[1] == "tigge_mx2t6_local_calendar_day_max_v1"
+    assert priority[1] == "tigge_mx2t6_local_calendar_day_max"
     assert len(priority) == 2
 
 
@@ -38,7 +38,7 @@ def test_priority_order_low():
     assert priority[0] == ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION
     assert priority[1] == ECMWF_OPENDATA_LOW_DATA_VERSION
     assert priority[2] == TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION
-    assert priority[3] == "tigge_mn2t6_local_calendar_day_min_v1"
+    assert priority[3] == "tigge_mn2t6_local_calendar_day_min"
     assert len(priority) == 4
 
 
@@ -68,7 +68,7 @@ def _build_dual_row_db():
     conn.execute(
         "INSERT INTO ensemble_snapshots (city, target_date, temperature_metric,"
         " data_version, available_at, members_json) VALUES (?, ?, ?, ?, ?, ?)",
-        common + ("tigge_mx2t6_local_calendar_day_max_v1",
+        common + ("tigge_mx2t6_local_calendar_day_max",
                   "2026-04-30T00:00:00+00:00", "[]"),
     )
     conn.execute(
@@ -117,7 +117,7 @@ def test_priority_select_falls_back_to_tigge_when_opendata_absent():
         "INSERT INTO ensemble_snapshots (city, target_date, temperature_metric,"
         " data_version, available_at, members_json) VALUES (?, ?, ?, ?, ?, ?)",
         ("London", "2026-04-15", "high",
-         "tigge_mx2t6_local_calendar_day_max_v1",
+         "tigge_mx2t6_local_calendar_day_max",
          "2026-04-13T00:00:00+00:00", "[]"),
     )
     priority = data_version_priority_for_metric("high")
@@ -134,4 +134,4 @@ def test_priority_select_falls_back_to_tigge_when_opendata_absent():
         ("high", *priority, priority[0]),
     ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["data_version"] == "tigge_mx2t6_local_calendar_day_max_v1"
+    assert rows[0]["data_version"] == "tigge_mx2t6_local_calendar_day_max"

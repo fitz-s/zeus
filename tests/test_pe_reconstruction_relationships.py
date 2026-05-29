@@ -46,10 +46,10 @@ ALLOWED_TEMPERATURE_METRIC = {"high", "low"}
 ALLOWED_OBSERVATION_FIELD = {"high_temp", "low_temp"}
 ALLOWED_ROUNDING = {"wmo_half_up", "oracle_truncate"}
 ALLOWED_DATA_VERSION = {
-    "wu_icao_history_v1",
-    "ogimet_metar_v1",
-    "hko_daily_api_v1",
-    "cwa_no_collector_v0",
+    "wu_icao_history",
+    "ogimet_metar",
+    "hko_daily_api",
+    "cwa_no_collector",
 }
 CLOSED_QUARANTINE_REASONS = {
     # P-F carried-forward (6)

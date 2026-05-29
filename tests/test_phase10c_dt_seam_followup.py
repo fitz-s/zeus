@@ -222,9 +222,9 @@ class TestRCSHarvesterLowRouting:
             forecast_issue_time="2026-03-30T00:00:00Z",
             forecast_available_at="2026-03-30T12:00:00Z",
             forecast_model_id=(
-                "tigge_mn2t6_local_calendar_day_min_v1"
+                "tigge_mn2t6_local_calendar_day_min"
                 if temperature_metric == "low"
-                else "tigge_mx2t6_local_calendar_day_max_v1"
+                else "tigge_mx2t6_local_calendar_day_max"
             ),
             settlement_value=42.5,
             temperature_metric=temperature_metric,
@@ -295,7 +295,7 @@ class TestRCSHarvesterLowRouting:
             f"R-CS.2 post-C5: expected metric='high', got "
             f"{rows_v2[0]['temperature_metric']!r}"
         )
-        assert rows_v2[0]["dataset_id"] == "tigge_mx2t6_local_calendar_day_max_v1", (
+        assert rows_v2[0]["dataset_id"] == "tigge_mx2t6_local_calendar_day_max", (
             f"R-CS.2 post-C5: expected canonical HIGH data_version; got "
             f"{rows_v2[0]['dataset_id']!r}"
         )

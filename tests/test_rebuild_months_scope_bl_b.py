@@ -70,7 +70,7 @@ def _insert_pair(
              forecast_available_at, dataset_id, decision_group_id,
              bin_source, authority, training_allowed, causality_status)
         VALUES (?, ?, ?, 'high_temp', 'low', 0.5, 0, 5.0, 'MAM', 'all',
-                '2025-01-01T12:00:00', 'tigge_mx2t6_local_calendar_day_max_v1',
+                '2025-01-01T12:00:00', 'tigge_mx2t6_local_calendar_day_max',
                 'test-dgid', ?, 'VERIFIED', 1, 'OK')
         """,
         (city, target_date, temperature_metric, CANONICAL_BIN_SOURCE_V2),
@@ -83,7 +83,7 @@ def _insert_snapshot(
     city: str,
     target_date: str,
     temperature_metric: str = "high",
-    data_version: str = "tigge_mx2t6_local_calendar_day_max_v1",
+    data_version: str = "tigge_mx2t6_local_calendar_day_max",
 ) -> None:
     """Insert a minimal ensemble_snapshots row that passes the eligibility WHERE."""
     conn.execute(

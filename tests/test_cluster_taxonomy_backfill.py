@@ -20,7 +20,7 @@ def test_backfill_calibration_pairs_updates_cluster_and_clears_models(tmp_path, 
         VALUES ('Paris', '2026-04-03', 'high', 'high_temp',
                 '12C', 1.0, 1, 1.0, 'MAM', 'Europe',
                 '2026-04-02T08:00:00Z', 12.0,
-                'tigge_mx2t6_local_calendar_day_max_v1', 'dg_Paris_0')
+                'tigge_mx2t6_local_calendar_day_max', 'dg_Paris_0')
         """
     )
     conn.execute(
@@ -30,7 +30,7 @@ def test_backfill_calibration_pairs_updates_cluster_and_clears_models(tmp_path, 
          bucket_key, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, input_space)
         VALUES ('high:Europe:MAM:tigge_mx2t6_local_calendar_day_max_v1:00:tigge_mars:full:raw_probability',
-                'high', 'Europe', 'MAM', 'tigge_mx2t6_local_calendar_day_max_v1',
+                'high', 'Europe', 'MAM', 'tigge_mx2t6_local_calendar_day_max',
                 'Europe_MAM', 1.0, 0.0, 0.0, '[]', 20, 0.1, '2026-04-01T00:00:00Z', 1, 'raw_probability')
         """
     )

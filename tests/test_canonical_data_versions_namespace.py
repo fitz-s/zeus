@@ -91,9 +91,9 @@ def test_settlement_set_non_empty_and_source_tagged():
     # All entries are source-scoped (not metric-scoped) per harvester
     # live-write path at src/execution/harvester.py.
     # Sanity-check the known harvester sources are present.
-    assert "wu_icao_history_v1" in settlement
-    assert "hko_daily_api_v1" in settlement
-    assert "ogimet_metar_v1" in settlement
+    assert "wu_icao_history" in settlement
+    assert "hko_daily_api" in settlement
+    assert "ogimet_metar" in settlement
 
 
 def test_assert_data_version_allowed_uses_ensemble_set():

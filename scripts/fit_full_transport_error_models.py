@@ -69,12 +69,12 @@ logger = logging.getLogger(__name__)
 # every city (script looked up HIGH residuals on LOW snapshots). Metric-aware now.
 _ENS_DATA_VERSIONS = {
     "high": {
-        "live": "ecmwf_opendata_mx2t3_local_calendar_day_max_v1",
-        "prior": "tigge_mx2t6_local_calendar_day_max_v1",
+        "live": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "prior": "tigge_mx2t6_local_calendar_day_max",
     },
     "low": {
-        "live": "ecmwf_opendata_mn2t3_local_calendar_day_min_v1",
-        "prior": "tigge_mn2t6_local_calendar_day_min_v1",
+        "live": "ecmwf_opendata_mn2t3_local_calendar_day_min",
+        "prior": "tigge_mn2t6_local_calendar_day_min",
     },
 }
 # Back-compat module-level names: kept as HIGH defaults for legacy callers; the

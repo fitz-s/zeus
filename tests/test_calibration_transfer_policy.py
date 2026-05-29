@@ -65,7 +65,7 @@ def test_unmapped_data_version_blocks_transfer() -> None:
     decision = evaluate_calibration_transfer_policy(
         config=cfg,
         source_id="ecmwf_open_data",
-        forecast_data_version="tigge_mx2t6_local_calendar_day_max_v1",
+        forecast_data_version="tigge_mx2t6_local_calendar_day_max",
     )
 
     assert decision.status == "BLOCKED"

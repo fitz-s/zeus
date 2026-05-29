@@ -1024,7 +1024,7 @@ def _seed_ensemble_snapshot(
     *,
     members_json: str,
     authority: str = "VERIFIED",
-    data_version: str = "tigge_mx2t6_local_calendar_day_max_v1",
+    data_version: str = "tigge_mx2t6_local_calendar_day_max",
     lead_hours: float = 24.0,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()

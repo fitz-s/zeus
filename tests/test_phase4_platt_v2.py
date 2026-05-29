@@ -29,9 +29,9 @@ class TestPlattModelV2FamilyIsolation:
 
     def _base_model_row(self, temperature_metric: str, model_key: str) -> dict:
         dv = (
-            "tigge_mx2t6_local_calendar_day_max_v1"
+            "tigge_mx2t6_local_calendar_day_max"
             if temperature_metric == "high"
-            else "tigge_mn2t6_local_calendar_day_min_v1"
+            else "tigge_mn2t6_local_calendar_day_min"
         )
         return dict(
             model_key=model_key,
@@ -58,7 +58,7 @@ class TestPlattModelV2FamilyIsolation:
                 conn=conn,
                 cluster="NYC_F_2",
                 season="spring",
-                data_version="tigge_mx2t6_local_calendar_day_max_v1",
+                data_version="tigge_mx2t6_local_calendar_day_max",
                 input_space="raw_probability",
                 param_A=1.0,
                 param_B=0.0,
@@ -144,8 +144,8 @@ class TestPlattModelV2FamilyIsolation:
         assert row is not None
         tm, dv = row
         assert tm == "high"
-        assert dv == "tigge_mx2t6_local_calendar_day_max_v1", (
-            f"High-track Platt model must use 'tigge_mx2t6_local_calendar_day_max_v1', "
+        assert dv == "tigge_mx2t6_local_calendar_day_max", (
+            f"High-track Platt model must use 'tigge_mx2t6_local_calendar_day_max', "
             f"got {dv!r} (R-4D). Peak-window tag is quarantined."
         )
 

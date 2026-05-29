@@ -47,7 +47,7 @@ def test_parse_response_populates_data_version_for_known_source_high():
         source_id="ecmwf_open_data",
         temperature_metric="high",
     )
-    assert r["data_version"] == "ecmwf_opendata_mx2t6_local_calendar_day_max_v1"
+    assert r["data_version"] == "ecmwf_opendata_mx2t6_local_calendar_day_max"
 
 
 def test_parse_response_populates_data_version_for_known_source_low():
@@ -58,7 +58,7 @@ def test_parse_response_populates_data_version_for_known_source_low():
         source_id="ecmwf_open_data",
         temperature_metric="low",
     )
-    assert r["data_version"] == "ecmwf_opendata_mn2t6_local_calendar_day_min_v1"
+    assert r["data_version"] == "ecmwf_opendata_mn2t6_local_calendar_day_min"
 
 
 def test_parse_response_sentinel_for_unrecognized_source():

@@ -74,7 +74,7 @@ CREATE TABLE ensemble_snapshots (
 )
 """
 
-_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max_v1"
+_DATA_VERSION = "ecmwf_opendata_mx2t3_local_calendar_day_max"
 _SOURCE_ID = "ecmwf_open_data"
 _SOURCE_TRANSPORT = "ensemble_snapshots_db_reader"
 _TARGET_DATE = "2026-05-22"

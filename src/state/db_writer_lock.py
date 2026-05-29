@@ -713,6 +713,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # --- Audit PR-I migration scripts ---
         "scripts/migrations/202605_add_redeem_operator_required_state.py",  # operator_invoked: --dry-run mode; daemon never imports
         "scripts/migrations/202605_consolidate_observation_instants_v2.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports
+        "scripts/migrations/202605_collapse_dataversion_integers.py",  # operator_invoked: db_writer_lock(BULK)+SAVEPOINT, --dry-run default; daemon never imports
         "scripts/migrations/__main__.py",                # operator_invoked: migration runner CLI; daemon never imports
         "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: idempotent; --dry-run mode
         # -------------------------------------------------------------------

@@ -1,8 +1,8 @@
 # Created: 2026-05-15
 # Last reused or audited: 2026-05-15
-# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p9_authority_inventory_v2/SCAFFOLD.md (rev 1.2)
+# Authority basis: docs/archive/2026-Q2/task_2026-05-15_p9_authority_inventory/SCAFFOLD.md (rev 1.2)
 """
-Tests for scripts/authority_inventory_v2.py (P9.1).
+Tests for scripts/authority_inventory.py (P9.1).
 
 Coverage:
   - iter_git_surfaces: with git-tracked tmp repo fixture
@@ -26,7 +26,7 @@ import pytest
 # Add scripts/ to sys.path so we can import the module directly
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 
-from authority_inventory_v2 import (
+from authority_inventory import (
     SurfaceRow,
     build_arg_parser,
     compute_drift_score,
@@ -524,7 +524,7 @@ class TestMainEndToEnd:
     def test_main_creates_output_file(self, git_repo_with_claude: Path, tmp_path: Path) -> None:
         output_path = tmp_path / "INVENTORY.md"
         sys.argv = [
-            "authority_inventory_v2.py",
+            "authority_inventory.py",
             "--repo-root", str(git_repo_with_claude),
             "--output", str(output_path),
             "--as-of", "2026-05-15T12:00:00",
@@ -537,7 +537,7 @@ class TestMainEndToEnd:
     def test_main_dry_run_writes_to_stdout(self, git_repo_with_claude: Path, tmp_path: Path, capsys) -> None:
         output_path = tmp_path / "DRY_RUN_SHOULD_NOT_EXIST.md"
         sys.argv = [
-            "authority_inventory_v2.py",
+            "authority_inventory.py",
             "--repo-root", str(git_repo_with_claude),
             "--output", str(output_path),
             "--dry-run",
@@ -551,7 +551,7 @@ class TestMainEndToEnd:
     def test_main_cohort7_row_present(self, git_repo_with_claude: Path, tmp_path: Path) -> None:
         output_path = tmp_path / "INVENTORY.md"
         sys.argv = [
-            "authority_inventory_v2.py",
+            "authority_inventory.py",
             "--repo-root", str(git_repo_with_claude),
             "--output", str(output_path),
             "--as-of", "2026-05-15T12:00:00",
@@ -564,7 +564,7 @@ class TestMainEndToEnd:
     def test_main_latent_target_sentinel_present(self, git_repo_with_claude: Path, tmp_path: Path) -> None:
         output_path = tmp_path / "INVENTORY.md"
         sys.argv = [
-            "authority_inventory_v2.py",
+            "authority_inventory.py",
             "--repo-root", str(git_repo_with_claude),
             "--output", str(output_path),
             "--as-of", "2026-05-15T12:00:00",
@@ -577,7 +577,7 @@ class TestMainEndToEnd:
     def test_main_output_has_table_header(self, git_repo_with_claude: Path, tmp_path: Path) -> None:
         output_path = tmp_path / "INVENTORY.md"
         sys.argv = [
-            "authority_inventory_v2.py",
+            "authority_inventory.py",
             "--repo-root", str(git_repo_with_claude),
             "--output", str(output_path),
             "--as-of", "2026-05-15T12:00:00",
