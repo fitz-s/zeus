@@ -3298,6 +3298,7 @@ def _resolve_ft_error_model_for_entry(
     city,
     target_date: str,
     metric_str: str,
+    lead_hours: float | None = None,
 ) -> "_PredictiveErrorModel | None":
     """Entry-path analogue of monitor_refresh._resolve_ft_error_model.
 
@@ -3309,6 +3310,12 @@ def _resolve_ft_error_model_for_entry(
     Cannot reuse monitor_refresh._resolve_ft_error_model directly: monitor_refresh
     imports evaluator (circular).  The logic is byte-equivalent to the monitor
     version; any future change to the resolution algorithm must be applied to both.
+
+    SEV-1 fix (2026-05-29): ``lead_hours`` param added. When provided (and flag ON),
+    the computed lead_bucket is passed to read_bias_model so the correct per-bucket
+    row is served (fail-closed: returns None if no row for that bucket). When absent
+    (legacy callers), no bucket filter is applied — behaviour is unchanged for
+    flag-OFF or callers that don't yet pass lead_hours.
 
     Returns None on flag-OFF, missing config, or missing model row (fail-open —
     caller falls back to plain p_raw_vector_from_maxes).  Logging mirrors the
@@ -3328,6 +3335,14 @@ def _resolve_ft_error_model_for_entry(
     # the trace → ALL opening_hunt candidates silently dropped (49→0 trades blocker).
     season = season_from_date(str(target_date), lat=city.lat)
     _FT_FAMILY = "full_transport_v1"
+    # SEV-1: compute lead_bucket from lead_hours when available (flag-gated: no-op when OFF).
+    _lb: str | None = None
+    if lead_hours is not None:
+        try:
+            from src.calibration.lead_bucket import lead_bucket as _lb_fn  # noqa: PLC0415
+            _lb = _lb_fn(float(lead_hours))
+        except Exception:
+            _lb = None
     row = _read_bias_model_for_entry(
         conn,
         city=city.name,
@@ -3336,6 +3351,7 @@ def _resolve_ft_error_model_for_entry(
         live_data_version=live_data_version,
         month=None,
         error_model_family=_FT_FAMILY,
+        lead_bucket=_lb,
     )
     if row is None:
         import logging as _logging
@@ -4109,8 +4125,11 @@ def evaluate_candidate(
             # model_bias_ens is trained on TIGGE ENS members; applying it to GFS
             # members would be a wrong-error-model regression.
             # Authority: FT_SHIP_EXECUTION_LEDGER_2026-05-25.md F1.
+            # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row
+            # is resolved. lead_days is already computed above (line ~3867).
             _ft_model = _resolve_ft_error_model_for_entry(
-                conn, city, target_date, temperature_metric.temperature_metric
+                conn, city, target_date, temperature_metric.temperature_metric,
+                lead_hours=lead_days * 24.0,
             )
             if _ft_model is not None:
                 p_raw = _p_raw_vector_with_error_model(
@@ -4153,8 +4172,10 @@ def evaluate_candidate(
             assert ens is not None
             # Zeus #64 FT-ship F1 (2026-05-26): ens-signal branch FT wiring.
             # Same error-model resolution as the period_extrema branch above.
+            # SEV-1 fix (2026-05-29): pass lead_hours for per-bucket row selection.
             _ft_model_ens = _resolve_ft_error_model_for_entry(
-                conn, city, target_date, temperature_metric.temperature_metric
+                conn, city, target_date, temperature_metric.temperature_metric,
+                lead_hours=lead_days * 24.0,
             )
             if _ft_model_ens is not None:
                 p_raw = _p_raw_vector_with_error_model(

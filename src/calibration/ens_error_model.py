@@ -279,6 +279,7 @@ def fit_city_predictive_error(
     season_months: tuple[int, ...] | None = None,
     metric: str = "high",
     lead_max: float = 48.0,
+    lead_bucket_filter: str | None = None,
     min_live_n: int = DEFAULT_MIN_LIVE_N,
     settled_before: str | None = None,
     kappa: float = 1.0,
@@ -289,6 +290,11 @@ def fit_city_predictive_error(
     F50/TIGGE prior -> transported to the F25/OpenData lineage via Δ=F25-F50 ->
     updated by the OpenData live residual likelihood -> predictive-error model.
     All sub-steps are individually unit-tested; this only wires them.
+
+    ``lead_bucket_filter`` restricts residuals/delta to a specific lead-hour bucket
+    (e.g. 'L00_24', 'L24_48'). Pass the same value used to segment the outer fit loop
+    so all three loaders (tig, opd, delta) see the same lead-hour slice. Without this,
+    the fit pools all lead hours regardless of the bucket label (#363 finding #1).
     """
     import statistics
     from src.calibration.ens_bias_model import (
@@ -296,8 +302,8 @@ def fit_city_predictive_error(
     )
     from src.calibration.ens_bias_repo import load_bucket_residuals, load_paired_delta
 
-    common = dict(metric=metric, lead_max=lead_max, season_months=season_months,
-                  settled_before=settled_before)
+    common = dict(metric=metric, lead_max=lead_max, lead_bucket_filter=lead_bucket_filter,
+                  season_months=season_months, settled_before=settled_before)
     tig = load_bucket_residuals(conn, city=city, data_version=prior_data_version,
                                 require_verified=False,
                                 contributor_policy="legacy_tigge_null_passthrough", **common)

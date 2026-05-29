@@ -1,6 +1,6 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-18
-# Authority basis: backtest_v2_port_2026_05_07.md §D2+D3
+# Last reused or audited: 2026-05-29
+# Authority basis: TRIBUNAL Finding 2 (value-derived winning bin)
 #
 # Dynamic SQL safety (PR #87 Copilot reply): all f-string SQL in this module
 # interpolates only module-level table-name constants (sv2_table, cp_table,
@@ -188,6 +188,40 @@ def _build_timezone_stratification(rows: list[dict]) -> dict:
 # Core per-snapshot scorer
 # ---------------------------------------------------------------------------
 
+def _derive_winning_bin_in_market_vocab(
+    settlement_value: float,
+    labels: list[str],
+    parse_fn,
+) -> Optional[str]:
+    """Find which market-vocabulary label contains settlement_value.
+
+    Uses the MARKET bins (from calibration_pairs / market_events) so the
+    derived label is in the same vocabulary as picked_labels.  Exact
+    string membership in _score_snapshot_hit is then safe.
+
+    Returns the matching label, or None if no market bin contains the value
+    (genuine misalignment / value outside all market ranges).
+    """
+    for lbl in labels:
+        lo, hi = parse_fn(lbl)
+        if lo is None and hi is None:
+            continue
+        # Open-low shoulder: "X or below" → hi only
+        if lo is None and hi is not None:
+            if settlement_value <= hi:
+                return lbl
+            continue
+        # Open-high shoulder: "X or higher" → lo only
+        if hi is None and lo is not None:
+            if settlement_value >= lo:
+                return lbl
+            continue
+        # Interior bin: inclusive-closed [lo, hi]
+        if lo <= settlement_value <= hi:
+            return lbl
+    return None
+
+
 def _score_one_snapshot(
     ctx: ReplayContext,
     city: City,
@@ -200,11 +234,23 @@ def _score_one_snapshot(
     p_market_source: Literal["stored", "uniform", "climatology", "frozen_at_decision"],
     override_platt: bool,
     clim_rows: list[dict],
+    settlement_value: Optional[float] = None,
+    stored_winning_bin_evidence: Optional[str] = None,
 ) -> dict:
     """Score one (city, target_date, snapshot_id) against the live FDR path.
 
     Returns a dict with keys: city, target_date, snapshot_id, hit, brier,
-    picked_labels, winning_bin, missing_reason, timezone_class.
+    picked_labels, winning_bin, derived_winning_bin, stored_winning_bin_evidence,
+    stored_matches_derived, truth_source, missing_reason, timezone_class.
+
+    TRIBUNAL Finding 2 (S2-1 fix): the winning bin is derived from settlement_value
+    within the MARKET vocabulary (labels built from calibration_pairs / market_events),
+    not the canonical grid vocabulary.  This guarantees the derived label is a member
+    of picked_labels when the forecast was correct, regardless of whether the city uses
+    1°C, 2°F, or any other market bin width.
+
+    The derivation happens AFTER labels are built so the vocabulary is guaranteed to
+    match.  The stored winning_bin is preserved as stored_winning_bin_evidence only.
     """
     from src.data.market_scanner import _parse_temp_range
     from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
@@ -224,6 +270,10 @@ def _score_one_snapshot(
         "lead_days": 0.0,
         "picked_labels": [],
         "winning_bin": winning_bin,
+        "derived_winning_bin": None,
+        "stored_winning_bin_evidence": stored_winning_bin_evidence,
+        "stored_matches_derived": None,
+        "truth_source": "settlement_value_derived",
         "missing_reason": "",
         "timezone_class": tz_class,
     }
@@ -317,6 +367,27 @@ def _score_one_snapshot(
         for lbl in labels
     ]
     base_result["n_bins"] = len(bins)
+
+    # TRIBUNAL Finding 2 / S2-1: derive winning bin in MARKET vocabulary.
+    # labels are now available (same vocab as picked_labels), so derivation
+    # is vocabulary-safe.  Fall back to stored winning_bin if no value provided.
+    if settlement_value is not None:
+        derived_winning_bin = _derive_winning_bin_in_market_vocab(
+            float(settlement_value), labels, _parse_temp_range
+        )
+        base_result["derived_winning_bin"] = derived_winning_bin
+        if stored_winning_bin_evidence:
+            base_result["stored_matches_derived"] = (
+                stored_winning_bin_evidence == derived_winning_bin
+            )
+        if derived_winning_bin is None:
+            # settlement_value falls outside all market bins — genuine misalignment
+            base_result["missing_reason"] = "winner_not_in_market_bins"
+            return base_result
+        scoring_winning_bin = derived_winning_bin
+    else:
+        # Legacy fallback: no settlement_value provided — use stored label directly
+        scoring_winning_bin = winning_bin
 
     bin_probs_raw = np.array(p_raw_stored, dtype=float)
 
@@ -452,14 +523,14 @@ def _score_one_snapshot(
         and row.get("direction") == "buy_yes"  # only buy_yes for hit scoring
     ]
 
-    # -- Score hit
-    hit = _score_snapshot_hit(picked_labels, winning_bin)
+    # -- Score hit (TRIBUNAL Finding 2: use value-derived label, not stored string)
+    hit = _score_snapshot_hit(picked_labels, scoring_winning_bin)
 
     # -- Brier score for the winning bin (p_cal vs outcome)
     brier = None
-    if winning_bin:
+    if scoring_winning_bin:
         try:
-            win_idx = labels.index(winning_bin)
+            win_idx = labels.index(scoring_winning_bin)
             brier_scores = []
             for i, p in enumerate(bin_probs_cal):
                 outcome = 1.0 if i == win_idx else 0.0
@@ -598,6 +669,7 @@ def run_selection_coverage(
     snapshot_results: list[dict] = []
     per_city: dict[str, dict] = {}
     n_replayed = 0
+    n_winner_underivable_dropped = 0  # S2-2 survivorship counter
 
     for row in settlement_rows:
         city = cities_by_name.get(str(row["city"] or ""))
@@ -605,7 +677,11 @@ def run_selection_coverage(
             continue
 
         target_date = str(row["target_date"])
+        # stored winning_bin kept as evidence only — NOT used for hit scoring
         winning_bin = str(row["winning_bin"] or "")
+        # settlement_value is the truth; derivation into market vocab happens inside
+        # _score_one_snapshot after labels are built (S2-1: market-vocabulary derivation)
+        settlement_value = float(row["settlement_value"])  # guaranteed NOT NULL by query filter
 
         # Resolve snapshot_id: use settlement_outcomes column if present, else latest snapshot
         snap_id = None
@@ -642,7 +718,16 @@ def run_selection_coverage(
             p_market_source=p_market_source,
             override_platt=override_platt,
             clim_rows=clim_rows,
+            settlement_value=settlement_value,
+            stored_winning_bin_evidence=winning_bin or None,
         )
+        # S2-2: track rows dropped due to market-bin misalignment for survivorship audit
+        if result.get("missing_reason") == "winner_not_in_market_bins":
+            n_winner_underivable_dropped += 1
+            logger.warning(
+                "winner_not_in_market_bins: %s/%s settlement_value=%s not in any market label",
+                city.name, target_date, settlement_value,
+            )
         snapshot_results.append(result)
         n_replayed += 1
 
@@ -673,11 +758,14 @@ def run_selection_coverage(
             settlement_value=row["settlement_value"],
             settlement_unit=city.settlement_unit,
             derived_wu_outcome=None if result["hit"] is None else bool(result["hit"]),
-            truth_source="settlement_outcomes.winning_bin",
+            truth_source=result.get("truth_source", "settlement_value_derived"),
             divergence_status=result["missing_reason"] or "scored",
             evidence={
                 "picked_labels": result["picked_labels"],
                 "winning_bin": winning_bin,
+                "derived_winning_bin": result.get("derived_winning_bin"),
+                "stored_winning_bin_evidence": result.get("stored_winning_bin_evidence"),
+                "stored_matches_derived": result.get("stored_matches_derived"),
                 "hit": result["hit"],
                 "brier": result["brier"],
                 "p_market_source": p_market_source,
@@ -773,6 +861,7 @@ def run_selection_coverage(
         "n_picks": n_picks,
         "n_scored": len(all_hits),
         "n_no_pick": n_replayed - n_picks,
+        "winner_underivable_dropped": n_winner_underivable_dropped,
         "brier_aggregate": brier_mean,
         "bss_vs_climatology": bss,
         "by_timezone_class": tz_strat,

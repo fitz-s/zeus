@@ -9,10 +9,11 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, List
 
 from src.config import settings
 from src.data.forecast_extrema_authority import (
@@ -184,6 +185,16 @@ class ExecutableForecastReadResult:
     status: str
     reason_code: str
     snapshot: ExecutableForecastSnapshot | None = None
+    # TRIBUNAL Finding 8 — inter-cycle spread diagnostics (additive, election byte-identical).
+    # candidate_snapshot_count: number of rows matching the WHERE clause (before LIMIT 1).
+    # candidate_snapshot_ids: all matching snapshot_ids in election-rank order.
+    # inter_cycle_spread: stdev of source_cycle_time ordinals (seconds-since-epoch diff)
+    #   across candidates; 0.0 when single candidate; None when diagnostics not available.
+    # election_reason: human-readable summary of why the elected snapshot won.
+    candidate_snapshot_count: int | None = None
+    candidate_snapshot_ids: List[int] | None = None
+    inter_cycle_spread: float | None = None
+    election_reason: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -611,6 +622,88 @@ def _snapshot_query_sql(table: str, *, source_run_id_present: bool) -> str:
         raise ValueError("unsupported ensemble_snapshots authority table")
 
 
+def _snapshot_diagnostic_query_sql(table: str, *, source_run_id_present: bool) -> str:
+    """Return SQL that fetches snapshot_id + source_cycle_time for ALL matching rows
+    (no LIMIT) in election-rank order.  Used only for TRIBUNAL Finding 8 diagnostics —
+    does NOT change which snapshot is elected.
+
+    Created: 2026-05-29
+    Authority: TRIBUNAL Finding 8 (additive diagnostic — election byte-identical).
+    """
+    if table == f"{FORECASTS_SCHEMA}.ensemble_snapshots":
+        extra_filter = "AND source_run_id = ?" if source_run_id_present else ""
+        return f"""
+            SELECT snapshot_id, source_cycle_time
+            FROM forecasts.ensemble_snapshots
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND dataset_id = ?
+              AND source_id = ?
+              AND source_transport = ?
+              {extra_filter}
+            ORDER BY {_EXTREMA_RANK_ORDER_BY}
+            """
+    elif table == f"{WORLD_SCHEMA}.ensemble_snapshots":
+        extra_filter = "AND source_run_id = ?" if source_run_id_present else ""
+        return f"""
+            SELECT snapshot_id, source_cycle_time
+            FROM world.ensemble_snapshots
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND dataset_id = ?
+              AND source_id = ?
+              AND source_transport = ?
+              {extra_filter}
+            ORDER BY {_EXTREMA_RANK_ORDER_BY}
+            """
+    elif table == "ensemble_snapshots":
+        extra_filter = "AND source_run_id = ?" if source_run_id_present else ""
+        return f"""
+            SELECT snapshot_id, source_cycle_time
+            FROM ensemble_snapshots
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND dataset_id = ?
+              AND source_id = ?
+              AND source_transport = ?
+              {extra_filter}
+            ORDER BY {_EXTREMA_RANK_ORDER_BY}
+            """
+    else:
+        raise ValueError("unsupported ensemble_snapshots authority table")
+
+
+def _compute_inter_cycle_spread(cycle_times: list[str | None]) -> float:
+    """Stdev (population) of source_cycle_time ordinals (parsed as ISO strings → epoch seconds).
+
+    Returns 0.0 for single-element lists.  Falls back to max-min range if stdev
+    cannot be computed (e.g. all None).
+
+    Created: 2026-05-29
+    Authority: TRIBUNAL Finding 8.
+    """
+    if len(cycle_times) <= 1:
+        return 0.0
+    epochs: list[float] = []
+    for ct in cycle_times:
+        if ct is None:
+            continue
+        try:
+            # source_cycle_time is stored as ISO-8601 UTC string, e.g. "2026-05-29T00:00:00+00:00"
+            dt = datetime.fromisoformat(str(ct).replace("Z", "+00:00"))
+            epochs.append(dt.timestamp())
+        except (ValueError, TypeError):
+            continue
+    if len(epochs) <= 1:
+        return 0.0
+    mean = sum(epochs) / len(epochs)
+    variance = sum((e - mean) ** 2 for e in epochs) / len(epochs)
+    return math.sqrt(variance)
+
+
 def _coverage_for_producer(
     conn: sqlite3.Connection,
     *,
@@ -731,7 +824,43 @@ def read_executable_forecast_snapshot(
             else None
         ),
     )
-    return ExecutableForecastReadResult("LIVE_ELIGIBLE", "EXECUTABLE_FORECAST_READY", snapshot)
+    # TRIBUNAL Finding 8 — additive diagnostics (election byte-identical).
+    # Run a separate no-LIMIT diagnostic query to materialise the full candidate set.
+    _diag_candidate_count: int | None = None
+    _diag_candidate_ids: List[int] | None = None
+    _diag_spread: float | None = None
+    _diag_election_reason: str | None = None
+    try:
+        diag_rows = [
+            dict(r)
+            for r in conn.execute(
+                _snapshot_diagnostic_query_sql(table, source_run_id_present=source_run_id is not None),
+                tuple(params),
+            ).fetchall()
+        ]
+        _diag_candidate_count = len(diag_rows)
+        _diag_candidate_ids = [int(r["snapshot_id"]) for r in diag_rows]
+        _diag_spread = _compute_inter_cycle_spread(
+            [r.get("source_cycle_time") for r in diag_rows]
+        )
+        if _diag_candidate_count == 1:
+            _diag_election_reason = "SOLE_CANDIDATE"
+        elif _diag_candidate_count > 1:
+            _diag_election_reason = f"EXTREMA_RANK_TOP1_OF_{_diag_candidate_count}"
+        else:
+            _diag_election_reason = "UNKNOWN"
+    except Exception:
+        # Diagnostic query failure must never block the elected result.
+        pass
+    return ExecutableForecastReadResult(
+        "LIVE_ELIGIBLE",
+        "EXECUTABLE_FORECAST_READY",
+        snapshot,
+        candidate_snapshot_count=_diag_candidate_count,
+        candidate_snapshot_ids=_diag_candidate_ids,
+        inter_cycle_spread=_diag_spread,
+        election_reason=_diag_election_reason,
+    )
 
 
 @dataclass(frozen=True)

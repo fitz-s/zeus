@@ -345,6 +345,7 @@ def _resolve_ft_error_model(
     city,
     target_d: date,
     metric_str: str,
+    lead_hours: float | None = None,
 ) -> "PredictiveErrorModel | None":
     """Resolve bucket keys and delegate to _load_ft_error_model.
 
@@ -356,6 +357,11 @@ def _resolve_ft_error_model(
     This matches because Zeus has no Southern-Hemisphere cities (all lat > 0); the call
     signatures agree for every active city. Add an assertion or override if SH cities
     are added.
+
+    SEV-1 fix (2026-05-29): ``lead_hours`` param added. When provided (and flag ON),
+    the computed lead_bucket is passed to _load_ft_error_model so the correct
+    per-bucket row is served. Absent → no bucket filter (legacy behaviour, flag-OFF
+    path is still a no-op).
     """
     # Flag-check first: avoid config/season resolution work on every cycle when OFF (default).
     if not bool(settings["feature_flags"].get("full_transport_live_enabled", False)):
@@ -367,12 +373,21 @@ def _resolve_ft_error_model(
     except Exception:
         return None
     season = season_from_date(target_d.isoformat(), lat=city.lat)
+    # SEV-1: compute lead_bucket from lead_hours when available.
+    _lb: str | None = None
+    if lead_hours is not None:
+        try:
+            from src.calibration.lead_bucket import lead_bucket as _lb_fn  # noqa: PLC0415
+            _lb = _lb_fn(float(lead_hours))
+        except Exception:
+            _lb = None
     return _load_ft_error_model(
         conn,
         city_name=city.name,
         season=season,
         metric=metric_str,
         live_data_version=live_data_version,
+        lead_bucket=_lb,
     )
 
 
@@ -383,6 +398,7 @@ def _load_ft_error_model(
     season: str,
     metric: str,
     live_data_version: str,
+    lead_bucket: str | None = None,
 ) -> "PredictiveErrorModel | None":
     """Load a persisted PredictiveErrorModel for full_transport_live if the flag is ON.
 
@@ -390,19 +406,29 @@ def _load_ft_error_model(
     - Flag OFF → returns None immediately (caller uses plain p_raw path, byte-identical).
     - Flag ON + row found → reconstructs PredictiveErrorModel from canonical schema fields.
     - Flag ON + no row → logs WARNING + returns None (fail-closed; caller uses plain p_raw).
+
+    SEV-1 fix (2026-05-29): ``lead_bucket`` param added. Delegates to read_bias_model
+    (which adds ``AND lead_bucket=?`` when the param is supplied) instead of raw SQL.
+    Fail-closed: when the requested bucket has no row, returns None. When lead_bucket
+    is None (legacy/flag-OFF path), no bucket filter is applied.
     """
     ft_enabled = bool(settings["feature_flags"].get("full_transport_live_enabled", False))
     if not ft_enabled:
         return None
 
-    # Bug 1 fix (Zeus #64 PR #342): filter on error_model_family='full_transport_v1'
-    # to avoid loading a legacy/wrong-family row when multiple families coexist
-    # per (city, season, metric, live_data_version, month=0).
-    row = conn.execute(
-        "SELECT * FROM model_bias_ens WHERE city=? AND season=? AND metric=? "
-        "AND live_data_version=? AND month=0 AND error_model_family=?",
-        (city_name, season, metric, live_data_version, "full_transport_v1"),
-    ).fetchone()
+    # SEV-1 fix: use read_bias_model (which handles lead_bucket filter + all guards)
+    # instead of a raw SQL query that bypassed the bucket dimension entirely.
+    # Bug 1 fix (Zeus #64 PR #342) is preserved: error_model_family='full_transport_v1'.
+    row = read_bias_model(
+        conn,
+        city=city_name,
+        season=season,
+        metric=metric,
+        live_data_version=live_data_version,
+        month=0,
+        error_model_family="full_transport_v1",
+        lead_bucket=lead_bucket,
+    )
     if row is None:
         logger.warning(
             "full_transport_live: flag ON but no model_bias_ens row for "
@@ -556,7 +582,11 @@ def _refresh_ens_member_counting(
                 "period_extrema_members_invalid",
             ]
         _member_unit = expected_members_unit  # already validated above
-        _ft_model = _resolve_ft_error_model(conn, city, target_d, _position_metric_str)
+        # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
+        _ft_model = _resolve_ft_error_model(
+            conn, city, target_d, _position_metric_str,
+            lead_hours=lead_days * 24.0,
+        )
         if _ft_model is not None:
             p_raw_vector = p_raw_vector_with_error_model(
                 member_extrema,
@@ -601,7 +631,11 @@ def _refresh_ens_member_counting(
         else:
             _ens_member_extrema = ens.member_maxes
         _member_unit = "degC" if city.settlement_unit == "C" else "degF"
-        _ft_model = _resolve_ft_error_model(conn, city, target_d, _position_metric_str)
+        # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
+        _ft_model = _resolve_ft_error_model(
+            conn, city, target_d, _position_metric_str,
+            lead_hours=lead_days * 24.0,
+        )
         if _ft_model is not None:
             p_raw_vector = p_raw_vector_with_error_model(
                 _ens_member_extrema,
