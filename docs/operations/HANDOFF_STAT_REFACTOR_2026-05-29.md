@@ -2,12 +2,18 @@
 
 Single resume reference. Read §0 + §7 first.
 
-> **Session-2 update (2026-05-29 cont.):** P2 pair_residual loop wiring (D-J1 drop) and
-> P4 analytic Gaussian-mixture p_raw are now BUILT + TDD'd + committed
-> (`b62b025898` P2, `67968ec915` P4; under a wave-level opus critic at time of writing).
-> Both are offline/additive — no live serving wired. See §2/§4 marked **[S2 DONE]**.
-> Remaining highest-leverage: D-S1 settlement-schema columns, P5 run-selection, P3
-> production-serving integration (DORMANT). 121 redesign/signal tests green.
+> **Session-2 update (2026-05-29 cont.):** Three increments BUILT + TDD'd + committed,
+> all offline/additive (no live serving wired) — wave-critic reviewed:
+> - `b62b025898` **P2 pair_residual loop** (D-J1 wrong-station drop) + canonical `dataset_id`.
+> - `67968ec915` **P4 analytic Gaussian-mixture p_raw** — equivalence-proven vs 10k MC; MC stays live (critic ACCEPT).
+> - `8d7933624f` **P2 SEV-2 fix** — settlement-authority registry: forecast `noaa`/`cwa_station`
+>   reconcile with settlement `ogimet`/`cwa` collectors (operator-confirmed same-truth); `?site=`
+>   station parser; UnknownSettlementAuthorityError = loud quarantine. Un-drops Istanbul/Moscow/Tel Aviv.
+> - `7f2b489f9c` docs: tautological metric/unit gate dims + canonical-schema precondition.
+>
+> Remaining highest-leverage: **D-S1** settlement-schema columns (also un-blocks Hong Kong, whose
+> climat.htm settlement URL has NO parseable station), P5 run-selection, P3 production-serving
+> integration (DORMANT). Contracts have zero active-live consumers yet. 84 redesign/signal tests green.
 
 - Worktree: `.claude/worktrees/stat-whole-refactor`  ·  Branch: `stat-whole-refactor`  ·  HEAD: `67968ec915`
 - Base: merged current with `origin/main` (PR #359 canonicalization in). Collection: 0 errors. 68 new contract/stat tests green.
