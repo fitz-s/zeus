@@ -41,6 +41,7 @@ class CandidateDecision:
     raw_is_default: bool
     beats_raw_count: dict[str, int] = field(default_factory=dict)
     passing: list[str] = field(default_factory=list)
+    refused_cross_product: list[str] = field(default_factory=list)
 
 
 def _is_real(x) -> bool:
@@ -67,6 +68,8 @@ def choose_candidate(
     improvement_lcb: dict[str, float],
     catastrophic: dict[str, bool],
     *,
+    target_product: str,
+    candidate_products: dict[str, str],
     raw_name: str = "raw",
 ) -> CandidateDecision:
     """Select the model for one bucket. Returns raw_name unless a correction clears the gate.
@@ -88,8 +91,19 @@ def choose_candidate(
     """
     beats: dict[str, int] = {}
     passing: list[str] = []
+    refused_cross_product: list[str] = []
     for name, cand in candidate_metrics.items():
         if name == raw_name:
+            continue
+        # Product-segregation gate (asym SEV-1-B): a candidate may serve ONLY the product its
+        # OOS evidence was computed on. 6h-TIGGE (mx2t6) and 3h-OpenData (mx2t3) are different
+        # random variables; TIGGE→OpenData transfer HURTS 7/11 buckets. A candidate whose
+        # evidence product differs from (or is undeclared for) the serving target is refused
+        # outright — no matter how strong its (wrong-product) scores look. Transfer is allowed
+        # ONLY when it was OOS-tested on the target product itself. This makes "apply a
+        # TIGGE-proven correction to live OpenData" (sd3 renamed) unconstructable.
+        if candidate_products.get(name) != target_product:
+            refused_cross_product.append(name)
             continue
         b = _beats_raw_count(cand, raw_metrics)
         beats[name] = b
@@ -105,10 +119,11 @@ def choose_candidate(
     if not passing:
         return CandidateDecision(
             chosen=raw_name,
-            reason="no candidate cleared the OOS gate (>=2/3 proper-score wins + LCB>0 + no catastrophe); raw identity dominates",
+            reason="no candidate cleared the OOS gate (same-product evidence + >=2/3 proper-score wins + LCB>0 + no catastrophe); raw identity dominates",
             raw_is_default=True,
             beats_raw_count=beats,
             passing=[],
+            refused_cross_product=refused_cross_product,
         )
 
     chosen = max(passing, key=lambda n: improvement_lcb[n])
@@ -118,4 +133,5 @@ def choose_candidate(
         raw_is_default=False,
         beats_raw_count=beats,
         passing=sorted(passing),
+        refused_cross_product=refused_cross_product,
     )

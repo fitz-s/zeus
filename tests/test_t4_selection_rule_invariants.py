@@ -38,6 +38,8 @@ def test_clear_winner_is_selected():
         raw_metrics=RAW,
         improvement_lcb={"live_bias": 0.05},
         catastrophic={"live_bias": False},
+        target_product="mx2t3",
+        candidate_products={"live_bias": "mx2t3"},
     )
     assert d.chosen == "live_bias"
     assert d.raw_is_default is False
@@ -52,6 +54,8 @@ def test_only_one_metric_win_falls_back_to_raw():
         raw_metrics=RAW,
         improvement_lcb={"scale_only": 0.05},
         catastrophic={"scale_only": False},
+        target_product="mx2t3",
+        candidate_products={"scale_only": "mx2t3"},
     )
     assert d.chosen == "raw"
     assert d.raw_is_default is True
@@ -65,6 +69,8 @@ def test_infold_win_but_nonpositive_lcb_falls_back_to_raw():
         raw_metrics=RAW,
         improvement_lcb={"transported": -0.01},
         catastrophic={"transported": False},
+        target_product="mx2t3",
+        candidate_products={"transported": "mx2t3"},
     )
     assert d.chosen == "raw"
     assert d.raw_is_default is True
@@ -77,6 +83,8 @@ def test_zero_lcb_is_not_strictly_positive_falls_back_to_raw():
         raw_metrics=RAW,
         improvement_lcb={"prior_bias": 0.0},
         catastrophic={"prior_bias": False},
+        target_product="mx2t3",
+        candidate_products={"prior_bias": "mx2t3"},
     )
     assert d.chosen == "raw"
 
@@ -88,13 +96,15 @@ def test_catastrophic_regression_vetoes_even_a_winner():
         raw_metrics=RAW,
         improvement_lcb={"hierarchical_fallback": 0.05},
         catastrophic={"hierarchical_fallback": True},
+        target_product="mx2t3",
+        candidate_products={"hierarchical_fallback": "mx2t3"},
     )
     assert d.chosen == "raw"
     assert d.raw_is_default is True
 
 
 def test_no_candidates_is_raw():
-    d = choose_candidate({}, RAW, {}, {})
+    d = choose_candidate({}, RAW, {}, {}, target_product="mx2t3", candidate_products={})
     assert d.chosen == "raw"
     assert d.passing == []
 
@@ -107,6 +117,8 @@ def test_exactly_two_of_three_is_eligible():
         raw_metrics=RAW,
         improvement_lcb={"live_bias": 0.03},
         catastrophic={"live_bias": False},
+        target_product="mx2t3",
+        candidate_products={"live_bias": "mx2t3"},
     )
     assert d.chosen == "live_bias"
     assert d.beats_raw_count["live_bias"] == 2
@@ -123,6 +135,8 @@ def test_among_passing_pick_max_lcb():
         raw_metrics=RAW,
         improvement_lcb={"candA": 0.02, "candB": 0.08},  # B more robust OOS
         catastrophic={"candA": False, "candB": False},
+        target_product="mx2t3",
+        candidate_products={"candA": "mx2t3", "candB": "mx2t3"},
     )
     assert set(d.passing) == {"candA", "candB"}
     assert d.chosen == "candB"
@@ -137,6 +151,8 @@ def test_nan_metric_is_not_credited_as_a_win():
         raw_metrics=RAW,
         improvement_lcb={"transported": 0.05},
         catastrophic={"transported": False},
+        target_product="mx2t3",
+        candidate_products={"transported": "mx2t3"},
     )
     assert d.chosen == "raw"
     assert d.beats_raw_count["transported"] == 1
@@ -149,6 +165,8 @@ def test_raw_in_candidate_dict_never_selected_over_itself():
         raw_metrics=RAW,
         improvement_lcb={"raw": 0.0, "live_bias": 0.05},
         catastrophic={},
+        target_product="mx2t3",
+        candidate_products={"raw": "mx2t3", "live_bias": "mx2t3"},
     )
     assert d.chosen == "live_bias"
 
