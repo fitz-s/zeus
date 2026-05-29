@@ -2,6 +2,10 @@
 # Purpose: Idempotent one-shot migration creating no_trade_events table and indexes in zeus-world.db.
 # Reuse: Verify DDL matches no_trade_events_schema.py and that no_trade_events does not already exist.
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742); Phase 2 T2 production pass
+# WRITER_LOCK_DEFER_REVIEW=2026-05-29
+# Justification: Idempotent CREATE TABLE IF NOT EXISTS + 2 indexes on zeus-world.db; no INSERT/UPDATE/DELETE.
+# Daemon-DOWN operator migration. DDL-only CREATE scripts are lowest priority for db_writer_lock retrofit.
+# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 """Idempotent CREATE TABLE migration for no_trade_events (world DB).
 
 Creates the no_trade_events table and its two indexes if they do not

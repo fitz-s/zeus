@@ -4,6 +4,10 @@
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: One-shot idempotent migration adding polymarket_end_anchor_source + PR6 columns to settlement_commands and wrap_unwrap_commands in world.db.
 # Reuse: Run once per DB instance; check --dry-run output before --apply; idempotent on re-run (duplicate column errors silently skipped).
+# WRITER_LOCK_DEFER_REVIEW=2026-05-29
+# Justification: DDL-only ALTER TABLE ADD COLUMN; dry-run default; bare sqlite3.connect() only in --db override path.
+# Default path uses get_trade_connection_with_world(). Daemon-DOWN assumption for --db path.
+# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 """PR 3 migration: add polymarket_end_anchor_source to settlement_commands.
 
 Adds a single TEXT NOT NULL column with DEFAULT 'gamma_explicit' to

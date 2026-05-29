@@ -4,6 +4,10 @@
 # Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=never
 # Purpose: One-shot idempotent migration adding timing chain + alpha proxy columns to ensemble_snapshots in forecasts.db.
 # Reuse: Run once per DB instance; check --dry-run output before --apply; nullable columns so no backfill required.
+# WRITER_LOCK_DEFER_REVIEW=2026-05-29
+# Justification: DDL-only ALTER TABLE ADD COLUMN on ensemble_snapshots in zeus-forecasts.db; dry-run default.
+# Bare sqlite3.connect() only in --db override path; default path uses get_forecasts_connection(). Daemon-DOWN.
+# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 """PR 6 migration: add timing chain + alpha proxy columns to ensemble_snapshots.
 
 Adds 3 columns to ensemble_snapshots in forecasts.db:

@@ -40,7 +40,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -133,22 +140,23 @@ def run(db_path: Path, dry_run: bool = False) -> None:
         logger.info("--dry-run: would migrate no_trade_events, ensure tail_stress_scenarios, then PRAGMA user_version = 18")
         return
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
-        _migrate_no_trade(conn)
-        _ensure_stress(conn)
-        conn.execute(_STEP6_USER_VERSION)
-        conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
-        conn.commit()
-        logger.info("Migration complete: no_trade_events and tail_stress_scenarios ensured; user_version = 18")
-    except Exception:
-        conn.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
-        conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
-        raise
-    finally:
-        conn.close()
+    with db_writer_lock(db_path, WriteClass.BULK):
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(f"SAVEPOINT {_SAVEPOINT_NAME}")
+            _migrate_no_trade(conn)
+            _ensure_stress(conn)
+            conn.execute(_STEP6_USER_VERSION)
+            conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
+            conn.commit()
+            logger.info("Migration complete: no_trade_events and tail_stress_scenarios ensured; user_version = 18")
+        except Exception:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {_SAVEPOINT_NAME}")
+            conn.execute(f"RELEASE SAVEPOINT {_SAVEPOINT_NAME}")
+            raise
+        finally:
+            conn.close()
 
 
 def main() -> None:

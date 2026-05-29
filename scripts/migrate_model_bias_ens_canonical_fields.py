@@ -4,6 +4,10 @@
 # Purpose: Schema migration — add canonical error-model columns to model_bias_ens (idempotent, guarded by PRAGMA table_info).
 # Reuse: Safe to re-run; ALTERs are no-ops if columns already exist. Verify schema_version before reuse.
 # Authority basis: Zeus #64 / #68 / #69 — canonical error-model schema.
+# WRITER_LOCK_DEFER_REVIEW=2026-05-29
+# Justification: DDL-only ALTER TABLE ADD COLUMN; --commit gated (dry-run default); targets staging/copy DB only.
+# Daemon-DOWN assumption; additive-only schema changes; no INSERT/UPDATE/DELETE.
+# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 #   Extends model_bias_ens to the full domain-identity field set per task spec
 #   (FT_SHIP_MASTER_SPEC_2026-05-25 enumerated field list).  Each ALTER is guarded
 #   by PRAGMA table_info so re-runs are no-ops.

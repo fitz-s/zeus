@@ -2,6 +2,10 @@
 # Last reused or audited: 2026-05-19
 # Authority basis: PHASE_1_ULTRAPLAN.md §4.2 (Path D natural-key schema, v3)
 # SCAFFOLD: migration script — production execution pending T1 production pass
+# WRITER_LOCK_DEFER_REVIEW=2026-05-29
+# Justification: Idempotent CREATE TABLE IF NOT EXISTS + TRIGGER IF NOT EXISTS + 3 INDEX IF NOT EXISTS on zeus-world.db.
+# No INSERT/UPDATE/DELETE; all DDL uses IF NOT EXISTS guards. Daemon-DOWN operator migration.
+# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 """Create decision_events + AFTER INSERT TRIGGER (backstop) + indices on world DB.
 
 Idempotent (IF NOT EXISTS).  Does NOT bump SCHEMA_VERSION (src/state/db.py owns).

@@ -3,6 +3,12 @@
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
 #                  docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md P7-3
 #                  docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
+# WRITER_LOCK_DEFER_REVIEW=2026-05-29
+# Justification: DML (INSERT/UPDATE) executed via get_forecasts_connection_with_world() — already
+# writer-lock contract-compliant through the helper; false-positive is on the bare-sqlite3.connect
+# scan only (the only literal "sqlite3.connect(" is in a docstring comment, not a call site).
+# Defer reason: helper-routed, not a raw-connect daemon-race risk.
+# Ops-doc entry: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F22_WRITER_LOCK_FIX.md
 """
 Migration script: quarantine settlement_commands in-flight at the era flip boundary.
 
