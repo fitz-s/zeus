@@ -1,7 +1,6 @@
 # Created: 2026-05-25
 # Last reused or audited: 2026-05-25
 # Lifecycle: created=2026-05-25; last_reviewed=2026-05-25; last_reused=never
-# WRITER_LOCK_DEFER_REVIEW=2026-05-28
 # Purpose: Schema migration — add canonical error-model columns to model_bias_ens (idempotent, guarded by PRAGMA table_info).
 # Reuse: Safe to re-run; ALTERs are no-ops if columns already exist. Verify schema_version before reuse.
 # Authority basis: Zeus #64 / #68 / #69 — canonical error-model schema.

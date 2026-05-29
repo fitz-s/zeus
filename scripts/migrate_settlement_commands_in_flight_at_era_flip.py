@@ -1,7 +1,6 @@
 # Created: 2026-05-19
 # Last reused or audited: 2026-05-19
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ULTRAPLAN.md §D.1
-# WRITER_LOCK_DEFER_REVIEW=2026-05-28
 #                  docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/critic_1_pr1_settlement.md P7-3
 #                  docs/archive/2026-Q2/task_2026-05-17_strategy_vnext_phase0/PHASE_0_V4_ADDENDUM.md
 """

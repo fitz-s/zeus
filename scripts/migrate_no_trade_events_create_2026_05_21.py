@@ -1,5 +1,4 @@
 # Lifecycle: created=2026-05-20; last_reviewed=2026-05-20; last_reused=never
-# WRITER_LOCK_DEFER_REVIEW=2026-05-28
 # Purpose: Idempotent one-shot migration creating no_trade_events table and indexes in zeus-world.db.
 # Reuse: Verify DDL matches no_trade_events_schema.py and that no_trade_events does not already exist.
 # Authority basis: PHASE_2_ULTRAPLAN.md v3.1 §5.2 (sha 00c2399742); Phase 2 T2 production pass

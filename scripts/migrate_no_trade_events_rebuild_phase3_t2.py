@@ -1,7 +1,6 @@
 # Created: 2026-05-21
 # Last reused or audited: 2026-05-21
 # Authority basis: docs/operations/task_2026-05-21_strategy_vnext_phase3_shoulder/PHASE_3_SHOULDER_PLAN.md §2 T2 + 04_PHASE_3_SHOULDER.md §"Schema impact"
-# WRITER_LOCK_DEFER_REVIEW=2026-05-28
 # Lifecycle: created=2026-05-21; last_reviewed=2026-05-21; last_reused=never
 # Purpose: SCAFFOLD migration for no_trade_events table-rebuild + tail_stress_scenarios creation (Phase 3 T2)
 # Reuse: SCAFFOLD — run() raises NotImplementedError; T2 production pass owns execution; review _ROLLBACK SQL before running
