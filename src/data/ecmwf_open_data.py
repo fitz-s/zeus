@@ -774,7 +774,24 @@ def _write_source_authority_chain(
         data_version=data_version,
     )
     source_run_status, source_run_completeness, partial_run, reason_code = _source_run_outcome(summary, status)
-    observed_member_counts = [_usable_member_count(row.get("members_json")) for row in rows]
+    # source_run.observed_members is the run-level "did we ingest the ensemble"
+    # signal that gates the decision certificate (compiler
+    # _validate_forecast_authority_payload reads source_run_completeness_status).
+    # It MUST aggregate over only the snapshots that contribute to a target
+    # extrema window. Boundary-ambiguous / far-horizon-overflow snapshots are
+    # written as all-null placeholders (contributes_to_target_extrema=0,
+    # forecast_window_attribution_status=AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY);
+    # including them in a min() over ALL rows let a single unfillable Southern-
+    # hemisphere / D+5 window zero out observed_members for the entire global
+    # run, vetoing every per-city certificate even though the contributing
+    # windows each carried the full 51-member ensemble. Per-target member
+    # adequacy is still enforced per-scope below (observed_members_for_scope)
+    # and again by the executable forecast reader's member floor.
+    contributing_rows = [
+        row for row in rows if int(row.get("contributes_to_target_extrema") or 0) == 1
+    ]
+    member_count_rows = contributing_rows if contributing_rows else rows
+    observed_member_counts = [_usable_member_count(row.get("members_json")) for row in member_count_rows]
     observed_members = min(observed_member_counts) if observed_member_counts else 0
     if rows and observed_members < 51 and source_run_status == "SUCCESS":
         source_run_status = "PARTIAL"
