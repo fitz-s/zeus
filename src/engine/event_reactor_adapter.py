@@ -53,7 +53,7 @@ from src.events.opportunity_event import OpportunityEvent
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.riskguard.risk_level import RiskLevel
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
-from src.config import runtime_cities_by_name
+from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 from src.types.market import Bin
@@ -194,6 +194,7 @@ def executable_snapshot_gate_from_trade_conn(
             event,
             condition_ids=condition_ids,
             fresh_at=checked_at,
+            require_fresh=False,  # entry gate proves market identity; price-freshness is enforced at submission
         )
         if not rows:
             return False
@@ -483,6 +484,7 @@ def build_event_bound_no_submit_receipt(
         event,
         condition_ids=family_condition_ids,
         fresh_at=decision_time,
+        require_fresh=False,  # FDR proves family identity/completeness; price-freshness is enforced at submission
     )
     if not family_rows:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING")
@@ -2303,8 +2305,8 @@ def _generate_candidate_proofs(
                 c_cost_95pct=c_cost_95pct,
                 p_fill_lcb=p_fill_lcb,
             )
-            p_value = canonical_p_values[(condition_id, direction)]
-            passed_prefilter = bool(canonical_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
+            p_value = generated_p_values[(condition_id, direction)]
+            passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             proofs.append(
                 _CandidateProof(
                     candidate=candidate,
@@ -2362,8 +2364,11 @@ def _live_yes_probabilities(
     dict[tuple[str, str], bool],
     dict[str, str],
 ]:
+    # 2026-05-30: canonical kernel reconstructed (snapshot fetch + MarketAnalysis assembly +
+    # hypothesis-family scan + evaluate_live_bins). Gated by the acceptance suite in
+    # tests/engine/test_event_reactor_no_bypass.py; SHADOW until #24 bias. See task Break-4.
     if event.event_type == "FORECAST_SNAPSHOT_READY":
-        return _forecast_snapshot_probability_and_fdr_proof(
+        return _canonical_probability_and_fdr_proof(
             event=event,
             family=family,
             conn=conn,
@@ -2372,7 +2377,7 @@ def _live_yes_probabilities(
             decision_time=decision_time,
         )
     if event.event_type == "DAY0_EXTREME_UPDATED":
-        generated = _forecast_snapshot_probability_and_fdr_proof(
+        generated = _canonical_probability_and_fdr_proof(
             event=event,
             family=family,
             conn=conn,
@@ -2382,13 +2387,13 @@ def _live_yes_probabilities(
             decision_time=decision_time,
         )
         q_by_condition, lcb_by_condition, p_values, prefilter, evidence = generated
-        masked_q, masked_lcb, masked_p_values, masked_prefilter = _apply_day0_mask_to_generated_probabilities(
+        masked_q, masked_lcb = _apply_day0_mask_to_generated_probabilities(
             payload=payload,
             family=family,
             q_by_condition=q_by_condition,
             lcb_by_condition=lcb_by_condition,
         )
-        return masked_q, masked_lcb, masked_p_values, masked_prefilter, {
+        return masked_q, masked_lcb, p_values, prefilter, {
             **evidence,
             "p_live_vector_hash": _probability_vector_hash(
                 masked_q[str(candidate.condition_id or "")]
@@ -2481,6 +2486,7 @@ def _canonical_probability_and_fdr_proof(
         decision_time=decision_time,
     )
     from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
+    from src.config import edge_n_bootstrap
 
     hypotheses = scan_full_hypothesis_family(analysis, n_bootstrap=edge_n_bootstrap())
     hypothesis_by_label_direction = {
@@ -2491,28 +2497,46 @@ def _canonical_probability_and_fdr_proof(
     lcb_by_direction: dict[tuple[str, str], float] = {}
     p_values: dict[tuple[str, str], float] = {}
     prefilter: dict[tuple[str, str], bool] = {}
-    # STUB: probability_rows and hypothesis_rows are placeholders pending canonical
-    # DB-backed row fetch implementation. Initialized empty so the loop raises
-    # ValueError fail-closed rather than NameError.
-    probability_rows: dict = {}
-    hypothesis_rows: dict = {}
-    for candidate in family.candidates:
+    # Live FDR truth comes from the family hypothesis scan above (the same
+    # scan_full_hypothesis_family / FullFamilyHypothesis the legacy evaluator uses),
+    # keyed by (range_label, direction). Each hypothesis carries p_posterior (calibrated
+    # forecast probability), bootstrap p_value, ci_lower, and prefilter. We read those
+    # directly — no DB selection-fact round-trip — fail-closed if any bin/direction is absent.
+    p_market_yes_vec = np.asarray(analysis.p_market, dtype=float)
+    p_market_no_vec = np.asarray(analysis.p_market_no, dtype=float)
+    p_posterior_vec = np.asarray(analysis.p_posterior, dtype=float)
+    for index, candidate in enumerate(family.candidates):
         condition_id = str(candidate.condition_id or "")
         range_label = candidate.bin.label
-        yes_probability = probability_rows.get((range_label, "buy_yes"))
-        yes_hypothesis = hypothesis_rows.get((range_label, "buy_yes"))
-        if yes_probability is None:
-            raise ValueError(f"canonical probability_trace_fact missing buy_yes row for {range_label}")
-        if yes_hypothesis is None or yes_hypothesis.get("ci_lower") is None:
-            raise ValueError(f"canonical selection_hypothesis_fact missing buy_yes CI row for {range_label}")
-        q_by_condition[condition_id] = float(yes_probability["p_posterior"])
+        # q-posterior is defined for EVERY bin from the calibrated forecast (market-independent),
+        # so the full MECE family prior is always complete even for bins with no executable quote.
+        yes_posterior = float(p_posterior_vec[index])
+        q_by_condition[condition_id] = yes_posterior
+        # The hypothesis bootstrap returns the EDGE CI (percentile of p_posterior - c_b). The
+        # robust trade score consumes q's LOWER bound in probability space (it subtracts the cost
+        # itself). Because c_b is fixed in the bootstrap, percentile(p_post - c_b) =
+        # percentile(p_post) - c_b, so q_lcb = edge_lcb + c_b. Restore probability space here; the
+        # FDR keeps using edge-space p_value + prefilter (which already encode edge_lcb>0).
+        cost_by_direction = {
+            "buy_yes": float(p_market_yes_vec[index]),
+            "buy_no": float(p_market_no_vec[index]),
+        }
         for direction in ("buy_yes", "buy_no"):
-            row = hypothesis_rows.get((range_label, direction))
-            if row is None or row.get("p_value") is None or row.get("ci_lower") is None:
-                raise ValueError(f"canonical selection_hypothesis_fact missing {direction} p_value/CI for {range_label}")
-            p_values[(condition_id, direction)] = float(row["p_value"])
-            lcb_by_direction[(condition_id, direction)] = float(row["ci_lower"])
-            prefilter[(condition_id, direction)] = bool(row.get("passed_prefilter"))
+            hyp = hypothesis_by_label_direction.get((range_label, direction))
+            if hyp is not None and hyp.p_value is not None and hyp.ci_lower is not None:
+                p_values[(condition_id, direction)] = float(hyp.p_value)
+                lcb_by_direction[(condition_id, direction)] = float(hyp.ci_lower) + cost_by_direction[direction]
+                prefilter[(condition_id, direction)] = bool(hyp.passed_prefilter)
+            else:
+                # scan_full_hypothesis_family omits a direction when that side has no executable
+                # market (bin skipped entirely if YES non-executable; buy_no omitted if NO side
+                # non-executable). Emit neutral, non-actionable values: the direction is then
+                # rejected downstream by the missing native execution price
+                # (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed raise.
+                q_point = yes_posterior if direction == "buy_yes" else (1.0 - yes_posterior)
+                p_values[(condition_id, direction)] = 1.0
+                lcb_by_direction[(condition_id, direction)] = q_point
+                prefilter[(condition_id, direction)] = False
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
 
     prior = tuple(max(q_by_condition[str(candidate.condition_id or "")], 1e-9) for candidate in family.candidates)
@@ -2537,7 +2561,7 @@ def _canonical_probability_and_fdr_proof(
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 
-def _canonical_probability_rows(
+def _forecast_snapshot_row_for_event(
     conn: sqlite3.Connection,
     *,
     event: OpportunityEvent,
@@ -2545,11 +2569,17 @@ def _canonical_probability_rows(
     allow_latest: bool,
     decision_time: datetime,
 ) -> dict[str, Any] | None:
+    """Fetch the causal (or, for Day0, latest-available) ensemble_snapshots row for a family.
+
+    ``allow_latest`` selects the latest available snapshot (Day0 base) rather than the exact
+    causal snapshot bound by the event. Returns the row as a dict, or None if the authority
+    table/columns are absent. Raises (fail-closed) if the forecast reader block-reason fires.
+    """
     table_ref = _authority_table_ref(conn, "ensemble_snapshots")
     if table_ref is None:
-        raise ValueError("canonical probability_trace_fact table missing")
+        raise ValueError("ensemble_snapshots authority table missing for event-bound inference")
     columns = _table_ref_columns(conn, table_ref)
-    required = {"city", "target_date", "range_label", "direction", "p_posterior"}
+    required = {"city", "target_date", "temperature_metric", "snapshot_id"}
     if not required.issubset(columns):
         return None
     predicates = ["city = ?", "target_date = ?", "temperature_metric = ?"]
@@ -2557,10 +2587,7 @@ def _canonical_probability_rows(
     if not allow_latest:
         predicates.append("CAST(snapshot_id AS TEXT) = ?")
         params.append(str(event.causal_snapshot_id or ""))
-        if "available_at" in columns:
-            predicates.append("available_at <= ?")
-            params.append(decision_time.astimezone(UTC).isoformat())
-    elif "available_at" in columns:
+    if "available_at" in columns:
         predicates.append("available_at <= ?")
         params.append(decision_time.astimezone(UTC).isoformat())
     if "authority" in columns:
@@ -2572,17 +2599,19 @@ def _canonical_probability_rows(
     order_field = "available_at" if "available_at" in columns else "snapshot_id"
     cur = conn.execute(
         f"""
-        SELECT {', '.join(select_fields)}
+        SELECT *
         FROM {table_ref}
         WHERE {' AND '.join(predicates)}
-          AND direction IN ('buy_yes', 'buy_no')
-        ORDER BY recorded_at DESC
+        ORDER BY {order_field} DESC
         """,
         tuple(params),
     )
+    row = cur.fetchone()
+    if row is None:
+        return None
     names = [description[0] for description in cur.description]
     snapshot = {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
-    reason = _forecast_snapshot_reader_block_reason(
+    reason, elected_snapshot_id = _forecast_snapshot_reader_block_reason(
         conn,
         snapshot=snapshot,
         event=event,
@@ -2592,11 +2621,30 @@ def _canonical_probability_rows(
     )
     if reason is not None:
         raise ValueError(reason)
+    # Compute inference on the reader-ELECTED executable snapshot (the single forecast
+    # authority), not the causal-pinned seed. The causal snapshot triggers the event but its
+    # source_run may still be re-ingesting members (captured_at advances past the decision
+    # moment), so the reader's causality gate legitimately drops it and elects the freshest
+    # fully-captured FULL_CONTRIBUTOR (often an earlier cycle). Returning that row — instead of
+    # asserting reader==causal — dissolves the permanent FORECAST_READER_SNAPSHOT_MISMATCH leak.
+    # causal_snapshot_id stays as event provenance.
+    if elected_snapshot_id is not None and _nonnull(snapshot.get("snapshot_id")) != _nonnull(elected_snapshot_id):
+        cur = conn.execute(
+            f"SELECT * FROM {table_ref} WHERE CAST(snapshot_id AS TEXT) = ?",
+            (str(elected_snapshot_id),),
+        )
+        elected_row = cur.fetchone()
+        if elected_row is not None:
+            names = [description[0] for description in cur.description]
+            return (
+                {name: elected_row[name] for name in names}
+                if isinstance(elected_row, sqlite3.Row)
+                else dict(zip(names, elected_row))
+            )
     return snapshot
 
 
-def _canonical_hypothesis_rows(
-    conn: sqlite3.Connection,
+def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
     snapshot: dict[str, Any],
@@ -2606,6 +2654,7 @@ def _canonical_hypothesis_rows(
     decision_time: datetime | None,
 ) -> MarketAnalysis:
     from src.strategy.market_analysis import MarketAnalysis
+    from src.config import settings
 
     bins = list(family.bins)
     members = _snapshot_members(snapshot)
@@ -2666,14 +2715,6 @@ def _canonical_hypothesis_rows(
         bootstrap_probability_sampler=sampler,
         bootstrap_signal_type="edli_event_bound_day0" if family.event_type == "DAY0_EXTREME_UPDATED" else "edli_event_bound_forecast",
     )
-    names = [description[0] for description in cur.description]
-    out: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in cur.fetchall():
-        item = {name: row[name] for name in names} if isinstance(row, sqlite3.Row) else dict(zip(names, row))
-        key = (_nonnull(item.get("range_label")), _nonnull(item.get("direction")))
-        if key[0] and key[1] and key not in out:
-            out[key] = item
-    return out
 
 
 def _snapshot_members(snapshot: dict[str, Any]) -> np.ndarray:
@@ -2838,6 +2879,48 @@ def _members_extrema_transform(metric: object) -> str:
     raise ValueError("FORECAST_MEMBERS_METRIC_IDENTITY_MISSING")
 
 
+def _day0_absorbing_mask(*, payload: dict[str, object], family) -> "np.ndarray":
+    """Absorbing-boundary mask over family bins for a Day0 observed extreme.
+
+    A bin is zeroed when the observed rounded extreme already rules it out:
+    for ``high`` the observed max exceeds the bin's upper edge; for ``low`` the observed
+    min falls below the bin's lower edge. Shoulder bins (open-ended edge) are retained.
+    """
+    rounded = _optional_float(payload.get("rounded_value"))
+    if rounded is None:
+        raise ValueError("Day0 event missing rounded_value")
+    metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
+    mask = np.ones(len(family.candidates), dtype=float)
+    for index, candidate in enumerate(family.candidates):
+        bin_value = candidate.bin
+        if metric == "high":
+            if bin_value.high is not None and rounded > float(bin_value.high):
+                mask[index] = 0.0
+        elif metric == "low":
+            if bin_value.low is not None and rounded < float(bin_value.low):
+                mask[index] = 0.0
+        else:
+            raise ValueError(f"unsupported Day0 metric: {metric}")
+    return mask
+
+
+def _apply_day0_mask_to_probability_vector(*, payload: dict[str, object], family, vector) -> "np.ndarray":
+    """Apply the Day0 absorbing-boundary mask to a probability vector and renormalize.
+
+    Used pre-inference on p_raw / p_cal so the calibrated forecast respects the observed
+    extreme before posterior + hypothesis construction. If the mask eliminates all support
+    (degenerate observation) the unmasked vector is returned unchanged rather than dividing
+    by zero — the downstream gates then reject on absent edge.
+    """
+    arr = np.asarray(vector, dtype=float)
+    mask = _day0_absorbing_mask(payload=payload, family=family)
+    masked = arr * mask
+    total = float(masked.sum())
+    if total <= 0.0:
+        return arr
+    return masked / total
+
+
 def _apply_day0_mask_to_generated_probabilities(
     *,
     payload: dict[str, object],
@@ -2931,15 +3014,31 @@ def _latest_snapshot_rows_for_event_family(
     *,
     condition_ids: tuple[str, ...],
     fresh_at: datetime | None = None,
+    require_fresh: bool = True,
 ) -> list[dict[str, Any]]:
+    """Latest executable snapshot row per family condition_id.
+
+    ``require_fresh`` controls whether the 30s PRICE-freshness window
+    (``freshness_deadline``) is applied. The entry/FDR family-completeness gate proves
+    MARKET IDENTITY (a snapshot row exists for every MECE sibling), which does not decay
+    with price age — once a market is captured it does not "disappear". A full family is
+    captured bin-by-bin and can span >30s, so applying the price window here would drop
+    early-captured siblings and make large-family decisions structurally impossible. Callers
+    proving identity pass ``require_fresh=False``; PRICE-freshness for the actually-traded
+    selected bin is enforced at submission (``assert_snapshot_executable``). Operator design
+    law 2026-05-30: "freshness 针对价格不针对市场; 市场捕捉了不会突然消失."
+    """
     if not _table_exists(trade_conn, "executable_market_snapshots"):
         return []
     columns = _table_columns(trade_conn, "executable_market_snapshots")
     clean_condition_ids = tuple(condition_id for condition_id in condition_ids if condition_id)
     if not clean_condition_ids or "condition_id" not in columns:
         return []
-    predicates = ["freshness_deadline >= ?"]
-    params: list[object] = [(fresh_at or datetime.now(UTC)).isoformat()]
+    predicates: list[str] = []
+    params: list[object] = []
+    if require_fresh:
+        predicates.append("freshness_deadline >= ?")
+        params.append((fresh_at or datetime.now(UTC)).isoformat())
     placeholders = ",".join("?" for _ in clean_condition_ids)
     predicates.append(f"condition_id IN ({placeholders})")
     params.extend(clean_condition_ids)
@@ -3026,11 +3125,36 @@ def _topology_candidate_from_market_event(
     )
 
 
+def _settlement_unit_for_payload_city(payload: dict[str, object]) -> str:
+    """Authoritative settlement unit for the payload's city.
+
+    The unit is CARRIED from the city settlement contract (``SettlementSemantics`` — the same
+    authority p_raw uses), never inferred from the market label or blindly defaulted to 'F'.
+    market_events has no unit column, so defaulting a missing payload unit to 'F' silently
+    mislabelled every Celsius-city bin and failed closed on EVENT_BOUND_MARKET_TOPOLOGY_INVALID
+    ('… is Celsius but unit=F'). Falls back to an explicit payload unit only when the city is
+    unknown, then 'F'. The Bin label cross-check remains the fail-closed guard if config and
+    market label ever disagree. Data-provenance law (Fitz #4): authority over default.
+    """
+    city_name = _nonnull(payload.get("city"))
+    if city_name:
+        try:
+            from src.config import runtime_cities_by_name
+            from src.contracts.settlement_semantics import SettlementSemantics
+
+            city_obj = runtime_cities_by_name().get(city_name)
+            if city_obj is not None:
+                return SettlementSemantics.for_city(city_obj).measurement_unit
+        except Exception:
+            pass
+    return _nonnull(payload.get("unit") or payload.get("temperature_unit") or "F")
+
+
 def _bin_from_market_event(row: dict[str, Any], payload: dict[str, object]) -> Bin:
     label = _nonnull(row.get("range_label") or row.get("outcome") or payload.get("bin_label") or payload.get("outcome_label"))
     low = row.get("range_low")
     high = row.get("range_high")
-    unit = _nonnull(payload.get("unit") or payload.get("temperature_unit") or "F")
+    unit = _settlement_unit_for_payload_city(payload)
     if isinstance(low, (int, float)) or isinstance(high, (int, float)):
         return Bin(
             low=float(low) if isinstance(low, (int, float)) else None,
@@ -3260,6 +3384,14 @@ def _runtime_bankroll_usd(*, cached_only: bool = False) -> float:
         if cached_only and hasattr(bankroll_provider, "cached")
         else bankroll_provider.current()
     )
+    if bankroll is None and cached_only:
+        # Cache cold (the cycle-level warm hasn't populated the in-process cache yet,
+        # e.g. the daemon's long-lived client lost API-key auth on the warm call). A
+        # read-only on-chain BALANCE fetch is NOT an order side-effect, so do one here
+        # to fail-OPEN on availability rather than fail-closed on a transient warm miss.
+        # current() also repopulates the module cache, so later same-cycle proofs hit
+        # cached() without re-fetching.
+        bankroll = bankroll_provider.current()
     if bankroll is None:
         raise ValueError("bankroll_provider_unavailable")
     if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
@@ -3537,19 +3669,20 @@ def _forecast_snapshot_reader_block_reason(
     family,
     allow_latest: bool,
     decision_time: datetime,
-) -> str | None:
+) -> tuple[str | None, str | None]:
+    """Return ``(reason, elected_snapshot_id)`` — see _executable_forecast_reader_authority_block_reason."""
     if event.event_type not in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}:
-        return None
+        return None, None
     source_run_id = _nonnull(snapshot.get("source_run_id") or _payload(event).get("source_run_id"))
     if not source_run_id:
-        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_id_missing"
+        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_id_missing", None
     source_run_table = _authority_table_ref(conn, "source_run")
     coverage_table = _authority_table_ref(conn, "source_run_coverage")
     if source_run_table is None or coverage_table is None:
-        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_authority_missing"
+        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_authority_missing", None
     source_run = _row_by_id(conn, source_run_table, "source_run_id", source_run_id)
     if source_run is None:
-        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_missing"
+        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:source_run_missing", None
     coverage = _coverage_row_for_snapshot(
         conn,
         coverage_table,
@@ -3558,8 +3691,8 @@ def _forecast_snapshot_reader_block_reason(
         snapshot=snapshot,
     )
     if coverage is None:
-        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:coverage_missing"
-    reader_reason = _executable_forecast_reader_authority_block_reason(
+        return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:coverage_missing", None
+    return _executable_forecast_reader_authority_block_reason(
         conn,
         snapshot=snapshot,
         source_run=source_run,
@@ -3569,9 +3702,6 @@ def _forecast_snapshot_reader_block_reason(
         allow_latest=allow_latest,
         decision_time=decision_time,
     )
-    if reader_reason is not None:
-        return reader_reason
-    return None
 
 
 def _executable_forecast_reader_authority_block_reason(
@@ -3584,8 +3714,19 @@ def _executable_forecast_reader_authority_block_reason(
     family,
     allow_latest: bool,
     decision_time: datetime,
-) -> str | None:
-    """Revalidate forecast eligibility through the canonical executable reader."""
+) -> tuple[str | None, str | None]:
+    """Revalidate forecast eligibility through the canonical executable reader.
+
+    Returns ``(reason, elected_snapshot_id)``. On success ``reason`` is None and
+    ``elected_snapshot_id`` is the snapshot the canonical reader ELECTS as the
+    executable forecast for this scope — which may differ from the event's causal
+    (trigger) snapshot when the causal cycle's source_run is still re-ingesting
+    members (captured_at advances past the decision moment) and the reader's
+    causality gate drops it in favour of the freshest fully-captured
+    FULL_CONTRIBUTOR. The caller computes inference on the elected row;
+    causal_snapshot_id remains provenance only. On block, ``reason`` is the
+    BLOCKED reason code and elected id is None.
+    """
 
     try:
         from src.data.executable_forecast_reader import SOURCE_TRANSPORT, read_executable_forecast
@@ -3605,7 +3746,7 @@ def _executable_forecast_reader_authority_block_reason(
             or not track
             or not condition_id
         ):
-            return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:scope_incomplete"
+            return "FORECAST_READER_SCOPE_CONSTRUCTION_MISSING:scope_incomplete", None
         result = read_executable_forecast(
             conn,
             city_id=str(coverage.get("city_id") or family.city),
@@ -3624,15 +3765,18 @@ def _executable_forecast_reader_authority_block_reason(
             require_entry_readiness=False,
         )
     except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
-        return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{exc}"
+        return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{exc}", None
     if not result.ok or result.bundle is None:
-        return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{result.reason_code}"
-    selected_snapshot_id = _nonnull(snapshot.get("snapshot_id"))
-    if _nonnull(result.bundle.snapshot.snapshot_id) != selected_snapshot_id:
-        return "FORECAST_READER_SNAPSHOT_MISMATCH"
-    if not allow_latest and _nonnull(event.causal_snapshot_id) != selected_snapshot_id:
-        return "FORECAST_READER_CAUSAL_SNAPSHOT_MISMATCH"
-    return None
+        return f"FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:{result.reason_code}", None
+    # SINGLE SNAPSHOT AUTHORITY: honour the reader's elected executable snapshot rather than
+    # asserting it equals the reactor's causal-pinned selection. The causal snapshot triggers
+    # the event but its source_run may still be re-ingesting members (captured_at advances past
+    # the decision moment), so the causality gate legitimately drops it and the reader elects
+    # the freshest fully-captured FULL_CONTRIBUTOR (often an earlier cycle). The prior
+    # assertion produced a permanent FORECAST_READER_SNAPSHOT_MISMATCH leak (decision_events=0)
+    # whenever the causal cycle was still ingesting. Elected snapshot = executable authority;
+    # causal_snapshot_id stays provenance only.
+    return None, _nonnull(result.bundle.snapshot.snapshot_id)
 
 
 def _row_by_id(conn: sqlite3.Connection, table_ref: str, id_col: str, value: str) -> dict[str, Any] | None:

@@ -518,6 +518,14 @@ def ingest_json_file(
     payload = snapshot.to_json_dict()
 
     data_version = str(payload.get("data_version", ""))
+    # #38 / #362 version-eradication: OpenData extracted JSON artifacts carry the
+    # legacy ``_v1`` suffix on ecmwf_opendata data_versions, but #362 dropped ``_v1``
+    # from the canonical allowlist (same data, redundant version tag). Normalize
+    # before the NC-12 guard so post-#362 ingest accepts pre-existing and freshly
+    # extracted artifacts without a full re-extract. TIGGE ``_v1`` is unaffected.
+    if data_version.startswith("ecmwf_opendata_") and data_version.endswith("_v1"):
+        data_version = data_version[:-3]
+        payload["data_version"] = data_version
     # NC-12: guard must fire before INSERT
     assert_data_version_allowed(data_version, context="ingest_grib_to_snapshots")
 

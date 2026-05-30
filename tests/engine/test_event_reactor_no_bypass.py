@@ -120,7 +120,7 @@ def _convert_fixture_to_low_extrema(conn: sqlite3.Connection) -> None:
         UPDATE source_run
         SET temperature_metric = 'low',
             observation_field = 'low_temp',
-            data_version = ?,
+            dataset_id = ?,
             physical_quantity = 'temperature'
         WHERE source_run_id = 'run-1'
         """,
@@ -154,7 +154,7 @@ def _convert_fixture_to_low_extrema(conn: sqlite3.Connection) -> None:
             members_json = ?,
             p_raw_json = ?,
             p_cal_json = ?,
-            data_version = ?
+            dataset_id = ?
         WHERE snapshot_id = '1'
         """,
         (
@@ -376,7 +376,7 @@ def _trade_conn_with_snapshot(
             fetch_time TEXT,
             manifest_hash TEXT,
             lead_hours REAL,
-            data_version TEXT,
+            dataset_id TEXT,
             local_day_start_utc TEXT,
             step_horizon_hours REAL,
             first_member_observed_time TEXT,
@@ -546,7 +546,7 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             temperature_metric TEXT,
             physical_quantity TEXT,
             observation_field TEXT,
-            data_version TEXT,
+            dataset_id TEXT,
             expected_members INTEGER,
             observed_members INTEGER,
             expected_steps_json TEXT NOT NULL DEFAULT '[]',
@@ -639,7 +639,7 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             source_cycle_time, source_issue_time, source_release_time, source_available_at,
             fetch_started_at, fetch_finished_at, captured_at, imported_at,
             valid_time_start, valid_time_end, target_local_date, city_id, city_timezone,
-            temperature_metric, physical_quantity, observation_field, data_version,
+            temperature_metric, physical_quantity, observation_field, dataset_id,
             expected_members, observed_members, expected_steps_json, observed_steps_json,
             expected_count, observed_count, completeness_status, partial_run,
             raw_payload_hash, manifest_hash, status, reason_code
@@ -826,7 +826,6 @@ def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
     assert edli_trade_score_gate(event) is True
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_runtime_receipt_uses_event_bound_final_intent_contract():
     event = _bound_forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot())
@@ -877,7 +876,6 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
     event = _forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot())
@@ -892,7 +890,6 @@ def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_recei
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_certificate_rejects_calibration_artifact_available_after_decision():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -917,7 +914,6 @@ def test_certificate_rejects_calibration_artifact_available_after_decision():
     assert "calibration.training_cutoff after decision_time" in (result.failures[0].reason_detail or "")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -931,7 +927,6 @@ def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
     assert receipt.decision_proof_bundle.market_topology.clock.source_available_at.isoformat() != event.available_at
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_topology_persisted_after_decision_blocks_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -949,7 +944,6 @@ def test_topology_persisted_after_decision_blocks_certificate():
     assert "source_available_at after decision_time" in (result.failures[0].reason_detail or "")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_topology_clock_missing_blocks_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -959,7 +953,6 @@ def test_topology_clock_missing_blocks_certificate():
         _receipt(event, conn, decision_time=DECISION_TIME)
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_adapter_source_truth_status_comes_from_forecast_authority():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -983,7 +976,6 @@ def test_market_events_authority_rows_have_topology_clock_fields():
     assert "created_at" in columns
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_no_submit_receipt_succeeds_with_production_market_events_clock_shape():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -996,7 +988,6 @@ def test_no_submit_receipt_succeeds_with_production_market_events_clock_shape():
     assert receipt.decision_proof_bundle.market_topology.clock.persisted_at.isoformat() == "2026-05-24T08:11:00+00:00"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1006,7 +997,6 @@ def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
         _receipt(event, conn, decision_time=DECISION_TIME)
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_cost_model_certificate_records_native_cost_source():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1019,7 +1009,6 @@ def test_cost_model_certificate_records_native_cost_source():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["cost_source"] == "native_orderbook_ask"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_certificate_records_members_json_hash_and_window_authority():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1038,7 +1027,6 @@ def test_forecast_certificate_records_members_json_hash_and_window_authority():
     assert forecast["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_high_forecast_snapshot_members_json_is_daily_max_extrema():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1056,7 +1044,6 @@ def test_high_forecast_snapshot_members_json_is_daily_max_extrema():
     )
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_low_forecast_snapshot_members_json_is_daily_min_extrema():
     event = _low_bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1075,7 +1062,6 @@ def test_low_forecast_snapshot_members_json_is_daily_min_extrema():
     )
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_event_bound_low_uses_low_extrema_members_not_raw_hourly_or_max_members():
     event = _low_bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1122,7 +1108,6 @@ def test_adapter_does_not_synthesize_forecast_applied_validations():
     assert "FORECAST_AUTHORITY_VALIDATIONS_MISSING" in forecast_section
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_adapter_rejects_empty_reader_applied_validations(monkeypatch):
     from src.data import executable_forecast_reader
 
@@ -1170,7 +1155,6 @@ def test_adapter_rejects_empty_reader_applied_validations(monkeypatch):
         _receipt(event, conn, decision_time=DECISION_TIME)
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_family_closure_clock_missing_blocks_certificate():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1312,13 +1296,49 @@ def test_edli_p_cal_matches_existing_evaluator_platt_path_for_same_snapshot_and_
     np.testing.assert_allclose(edli_p_cal, expected, rtol=0.0, atol=0.0)
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_family_candidates_use_market_event_range_bounds_not_payload_default():
     event = _forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot())
 
     assert receipt.bin_label == "70-71°F"
     assert receipt.bin_label != "0-1°F"
+
+
+def test_bin_from_market_event_carries_celsius_unit_from_city_settlement_authority():
+    """Bin unit is CARRIED from the city settlement authority, never defaulted to 'F'
+    (data-provenance law 2026-05-30).
+
+    market_events has no unit column — the unit lives in the city's SettlementSemantics
+    (the same authority p_raw uses) and is echoed in the market label (°C/°F). Defaulting a
+    missing payload unit to 'F' made every Celsius-city candidate fail closed with
+    EVENT_BOUND_MARKET_TOPOLOGY_INVALID ('… is Celsius but unit=F'). The Bin must carry the
+    city's true settlement unit; the label cross-check in Bin remains the fail-closed guard.
+    """
+    from src.engine.event_reactor_adapter import _bin_from_market_event
+
+    # Celsius city (Wuhan), market "26°C or below" shoulder bin, NO unit in payload.
+    row = {
+        "range_label": "Will the highest temperature in Wuhan be 26°C or below on May 31?",
+        "range_low": None,
+        "range_high": 26.0,
+    }
+    payload = {"city": "Wuhan", "metric": "high"}
+
+    bin_obj = _bin_from_market_event(row, payload)
+
+    assert bin_obj.unit == "C"  # carried from city settlement authority, NOT defaulted to 'F'
+
+
+def test_bin_from_market_event_carries_fahrenheit_unit_for_usa_city():
+    """Fahrenheit cities keep unit 'F' from the same city settlement authority (no regression)."""
+    from src.engine.event_reactor_adapter import _bin_from_market_event
+
+    row = {"range_label": "70-71°F", "range_low": 70.0, "range_high": 71.0}
+    payload = {"city": "Chicago", "metric": "high"}
+
+    bin_obj = _bin_from_market_event(row, payload)
+
+    assert bin_obj.unit == "F"
 
 
 def test_missing_market_topology_range_blocks_no_submit_receipt():
@@ -1332,7 +1352,6 @@ def test_missing_market_topology_range_blocks_no_submit_receipt():
     assert receipt.reason == "EVENT_BOUND_MARKET_TOPOLOGY_INVALID:market topology bin range missing"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_selected_snapshot_row_not_first_still_binds_matching_candidate():
     event = _bound_forecast_event(token_id="yes-2")
     receipt = _receipt(event, _trade_conn_with_snapshot())
@@ -1342,7 +1361,6 @@ def test_selected_snapshot_row_not_first_still_binds_matching_candidate():
     assert receipt.bin_label == "71-72°F"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask():
     event = _bound_forecast_event(token_id="no-1")
     receipt = _receipt(event, _trade_conn_with_snapshot(selected_ask="0.10", no_selected_ask="0.80"))
@@ -1355,7 +1373,6 @@ def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask():
     assert receipt.reason == "TRADE_SCORE_NON_POSITIVE"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists():
     event = _bound_forecast_event(token_id="no-1")
     conn = _trade_conn_with_snapshot()
@@ -1384,7 +1401,6 @@ def test_runtime_receipt_rejects_when_family_topology_has_missing_sibling_snapsh
     assert receipt.family_complete is False
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_runtime_receipt_generates_fdr_from_family_not_event_payload():
     event = _bound_forecast_event()
     payload = json.loads(event.payload_json)
@@ -1397,7 +1413,6 @@ def test_runtime_receipt_generates_fdr_from_family_not_event_payload():
     assert receipt.reason != "FDR_FULL_FAMILY_PROOF_MISSING"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1414,7 +1429,6 @@ def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
     assert receipt.fdr_hypothesis_count == 4
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_receipt_uses_separate_forecast_authority_connection():
     event = _bound_forecast_event()
     trade_conn = _trade_conn_with_snapshot()
@@ -1444,7 +1458,16 @@ def test_executable_snapshot_gate_uses_forecast_topology_authority_connection():
     assert gate(event, DECISION_TIME) is True
 
 
-def test_executable_snapshot_gate_uses_reactor_decision_time_not_construction_clock():
+def test_executable_snapshot_gate_ignores_price_freshness_window_binds_identity():
+    """Entry gate binds market IDENTITY, not the 30s price window (operator law 2026-05-30:
+    "freshness 针对价格不针对市场; 市场捕捉了不会突然消失").
+
+    Supersedes the prior decision-time-vs-construction-clock freshness contract. That contract
+    rejected a captured family once its price window lapsed, which structurally halted
+    large-family decisions (a full MECE family captures bin-by-bin over >30s, so early bins
+    always lapse before the last is captured). Price-freshness for the actually-traded selected
+    bin is now enforced only at submission (assert_snapshot_executable).
+    """
     event = _bound_forecast_event()
     trade_conn = _trade_conn_with_snapshot()
     forecast_conn = _trade_conn_with_snapshot()
@@ -1457,8 +1480,39 @@ def test_executable_snapshot_gate_uses_reactor_decision_time_not_construction_cl
         now=datetime(2026, 5, 24, 9, 0, tzinfo=timezone.utc),
     )
 
+    # Identity persists regardless of where the decision clock sits relative to the (now
+    # submission-only) price window — passes both before AND after the lapsed deadline.
     assert gate(event, datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)) is True
-    assert gate(event, datetime(2026, 5, 24, 8, 13, tzinfo=timezone.utc)) is False
+    assert gate(event, datetime(2026, 5, 24, 8, 13, tzinfo=timezone.utc)) is True
+
+
+def test_entry_gate_binds_on_identity_not_price_freshness_across_slow_family_capture():
+    """RELATIONSHIP (capture -> entry/FDR gate -> submission).
+
+    Operator design law 2026-05-30: "freshness 针对价格不针对市场; 市场捕捉了不会突然消失."
+    A MECE family is captured bin-by-bin; a full family (tens of bins) takes >30s, so by
+    the time the last bin is captured the early bins' price-freshness window
+    (captured_at + FRESHNESS_WINDOW_DEFAULT) has already expired. The entry/FDR gate proves
+    MARKET IDENTITY/family-completeness (a snapshot row exists for every sibling
+    condition_id), which does NOT decay with price age. PRICE-freshness is a property of the
+    SELECTED bin's tradeable cost and is enforced ONLY at submission
+    (assert_snapshot_executable). Binding the entry gate on a 30s price window made
+    large-family decisions structurally impossible (decision_events stuck at 0).
+    """
+    event = _bound_forecast_event()
+    trade_conn = _trade_conn_with_snapshot()
+    forecast_conn = _trade_conn_with_snapshot()
+    forecast_conn.execute("DROP TABLE executable_market_snapshots")
+    trade_conn.execute("DROP TABLE market_events")
+    # Whole family present (identity intact) but EVERY bin price-stale relative to the
+    # decision clock — simulates a >30s full-family capture where early bins expired.
+    trade_conn.execute(
+        "UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:11:00+00:00'"
+    )
+    gate = executable_snapshot_gate_from_trade_conn(trade_conn, topology_conn=forecast_conn)
+
+    # NEW invariant: identity present for the full family -> gate PASSES regardless of price age.
+    assert gate(event, datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)) is True
 
 
 def test_executable_snapshot_gate_requires_topology_authority_connection():
@@ -1503,7 +1557,6 @@ def test_receipt_requires_explicit_forecast_and_topology_authority_connections()
     assert missing_calibration.reason == "CALIBRATION_AUTHORITY_CONNECTION_MISSING"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_missing_calibration_authority_blocks_receipt():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1515,7 +1568,6 @@ def test_missing_calibration_authority_blocks_receipt():
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_receipt_uses_world_calibration_authority_not_forecast_conn():
     event = _bound_forecast_event()
     trade_conn = _trade_conn_with_snapshot()
@@ -1541,7 +1593,6 @@ def test_receipt_uses_world_calibration_authority_not_forecast_conn():
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_conn_fake_platt_model_is_not_calibration_authority():
     event = _bound_forecast_event()
     trade_conn = _trade_conn_with_snapshot()
@@ -1566,7 +1617,6 @@ def test_forecast_conn_fake_platt_model_is_not_calibration_authority():
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_p_cal_json_without_authority_does_not_authorize_without_calibrator():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1578,7 +1628,6 @@ def test_p_cal_json_without_authority_does_not_authorize_without_calibrator():
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_exists():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1590,7 +1639,6 @@ def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_e
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_adapter_surfaces_reader_block_after_event_emit(monkeypatch):
     from types import SimpleNamespace
 
@@ -1611,32 +1659,62 @@ def test_adapter_surfaces_reader_block_after_event_emit(monkeypatch):
     assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READINESS_BLOCKED" in receipt.reason
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
-def test_adapter_uses_reader_snapshot_id_as_authority(monkeypatch):
+def test_adapter_computes_on_reader_elected_snapshot_not_causal_pin(monkeypatch):
+    """RELATIONSHIP: the reactor computes inference on the executable-forecast reader's
+    ELECTED snapshot, never on the causal-pinned seed with an equality assertion.
+
+    The causal snapshot triggers the event, but when its source_run is still re-ingesting
+    members (captured_at advances past the decision moment) the reader's causality gate drops
+    it and elects a different fully-captured FULL_CONTRIBUTOR. The prior code pinned inference
+    to the causal snapshot and asserted reader==causal, raising FORECAST_READER_SNAPSHOT_MISMATCH
+    on every re-ingestion race — the permanent decision_events=0 leak. The reactor must instead
+    return the reader-elected snapshot row (causal_snapshot_id stays provenance only).
+    """
     from types import SimpleNamespace
 
     from src.data import executable_forecast_reader
+    from src.engine.event_reactor_adapter import _forecast_snapshot_row_for_event
 
-    event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE source_run_coverage SET snapshot_ids_json = '[\"other-snapshot\"]'")
+    # A second valid snapshot ('2') for the SAME family — the executable authority the reader
+    # elects when the causal seed ('1') is still ingesting. Clone '1' so it passes every
+    # authority/causality/boundary predicate, then re-key to '2'.
+    cols = [str(r[1]) for r in conn.execute("PRAGMA table_info(ensemble_snapshots)").fetchall()]
+    seed = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id='1'").fetchone())
+    seed["snapshot_id"] = "2"
+    conn.execute(
+        f"INSERT INTO ensemble_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+        [seed[c] for c in cols],
+    )
+    event = _bound_forecast_event()
+    family = SimpleNamespace(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        family_id="run-1",
+        condition_ids=["condition-1"],
+        candidates=[],
+    )
     monkeypatch.setattr(
         executable_forecast_reader,
         "read_executable_forecast",
         lambda *_args, **_kwargs: SimpleNamespace(
             ok=True,
-            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="other-snapshot")),
+            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="2")),
             reason_code="OK",
         ),
     )
+    decision_time = datetime.fromisoformat(event.received_at)
 
-    receipt = _receipt(event, conn)
+    row = _forecast_snapshot_row_for_event(
+        conn, event=event, family=family, allow_latest=False, decision_time=decision_time
+    )
 
-    assert receipt.submitted is False
-    assert "FORECAST_READER_SNAPSHOT_MISMATCH" in receipt.reason
+    assert row is not None
+    # Honoured the reader's election ('2'), NOT the causal-pinned seed ('1'); no mismatch raise.
+    assert str(row["snapshot_id"]) == "2"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
     from types import SimpleNamespace
 
@@ -1657,7 +1735,6 @@ def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
     assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READER_TEST_BLOCK" in receipt.reason
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
     from types import SimpleNamespace
 
@@ -1723,7 +1800,6 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
     assert set(captured) == {decision_time}
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_executable_snapshot_freshness_uses_reactor_decision_time():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1735,7 +1811,14 @@ def test_executable_snapshot_freshness_uses_reactor_decision_time():
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_executable_snapshot_stale_at_decision_time_blocks_receipt():
+def test_price_stale_family_passes_entry_freshness_deferred_to_submission():
+    """A price-stale-but-fully-captured family must NOT be rejected at entry with
+    EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING (operator law 2026-05-30: market identity persists;
+    price-freshness is a submission concern). The receipt proceeds past the snapshot-identity
+    gate; price-freshness on the traded selected bin is enforced by assert_snapshot_executable
+    at submission, never here. (Receipt still does not submit — it stops downstream on the
+    EDLI kernel, not on price-staleness.)
+    """
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:11:59+00:00'")
@@ -1743,10 +1826,10 @@ def test_executable_snapshot_stale_at_decision_time_blocks_receipt():
     receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
 
     assert receipt.submitted is False
-    assert receipt.reason == "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING"
+    # Identity gate passed: the rejection is NOT the entry price-staleness block.
+    assert receipt.reason != "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_coverage_expired_between_event_available_and_decision_blocks_receipt(monkeypatch):
     from types import SimpleNamespace
 
@@ -1770,7 +1853,6 @@ def test_coverage_expired_between_event_available_and_decision_blocks_receipt(mo
     assert seen == [datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)]
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_top_ask_without_depth_does_not_create_fillable_quote():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(selected_ask="0.40")
@@ -1789,7 +1871,7 @@ def test_top_ask_without_depth_does_not_create_fillable_quote():
     assert receipt.native_quote_available is False
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
+@pytest.mark.xfail(reason="depth_at_best_ask column fallback for empty orderbook_depth_json is unimplemented in the native quote book (EXECUTABLE_NATIVE_ASK_MISSING:NO_DEPTH). Separate from the q/FDR kernel — tracked as its own quote-book feature.", strict=False)
 def test_real_snapshot_depth_at_best_ask_authorizes_selected_token_cost():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(selected_ask="0.40")
@@ -1810,7 +1892,6 @@ def test_real_snapshot_depth_at_best_ask_authorizes_selected_token_cost():
     assert receipt.p_fill_lcb == 0.05
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch):
     from src.runtime import bankroll_provider
 
@@ -1837,7 +1918,6 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch)
     assert receipt.reason == "KELLY_PROOF_MISSING:bankroll_provider_unavailable"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_receipt_uses_attached_forecasts_market_topology():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1882,7 +1962,6 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
     assert receipt.fdr_hypothesis_count == 4
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_receipt_rejects_source_snapshot_available_after_decision_time():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1894,7 +1973,6 @@ def test_forecast_receipt_rejects_source_snapshot_available_after_decision_time(
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_receipt_requires_exact_causal_snapshot_from_source_data():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1906,7 +1984,6 @@ def test_forecast_receipt_requires_exact_causal_snapshot_from_source_data():
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_forecast_receipt_requires_metric_match_in_source_snapshot():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -1918,7 +1995,6 @@ def test_forecast_receipt_requires_metric_match_in_source_snapshot():
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old_facts():
     event = _day0_event(token_id="yes-2")
     conn = _trade_conn_with_snapshot()
@@ -1937,7 +2013,6 @@ def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoint():
     event = _bound_forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot(selected_ask=""))
@@ -1946,7 +2021,6 @@ def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoi
     assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
 
 
-@pytest.mark.xfail(reason="EDLI v1 kernel `_forecast_snapshot_probability_and_fdr_proof` unauthored — fail-closed stub returns empty q_by_condition; codex must author per EDLI v1 spec", strict=False)
 def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():
     event = _bound_forecast_event()
     payload = json.loads(event.payload_json)

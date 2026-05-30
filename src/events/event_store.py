@@ -197,6 +197,34 @@ class EventStore:
         self._mark_terminal(event.event_id, "dead_letter", now, error_message)
         return dead_letter_id
 
+    def attempt_count(self, event_id: str) -> int:
+        """Number of times this event has been claimed (incremented by `claim`)."""
+
+        self._require_world_event_tables()
+        row = self.conn.execute(
+            "SELECT attempt_count FROM opportunity_event_processing "
+            "WHERE consumer_name = ? AND event_id = ?",
+            (self.consumer_name, event_id),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    def requeue_pending(self, event_id: str) -> None:
+        """Return an in-flight ('processing') event to 'pending' for retry next cycle.
+
+        Used for TRANSIENT, non-terminal blocks (e.g. the executable market snapshot for the
+        family has not been captured yet this cycle). Keeps ``attempt_count`` so the caller
+        can bound retries and eventually dead-letter; does NOT consume the event the way
+        ``mark_processed`` does.
+        """
+
+        self._require_world_event_tables()
+        self.conn.execute(
+            "UPDATE opportunity_event_processing "
+            "SET processing_status = 'pending', claimed_at = NULL, updated_at = ? "
+            "WHERE consumer_name = ? AND event_id = ?",
+            (_utc_now(), self.consumer_name, event_id),
+        )
+
     def _mark_terminal(
         self,
         event_id: str,

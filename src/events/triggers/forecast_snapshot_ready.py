@@ -104,10 +104,15 @@ def classify_forecast_snapshot(
         )
     )
 
+    # Coverage (source_run_coverage) is the WINDOW-SCOPED completeness authority per the
+    # redesign. The whole-run source_run.completeness_status reflects full-run fetch state
+    # (PARTIAL under the OpenData 5-day/144h cap, plus member-count accounting orphaned from
+    # the snapshot write) and must NOT veto a forecast the coverage layer has certified
+    # complete for the target window. This is an authority correction, not a relaxation:
+    # the COMPLETE branch below STILL requires required_steps_present (window steps observed),
+    # observed_members >= expected_members, and reader_live (the executable-forecast reader).
     source_complete = (
-        source_run.get("status") == "SUCCESS"
-        and source_run.get("completeness_status") == "COMPLETE"
-        and coverage.get("completeness_status") == "COMPLETE"
+        coverage.get("completeness_status") == "COMPLETE"
         and coverage.get("readiness_status") == "LIVE_ELIGIBLE"
     )
     reader_live = (
@@ -202,7 +207,12 @@ def build_forecast_snapshot_ready_event(
         received_at=received_at,
         causal_snapshot_id=payload.snapshot_id,
         payload=payload,
-        priority=10 if classification.completeness_status == "COMPLETE" else 0,
+        # COMPLETE families emit at an elevated priority so freshly-captured, market-backed
+        # families (only these emit now — see the market_events filter in scan_committed_snapshots)
+        # are processed ahead of any older lower-priority backlog under the reactor's
+        # `ORDER BY priority DESC, available_at ASC` fetch. Without this, newest-available_at
+        # families are perpetually starved at the tail behind the existing backlog.
+        priority=50 if classification.completeness_status == "COMPLETE" else 0,
     )
 
 
@@ -250,9 +260,25 @@ class ForecastSnapshotReadyTrigger:
 
         if not all(_table_exists(forecasts_conn, table) for table in _FORECAST_TABLES):
             return []
+        # Decision-first emission: a family with no Polymarket market (no market_events row)
+        # can never trade, so it must not consume the reactor's bounded decision-proof budget
+        # (market-less families would otherwise starve the market-backed ones at 10/cycle).
+        # Fail-open: if market_events is entirely empty (no market knowledge yet, e.g. fresh
+        # boot / tests) emit all and let the executable-snapshot gate filter downstream; once
+        # any market exists, require the family to have one. Non-permanent — re-scanned every
+        # cycle, so a family emits as soon as its market is discovered.
+        market_filter = ""
+        if _table_exists(forecasts_conn, "market_events"):
+            market_filter = (
+                " AND (NOT EXISTS (SELECT 1 FROM market_events)"
+                " OR EXISTS (SELECT 1 FROM market_events m"
+                " WHERE m.city = c.city"
+                " AND m.target_date = c.target_local_date"
+                " AND m.temperature_metric = c.temperature_metric))"
+            )
         rows = _dict_rows(
             forecasts_conn,
-            """
+            f"""
             SELECT
                 c.*,
                 sr.source_cycle_time AS sr_source_cycle_time,
@@ -285,8 +311,10 @@ class ForecastSnapshotReadyTrigger:
              AND s.temperature_metric = c.temperature_metric
             WHERE COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
               AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
-              AND (c.computed_at IS NULL OR c.computed_at <= ?)
-            ORDER BY c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
+              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}
+            ORDER BY
+                CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
+                c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
             LIMIT ?
             """,
             (
