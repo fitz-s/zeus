@@ -1904,6 +1904,15 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "quote_source_kind": "executable_market_snapshot_native_book",
                 "forbidden_cost_source": False,
                 "selected_token_id": proof.token_id,
+                # Top-of-book is the SAME causally-bound, freshness-gated selected_snapshot_row
+                # that already passed entry gates and from which quote_clock
+                # (source_available_at) is derived. The passive-maker consumer
+                # (_passive_maker_context_from_authorities) requires best_bid/best_ask on this
+                # cert; the production payload previously omitted them, so the live cert build
+                # failed QUOTE_FEASIBILITY_BID_ASK_REQUIRED for every candidate. No quote
+                # newer than decision_time and no relaxed staleness bound is introduced here.
+                "best_bid": _optional_float(selected_snapshot_row.get("orderbook_top_bid")),
+                "best_ask": _optional_float(selected_snapshot_row.get("orderbook_top_ask")),
                 "quote_depth_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
                 "p_fill_lcb_policy_id": "edli_v1.no_submit_visible_depth_fill_lcb",
                 "native_quote_available": proof.native_quote_available,
