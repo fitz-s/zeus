@@ -92,7 +92,15 @@ class EventStore:
               AND e.available_at <= ?
               AND e.received_at <= ?
               AND (e.expires_at IS NULL OR e.expires_at > ?)
-            ORDER BY e.priority DESC, e.available_at ASC, e.received_at ASC, e.event_id ASC
+            ORDER BY
+              -- COMPLETE FORECAST_SNAPSHOT_READY events sort before PARTIAL/null ones so they
+              -- are not starved by dead-on-arrival PARTIAL events that share the same priority.
+              CASE
+                WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'
+                 AND json_extract(e.payload_json, '$.source_run_completeness_status') = 'COMPLETE'
+                THEN 0 ELSE 1
+              END ASC,
+              e.priority DESC, e.available_at ASC, e.received_at ASC, e.event_id ASC
             LIMIT ?
             """,
             (

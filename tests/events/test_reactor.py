@@ -236,6 +236,119 @@ def test_market_channel_event_no_direct_stale_trade():
     assert submitted == []
 
 
+def _retry_reactor(store, snapshot_present: dict):
+    return OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: snapshot_present["v"],
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=lambda _e, _dt: None,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+
+def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_after_capture():
+    """A snapshot-block is TRANSIENT: the event is requeued (stays 'pending') rather than
+    marked processed, so once the family's snapshots are captured a later cycle re-evaluates
+    it instead of losing it. This is the #42b fix for the live reactor never running the kernel.
+    """
+    from src.events.reactor import MAX_EXECUTABLE_SNAPSHOT_RETRIES
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    present = {"v": False}
+    reactor = _retry_reactor(store, present)
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    def _status():
+        return conn.execute(
+            "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()[0]
+
+    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES - 1):
+        result = reactor.process_pending(decision_time=dt)
+        assert result.processed == 0
+        assert result.retried == 1
+        assert _status() == "pending"  # retryable, NOT consumed
+
+    present["v"] = True
+    result = reactor.process_pending(decision_time=dt)
+    assert result.processed == 1
+    assert _status() == "processed"
+
+
+def test_executable_snapshot_block_dead_letters_after_max_retries():
+    from src.events.reactor import MAX_EXECUTABLE_SNAPSHOT_RETRIES
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    present = {"v": False}  # never captured
+    reactor = _retry_reactor(store, present)
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 2):
+        reactor.process_pending(decision_time=dt)
+
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status == "dead_letter"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0] == 1
+
+
+def test_source_captured_after_decision_time_is_retryable_not_consumed():
+    """The forecast-source re-ingestion race (SOURCE_CAPTURED_AFTER_DECISION_TIME) is TRANSIENT:
+    the event is requeued and retried next cycle (decision_time advances past the source's
+    available time) rather than consumed at the money-path stage. Mirrors the snapshot retry.
+    """
+    payload = json.loads(_forecast_event().payload_json)
+
+    def _submit(event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=False,
+            reason="LIVE_INFERENCE_INPUTS_MISSING:FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:SOURCE_CAPTURED_AFTER_DECISION_TIME",
+        )
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.processed == 0
+    assert result.retried == 1
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status == "pending"
+
+
 def test_processed_event_terminal_surface_includes_execution_receipt_certificate():
     from src.decision_kernel.certificates.execution import (
         build_execution_command_certificate_from_final_intent,
@@ -1492,3 +1605,115 @@ def test_reactor_exception_dead_letters_event():
 
     assert result.dead_lettered == 1
     assert conn.execute("SELECT COUNT(*) FROM event_dead_letters").fetchone()[0] == 1
+
+
+def _fsr_event(key_suffix: str, completeness: str, available_at: str, received_at: str):
+    """Build a FORECAST_SNAPSHOT_READY event with the given completeness status."""
+    import json as _json
+    payload = ForecastSnapshotReadyPayload(
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        source_id="opendata",
+        source_run_id=f"run-{key_suffix}",
+        cycle="00",
+        track="live",
+        snapshot_id=f"snap-{key_suffix}",
+        snapshot_hash=f"hash-{key_suffix}",
+        captured_at="2026-05-24T04:00:00+00:00",
+        available_at=available_at,
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=51 if completeness == "COMPLETE" else 10,
+        min_members_floor=40,
+        completeness_status=completeness,
+        required_steps=[0],
+        observed_steps=[0],
+        expected_members=51,
+        source_run_status="SUCCESS",
+        source_run_completeness_status=completeness,
+        coverage_completeness_status=completeness,
+        coverage_readiness_status="LIVE_ELIGIBLE" if completeness == "COMPLETE" else "NOT_ELIGIBLE",
+    )
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=f"Chicago|2026-05-24|high|{key_suffix}",
+        source="forecast_live",
+        observed_at="2026-05-24T04:00:00+00:00",
+        available_at=available_at,
+        received_at=received_at,
+        payload=payload,
+        causal_snapshot_id=f"snap-{key_suffix}",
+    )
+
+
+def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
+    """Relationship test: PARTIAL FSR events dead-letter immediately; COMPLETE FSR events
+    are dequeued before PARTIAL ones even when PARTIAL has an older available_at.
+
+    Invariant: a PARTIAL-payload FSR event can NEVER produce a receipt (cert requires COMPLETE).
+    The reactor must drain them permanently rather than letting them clog the queue.
+    """
+    conn, store = _store()
+
+    # PARTIAL event has older available_at (would sort first under naive priority+available_at order)
+    partial_event = _fsr_event(
+        key_suffix="partial",
+        completeness="PARTIAL",
+        available_at="2026-05-24T04:00:00+00:00",
+        received_at="2026-05-24T04:01:00+00:00",
+    )
+    # COMPLETE event has newer available_at (would sort second under naive order)
+    complete_event = _fsr_event(
+        key_suffix="complete",
+        completeness="COMPLETE",
+        available_at="2026-05-24T05:00:00+00:00",
+        received_at="2026-05-24T05:01:00+00:00",
+    )
+
+    store.insert_or_ignore(partial_event)
+    store.insert_or_ignore(complete_event)
+
+    submitted_order = []
+
+    def _submit(event, _dt):
+        submitted_order.append(event.event_id)
+        return None  # no receipt — source_truth_gate rejects before here in a real run
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    result = reactor.process_pending(decision_time=dt, limit=100)
+
+    # PARTIAL event must be dead-lettered, not processed normally
+    partial_status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (partial_event.event_id,),
+    ).fetchone()[0]
+    assert partial_status == "dead_letter", f"PARTIAL FSR should dead-letter, got {partial_status}"
+
+    # PARTIAL event must appear in event_dead_letters
+    partial_dl = conn.execute(
+        "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
+        (partial_event.event_id,),
+    ).fetchone()[0]
+    assert partial_dl == 1, "PARTIAL FSR must have a dead_letter entry"
+
+    # COMPLETE event must NOT be dead-lettered (it proceeds through the pipeline)
+    complete_status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (complete_event.event_id,),
+    ).fetchone()[0]
+    assert complete_status != "dead_letter", f"COMPLETE FSR must not dead-letter at intake, got {complete_status}"
+
+    # COMPLETE event must be processed (reached submit), PARTIAL must not reach submit
+    assert complete_event.event_id in submitted_order, "COMPLETE FSR must reach submit"
+    assert partial_event.event_id not in submitted_order, "PARTIAL FSR must not reach submit"

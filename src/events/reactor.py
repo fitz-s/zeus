@@ -107,6 +107,10 @@ class ReactorConfig:
 # the event is dead-lettered as genuinely uncapturable.
 _EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
 MAX_EXECUTABLE_SNAPSHOT_RETRIES = 8
+# Sentinel returned by _process_one when a FORECAST_SNAPSHOT_READY event has been dead-lettered
+# due to a non-COMPLETE source_run_completeness_status. The dead-letter + reject writes are done
+# inside _process_one; process_pending must NOT double-count or attempt mark_processed on this path.
+_FSR_PARTIAL_DEAD_LETTER = "FSR_PARTIAL_DEAD_LETTER"
 
 
 @dataclass
@@ -165,6 +169,11 @@ class OpportunityEventReactor:
             try:
                 self._store.conn.execute("SAVEPOINT edli_reactor_event")
                 disposition = self._process_one(event, decision_time=decision_time, result=result)
+                if disposition == _FSR_PARTIAL_DEAD_LETTER:
+                    # PARTIAL FSR: reject + dead_letter writes already committed by _process_one.
+                    # Only release the savepoint; do NOT call mark_processed.
+                    self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    continue
                 if disposition == _EXECUTABLE_SNAPSHOT_RETRY:
                     attempts = self._store.attempt_count(event.event_id)
                     if attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES:
@@ -214,6 +223,27 @@ class OpportunityEventReactor:
         if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED", "NEW_MARKET_DISCOVERED"}:
             self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result, decision_time=decision_time)
             return
+        if event.event_type == "FORECAST_SNAPSHOT_READY":
+            # Dead-letter immediately if the source_run is not COMPLETE — a PARTIAL-payload FSR
+            # event can never satisfy the NO_SUBMIT_CERTIFICATE gate (which requires COMPLETE).
+            # Dead-lettering here drains the queue permanently and prevents PARTIAL events from
+            # starving COMPLETE ones across cycles.
+            try:
+                payload = json.loads(event.payload_json) if isinstance(event.payload_json, str) else event.payload_json
+                src_completeness = payload.get("source_run_completeness_status", "")
+            except Exception:
+                src_completeness = ""
+            if src_completeness != "COMPLETE":
+                error_msg = f"FSR source_run_completeness_status={src_completeness!r} must be COMPLETE; dead-lettering"
+                self._reject_event(event, "SOURCE_TRUTH", "FSR_SOURCE_RUN_NOT_COMPLETE", result, decision_time=decision_time)
+                self._store.mark_dead_letter(
+                    event,
+                    failure_stage="FSR_SOURCE_RUN_NOT_COMPLETE",
+                    error_message=error_msg,
+                    created_at=decision_time.astimezone(UTC).isoformat(),
+                )
+                result.dead_lettered += 1
+                return _FSR_PARTIAL_DEAD_LETTER
         if self._config.reactor_mode not in EDLI_PROCESSING_REACTOR_MODES:
             self._reject_event(event, "LIVE_CAP", "REACTOR_NOT_LIVE", result, decision_time=decision_time)
             return
