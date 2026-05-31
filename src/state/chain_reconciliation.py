@@ -533,6 +533,125 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         return True
 
+    def _canonical_current_chain_shares(position_id: str) -> tuple[bool, float | None]:
+        """Return (row_exists, chain_shares) from position_current.
+
+        chain_shares is the persisted on-chain share count (NULL when the
+        chain observation has never been projected). (False, None) means no
+        canonical row exists yet — the position has no projection to update.
+        """
+        if conn is None:
+            return (False, None)
+        try:
+            row = conn.execute(
+                "SELECT chain_shares FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+        except Exception:
+            return (False, None)
+        if row is None:
+            return (False, None)
+        value = row["chain_shares"] if hasattr(row, "keys") else row[0]
+        if value is None:
+            return (True, None)
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return (True, None)
+        if not parsed.is_finite():
+            return (True, None)
+        return (True, float(parsed))
+
+    def _append_canonical_chain_observation_if_available(position: Position) -> bool:
+        """Persist chain economics for a SYNCED (matched, no size-mismatch)
+        position whose persisted chain_shares is NULL (first-population) or has
+        drifted from the freshly-observed chain.size.
+
+        Chain-shares-persist fix (2026-05-31, task #56): the matched-no-size-
+        mismatch path mutated Position.chain_shares in-memory but issued NO
+        canonical write, leaving position_current.chain_shares NULL forever for
+        every synced position (only the SIZE-MISMATCH branch persisted via
+        _append_canonical_size_correction_if_available). This sibling emits a
+        chain-OBSERVATION canonical event (build_chain_economics_observed_
+        canonical_write) that projects chain_shares / chain_avg_price /
+        chain_cost_basis_usd / chain_seen_at onto position_current WITHOUT any
+        share mutation or phase transition.
+
+        Gating mirrors _append_canonical_size_correction_if_available:
+          - conn present; skip pending_entry phase (don't fight fill detection);
+          - canonical row must exist with phase == expected_phase
+            (active/day0_window) — a missing projection with prior history is a
+            contract violation surfaced by the shared baseline gate;
+          - only writes when chain_shares needs first-population (NULL) or
+            drift-correction (persisted != chain.size by > 1e-9).
+
+        Fail-closed: any unexpected error is swallowed (logged) so reconcile
+        never crashes. The next cycle re-detects and retries the write.
+        """
+        if conn is None:
+            return False
+        try:
+            trade_id = getattr(position, "trade_id", "")
+            # Race: fill just landed → still pending_entry. The fill path owns
+            # the size; skip here to avoid colliding with fill detection.
+            try:
+                _phase_row = conn.execute(
+                    "SELECT phase FROM position_current WHERE position_id = ?",
+                    (trade_id,),
+                ).fetchone()
+            except Exception:
+                _phase_row = None
+            if _phase_row is not None and str(_phase_row[0] or "") == "pending_entry":
+                return False
+            expected_phase = "day0_window" if getattr(position, "day0_entered_at", "") else "active"
+            # Reuse the shared baseline gate: requires a canonical row whose
+            # phase == expected_phase (raises on a history-without-projection
+            # contract violation, returns False on no-history positions).
+            if not _canonical_size_correction_baseline_available(
+                trade_id, expected_phase=expected_phase
+            ):
+                return False
+
+            row_exists, persisted_chain_shares = _canonical_current_chain_shares(trade_id)
+            if not row_exists:
+                return False
+            target_chain_shares = getattr(position, "chain_shares", None)
+            if target_chain_shares is None:
+                return False
+            # Only write on first-population (NULL) or genuine drift.
+            if persisted_chain_shares is not None and abs(
+                float(persisted_chain_shares) - float(target_chain_shares)
+            ) <= 1e-9:
+                return False
+
+            from src.engine.lifecycle_events import (
+                build_chain_economics_observed_canonical_write,
+            )
+            from src.state.db import append_many_and_project
+
+            current_phase = (
+                LifecyclePhase.DAY0_WINDOW.value
+                if expected_phase == "day0_window"
+                else LifecyclePhase.ACTIVE.value
+            )
+            events, projection = build_chain_economics_observed_canonical_write(
+                position,
+                chain_observed_at=now,
+                sequence_no=_next_canonical_sequence_no(trade_id),
+                phase_after=current_phase,
+                chain_shares_before=persisted_chain_shares,
+                source_module="src.state.chain_reconciliation",
+            )
+            append_many_and_project(conn, events, projection)
+        except Exception as exc:
+            logger.warning(
+                "CHAIN_OBSERVATION canonical write failed for %s: %s "
+                "(in-memory chain_shares stands; next reconcile cycle retries)",
+                getattr(position, "trade_id", "?"), exc,
+            )
+            return False
+        return True
+
     def _append_canonical_review_required(position: Position, *, reason: str) -> bool:
         """PR #352 (Part-3 audit Finding 4): persist a durable REVIEW_REQUIRED
         event + quarantined projection for an unresolved size mismatch.
@@ -1235,6 +1354,20 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         )
                 else:
                     stats["updated"] += 1
+            else:
+                # Chain-shares-persist fix (2026-05-31, task #56): matched —
+                # chain.size == local_shares, single-lot (NOT aggregate-backed),
+                # no size mismatch. The pre-fix code mutated corrected.chain_*
+                # in-memory here but issued NO canonical write, so
+                # position_current.chain_shares stayed NULL forever for every
+                # synced position (only the SIZE-MISMATCH branch persisted chain
+                # economics). Persist the chain OBSERVATION when chain_shares
+                # needs first-population (NULL) or has drifted. Fail-closed:
+                # the helper never raises; in-memory chain_* below still stands.
+                if _append_canonical_chain_observation_if_available(corrected):
+                    stats["chain_observation_persisted"] = (
+                        stats.get("chain_observation_persisted", 0) + 1
+                    )
             pos.chain_state = corrected.chain_state
             pos.chain_shares = corrected.chain_shares
             pos.chain_avg_price = corrected.chain_avg_price
