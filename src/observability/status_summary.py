@@ -137,6 +137,13 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
     if minimal_refresh_ok:
         _refresh_pulse_infrastructure_status(status, cycle_summary)
         status["timestamp"] = generated_at
+        # Freshness-contract bridge: release-gate / EDLI-stage readiness checks
+        # read a canonical top-level freshness key (generated_at|updated_at|
+        # observed_at|captured_at), not "timestamp". Emit generated_at at the top
+        # level (same instant as timestamp) so a genuinely-fresh pulse is read as
+        # fresh by the gate. This is the producer honoring the gate's contract,
+        # NOT a relaxation of the freshness window.
+        status["generated_at"] = generated_at
         status = annotate_truth_payload(status, STATUS_PATH, generated_at=generated_at, authority="VERIFIED")
     else:
         _preserve_prior_status_freshness_after_pulse_failure(status, prior)
@@ -149,8 +156,13 @@ def _preserve_prior_status_freshness_after_pulse_failure(status: dict, prior: di
     prior_timestamp = prior.get("timestamp") if isinstance(prior, dict) else None
     if prior_timestamp:
         status["timestamp"] = prior_timestamp
+        # Keep generated_at (gate freshness key) in lockstep with timestamp so a
+        # failed pulse refresh cannot mint a fresh generated_at the gate would
+        # read as live. Fail-closed: inherit the prior (stale) instant.
+        status["generated_at"] = prior_timestamp
     else:
         status.pop("timestamp", None)
+        status.pop("generated_at", None)
     prior_truth = prior.get("truth") if isinstance(prior, dict) else None
     truth = dict(prior_truth) if isinstance(prior_truth, dict) else {}
     truth.setdefault("runtime_state", get_mode())

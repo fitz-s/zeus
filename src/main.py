@@ -104,6 +104,17 @@ EDLI_STAGE_RISK_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
+# Surface-freshness reasons that writers populate AFTER daemon boot.  In shadow
+# mode these are expected-absent at boot-time and must WARN rather than prevent
+# startup — the scheduler refreshes them once the first cycle runs.  All other
+# reason prefixes (LOADED_SHA, UNRESOLVED_SUBMIT, LIVE_CAP_RESERVED) still
+# block shadow boot because they reflect live-money or identity risk.
+_EDLI_SHADOW_DEFERRED_REASON_PREFIXES = (
+    "EDLI_STAGE_SOURCE_HEALTH_STALE",
+    "EDLI_STAGE_SOURCE_HEALTH_MISSING",
+    "EDLI_STAGE_STATUS_SUMMARY_STALE",
+    "EDLI_STAGE_STATUS_SUMMARY_MISSING",
+)
 REQUIRED_STAGE_FILES_BY_MODE = {
     "edli_submit_disabled_bridge": (
         "edli_stage_loaded_sha_file",
@@ -353,8 +364,29 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         max_age_seconds=int(edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)),
     )
     if stage in {"edli_shadow_no_submit", "edli_submit_disabled_bridge"}:
-        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} or report.live_entries_allowed:
-            raise RuntimeError("EDLI_STAGE_READINESS_FAILED:" + ",".join(report.reasons or (report.status,)))
+        if report.live_entries_allowed:
+            raise RuntimeError("EDLI_STAGE_READINESS_FAILED:live_entries_not_allowed_in_shadow")
+        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING}:
+            # Partition reasons: surface-freshness (writers populate after boot,
+            # deferred in shadow) vs hard blockers (identity/risk, always fatal).
+            blocking = [
+                r for r in (report.reasons or ())
+                if not r.startswith(_EDLI_SHADOW_DEFERRED_REASON_PREFIXES)
+            ]
+            deferred = [
+                r for r in (report.reasons or ())
+                if r.startswith(_EDLI_SHADOW_DEFERRED_REASON_PREFIXES)
+            ]
+            if blocking:
+                raise RuntimeError(
+                    "EDLI_STAGE_READINESS_FAILED:" + ",".join(blocking)
+                )
+            if deferred:
+                logger.warning(
+                    "EDLI shadow boot: stage surfaces stale/absent (expected "
+                    "pre-first-cycle); will refresh after scheduler starts: %s",
+                    ", ".join(deferred),
+                )
         return report
     if stage == "edli_live_canary":
         risk_reasons = [reason for reason in report.reasons if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
@@ -2434,6 +2466,44 @@ def _capture_boot_state() -> dict:
         )
 
 
+def _write_loaded_sha_state(boot_sha: str | None) -> None:
+    """Write the running daemon's git HEAD SHA to state/loaded_sha.json at boot.
+
+    EDLI-mode release-gate surface. The live-release gate's loaded_sha check and
+    main.evaluate_edli_stage_readiness compare the *loaded* SHA (what this process
+    actually booted on) against the expected HEAD. In legacy_cron mode run_cycle
+    produced no such file; in EDLI modes nothing wrote it -> gate FAIL
+    (missing_loaded_sha). This writes the GENUINE booted SHA (reuses the value
+    _capture_boot_state already captured via git rev-parse HEAD), once at boot.
+
+    A divergence between loaded_sha and current HEAD (filesystem updated without
+    restart) is exactly what the gate is meant to catch — so this file is written
+    ONCE at boot and intentionally NOT refreshed, encoding the truly-loaded SHA.
+
+    Authority: fix/edli-stage-readiness-2026-05-31 (loaded_sha surface).
+    """
+    if not boot_sha:
+        logger.warning(
+            "loaded_sha: boot SHA unavailable (ZEUS_ACCEPT_STALE_DEPLOY override?); "
+            "skipping state/loaded_sha.json write — release gate will read missing_loaded_sha"
+        )
+        return
+    from src.config import state_path
+
+    out_path = state_path("loaded_sha.json")
+    payload = {
+        "loaded_sha": boot_sha,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(out_path)
+        logger.info("loaded_sha: wrote state/loaded_sha.json loaded_sha=%s", boot_sha[:8])
+    except OSError as exc:
+        logger.error("loaded_sha: failed to write state/loaded_sha.json: %s", exc)
+
+
 @_scheduler_job("deployment_freshness")
 def _check_deployment_freshness(
     *,
@@ -4215,6 +4285,25 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
         except Exception:
             pass
 
+    # EDLI status-summary freshness writer (release-gate surface).
+    # In EDLI event-driven modes run_cycle() is never called, so the legacy
+    # _export_status -> write_cycle_pulse path is silent and state/status_summary.json
+    # goes stale -> the live-release gate fails status_summary / edli_stage_readiness.
+    # This chain-sync job runs under ALL EDLI modes, so emit a genuine business-plane
+    # status pulse here each cycle. write_cycle_pulse re-reads the live DB read model
+    # (open orders, risk, portfolio, capability) -> it reflects REAL current state,
+    # never a hardcoded healthy value. Non-fatal: a pulse failure must not abort the
+    # chain-sync job. Authority: fix/edli-stage-readiness-2026-05-31 (status_summary).
+    try:
+        from src.observability.status_summary import write_cycle_pulse
+        write_cycle_pulse(summary)
+    except Exception as exc:
+        logger.error(
+            "chain_sync_and_exit_monitor: status pulse failed (non-fatal): %s",
+            exc,
+            exc_info=True,
+        )
+
     _write_scheduler_health(
         "chain_sync_and_exit_monitor",
         failed=False,
@@ -4273,6 +4362,11 @@ def main():
     _BOOT_STATE.update(_boot)
     if _boot.get("sha"):
         logger.info("deployment_freshness: boot_sha=%s", _boot["sha"][:8])
+    # EDLI-mode release-gate surface: persist the genuinely-booted HEAD SHA so the
+    # live-release gate's loaded_sha check can compare loaded vs expected. Reuses
+    # the boot SHA captured above; written once (not refreshed) so a post-boot
+    # filesystem divergence is still caught by the gate.
+    _write_loaded_sha_state(_boot.get("sha"))
 
     # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).

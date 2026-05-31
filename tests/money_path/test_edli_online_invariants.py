@@ -360,7 +360,12 @@ def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
 
 
 def test_live_canary_requires_stage_evidence_file_paths(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_REQUIRES_STAGE_EVIDENCE_FILES"):
+    # Post-PR #367: stage paths are configured in settings.json, so
+    # _require_stage_file_paths no longer raises; the downstream
+    # evaluate_edli_stage_readiness raises instead (files absent on disk →
+    # STALE/MISSING reasons → FAIL). Canary must still block at boot when
+    # surfaces are absent — only the error prefix changed.
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_READINESS_FAIL"):
         _run_main_with_fake_scheduler(
             monkeypatch,
             _edli_live_canary_updates(),
