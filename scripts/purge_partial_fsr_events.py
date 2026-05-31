@@ -81,18 +81,28 @@ def main() -> None:
             print("Nothing to delete.")
             return
 
-        # Drop append-only guards, delete, restore guards — all in one connection
+        # Drop append-only guards, delete, restore guards — all in one connection.
+        # Inner try/finally guarantees triggers are ALWAYS recreated and committed,
+        # even if the DELETE/COMMIT raises; the outer finally only closes the connection.
         conn.execute(DROP_NO_DELETE)
         conn.execute(DROP_NO_UPDATE)
-
-        conn.execute("BEGIN")
-        cur = conn.execute(DELETE_PARTIAL)
-        deleted = cur.rowcount
-        conn.execute("COMMIT")
-
-        # Restore triggers
-        conn.execute(RESTORE_NO_DELETE)
-        conn.execute(RESTORE_NO_UPDATE)
+        try:
+            conn.execute("BEGIN")
+            cur = conn.execute(DELETE_PARTIAL)
+            deleted = cur.rowcount
+            conn.execute("COMMIT")
+        except Exception:
+            # Attempt rollback in case DELETE raised before COMMIT
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            # Restore triggers unconditionally, even on DELETE failure
+            conn.execute(RESTORE_NO_DELETE)
+            conn.execute(RESTORE_NO_UPDATE)
+            conn.commit()
 
         complete_after = conn.execute(COUNT_COMPLETE).fetchone()[0]
         partial_after = conn.execute(COUNT_PARTIAL).fetchone()[0]

@@ -6,7 +6,9 @@
 #   in /tmp/platt_verdict_full.tsv). Read-heavy OOS scoring; 3-way parallel (WAL-safe).
 # Output: per-city raw output in /tmp/platt49/<city>.out ; progress in /tmp/platt49/progress.log.
 set -u
-cd /Users/leofitz/.openclaw/workspace-venus/zeus
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 source .venv/bin/activate 2>/dev/null
 mkdir -p /tmp/platt49
 
