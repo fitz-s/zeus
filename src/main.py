@@ -3454,6 +3454,7 @@ def _edli_event_reactor_cycle() -> None:
                 get_current_level=get_current_level,
                 real_order_submit_enabled=real_order_submit_enabled if reactor_mode == "live" else False,
                 live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
+                durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
                 pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(conn, edli_cfg),
