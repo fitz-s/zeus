@@ -2085,6 +2085,28 @@ def _forecast_authority_payload_and_clock(
     if city_config is None:
         raise ValueError(f"FORECAST_AUTHORITY_EVIDENCE_MISSING:city:{family.city}")
     members_json_hash = _snapshot_members_json_hash(snapshot)
+    # horizon_profile is NOT a column on ensemble_snapshots and is not populated upstream
+    # (forecast_calibration_domain.derive_phase2_keys_from_ens_result docstring). The calibrator
+    # lookup DERIVES the horizon stratum from the forecast cycle (00/12 -> 'full', else 'short').
+    # The forecast authority must carry that SAME derived value so the no-submit cert can enforce a
+    # real calibration.horizon_profile == forecast.horizon_profile equality instead of silently
+    # comparing a derived 'full' against a structural None (the live FORECAST horizon mismatch leak).
+    from src.calibration.forecast_calibration_domain import derive_phase2_keys_from_ens_result
+
+    _, _, derived_horizon_profile = derive_phase2_keys_from_ens_result(
+        {
+            "issue_time": _nonnull(
+                evidence.source_issue_time
+                or evidence.source_cycle_time
+                or snapshot.get("source_issue_time")
+                or snapshot.get("source_cycle_time")
+                or payload.get("issue_time")
+                or payload.get("source_cycle_time")
+            ),
+            "source_id": _nonnull(evidence.forecast_source_id or snapshot.get("source_id") or payload.get("source_id")),
+            "horizon_profile": snapshot.get("horizon_profile"),
+        }
+    )
     payload_out = {
         "identity": str(result.bundle.snapshot.snapshot_id),
         "snapshot_id": str(result.bundle.snapshot.snapshot_id),
@@ -2121,7 +2143,7 @@ def _forecast_authority_payload_and_clock(
         "source_transport": evidence.source_transport,
         "source_cycle_time": evidence.source_cycle_time,
         "source_issue_time": evidence.source_issue_time,
-        "horizon_profile": snapshot.get("horizon_profile"),
+        "horizon_profile": _nonnull(snapshot.get("horizon_profile")) or derived_horizon_profile,
         "source_run_id": evidence.source_run_id,
         "coverage_id": evidence.coverage_id,
         "producer_readiness_id": evidence.producer_readiness_id,

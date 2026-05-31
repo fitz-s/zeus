@@ -355,9 +355,22 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
     if projection.get("proof_accepted") is not True:
         raise ValueError("projection.proof_accepted must be true")
     if event.causal_snapshot_id:
+        # Two distinct snapshot chains, per the single-snapshot reader-elect authority
+        # (event_reactor_adapter._forecast_snapshot_row_for_event): the CAUSAL chain is the
+        # event's trigger snapshot (provenance only); the EXECUTABLE-AUTHORITY chain is the
+        # reader-ELECTED snapshot on which inference was actually computed. When the causal
+        # cycle's source_run is still re-ingesting members, the reader's causality gate drops
+        # the causal snapshot and elects the freshest fully-captured FULL_CONTRIBUTOR, so the
+        # elected id legitimately differs from the causal id. Asserting forecast.snapshot_id ==
+        # event.causal_snapshot_id here contradicted that fix and produced a permanent
+        # FORECAST_READER_SNAPSHOT_MISMATCH leak (no receipts). We bind each chain to its own
+        # identity instead:
+        #   causal provenance      : source_truth.{causal_snapshot_id,snapshot_id} == event.causal
+        #   executable authority   : source_truth.derived_from_snapshot_id == forecast.snapshot_id
+        #                            (asserted below at the FORECAST_SNAPSHOT_READY block) and
+        #                            belief.forecast_snapshot_id == forecast.snapshot_id (later).
         _require_equal("source_truth.causal_snapshot_id", source.get("causal_snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
-        _require_equal("forecast.snapshot_id", forecast.get("snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
-        _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "forecast.snapshot_id", forecast.get("snapshot_id"))
+        _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "event.causal_snapshot_id", event.causal_snapshot_id)
     if event.event_type == "FORECAST_SNAPSHOT_READY":
         _validate_source_truth_payload(source)
         _require_equal("source_truth.completeness_status", source.get("completeness_status"), "COMPLETE", "COMPLETE")
@@ -450,8 +463,11 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
     if calibration.get("source_cycle") is not None and forecast.get("source_cycle_time") is not None:
         if str(calibration.get("source_cycle")) not in str(forecast.get("source_cycle_time")):
             raise ValueError("calibration.source_cycle does not match forecast.source_cycle_time")
-    if calibration.get("horizon_profile") is not None and forecast.get("horizon_profile") is not None:
-        _require_equal("calibration.horizon_profile", calibration.get("horizon_profile"), "forecast.horizon_profile", forecast.get("horizon_profile"))
+    # Enforced equality (matches verifier._verify_forecast_no_submit_semantic_consistency): the
+    # forecast authority DERIVES horizon_profile from its cycle exactly as the calibrator lookup
+    # does, so both are always populated for a live forecast. A None on either side is a real
+    # provenance gap (no derivable horizon stratum) and must fail closed, never be skipped.
+    _require_equal("calibration.horizon_profile", calibration.get("horizon_profile"), "forecast.horizon_profile", forecast.get("horizon_profile"))
     hypothesis_id = candidate.get("hypothesis_id") or candidate.get("identity")
     if hypothesis_id not in tuple(fdr.get("selected_hypotheses") or ()):
         raise ValueError("fdr.selected_hypotheses missing candidate hypothesis")
@@ -558,8 +574,10 @@ def _validate_calibration_payload(
         when = _optional_dt(calibration.get(field))
         if when is not None and when > decision_time:
             raise ValueError(f"calibration.{field} after decision_time")
-    if calibration.get("horizon_profile") is not None and forecast.get("horizon_profile") is not None:
-        _require_equal("calibration.horizon_profile", calibration.get("horizon_profile"), "forecast.horizon_profile", forecast.get("horizon_profile"))
+    # Enforced equality (see _validate_no_submit_parent_consistency + verifier): the forecast
+    # authority derives horizon_profile from its cycle exactly as the calibrator lookup does, so a
+    # None on either side is a real provenance gap and must fail closed rather than be skipped.
+    _require_equal("calibration.horizon_profile", calibration.get("horizon_profile"), "forecast.horizon_profile", forecast.get("horizon_profile"))
 
 
 def _validate_unit_authority(forecast: dict[str, Any], belief: dict[str, Any], family: dict[str, Any]) -> None:

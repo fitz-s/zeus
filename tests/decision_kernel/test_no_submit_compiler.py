@@ -304,6 +304,138 @@ def test_no_submit_rejects_forecast_snapshot_parent_mismatch():
     assert "forecast.snapshot_id" in (result.failures[0].reason_detail or "")
 
 
+def _bundle_with_reader_elected_snapshot(event, receipt, *, decision_time, elected_snapshot_id):
+    """Build a bundle where the forecast reader ELECTED an executable snapshot that differs
+    from the event's causal (trigger) snapshot.
+
+    Mirrors the live reader-elect path in event_reactor_adapter._forecast_snapshot_row_for_event:
+    the causal cycle's source_run is still re-ingesting members, so the reader's causality gate
+    drops the causal snapshot and elects the freshest fully-captured FULL_CONTRIBUTOR. The
+    executable authority chain (forecast.snapshot_id == source_truth.derived_from_snapshot_id ==
+    belief.forecast_snapshot_id) carries the ELECTED id; the causal-provenance chain
+    (source_truth.causal_snapshot_id == event.causal_snapshot_id) carries the causal id.
+    """
+    bundle = build_test_no_submit_proof_bundle(event, receipt, decision_time=decision_time)
+    causal = event.causal_snapshot_id
+    assert elected_snapshot_id != causal
+    forecast = replace(
+        bundle.forecast_authority,
+        payload={**bundle.forecast_authority.payload, "snapshot_id": elected_snapshot_id, "identity": elected_snapshot_id},
+    )
+    source = replace(
+        bundle.source_truth,
+        payload={
+            **bundle.source_truth.payload,
+            # causal-provenance chain: causal trigger snapshot
+            "snapshot_id": causal,
+            "causal_snapshot_id": causal,
+            # executable-authority chain: reader-elected snapshot
+            "derived_from_snapshot_id": elected_snapshot_id,
+        },
+    )
+    belief = replace(
+        bundle.belief,
+        payload={**bundle.belief.payload, "forecast_snapshot_id": elected_snapshot_id},
+    )
+    return replace(bundle, forecast_authority=forecast, source_truth=source, belief=belief)
+
+
+def test_no_submit_accepts_reader_elected_snapshot_differing_from_causal():
+    """RELATIONSHIP: when the forecast reader elects an executable snapshot that differs from the
+    event's causal trigger snapshot (source_run still ingesting), the no-submit cert MUST accept it.
+
+    The causal id is preserved as provenance (source_truth.causal_snapshot_id == event.causal); the
+    elected id is the single forecast authority (forecast.snapshot_id == derived_from_snapshot_id ==
+    belief.forecast_snapshot_id). This is the live FORECAST_READER_SNAPSHOT_MISMATCH category that
+    previously produced "forecast.snapshot_id != event.causal_snapshot_id" rejections.
+    """
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = _bundle_with_reader_elected_snapshot(
+        event, _receipt(event.event_id), decision_time=decision_time, elected_snapshot_id="snap-elected-earlier",
+    )
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=bundle)
+
+    assert result.status == "VERIFIED", (result.failures[0].reason_detail if result.failures else None)
+    assert result.no_submit_certificate is not None
+
+
+def test_no_submit_still_rejects_elected_snapshot_inconsistent_with_belief():
+    """RELATIONSHIP guard: the elected-snapshot acceptance must NOT weaken the executable-authority
+    chain. If belief.forecast_snapshot_id disagrees with forecast.snapshot_id, the cert still rejects.
+    """
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = _bundle_with_reader_elected_snapshot(
+        event, _receipt(event.event_id), decision_time=decision_time, elected_snapshot_id="snap-elected-earlier",
+    )
+    bad_belief = replace(bundle.belief, payload={**bundle.belief.payload, "forecast_snapshot_id": "snap-elected-other"})
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, belief=bad_belief))
+
+    assert result.status == "REJECTED"
+    assert "belief.forecast_snapshot_id" in (result.failures[0].reason_detail or "")
+
+
+def test_no_submit_still_rejects_causal_provenance_broken():
+    """RELATIONSHIP guard: causal-provenance chain stays mandatory. If source_truth.causal_snapshot_id
+    no longer matches event.causal_snapshot_id, the cert still rejects even with a valid elected id.
+    """
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = _bundle_with_reader_elected_snapshot(
+        event, _receipt(event.event_id), decision_time=decision_time, elected_snapshot_id="snap-elected-earlier",
+    )
+    bad_source = replace(bundle.source_truth, payload={**bundle.source_truth.payload, "causal_snapshot_id": "snap-not-causal"})
+    result = DecisionCompiler().compile_no_submit(event, decision_time=decision_time, proof_bundle=replace(bundle, source_truth=bad_source))
+
+    assert result.status == "REJECTED"
+    assert "source_truth.causal_snapshot_id" in (result.failures[0].reason_detail or "")
+
+
+def test_no_submit_accepts_forecast_horizon_profile_derived_to_match_calibration():
+    """RELATIONSHIP: forecast.horizon_profile and calibration.horizon_profile must be a REAL,
+    enforced equality — not skipped when forecast carries None.
+
+    Live data has no ensemble_snapshots.horizon_profile column, so the forecast authority must
+    DERIVE horizon_profile from the forecast cycle the same way the calibrator lookup does
+    (derive_phase2_keys_from_ens_result: 00/12 -> 'full', else 'short'). This reproduces the live
+    "calibration.horizon_profile != forecast.horizon_profile: 'full' != None" rejection by setting
+    calibration to 'full' and requiring the cert to bind forecast's derived 'full' to it.
+    """
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    # 00z cycle -> calibrator stratum 'full'; forecast authority must carry the same derived value.
+    full_forecast = replace(bundle.forecast_authority, payload={**bundle.forecast_authority.payload, "horizon_profile": "full"})
+    full_calibration = replace(bundle.calibration, payload={**bundle.calibration.payload, "horizon_profile": "full"})
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=replace(bundle, forecast_authority=full_forecast, calibration=full_calibration),
+    )
+
+    assert result.status == "VERIFIED", (result.failures[0].reason_detail if result.failures else None)
+
+
+def test_no_submit_rejects_horizon_profile_mismatch_when_both_present():
+    """RELATIONSHIP guard: when forecast and calibration carry DIFFERENT horizon strata, the cert
+    must still reject (the equality must be enforced, not silently skipped).
+    """
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    full_forecast = replace(bundle.forecast_authority, payload={**bundle.forecast_authority.payload, "horizon_profile": "short"})
+    full_calibration = replace(bundle.calibration, payload={**bundle.calibration.payload, "horizon_profile": "full"})
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=replace(bundle, forecast_authority=full_forecast, calibration=full_calibration),
+    )
+
+    assert result.status == "REJECTED"
+    assert "horizon_profile" in (result.failures[0].reason_detail or "")
+
+
 def test_no_submit_rejects_quote_token_candidate_token_mismatch():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
