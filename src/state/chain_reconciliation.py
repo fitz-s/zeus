@@ -207,6 +207,12 @@ class ChainPositionView:
 
 
 _ALLOCATE_DUST = 0.01  # minimum size difference treated as dust, not a gap
+# Copilot review fix (2026-05-31, issue #1): after the chain_shares first-
+# population the old helper returned early when shares were unchanged, leaving
+# chain_seen_at permanently frozen. Re-emit the observation event when the
+# persisted timestamp is older than this threshold to keep classify_chain_state()
+# correctly classifying long-lived synced positions on daemon restart.
+_CHAIN_SEEN_AT_MAX_AGE_SECONDS: int = 1800  # 30 minutes
 
 
 def allocate_chain_truth(
@@ -533,39 +539,58 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
 
         return True
 
-    def _canonical_current_chain_shares(position_id: str) -> tuple[bool, float | None]:
-        """Return (row_exists, chain_shares) from position_current.
+    def _canonical_current_chain_shares(
+        position_id: str,
+    ) -> tuple[bool, float | None, str | None]:
+        """Return (row_exists, chain_shares, chain_seen_at) from position_current.
 
         chain_shares is the persisted on-chain share count (NULL when the
-        chain observation has never been projected). (False, None) means no
-        canonical row exists yet — the position has no projection to update.
+        chain observation has never been projected). chain_seen_at is the
+        ISO-8601 string of the last persisted positive-observation timestamp
+        (empty-string or NULL when never written). (False, None, None) means
+        no canonical row exists yet — the position has no projection to update.
+
+        Copilot review fix (2026-05-31, issue #1): include chain_seen_at so the
+        observation helper can decide whether the TIMESTAMP needs refresh
+        independently of whether chain_shares changed. Without this the helper
+        returned early on shares-unchanged positions and chain_seen_at went
+        permanently stale after first-population, causing classify_chain_state()
+        to mis-classify long-lived synced positions on restart.
         """
         if conn is None:
-            return (False, None)
+            return (False, None, None)
         try:
             row = conn.execute(
-                "SELECT chain_shares FROM position_current WHERE position_id = ?",
+                "SELECT chain_shares, chain_seen_at FROM position_current "
+                "WHERE position_id = ?",
                 (position_id,),
             ).fetchone()
         except Exception:
-            return (False, None)
+            return (False, None, None)
         if row is None:
-            return (False, None)
-        value = row["chain_shares"] if hasattr(row, "keys") else row[0]
-        if value is None:
-            return (True, None)
+            return (False, None, None)
+        if hasattr(row, "keys"):
+            raw_shares = row["chain_shares"]
+            raw_seen_at = row["chain_seen_at"]
+        else:
+            raw_shares = row[0]
+            raw_seen_at = row[1]
+        seen_at = str(raw_seen_at or "") or None
+        if raw_shares is None:
+            return (True, None, seen_at)
         try:
-            parsed = Decimal(str(value))
+            parsed = Decimal(str(raw_shares))
         except (InvalidOperation, ValueError):
-            return (True, None)
+            return (True, None, seen_at)
         if not parsed.is_finite():
-            return (True, None)
-        return (True, float(parsed))
+            return (True, None, seen_at)
+        return (True, float(parsed), seen_at)
 
     def _append_canonical_chain_observation_if_available(position: Position) -> bool:
         """Persist chain economics for a SYNCED (matched, no size-mismatch)
-        position whose persisted chain_shares is NULL (first-population) or has
-        drifted from the freshly-observed chain.size.
+        position whose persisted chain_shares is NULL (first-population), has
+        drifted from the freshly-observed chain.size, OR whose persisted
+        chain_seen_at is stale (> _CHAIN_SEEN_AT_MAX_AGE_SECONDS old).
 
         Chain-shares-persist fix (2026-05-31, task #56): the matched-no-size-
         mismatch path mutated Position.chain_shares in-memory but issued NO
@@ -577,13 +602,23 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         chain_cost_basis_usd / chain_seen_at onto position_current WITHOUT any
         share mutation or phase transition.
 
+        Timestamp-refresh fix (2026-05-31, Copilot review issue #1): after
+        first-population, shares are unchanged so the old code returned early
+        every cycle — chain_seen_at was frozen at the first-population timestamp
+        forever. On daemon restart classify_chain_state() reads chain_seen_at
+        from position_current back into Position.chain_verified_at; a stale
+        positive-observation timestamp triggers CHAIN_UNKNOWN mis-classification
+        for long-lived synced positions. Fix: skip the write ONLY when shares
+        are unchanged AND the persisted chain_seen_at is fresh (within
+        _CHAIN_SEEN_AT_MAX_AGE_SECONDS). When the timestamp is stale the
+        observation event is re-emitted (cheap: one SAVEPOINT write per cycle
+        per stale position, bounded by the 30-minute window).
+
         Gating mirrors _append_canonical_size_correction_if_available:
           - conn present; skip pending_entry phase (don't fight fill detection);
           - canonical row must exist with phase == expected_phase
             (active/day0_window) — a missing projection with prior history is a
-            contract violation surfaced by the shared baseline gate;
-          - only writes when chain_shares needs first-population (NULL) or
-            drift-correction (persisted != chain.size by > 1e-9).
+            contract violation surfaced by the shared baseline gate.
 
         Fail-closed: any unexpected error is swallowed (logged) so reconcile
         never crashes. The next cycle re-detects and retries the write.
@@ -612,17 +647,44 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             ):
                 return False
 
-            row_exists, persisted_chain_shares = _canonical_current_chain_shares(trade_id)
+            row_exists, persisted_chain_shares, persisted_seen_at = (
+                _canonical_current_chain_shares(trade_id)
+            )
             if not row_exists:
                 return False
             target_chain_shares = getattr(position, "chain_shares", None)
             if target_chain_shares is None:
                 return False
-            # Only write on first-population (NULL) or genuine drift.
-            if persisted_chain_shares is not None and abs(
-                float(persisted_chain_shares) - float(target_chain_shares)
-            ) <= 1e-9:
-                return False
+
+            # Decide whether a write is needed:
+            #   (a) shares need first-population (NULL) → always write.
+            #   (b) shares have genuinely drifted → always write.
+            #   (c) shares are unchanged AND timestamp is fresh → skip.
+            #   (d) shares are unchanged AND timestamp is stale/missing → write
+            #       to refresh chain_seen_at so classify_chain_state() keeps the
+            #       correct CHAIN_KNOWN classification on restart.
+            shares_unchanged = (
+                persisted_chain_shares is not None
+                and abs(float(persisted_chain_shares) - float(target_chain_shares)) <= 1e-9
+            )
+            if shares_unchanged:
+                # Check timestamp freshness (case c vs d).
+                timestamp_fresh = False
+                if persisted_seen_at:
+                    try:
+                        from datetime import datetime, timezone
+                        ts = datetime.fromisoformat(persisted_seen_at)
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        now_dt = datetime.fromisoformat(now)
+                        if now_dt.tzinfo is None:
+                            now_dt = now_dt.replace(tzinfo=timezone.utc)
+                        age_s = (now_dt - ts).total_seconds()
+                        timestamp_fresh = age_s < _CHAIN_SEEN_AT_MAX_AGE_SECONDS
+                    except Exception:
+                        timestamp_fresh = False  # parse failure → treat as stale
+                if timestamp_fresh:
+                    return False  # case c: nothing to write
 
             from src.engine.lifecycle_events import (
                 build_chain_economics_observed_canonical_write,

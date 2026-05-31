@@ -57,6 +57,7 @@ test_trust_policy:
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/engine/test_substrate_illiquid_bin_capture.py: {created: "2026-05-30", last_used: "2026-05-30"}
     tests/engine/test_trade_score_direction_semantics.py: {created: "2026-05-30", last_used: "2026-05-30"}
     tests/engine/test_topology_clock_from_persisted_market_events.py: {created: "2026-05-30", last_used: "2026-05-30"}

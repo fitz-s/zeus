@@ -1,8 +1,8 @@
-# Created: 2026-05-31
-# Last reused or audited: 2026-05-31
-# Authority basis: task #56 chain-shares-persist — matched-no-mismatch path
-#   issued no canonical write, leaving position_current.chain_shares NULL for
-#   every synced position (local DB diverges from on-chain reality).
+# Lifecycle: created=2026-05-31; last_reviewed=2026-05-31; last_reused=2026-05-31
+# Purpose: Relationship test — chain economics (chain_shares, chain_seen_at) persist
+#   to position_current for SYNCED positions and survive a fresh DB read (task #56).
+# Reuse: inspect chain_reconciliation.reconcile() else-branch + _append_canonical_chain_observation_if_available
+#   before re-running; requires position_current.chain_shares + chain_seen_at columns (added F1).
 """Relationship test: chain_shares persists to position_current for SYNCED positions.
 
 Fitz methodology — relationship test, not a function test. The cross-module
@@ -174,6 +174,25 @@ def _read_persisted_chain_shares(db_path: str, trade_id: str):
     if row is None:
         return ("missing", None)
     return ("ok", row["chain_shares"])
+
+
+def _read_persisted_chain_seen_at(db_path: str, trade_id: str) -> str | None:
+    """Open a FRESH connection and read position_current.chain_seen_at.
+
+    Returns the persisted ISO-8601 string or None (empty / NULL / missing row).
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT chain_seen_at FROM position_current WHERE position_id = ?",
+            (trade_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return row["chain_seen_at"] or None
 
 
 # ---------------------------------------------------------------------------
@@ -366,4 +385,140 @@ def test_size_mismatch_still_uses_correction_path() -> None:
     # Correction path persists chain.size too (the existing behaviour).
     assert status == "ok" and persisted == pytest.approx(25.0), (
         f"correction path must persist chain.size=25.0, got {persisted!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. chain_seen_at advances on 2nd cycle even when chain_shares is unchanged
+#    (Copilot review issue #1: stale positive-observation timestamp)
+# ---------------------------------------------------------------------------
+
+
+def test_chain_seen_at_advances_across_two_cycles_persisted() -> None:
+    """Timestamp-refresh test (Copilot review 2026-05-31, issue #1).
+
+    A synced position observed across two reconcile cycles where chain_shares
+    is UNCHANGED must still have its chain_seen_at ADVANCED on the 2nd cycle
+    when the first-cycle timestamp is old enough to be considered stale.
+
+    Pre-fix: the helper returned False immediately when shares were unchanged,
+    so chain_seen_at was permanently frozen at the first-population value.
+    On daemon restart classify_chain_state() reads chain_seen_at back into
+    Position.chain_verified_at; a stale positive-observation timestamp caused
+    CHAIN_UNKNOWN mis-classification for long-lived synced positions.
+
+    Post-fix: the observation event is re-emitted when the persisted
+    chain_seen_at is older than _CHAIN_SEEN_AT_MAX_AGE_SECONDS, advancing
+    the timestamp. The advanced value must survive a fresh DB read.
+    """
+    from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
+
+    chain_size = 15.0
+    trade_id = "ts-refresh-pos"
+
+    # Use a timestamp that is clearly past the max-age threshold so cycle 2
+    # always sees a stale timestamp even on fast machines.
+    stale_offset_s = _CHAIN_SEEN_AT_MAX_AGE_SECONDS + 120  # 120s past the threshold
+    from datetime import datetime, timezone, timedelta
+
+    stale_ts = (
+        datetime.now(timezone.utc) - timedelta(seconds=stale_offset_s)
+    ).isoformat()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+
+        pos = _make_position(trade_id=trade_id, token_id="tok-ts", shares=chain_size)
+        # Seed with chain_shares already populated (post-first-cycle state) but
+        # with a stale chain_seen_at to simulate a long-lived synced position.
+        from src.state.projection import CANONICAL_POSITION_CURRENT_COLUMNS, ordered_values
+
+        payload = {
+            "position_id": trade_id,
+            "phase": "active",
+            "trade_id": trade_id,
+            "market_id": pos.market_id,
+            "city": pos.city,
+            "cluster": pos.cluster,
+            "target_date": pos.target_date,
+            "bin_label": pos.bin_label,
+            "direction": pos.direction,
+            "unit": "F",
+            "size_usd": pos.size_usd,
+            "shares": pos.shares,
+            "cost_basis_usd": pos.cost_basis_usd,
+            "entry_price": pos.entry_price,
+            "p_posterior": pos.p_posterior,
+            "last_monitor_prob": None,
+            "last_monitor_edge": None,
+            "last_monitor_market_price": None,
+            "decision_snapshot_id": pos.decision_snapshot_id,
+            "entry_method": pos.entry_method,
+            "strategy_key": pos.strategy_key,
+            "edge_source": pos.edge_source,
+            "discovery_mode": pos.discovery_mode,
+            "chain_state": pos.chain_state,
+            "token_id": pos.token_id,
+            "no_token_id": "",
+            "condition_id": pos.condition_id,
+            "order_id": pos.order_id,
+            "order_status": pos.order_status,
+            "updated_at": _DUMMY_TS,
+            "temperature_metric": "high",
+            "fill_authority": "",
+            "recovery_authority": "",
+            "chain_shares": chain_size,   # already populated (post-first-cycle)
+            "chain_avg_price": 0.55,
+            "chain_cost_basis_usd": 8.25,
+            "chain_seen_at": stale_ts,    # stale → must be advanced on 2nd cycle
+            "chain_absence_at": "",
+        }
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO position_current ({", ".join(CANONICAL_POSITION_CURRENT_COLUMNS)})
+            VALUES ({", ".join(["?"] * len(CANONICAL_POSITION_CURRENT_COLUMNS))})
+            """,
+            ordered_values(payload, CANONICAL_POSITION_CURRENT_COLUMNS),
+        )
+        conn.commit()
+
+        # Verify stale timestamp is seeded correctly.
+        assert _read_persisted_chain_seen_at(db_path, trade_id) == stale_ts, (
+            "precondition: stale chain_seen_at must be seeded before 2nd cycle"
+        )
+
+        # Arm Position with matching chain economics (no shares drift).
+        pos.chain_shares = chain_size
+        pos.chain_avg_price = 0.55
+        pos.chain_cost_basis_usd = 8.25
+
+        portfolio = PortfolioState(positions=[pos])
+        chain = ChainPosition(
+            token_id="tok-ts",
+            size=chain_size,   # == shares → NO size mismatch
+            avg_price=0.55,
+            cost=8.25,
+            condition_id="cond-1",
+        )
+        stats = reconcile(portfolio, [chain], conn=conn)
+        conn.close()
+
+        # Relationship assertion: chain_seen_at advanced past the stale
+        # timestamp, persisted to disk and visible on a fresh connection.
+        # Must be inside the with-block so tmpdir still exists.
+        refreshed_ts = _read_persisted_chain_seen_at(db_path, trade_id)
+
+    assert refreshed_ts is not None, (
+        "chain_seen_at must be non-NULL after 2nd-cycle reconcile"
+    )
+    assert refreshed_ts > stale_ts, (
+        f"chain_seen_at must advance on 2nd cycle when stale; "
+        f"stale={stale_ts!r} refreshed={refreshed_ts!r}. "
+        "Pre-fix: timestamp was frozen; classify_chain_state() would mis-classify "
+        "this position as CHAIN_UNKNOWN on restart."
+    )
+    assert stats.get("chain_observation_persisted", 0) == 1, (
+        f"2nd-cycle stale-timestamp refresh must count as chain_observation_persisted; "
+        f"stats={stats}"
     )
