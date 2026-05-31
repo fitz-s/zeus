@@ -1,6 +1,6 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-05-16
-# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1; PR #121 forecast-live OpenData-only source-health boundary
+# Last reused/audited: 2026-05-31
+# Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1; PR #121 forecast-live OpenData-only source-health boundary; fix/edli-stage-readiness-2026-05-31 (gate-canonical generated_at)
 """Source health probe loop — Phase 2 ingest improvement.
 
 Runs a 1-row-fetch + latency probe against each upstream data source.
@@ -552,8 +552,16 @@ def write_source_health(
     else:
         out_path = state_dir / "source_health.json"
 
+    # written_at: legacy key kept for existing consumers.
+    # generated_at: gate-canonical freshness key. The live-release gate's _fresh()
+    # and main.evaluate_edli_stage_readiness recognize generated_at|updated_at|
+    # observed_at|captured_at, NOT written_at — so without generated_at a genuinely
+    # fresh source_health.json is read as missing_timestamp. Same instant as
+    # written_at; honors the gate contract (no freshness-window relaxation).
+    _stamp = _now_iso()
     payload = {
-        "written_at": _now_iso(),
+        "written_at": _stamp,
+        "generated_at": _stamp,
         "sources": results,
     }
     tmp = Path(str(out_path) + ".tmp")
