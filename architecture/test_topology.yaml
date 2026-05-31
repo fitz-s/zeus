@@ -88,6 +88,7 @@ test_trust_policy:
     tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/money_path/test_edli_live_canary.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/money_path/test_edli_live_bridge_allocator_refresh.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/state/test_edli_table_ownership.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # task_2026-05-04_oracle_kelly_evidence_rebuild antibodies (A1-A7).
     # All packet-specific test files registered here so topology_doctor

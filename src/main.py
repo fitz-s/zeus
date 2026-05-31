@@ -50,6 +50,7 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
 from src.config import cities_by_name, get_mode, settings
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
+from src.runtime import bankroll_provider
 from src.state.db import (
     init_schema,
     init_schema_trade_only,
@@ -57,6 +58,7 @@ from src.state.db import (
     get_trade_connection,
     get_world_connection_read_only,
 )
+from src.state.portfolio import load_portfolio
 
 logger = logging.getLogger("zeus")
 
@@ -3188,6 +3190,118 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
 
+def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
+    """Configure the process-wide risk allocator/governor for the EDLI live path.
+
+    ROOT (see /tmp/edli_submit_gate_trace.md): the live ``_live_order`` submit path
+    calls ``select_global_order_type`` which raises
+    ``AllocationDenied("allocator_not_configured")`` whenever the process singletons
+    ``_GLOBAL_ALLOCATOR`` / ``_GLOBAL_GOVERNOR_STATE`` are None. The legacy discover
+    cycle (``src/engine/cycle_runner.py``) populates them via
+    ``refresh_global_allocator``; the EDLI event-reactor cycle does NOT run that
+    legacy cycle, so without this seam every canary order silently blocks.
+
+    Drawdown sourcing (this drives the governor's drawdown kill-switch — getting it
+    wrong is a live-capital risk):
+      * baseline (``daily_baseline_total``) comes from ``load_portfolio()``.
+        NOTE: ``daily_baseline_total`` is structurally 0.0 system-wide (it equals
+        ``bankroll`` in the canonical DB loader — see ``src/state/portfolio.py:1790``
+        and verified live 2026-05-31). The legacy discover cycle
+        (``src/engine/cycle_runner.py:711``) uses ``_drawdown_pct = ... if _baseline
+        > 0 else 0.0`` — i.e. it tolerates zero baseline by passing drawdown=0.0 and
+        PROCEEDING to configure the allocator. The drawdown-from-baseline kill-switch
+        is therefore inert system-wide; real safety layers are riskguard risk_level
+        (GREEN gate), trailing-loss reference, bankroll truth, $5 canary cap, and
+        Kelly sizing. This seam MUST mirror that same tolerance — a stricter gate
+        here would permanently block the EDLI canary while the legacy cycle runs fine.
+      * current bankroll comes from the on-chain wallet truth via
+        ``bankroll_provider.cached()`` (warmed once per cycle by the EDLI cycle's
+        bankroll warm at the top of ``_edli_event_reactor_cycle``). The on-chain
+        wallet is the only bankroll truth source in live mode.
+      * drawdown_pct mirrors the legacy formula EXACTLY
+        (``src/engine/cycle_runner.py:711``):
+        ``max((baseline - bankroll) / baseline * 100, 0)`` for ``baseline > 0``,
+        ``0.0`` otherwise.
+
+    FAIL-CLOSED: if bankroll cache is None (wallet unreachable) or any exception
+    occurs, this does NOT configure an allow-everything allocator. It leaves the
+    singletons in their submit-blocking state and returns ``{"configured": False,
+    "fail_closed": True, ...}`` so the caller degrades to no-submit this cycle.
+    Zero/negative baseline is NOT a fail-closed trigger — it mirrors the legacy
+    path's drawdown=0.0 tolerance. Mirrors ``src/engine/cycle_runner.py:718-728``.
+    """
+    from src.control.heartbeat_supervisor import summary as _heartbeat_summary
+    from src.control.ws_gap_guard import summary as _ws_gap_summary
+    from src.risk_allocator import refresh_global_allocator
+    from src.riskguard.riskguard import get_current_level
+
+    try:
+        # On-chain wallet is the only bankroll truth. cached() never re-fetches; the
+        # EDLI cycle warms it via current(max_age_seconds=0.0) at cycle start. None →
+        # wallet unreachable / cache cold → drawdown untrustworthy → fail closed.
+        _bk = bankroll_provider.cached()
+        if _bk is None:
+            logger.error(
+                "EDLI live-bridge allocator refresh: on-chain bankroll cache is None "
+                "(wallet unreachable) — drawdown untrustworthy; FAIL-CLOSED, blocking "
+                "live submit this cycle (no fake-0.0 drawdown)."
+            )
+            return {
+                "configured": False,
+                "fail_closed": True,
+                "error": "bankroll_unavailable",
+                "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+            }
+        _current_bankroll = float(getattr(_bk, "value_usd", 0.0) or 0.0)
+
+        _portfolio = load_portfolio()
+        _baseline = float(getattr(_portfolio, "daily_baseline_total", 0.0) or 0.0)
+
+        # Legacy formula EXACTLY (cycle_runner.py:711): drawdown=0.0 when baseline<=0.
+        # baseline is structurally 0.0 system-wide; the legacy cycle runs fine with
+        # this — we must not impose a stricter gate here.
+        _drawdown_pct = (
+            max(((_baseline - _current_bankroll) / _baseline) * 100.0, 0.0)
+            if _baseline > 0.0
+            else 0.0
+        )
+
+        _result = refresh_global_allocator(
+            conn,
+            ledger={"current_drawdown_pct": _drawdown_pct, "risk_level": get_current_level().value},
+            heartbeat=_heartbeat_summary(),
+            ws_status=_ws_gap_summary(),
+        )
+        logger.info(
+            "EDLI live-bridge allocator refresh: CONFIGURED drawdown_pct=%.3f baseline=%.2f "
+            "bankroll=%.2f",
+            _drawdown_pct, _baseline, _current_bankroll,
+        )
+        return _result
+    except Exception as _refresh_exc:  # noqa: BLE001 — fail-closed by contract
+        # Never let a refresh failure leave an unconfigured-but-proceeding live submit.
+        # Reset to the explicit unconfigured (blocking) state so the submit path keeps
+        # raising allocator_not_configured, and signal the caller to degrade to no-submit.
+        from src.risk_allocator import configure_global_allocator
+
+        try:
+            configure_global_allocator(None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        logger.error(
+            "EDLI live-bridge allocator refresh FAILED: %s; FAIL-CLOSED, blocking live "
+            "submit this cycle (degrade to no-submit).",
+            _refresh_exc,
+            exc_info=True,
+        )
+        return {
+            "configured": False,
+            "fail_closed": True,
+            "error": str(_refresh_exc),
+            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+        }
+
+
 @_scheduler_job("edli_event_reactor")
 def _edli_event_reactor_cycle() -> None:
     """EDLI event-reactor scheduler hook.
@@ -3312,6 +3426,25 @@ def _edli_event_reactor_cycle() -> None:
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
         live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
+        # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
+        # built so the live submit path's select_global_order_type does not raise
+        # AllocationDenied("allocator_not_configured"). The legacy discover cycle wires this
+        # via refresh_global_allocator; the EDLI cycle does not run that cycle, so without
+        # this seam every canary order silently blocks (see /tmp/edli_submit_gate_trace.md).
+        # FAIL-CLOSED: if the refresh cannot source a trustworthy drawdown (wallet unreachable
+        # / baseline undefined / exception), degrade THIS cycle to the no-submit adapter rather
+        # than submit live with an unconfigured-but-proceeding allocator.
+        live_submit_effective = live_bridge_mode
+        if live_bridge_mode:
+            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(conn)
+            if not _alloc_refresh.get("configured"):
+                live_submit_effective = False
+                logger.error(
+                    "EDLI reactor: live-bridge allocator refresh did not configure "
+                    "(fail_closed=%r reason=%r) — degrading to NO-SUBMIT this cycle.",
+                    _alloc_refresh.get("fail_closed"),
+                    _alloc_refresh.get("entry", {}).get("reason"),
+                )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -3332,7 +3465,7 @@ def _edli_event_reactor_cycle() -> None:
                     decision_time=now,
                 ),
             )
-            if live_bridge_mode
+            if live_submit_effective
             else event_bound_no_submit_adapter_from_trade_conn(
                 trade_conn,
                 forecast_conn=forecasts_conn,
