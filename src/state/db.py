@@ -3520,7 +3520,15 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     world_path = str(ZEUS_WORLD_DB_PATH)
-    if ZEUS_WORLD_DB_PATH.exists() and ZEUS_WORLD_DB_PATH.stat().st_size > 0:
+    # Fingerprint-safety: when called with a :memory: connection (e.g.
+    # check_schema_fingerprint.py), always use the static DDL path.  The ATTACH
+    # path copies schema from the live zeus-world.db file, making the fingerprint
+    # environment-dependent (different on dev machines vs CI).  Static DDL is the
+    # only reproducible source of truth for code-plane schema checks.
+    _conn_is_memory = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name='main'"
+    ).fetchone()[0] in ("", ":memory:")
+    if not _conn_is_memory and ZEUS_WORLD_DB_PATH.exists() and ZEUS_WORLD_DB_PATH.stat().st_size > 0:
         # --- Production path: replicate schema from world.db sqlite_master ---
         # P2 stop-condition #8: iterate registry (not raw world_src.sqlite_master)
         # so ATTACH path and static-helpers path are always in sync with the
@@ -3589,14 +3597,19 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             _create_ensemble_snapshots(conn)
             _create_calibration_pairs(conn)
     else:
-        # --- Fresh-deploy fallback: static helpers (must stay in sync manually) ---
+        # --- Fresh-deploy / :memory: fallback: static helpers ---
+        # Two cases reach here:
+        #   1. :memory: connection (e.g. check_schema_fingerprint.py) — intentional;
+        #      ATTACH path would make fingerprint environment-dependent.
+        #   2. Fresh deploy where world.db does not yet exist.
         import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "init_schema_forecasts: world.db not found at %s; "
-            "falling back to static DDL helpers.  Schema may drift from "
-            "production world.db if ALTER TABLE migrations were not applied.",
-            world_path,
-        )
+        if not _conn_is_memory:
+            _logging.getLogger(__name__).warning(
+                "init_schema_forecasts: world.db not found at %s; "
+                "falling back to static DDL helpers.  Schema may drift from "
+                "production world.db if ALTER TABLE migrations were not applied.",
+                world_path,
+            )
         _create_observations(conn)
         _create_source_run(conn)
         _create_job_run(conn)
