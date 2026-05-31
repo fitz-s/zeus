@@ -3209,8 +3209,14 @@ def _apply_day0_mask_to_generated_probabilities(
         condition_id = str(candidate.condition_id or "")
         q_value = float(live_state.probabilities[str(index)])
         masked_q_by_condition[condition_id] = q_value
-        yes_lcb = lcb_by_condition[(condition_id, "buy_yes")]
-        no_lcb = lcb_by_condition[(condition_id, "buy_no")]
+        # BLOCKER #3 fix (day0 critic 2026-05-31): direct dict lookup raised KeyError
+        # for any bin-direction with no executable market quote (common in day0 where
+        # some bins are illiquid/delisted), propagating as LIVE_INFERENCE_INPUTS_MISSING
+        # and killing the ENTIRE family (zero candidates) instead of skipping just the
+        # non-executable direction. .get(...,0.0) → that direction gets no fill confidence
+        # (min(0.0,·)=0.0 → not acceptable) while bins WITH quotes still proceed.
+        yes_lcb = lcb_by_condition.get((condition_id, "buy_yes"), 0.0)
+        no_lcb = lcb_by_condition.get((condition_id, "buy_no"), 0.0)
         masked_lcb_by_direction[(condition_id, "buy_yes")] = 0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value)
         masked_lcb_by_direction[(condition_id, "buy_no")] = min(no_lcb, 1.0 - q_value)
     return masked_q_by_condition, masked_lcb_by_direction
