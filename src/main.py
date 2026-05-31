@@ -3509,6 +3509,56 @@ def _edli_event_reactor_cycle() -> None:
         conn.close()
 
 
+@_scheduler_job("edli_bankroll_warm")
+def _edli_bankroll_warm_cycle() -> None:
+    """Dedicated frequent (~60s) on-chain bankroll-of-record cache warmer.
+
+    STRUCTURAL FIX (2026-05-31, follow-up to #45): the per-event no-submit Kelly
+    proof and the live-bridge allocator refresh both read
+    ``bankroll_provider.cached()`` (300s fail-closed window) and MUST NOT live-fetch
+    per decision. The reactor cycle previously warmed that cache ONCE at cycle
+    start, but the canary cycle runs ~330s (heavy MC re-pricing + live /book fetches
+    + submit path), so by the time those consumers ran near cycle END the cache age
+    had exceeded 300s → ``cached()`` returned None → allocator fail-closed
+    (bankroll_unavailable) AND every candidate rejected with
+    ``KELLY_PROOF_MISSING:bankroll_provider_unavailable``. Bankroll freshness was
+    structurally COUPLED to the slow reactor cycle.
+
+    This job DECOUPLES freshness from the reactor cycle: it runs on its own ~60s
+    cadence and forces a fresh on-chain fetch (``current(max_age_seconds=0.0)``),
+    advancing ``_last_fetched_at`` so ``cached()`` (300s window) always resolves
+    regardless of how long the reactor cycle takes. It does NOT widen the
+    ``cached()`` window or weaken any fail-closed semantics — the consumers still
+    fail-closed correctly when bankroll is genuinely unavailable.
+
+    Not a DB writer (no table owned) — the @_scheduler_job decorator is the only
+    wiring needed (B047 observability). Fail-soft: a transient wallet-RPC failure
+    logs an ERROR but never crashes this job; a failed warm simply means this tick's
+    freshness did not advance (the next tick retries in ~60s, and consumers stay
+    fail-closed in the interim).
+    """
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    from src.runtime import bankroll_provider as _bankroll_provider
+
+    try:
+        warm = _bankroll_provider.current(max_age_seconds=0.0)
+    except Exception as exc:  # noqa: BLE001 — fail-soft; consumers fail-closed on None
+        logger.error(
+            "EDLI bankroll warm: on-chain wallet fetch raised (non-fatal, freshness "
+            "did not advance this tick): %r",
+            exc,
+        )
+        return
+    if warm is None:
+        logger.error(
+            "EDLI bankroll warm: current() returned None — on-chain wallet fetch is "
+            "failing; cached() will fail closed (KELLY_PROOF_MISSING) until it recovers."
+        )
+
+
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
     try:
         value = int(config.get(key, default))
@@ -4698,6 +4748,21 @@ def main():
             max_instances=1,
             coalesce=True,
             executor="reactor",
+        )
+        # STRUCTURAL FIX (2026-05-31, #45 follow-up): dedicated ~60s on-chain bankroll
+        # cache warmer, DECOUPLED from the slow (~330s) reactor cycle. The reactor's
+        # warm-once-at-cycle-start let _last_fetched_at age past the cached() 300s
+        # window before per-event Kelly / allocator reads ran near cycle END →
+        # KELLY_PROOF_MISSING:bankroll_provider_unavailable on every candidate. This
+        # frequent independent warm keeps cached() fresh. Not a DB writer; fail-soft.
+        scheduler.add_job(
+            _edli_bankroll_warm_cycle,
+            "interval",
+            seconds=60,
+            id="edli_bankroll_warm",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 30.0),
+            max_instances=1,
+            coalesce=True,
         )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("market_channel_ingestor_enabled"):
         scheduler.add_job(
