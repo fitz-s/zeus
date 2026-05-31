@@ -2434,6 +2434,44 @@ def _capture_boot_state() -> dict:
         )
 
 
+def _write_loaded_sha_state(boot_sha: str | None) -> None:
+    """Write the running daemon's git HEAD SHA to state/loaded_sha.json at boot.
+
+    EDLI-mode release-gate surface. The live-release gate's loaded_sha check and
+    main.evaluate_edli_stage_readiness compare the *loaded* SHA (what this process
+    actually booted on) against the expected HEAD. In legacy_cron mode run_cycle
+    produced no such file; in EDLI modes nothing wrote it -> gate FAIL
+    (missing_loaded_sha). This writes the GENUINE booted SHA (reuses the value
+    _capture_boot_state already captured via git rev-parse HEAD), once at boot.
+
+    A divergence between loaded_sha and current HEAD (filesystem updated without
+    restart) is exactly what the gate is meant to catch — so this file is written
+    ONCE at boot and intentionally NOT refreshed, encoding the truly-loaded SHA.
+
+    Authority: fix/edli-stage-readiness-2026-05-31 (loaded_sha surface).
+    """
+    if not boot_sha:
+        logger.warning(
+            "loaded_sha: boot SHA unavailable (ZEUS_ACCEPT_STALE_DEPLOY override?); "
+            "skipping state/loaded_sha.json write — release gate will read missing_loaded_sha"
+        )
+        return
+    from src.config import state_path
+
+    out_path = state_path("loaded_sha.json")
+    payload = {
+        "loaded_sha": boot_sha,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, indent=2))
+        tmp.replace(out_path)
+        logger.info("loaded_sha: wrote state/loaded_sha.json loaded_sha=%s", boot_sha[:8])
+    except OSError as exc:
+        logger.error("loaded_sha: failed to write state/loaded_sha.json: %s", exc)
+
+
 @_scheduler_job("deployment_freshness")
 def _check_deployment_freshness(
     *,
@@ -4292,6 +4330,11 @@ def main():
     _BOOT_STATE.update(_boot)
     if _boot.get("sha"):
         logger.info("deployment_freshness: boot_sha=%s", _boot["sha"][:8])
+    # EDLI-mode release-gate surface: persist the genuinely-booted HEAD SHA so the
+    # live-release gate's loaded_sha check can compare loaded vs expected. Reuses
+    # the boot SHA captured above; written once (not refreshed) so a post-boot
+    # filesystem divergence is still caught by the gate.
+    _write_loaded_sha_state(_boot.get("sha"))
 
     # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
     # without VPN. Must precede any HTTP call (PolymarketClient wallet check, etc).
