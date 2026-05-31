@@ -83,7 +83,7 @@
     "market_channel_quote_cache_enabled": true,
     "redecision_continuous_enabled": false,
     "redecision_max_per_cycle": 50,
-    "edli_bias_correction_enabled": false,
+    "edli_bias_correction_enabled": true,
     "bias_decay_kelly_haircut_enabled": true,
     "bias_decay_threshold_c": 2.0,
     "bias_decay_threshold_f": 3.0,

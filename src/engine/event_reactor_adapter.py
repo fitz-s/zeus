@@ -2928,11 +2928,17 @@ def _maybe_apply_edli_bias_correction(
         wl = row["weight_live"] if "weight_live" in keys else 0.0
         if eff is None or float(wl or 0.0) <= 0.0:
             return members, False
-        corrected = np.asarray(members, dtype=float) - float(eff)
+        # UNIT FIX (2026-05-31): effective_bias_c is degC; members carry the city's
+        # SETTLEMENT unit. SF/Seattle settle degF, so a degC bias must be converted to
+        # degF (x1.8) before subtracting — else F-cities are under-corrected 1.8x.
+        # Validated by settled-truth backtest (SF bin_bias<=1 8%->65% with unit-correct form).
+        _unit = getattr(city, "settlement_unit", "C")
+        eff_native = float(eff) * 1.8 if _unit == "F" else float(eff)
+        corrected = np.asarray(members, dtype=float) - eff_native
         import logging
         logging.getLogger("zeus.edli_bias").info(
-            "EDLI bias correction applied city=%s season=%s metric=%s eff_bias_c=%.3f",
-            city.name, season, family.metric, float(eff),
+            "EDLI bias correction applied city=%s season=%s metric=%s unit=%s eff_bias_c=%.3f eff_native=%.3f",
+            city.name, season, family.metric, _unit, float(eff), eff_native,
         )
         return corrected, True
     except Exception as exc:  # fail-closed: never break the live decision path
