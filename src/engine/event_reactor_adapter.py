@@ -2583,23 +2583,16 @@ def _canonical_probability_and_fdr_proof(
     # P1 (continuous re-decision): cache this family's belief (q-posterior per bin) so the periodic
     # re-decision scan can cheap-screen it against fresh prices WITHOUT re-running this kernel between
     # forecast cycles. Best-effort + double-guarded — a cache hiccup must never break the decision.
-    try:
-        from src.events.continuous_redecision import persist_belief_live
-
-        persist_belief_live(
-            family_id=str(getattr(event, "entity_key", "") or ""),
-            city=str((snapshot or {}).get("city") or ""),
-            target_date=str((snapshot or {}).get("target_date") or ""),
-            snapshot_id=str((snapshot or {}).get("snapshot_id") or (snapshot or {}).get("id") or ""),
-            calibrator_model_hash="identity",
-            bin_labels=[c.bin.label for c in family.candidates],
-            p_posterior_vec=[
-                float(q_by_condition.get(str(c.condition_id or ""), 0.0)) for c in family.candidates
-            ],
-            recorded_at=decision_time.isoformat(),
-        )
-    except Exception:  # noqa: BLE001 — belief cache is non-critical; never break the live decision
-        pass
+    # DISABLED 2026-05-31: persist_belief_live opened a SECOND world connection and
+    # INSERT+committed probability_trace_fact WHILE this kernel runs inside the reactor's
+    # OWN world write-transaction (process_pending's per-event SAVEPOINT) → SQLite
+    # self-deadlock that HUNG every event in process_pending (faulthandler-pinned:
+    # continuous_redecision.cache_belief:124). The surrounding try/except could not catch
+    # it because it HANGS, not raises. The belief cache is currently write-only — no live
+    # reader (enqueue_live_redecisions/screen_exit are unwired dead code per the 2026-05-31
+    # audit) — so skipping the write is safe and is the unlock for the first receipt.
+    # Re-enable under plan A2 by writing the belief through the reactor's EXISTING
+    # connection (same transaction), never a fresh get_world_connection().
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 

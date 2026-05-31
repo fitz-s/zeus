@@ -26,10 +26,21 @@ import signal
 import sys
 import threading
 import time
+import faulthandler
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+# Live-hang diagnostics (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
+# (logs/zeus-live.err) so a frozen reactor cycle (indefinite _PyMutex/lock
+# deadlock — same class as the 5h market-channel hang) can be pinned WITHOUT
+# root-level py-spy. faulthandler.enable() also dumps on fatal signals. Additive.
+faulthandler.enable()
+try:
+    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+except (AttributeError, ValueError, OSError):
+    pass
 
 try:
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -2102,6 +2113,17 @@ def _refresh_pending_family_snapshots(
     if not families:
         return {"status": "no_pending_families"}
 
+    # A2 throughput (2026-05-31): cap per-cycle capture so a cycle COMPLETES fast.
+    # Each family's capture makes serial per-token order-book fetches (uncacheable,
+    # ~1s each); refreshing ALL pending families serially made cycles 10-30 min →
+    # process_pending never ran → 0 receipts. `families` is priority-ordered (query
+    # ORDER BY priority DESC, available_at ASC), so the highest-priority families are
+    # captured first; the remainder are picked up on subsequent cycles. The reactor's
+    # own proof_limit still bounds decisions; this bounds the venue-I/O per cycle.
+    _FAMILY_REFRESH_CAP = 8
+    if len(families) > _FAMILY_REFRESH_CAP:
+        families = families[:_FAMILY_REFRESH_CAP]
+
     # Step 2: Cache-skip: for each family check whether ALL known condition_ids
     #         (from market_events topology) already have fresh snapshots.
     #         Families with ANY stale/missing bin still proceed to Gamma fetch.
@@ -3142,7 +3164,18 @@ def _edli_event_reactor_cycle() -> None:
     try:
         from src.runtime import bankroll_provider as _bankroll_provider
 
-        _bankroll_provider.current()
+        # 2026-05-31: FORCE a fresh on-chain fetch each cycle (max_age_seconds=0.0) so the
+        # per-event no-submit Kelly read (bankroll_provider.cached(), 300s window) always sees
+        # a fresh value. The prior plain current() used the default 30s freshness and could
+        # return a stale cache-hit without re-fetching, letting _last_fetched_at age past 300s
+        # → cached() None → KELLY_PROOF_MISSING:bankroll_provider_unavailable on every event.
+        # Cycle-level (not per-decision) — preserves #45's "no per-decision wallet fetch".
+        _bk_warm = _bankroll_provider.current(max_age_seconds=0.0)
+        if _bk_warm is None:
+            logger.error(
+                "EDLI reactor: bankroll warm current() returned None — cache cold, Kelly will "
+                "fail closed (KELLY_PROOF_MISSING). On-chain wallet fetch is failing."
+            )
     except Exception as _bk_exc:  # noqa: BLE001
         logger.warning("EDLI reactor: bankroll cache warm failed (non-fatal): %r", _bk_exc)
     try:
@@ -3258,7 +3291,11 @@ def _edli_event_reactor_cycle() -> None:
                 tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),
             ),
         )
-        reactor.process_pending(decision_time=now, limit=proof_limit)
+        _rr = reactor.process_pending(decision_time=now, limit=proof_limit)
+        logger.info(
+            "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d reasons=%r",
+            _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered, _rr.rejection_reasons[:8],
+        )
         conn.commit()
     finally:
         try:
@@ -4223,7 +4260,22 @@ def main():
     # task_2026-05-04_strategy_redesign_day0_endgame/PLAN_v3.md`` §P0
     # (the file is at v3 per its §0.1 changelog) and §4 D-D drift +
     # operator directive 2026-05-04 "所有的执行时间都需要严格统一用utc".
-    scheduler = BlockingScheduler(timezone=ZoneInfo("UTC"))
+    # Dedicated executor for the EDLI reactor so venue-heavy jobs (market
+    # discovery, reconcile, venue heartbeat — many serial blocking CLOB HTTP
+    # calls) in the shared 'default' pool cannot starve it. Symptom 2026-05-31:
+    # the reactor misfired for 10+ min (coalesce-skipped) while all default
+    # workers were blocked on socket reads (py-sample: 189 read frames, 0 reactor
+    # frames), so 0 no-submit receipts ever formed. An isolated pool guarantees
+    # the reactor always has a worker. Authority: docs plan A2-throughput.
+    from apscheduler.executors.pool import ThreadPoolExecutor as _APThreadPoolExecutor
+
+    scheduler = BlockingScheduler(
+        timezone=ZoneInfo("UTC"),
+        executors={
+            "default": _APThreadPoolExecutor(20),
+            "reactor": _APThreadPoolExecutor(2),
+        },
+    )
     discovery = settings["discovery"]
 
     # All modes use the SAME CycleRunner with different DiscoveryMode values
@@ -4279,6 +4331,7 @@ def main():
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
             max_instances=1,
             coalesce=True,
+            executor="reactor",
         )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("market_channel_ingestor_enabled"):
         scheduler.add_job(

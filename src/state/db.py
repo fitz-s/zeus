@@ -2442,6 +2442,21 @@ def init_schema(
         if "duplicate column" not in str(exc).lower():
             raise  # Column already exists — idempotent re-run
 
+    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed economics on
+    # position_current. F1 added chain_avg_price / chain_cost_basis_usd to the canonical
+    # column contract (src/state/projection.py CANONICAL_POSITION_CURRENT_COLUMNS) and the
+    # Position dataclass, but the boot migration was never added — so live trade DBs lack
+    # the columns and exchange_reconcile's ordered_values(projection, CANONICAL_...) raises
+    # "table position_current has no column named chain_avg_price", breaking the entire
+    # exit/PnL reconcile path. Additive nullable REAL — safe on populated tables
+    # (idempotent; OperationalError "duplicate column" = already present).
+    for _f1_col in ("chain_avg_price", "chain_cost_basis_usd"):
+        try:
+            conn.execute(f"ALTER TABLE position_current ADD COLUMN {_f1_col} REAL;")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise  # Column already exists — idempotent re-run
+
     # B091 lower half: add decision_time_status column to selection_family_fact.
     # Additive column — safe on existing DBs (idempotent; OperationalError = already present).
     try:

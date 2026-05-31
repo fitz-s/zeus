@@ -147,10 +147,21 @@ def cached(*, max_age_seconds: float = _DEFAULT_FAIL_CLOSED_AFTER_SECONDS) -> Op
     """
     with _lock:
         if _last_value_usd is None or _last_fetched_at is None:
+            logger.error(
+                "bankroll cached() -> None: NEVER-FETCHED in this process "
+                "(_last_value_usd=%r _last_fetched_at=%r). The per-cycle warm "
+                "current() is not populating this module global.",
+                _last_value_usd, _last_fetched_at,
+            )
             return None
         now = _now_utc()
         age = (now - _last_fetched_at).total_seconds()
         if age > max_age_seconds:
+            logger.error(
+                "bankroll cached() -> None: STALE age=%.1fs > max=%.1fs (last_fetch=%s). "
+                "Warm fetched once but isn't refreshing.",
+                age, max_age_seconds, _last_fetched_at.isoformat(),
+            )
             return None
         return BankrollOfRecord(
             value_usd=_last_value_usd,
