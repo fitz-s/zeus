@@ -4215,6 +4215,25 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
         except Exception:
             pass
 
+    # EDLI status-summary freshness writer (release-gate surface).
+    # In EDLI event-driven modes run_cycle() is never called, so the legacy
+    # _export_status -> write_cycle_pulse path is silent and state/status_summary.json
+    # goes stale -> the live-release gate fails status_summary / edli_stage_readiness.
+    # This chain-sync job runs under ALL EDLI modes, so emit a genuine business-plane
+    # status pulse here each cycle. write_cycle_pulse re-reads the live DB read model
+    # (open orders, risk, portfolio, capability) -> it reflects REAL current state,
+    # never a hardcoded healthy value. Non-fatal: a pulse failure must not abort the
+    # chain-sync job. Authority: fix/edli-stage-readiness-2026-05-31 (status_summary).
+    try:
+        from src.observability.status_summary import write_cycle_pulse
+        write_cycle_pulse(summary)
+    except Exception as exc:
+        logger.error(
+            "chain_sync_and_exit_monitor: status pulse failed (non-fatal): %s",
+            exc,
+            exc_info=True,
+        )
+
     _write_scheduler_health(
         "chain_sync_and_exit_monitor",
         failed=False,
