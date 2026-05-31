@@ -697,6 +697,12 @@ def build_event_bound_no_submit_receipt(
             else _runtime_bankroll_usd(cached_only=True)
         )
         kelly_multiplier = _runtime_kelly_multiplier()
+        (
+            kelly_multiplier,
+            _bias_decay_applied,
+            _bias_decay_native,
+            _bias_decay_reason,
+        ) = _maybe_bias_decay_kelly_haircut(kelly_multiplier, family=family)
         kelly = evaluate_kelly(
             kelly_decision_id=f"edli_kelly:{event.event_id}:{selected_token_id}",
             p_posterior=proof.q_posterior,
@@ -810,6 +816,10 @@ def build_event_bound_no_submit_receipt(
             "c_cost_95pct": proof.c_cost_95pct,
             "p_fill_lcb": proof.p_fill_lcb,
             "trade_score": trade_score,
+            "bias_decay_applied": bool(_bias_decay_applied),
+            "bias_decay_bias_native": _bias_decay_native,
+            "bias_decay_reason": _bias_decay_reason,
+            "bias_decay_kelly_factor": float(settings["edli_v1"].get("bias_decay_kelly_factor", 0.5)) if _bias_decay_applied else 1.0,
             "native_quote_available": True,
             "source_status": FORECAST_LIVE_ELIGIBLE_STATUS,
             "family_complete": True,
@@ -2767,6 +2777,98 @@ def _snapshot_members_json_hash(snapshot: dict[str, Any]) -> str:
 _EDLI_BIAS_FAMILY = "edli_per_city_v1"
 
 
+def _maybe_bias_decay_kelly_haircut(
+    kelly_multiplier: float,
+    *,
+    family,
+) -> tuple[float, bool, float | None, str]:
+    """INTERIM (data-insufficient phase) pre-submit Kelly haircut on high-bias cities.
+
+    Operator directive 2026-05-31: if the per-city forecast bias magnitude exceeds the
+    unit-aware threshold (edli_v1.bias_decay_threshold_c for C-settled cities,
+    bias_decay_threshold_f for F-settled SF/Seattle), multiply the Kelly multiplier by
+    bias_decay_kelly_factor (0.5 = halve). Sizes DOWN cities whose forecast we cannot yet
+    trust enough to fully correct (corrected-#24 showed a full p_raw correction worsens
+    the live gate -> edge-reversal risk). Does NOT shift p_raw.
+
+    Bias source: model_bias_ens.effective_bias_c (edli_per_city_v1, VERIFIED). The stored
+    bias is degC; for F-settled cities compare |eff_c * 1.8| to the F threshold.
+    FAIL-SAFE: no VERIFIED bias row (data absent = the data-insufficient trigger) -> apply
+    the haircut + WARN. FAIL-OPEN on UNEXPECTED ERROR only: any exception -> NO haircut +
+    WARN (never crash or zero a live size). Flag-gated: edli_v1.bias_decay_kelly_haircut_enabled.
+    """
+    try:
+        ev = settings["edli_v1"]
+        if not bool(ev.get("bias_decay_kelly_haircut_enabled", False)):
+            return kelly_multiplier, False, None, "disabled"
+        import contextlib
+        import logging
+        from src.calibration.manager import season_from_date
+        from src.calibration.ens_bias_repo import read_bias_model
+        from src.state.db import get_world_connection
+
+        city = runtime_cities_by_name().get(family.city)
+        if city is None:
+            return kelly_multiplier, False, None, "no_city"
+        unit = getattr(city, "settlement_unit", "C")
+        metric = family.metric
+        ldv = (
+            "ecmwf_opendata_mx2t3_local_calendar_day_max"
+            if metric == "high"
+            else "ecmwf_opendata_mn2t3_local_calendar_day_min"
+        )
+        season = season_from_date(str(family.target_date), lat=city.lat)
+        month = int(str(family.target_date)[5:7])
+        eff_c = None
+        with contextlib.closing(get_world_connection()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = read_bias_model(
+                conn,
+                city=city.name,
+                season=season,
+                metric=metric,
+                live_data_version=ldv,
+                month=month,
+                target_month=month,
+                authority="VERIFIED",
+                error_model_family=_EDLI_BIAS_FAMILY,
+            )
+        if row is not None:
+            try:
+                eff_c = float(row["effective_bias_c"])
+            except Exception:
+                eff_c = None
+        factor = float(ev.get("bias_decay_kelly_factor", 0.5))
+        if eff_c is None:
+            logging.getLogger("zeus.edli_bias").warning(
+                "bias-decay haircut APPLIED (fail-safe: no VERIFIED bias row) city=%s metric=%s factor=%.2f",
+                family.city, metric, factor,
+            )
+            return kelly_multiplier * factor, True, None, "no_bias_row_conservative"
+        if unit == "F":
+            bias_native = eff_c * 1.8
+            thr = float(ev.get("bias_decay_threshold_f", 3.0))
+        else:
+            bias_native = eff_c
+            thr = float(ev.get("bias_decay_threshold_c", 2.0))
+        if abs(bias_native) > thr:
+            logging.getLogger("zeus.edli_bias").info(
+                "bias-decay haircut APPLIED city=%s unit=%s bias_native=%.2f thr=%.2f factor=%.2f",
+                family.city, unit, bias_native, thr, factor,
+            )
+            return kelly_multiplier * factor, True, bias_native, "bias_exceeds"
+        return kelly_multiplier, False, bias_native, "within_threshold"
+    except Exception as exc:  # fail-OPEN on unexpected error: never crash/zero a live size
+        try:
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "bias-decay haircut SKIPPED (fail-open on error, no haircut): %s", exc
+            )
+        except Exception:
+            pass
+        return kelly_multiplier, False, None, "error_fail_open"
+
+
 def _maybe_apply_edli_bias_correction(
     members: np.ndarray,
     *,
@@ -2826,11 +2928,17 @@ def _maybe_apply_edli_bias_correction(
         wl = row["weight_live"] if "weight_live" in keys else 0.0
         if eff is None or float(wl or 0.0) <= 0.0:
             return members, False
-        corrected = np.asarray(members, dtype=float) - float(eff)
+        # UNIT FIX (2026-05-31): effective_bias_c is degC; members carry the city's
+        # SETTLEMENT unit. SF/Seattle settle degF, so a degC bias must be converted to
+        # degF (x1.8) before subtracting — else F-cities are under-corrected 1.8x.
+        # Validated by settled-truth backtest (SF bin_bias<=1 8%->65% with unit-correct form).
+        _unit = getattr(city, "settlement_unit", "C")
+        eff_native = float(eff) * 1.8 if _unit == "F" else float(eff)
+        corrected = np.asarray(members, dtype=float) - eff_native
         import logging
         logging.getLogger("zeus.edli_bias").info(
-            "EDLI bias correction applied city=%s season=%s metric=%s eff_bias_c=%.3f",
-            city.name, season, family.metric, float(eff),
+            "EDLI bias correction applied city=%s season=%s metric=%s unit=%s eff_bias_c=%.3f eff_native=%.3f",
+            city.name, season, family.metric, _unit, float(eff), eff_native,
         )
         return corrected, True
     except Exception as exc:  # fail-closed: never break the live decision path

@@ -546,8 +546,8 @@ def _reconcile_pending_positions(portfolio: PortfolioState, clob, tracker) -> di
     return _runtime.reconcile_pending_positions(portfolio, clob, tracker, deps=sys.modules[__name__])
 
 
-def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact: CycleArtifact, tracker, summary: dict):
-    return _runtime.execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary, deps=sys.modules[__name__])
+def _execute_monitoring_phase(conn, clob: PolymarketClient, portfolio, artifact: CycleArtifact, tracker, summary: dict, *, exit_order_submit_enabled: bool = True):
+    return _runtime.execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary, deps=sys.modules[__name__], exit_order_submit_enabled=exit_order_submit_enabled)
 
 
 def _execute_discovery_phase(
