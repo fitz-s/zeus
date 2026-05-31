@@ -4469,6 +4469,21 @@ def main():
             max_instances=1,
             coalesce=True,
         )
+    # Blocker #56: chain-truth sync + exit-lifecycle monitoring. Registered in BOTH
+    # legacy_cron AND EDLI event-driven modes — in EDLI modes run_cycle() never fires,
+    # so this standalone job is the ONLY path that populates chain_shares/chain_avg_price
+    # and resolves exit_pending_missing / settled-but-active positions. Shadow-safe:
+    # the job runs the monitoring phase with exit_order_submit_enabled=real_order_submit_enabled
+    # (False in shadow → DB state transitions only, no real sell orders).
+    scheduler.add_job(
+        _chain_sync_and_exit_monitor_cycle,
+        "interval",
+        minutes=2,
+        id="chain_sync_and_exit_monitor",
+        next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 60.0),
+        max_instances=1,
+        coalesce=True,
+    )
     if live_execution_mode == "legacy_cron":
         scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
