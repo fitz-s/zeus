@@ -81,7 +81,7 @@
     "day0_hard_fact_live_enabled": false,
     "market_channel_ingestor_enabled": false,
     "market_channel_quote_cache_enabled": true,
-    "redecision_continuous_enabled": false,
+    "redecision_continuous_enabled": true,
     "redecision_max_per_cycle": 50,
     "edli_bias_correction_enabled": true,
     "bias_decay_kelly_haircut_enabled": true,
