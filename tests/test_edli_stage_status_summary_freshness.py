@@ -5,6 +5,12 @@
 #   run_cycle(), so write_cycle_pulse (the status_summary writer) was silent and
 #   the gate's _fresh() found no recognized top-level timestamp key.
 #
+# Lifecycle: created=2026-05-31; last_reviewed=2026-05-31; last_reused=never
+# Purpose: Prove write_cycle_pulse emits a gate-canonical freshness key so the
+#   EDLI-mode live-release gate reads a fresh pulse as fresh (cross-module relationship test).
+# Reuse: Verify status_summary.STATUS_PATH still points at a writable path and
+#   check_live_release_gate._fresh signature unchanged before reusing.
+#
 # Relationship invariant (writer -> release gate, cross-module boundary):
 #   When write_cycle_pulse() writes status_summary.json on a fresh pulse, the
 #   payload MUST carry a top-level freshness key from the gate's canonical set

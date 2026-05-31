@@ -6,6 +6,12 @@
 #   canonical key set (generated_at|updated_at|observed_at|captured_at), so a
 #   genuinely-fresh source_health.json was read as missing_timestamp.
 #
+# Lifecycle: created=2026-05-31; last_reviewed=2026-05-31; last_reused=never
+# Purpose: Prove write_source_health emits a gate-canonical freshness key so the
+#   EDLI-mode live-release gate reads source_health as fresh (cross-module relationship test).
+# Reuse: Confirm write_source_health state_dir param still accepted and
+#   check_live_release_gate._fresh signature unchanged before reusing.
+#
 # Relationship invariant (forecast-live writer -> release gate, cross-module):
 #   write_source_health() MUST emit a top-level gate-canonical freshness key,
 #   and a file it just wrote MUST be read as fresh by the gate's _fresh().

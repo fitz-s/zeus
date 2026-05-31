@@ -4,6 +4,12 @@
 #   loaded_sha surface. ROOT: in EDLI modes nothing wrote state/loaded_sha.json,
 #   so the gate's loaded_sha check returned missing_loaded_sha.
 #
+# Lifecycle: created=2026-05-31; last_reviewed=2026-05-31; last_reused=never
+# Purpose: Prove _write_loaded_sha_state writes the genuine HEAD SHA and the gate
+#   reads it as PASS, and that wrong/absent SHA fails the gate (cross-module relationship test).
+# Reuse: Confirm _write_loaded_sha_state still exists in src.main and
+#   check_live_release_gate._check_loaded_sha signature unchanged before reusing.
+#
 # Relationship invariant (daemon boot -> release gate, cross-module boundary):
 #   _write_loaded_sha_state(boot_sha) MUST write a file whose loaded_sha is the
 #   GENUINE booted HEAD, such that the gate's _check_loaded_sha(expected=HEAD)

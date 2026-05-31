@@ -104,6 +104,17 @@ EDLI_STAGE_RISK_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
+# Surface-freshness reasons that writers populate AFTER daemon boot.  In shadow
+# mode these are expected-absent at boot-time and must WARN rather than prevent
+# startup — the scheduler refreshes them once the first cycle runs.  All other
+# reason prefixes (LOADED_SHA, UNRESOLVED_SUBMIT, LIVE_CAP_RESERVED) still
+# block shadow boot because they reflect live-money or identity risk.
+_EDLI_SHADOW_DEFERRED_REASON_PREFIXES = (
+    "EDLI_STAGE_SOURCE_HEALTH_STALE",
+    "EDLI_STAGE_SOURCE_HEALTH_MISSING",
+    "EDLI_STAGE_STATUS_SUMMARY_STALE",
+    "EDLI_STAGE_STATUS_SUMMARY_MISSING",
+)
 REQUIRED_STAGE_FILES_BY_MODE = {
     "edli_submit_disabled_bridge": (
         "edli_stage_loaded_sha_file",
@@ -353,8 +364,29 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
         max_age_seconds=int(edli_cfg.get("edli_stage_readiness_max_age_seconds", 15 * 60)),
     )
     if stage in {"edli_shadow_no_submit", "edli_submit_disabled_bridge"}:
-        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} or report.live_entries_allowed:
-            raise RuntimeError("EDLI_STAGE_READINESS_FAILED:" + ",".join(report.reasons or (report.status,)))
+        if report.live_entries_allowed:
+            raise RuntimeError("EDLI_STAGE_READINESS_FAILED:live_entries_not_allowed_in_shadow")
+        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING}:
+            # Partition reasons: surface-freshness (writers populate after boot,
+            # deferred in shadow) vs hard blockers (identity/risk, always fatal).
+            blocking = [
+                r for r in (report.reasons or ())
+                if not r.startswith(_EDLI_SHADOW_DEFERRED_REASON_PREFIXES)
+            ]
+            deferred = [
+                r for r in (report.reasons or ())
+                if r.startswith(_EDLI_SHADOW_DEFERRED_REASON_PREFIXES)
+            ]
+            if blocking:
+                raise RuntimeError(
+                    "EDLI_STAGE_READINESS_FAILED:" + ",".join(blocking)
+                )
+            if deferred:
+                logger.warning(
+                    "EDLI shadow boot: stage surfaces stale/absent (expected "
+                    "pre-first-cycle); will refresh after scheduler starts: %s",
+                    ", ".join(deferred),
+                )
         return report
     if stage == "edli_live_canary":
         risk_reasons = [reason for reason in report.reasons if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
