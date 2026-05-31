@@ -3081,7 +3081,7 @@ def _execution_stub(candidate, decision, result, city, mode, *, deps):
 
 
 
-def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: dict, *, deps):
+def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: dict, *, deps, exit_order_submit_enabled: bool = True):
     from src.engine.monitor_refresh import refresh_position
     from src.execution.exit_lifecycle import (
         ExitContext,
@@ -3419,19 +3419,29 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     pos,
                     replace(exit_context, exit_reason=exit_reason),
                 )
-                outcome = execute_exit(
-                    portfolio=portfolio,
-                    position=pos,
-                    exit_context=replace(exit_context, exit_reason=exit_reason),
-                    clob=clob,
-                    conn=conn,
-                    exit_intent=exit_intent,
-                )
-                if outcome.startswith("exit_filled:"):
-                    tracker.record_exit(pos)
-                    tracker_dirty = True
-                summary["exits"] += 1
-                portfolio_dirty = True
+                if not exit_order_submit_enabled:
+                    # Shadow/no-submit mode: record the exit decision in
+                    # summary for observability but do NOT place the sell order.
+                    # chain_sync_and_exit_monitor standalone job runs with this
+                    # flag=False so EDLI shadow mode never submits real orders
+                    # through the monitoring phase.
+                    summary["exits_suppressed_no_submit"] = summary.get("exits_suppressed_no_submit", 0) + 1
+                    summary["exits"] += 1
+                    portfolio_dirty = True
+                else:
+                    outcome = execute_exit(
+                        portfolio=portfolio,
+                        position=pos,
+                        exit_context=replace(exit_context, exit_reason=exit_reason),
+                        clob=clob,
+                        conn=conn,
+                        exit_intent=exit_intent,
+                    )
+                    if outcome.startswith("exit_filled:"):
+                        tracker.record_exit(pos)
+                        tracker_dirty = True
+                    summary["exits"] += 1
+                    portfolio_dirty = True
         except Exception as e:
             deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e, exc_info=True)
             summary["monitor_failed"] = summary.get("monitor_failed", 0) + 1

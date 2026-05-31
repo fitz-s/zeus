@@ -4088,6 +4088,122 @@ def _edli_market_channel_ingestor_cycle() -> None:
     )
 
 
+@_scheduler_job("chain_sync_and_exit_monitor")
+def _chain_sync_and_exit_monitor_cycle() -> None:
+    """Standalone chain-truth sync + exit-lifecycle monitoring job.
+
+    Wired under BOTH legacy_cron AND EDLI_EVENT_DRIVEN_MODES (Blocker #56).
+
+    In legacy_cron mode the same logic also runs embedded inside run_cycle();
+    this standalone job is a belt-and-suspenders addition that ensures chain_shares
+    stays populated and exit_pending_missing / settled-but-active positions are
+    resolved regardless of which execution mode the daemon is in.
+
+    In EDLI shadow/no-submit modes (edli_shadow_no_submit, edli_submit_disabled_bridge,
+    edli_live_canary, edli_live) this is the ONLY path that fires chain sync and exit
+    monitoring — run_cycle() is never called in those modes.
+
+    Shadow-mode safety: exit_order_submit_enabled is set to False when
+    real_order_submit_enabled is False, preventing real sell orders from being
+    placed by the monitoring phase while the daemon is in shadow/no-submit mode.
+    State transitions (exit_pending_missing resolution, chain_state updates) still
+    run — they are read + DB-state-only operations, not order submissions.
+
+    run_chain_sync uses the Polymarket REST Data API
+    (data-api.polymarket.com/positions). If funder_address is absent from Keychain,
+    PolymarketClient degrades gracefully — the call returns None/raises, which is
+    caught here and logged without crashing the daemon.
+
+    Created: 2026-05-31
+    Authority: Blocker #56 fix — /tmp/exit_chain_dx.md root cause analysis.
+    """
+    from src.data.polymarket_client import PolymarketClient
+    from src.engine.cycle_runner import (
+        _run_chain_sync,
+        _execute_monitoring_phase,
+        get_connection,
+        get_tracker,
+        load_portfolio,
+        save_tracker,
+        save_portfolio,
+    )
+    from src.state.decision_chain import CycleArtifact
+
+    edli_cfg = _settings_section("edli_v1", {})
+    real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
+
+    conn = get_connection()
+    if conn is None:
+        logger.warning("chain_sync_and_exit_monitor: DB write-lock degrade — skipping cycle")
+        return
+
+    summary: dict = {"monitors": 0, "exits": 0}
+    try:
+        portfolio = load_portfolio()
+        clob = PolymarketClient()
+
+        # Phase 1: chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
+        # Degrades gracefully if Keychain funder_address is absent (REST call fails → caught).
+        try:
+            chain_stats, _ = _run_chain_sync(portfolio, clob, conn)
+            if chain_stats:
+                summary["chain_sync"] = chain_stats
+        except Exception as exc:
+            logger.error(
+                "chain_sync_and_exit_monitor: chain sync failed (non-fatal): %s", exc, exc_info=True
+            )
+            summary["chain_sync_error"] = str(exc)
+
+        # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
+        # checks pending exit fills, runs monitor refresh for active positions.
+        # exit_order_submit_enabled=False in shadow/no-submit modes: state
+        # transitions run but no real sell orders are placed.
+        tracker = get_tracker()
+        artifact = CycleArtifact(
+            mode="chain_sync_monitor",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            summary=summary,
+        )
+        try:
+            portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
+                conn, clob, portfolio, artifact, tracker, summary,
+                exit_order_submit_enabled=real_order_submit_enabled,
+            )
+            if portfolio_dirty:
+                save_portfolio(portfolio)
+            if tracker_dirty:
+                save_tracker(tracker)
+        except Exception as exc:
+            logger.error(
+                "chain_sync_and_exit_monitor: monitoring phase failed (non-fatal): %s",
+                exc,
+                exc_info=True,
+            )
+            summary["monitoring_error"] = str(exc)
+
+        conn.commit()
+    except Exception as exc:
+        logger.error(
+            "chain_sync_and_exit_monitor: unexpected error: %s", exc, exc_info=True
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    _write_scheduler_health(
+        "chain_sync_and_exit_monitor",
+        failed=False,
+        extra={
+            "exit_order_submit_enabled": real_order_submit_enabled,
+            "monitors": summary.get("monitors", 0),
+            "exits": summary.get("exits", 0),
+            "chain_sync_summary": summary.get("chain_sync", {}),
+        },
+    )
+
+
 def main():
     _start = time.monotonic()  # F86: process start time for SIGTERM elapsed log
     global BlockingScheduler
