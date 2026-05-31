@@ -4164,15 +4164,12 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
             started_at=datetime.now(timezone.utc).isoformat(),
             summary=summary,
         )
+        portfolio_dirty = tracker_dirty = False
         try:
             portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
                 conn, clob, portfolio, artifact, tracker, summary,
                 exit_order_submit_enabled=real_order_submit_enabled,
             )
-            if portfolio_dirty:
-                save_portfolio(portfolio)
-            if tracker_dirty:
-                save_tracker(tracker)
         except Exception as exc:
             logger.error(
                 "chain_sync_and_exit_monitor: monitoring phase failed (non-fatal): %s",
@@ -4181,7 +4178,33 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
             )
             summary["monitoring_error"] = str(exc)
 
-        conn.commit()
+        # INV-17 / DT#1: commit the DB transaction (chain-sync + monitoring state
+        # transitions) FIRST, then export the derived portfolio/tracker JSON with the
+        # committed artifact id — so canonical_write.detect_stale_portfolio's marker
+        # stays valid and JSON can never lead the DB.
+        from src.state.canonical_write import commit_then_export
+        from src.state.decision_chain import store_artifact
+        _aid_box: list = [None]
+
+        def _db_op():
+            _aid_box[0] = store_artifact(conn, artifact)
+            return _aid_box[0]
+
+        def _export_portfolio():
+            if portfolio_dirty:
+                save_portfolio(
+                    portfolio,
+                    last_committed_artifact_id=_aid_box[0],
+                    source="chain_sync_monitor",
+                )
+
+        def _export_tracker():
+            if tracker_dirty:
+                save_tracker(tracker)
+
+        commit_then_export(
+            conn, db_op=_db_op, json_exports=[_export_portfolio, _export_tracker]
+        )
     except Exception as exc:
         logger.error(
             "chain_sync_and_exit_monitor: unexpected error: %s", exc, exc_info=True

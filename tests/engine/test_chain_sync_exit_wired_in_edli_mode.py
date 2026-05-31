@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-05-31
+# Last reused/audited: 2026-05-31
 # Authority basis: Blocker #56 diagnosis /tmp/exit_chain_dx.md — chain_sync +
 #   exit_monitor must fire under EDLI modes, not just legacy_cron. Relationship
 #   test: proves scheduler wiring at the boot path, not just unit logic.

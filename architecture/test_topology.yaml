@@ -28,6 +28,8 @@ test_trust_policy:
   # Machine-readable registry: 122 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/engine/test_bias_decay_kelly_haircut.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/engine/test_chain_sync_exit_wired_in_edli_mode.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_multiclass_skill_scoring.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_settlement_resolution_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_selection_coverage_settlement_truth.py: {created: "2026-05-29", last_used: "2026-05-29"}

@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-05-31
+# Last reused/audited: 2026-05-31
 # Authority basis: operator directive 2026-05-31 — pre-submit bias-decay Kelly haircut
 #   (INTERIM, data-insufficient phase). Relationship test for
 #   event_reactor_adapter._maybe_bias_decay_kelly_haircut: |per-city forecast bias| over
@@ -46,11 +46,12 @@ def patched(monkeypatch):
     monkeypatch.setattr(era, "runtime_cities_by_name", lambda: cities)
     monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
     monkeypatch.setattr(cal_manager, "season_from_date", lambda d, lat=None: "JJA")
-    # ensure flags ON with canonical thresholds
-    era.settings["edli_v1"]["bias_decay_kelly_haircut_enabled"] = True
-    era.settings["edli_v1"]["bias_decay_threshold_c"] = 2.0
-    era.settings["edli_v1"]["bias_decay_threshold_f"] = 3.0
-    era.settings["edli_v1"]["bias_decay_kelly_factor"] = 0.5
+    # ensure flags ON with canonical thresholds — monkeypatch.setitem auto-restores at
+    # teardown so these never leak into other tests (no order-dependent failures).
+    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_kelly_haircut_enabled", True)
+    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_threshold_c", 2.0)
+    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_threshold_f", 3.0)
+    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_kelly_factor", 0.5)
 
     def set_eff(eff_c):
         if eff_c is None:
@@ -98,13 +99,10 @@ def test_no_bias_row_fail_safe_halves(patched):
     assert mult == pytest.approx(0.20)
 
 
-def test_toggle_off_never_halves(patched):
+def test_toggle_off_never_halves(patched, monkeypatch):
     patched(-9.0)  # huge bias, but toggle OFF
-    era.settings["edli_v1"]["bias_decay_kelly_haircut_enabled"] = False
-    try:
-        mult, applied, native, reason = era._maybe_bias_decay_kelly_haircut(0.40, family=_Family("Tokyo"))
-    finally:
-        era.settings["edli_v1"]["bias_decay_kelly_haircut_enabled"] = True
+    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_kelly_haircut_enabled", False)
+    mult, applied, native, reason = era._maybe_bias_decay_kelly_haircut(0.40, family=_Family("Tokyo"))
     assert applied is False and reason == "disabled"
     assert mult == pytest.approx(0.40)
 
