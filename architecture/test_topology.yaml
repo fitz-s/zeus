@@ -57,7 +57,7 @@ test_trust_policy:
     tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-05-31"}
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}

@@ -507,3 +507,182 @@ def test_min_order_size_enforced():
     )
     with pytest.raises(ExecutableCostError, match="min order"):
         executable_cost(book, direction="buy_yes", shares=__import__("decimal").Decimal("4"))
+
+
+# ---------------------------------------------------------------------------
+# Blocker #52 — universe coverage relationship test (EDLI live canary)
+# Created: 2026-05-31
+# Last reused/audited: 2026-05-31
+# Authority basis: EDLI live canary Blocker #52 — pre-submit authority witness
+#   (_edli_latest_pre_submit_book_row) needs a fresh execution_feasibility_evidence
+#   row per candidate token. Universe query must cover EVERY active candidate token,
+#   not the N most-recent snapshot ROWS.
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_universe_table_with_candidate_and_fillers(n_fillers: int):
+    """A candidate market with an OLDER snapshot + many fillers with FRESHER rows.
+
+    Under the legacy ``ORDER BY captured_at DESC LIMIT n`` (on ROWS) the candidate
+    is pushed out by the fresher filler rows. The fix (latest-per-market) keeps the
+    candidate because it ranks per condition, not globally by row recency.
+    """
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            min_tick_size TEXT,
+            min_order_size TEXT,
+            neg_risk INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT
+        )
+        """
+    )
+    # Candidate market — snapshot captured EARLIER than all fillers.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-cand','0xcand','chicago-weather-high','yes-cand','no-cand','0.01','5',0,1,0,'2026-05-31T00:00:00+00:00')"
+    )
+    # Fillers — each FRESHER than the candidate, so a row-LIMIT prefers them.
+    for i in range(n_fillers):
+        ts = f"2026-05-31T10:{i % 60:02d}:{(i // 60) % 60:02d}+00:00"
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES "
+            f"('snap-f{i}','0xf{i}','tokyo-temperature-{i}','yes-f{i}','no-f{i}','0.01','5',0,1,0,'{ts}')"
+        )
+    return conn
+
+
+def test_candidate_token_excluded_under_row_limit_then_covered_by_latest_per_market():
+    """RED→GREEN: candidate token excluded by row-LIMIT, included by the fix.
+
+    Relationship: snapshot universe -> ingestor capture set. The candidate token
+    MUST be in the capture set even though its snapshot is older than the cap-many
+    filler rows. This is the precondition for it ever getting an evidence row.
+    """
+
+    n_fillers = 600  # > any reasonable per-market cap; rows, not markets
+    conn = _snapshot_universe_table_with_candidate_and_fillers(n_fillers)
+
+    # --- RED baseline: reproduce the legacy row-LIMIT behavior directly. ---
+    legacy_rows = conn.execute(
+        """
+        SELECT yes_token_id, no_token_id
+        FROM executable_market_snapshots
+        WHERE COALESCE(active,0)=1 AND COALESCE(closed,0)=0
+          AND (LOWER(COALESCE(event_slug,'')) LIKE '%weather%'
+               OR LOWER(COALESCE(event_slug,'')) LIKE '%temperature%')
+        ORDER BY captured_at DESC
+        LIMIT 500
+        """
+    ).fetchall()
+    legacy_tokens = {str(t) for row in legacy_rows for t in row if t}
+    assert "yes-cand" not in legacy_tokens, "RED expectation: row-LIMIT excludes the candidate"
+    assert "no-cand" not in legacy_tokens
+
+    # --- GREEN: the fixed universe covers the candidate at any sane cap. ---
+    md = active_weather_token_metadata_from_snapshots(conn, limit=500)
+    assert "yes-cand" in md, "candidate YES token must be in capture set after fix"
+    assert "no-cand" in md, "candidate NO token must be in capture set after fix"
+    assert md["yes-cand"].outcome_label == "YES"
+    assert md["no-cand"].outcome_label == "NO"
+
+
+def test_priority_pinning_keeps_candidate_even_below_cap():
+    """Even with a tight cap that excludes most markets, pinned candidates survive."""
+
+    conn = _snapshot_universe_table_with_candidate_and_fillers(50)
+    # Tight cap = 5 markets. Candidate's older snapshot would lose the newest-first
+    # bounded slice — but priority pinning forces it in.
+    md = active_weather_token_ids_from_snapshots(
+        conn, limit=5, priority_token_ids={"yes-cand", "no-cand"}
+    )
+    assert "yes-cand" in md
+    assert "no-cand" in md
+
+
+def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
+    """End-to-end relationship: universe -> ingestor REST seed -> evidence row -> witness.
+
+    Boundary under test: the candidate token's snapshot flows through the ingestor
+    capture path and produces an execution_feasibility_evidence row whose
+    quote_seen_at is fresh and <= decision_time, so the pre-submit witness query
+    (_edli_latest_pre_submit_book_row) returns a usable bid/ask/book_hash row.
+
+    Pre-fix the candidate is absent from the universe -> no evidence row -> witness
+    returns None -> EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED.
+    """
+
+    from src.main import _edli_latest_pre_submit_book_row
+
+    snap_conn = _snapshot_universe_table_with_candidate_and_fillers(600)
+    # Universe with candidate pinned (mirrors the live wiring in main.py).
+    token_metadata = active_weather_token_metadata_from_snapshots(
+        snap_conn, limit=500, priority_token_ids={"yes-cand", "no-cand"}
+    )
+    assert "yes-cand" in token_metadata
+
+    # World DB with the REAL execution_feasibility_evidence schema + witness reads.
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    ingestor = MarketChannelIngestor(
+        EventWriter(world_conn),
+        active_token_ids=set(token_metadata),
+        token_metadata=token_metadata,
+    )
+
+    seed_time = "2026-05-31T12:00:00+00:00"
+
+    def _fetch_orderbook(token_id: str) -> dict:
+        # Minimal valid book with bid/ask/hash for the candidate; empty otherwise.
+        # ISO timestamp passes through _timestamp_ms_to_iso unchanged (avoids ms math).
+        if token_id in {"yes-cand", "no-cand"}:
+            return {
+                "event_type": "book",
+                "asset_id": token_id,
+                "market": "0xcand",
+                "timestamp": seed_time,
+                "hash": f"bookhash-{token_id}",
+                "bids": [{"price": "0.48", "size": "100"}],
+                "asks": [{"price": "0.52", "size": "100"}],
+            }
+        return {
+            "event_type": "book",
+            "asset_id": token_id,
+            "timestamp": seed_time,
+            "hash": "",
+            "bids": [],
+            "asks": [],
+        }
+
+    ingestor.seed_from_rest(_fetch_orderbook, received_at=seed_time)
+    world_conn.commit()
+
+    # Decision time strictly AFTER the seed quote — causal witness must accept it.
+    decision_time = datetime(2026, 5, 31, 12, 0, 30, tzinfo=timezone.utc)
+    row = _edli_latest_pre_submit_book_row(
+        world_conn, token_id="yes-cand", decision_time=decision_time
+    )
+    assert row is not None, "witness must find a fresh evidence row for the candidate token"
+    quote_seen_at, book_hash_before, best_bid_before, best_ask_before = row
+    assert book_hash_before == "bookhash-yes-cand"
+    assert best_bid_before is not None and best_ask_before is not None
+    # Causal guard preserved: the captured quote is <= decision_time.
+    assert datetime.fromisoformat(quote_seen_at) <= decision_time
+
+    # Safety NOT relaxed: a future-dated decision boundary still excludes the quote.
+    past_decision = datetime(2026, 5, 31, 11, 59, 0, tzinfo=timezone.utc)
+    assert (
+        _edli_latest_pre_submit_book_row(
+            world_conn, token_id="yes-cand", decision_time=past_decision
+        )
+        is None
+    ), "causal guard must still reject quotes seen after the decision time"

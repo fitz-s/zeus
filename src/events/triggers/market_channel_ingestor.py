@@ -301,18 +301,51 @@ class MarketChannelIngestor:
         return result
 
 
-def active_weather_token_ids_from_snapshots(conn: sqlite3.Connection, *, limit: int = 500) -> set[str]:
+def active_weather_token_ids_from_snapshots(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 2000,
+    priority_token_ids: set[str] | None = None,
+) -> set[str]:
     """Read active YES/NO token ids from executable snapshot truth."""
 
-    return set(active_weather_token_metadata_from_snapshots(conn, limit=limit))
+    return set(
+        active_weather_token_metadata_from_snapshots(
+            conn, limit=limit, priority_token_ids=priority_token_ids
+        )
+    )
 
 
 def active_weather_token_metadata_from_snapshots(
     conn: sqlite3.Connection,
     *,
-    limit: int = 500,
+    limit: int = 2000,
+    priority_token_ids: set[str] | None = None,
 ) -> dict[str, MarketTokenMetadata]:
-    """Read active weather token metadata from executable snapshot truth."""
+    """Read active weather token metadata from executable snapshot truth.
+
+    Coverage contract (EDLI live canary, Blocker #52 — 2026-05-31)
+    ---------------------------------------------------------------
+    The market-channel ingestor subscribes to / REST-seeds books for EVERY
+    token returned here. Those books become the ``execution_feasibility_evidence``
+    rows the pre-submit witness (``_edli_latest_pre_submit_book_row``) reads.
+
+    The MUST-HAVE invariant is: **every token that can become an EDLI candidate
+    must be in this set**, so it receives a fresh evidence row before the reactor
+    decides on it. A global ``ORDER BY captured_at DESC LIMIT N`` on ROWS violated
+    that invariant — it covered only the ~66 distinct tokens whose snapshot rows
+    happened to be most-recent, silently excluding ~3,956 active-weather tokens
+    (incl. live candidates whose snapshots were slightly older) → empty witness
+    quote → ``EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED``.
+
+    The fix selects the LATEST snapshot **per market** (window over condition_id),
+    so every distinct active condition's YES/NO tokens are covered — distinct
+    tokens, not distinct rows. ``priority_token_ids`` (the candidate universe —
+    tokens the reactor has live opportunity families for) are pinned into the set
+    unconditionally and never dropped by the ``limit`` cap; the remaining
+    (non-priority) markets fill up to ``limit`` newest-first (round-robin the rest)
+    to bound the connect-time REST seed / WS subscription against venue rate limits.
+    """
 
     if not _table_exists(conn, "executable_market_snapshots"):
         return {}
@@ -320,6 +353,7 @@ def active_weather_token_metadata_from_snapshots(
     required = {"snapshot_id", "condition_id", "yes_token_id", "no_token_id", "min_tick_size", "min_order_size", "neg_risk"}
     if not required <= columns:
         return {}
+    has_captured_at = "captured_at" in columns
     predicates = []
     if "active" in columns:
         predicates.append("COALESCE(active, 0) = 1")
@@ -328,18 +362,50 @@ def active_weather_token_metadata_from_snapshots(
     if "event_slug" in columns:
         predicates.append("(LOWER(COALESCE(event_slug, '')) LIKE '%weather%' OR LOWER(COALESCE(event_slug, '')) LIKE '%temperature%')")
     where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
-    rows = conn.execute(
-        f"""
-        SELECT snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk
+    # Latest snapshot per market (condition_id). Without a captured_at column we
+    # cannot rank temporally, so fall back to one row per condition by rowid.
+    order_expr = "captured_at DESC, rowid DESC" if has_captured_at else "rowid DESC"
+    latest_per_condition = f"""
+        SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
+               min_tick_size, min_order_size, neg_risk,
+               ROW_NUMBER() OVER (
+                   PARTITION BY condition_id ORDER BY {order_expr}
+               ) AS _rn
         FROM executable_market_snapshots
         {where_clause}
-        ORDER BY captured_at DESC
-        LIMIT ?
-        """,
-        (limit,),
+    """
+    rows = conn.execute(
+        f"""
+        WITH latest AS ({latest_per_condition})
+        SELECT snapshot_id, condition_id, yes_token_id, no_token_id,
+               min_tick_size, min_order_size, neg_risk
+        FROM latest
+        WHERE _rn = 1
+        ORDER BY snapshot_id
+        """
     ).fetchall()
+
+    priority = {str(t) for t in (priority_token_ids or set()) if t}
+    capped_limit = max(1, int(limit))
+    # Partition markets: candidate-bearing markets are pinned (always captured);
+    # the rest are bounded by the limit. Sort the non-priority markets newest-first
+    # so the bounded slice prefers freshly-captured markets (round-robin the tail).
+    priority_rows: list = []
+    other_rows: list = []
+    for row in rows:
+        _snap, _cond, yes_token_id, no_token_id, *_ = row
+        is_priority = (
+            (yes_token_id and str(yes_token_id) in priority)
+            or (no_token_id and str(no_token_id) in priority)
+        )
+        (priority_rows if is_priority else other_rows).append(row)
+
+    selected = list(priority_rows)
+    if len(selected) < capped_limit:
+        selected.extend(other_rows[: capped_limit - len(selected)])
+
     metadata: dict[str, MarketTokenMetadata] = {}
-    for snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk in rows:
+    for snapshot_id, condition_id, yes_token_id, no_token_id, min_tick_size, min_order_size, neg_risk in selected:
         if yes_token_id:
             metadata.setdefault(
                 str(yes_token_id),

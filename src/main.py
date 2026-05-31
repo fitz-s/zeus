@@ -4176,6 +4176,46 @@ def _edli_user_channel_reconcile_cycle() -> None:
     )
 
 
+def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> set[str]:
+    """Tokens the EDLI reactor has recently decided on — the candidate universe.
+
+    These are the YES/NO tokens of opportunity families the reactor actually
+    evaluates. They MUST be pinned into the market-channel ingestor universe so a
+    fresh ``execution_feasibility_evidence`` row exists for each by the time the
+    reactor decides on it (Blocker #52). ``no_trade_regret_events`` records every
+    reactor decision (incl. the witness-failure rejections we are fixing), so its
+    recent token set is a precise, self-maintaining candidate signal — no
+    cross-DB topology read in the hot path.
+    """
+
+    if world_conn is None:
+        return set()
+    try:
+        has_table = world_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='no_trade_regret_events'"
+        ).fetchone()
+    except Exception:
+        return set()
+    if not has_table:
+        return set()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(0.0, lookback_hours))).isoformat()
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT DISTINCT token_id
+            FROM no_trade_regret_events
+            WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (cutoff, int(limit)),
+        ).fetchall()
+    except Exception:
+        return set()
+    return {str(r[0]) for r in rows if r and r[0]}
+
+
 @_scheduler_job("edli_market_channel_ingestor")
 def _edli_market_channel_ingestor_cycle() -> None:
     """EDLI market-channel online data-service bootstrap.
@@ -4202,11 +4242,36 @@ def _edli_market_channel_ingestor_cycle() -> None:
         return
 
     from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_from_snapshots
-    from src.state.db import get_trade_connection
+    from src.state.db import get_trade_connection, get_world_connection
+
+    # Candidate universe (Blocker #52): tokens the reactor recently decided on must
+    # be PINNED into the ingestor universe so each has a fresh execution_feasibility_
+    # evidence row before the pre-submit witness reads it. The full latest-per-market
+    # universe is captured up to the cap; candidates are never dropped by the cap.
+    priority_token_ids: set[str] = set()
+    world_read = get_world_connection(write_class=None)
+    try:
+        priority_token_ids = _edli_candidate_priority_token_ids(world_read)
+    except Exception as exc:  # noqa: BLE001 - priority pinning is best-effort, universe still captured
+        logger.warning("EDLI ingestor candidate-priority read failed (non-fatal): %s", exc)
+    finally:
+        if world_read is not None:
+            world_read.close()
+
+    universe_cap = _edli_bounded_positive_int(
+        edli_cfg,
+        "market_channel_universe_max_tokens",
+        default=2000,
+        maximum=8000,
+    )
 
     trade_conn = get_trade_connection(write_class=None)
     try:
-        token_metadata = active_weather_token_metadata_from_snapshots(trade_conn)
+        token_metadata = active_weather_token_metadata_from_snapshots(
+            trade_conn,
+            limit=universe_cap,
+            priority_token_ids=priority_token_ids,
+        )
         token_ids = set(token_metadata)
     finally:
         trade_conn.close()
