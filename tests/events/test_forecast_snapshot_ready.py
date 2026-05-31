@@ -342,6 +342,250 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
     assert json.loads(payload)["completeness_status"] == "COMPLETE"
 
 
+def test_scan_emits_only_for_families_with_a_market_when_markets_exist():
+    """Decision-first emission relationship.
+
+    A committed forecast family that has NO Polymarket market (no market_events row) must NOT
+    emit a decision event once any market exists — it can never trade, so it must not consume
+    the reactor's bounded decision-proof budget. Fail-open is covered by the other tests
+    (empty market_events -> emit all). Once the family's market appears, it emits.
+    """
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.execute(
+        """
+        INSERT INTO source_run (
+            source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
+            source_cycle_time, source_available_at, captured_at, target_local_date,
+            city_id, city_timezone, temperature_metric, dataset_id,
+            expected_members, observed_members, expected_steps_json, observed_steps_json,
+            completeness_status, status
+        ) VALUES (
+            'run-1', 'ecmwf-open-data', 'ens', '2026-05-24T00', 'SCHEDULED_LIVE', 'SCHEDULED_LIVE',
+            '2026-05-24T00:00:00+00:00', '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00',
+            '2026-05-24', 'chicago', 'America/Chicago', 'high', 'v1',
+            51, 51, '[0,3,6]', '[0,3,6]', 'COMPLETE', 'SUCCESS'
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport, release_calendar_key, track,
+            city_id, city, city_timezone, target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members, observed_members, expected_steps_json,
+            observed_steps_json, snapshot_ids_json, target_window_start_utc, target_window_end_utc,
+            completeness_status, readiness_status, computed_at, expires_at
+        ) VALUES (
+            'cov-1', 'run-1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', '2026-05-24T00', 'ens',
+            'chicago', 'Chicago', 'America/Chicago', '2026-05-24', 'high', 'temperature',
+            'high_temp', 'v1', 51, 51, '[0,3,6]', '[0,3,6]', '[1]',
+            '2026-05-24T05:00:00+00:00', '2026-05-25T05:00:00+00:00',
+            'COMPLETE', 'LIVE_ELIGIBLE', '2026-05-24T04:16:00+00:00', '2026-05-25T04:16:00+00:00'
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+            issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+            model_version, dataset_id, source_id, source_transport, source_run_id,
+            release_calendar_key, source_cycle_time, source_release_time, source_available_at,
+            authority, causality_status, boundary_ambiguous, contributes_to_target_extrema,
+            forecast_window_attribution_status, local_day_start_utc, step_horizon_hours,
+            members_unit, raw_orderbook_hash_transition_delta_ms
+        ) VALUES (
+            1, 'Chicago', '2026-05-24', 'high', 'temperature', 'high_temp',
+            '2026-05-24T00:00:00+00:00', '2026-05-24T06:00:00+00:00',
+            '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00', 6,
+            '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51]',
+            'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', 'run-1',
+            '2026-05-24T00', '2026-05-24T00:00:00+00:00', '2026-05-24T03:00:00+00:00',
+            '2026-05-24T04:15:00+00:00', 'VERIFIED', 'OK', 0, 1,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', '2026-05-24T05:00:00+00:00', 6, 'F', 0
+        )
+        """
+    )
+    # A market exists, but for a DIFFERENT family — Chicago|2026-05-24|high has none.
+    forecasts_conn.execute(
+        "INSERT INTO market_events (market_slug, city, target_date, temperature_metric) VALUES (?, ?, ?, ?)",
+        ("denver-high-2026-05-24", "Denver", "2026-05-24", "high"),
+    )
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+    )
+
+    # Market exists for another family -> filter active -> Chicago (no market) is NOT emitted.
+    results = trigger.scan_committed_snapshots(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+    )
+    assert results == []
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+
+    # Once Chicago's market appears, the same family emits on the next scan.
+    forecasts_conn.execute(
+        "INSERT INTO market_events (market_slug, city, target_date, temperature_metric) VALUES (?, ?, ?, ?)",
+        ("chicago-high-2026-05-24", "Chicago", "2026-05-24", "high"),
+    )
+    results = trigger.scan_committed_snapshots(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:18:00+00:00",
+    )
+    assert len(results) == 1
+    assert world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
+
+
+def test_coverage_is_completeness_authority_over_partial_source_run():
+    """Relationship: source_run_coverage is the WINDOW-SCOPED completeness authority.
+
+    Cross-module invariant (the live Break-1 dual-authority defect): when the coverage
+    layer says the target window is COMPLETE/LIVE_ELIGIBLE (window steps present, 51
+    members, executable-reader live) the snapshot must classify COMPLETE even though the
+    raw whole-run source_run reports completeness_status=PARTIAL/status=PARTIAL (its
+    observed_members accounting is orphaned from the snapshot write under the OpenData
+    5-day cap). The legacy whole-run authority must NOT veto a window-complete forecast.
+    RED before Fix-B (source_complete also required source_run==COMPLETE → PARTIAL_ALLOWED).
+    """
+    result = classify_forecast_snapshot(
+        source_run=_source_run(status="PARTIAL", completeness="PARTIAL"),
+        coverage=_coverage(completeness="COMPLETE", readiness="LIVE_ELIGIBLE", members=51),
+        snapshot=_snapshot(),
+        decision_time=_decision_time(),
+        min_members_floor=40,
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+    assert result.completeness_status == "COMPLETE"
+    assert result.live_eligible is True
+
+
+def test_window_guards_still_block_when_coverage_lies_about_steps():
+    """Fix-B must NOT become a rubber stamp: even with coverage COMPLETE/LIVE_ELIGIBLE,
+    if the window steps are NOT actually present the classification must not be COMPLETE.
+    Guards required_steps_present / observed_members / reader_live remain load-bearing."""
+    coverage = _coverage(completeness="COMPLETE", readiness="LIVE_ELIGIBLE", members=51)
+    coverage["observed_steps_json"] = "[0,3]"  # missing step 6 → window incomplete
+    result = classify_forecast_snapshot(
+        source_run=_source_run(status="PARTIAL", completeness="PARTIAL"),
+        coverage=coverage,
+        snapshot=_snapshot(),
+        decision_time=_decision_time(),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+    assert result.completeness_status != "COMPLETE"
+
+
+def test_scan_prioritizes_live_eligible_over_fresher_blocked_under_limit():
+    """Relationship: emit selection must not be starved by recency. A near-date
+    LIVE_ELIGIBLE coverage row must be emitted ahead of a FRESHER (newer computed_at)
+    far-horizon BLOCKED row when the emit LIMIT is smaller than the candidate set.
+    RED before Fix-1 (ORDER BY computed_at DESC picks the fresher BLOCKED row)."""
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    _MEMBERS = "[" + ",".join(str(i) for i in range(1, 52)) + "]"
+
+    def _ins_run(run_id, city_id, comp, status):
+        forecasts_conn.execute(
+            """
+            INSERT INTO source_run (
+                source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
+                source_cycle_time, source_available_at, captured_at, target_local_date,
+                city_id, city_timezone, temperature_metric, dataset_id,
+                expected_members, observed_members, expected_steps_json, observed_steps_json,
+                completeness_status, status
+            ) VALUES (?, 'ecmwf-open-data', 'ens', '2026-05-24T00', 'SCHEDULED_LIVE', 'SCHEDULED_LIVE',
+                '2026-05-24T00:00:00+00:00', '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00',
+                '2026-05-24', ?, 'America/Chicago', 'high', 'v1',
+                51, 51, '[0,3,6]', '[0,3,6]', ?, ?)
+            """,
+            (run_id, city_id, comp, status),
+        )
+
+    def _ins_cov(cov_id, run_id, city_id, city, readiness, comp, computed_at):
+        forecasts_conn.execute(
+            """
+            INSERT INTO source_run_coverage (
+                coverage_id, source_run_id, source_id, source_transport, release_calendar_key, track,
+                city_id, city, city_timezone, target_local_date, temperature_metric, physical_quantity,
+                observation_field, data_version, expected_members, observed_members, expected_steps_json,
+                observed_steps_json, snapshot_ids_json, target_window_start_utc, target_window_end_utc,
+                completeness_status, readiness_status, computed_at, expires_at
+            ) VALUES (?, ?, 'ecmwf-open-data', 'ensemble_snapshots_db_reader', '2026-05-24T00', 'ens',
+                ?, ?, 'America/Chicago', '2026-05-24', 'high', 'temperature',
+                'high_temp', 'v1', 51, 51, '[0,3,6]', '[0,3,6]', ?,
+                '2026-05-24T05:00:00+00:00', '2026-05-25T05:00:00+00:00',
+                ?, ?, ?, '2026-05-25T04:16:00+00:00')
+            """,
+            (cov_id, run_id, city_id, city, '[' + cov_id[-1] + ']', comp, readiness, computed_at),
+        )
+
+    def _ins_snap(snap_id, run_id, city):
+        forecasts_conn.execute(
+            """
+            INSERT INTO ensemble_snapshots (
+                snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+                issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+                model_version, dataset_id, source_id, source_transport, source_run_id,
+                release_calendar_key, source_cycle_time, source_release_time, source_available_at,
+                authority, causality_status, boundary_ambiguous, contributes_to_target_extrema,
+                forecast_window_attribution_status, local_day_start_utc, step_horizon_hours,
+                members_unit, raw_orderbook_hash_transition_delta_ms
+            ) VALUES (?, ?, '2026-05-24', 'high', 'temperature', 'high_temp',
+                '2026-05-24T00:00:00+00:00', '2026-05-24T06:00:00+00:00',
+                '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00', 6, ?,
+                'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', ?,
+                '2026-05-24T00', '2026-05-24T00:00:00+00:00', '2026-05-24T03:00:00+00:00',
+                '2026-05-24T04:15:00+00:00', 'VERIFIED', 'OK', 0, 1,
+                'FULLY_INSIDE_TARGET_LOCAL_DAY', '2026-05-24T05:00:00+00:00', 6, 'F', 0)
+            """,
+            (snap_id, city, _MEMBERS, run_id),
+        )
+
+    # Eligible near-date row, OLDER computed_at.
+    _ins_run("run-elig", "chicago", "COMPLETE", "SUCCESS")
+    _ins_cov("cov-1", "run-elig", "chicago", "Chicago", "LIVE_ELIGIBLE", "COMPLETE", "2026-05-24T04:16:00+00:00")
+    _ins_snap(1, "run-elig", "Chicago")
+    # Far-horizon blocked row, FRESHER computed_at (would win recency ORDER BY).
+    _ins_run("run-blk", "seattle", "PARTIAL", "PARTIAL")
+    _ins_cov("cov-2", "run-blk", "seattle", "Seattle", "BLOCKED", "PARTIAL", "2026-05-24T04:30:00+00:00")
+    _ins_snap(2, "run-blk", "Seattle")
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+    results = trigger.scan_committed_snapshots(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+        limit=1,
+    )
+    assert len(results) == 1
+    import json as _json
+
+    row = world_conn.execute("SELECT payload_json FROM opportunity_events").fetchone()
+    assert row is not None, "no event emitted under limit=1"
+    payload = _json.loads(row[0])
+    assert payload["city"] == "Chicago", (
+        f"emit starved the LIVE_ELIGIBLE near-date row; emitted {payload['city']} instead"
+    )
+
+
 def test_scan_committed_snapshot_blocks_future_coverage_computed_at():
     forecasts_conn = sqlite3.connect(":memory:")
     forecasts_conn.execute(

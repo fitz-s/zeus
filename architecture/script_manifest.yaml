@@ -747,6 +747,11 @@ scripts:
   run_offline_calibration_rebuild.py: {class: repair, dangerous_if_run: true, dry_run_default: false, apply_flag: implicit, target_db: explicit_isolated_staging_db, read_targets: [explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], authority_scope: operator_invoked, reuse_when: "After seed_isolated_calibration_db.py: runs rebuild_all_v2() against isolated staging DB with --error-model full_transport_v1.", do_not_use_when: "Never pass canonical live DB as --db (script refuses at startup via _resolve_isolated_calibration_write_db_path).", canonical_command: "python scripts/run_offline_calibration_rebuild.py --db /tmp/iso.db --n-mc 10000 --workers 14 --error-model full_transport_v1", delete_policy: "Ephemeral driver; keep while staging DB is in use.", promotion_barrier: "Calibration pairs output requires separate promotion script.", required_helpers: ["scripts/rebuild_calibration_pairs.py::rebuild_all_v2", "scripts/rebuild_calibration_pairs.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py], unguarded_write_rationale: "Writes only to caller-specified isolated DB; canonical DB refusal enforced by _resolve_isolated_calibration_write_db_path."}
   run_offline_platt_refit.py: {class: repair, dangerous_if_run: true, dry_run_default: false, apply_flag: implicit, target_db: explicit_isolated_staging_db, read_targets: [explicit_isolated_staging_db], write_targets: [explicit_isolated_staging_db], authority_scope: operator_invoked, reuse_when: "After run_offline_calibration_rebuild.py completes: runs refit_all_v2() against isolated staging DB; rebuild-complete sentinel gate preserved.", do_not_use_when: "Never pass canonical live world DB as --db (script refuses at startup).", canonical_command: "python scripts/run_offline_platt_refit.py --db /tmp/iso.db --error-model full_transport_v1", delete_policy: "Ephemeral driver; keep while staging DB is in use.", promotion_barrier: "Platt model output requires separate promote_platt.py step.", required_helpers: ["scripts/refit_platt.py::refit_all_v2", "scripts/refit_platt.py::_resolve_isolated_calibration_write_db_path"], required_tests: [tests/test_rebuild_live_sentinel.py], unguarded_write_rationale: "Writes only to caller-specified isolated DB; canonical DB refusal enforced by _resolve_isolated_calibration_write_db_path."}
   validate_ens_refit_oos.py: {class: diagnostic, dangerous_if_run: false, dry_run_default: true, apply_flag: "N/A (read-only)", target_db: explicit_isolated_staging_db, read_targets: [explicit_isolated_staging_db], write_targets: [stdout], authority_scope: read_only_audit, reuse_when: "After run_offline_platt_refit.py: group-blocked OOS validation of calibration quality; outputs markdown table.", do_not_use_when: "Do not pass a live world/forecasts DB; must be the isolated staging DB.", canonical_command: "python scripts/validate_ens_refit_oos.py --db /tmp/iso.db --metric high", delete_policy: "Long-lived; reusable for any isolated DB.", promotion_barrier: "Read-only; no promotion side effects.", required_helpers: ["src/calibration/platt.py::ExtendedPlattCalibrator"], required_tests: [], unguarded_write_rationale: "N/A — read-only."}
+  # Platt OOS scoring library and driver (2026-05-30): full-chain identity-vs-Platt OOS gate
+  # for the 8 HIGH cities. Score-only; never writes to any live DB. PROMOTE verdicts are for
+  # operator review only — do not auto-apply. See STAT_WAVE_REPORT_AND_PLATT_TASK_SPEC_2026-05-29.md.
+  score_platt_candidates.py: {class: library, dangerous_if_run: false, dry_run_default: true, apply_flag: "N/A (library)", read_targets: [], write_targets: [stdout], authority_scope: read_only_audit, reuse_when: "Import run_platt_scoring() for Platt candidate OOS gate; never call directly.", do_not_use_when: "Do not run as a script; it is a library module imported by run_platt_oos_scoring.py.", delete_policy: "Long-lived; canonical Platt OOS gate library.", promotion_barrier: "Library only; no DB writes.", required_helpers: ["src/calibration/platt_oos_resolver.py::PlattCandidate", "src/calibration/platt_oos_resolver.py::apply_candidate", "src/calibration/oos_gate.py"], required_tests: [tests/test_platt_oos_scoring.py], unguarded_write_rationale: "N/A — library only, no DB writes."}
+  run_platt_oos_scoring.py: {class: diagnostic, dangerous_if_run: false, dry_run_default: true, apply_flag: "N/A (score-only)", target_db: state/zeus-forecasts.db, read_targets: [state/zeus-forecasts.db], write_targets: [stdout, /tmp/platt_oos_results.json], authority_scope: read_only_audit, reuse_when: "Produce identity-vs-Platt OOS verdict for the 8 HIGH cities; run before any Platt promotion decision.", do_not_use_when: "This script scores only — never apply PROMOTE verdicts without operator review and a separate platt_oos_decisions DB write.", canonical_command: "python scripts/run_platt_oos_scoring.py", delete_policy: "Long-lived; rerun whenever p_raw_domain_hash changes or new calibration_pairs land.", promotion_barrier: "PROMOTE flags are for operator review only; actual promotion requires a separate platt_oos_decisions INSERT via PlattOosDecisionStore.", required_helpers: ["scripts/score_platt_candidates.py::run_platt_scoring", "src/calibration/platt_oos_resolver.py::PlattCandidate", "src/calibration/platt.py::ExtendedPlattCalibrator", "src/config.py::cities_by_name"], required_tests: [tests/test_platt_oos_scoring.py], unguarded_write_rationale: "N/A — reads zeus-forecasts.db read-only; writes only to /tmp output file."}
   promote_platt.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-world.db, read_targets: [explicit_isolated_staging_db, state/zeus-world.db], write_targets: [state/zeus-world.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of platt_models_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from refit_platt.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_platt.py::_rw_connect", "scripts/promote_platt.py::_backup_prod_tables"], required_tests: [tests/test_promote_platt.py]}
   promote_calibration.py: {class: repair, dangerous_if_run: true, dry_run_default: true, apply_flag: "--commit", target_db: state/zeus-forecasts.db, read_targets: [explicit_isolated_staging_db, state/zeus-forecasts.db], write_targets: [state/zeus-forecasts.db], unguarded_write_rationale: "K1 workload-class split (2026-05-12; PR #112 Option c): STAGE -> PROD promotion of calibration_pairs_v2; --commit DELETEs by data_version then INSERTs from STAGE, gated by sentinel-completeness, schema match, non-empty STAGE, gzipped pre-promotion backup, BEGIN IMMEDIATE + rollback, and PRAGMA integrity_check.", promotion_barrier: "STAGE_DB content must originate from rebuild_calibration_pairs.py against an isolated staging DB; promotion is operator-mediated only.", required_helpers: ["scripts/promote_calibration.py::_rw_connect", "scripts/promote_calibration.py::_backup_prod_tables"], required_tests: [tests/test_promote_calibration.py]}
 
@@ -1944,4 +1949,190 @@ scripts:
     promotion_barrier: "Read-only corroboration diagnostic; does not write DB truth."
     unguarded_write_rationale: "READ-ONLY on DB; writes only to CSV output."
     required_helpers: [scripts.audit_refit_proper_scores]
+    required_tests: []
+
+  # --- Scripts added by feat/edli-continuous-redecision-shadow (PR #364) ---
+
+  backfill_market_events_created_at.py:
+    class: repair
+    status: active
+    lifecycle: long_lived
+    authority_scope: repair_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--dry-run"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/backfill_market_events_created_at.py [--dry-run]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      One-time backfill: populate market_events.created_at for NULL rows using
+      recorded_at (persisted timestamp). Heals TOPOLOGY_CLOCK_MISSING gate that
+      was blocking all families before the market_scanner writer fix.
+    do_not_use_when: "After market_scanner fix is live and all market_events rows carry created_at."
+    promotion_barrier: "Writes only to market_events.created_at; does not affect trade truth."
+    unguarded_write_rationale: "Backfill of infrastructure clock column; operator-authorized one-shot; dry-run default."
+    required_helpers: [src.state.db.get_world_connection]
+    required_tests: [tests/engine/test_topology_clock_from_persisted_market_events.py]
+
+  purge_partial_fsr_events.py:
+    class: repair
+    status: active
+    lifecycle: long_lived
+    authority_scope: repair_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--dry-run"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/purge_partial_fsr_events.py [--dry-run]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Operator-authorized one-shot: purge permanently-unresolvable PARTIAL
+      FORECAST_SNAPSHOT_READY events from opportunity_events. These can never pass
+      the COMPLETE certificate gate; their source_run was rewritten by corrected reingest.
+    do_not_use_when: "After purge is complete; PARTIAL FSR count is already zero."
+    promotion_barrier: "Drops and restores append-only triggers atomically; COMPLETE events intact."
+    unguarded_write_rationale: "Operator-authorized destructive DELETE gated by dry-run default."
+    required_helpers: []
+    required_tests: []
+
+  run24_forecast_bias_shadow_vs_online.py:
+    class: diagnostic_report_writer
+    status: active
+    lifecycle: long_lived
+    authority_scope: diagnostic_non_promotion
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [state/zeus-forecasts.db, external_data]
+    write_targets: [stdout, temp]
+    canonical_command: "python scripts/run24_forecast_bias_shadow_vs_online.py [--out /tmp/run24_bin_bias.json]"
+    external_inputs: [Open-Meteo deterministic forecast]
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Run #24 unshadow gate: per-(city, target_date, HIGH) shadow predicted bin vs
+      online forecast predicted bin. PASS if bin_bias <= 1. READ-ONLY; never mutates DB.
+    do_not_use_when: "The #24 unshadow gate has already passed."
+    promotion_barrier: "Diagnostic gate output only; does not authorize live changes."
+    unguarded_write_rationale: "Writes only to /tmp output file; no canonical DB writes."
+    required_helpers: [src.signal.ensemble_signal.p_raw_vector_from_maxes]
+    required_tests: []
+
+  edli_dryrun_high_calibrator_receipt.py:
+    class: diagnostic
+    status: active
+    lifecycle: long_lived
+    authority_scope: diagnostic_non_promotion
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [state/zeus-world.db, state/zeus-forecasts.db, state/zeus_trades.db]
+    write_targets: [stdout]
+    canonical_command: "python scripts/edli_dryrun_high_calibrator_receipt.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Read-only EDLI no-submit decision dry-run for HIGH-calibrator cities. Reconstructs
+      FORECAST_SNAPSHOT_READY events and runs build_event_bound_no_submit_receipt against
+      live connections to verify cert fixes produce a valid receipt. Pure read; no DB mutation.
+    do_not_use_when: "Cert fix is confirmed and receipts are being produced by the live daemon."
+    promotion_barrier: "Diagnostic probe only; does not write receipts or authorize trades."
+    required_helpers: [src.engine.event_reactor_adapter.build_event_bound_no_submit_receipt]
+    required_tests: [tests/money_path/test_edli_live_canary.py]
+
+  edli_persist_high_receipt.py:
+    class: repair
+    status: active
+    lifecycle: long_lived
+    authority_scope: repair_write
+    dangerous_if_run: true
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db, state/zeus-forecasts.db, state/zeus_trades.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/edli_persist_high_receipt.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Deterministic replay of EDLI reactor persist path for HIGH-calibrator cities.
+      Calls build_event_bound_no_submit_receipt + EdliNoSubmitReceiptLedger.insert_idempotent
+      (same functions the live reactor calls) against committed FSR events. Produces genuine
+      persisted receipts when the daemon already consumed FSR events terminally under pre-cert-fix code.
+    do_not_use_when: "The live daemon is producing receipts autonomously via fresh FSR events."
+    promotion_barrier: "Idempotent by receipt_id; daemon reproduces same receipt from next fresh FSR."
+    unguarded_write_rationale: "Operator-authorized bridge: daemon consumed FSR events terminally; no fresh FSR until next ingest window."
+    required_helpers: [src.engine.event_reactor_adapter.build_event_bound_no_submit_receipt]
+    required_tests: [tests/money_path/test_edli_live_canary.py]
+
+  run_platt_oos_49.sh:
+    class: utility
+    status: active
+    lifecycle: long_lived
+    authority_scope: diagnostic_non_promotion
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [temp]
+    canonical_command: "bash scripts/run_platt_oos_49.sh"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Run Platt OOS scoring across remaining 41 tradeable cities (3-way parallel,
+      WAL-safe). Per-city output in /tmp/platt49/<city>.out; progress log in
+      /tmp/platt49/progress.log. Wraps run_platt_oos_scoring.py.
+    do_not_use_when: "All 49 cities already have Platt OOS verdicts."
+    promotion_barrier: "Scoring only; PROMOTE verdicts require separate operator review and platt_oos_decisions INSERT."
+    required_helpers: [scripts/run_platt_oos_scoring.py]
+    required_tests: []
+
+  write_promoted_edli_bias.py:
+    class: promotion_write
+    status: active
+    lifecycle: long_lived
+    authority_scope: promotion_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--commit"
+    target_db: state/zeus-world.db
+    read_targets: [/tmp/canonical_bias_rows.json]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/write_promoted_edli_bias.py [--commit] [--authority VERIFIED] [--months 5,6] [--rows /tmp/canonical_bias_rows.json]"
+    external_inputs: [/tmp/canonical_bias_rows.json]
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Write per-city EDLI bias rows to model_bias_ens (zeus-world.db) for the A4
+      per-city bias correction path. Writes one row per (city, month) for months 5+6
+      (MAM->JJA season boundary coverage) with error_model_family='edli_per_city_v1',
+      authority='VERIFIED', effective_bias_c = mean(forecast - observed) from
+      canonical settled data. LIVE reactor reads these rows when
+      edli_v1.edli_bias_correction_enabled is ON. DRY-RUN by default.
+      Rerun whenever the canonical bias dataset changes or new settlement months
+      accumulate. Input: /tmp/canonical_bias_rows.json (JSON list of {city, err}).
+    do_not_use_when: >
+      Do not run with --commit without first verifying the canonical_bias_rows.json
+      input is from the current settled dataset. Do not run with authority=VERIFIED
+      if the bias estimates have not been operator-reviewed.
+    promotion_barrier: >
+      Requires operator review of bias estimates + #24 re-proof per city before
+      setting edli_bias_correction_enabled=true in production. Idempotent via
+      model_bias_ens UPSERT; re-running overwrites existing rows for same keys.
+    unguarded_write_rationale: >
+      Operator-directed promotion: writes the per-city bias rows the live EDLI reactor
+      reads for the A4 correction. Rows are idempotent (UPSERT by composite key).
+      Fail-closed in reactor: missing/STAGING row -> no correction applied.
+    required_helpers:
+      - src/calibration/ens_bias_repo.py::write_bias_model
+      - src/calibration/ens_bias_repo.py::init_ens_bias_schema
+      - src/calibration/manager.py::season_from_date
+      - src/config.py::cities_by_name
     required_tests: []

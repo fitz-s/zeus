@@ -2442,6 +2442,21 @@ def init_schema(
         if "duplicate column" not in str(exc).lower():
             raise  # Column already exists — idempotent re-run
 
+    # F1 (docs/findings_2026_05_28.md §F1, 2026-05-28): chain-observed economics on
+    # position_current. F1 added chain_avg_price / chain_cost_basis_usd to the canonical
+    # column contract (src/state/projection.py CANONICAL_POSITION_CURRENT_COLUMNS) and the
+    # Position dataclass, but the boot migration was never added — so live trade DBs lack
+    # the columns and exchange_reconcile's ordered_values(projection, CANONICAL_...) raises
+    # "table position_current has no column named chain_avg_price", breaking the entire
+    # exit/PnL reconcile path. Additive nullable REAL — safe on populated tables
+    # (idempotent; OperationalError "duplicate column" = already present).
+    for _f1_col in ("chain_avg_price", "chain_cost_basis_usd"):
+        try:
+            conn.execute(f"ALTER TABLE position_current ADD COLUMN {_f1_col} REAL;")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise  # Column already exists — idempotent re-run
+
     # B091 lower half: add decision_time_status column to selection_family_fact.
     # Additive column — safe on existing DBs (idempotent; OperationalError = already present).
     try:
@@ -3478,6 +3493,17 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     from src.state.table_registry import SchemaClass as _SchemaClass, tables_for_class as _tables_for_class
     _registry_forecast_tables: frozenset[str] = _tables_for_class(_SchemaClass.FORECAST_CLASS)
 
+    # K1-ghost exclusion: tables that are forecast-class-owned and must NEVER be
+    # sourced from world_src.sqlite_master, even if a stale ghost row exists there.
+    # market_events: B3cont (PR3) collapsed market_events_v2 → market_events on
+    # forecasts.db; the old v1 shell on world.db (0 rows, missing temperature_metric
+    # + recorded_at) was declared legacy_archived but not yet dropped from the live
+    # file. If the ATTACH path picks up that ghost DDL and then _ensure_v2_forecast_indexes
+    # runs CREATE INDEX ON market_events(temperature_metric), it crashes with
+    # "no such column: temperature_metric". Fix: always build via _create_market_events
+    # (canonical static DDL in v2_schema.py) and never copy from world_src.
+    _WORLD_ATTACH_EXCLUDED: frozenset[str] = frozenset({"market_events"})
+
     # Opt-in TypedConnection identity guard (P2): if a TypedConnection is
     # passed, verify it wraps the forecasts DB. Raw sqlite3.Connection callers
     # are accepted without check (P3 migrates all call sites to ForecastsConnection).
@@ -3494,7 +3520,15 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA busy_timeout = {_busy_ms}")
 
     world_path = str(ZEUS_WORLD_DB_PATH)
-    if ZEUS_WORLD_DB_PATH.exists() and ZEUS_WORLD_DB_PATH.stat().st_size > 0:
+    # Fingerprint-safety: when called with a :memory: connection (e.g.
+    # check_schema_fingerprint.py), always use the static DDL path.  The ATTACH
+    # path copies schema from the live zeus-world.db file, making the fingerprint
+    # environment-dependent (different on dev machines vs CI).  Static DDL is the
+    # only reproducible source of truth for code-plane schema checks.
+    _conn_is_memory = conn.execute(
+        "SELECT file FROM pragma_database_list WHERE name='main'"
+    ).fetchone()[0] in ("", ":memory:")
+    if not _conn_is_memory and ZEUS_WORLD_DB_PATH.exists() and ZEUS_WORLD_DB_PATH.stat().st_size > 0:
         # --- Production path: replicate schema from world.db sqlite_master ---
         # P2 stop-condition #8: iterate registry (not raw world_src.sqlite_master)
         # so ATTACH path and static-helpers path are always in sync with the
@@ -3502,6 +3536,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         conn.execute(f"ATTACH DATABASE '{world_path}' AS world_src")
         try:
             for tbl in _registry_forecast_tables:
+                if tbl in _WORLD_ATTACH_EXCLUDED:
+                    # Never copy from world_src; always built via canonical static DDL.
+                    continue
                 row = conn.execute(
                     "SELECT sql FROM world_src.sqlite_master"
                     " WHERE type='table' AND name=?",
@@ -3515,6 +3552,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
                     conn.execute(ddl)
 
             for tbl in _registry_forecast_tables:
+                if tbl in _WORLD_ATTACH_EXCLUDED:
+                    # Indexes for excluded tables are built by their static helper.
+                    continue
                 for (sql,) in conn.execute(
                     "SELECT sql FROM world_src.sqlite_master"
                     " WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
@@ -3528,6 +3568,11 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
                     conn.execute(idx_ddl)
         finally:
             conn.execute("DETACH DATABASE world_src")
+
+        # K1-ghost exclusion: build excluded tables from canonical static DDL
+        # unconditionally, so a stale world ghost can never poison forecasts schema.
+        from src.state.schema.v2_schema import _create_market_events as _cme
+        _cme(conn)
 
         # Post-P2 fallback: world.db may be world-class-only (no legacy forecast
         # table copies). Any registry forecast table not yet on forecasts conn
@@ -3552,14 +3597,19 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
             _create_ensemble_snapshots(conn)
             _create_calibration_pairs(conn)
     else:
-        # --- Fresh-deploy fallback: static helpers (must stay in sync manually) ---
+        # --- Fresh-deploy / :memory: fallback: static helpers ---
+        # Two cases reach here:
+        #   1. :memory: connection (e.g. check_schema_fingerprint.py) — intentional;
+        #      ATTACH path would make fingerprint environment-dependent.
+        #   2. Fresh deploy where world.db does not yet exist.
         import logging as _logging
-        _logging.getLogger(__name__).warning(
-            "init_schema_forecasts: world.db not found at %s; "
-            "falling back to static DDL helpers.  Schema may drift from "
-            "production world.db if ALTER TABLE migrations were not applied.",
-            world_path,
-        )
+        if not _conn_is_memory:
+            _logging.getLogger(__name__).warning(
+                "init_schema_forecasts: world.db not found at %s; "
+                "falling back to static DDL helpers.  Schema may drift from "
+                "production world.db if ALTER TABLE migrations were not applied.",
+                world_path,
+            )
         _create_observations(conn)
         _create_source_run(conn)
         _create_job_run(conn)

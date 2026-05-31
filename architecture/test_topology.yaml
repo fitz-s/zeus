@@ -53,6 +53,12 @@ test_trust_policy:
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_market_channel_ingestor.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/engine/test_substrate_illiquid_bin_capture.py: {created: "2026-05-30", last_used: "2026-05-30"}
+    tests/engine/test_trade_score_direction_semantics.py: {created: "2026-05-30", last_used: "2026-05-30"}
+    tests/engine/test_topology_clock_from_persisted_market_events.py: {created: "2026-05-30", last_used: "2026-05-30"}
+    tests/test_opendata_observed_members_aggregation.py: {created: "2026-05-30", last_used: "2026-05-30"}
     tests/events/test_live_cap.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/events/test_live_order_aggregate.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/events/test_live_order_reconcile.py: {created: "2026-05-26", last_used: "2026-05-26"}

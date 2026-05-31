@@ -100,12 +100,26 @@ class ReactorConfig:
     tiny_live_max_orders_per_day: int = 1
 
 
+# An executable market snapshot for the family may simply not be captured yet on the cycle
+# the reactor reaches the event (the targeted refresh and the reactor share a cycle). That is
+# a TRANSIENT condition, not a terminal rejection: the event is requeued and retried on a later
+# cycle (after capture) rather than being consumed. After this many attempts without a snapshot
+# the event is dead-lettered as genuinely uncapturable.
+_EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
+MAX_EXECUTABLE_SNAPSHOT_RETRIES = 8
+# Sentinel returned by _process_one when a FORECAST_SNAPSHOT_READY event has been dead-lettered
+# due to a non-COMPLETE source_run_completeness_status. The dead-letter + reject writes are done
+# inside _process_one; process_pending must NOT double-count or attempt mark_processed on this path.
+_FSR_PARTIAL_DEAD_LETTER = "FSR_PARTIAL_DEAD_LETTER"
+
+
 @dataclass
 class ReactorResult:
     processed: int = 0
     rejected: int = 0
     proof_accepted: int = 0
     dead_lettered: int = 0
+    retried: int = 0
     rejection_reasons: list[str] = field(default_factory=list)
 
     @property
@@ -154,7 +168,32 @@ class OpportunityEventReactor:
                 continue
             try:
                 self._store.conn.execute("SAVEPOINT edli_reactor_event")
-                self._process_one(event, decision_time=decision_time, result=result)
+                disposition = self._process_one(event, decision_time=decision_time, result=result)
+                if disposition == _FSR_PARTIAL_DEAD_LETTER:
+                    # PARTIAL FSR: reject + dead_letter writes already committed by _process_one.
+                    # Only release the savepoint; do NOT call mark_processed.
+                    self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    continue
+                if disposition == _EXECUTABLE_SNAPSHOT_RETRY:
+                    attempts = self._store.attempt_count(event.event_id)
+                    if attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES:
+                        # Genuinely uncapturable after repeated cycles → terminal.
+                        self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result, decision_time=decision_time)
+                        self._store.mark_dead_letter(
+                            event,
+                            failure_stage="EXECUTABLE_SNAPSHOT_BLOCKED",
+                            error_message=f"executable snapshot not captured after {attempts} attempts",
+                            created_at=decision_time.astimezone(UTC).isoformat(),
+                        )
+                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                        result.dead_lettered += 1
+                    else:
+                        # Transient block: requeue for retry next cycle (after capture completes).
+                        # Do NOT consume the event the way mark_processed would.
+                        self._store.requeue_pending(event.event_id)
+                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                        result.retried += 1
+                    continue
                 self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
                 self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                 result.processed += 1
@@ -179,11 +218,32 @@ class OpportunityEventReactor:
                 result.dead_lettered += 1
         return result
 
-    def _process_one(self, event: OpportunityEvent, *, decision_time: datetime, result: ReactorResult) -> None:
+    def _process_one(self, event: OpportunityEvent, *, decision_time: datetime, result: ReactorResult) -> str | None:
         assert_available_for_decision(event, decision_time)
         if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED", "NEW_MARKET_DISCOVERED"}:
             self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result, decision_time=decision_time)
             return
+        if event.event_type == "FORECAST_SNAPSHOT_READY":
+            # Dead-letter immediately if the source_run is not COMPLETE — a PARTIAL-payload FSR
+            # event can never satisfy the NO_SUBMIT_CERTIFICATE gate (which requires COMPLETE).
+            # Dead-lettering here drains the queue permanently and prevents PARTIAL events from
+            # starving COMPLETE ones across cycles.
+            try:
+                payload = json.loads(event.payload_json) if isinstance(event.payload_json, str) else event.payload_json
+                src_completeness = payload.get("source_run_completeness_status", "")
+            except Exception:
+                src_completeness = ""
+            if src_completeness != "COMPLETE":
+                error_msg = f"FSR source_run_completeness_status={src_completeness!r} must be COMPLETE; dead-lettering"
+                self._reject_event(event, "SOURCE_TRUTH", "FSR_SOURCE_RUN_NOT_COMPLETE", result, decision_time=decision_time)
+                self._store.mark_dead_letter(
+                    event,
+                    failure_stage="FSR_SOURCE_RUN_NOT_COMPLETE",
+                    error_message=error_msg,
+                    created_at=decision_time.astimezone(UTC).isoformat(),
+                )
+                result.dead_lettered += 1
+                return _FSR_PARTIAL_DEAD_LETTER
         if self._config.reactor_mode not in EDLI_PROCESSING_REACTOR_MODES:
             self._reject_event(event, "LIVE_CAP", "REACTOR_NOT_LIVE", result, decision_time=decision_time)
             return
@@ -194,8 +254,9 @@ class OpportunityEventReactor:
             self._reject_event(event, "SOURCE_TRUTH", "SOURCE_TRUTH_BLOCKED", result, decision_time=decision_time)
             return
         if not self._executable_snapshot_gate(event, decision_time.astimezone(UTC)):
-            self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result, decision_time=decision_time)
-            return
+            # Transient: the family's executable snapshots may not be captured yet this cycle.
+            # Signal a retry instead of consuming the event (see process_pending).
+            return _EXECUTABLE_SNAPSHOT_RETRY
         self._log_family_once(event)
         if not self._riskguard_gate(event):
             self._reject_event(event, "RISK_GUARD", "RISK_GUARD_BLOCKED", result, decision_time=decision_time)
@@ -208,6 +269,12 @@ class OpportunityEventReactor:
             return
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt)
         if proof_stage is not None:
+            if proof_reason and "SOURCE_CAPTURED_AFTER_DECISION_TIME" in proof_reason:
+                # Transient: the forecast source was re-ingested (source_available_at updated)
+                # after this cycle's decision moment. Not a terminal rejection — requeue and
+                # retry next cycle, when decision_time advances past the source's available time
+                # (bounded by MAX_EXECUTABLE_SNAPSHOT_RETRIES → dead-letter). See process_pending.
+                return _EXECUTABLE_SNAPSHOT_RETRY
             self._reject_event(event, proof_stage, proof_reason, result, receipt=receipt, decision_time=decision_time)
             return
         if receipt.side_effect_status in LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:

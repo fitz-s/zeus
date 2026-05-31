@@ -727,7 +727,14 @@ def _verify_forecast_no_submit_semantic_consistency(
     _require_equal("no_submit.event_id", cert.payload.get("event_id"), "causal.event_id", causal.get("event_id"))
     _require_equal("source_truth.event_id", source.get("event_id"), "causal.event_id", causal.get("event_id"))
     _require_equal("source_truth.causal_snapshot_id", source.get("causal_snapshot_id"), "causal.causal_snapshot_id", causal.get("causal_snapshot_id"))
-    _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "forecast.snapshot_id", forecast.get("snapshot_id"))
+    # source_truth.snapshot_id is the CAUSAL trigger snapshot (provenance), NOT the reader-elected
+    # executable snapshot. The reader may elect a snapshot that differs from the causal one when the
+    # causal cycle's source_run is still re-ingesting members (see
+    # event_reactor_adapter._forecast_snapshot_row_for_event). The executable-authority binding is
+    # carried by source_truth.derived_from_snapshot_id == forecast.snapshot_id (below) and
+    # belief.forecast_snapshot_id == forecast.snapshot_id; conflating snapshot_id with the elected id
+    # here re-introduces the FORECAST_READER_SNAPSHOT_MISMATCH leak.
+    _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "causal.causal_snapshot_id", causal.get("causal_snapshot_id"))
     _require_equal("source_truth.source_run_id", source.get("source_run_id"), "forecast.source_run_id", forecast.get("source_run_id"))
     _require_equal("source_truth.source_id", source.get("source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
     _require_equal("source_truth.payload_hash", source.get("payload_hash"), "causal.payload_hash", causal.get("payload_hash"))

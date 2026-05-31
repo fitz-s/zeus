@@ -277,6 +277,26 @@ class PolymarketV2Adapter:
     def _default_client_factory(self, **kwargs: Any) -> Any:
         from py_clob_client_v2.client import ClobClient
 
+        # 2026-05-31: bound py_clob_client_v2's process-wide httpx client.
+        # faulthandler proof: get_order()/balance reads hung 15+ min on an SSL
+        # read (http2 half-open stall) — the library default
+        # `httpx.Client(http2=True)` did NOT enforce its timeout on a stalled
+        # read, freezing exchange_reconcile.refresh_unresolved_reconcile_findings
+        # and starving the EDLI reactor's per-cycle _refresh_pending_family_snapshots
+        # (→ 0 receipts). A bounded HTTP/1.1 client makes a stalled venue read
+        # RAISE within ~15 s instead of hanging the scheduler cycle indefinitely.
+        # Idempotent: re-assigning the module global is safe (helpers.request()
+        # looks it up per call); non-fatal if the library layout changes.
+        try:
+            import httpx as _httpx
+            from py_clob_client_v2.http_helpers import helpers as _pcc_helpers
+
+            _pcc_helpers._http_client = _httpx.Client(
+                http2=False, timeout=_httpx.Timeout(15.0, connect=8.0)
+            )
+        except Exception:  # noqa: BLE001 - non-fatal; library default retained
+            pass
+
         client = ClobClient(
             kwargs["host"],
             kwargs["chain_id"],

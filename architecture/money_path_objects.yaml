@@ -579,6 +579,13 @@ state_machines:
       - EDLI_DURABLE_SUBMIT_OUTBOX_REQUIRED
       - EDLI_LIVE_SUBMIT_NOT_WIRED_IN_THIS_INCREMENT
       - EDLI_EVENT_BOUND_RECEIPT_NOT_NO_SUBMIT
+      # FSR intake-priority dispositions (PR #364: prioritize COMPLETE FSR,
+      # dead-letter PARTIAL at intake; transient executable-snapshot retry).
+      # Internal reactor disposition sentinels — classify forecast-completeness
+      # and capture-retry outcomes; not venue order states, never prove fill.
+      - FSR_SOURCE_RUN_NOT_COMPLETE
+      - FSR_PARTIAL_DEAD_LETTER
+      - RETRY_EXECUTABLE_SNAPSHOT_PENDING
     invariant_tests:
       - tests/events/test_forecast_snapshot_ready.py
       - tests/events/test_reactor.py

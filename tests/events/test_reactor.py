@@ -236,6 +236,119 @@ def test_market_channel_event_no_direct_stale_trade():
     assert submitted == []
 
 
+def _retry_reactor(store, snapshot_present: dict):
+    return OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: snapshot_present["v"],
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=lambda _e, _dt: None,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+
+
+def test_executable_snapshot_block_is_retryable_not_consumed_then_processes_after_capture():
+    """A snapshot-block is TRANSIENT: the event is requeued (stays 'pending') rather than
+    marked processed, so once the family's snapshots are captured a later cycle re-evaluates
+    it instead of losing it. This is the #42b fix for the live reactor never running the kernel.
+    """
+    from src.events.reactor import MAX_EXECUTABLE_SNAPSHOT_RETRIES
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    present = {"v": False}
+    reactor = _retry_reactor(store, present)
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    def _status():
+        return conn.execute(
+            "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()[0]
+
+    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES - 1):
+        result = reactor.process_pending(decision_time=dt)
+        assert result.processed == 0
+        assert result.retried == 1
+        assert _status() == "pending"  # retryable, NOT consumed
+
+    present["v"] = True
+    result = reactor.process_pending(decision_time=dt)
+    assert result.processed == 1
+    assert _status() == "processed"
+
+
+def test_executable_snapshot_block_dead_letters_after_max_retries():
+    from src.events.reactor import MAX_EXECUTABLE_SNAPSHOT_RETRIES
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    present = {"v": False}  # never captured
+    reactor = _retry_reactor(store, present)
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 2):
+        reactor.process_pending(decision_time=dt)
+
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status == "dead_letter"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0] == 1
+
+
+def test_source_captured_after_decision_time_is_retryable_not_consumed():
+    """The forecast-source re-ingestion race (SOURCE_CAPTURED_AFTER_DECISION_TIME) is TRANSIENT:
+    the event is requeued and retried next cycle (decision_time advances past the source's
+    available time) rather than consumed at the money-path stage. Mirrors the snapshot retry.
+    """
+    payload = json.loads(_forecast_event().payload_json)
+
+    def _submit(event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=False,
+            reason="LIVE_INFERENCE_INPUTS_MISSING:FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:SOURCE_CAPTURED_AFTER_DECISION_TIME",
+        )
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.processed == 0
+    assert result.retried == 1
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status == "pending"
+
+
 def test_processed_event_terminal_surface_includes_execution_receipt_certificate():
     from src.decision_kernel.certificates.execution import (
         build_execution_command_certificate_from_final_intent,
@@ -1492,3 +1605,227 @@ def test_reactor_exception_dead_letters_event():
 
     assert result.dead_lettered == 1
     assert conn.execute("SELECT COUNT(*) FROM event_dead_letters").fetchone()[0] == 1
+
+
+def _fsr_event(key_suffix: str, completeness: str, available_at: str, received_at: str):
+    """Build a FORECAST_SNAPSHOT_READY event with the given completeness status."""
+    import json as _json
+    payload = ForecastSnapshotReadyPayload(
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        source_id="opendata",
+        source_run_id=f"run-{key_suffix}",
+        cycle="00",
+        track="live",
+        snapshot_id=f"snap-{key_suffix}",
+        snapshot_hash=f"hash-{key_suffix}",
+        captured_at="2026-05-24T04:00:00+00:00",
+        available_at=available_at,
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=51 if completeness == "COMPLETE" else 10,
+        min_members_floor=40,
+        completeness_status=completeness,
+        required_steps=[0],
+        observed_steps=[0],
+        expected_members=51,
+        source_run_status="SUCCESS",
+        source_run_completeness_status=completeness,
+        coverage_completeness_status=completeness,
+        coverage_readiness_status="LIVE_ELIGIBLE" if completeness == "COMPLETE" else "NOT_ELIGIBLE",
+    )
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=f"Chicago|2026-05-24|high|{key_suffix}",
+        source="forecast_live",
+        observed_at="2026-05-24T04:00:00+00:00",
+        available_at=available_at,
+        received_at=received_at,
+        payload=payload,
+        causal_snapshot_id=f"snap-{key_suffix}",
+    )
+
+
+def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
+    """Relationship test: PARTIAL FSR events dead-letter immediately; COMPLETE FSR events
+    are dequeued before PARTIAL ones even when PARTIAL has an older available_at.
+
+    Invariant: a PARTIAL-payload FSR event can NEVER produce a receipt (cert requires COMPLETE).
+    The reactor must drain them permanently rather than letting them clog the queue.
+    """
+    conn, store = _store()
+
+    # PARTIAL event has older available_at (would sort first under naive priority+available_at order)
+    partial_event = _fsr_event(
+        key_suffix="partial",
+        completeness="PARTIAL",
+        available_at="2026-05-24T04:00:00+00:00",
+        received_at="2026-05-24T04:01:00+00:00",
+    )
+    # COMPLETE event has newer available_at (would sort second under naive order)
+    complete_event = _fsr_event(
+        key_suffix="complete",
+        completeness="COMPLETE",
+        available_at="2026-05-24T05:00:00+00:00",
+        received_at="2026-05-24T05:01:00+00:00",
+    )
+
+    store.insert_or_ignore(partial_event)
+    store.insert_or_ignore(complete_event)
+
+    submitted_order = []
+
+    def _submit(event, _dt):
+        submitted_order.append(event.event_id)
+        return None  # no receipt — source_truth_gate rejects before here in a real run
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    result = reactor.process_pending(decision_time=dt, limit=100)
+
+    # PARTIAL event must be dead-lettered, not processed normally
+    partial_status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (partial_event.event_id,),
+    ).fetchone()[0]
+    assert partial_status == "dead_letter", f"PARTIAL FSR should dead-letter, got {partial_status}"
+
+    # PARTIAL event must appear in event_dead_letters
+    partial_dl = conn.execute(
+        "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
+        (partial_event.event_id,),
+    ).fetchone()[0]
+    assert partial_dl == 1, "PARTIAL FSR must have a dead_letter entry"
+
+    # COMPLETE event must NOT be dead-lettered (it proceeds through the pipeline)
+    complete_status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (complete_event.event_id,),
+    ).fetchone()[0]
+    assert complete_status != "dead_letter", f"COMPLETE FSR must not dead-letter at intake, got {complete_status}"
+
+    # COMPLETE event must be processed (reached submit), PARTIAL must not reach submit
+    assert complete_event.event_id in submitted_order, "COMPLETE FSR must reach submit"
+    assert partial_event.event_id not in submitted_order, "PARTIAL FSR must not reach submit"
+
+
+def _market_channel_event(event_type: str, key_suffix: str, available_at: str = "2026-05-24T04:00:00+00:00"):
+    """Build a market-channel cache-hydration event (BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT)."""
+    payload = MarketBookEventPayload(
+        condition_id="0xcondition",
+        token_id=f"token-{key_suffix}",
+        outcome_label="YES",
+        event_type=event_type,
+        quote_seen_at=available_at,
+        book_hash=f"hash-{key_suffix}",
+    )
+    return make_opportunity_event(
+        event_type=event_type,
+        entity_key=f"0xcondition|token-{key_suffix}",
+        source="polymarket_market_channel",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at="2026-05-24T04:01:00+00:00",
+        payload=payload,
+        causal_snapshot_id=f"hash-{key_suffix}",
+    )
+
+
+def test_market_channel_events_do_not_starve_decision_triggers():
+    """Relationship test: a large backlog of market-channel events (BEST_BID_ASK_CHANGED /
+    BOOK_SNAPSHOT / NEW_MARKET_DISCOVERED) must not starve decision-trigger events
+    (FORECAST_SNAPSHOT_READY, DAY0_EXTREME_UPDATED) even when market-channel events have
+    an older available_at and would normally sort first within the same priority level.
+
+    The fetch_pending ORDER BY must assign market-channel events to a lower tier (tier 2)
+    than decision-trigger events (tier 0 / tier 1), so the per-cycle budget (limit) is
+    consumed by decision events first.
+
+    Invariant tested: with N_MC > limit market-channel events older than a DAY0_EXTREME_UPDATED
+    event, fetch_pending(limit=10) must include the DAY0 event and NOT fill all 10 slots with
+    market-channel events.
+
+    RED (without fix): BEST_BID_ASK_CHANGED events have older available_at → sort first at
+    tier=1 (same as DAY0); all 10 limit slots consumed by MC; DAY0 never fetched.
+    GREEN (with fix): MC events demoted to tier=2; DAY0 at tier=1 fetched before any MC event.
+    """
+    conn, store = _store()
+
+    # Insert N_MC BEST_BID_ASK_CHANGED events with older available_at (tier 2 with fix)
+    N_MC = 30  # exceeds limit=10; without MC demotion, all 10 slots go to MC
+    for i in range(N_MC):
+        ev = _market_channel_event(
+            "BEST_BID_ASK_CHANGED",
+            key_suffix=str(i),
+            available_at="2026-05-24T01:00:00+00:00",  # older than DAY0 event
+        )
+        store.insert_or_ignore(ev)
+
+    # Insert one DAY0_EXTREME_UPDATED with newer available_at (tier 1 — must not be starved)
+    day0 = _day0_event(key_suffix="starvation-test")
+    store.insert_or_ignore(day0)
+
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    fetched = store.fetch_pending(decision_time=dt.isoformat(), limit=10)
+
+    fetched_types = [e.event_type for e in fetched]
+    day0_fetched = any(e.event_id == day0.event_id for e in fetched)
+    mc_count = fetched_types.count("BEST_BID_ASK_CHANGED")
+
+    assert day0_fetched, (
+        f"DAY0_EXTREME_UPDATED was not fetched: market-channel events starved it. "
+        f"fetched event_types={fetched_types[:10]}"
+    )
+    assert mc_count < 10, (
+        f"All 10 fetch slots consumed by BEST_BID_ASK_CHANGED ({mc_count}); "
+        f"decision-trigger event starved."
+    )
+
+
+def test_market_channel_events_do_not_starve_fsr():
+    """Relationship test: COMPLETE FSR events must be fetched before market-channel events
+    due to tier-0 priority, even with a large MC backlog of older events.
+
+    This test covers the COMPLETE FSR path (tier 0, unconditionally first).
+    See test_market_channel_events_do_not_starve_decision_triggers for the tier-1 starvation
+    case (DAY0_EXTREME_UPDATED / other decision events vs MC).
+    """
+    conn, store = _store()
+
+    # 30 MC events older than FSR
+    N_MC = 30
+    for i in range(N_MC):
+        ev = _market_channel_event(
+            "BEST_BID_ASK_CHANGED",
+            key_suffix=str(i),
+            available_at="2026-05-24T01:00:00+00:00",
+        )
+        store.insert_or_ignore(ev)
+
+    # 1 COMPLETE FSR, newer available_at
+    fsr = _fsr_event(
+        key_suffix="sole-fsr",
+        completeness="COMPLETE",
+        available_at="2026-05-24T05:00:00+00:00",
+        received_at="2026-05-24T05:01:00+00:00",
+    )
+    store.insert_or_ignore(fsr)
+
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    fetched = store.fetch_pending(decision_time=dt.isoformat(), limit=10)
+
+    fetched_ids = [e.event_id for e in fetched]
+    assert fsr.event_id in fetched_ids, (
+        f"COMPLETE FSR not in top-10 fetch despite tier-0 priority. "
+        f"Fetched types: {[e.event_type for e in fetched][:10]}"
+    )

@@ -37,6 +37,15 @@ DATA_API_BASE = "https://data-api.polymarket.com"
 PUBLIC_CLOB_HTTP_TIMEOUT_SECONDS = 15.0
 PUBLIC_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=8, max_connections=16, keepalive_expiry=30.0)
 
+# A2 throughput (2026-05-31): the executable-snapshot capture fetched /fee-rate PER TOKEN
+# on EVERY reactor cycle → hundreds of serial 15s-bounded calls → 10-30 min/cycle → fresh
+# families never finished capture to reach Kelly (0 receipts). Polymarket CLOB fees are
+# process-stable, so cache per-token fee details with a TTL: each token is fetched once per
+# window instead of per cycle. SHADOW-safe; cost-basis impact nil (fees stable). Cached
+# value is the already-canonicalized details dict.
+_FEE_RATE_CACHE: dict[str, tuple[dict[str, Any], datetime]] = {}
+_FEE_RATE_TTL_SECONDS = 1800.0
+
 
 # ---------------------------------------------------------------------------
 # INV-24 / NC-16 runtime call-stack guard for place_limit_order
@@ -530,6 +539,11 @@ class PolymarketClient:
     def get_fee_rate_details(self, token_id: str) -> dict[str, Any]:
         """Fetch token-specific fee metadata with explicit fraction/bps units."""
 
+        _cached = _FEE_RATE_CACHE.get(token_id)
+        if _cached is not None and (
+            datetime.now(timezone.utc) - _cached[1]
+        ).total_seconds() < _FEE_RATE_TTL_SECONDS:
+            return _cached[0]
         resp = self._public_get("/fee-rate", params={"token_id": token_id})
         resp.raise_for_status()
         data = resp.json()
@@ -537,13 +551,15 @@ class PolymarketClient:
         if not isinstance(schedule, dict):
             schedule = data if isinstance(data, dict) else {}
         try:
-            return canonicalize_fee_details(
+            _details = canonicalize_fee_details(
                 schedule,
                 source="clob_fee_rate",
                 token_id=token_id,
             )
         except MarketSnapshotMismatchError as exc:
             raise RuntimeError(f"Fee-rate response missing base_fee/feeRate for {token_id}: {exc}") from exc
+        _FEE_RATE_CACHE[token_id] = (_details, datetime.now(timezone.utc))
+        return _details
 
     def bind_submission_envelope(self, envelope: Any) -> None:
         """Bind the next limit-order submit to executable snapshot provenance."""

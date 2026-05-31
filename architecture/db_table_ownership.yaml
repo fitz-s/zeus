@@ -1152,6 +1152,22 @@ tables:
     pk_col: null
     notes: Pre-v2 Platt calibration models (legacy). v2 is platt_models_v2.
 
+  - name: platt_oos_decisions
+    db: forecasts
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: PlattOosDecisionStore
+    pk_col: null
+    notes: >
+      PR #364: OOS Platt-promotion decision store (src/calibration/platt_oos_resolver.py).
+      Currently UNWIRED in the live decision path (resolver imported only by the
+      operator-run scoring scripts, which open forecasts read-only). Registered as
+      legacy_archived so boot-time assert_db_matches_registry tolerates the table
+      whether or not the standalone DDL has created it — it never gates a trade.
+      Promote to a forecast_class entry (with init_schema_forecasts ownership) only
+      if/when the OOS promotion seam is actually wired live; otherwise drop with the
+      dead resolver per the 2026-05-31 calibration audit.
+
   - name: position_current
     db: trade
     schema_class: trade_class

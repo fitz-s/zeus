@@ -12,7 +12,7 @@ import sqlite3
 import time
 import hashlib
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -713,7 +713,17 @@ def _persist_market_events_to_db(
                 city_name = city_obj.name if city_obj is not None else ""
                 target_date = str(event.get("target_date", ""))
                 temperature_metric = event.get("temperature_metric", "")
+                # created_at is the topology-clock anchor the reactor reads
+                # (_evidence_clock_from_topology_row). Gamma's discovery
+                # timestamp is preferred; when the upstream payload omits it we
+                # stamp a tz-aware write-time so the persisted row always
+                # carries a resolvable clock (else TOPOLOGY_CLOCK_MISSING blocks
+                # the family pre-score). recorded_at's CURRENT_TIMESTAMP is
+                # space-separated/naive and the reactor's _parse_utc rejects it,
+                # so it cannot serve as the clock — created_at must be non-null.
                 created_at = event.get("created_at")
+                if created_at in (None, ""):
+                    created_at = datetime.now(timezone.utc).isoformat()
                 for outcome in event.get("outcomes", []):
                     condition_id = outcome.get("condition_id", "")
                     token_id = outcome.get("token_id", "")
@@ -1782,6 +1792,11 @@ def _parse_event(
         "city": city,
         "target_date": target_date,
         "temperature_metric": temperature_metric,
+        # Surface Gamma's market-discovery timestamp so _persist_market_events_to_db
+        # writes it verbatim into market_events.created_at — the reactor's
+        # topology-clock anchor. When Gamma omits it the writer stamps a
+        # tz-aware write-time fallback (see _persist_market_events_to_db).
+        "created_at": created_str,
         "hours_to_resolution": hours_to_resolution,
         "hours_since_open": hours_since_open,
         # P2 (PLAN_v3 §6.P2 stage 3 critic R3 ATTACK 8 fix, 2026-05-04):
@@ -2515,12 +2530,26 @@ def capture_executable_market_snapshot(
     scan_authority: str,
     execution_side: str = "BUY",
     prefetched_orderbook: dict | None = None,
+    tolerate_missing_book: bool = False,
 ) -> dict[str, str | bool]:
     """Capture and persist an executable market snapshot.
 
     This is deliberately post-decision: the selected YES/NO token is known, so
     the stored orderbook hash and top-of-book facts describe the token that the
     executor will actually submit against.
+
+    ``tolerate_missing_book`` (substrate-enumeration path ONLY): when True the
+    SELECTED side's top-of-book may be absent without aborting capture.  Weather
+    families are MECE temperature partitions; near-zero-probability tail bins are
+    active Gamma markets (active=1, closed=0) with NO liquidity (no asks).  The
+    operator design is "市场捕捉了不会消失; freshness 针对价格不针对市场" — capture
+    market IDENTITY for every active bin so the FDR full-family identity proof can
+    be assembled, while price freshness is a separate concern.  Such a snapshot is
+    persisted with ``orderbook_top_ask=None`` and a tradeability_status whose
+    ``executable_allowed`` is False (reason ``clob_no_ask_illiquid``) so it is
+    NEVER tradeable at submission (assert_snapshot_executable rejects no-ask BUY).
+    The trade-execution callers leave this False: a no-ask bin must abort capture
+    on the order path, preserving the strict submit contract.
     """
 
     side = str(execution_side or "BUY").strip().upper()
@@ -2570,10 +2599,18 @@ def capture_executable_market_snapshot(
     active = _optional_bool_fact((outcome, gamma_market_raw), ("active", "isActive"), default=False)
     child_closed = _boolish_market_field(outcome, "closed", "isClosed")
     closed = bool(child_closed is True)
-    enable_orderbook = _required_bool_fact(
-        (outcome, gamma_market_raw),
-        ("enable_orderbook", "enableOrderBook", "orderbookEnabled"),
+    # enable_orderbook: read from Gamma surfaces first; fall back to CLOB if absent.
+    # Gamma's slug-pattern API sometimes omits enableOrderBook from child markets
+    # (field present in tag-based responses but absent in slug responses for the
+    # same event).  CLOB /markets/{cid} is the authoritative tradability source
+    # (FT-64 design), so filling from CLOB when Gamma omits the field is correct.
+    enable_orderbook: bool | None = _boolish_market_field(
+        outcome, "enable_orderbook", "enableOrderBook", "orderbookEnabled"
     )
+    if enable_orderbook is None:
+        enable_orderbook = _boolish_market_field(
+            gamma_market_raw, "enable_orderbook", "enableOrderBook", "orderbookEnabled"
+        )
     accepting_orders = _boolish_market_field(outcome, "accepting_orders", "acceptingOrders")
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
@@ -2591,18 +2628,29 @@ def capture_executable_market_snapshot(
     # batched (see prefetched_orderbook below); the proper full fix that also
     # removes this per-outcome read is the WS market channel (follow-up).
     raw_clob_market = _fetch_clob_market_info(clob, condition_id)
+    # Fill enable_orderbook from CLOB when Gamma omitted it (slug-discovered
+    # markets) or for the persisted-reconstruction path.  CLOB is authoritative.
+    clob_orderbook = _boolish_market_field(
+        raw_clob_market,
+        "enable_order_book",
+        "enableOrderBook",
+        "orderbookEnabled",
+    )
     if reconstructed_tradability:
         accepting_orders = _boolish_market_field(raw_clob_market, "accepting_orders", "acceptingOrders")
-        clob_orderbook = _boolish_market_field(
-            raw_clob_market,
-            "enable_order_book",
-            "enableOrderBook",
-            "orderbookEnabled",
-        )
         if clob_orderbook is not None:
             enable_orderbook = clob_orderbook
-    elif accepting_orders is not True or enable_orderbook is not True:
-        raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
+    else:
+        # For fresh Gamma data: fill enable_orderbook from CLOB when Gamma lacked
+        # the field (slug-pattern discovery omits it; tag-based includes it).
+        if enable_orderbook is None and clob_orderbook is not None:
+            enable_orderbook = clob_orderbook
+        if enable_orderbook is None:
+            raise ExecutableSnapshotCaptureError(
+                "required boolean fact missing: enable_orderbook/enableOrderBook/orderbookEnabled"
+            )
+        if accepting_orders is not True or enable_orderbook is not True:
+            raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
     # Orderbook leg: use the event-batched book when the refresh loop prefetched
     # it (one POST /books for all bins), else fall back to the per-token GET /book.
     # The prefetched book is byte-identical to the fetched one (same /books vs
@@ -2649,14 +2697,38 @@ def capture_executable_market_snapshot(
         (raw_orderbook, raw_clob_market),
         ("neg_risk", "negRisk", "negative_risk"),
     )
+    # The "selected side" is the book level the executor would actually cross
+    # (asks for BUY, bids for SELL).  On the order/live path it is REQUIRED — a
+    # missing selected side aborts capture.  On the substrate-enumeration path
+    # (tolerate_missing_book) it is OPTIONAL: illiquid MECE tail bins have an
+    # empty selected side but must still be captured for identity (see docstring).
     if side == "BUY":
         top_bid, _bid_size = _optional_top_book_level_decimal(raw_orderbook, "bids")
-        top_ask, _ask_size = _top_book_level_decimal(raw_orderbook, "asks")
+        if tolerate_missing_book:
+            top_ask, _ask_size = _optional_top_book_level_decimal(raw_orderbook, "asks")
+        else:
+            top_ask, _ask_size = _top_book_level_decimal(raw_orderbook, "asks")
+        selected_side_top = top_ask
     else:
-        top_bid, _bid_size = _top_book_level_decimal(raw_orderbook, "bids")
         top_ask, _ask_size = _optional_top_book_level_decimal(raw_orderbook, "asks")
+        if tolerate_missing_book:
+            top_bid, _bid_size = _optional_top_book_level_decimal(raw_orderbook, "bids")
+        else:
+            top_bid, _bid_size = _top_book_level_decimal(raw_orderbook, "bids")
+        selected_side_top = top_bid
     if top_bid is not None and top_ask is not None and top_bid >= top_ask:
         raise ExecutableSnapshotCaptureError("CLOB orderbook is crossed")
+    # Substrate identity capture of an illiquid bin: the bin is part of the MECE
+    # family partition but has no executable selected-side liquidity.  Persist it
+    # with the identity facts and an explicitly NON-executable tradeability status
+    # so it is never selectable as a trade target and assert_snapshot_executable
+    # rejects it at submission.
+    if tolerate_missing_book and selected_side_top is None:
+        tradeability_status = replace(
+            tradeability_status,
+            executable_allowed=False,
+            reason="clob_no_ask_illiquid",
+        )
 
     # Validate the caller's boundary timestamp, but do not use it as the
     # executable snapshot's authority time.  The fresh orderbook authority is
@@ -3469,6 +3541,10 @@ def refresh_executable_market_substrate_snapshots(
                 scan_authority=scan_authority,
                 execution_side="BUY",
                 prefetched_orderbook=prefetched_book,
+                # Substrate enumeration: capture IDENTITY for every active MECE
+                # bin including illiquid (no-ask) tail bins so the FDR full-family
+                # proof can be assembled.  Illiquid bins are persisted non-tradeable.
+                tolerate_missing_book=True,
             )
             inserted += 1
             inserted_cities.add(_snapshot_refresh_city_key(market))

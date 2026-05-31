@@ -230,6 +230,14 @@ operator decision in the next housekeeping pass:
 - `ENS_REFIT_PLAN_2026-05-24.md` — PR #337 full_transport_v1 calibration REFIT architecture plan: isolated staging DB design, correctness proof, flag-gated rebuild+refit pipeline (model layer; not live-wired).
 - `ENS_REFIT_VALIDATION_2026-05-24.md` — PR #337 full_transport_v1 calibration REFIT validation evidence: Platt refit summary (49/50 VERIFIED), group-blocked OOS table (HIGH 14-city subset; raw LogLoss −50%, OOS LogLoss −9% coastal) (model layer; not live-wired).
 
+## Session handoff and plan docs (2026-05-29 – 2026-05-31, PR #364)
+
+- `LIVE_SHADOW_SEAMHUNT_HANDOFF_2026-05-29.md` — Seamhunt session handoff 2026-05-29: EDLI shadow investigation, observed_members bug root-cause, FSR PARTIAL veto chain, and unshadow gate checklist.
+- `HANDOFF_2026-05-30_FULL_REMAINING.md` — Full remaining work handoff 2026-05-30: TOPOLOGY_CLOCK_MISSING gate fix, Run #24 bin-bias gate, live-halt recovery steps, and continuous re-decision plan scope.
+- `LIVE_HALT_RECOVERY_HANDOFF_2026-05-30.md` — Live halt recovery handoff 2026-05-30: step-by-step operator recovery sequence for TOPOLOGY_CLOCK_MISSING live halt, backfill and restart checklist.
+- `HANDOFF_2026-05-31_CERT_FIX_FULL_SHADOW.md` — Cert-fix full shadow handoff 2026-05-31: EDLI cert fix (reader-elected snapshot + horizon_profile), purge of 941 PARTIAL FSR events, receipt persistence, and full shadow validation checklist.
+- `PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md` — Continuous re-decision max-alpha plan 2026-05-31: design for per-cycle cheap-screen re-evaluation (cache + screen + enqueue), Platt 49-city OOS scope, and shadow integration plan. Authority for PR #364.
+
 ## Registered full_transport ship artifacts (2026-05-25)
 - `FT_SHIP_EXECUTION_LEDGER_2026-05-25.md` — PR #342 full_transport → live ship execution ledger: task status, key paths, finished phases, open items. Authority: Zeus #64 live-ship program.
 

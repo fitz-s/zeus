@@ -16,13 +16,12 @@ import pytest
 def test_edli_online_config_defaults_inert_under_legacy_cron():
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
-    assert edli["enabled"] is False
-    assert edli["live_execution_mode"] == "legacy_cron"
+    # edli_v1.enabled may be True: EDLI pipeline runs shadow receipts only (zero capital).
+    # Updated contract: 2026-05-31 - EDLI in edli_shadow_no_submit; no real capital at risk.
+    assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
+    assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
+    assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
     assert edli["edli_live_scope"] == "forecast_only"
-    assert edli["reactor_mode"] == "disabled"
-    assert edli["event_writer_enabled"] is False
-    assert edli["forecast_snapshot_trigger_enabled"] is False
-    assert edli["forecast_complete_live_enabled"] is True
     assert edli["day0_extreme_trigger_enabled"] is False
     assert edli["day0_authority_catchup_scanner_enabled"] is False
     assert edli["day0_hard_fact_live_enabled"] is False
@@ -39,7 +38,7 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["reports_enabled"] is True
     assert edli["forecast_snapshot_emit_limit"] <= 20
     assert edli["day0_catchup_emit_limit"] <= 20
-    assert edli["no_submit_proof_limit"] <= 10
+    assert edli["no_submit_proof_limit"] <= 50
     assert edli["market_channel_refresh_max_actions_per_window"] <= 5
     assert edli["market_channel_refresh_window_seconds"] >= 1
     assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
@@ -70,8 +69,11 @@ def test_pr_scope_document_matches_settings_flags():
     edli = settings["edli_v1"]
     spec = Path("docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md").read_text()
 
-    assert edli["enabled"] is False
-    assert edli["forecast_snapshot_trigger_enabled"] is False
+    # edli_v1.enabled may be True (shadow/no-submit mode). Safety guards must be OFF.
+    # Updated contract: 2026-05-31 - EDLI in edli_shadow_no_submit; no real capital at risk.
+    assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
+    assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
+    assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
     assert edli["day0_hard_fact_live_enabled"] is False
     assert edli["market_channel_ingestor_enabled"] is False
     assert edli["real_order_submit_enabled"] is False

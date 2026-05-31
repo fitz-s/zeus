@@ -42,6 +42,27 @@ def date_blocked_folds(target_dates: Sequence[str], k: int) -> list[int]:
     return folds
 
 
+def decision_group_blocked_folds(decision_group_ids: Sequence[str], k: int) -> list[int]:
+    """Assign each record a fold in [0, k) keyed by its decision_group_id.
+
+    The Platt fold unit: a calibration row is one BIN of a forecast distribution;
+    many bins share one weather event = one decision_group_id, and those bins are
+    LABEL-CORRELATED (exactly one is the settled bin, the rest 0). Records sharing
+    a decision_group_id ALWAYS land in the same fold so adjacent label-correlated
+    bins never split across the train/test boundary — the decision-group analogue
+    of ``date_blocked_folds`` (which keys on target_date).
+
+    Deterministic via a stable hash of the decision_group_id string.
+    """
+    if k < 1:
+        raise ValueError("k must be >= 1")
+    folds: list[int] = []
+    for gid in decision_group_ids:
+        h = int(hashlib.sha1(str(gid).encode()).hexdigest(), 16)
+        folds.append(h % k)
+    return folds
+
+
 def lag1_autocorr(x: Sequence[float]) -> float:
     """Lag-1 autocorrelation of a series. Returns 0.0 for constant/degenerate input."""
     a = np.asarray(x, dtype=float)
