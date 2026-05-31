@@ -13,16 +13,28 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_live_canary_runtime_remains_disabled_until_executor_cut():
+def test_live_canary_runtime_stays_in_shadow_no_submit_until_operator_unshadow():
+    """SHADOW-contract money guard (2026-05-30).
+
+    The reactor runs in shadow (edli_shadow_no_submit): it forms decisions/candidates with NO
+    venue submission so the p_raw-vs-online bias test (#24) can run on real flow. The
+    load-bearing money guard is ``real_order_submit_enabled is False`` plus both write-side
+    triggers (day0, market-channel) staying off — these must hold until the operator's
+    irreversible unshadow. Supersedes the prior fully-disabled canary, which predated the
+    deliberate shadow launch.
+    """
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
 
-    assert edli["enabled"] is False
-    assert edli["live_execution_mode"] == "legacy_cron"
-    assert edli["reactor_mode"] == "disabled"
-    assert edli["event_writer_enabled"] is False
-    assert edli["forecast_snapshot_trigger_enabled"] is False
+    # MONEY GUARD — no real capital can leave until operator unshadow.
     assert edli["real_order_submit_enabled"] is False
+    assert edli["live_execution_mode"] == "edli_shadow_no_submit"
+    assert edli["reactor_mode"] == "live_no_submit"
+    # Shadow surfaces that are intentionally ON to produce decisions for the bias test.
+    assert edli["enabled"] is True
+    assert edli["event_writer_enabled"] is True
+    assert edli["forecast_snapshot_trigger_enabled"] is True
+    # Write-side venue triggers stay OFF in shadow.
     assert edli["day0_extreme_trigger_enabled"] is False
     assert edli["market_channel_ingestor_enabled"] is False
     assert "live_canary_enabled" not in edli

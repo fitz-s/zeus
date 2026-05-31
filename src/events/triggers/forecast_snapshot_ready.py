@@ -153,6 +153,7 @@ def build_forecast_snapshot_ready_event(
     received_at: str,
     min_members_floor: int = 40,
     live_eligibility_reader: LiveEligibilityReader | None = None,
+    source: str | None = None,
 ) -> OpportunityEvent:
     classification = classify_forecast_snapshot(
         source_run=source_run,
@@ -201,7 +202,10 @@ def build_forecast_snapshot_ready_event(
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
         entity_key=entity_key,
-        source="forecast_snapshot_ready_trigger",
+        # Per-cycle distinct source (continuous re-decision) → distinct idempotency_key → the same
+        # committed family re-emits a fresh FSR-equivalent each reactor cycle instead of deduping to
+        # the consumed one. Default source preserves the one-shot catch-up behavior.
+        source=source if source is not None else "forecast_snapshot_ready_trigger",
         observed_at=str(source_run.get("captured_at") or snapshot.get("fetch_time") or available_at),
         available_at=available_at,
         received_at=received_at,
@@ -236,6 +240,7 @@ class ForecastSnapshotReadyTrigger:
         snapshot: dict[str, Any],
         decision_time: datetime,
         received_at: str,
+        source: str | None = None,
     ) -> EventWriteResult:
         event = build_forecast_snapshot_ready_event(
             source_run=source_run,
@@ -245,6 +250,7 @@ class ForecastSnapshotReadyTrigger:
             received_at=received_at,
             min_members_floor=self._min_members_floor,
             live_eligibility_reader=self._live_eligibility_reader,
+            source=source,
         )
         return self._writer.write(event)
 
@@ -255,8 +261,18 @@ class ForecastSnapshotReadyTrigger:
         decision_time: datetime,
         received_at: str,
         limit: int = 100,
+        source: str | None = None,
+        already_pending_keys: set[str] | None = None,
     ) -> list[EventWriteResult]:
-        """Catch up from committed source_run/source_run_coverage/snapshot rows."""
+        """Catch up from committed source_run/source_run_coverage/snapshot rows.
+
+        When ``source`` is supplied (continuous re-decision), each emitted event uses it as the
+        event ``source`` so the idempotency_key differs per cycle and committed families re-emit a
+        fresh FSR-equivalent (instead of deduping to the consumed one) → the reactor re-decides
+        every cycle against just-in-time-refreshed prices. ``already_pending_keys`` (entity_keys with
+        an unprocessed event) are skipped so the re-decision scan does not pile duplicates onto the
+        pending queue. Both default-None → the original one-shot catch-up behavior is unchanged.
+        """
 
         if not all(_table_exists(forecasts_conn, table) for table in _FORECAST_TABLES):
             return []
@@ -324,11 +340,20 @@ class ForecastSnapshotReadyTrigger:
                 limit,
             ),
         )
+        pending_skip = already_pending_keys or set()
         results: list[EventWriteResult] = []
         for row in reversed(rows):
             source_run = _source_run_from_join(row)
             coverage = _coverage_from_join(row)
             snapshot = _snapshot_from_join(row)
+            if pending_skip:
+                city = str(snapshot.get("city") or coverage.get("city") or "")
+                target_date = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
+                metric = str(snapshot.get("temperature_metric") or coverage.get("temperature_metric") or "")
+                source_run_id = str(source_run.get("source_run_id") or coverage.get("source_run_id") or "")
+                entity_key = "|".join((city, target_date, metric, source_run_id))
+                if entity_key in pending_skip:
+                    continue
             results.append(
                 self.emit_from_rows(
                     source_run=source_run,
@@ -336,6 +361,7 @@ class ForecastSnapshotReadyTrigger:
                     snapshot=snapshot,
                     decision_time=decision_time,
                     received_at=received_at,
+                    source=source,
                 )
             )
         return results

@@ -3478,6 +3478,17 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     from src.state.table_registry import SchemaClass as _SchemaClass, tables_for_class as _tables_for_class
     _registry_forecast_tables: frozenset[str] = _tables_for_class(_SchemaClass.FORECAST_CLASS)
 
+    # K1-ghost exclusion: tables that are forecast-class-owned and must NEVER be
+    # sourced from world_src.sqlite_master, even if a stale ghost row exists there.
+    # market_events: B3cont (PR3) collapsed market_events_v2 → market_events on
+    # forecasts.db; the old v1 shell on world.db (0 rows, missing temperature_metric
+    # + recorded_at) was declared legacy_archived but not yet dropped from the live
+    # file. If the ATTACH path picks up that ghost DDL and then _ensure_v2_forecast_indexes
+    # runs CREATE INDEX ON market_events(temperature_metric), it crashes with
+    # "no such column: temperature_metric". Fix: always build via _create_market_events
+    # (canonical static DDL in v2_schema.py) and never copy from world_src.
+    _WORLD_ATTACH_EXCLUDED: frozenset[str] = frozenset({"market_events"})
+
     # Opt-in TypedConnection identity guard (P2): if a TypedConnection is
     # passed, verify it wraps the forecasts DB. Raw sqlite3.Connection callers
     # are accepted without check (P3 migrates all call sites to ForecastsConnection).
@@ -3502,6 +3513,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
         conn.execute(f"ATTACH DATABASE '{world_path}' AS world_src")
         try:
             for tbl in _registry_forecast_tables:
+                if tbl in _WORLD_ATTACH_EXCLUDED:
+                    # Never copy from world_src; always built via canonical static DDL.
+                    continue
                 row = conn.execute(
                     "SELECT sql FROM world_src.sqlite_master"
                     " WHERE type='table' AND name=?",
@@ -3515,6 +3529,9 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
                     conn.execute(ddl)
 
             for tbl in _registry_forecast_tables:
+                if tbl in _WORLD_ATTACH_EXCLUDED:
+                    # Indexes for excluded tables are built by their static helper.
+                    continue
                 for (sql,) in conn.execute(
                     "SELECT sql FROM world_src.sqlite_master"
                     " WHERE type='index' AND tbl_name=? AND sql IS NOT NULL",
@@ -3528,6 +3545,11 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
                     conn.execute(idx_ddl)
         finally:
             conn.execute("DETACH DATABASE world_src")
+
+        # K1-ghost exclusion: build excluded tables from canonical static DDL
+        # unconditionally, so a stale world ghost can never poison forecasts schema.
+        from src.state.schema.v2_schema import _create_market_events as _cme
+        _cme(conn)
 
         # Post-P2 fallback: world.db may be world-class-only (no legacy forecast
         # table copies). Any registry forecast table not yet on forecasts conn

@@ -2580,6 +2580,26 @@ def _canonical_probability_and_fdr_proof(
             for candidate in family.candidates
         ),
     }
+    # P1 (continuous re-decision): cache this family's belief (q-posterior per bin) so the periodic
+    # re-decision scan can cheap-screen it against fresh prices WITHOUT re-running this kernel between
+    # forecast cycles. Best-effort + double-guarded — a cache hiccup must never break the decision.
+    try:
+        from src.events.continuous_redecision import persist_belief_live
+
+        persist_belief_live(
+            family_id=str(getattr(event, "entity_key", "") or ""),
+            city=str((snapshot or {}).get("city") or ""),
+            target_date=str((snapshot or {}).get("target_date") or ""),
+            snapshot_id=str((snapshot or {}).get("snapshot_id") or (snapshot or {}).get("id") or ""),
+            calibrator_model_hash="identity",
+            bin_labels=[c.bin.label for c in family.candidates],
+            p_posterior_vec=[
+                float(q_by_condition.get(str(c.condition_id or ""), 0.0)) for c in family.candidates
+            ],
+            recorded_at=decision_time.isoformat(),
+        )
+    except Exception:  # noqa: BLE001 — belief cache is non-critical; never break the live decision
+        pass
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 
@@ -3406,15 +3426,14 @@ def _runtime_bankroll_usd(*, cached_only: bool = False) -> float:
         if cached_only and hasattr(bankroll_provider, "cached")
         else bankroll_provider.current()
     )
-    if bankroll is None and cached_only:
-        # Cache cold (the cycle-level warm hasn't populated the in-process cache yet,
-        # e.g. the daemon's long-lived client lost API-key auth on the warm call). A
-        # read-only on-chain BALANCE fetch is NOT an order side-effect, so do one here
-        # to fail-OPEN on availability rather than fail-closed on a transient warm miss.
-        # current() also repopulates the module cache, so later same-cycle proofs hit
-        # cached() without re-fetching.
-        bankroll = bankroll_provider.current()
     if bankroll is None:
+        # No-submit/cached path must NEVER live-fetch the wallet (contract:
+        # tests/engine/test_event_reactor_no_bypass.py::
+        # test_no_submit_default_bankroll_path_does_not_live_fetch_wallet). A cold cache fails
+        # CLOSED → KELLY_PROOF_MISSING. Reliability is the cycle-warm's responsibility:
+        # _edli_event_reactor_cycle calls bankroll_provider.current() once per reactor cycle to
+        # populate cached(); the prior self-heal that called current() here re-introduced a
+        # per-decision live wallet fetch and is removed (#45).
         raise ValueError("bankroll_provider_unavailable")
     if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
         raise ValueError("bankroll_provider_not_canonical")

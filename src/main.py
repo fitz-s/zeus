@@ -2036,6 +2036,296 @@ def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
         time.sleep(max(0.1, cadence_seconds - elapsed))
 
 
+def _refresh_pending_family_snapshots(
+    world_conn,
+    forecasts_conn,
+    *,
+    consumer_name: str = "edli_reactor_v1",
+) -> dict:
+    """Targeted, cache-aware snapshot refresh for pending opportunity event families.
+
+    Decision-driven design ("先有下单结果再去找市场"):
+      - Scope: ONLY the families (city/target_date/metric) of PENDING events.
+      - Cache: skip entire families whose ALL bins are still fresh.
+      - Discovery: Gamma slug lookup scoped to pending target_dates — discovers
+        EVERY bin (incl. never-seen illiquid MECE tail bins) via full token payload.
+      - CLOB: max_outcomes=None so all family bins are captured (no city cap).
+        tolerate_missing_book=True (inside refresh) lets illiquid bins snapshot
+        as top_ask=None / executable_allowed=False.
+      - No universe sweep, no market_discovery, no find_weather_markets.
+
+    Reuses refresh_executable_market_substrate_snapshots write path unchanged.
+    Returns a summary dict; never raises (failures are logged and skipped).
+    """
+
+    from src.data.market_scanner import (
+        refresh_executable_market_substrate_snapshots,
+    )
+    from src.data.polymarket_client import PolymarketClient
+    from src.engine.event_reactor_adapter import _event_family_market_topology_rows
+    from src.state.db import get_trade_connection
+
+    now_utc = datetime.now(timezone.utc)
+    now_iso = now_utc.isoformat()
+
+    # Step 1: Collect distinct (city, target_date, metric) for pending events.
+    try:
+        pending_rows = world_conn.execute(
+            """
+            SELECT
+                json_extract(e.payload_json, '$.city')        AS city,
+                json_extract(e.payload_json, '$.target_date') AS target_date,
+                json_extract(e.payload_json, '$.metric')      AS metric
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p ON p.event_id = e.event_id
+            WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+            GROUP BY city, target_date, metric
+            -- Capture in the SAME order the reactor will process (priority DESC,
+            -- available_at ASC), so the highest-priority families the reactor picks
+            -- first are captured first even if a downstream capture budget truncates.
+            ORDER BY MAX(e.priority) DESC, MIN(e.available_at) ASC
+            """,
+            (consumer_name,),
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
+        return {"status": "error", "reason": str(exc)}
+
+    families: list[tuple[str, str, str]] = []
+    for row in pending_rows:
+        city = str(row[0] or "").strip()
+        target_date = str(row[1] or "").strip()
+        metric = str(row[2] or "").strip()
+        if city and target_date and metric:
+            families.append((city, target_date, metric))
+
+    if not families:
+        return {"status": "no_pending_families"}
+
+    # Step 2: Cache-skip: for each family check whether ALL known condition_ids
+    #         (from market_events topology) already have fresh snapshots.
+    #         Families with ANY stale/missing bin still proceed to Gamma fetch.
+    fresh_skipped = 0
+    no_topology = 0
+    families_needing_refresh: list[tuple[str, str, str]] = []
+
+    write_conn = get_trade_connection(write_class="live")
+    try:
+        for city, target_date, metric in families:
+            payload = {"city": city, "target_date": target_date, "metric": metric}
+            topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
+            if not topology_rows:
+                no_topology += 1
+                logger.debug(
+                    "refresh_pending_family_snapshots: no market topology for %s/%s/%s "
+                    "(no Polymarket market for this family — event will be rejected at gate)",
+                    city, target_date, metric,
+                )
+                # Still include: Gamma may discover bins not yet in topology.
+                families_needing_refresh.append((city, target_date, metric))
+                continue
+
+            any_stale = False
+            for trow in topology_rows:
+                cid = str(trow.get("condition_id") or "").strip()
+                if not cid:
+                    continue
+                fresh = write_conn.execute(
+                    """
+                    SELECT 1 FROM executable_market_snapshots
+                    WHERE condition_id = ? AND freshness_deadline >= ?
+                    LIMIT 1
+                    """,
+                    (cid, now_iso),
+                ).fetchone()
+                if not fresh:
+                    any_stale = True
+                    break
+
+            if any_stale:
+                families_needing_refresh.append((city, target_date, metric))
+            else:
+                fresh_skipped += 1
+
+        if not families_needing_refresh:
+            logger.info(
+                "refresh_pending_family_snapshots: all families fresh, skipped. "
+                "families=%d fresh_skipped=%d no_topology=%d",
+                len(families), fresh_skipped, no_topology,
+            )
+            return {
+                "status": "all_fresh",
+                "families_checked": len(families),
+                "fresh_skipped": fresh_skipped,
+                "no_topology": no_topology,
+            }
+
+        # Step 3: Targeted Gamma slug fetch — one request per pending family.
+        #         Build the exact slug for each (city, date, metric) and fetch
+        #         directly.  This is maximally bounded: N pending families = N
+        #         Gamma calls (vs the background slug-pattern scanner which
+        #         enumerates all 14 cities × all dates and is budget-capped).
+        #         Uses the City's slug_names[0] for the slug fragment.
+        try:
+            from datetime import date as _date_cls
+            from src.config import cities_by_name as _cities_by_name
+            from src.data.market_scanner import (
+                _gamma_get,
+                _parse_and_persist_weather_events,
+            )
+            _cbm = _cities_by_name
+
+            def _date_to_slug_fragment(date_str: str) -> str:
+                d = _date_cls.fromisoformat(date_str)
+                return d.strftime("%B-%-d-%Y").lower()
+
+            raw_events_seen: set = set()
+            raw_events_collected: list[dict] = []
+            for fam_city, fam_date, fam_metric in families_needing_refresh:
+                city_obj = _cbm.get(fam_city)
+                if city_obj is None:
+                    logger.warning(
+                        "refresh_pending_family_snapshots: city %r not in config, skipping",
+                        fam_city,
+                    )
+                    continue
+                slug_fragment = city_obj.slug_names[0] if city_obj.slug_names else fam_city.lower().replace(" ", "-")
+                try:
+                    slug_date = _date_to_slug_fragment(fam_date)
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "refresh_pending_family_snapshots: invalid date %r for %s, skipping",
+                        fam_date, fam_city,
+                    )
+                    continue
+                prefix = "lowest" if fam_metric == "low" else "highest"
+                slug = f"{prefix}-temperature-in-{slug_fragment}-on-{slug_date}"
+                _gamma_timeout = max(
+                    1.0,
+                    float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "10.0")),
+                )
+                try:
+                    resp = _gamma_get("/events", params={"slug": slug}, timeout=_gamma_timeout)
+                    if resp.status_code != 200:
+                        logger.debug(
+                            "refresh_pending_family_snapshots: Gamma %s → HTTP %s",
+                            slug, resp.status_code,
+                        )
+                        continue
+                    batch = resp.json()
+                    if not isinstance(batch, list):
+                        batch = [batch] if isinstance(batch, dict) and batch else []
+                    for event in batch:
+                        if not isinstance(event, dict):
+                            continue
+                        event_id = event.get("id") or event.get("slug")
+                        if event_id and event_id not in raw_events_seen:
+                            raw_events_seen.add(event_id)
+                            raw_events_collected.append(event)
+                except Exception as _exc:
+                    logger.warning(
+                        "refresh_pending_family_snapshots: Gamma fetch failed for %s: %s",
+                        slug, _exc,
+                    )
+                    continue
+
+            # #35: the per-family /events?slug= fetch above omits enableOrderBook on
+            # child markets → substrate capture refused ("required boolean fact missing").
+            # find_weather_markets uses the fully-enriched _get_active_events path that
+            # the liquid-bin capture already relies on. Use it as the discovery source so
+            # every bin (incl never-seen illiquid MECE tails) captures; the downstream
+            # gamma_by_family filter scopes CLOB capture to the pending families.
+            from src.data.market_scanner import find_weather_markets as _fwm
+            discovered_events = _fwm(min_hours_to_resolution=0.0)
+            logger.info(
+                "refresh_pending_family_snapshots: slug fetch complete "
+                "families_needing_refresh=%d raw_events=%d discovered_events=%d",
+                len(families_needing_refresh), len(raw_events_collected), len(discovered_events),
+            )
+        except Exception as exc:
+            logger.warning(
+                "refresh_pending_family_snapshots: Gamma slug lookup failed: %s", exc
+            )
+            return {"status": "error_gamma_lookup", "reason": str(exc)}
+
+        # Build a lookup: (city_name_lower, target_date, metric) -> parsed event dict.
+        gamma_by_family: dict[tuple[str, str, str], dict] = {}
+        for ev in discovered_events:
+            city_obj = ev.get("city")
+            city_name = getattr(city_obj, "name", None) or (city_obj if isinstance(city_obj, str) else "")
+            td = str(ev.get("target_date") or "")
+            metric_ev = str(ev.get("temperature_metric") or "")
+            key = (city_name.lower(), td, metric_ev)
+            gamma_by_family[key] = ev
+
+        # Filter to ONLY the pending families (bounded CLOB calls, no universe sweep).
+        markets: list[dict] = []
+        skipped_not_found = 0
+        for city, target_date, metric in families_needing_refresh:
+            key = (city.lower(), target_date, metric)
+            ev = gamma_by_family.get(key)
+            if ev is None:
+                skipped_not_found += 1
+                logger.warning(
+                    "refresh_pending_family_snapshots: Gamma did not return event for "
+                    "%s/%s/%s — bin identity unknown, family will stay at FDR gate",
+                    city, target_date, metric,
+                )
+                continue
+            markets.append(ev)
+
+        if not markets:
+            logger.warning(
+                "refresh_pending_family_snapshots: no Gamma events matched pending families; "
+                "families_needing_refresh=%d skipped_not_found=%d",
+                len(families_needing_refresh), skipped_not_found,
+            )
+            return {
+                "status": "no_refreshable_markets",
+                "families_needing_refresh": len(families_needing_refresh),
+                "skipped_not_found": skipped_not_found,
+            }
+
+        # Step 4: CLOB fetch + cache write.
+        #         max_outcomes=None: bypass per-city cap so ALL bins of each family
+        #         are captured (e.g. 11-bin Seoul negRisk event needs all 11).
+        #         tolerate_missing_book=True is already hardwired inside
+        #         refresh_executable_market_substrate_snapshots, so illiquid bins
+        #         snapshot as top_ask=None / executable_allowed=False — never tradeable.
+        _clob_timeout = max(
+            1.0,
+            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
+        )
+        with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+            summary = refresh_executable_market_substrate_snapshots(
+                write_conn,
+                markets=markets,
+                clob=clob,
+                captured_at=now_utc,
+                scan_authority="VERIFIED",
+                max_outcomes=None,
+            )
+        write_conn.commit()
+
+    except Exception as exc:
+        logger.warning("refresh_pending_family_snapshots: failed: %s", exc)
+        return {"status": "error", "reason": str(exc)}
+    finally:
+        write_conn.close()
+
+    result = {
+        "status": "refreshed",
+        "families_checked": len(families),
+        "families_needing_refresh": len(families_needing_refresh),
+        "no_topology": no_topology,
+        "fresh_skipped": fresh_skipped,
+        "markets_submitted": len(markets),
+        **summary,
+    }
+    logger.info("refresh_pending_family_snapshots: %s", result)
+    return result
+
+
 @_scheduler_job("market_discovery")
 def _market_discovery_cycle() -> None:
     """Refresh executable market substrate outside decision-cycle critical path."""
@@ -2829,11 +3119,32 @@ def _edli_event_reactor_cycle() -> None:
     from src.events.event_store import EventStore
     from src.events.reactor import OpportunityEventReactor, ReactorConfig
     from src.riskguard.riskguard import get_current_level
-    from src.state.db import get_trade_connection_with_world_required, get_world_connection
+    from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
     conn = get_world_connection()
-    trade_conn = get_trade_connection_with_world_required(write_class=None)
+    # K1: the calibration authority is split — platt_models lives in the world DB (this conn's
+    # main) while calibration_pairs lives in the forecasts DB. get_calibrator reads BOTH, so the
+    # calibration_conn must have forecasts attached for the unqualified calibration_pairs read to
+    # resolve; otherwise every live decision fails CALIBRATION_AUTHORITY_MISSING:calibration store
+    # unavailable. Read-only attach (no cross-DB write), idempotent.
+    try:
+        _attached_dbs = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "forecasts" not in _attached_dbs:
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+    except Exception as _attach_exc:  # noqa: BLE001 - non-fatal; calibration will fail-closed if unresolved
+        logger.warning("EDLI reactor: ATTACH forecasts to calibration conn failed (non-fatal): %r", _attach_exc)
+    forecasts_conn = get_forecasts_connection_read_only()
+    # Warm the in-process bankroll-of-record cache once per cycle so the per-event no-submit
+    # Kelly proof can read bankroll_provider.cached() (it must NOT live-fetch per decision).
+    # The on-chain wallet is the only bankroll truth; this is a cycle-level refresh, not a
+    # per-event side effect. Non-fatal — Kelly fails closed (KELLY_PROOF_MISSING) if unwarm.
+    try:
+        from src.runtime import bankroll_provider as _bankroll_provider
+
+        _bankroll_provider.current()
+    except Exception as _bk_exc:  # noqa: BLE001
+        logger.warning("EDLI reactor: bankroll cache warm failed (non-fatal): %r", _bk_exc)
     try:
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
@@ -2847,18 +3158,52 @@ def _edli_event_reactor_cycle() -> None:
                 received_at=received_at,
                 limit=forecast_emit_limit,
             )
+        # Continuous re-decision (DEFAULT OFF — redecision_continuous_enabled): re-emit
+        # FSR-equivalent events for committed market-backed families each cycle, with a per-cycle
+        # distinct source so they do NOT dedup to the consumed FSR. Routing through the pending path
+        # makes _refresh_pending_family_snapshots capture fresh prices just-in-time → the reactor
+        # re-decides every ~60s instead of once per 12h forecast. Fixes EDLI-mode "hours per order".
+        # already_pending skip + cap bound the queue. Non-fatal: never breaks the reactor cycle.
+        if bool(edli_cfg.get("redecision_continuous_enabled", False)):
+            try:
+                _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
+                _rd_source = f"edli_redecision:{now.isoformat()}"
+                _rd_pending = _edli_pending_entity_keys(conn)
+                _rd_n = _edli_emit_forecast_snapshot_events(
+                    conn,
+                    decision_time=now,
+                    received_at=received_at,
+                    limit=_rd_cap,
+                    source=_rd_source,
+                    already_pending_keys=_rd_pending,
+                )
+                logger.info(
+                    "edli_redecision: enqueued=%d cap=%d skipped_pending=%d",
+                    _rd_n, _rd_cap, len(_rd_pending),
+                )
+            except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
+                logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
         if (
             edli_cfg.get("day0_extreme_trigger_enabled")
             and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
         ):
-            _edli_emit_day0_extreme_events(
-                conn,
-                trade_conn,
-                decision_time=now,
-                received_at=received_at,
-                limit=day0_emit_limit,
-            )
+            _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
+            try:
+                _edli_emit_day0_extreme_events(
+                    conn,
+                    _day0_trade_conn,
+                    decision_time=now,
+                    received_at=received_at,
+                    limit=day0_emit_limit,
+                )
+            finally:
+                _day0_trade_conn.close()
         conn.commit()
+        # Targeted, cache-aware refresh of executable snapshots for pending families.
+        # Opens its own write trade connection and commits before trade_conn is opened,
+        # ensuring WAL read visibility for the gate below.
+        _refresh_pending_family_snapshots(conn, forecasts_conn)
+        trade_conn = get_trade_connection_with_world_required(write_class=None)
         store = EventStore(conn)
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
@@ -2916,7 +3261,11 @@ def _edli_event_reactor_cycle() -> None:
         reactor.process_pending(decision_time=now, limit=proof_limit)
         conn.commit()
     finally:
-        trade_conn.close()
+        try:
+            trade_conn.close()
+        except NameError:
+            pass
+        forecasts_conn.close()
         conn.close()
 
 
@@ -2934,8 +3283,17 @@ def _edli_emit_forecast_snapshot_events(
     decision_time: datetime,
     received_at: str,
     limit: int,
+    source: str | None = None,
+    already_pending_keys: set[str] | None = None,
 ) -> int:
-    """Emit EDLI forecast events from committed forecast DB rows."""
+    """Emit EDLI forecast events from committed forecast DB rows.
+
+    With ``source`` set (continuous re-decision), each emitted event uses it so the idempotency_key
+    differs per cycle → committed families re-emit a fresh FSR-equivalent every reactor cycle
+    (instead of deduping to the consumed FSR) → the reactor re-decides continuously against
+    just-in-time-refreshed prices. ``already_pending_keys`` (entity_keys with an unprocessed event)
+    are skipped to bound the pending queue. Both default-None → original one-shot catch-up.
+    """
 
     from src.events.event_writer import EventWriter
     from src.events.triggers.forecast_snapshot_ready import (
@@ -2956,10 +3314,33 @@ def _edli_emit_forecast_snapshot_events(
                 decision_time=decision_time,
                 received_at=received_at,
                 limit=limit,
+                source=source,
+                already_pending_keys=already_pending_keys,
             )
         )
     finally:
         forecasts_conn.close()
+
+
+def _edli_pending_entity_keys(world_conn) -> set[str]:
+    """entity_keys of opportunity_events still unprocessed for the EDLI reactor consumer.
+
+    Passed as ``already_pending_keys`` to the continuous re-decision emit so families with a
+    re-decision event already queued are not re-emitted (bounds the pending queue; the rate
+    self-regulates to families the reactor has already drained)."""
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT DISTINCT e.entity_key
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p ON p.event_id = e.event_id
+            WHERE p.consumer_name = 'edli_reactor_v1'
+              AND p.processing_status IN ('pending', 'processing', 'claimed')
+            """
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
+        return set()
+    return {str(r[0]) for r in rows}
 
 
 def _edli_emit_day0_extreme_events(

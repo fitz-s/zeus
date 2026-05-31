@@ -48,7 +48,7 @@ import numpy as np
 from src.calibration.ens_error_model import current_gate_set_hash
 from src.calibration.platt import ExtendedPlattCalibrator
 from src.calibration.platt_oos_resolver import PlattCandidate, make_clamped_candidate
-from src.config import cities_by_name
+from src.config import calibration_batch_rebuild_n_mc, cities_by_name
 from src.state.db import get_forecasts_connection, get_forecasts_connection_read_only
 
 # score_platt_candidates lives in scripts/ (same dir as this file)
@@ -180,7 +180,10 @@ def _build_candidates(
 
     try:
         cal = ExtendedPlattCalibrator()
-        cal.fit(p_raw, lead_days, outcomes)
+        # n_bootstrap=0: only the point estimate (A, B, C) is needed for OOS scoring.
+        # Bootstrap CIs are unused here; skipping saves ~200 sklearn.fit() calls on
+        # 761k rows per city (~60% of the fit-phase wall time).
+        cal.fit(p_raw, lead_days, outcomes, n_bootstrap=0)
         A, B, C = float(cal.A), float(cal.B), float(cal.C)
     except Exception as exc:
         print(f"[WARN] {city_name}: Platt global fit failed: {exc}", file=sys.stderr)
@@ -210,6 +213,7 @@ def score_city(
     *,
     conn: sqlite3.Connection,
     limit: Optional[int] = None,
+    n_mc: Optional[int] = None,
 ) -> dict:
     """Run full-chain OOS scoring for one city. Score-only — no DB writes."""
     city = cities_by_name.get(city_name)
@@ -265,6 +269,7 @@ def score_city(
             k_folds=3,
             p_raw_domain_hash=P_RAW_DOMAIN_HASH,
             override_fuse=False,
+            n_mc=n_mc,
         )
         result["city"] = city_name
         result["n_scoring_rows"] = n_scoring
@@ -391,17 +396,36 @@ def main() -> int:
         default="/tmp/platt_oos_results.json",
         help="Output JSON file path (default: /tmp/platt_oos_results.json).",
     )
+    parser.add_argument(
+        "--n-mc",
+        type=int,
+        default=None,
+        help=(
+            "MC iterations for p_raw computation. Default: calibration_batch_rebuild_n_mc() "
+            "(1000) per LAW 4 — batch scoring relies on many-group averaging, not per-row "
+            "precision. Pass 10000 to match live precision (much slower)."
+        ),
+    )
     args = parser.parse_args()
 
+    # Per LAW 4: offline batch scoring uses calibration_batch_rebuild_n_mc (1000),
+    # not the live ensemble_n_mc (10000). Many-group averaging makes per-row MC noise
+    # negligible; the 10x speedup lets the full 8-city run complete in minutes.
+    n_mc: Optional[int] = args.n_mc if args.n_mc is not None else calibration_batch_rebuild_n_mc()
+
     cities = [args.city] if args.city else HIGH_CITIES
-    unknown = [c for c in cities if c not in HIGH_CITIES]
+    # Accept any configured city (all 49 tradeable cities have ~780k HIGH calibration_pairs;
+    # the 8-city HIGH_CITIES list is the original scope default, not a data limit). Defer the
+    # validity check to cities_by_name so --city can compete Platt across the full universe.
+    unknown = [c for c in cities if cities_by_name.get(c) is None]
     if unknown:
-        print(f"ERROR: unknown city {unknown!r}; valid: {HIGH_CITIES}", file=sys.stderr)
+        print(f"ERROR: unknown city {unknown!r}; not in cities_by_name", file=sys.stderr)
         return 1
 
     print(f"[INFO] p_raw_domain_hash: {P_RAW_DOMAIN_HASH}", file=sys.stderr)
     print(f"[INFO] Cities: {cities}", file=sys.stderr)
     print(f"[INFO] Row limit per city: {args.limit or 'none'}", file=sys.stderr)
+    print(f"[INFO] n_mc per row: {n_mc} (calibration_batch_rebuild_n_mc; pass --n-mc 10000 for live precision)", file=sys.stderr)
 
     # Read-only connection (forecasts DB holds calibration_pairs + ensemble_snapshots).
     # Canonical connection helper (write_class=None → read-only) so this script
@@ -413,7 +437,7 @@ def main() -> int:
     try:
         for city_name in cities:
             print(f"\n[SCORING] {city_name} ...", file=sys.stderr)
-            result = score_city(city_name, conn=conn, limit=args.limit)
+            result = score_city(city_name, conn=conn, limit=args.limit, n_mc=n_mc)
             results[city_name] = result
             print(
                 f"[RESULT] {city_name}: decision={result.get('decision')} "

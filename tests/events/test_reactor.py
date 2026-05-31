@@ -1717,3 +1717,115 @@ def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
     # COMPLETE event must be processed (reached submit), PARTIAL must not reach submit
     assert complete_event.event_id in submitted_order, "COMPLETE FSR must reach submit"
     assert partial_event.event_id not in submitted_order, "PARTIAL FSR must not reach submit"
+
+
+def _market_channel_event(event_type: str, key_suffix: str, available_at: str = "2026-05-24T04:00:00+00:00"):
+    """Build a market-channel cache-hydration event (BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT)."""
+    payload = MarketBookEventPayload(
+        condition_id="0xcondition",
+        token_id=f"token-{key_suffix}",
+        outcome_label="YES",
+        event_type=event_type,
+        quote_seen_at=available_at,
+        book_hash=f"hash-{key_suffix}",
+    )
+    return make_opportunity_event(
+        event_type=event_type,
+        entity_key=f"0xcondition|token-{key_suffix}",
+        source="polymarket_market_channel",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at="2026-05-24T04:01:00+00:00",
+        payload=payload,
+        causal_snapshot_id=f"hash-{key_suffix}",
+    )
+
+
+def test_market_channel_events_do_not_starve_decision_triggers():
+    """Relationship test: a large backlog of market-channel events (BEST_BID_ASK_CHANGED /
+    BOOK_SNAPSHOT / NEW_MARKET_DISCOVERED) must not starve decision-trigger events
+    (FORECAST_SNAPSHOT_READY, DAY0_EXTREME_UPDATED) even when market-channel events have
+    an older available_at and would normally sort first within the same priority level.
+
+    The fetch_pending ORDER BY must assign market-channel events to a lower tier (tier 2)
+    than decision-trigger events (tier 0 / tier 1), so the per-cycle budget (limit) is
+    consumed by decision events first.
+
+    Invariant tested: with N_MC > limit market-channel events older than a DAY0_EXTREME_UPDATED
+    event, fetch_pending(limit=10) must include the DAY0 event and NOT fill all 10 slots with
+    market-channel events.
+
+    RED (without fix): BEST_BID_ASK_CHANGED events have older available_at → sort first at
+    tier=1 (same as DAY0); all 10 limit slots consumed by MC; DAY0 never fetched.
+    GREEN (with fix): MC events demoted to tier=2; DAY0 at tier=1 fetched before any MC event.
+    """
+    conn, store = _store()
+
+    # Insert N_MC BEST_BID_ASK_CHANGED events with older available_at (tier 2 with fix)
+    N_MC = 30  # exceeds limit=10; without MC demotion, all 10 slots go to MC
+    for i in range(N_MC):
+        ev = _market_channel_event(
+            "BEST_BID_ASK_CHANGED",
+            key_suffix=str(i),
+            available_at="2026-05-24T01:00:00+00:00",  # older than DAY0 event
+        )
+        store.insert_or_ignore(ev)
+
+    # Insert one DAY0_EXTREME_UPDATED with newer available_at (tier 1 — must not be starved)
+    day0 = _day0_event(key_suffix="starvation-test")
+    store.insert_or_ignore(day0)
+
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    fetched = store.fetch_pending(decision_time=dt.isoformat(), limit=10)
+
+    fetched_types = [e.event_type for e in fetched]
+    day0_fetched = any(e.event_id == day0.event_id for e in fetched)
+    mc_count = fetched_types.count("BEST_BID_ASK_CHANGED")
+
+    assert day0_fetched, (
+        f"DAY0_EXTREME_UPDATED was not fetched: market-channel events starved it. "
+        f"fetched event_types={fetched_types[:10]}"
+    )
+    assert mc_count < 10, (
+        f"All 10 fetch slots consumed by BEST_BID_ASK_CHANGED ({mc_count}); "
+        f"decision-trigger event starved."
+    )
+
+
+def test_market_channel_events_do_not_starve_fsr():
+    """Relationship test: COMPLETE FSR events must be fetched before market-channel events
+    due to tier-0 priority, even with a large MC backlog of older events.
+
+    This test covers the COMPLETE FSR path (tier 0, unconditionally first).
+    See test_market_channel_events_do_not_starve_decision_triggers for the tier-1 starvation
+    case (DAY0_EXTREME_UPDATED / other decision events vs MC).
+    """
+    conn, store = _store()
+
+    # 30 MC events older than FSR
+    N_MC = 30
+    for i in range(N_MC):
+        ev = _market_channel_event(
+            "BEST_BID_ASK_CHANGED",
+            key_suffix=str(i),
+            available_at="2026-05-24T01:00:00+00:00",
+        )
+        store.insert_or_ignore(ev)
+
+    # 1 COMPLETE FSR, newer available_at
+    fsr = _fsr_event(
+        key_suffix="sole-fsr",
+        completeness="COMPLETE",
+        available_at="2026-05-24T05:00:00+00:00",
+        received_at="2026-05-24T05:01:00+00:00",
+    )
+    store.insert_or_ignore(fsr)
+
+    dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    fetched = store.fetch_pending(decision_time=dt.isoformat(), limit=10)
+
+    fetched_ids = [e.event_id for e in fetched]
+    assert fsr.event_id in fetched_ids, (
+        f"COMPLETE FSR not in top-10 fetch despite tier-0 priority. "
+        f"Fetched types: {[e.event_type for e in fetched][:10]}"
+    )

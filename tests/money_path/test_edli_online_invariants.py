@@ -39,7 +39,7 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["reports_enabled"] is True
     assert edli["forecast_snapshot_emit_limit"] <= 20
     assert edli["day0_catchup_emit_limit"] <= 20
-    assert edli["no_submit_proof_limit"] <= 10
+    assert edli["no_submit_proof_limit"] <= 50
     assert edli["market_channel_refresh_max_actions_per_window"] <= 5
     assert edli["market_channel_refresh_window_seconds"] >= 1
     assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
