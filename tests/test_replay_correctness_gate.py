@@ -118,8 +118,11 @@ def test_gate_mismatch_returns_nonzero(tmp_path, monkeypatch):
         conn = sqlite3.connect(str(tampered_db))
         try:
             # Ensure opportunity_fact exists (DB may be empty in worktree env).
-            from src.state.db import init_schema
-            init_schema(conn)
+            # Check first to avoid running position_events migrations on live-DB copy.
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "opportunity_fact" not in tables:
+                from src.state.db import init_schema
+                init_schema(conn)
             conn.commit()
             # Inject a synthetic opportunity_fact row with a future timestamp
             # so it falls inside the 7-day seed window.
