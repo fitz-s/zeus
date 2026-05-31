@@ -941,6 +941,104 @@ def build_chain_size_corrected_canonical_write(
     return [event], projection
 
 
+def build_chain_economics_observed_canonical_write(
+    position: Any,
+    *,
+    chain_observed_at: str,
+    sequence_no: int,
+    phase_after: str,
+    chain_shares_before: float | None,
+    source_module: str = "src.state.chain_reconciliation",
+) -> tuple[list[dict], dict]:
+    """Canonical event: chain economics OBSERVED for an already-synced position.
+
+    Chain-shares-persist fix (2026-05-31, task #56): the matched-no-size-
+    mismatch reconciliation path (chain.size == local_shares) previously
+    mutated ``Position.chain_shares`` IN-MEMORY only and issued NO canonical
+    write, so ``position_current.chain_shares`` stayed NULL forever for every
+    synced position (only the SIZE-MISMATCH branch persisted chain economics
+    via ``build_chain_size_corrected_canonical_write``). EVIDENCE: 16 on-chain
+    positions, all chain_state='synced', chain_shares NULL on all 101 rows —
+    the local DB silently diverged from on-chain reality (operator's
+    "local db misalign with chain = alpha-" blocker).
+
+    This builder emits the chain OBSERVATION: chain economics
+    (``chain_shares`` / ``chain_avg_price`` / ``chain_cost_basis_usd`` /
+    ``chain_seen_at``) are projected onto ``position_current`` WITHOUT any
+    share mutation and WITHOUT a phase transition. It is semantically a
+    no-delta sibling of ``build_chain_size_corrected_canonical_write``:
+    chain.size already matched local_shares, so ``shares`` is unchanged and
+    ``chain_shares_before == chain_shares_after`` is the common case (the
+    only delta being the NULL→value first-population of the chain_* columns).
+
+    The persisted ``event_type`` is ``CHAIN_SIZE_CORRECTED`` — the only
+    no-op-phase chain event grammar already accepted by the position_events
+    CHECK constraint (avoiding a schema migration on a live DB). The payload
+    ``reason='chain_economics_observed'`` plus ``shares_unchanged=True``
+    distinguishes a chain OBSERVATION from a true size CORRECTION at the
+    event-grammar level for post-hoc analysis; a true correction always
+    carries ``reason='chain_size_corrected'``.
+
+    Phase is a no-op fold (``phase_before == phase_after``): the caller
+    passes the position's CURRENT canonical phase (active or day0_window).
+    This event never transitions phase.
+    """
+    if not phase_after:
+        raise ValueError(
+            "chain economics-observed canonical builder requires explicit "
+            "phase_after (caller passes the position's current phase; this "
+            "event does not transition phase)"
+        )
+    projection = build_position_current_projection(position)
+    projection["phase"] = phase_after
+    phase = fold_lifecycle_phase(phase_after, phase_after).value
+    if not chain_observed_at:
+        raise ValueError(
+            "chain_observed_at is required for build_chain_economics_observed_canonical_write"
+        )
+    occurred_at = chain_observed_at
+    payload = json.dumps(
+        {
+            "source": "chain_reconciliation",
+            "reason": "chain_economics_observed",
+            "shares_unchanged": True,
+            "chain_shares_before": chain_shares_before,
+            "chain_shares_after": getattr(position, "chain_shares", None),
+            "chain_avg_price": getattr(position, "chain_avg_price", None),
+            "chain_cost_basis_usd": getattr(position, "chain_cost_basis_usd", None),
+            "shares_after": getattr(position, "shares", None),
+            "condition_id": getattr(position, "condition_id", ""),
+            "chain_state": getattr(position, "chain_state", ""),
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{getattr(position, 'trade_id')}:chain_economics_observed:{sequence_no}",
+        "position_id": getattr(position, "trade_id"),
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        # CHAIN_SIZE_CORRECTED is the no-op-phase chain event grammar already
+        # in the position_events CHECK constraint; reason disambiguates.
+        "event_type": "CHAIN_SIZE_CORRECTED",
+        "occurred_at": occurred_at,
+        "phase_before": phase,
+        "phase_after": phase,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "chain_economics_observed",
+        "idempotency_key": f"{getattr(position, 'trade_id')}:chain_economics_observed:{sequence_no}",
+        "venue_status": None,
+        "source_module": source_module,
+        "env": _position_env(position),
+        "payload_json": payload,
+    }
+    return [event], projection
+
+
 def build_review_required_canonical_write(
     position: Any,
     *,
