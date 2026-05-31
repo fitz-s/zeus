@@ -2764,6 +2764,86 @@ def _snapshot_members_json_hash(snapshot: dict[str, Any]) -> str:
     return _probability_vector_hash(_snapshot_members(snapshot))
 
 
+_EDLI_BIAS_FAMILY = "edli_per_city_v1"
+
+
+def _maybe_apply_edli_bias_correction(
+    members: np.ndarray,
+    *,
+    snapshot: dict[str, Any],
+    family,
+    city,
+    payload: dict[str, object],
+) -> tuple[np.ndarray, bool]:
+    """A4 per-city promoted bias correction for the LIVE EDLI p_raw path.
+
+    Subtracts the promoted ``model_bias_ens.effective_bias_c`` (per city x season x
+    metric x live_data_version, authority='VERIFIED', error_model_family='edli_per_city_v1',
+    weight_live>0) from the member maxes BEFORE p_raw is computed. The bias sign
+    convention is ``effective_bias_c = mean(forecast - observed)`` so subtracting it
+    de-biases toward observed truth (cold forecast => negative bias_c => members warmed).
+
+    Flag-gated by ``edli_v1.edli_bias_correction_enabled`` (default OFF: prepared, not
+    active). FAIL-CLOSED: any missing flag/row/field or error returns the raw members
+    with applied=False, so the live path never breaks and never applies an unverified
+    correction. When applied, the caller marks payload['_edli_bias_corrected']=True so
+    the calibration step uses identity Platt for the corrected p_raw domain (train/serve
+    lockstep — calibration_pairs were fit on uncorrected p_raw).
+    """
+    try:
+        if not bool(settings["edli_v1"].get("edli_bias_correction_enabled", False)):
+            return members, False
+        import contextlib
+        from src.calibration.manager import season_from_date
+        from src.calibration.ens_bias_repo import read_bias_model
+        from src.state.db import get_world_connection
+
+        ldv = _nonnull(
+            snapshot.get("dataset_id")
+            or snapshot.get("data_version")
+            or payload.get("dataset_id")
+        )
+        if not ldv:
+            return members, False
+        season = season_from_date(str(family.target_date), lat=city.lat)
+        _tmonth = int(str(family.target_date)[5:7])
+        with contextlib.closing(get_world_connection()) as conn:
+            row = read_bias_model(
+                conn,
+                city=city.name,
+                season=season,
+                metric=family.metric,
+                live_data_version=str(ldv),
+                month=_tmonth,
+                target_month=_tmonth,
+                authority="VERIFIED",
+                error_model_family=_EDLI_BIAS_FAMILY,
+            )
+        if row is None:
+            return members, False
+        keys = set(row.keys())
+        eff = row["effective_bias_c"] if "effective_bias_c" in keys else None
+        wl = row["weight_live"] if "weight_live" in keys else 0.0
+        if eff is None or float(wl or 0.0) <= 0.0:
+            return members, False
+        corrected = np.asarray(members, dtype=float) - float(eff)
+        import logging
+        logging.getLogger("zeus.edli_bias").info(
+            "EDLI bias correction applied city=%s season=%s metric=%s eff_bias_c=%.3f",
+            city.name, season, family.metric, float(eff),
+        )
+        return corrected, True
+    except Exception as exc:  # fail-closed: never break the live decision path
+        try:
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "EDLI bias correction skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return members, False
+
+
 def _snapshot_p_raw(
     snapshot: dict[str, Any],
     *,
@@ -2778,6 +2858,13 @@ def _snapshot_p_raw(
     _snapshot_unit(snapshot, payload)
     _validate_snapshot_members_metric_identity(snapshot=snapshot, family=family, payload=payload)
     semantics = SettlementSemantics.for_city(city)
+    # A4 (2026-05-31): per-city promoted bias correction on member maxes BEFORE p_raw.
+    # Flag-gated (edli_v1.edli_bias_correction_enabled, default OFF) + FAIL-CLOSED.
+    members, _bias_corrected = _maybe_apply_edli_bias_correction(
+        members, snapshot=snapshot, family=family, city=city, payload=payload
+    )
+    if _bias_corrected:
+        payload["_edli_bias_corrected"] = True
     arr = p_raw_vector_from_maxes(members, city, semantics, bins)
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
         raise ValueError("event-bound p_raw vector invalid")
@@ -2801,6 +2888,17 @@ def _snapshot_p_cal(
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError(f"CALIBRATION_AUTHORITY_MISSING:city config missing for {family.city}")
+
+    # A4 lockstep: when the member maxes were bias-corrected pre-p_raw, the existing
+    # Platt models were fit on UNCORRECTED p_raw and would mis-calibrate the shifted
+    # domain. Use identity Platt (p_cal = normalized p_raw) for the corrected domain
+    # until a Platt is refit on the corrected p_raw_domain. Enforces train/serve match.
+    if bool(payload.get("_edli_bias_corrected")):
+        arr = np.asarray(p_raw, dtype=float)
+        total = float(arr.sum())
+        if not _valid_probability_vector(arr, len(bins)) or total <= 0.0:
+            raise ValueError("CALIBRATION_AUTHORITY_MISSING:bias-corrected p_raw invalid")
+        return arr / total
 
     source_id = _nonnull(snapshot.get("source_id") or payload.get("source_id"))
     issue_time = _nonnull(snapshot.get("issue_time") or snapshot.get("source_cycle_time") or payload.get("cycle"))
