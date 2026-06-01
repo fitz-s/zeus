@@ -3253,6 +3253,34 @@ def _forecast_snapshot_row_for_event(
     return snapshot
 
 
+def _assert_settlement_unit_identity(*, snapshot: dict[str, Any], payload: dict[str, object], city, bins) -> str:
+    """Fail-closed 3-way unit-identity gate at the q seam (#101 / U1).
+
+    The snapshot's unit, the city's settlement unit, and EVERY bin's unit MUST
+    agree — otherwise q is computed in one unit and the market resolves in
+    another (wrong-bin / wrong-SIDE on a KNOWN market, Paris-class). Returns the
+    single agreed unit. Raises ``FORECAST_SETTLEMENT_UNIT_DIVERGENCE`` on any
+    mismatch, empty bins, or mixed bin units (all fail-closed).
+    """
+    snapshot_unit = _snapshot_unit(snapshot, payload)
+    city_unit = getattr(city, "settlement_unit", None)
+    bin_units = {b.unit for b in bins}
+    if len(bin_units) != 1:
+        raise ValueError(
+            "FORECAST_SETTLEMENT_UNIT_DIVERGENCE: family bins carry "
+            f"{'no' if not bin_units else 'mixed'} units {sorted(bin_units)} "
+            f"(city={getattr(city, 'name', '?')})"
+        )
+    (bin_unit,) = tuple(bin_units)
+    if not (snapshot_unit == city_unit == bin_unit):
+        raise ValueError(
+            "FORECAST_SETTLEMENT_UNIT_DIVERGENCE: "
+            f"snapshot_unit={snapshot_unit} city_unit={city_unit} bin_unit={bin_unit} "
+            f"(city={getattr(city, 'name', '?')})"
+        )
+    return snapshot_unit
+
+
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
@@ -3275,6 +3303,13 @@ def _market_analysis_from_event_snapshot(
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError(f"city config missing for event-bound forecast inference: {family.city}")
+    # Settlement-unit identity gate (#101 / SETTLEMENT_CORRECTNESS_AUDIT U1): q is
+    # meaningless unless the snapshot members, the city's settlement unit, and the
+    # bin units all agree. Converts the previously-DISCARDED _snapshot_unit() call
+    # into a load-bearing fail-closed assertion at the q seam, so a future ingest
+    # unit-swap (Kelvin leak / source swap / new city) cannot silently invert q
+    # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
+    unit = _assert_settlement_unit_identity(snapshot=snapshot, payload=payload, city=city, bins=bins)
     members, _bias_corrected = _maybe_apply_edli_bias_correction(
         raw_members, snapshot=snapshot, family=family, city=city, payload=payload
     )
@@ -3328,7 +3363,7 @@ def _market_analysis_from_event_snapshot(
         alpha=float(settings["edge"]["base_alpha"]["level1"]),
         bins=bins,
         member_maxes=members,  # §4.1: corrected array (hoisted above)
-        unit=_snapshot_unit(snapshot, payload),
+        unit=unit,  # #101: the unit-identity-asserted agreed unit (snapshot==city==bins)
         precision=float(snapshot.get("members_precision") or 1.0),
         round_fn=None,
         city_name=family.city,
