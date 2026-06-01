@@ -427,11 +427,26 @@ def _verify_pre_submit_revalidation_for_command(
         "time_in_force",
         "post_only",
         "limit_price",
-        "tick_size",
         "min_order_size",
         "neg_risk",
     ):
         _require_equal(f"pre_submit.{field}", pre_submit.get(field), f"execution_command.{field}", command.get(field))
+    # tick_size: normalize both sides to Decimal before comparison — the pre-submit
+    # cert carries a float (0.01) while the execution command cert stores a Decimal
+    # string ("0.01"). Strict equality 0.01 != "0.01" would always fail. Both sides
+    # are coerced via Decimal(str(...)) so 0.01 == "0.01" == Decimal("0.01").
+    _ps_tick = pre_submit.get("tick_size")
+    _cmd_tick = command.get("tick_size")
+    try:
+        _ps_tick_d = Decimal(str(_ps_tick)) if _ps_tick is not None else None
+        _cmd_tick_d = Decimal(str(_cmd_tick)) if _cmd_tick is not None else None
+    except InvalidOperation:
+        _ps_tick_d = None
+        _cmd_tick_d = None
+    if _ps_tick_d != _cmd_tick_d:
+        raise CertificateVerificationError(
+            f"pre_submit.tick_size != execution_command.tick_size: {_ps_tick!r} != {_cmd_tick!r}"
+        )
     _require_equal(
         "pre_submit.live_cap_usage_id",
         pre_submit.get("live_cap_usage_id"),

@@ -272,10 +272,12 @@ def test_live_cap_certificate_is_backed_by_usage_row():
 def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.riskguard.risk_level import RiskLevel
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    ensure_table(conn)
     event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
     accepted = _accepted_receipt(event)
@@ -291,6 +293,7 @@ def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
+        taker_fok_fak_live_enabled=True,
     )
 
     receipt = submit(event, decision_time)
@@ -325,6 +328,7 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
         tiny_live_max_notional_usd=5.0,
         live_cap_conn=conn,
         pre_submit_authority_provider=_pre_submit_authority_provider,
+        taker_fok_fak_live_enabled=True,
     )
 
     events = conn.execute(
@@ -381,6 +385,7 @@ def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch)
         get_current_level=lambda: RiskLevel.GREEN,
         real_order_submit_enabled=False,
         pre_submit_authority_provider=_pre_submit_authority_provider,
+        taker_fok_fak_live_enabled=True,
     )
 
     receipt = submit(event, decision_time)
@@ -413,18 +418,32 @@ def test_live_execution_command_build_fails_without_pre_submit_authority_witness
             decision_time=decision_time,
             tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
+            taker_fok_fak_live_enabled=True,
         )
 
 
 def test_crossing_post_only_pre_submit_witness_blocks_command():
+    # Tests that a POST_ONLY MAKER order whose limit_price >= current_best_ask
+    # (i.e. would cross the book) is rejected by the pre-submit verifier with
+    # "would_cross_book=false".  The receipt must have low EV (trade_score=0.0,
+    # p_fill_lcb=0.0) so the EV boundary selects MAKER (post_only=True);
+    # a TAKER order has post_only=False and skips the crossing check by design.
     from src.engine import event_reactor_adapter as adapter
+    from src.state.schema.edli_live_cap_usage_schema import ensure_table
     from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
+    ensure_table(conn)
     event = _forecast_event()
     decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
-    accepted = _accepted_receipt(event)
+    # Low trade_score + p_fill_lcb keeps EV boundary False → MAKER (post_only=True).
+    # With limit_price ~0.4 and witness ask=0.39, would_cross=True → verifier raises.
+    accepted = replace(
+        _accepted_receipt(event),
+        trade_score=0.0,
+        p_fill_lcb=0.0,
+    )
     accepted = replace(
         accepted,
         decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
@@ -528,6 +547,7 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
             durable_submit_outbox_enabled=True,
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -619,6 +639,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
                 raw_response={"status": "rejected"},
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -766,6 +787,7 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
                 reconciliation_followup_required=True,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -831,6 +853,7 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
                 side_effect_known=False,
             ),
             pre_submit_authority_provider=_pre_submit_authority_provider,
+            taker_fok_fak_live_enabled=True,
         )
 
         receipt = submit(event, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
