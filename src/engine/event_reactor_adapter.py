@@ -3451,7 +3451,30 @@ def _snapshot_p_cal(
     except (sqlite3.Error, ValueError) as exc:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:calibration store unavailable") from exc
     if cal is None:
-        raise ValueError("CALIBRATION_AUTHORITY_MISSING:no Platt calibrator")
+        # Identity-Platt fallback: no fitted Platt for this (city, season, metric) bucket.
+        # Use normalized p_raw as p_cal (identity passthrough). This is the designed
+        # fail-closed default per platt_oos_resolver.py §P0: identity is the live default;
+        # a fitted Platt is a CANDIDATE that requires OOS proof. Prevents whole-city
+        # blackout when a season boundary is crossed before new Platt rows are fitted.
+        # Tagged for log aggregation: calibration_identity_fallback_no_platt_bucket.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "calibration_identity_fallback_no_platt_bucket city=%s "
+            "metric=%s target_date=%s cycle=%s source_id=%s "
+            "horizon_profile=%s — no fitted Platt for this bucket; using "
+            "identity (p_cal = normalized p_raw). Fit a Platt to promote.",
+            family.city,
+            family.metric,
+            family.target_date,
+            cycle,
+            calibration_source_id,
+            horizon_profile,
+        )
+        arr = np.asarray(p_raw, dtype=float)
+        total = float(arr.sum())
+        if not _valid_probability_vector(arr, len(bins)) or total <= 0.0:
+            raise ValueError("CALIBRATION_AUTHORITY_MISSING:identity fallback p_raw invalid")
+        return arr / total
     p_cal = calibrate_and_normalize(
         np.asarray(p_raw, dtype=float),
         cal,

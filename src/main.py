@@ -4340,6 +4340,10 @@ def _edli_user_channel_reconcile_cycle() -> None:
     now = datetime.now(timezone.utc)
     message_count = 0
     reconcile_count = 0
+    # DEFECT-1: aggregates whose user-channel TRADE message was processed this
+    # cycle. After the world-conn commit, the bridge materialises a canonical
+    # position_current row for each that reached FILL_CONFIRMED.
+    _edli_fill_bridge_aggregate_ids: set[str] = set()
     from src.events.live_order_aggregate import LiveOrderAggregateLedger
     from src.events.live_order_reconcile import append_reconciled
     from src.events.triggers.user_channel_ingestor import (
@@ -4403,6 +4407,15 @@ def _edli_user_channel_reconcile_cycle() -> None:
                     processed_at=now,
                 )
                 message_count += 1
+                # DEFECT-1 bridge (capital recoverability): a confirmed EDLI
+                # fill must materialise a canonical position_current row so
+                # chain-reconciliation / exit-lifecycle / harvester / redeem can
+                # see it. The actual cross-DB write happens AFTER this world-conn
+                # commit, on a trade-connection-with-world-attached (INV-37) —
+                # here we only record which aggregates received a trade message.
+                _message_kind = str(message.get("message_type") or message.get("type") or "").lower()
+                if _message_kind == "trade":
+                    _edli_fill_bridge_aggregate_ids.add(aggregate_id)
             except RuntimeError as exc:
                 status = INBOX_STALE_REJECTED if "STALE" in str(exc) else INBOX_FAILED
                 mark_user_channel_inbox_status(
@@ -4440,6 +4453,54 @@ def _edli_user_channel_reconcile_cycle() -> None:
         conn.commit()
     finally:
         conn.close()
+
+    # DEFECT-1 bridge pass (capital recoverability). The EDLI events are now
+    # durable on world.db. Materialise a canonical position_current row for any
+    # aggregate that reached FILL_CONFIRMED this cycle so the legacy lifecycle
+    # (chain-reconciliation / exit / harvester / redeem) can see and recover the
+    # position. INV-37: runs on a trade connection with world ATTACHed — the
+    # bridge reads world.edli_live_order_events and writes position_current /
+    # position_events on the SAME connection (ATTACH + SAVEPOINT, no independent
+    # connection). Idempotent: replay UPDATEs the same row, never duplicates.
+    # Fail-safe: a bridge error must not crash the scheduler job — log and retry
+    # next cycle (the EDLI events persist; the next confirmed-fill scan re-runs).
+    bridged_positions = 0
+    if _edli_fill_bridge_aggregate_ids:
+        from src.events.edli_position_bridge import (
+            materialize_position_current_from_edli_fill,
+        )
+        from src.state.db import get_trade_connection_with_world_required
+
+        bridge_conn = None
+        try:
+            bridge_conn = get_trade_connection_with_world_required(write_class="live")
+            for _agg_id in sorted(_edli_fill_bridge_aggregate_ids):
+                try:
+                    result = materialize_position_current_from_edli_fill(
+                        bridge_conn, _agg_id, now=now
+                    )
+                    if result is not None:
+                        bridged_positions += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "EDLI position bridge failed for aggregate %s (non-fatal; "
+                        "EDLI events persist, next cycle retries): %s",
+                        _agg_id,
+                        exc,
+                        exc_info=True,
+                    )
+            bridge_conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "EDLI position bridge pass failed (non-fatal): %s", exc, exc_info=True
+            )
+        finally:
+            if bridge_conn is not None:
+                try:
+                    bridge_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
     _write_scheduler_health(
         "edli_user_channel_reconcile",
         failed=False,
@@ -4449,6 +4510,7 @@ def _edli_user_channel_reconcile_cycle() -> None:
             "public_market_channel_fill_truth": "forbidden",
             "user_channel_messages": message_count,
             "venue_reconciliations": reconcile_count,
+            "edli_positions_bridged": bridged_positions,
         },
     )
 
