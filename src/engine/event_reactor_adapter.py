@@ -990,7 +990,21 @@ def _build_live_execution_command_certificates(
         proof_bundle=proof_bundle,
     )
     if compile_result.status != "VERIFIED":
-        reason = compile_result.failures[0].reason_code if compile_result.failures else "NO_SUBMIT_CERTIFICATE_REJECTED"
+        # KILLER 2 (2026-05-31): surface the UNDERLYING failing assertion, not just the
+        # generic stage reason_code. compiler._rejected() captures the specific failure
+        # message in CompileFailure.reason_detail (e.g. the exact field/parent that failed
+        # _validate_no_submit_parent_consistency), but only reason_code was propagated —
+        # so 147/308 positive-edge candidates died as opaque NO_SUBMIT_CERTIFICATE_REJECTED
+        # with no diagnosable sub-reason in no_trade_regret_events. Append reason_detail so
+        # the regret row records WHY the no-submit certificate was rejected.
+        if compile_result.failures:
+            failure = compile_result.failures[0]
+            reason = failure.reason_code
+            detail = getattr(failure, "reason_detail", None)
+            if detail:
+                reason = f"{reason}:{detail}"
+        else:
+            reason = "NO_SUBMIT_CERTIFICATE_REJECTED"
         raise ValueError(reason)
     base_certs = tuple(
         cert

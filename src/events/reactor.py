@@ -377,11 +377,25 @@ class OpportunityEventReactor:
             self._decision_certificate_ledger.persist_all(compile_result.certificates)
             self._decision_certificate_ledger.persist_failures(compile_result.failures)
             if compile_result.status != "VERIFIED":
-                reason = (
-                    compile_result.failures[0].reason_code
-                    if compile_result.failures
-                    else "NO_SUBMIT_CERTIFICATE_REJECTED"
-                )
+                # KILLER 2 (2026-05-31): surface the UNDERLYING failing assertion
+                # (CompileFailure.reason_detail), not just the opaque stage reason_code.
+                # 147/308 positive-edge contested candidates died here as bare
+                # NO_SUBMIT_CERTIFICATE_REJECTED with no diagnosable sub-reason in the
+                # regret stream; the real reason was only in decision_compile_failures.
+                failure = compile_result.failures[0] if compile_result.failures else None
+                detail = getattr(failure, "reason_detail", None) if failure else None
+                # TRANSIENT causality class (same family as SOURCE_CAPTURED_AFTER_DECISION_TIME,
+                # #43): a parent certificate's source_available_at was bumped past this cycle's
+                # decision_time by a later forecast re-ingest. This is NOT a terminal safety
+                # rejection — on the next cycle decision_time advances past the source's
+                # available time and the proof verifies. Requeue (bounded by retry cap →
+                # dead-letter) instead of terminally dropping the positive-edge candidate.
+                # 129/174 of the DECISION_CERTIFICATE rejections are exactly this.
+                if detail and "after decision_time" in detail:
+                    return _EXECUTABLE_SNAPSHOT_RETRY
+                reason = failure.reason_code if failure else "NO_SUBMIT_CERTIFICATE_REJECTED"
+                if detail:
+                    reason = f"{reason}:{detail}"
                 self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt, decision_time=decision_time)
                 return
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
