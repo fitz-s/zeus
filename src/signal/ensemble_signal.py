@@ -261,6 +261,16 @@ def p_raw_vector_from_maxes(
 
     total = p.sum()
     if total > 0:
+        # MASKING RE-NORMALIZATION (load-bearing site — Task #114 FDR family-
+        # completeness): when the bin set is not a complete integer partition,
+        # settlement mass landing OUTSIDE the modeled bins is silently discarded
+        # here and the remainder rescaled to sum 1.0. This is the canonical site
+        # that hides an incomplete family topology (NOT event_reactor_adapter
+        # `arr = arr / total` at :3602, which re-normalizes an already-normalized
+        # vector and is therefore redundant). The at-construction antibody in
+        # candidate_binding.bind_event_to_candidate_family rejects incomplete
+        # topologies upstream so this rescale never silently absorbs out-of-support
+        # mass for a bound live family.
         p = p / total
     return p
 

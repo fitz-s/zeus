@@ -14,7 +14,7 @@ from typing import Iterable
 
 from src.events.idempotency import canonical_json, sha256_text
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
-from src.types.market import Bin, to_json_safe
+from src.types.market import Bin, BinTopologyError, to_json_safe, validate_bin_topology
 
 
 class CandidateBindingError(ValueError):
@@ -124,6 +124,20 @@ def bind_event_to_candidate_family(
     yes_token_ids = tuple(_unique(candidate.yes_token_id for candidate in candidates))
     no_token_ids = tuple(_unique(candidate.no_token_id for candidate in candidates))
     bins = tuple(candidate.bin for candidate in candidates)
+    # FDR family-completeness antibody (Task #114, gates_on_q=FALSE): the bound
+    # family must form a complete integer partition (full -inf..+inf support).
+    # Validate the FULL family bins, never an executable-filtered subset — a
+    # legitimately delisted/subset family that still spans full support (with
+    # open-ended shoulders) MUST still construct (M2 carve-out is load-bearing,
+    # no trade-halt). An incomplete topology (e.g. NYC-type dup + no-shoulder,
+    # where settlement can land outside modeled bins) is rejected HERE rather
+    # than masked downstream by MC re-normalization (ensemble_signal.py:264).
+    try:
+        validate_bin_topology(list(bins))
+    except BinTopologyError as exc:
+        raise CandidateBindingError(
+            f"FDR_FAMILY_TOPOLOGY_INCOMPLETE:{exc}"
+        ) from exc
     binding_payload = {
         "event_id": event.event_id,
         "event_type": event.event_type,
