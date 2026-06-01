@@ -3175,8 +3175,24 @@ def _market_analysis_from_event_snapshot(
     from src.config import settings
 
     bins = list(family.bins)
-    members = _snapshot_members(snapshot)
-    p_raw = _snapshot_p_raw(snapshot, family=family, bins=bins, members=members, payload=payload)
+    raw_members = _snapshot_members(snapshot)
+    # §4.1 (CI_HONESTY_AND_SCORE_GATE_RULING_2026-06-01): hoist bias correction so
+    # both the p_raw path AND the bootstrap (member_maxes) consume the SAME corrected
+    # surface.  Pre-fix: correction was applied inside _snapshot_p_raw (local rebind)
+    # and never escaped — MarketAnalysis received uncorrected cold array, placing
+    # q_lcb_5pct ~|eff_bias_c|° below the warm point posterior.
+    city = runtime_cities_by_name().get(family.city)
+    if city is None:
+        raise ValueError(f"city config missing for event-bound forecast inference: {family.city}")
+    members, _bias_corrected = _maybe_apply_edli_bias_correction(
+        raw_members, snapshot=snapshot, family=family, city=city, payload=payload
+    )
+    if _bias_corrected:
+        payload["_edli_bias_corrected"] = True
+    p_raw = _snapshot_p_raw(
+        snapshot, family=family, bins=bins, members=members, payload=payload,
+        members_already_corrected=True,
+    )
     p_cal = _snapshot_p_cal(
         calibration_conn,
         snapshot=snapshot,
@@ -3220,14 +3236,14 @@ def _market_analysis_from_event_snapshot(
         executable_mask=np.asarray(executable_mask, dtype=bool),
         alpha=float(settings["edge"]["base_alpha"]["level1"]),
         bins=bins,
-        member_maxes=members,
+        member_maxes=members,  # §4.1: corrected array (hoisted above)
         unit=_snapshot_unit(snapshot, payload),
         precision=float(snapshot.get("members_precision") or 1.0),
         round_fn=None,
         city_name=family.city,
         season="",
         forecast_source=str(snapshot.get("source_id") or payload.get("source_id") or ""),
-        bias_corrected=False,
+        bias_corrected=_bias_corrected,  # §4.1: propagate correction flag
         market_complete=True,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
@@ -3432,6 +3448,7 @@ def _snapshot_p_raw(
     bins: list[Bin],
     members: np.ndarray,
     payload: dict[str, object],
+    members_already_corrected: bool = False,
 ) -> np.ndarray:
     city = runtime_cities_by_name().get(family.city)
     if city is None:
@@ -3441,11 +3458,15 @@ def _snapshot_p_raw(
     semantics = SettlementSemantics.for_city(city)
     # A4 (2026-05-31): per-city promoted bias correction on member maxes BEFORE p_raw.
     # Flag-gated (edli_v1.edli_bias_correction_enabled, default OFF) + FAIL-CLOSED.
-    members, _bias_corrected = _maybe_apply_edli_bias_correction(
-        members, snapshot=snapshot, family=family, city=city, payload=payload
-    )
-    if _bias_corrected:
-        payload["_edli_bias_corrected"] = True
+    # §4.1 guard: skip if caller already hoisted correction (members_already_corrected=True)
+    # to prevent double-application when _snapshot_p_raw is called from
+    # _market_analysis_from_event_snapshot (which now owns the single correction site).
+    if not members_already_corrected:
+        members, _bias_corrected = _maybe_apply_edli_bias_correction(
+            members, snapshot=snapshot, family=family, city=city, payload=payload
+        )
+        if _bias_corrected:
+            payload["_edli_bias_corrected"] = True
     arr = p_raw_vector_from_maxes(members, city, semantics, bins)
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
         raise ValueError("event-bound p_raw vector invalid")
