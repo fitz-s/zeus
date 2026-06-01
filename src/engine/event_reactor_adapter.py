@@ -1326,7 +1326,7 @@ def _build_live_execution_command_certificates(
             cap_scope="tiny_live_canary",
             requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
             max_notional_usd=float(tiny_live_max_notional_usd),
-            max_orders_per_day=1,
+            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
             final_intent_id=str(final_intent.payload["final_intent_id"]),
             execution_command_id=execution_command_id,
         )
@@ -1531,7 +1531,7 @@ def _build_live_cap_certificate_from_ledger(
             cap_scope="tiny_live_canary",
             requested_notional_usd=float(requested_notional),
             max_notional_usd=float(max_notional_usd),
-            max_orders_per_day=1,
+            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
             final_intent_id=receipt.final_intent_id,
         )
     else:
@@ -1543,7 +1543,7 @@ def _build_live_cap_certificate_from_ledger(
             decision_time=decision_time,
             cap_scope="tiny_live_canary",
             max_notional_usd=float(max_notional_usd),
-            max_orders_per_day=1,
+            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
             reserved_notional_usd=float(requested_notional),
             order_count=1,
             reservation_status="RESERVED",
