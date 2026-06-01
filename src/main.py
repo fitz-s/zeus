@@ -4872,6 +4872,35 @@ def main():
             max_instances=1,
             coalesce=True,
         )
+        # STRUCTURAL FIX (2026-05-31, #52 follow-up): executable_market_snapshots
+        # (EMS) substrate refresh in EDLI modes. market_discovery is the ONLY
+        # universe-wide writer of executable_market_snapshots (architecture/
+        # db_table_ownership.yaml::executable_market_snapshots; failure_chains.yaml::
+        # market_discovery_coverage_collapse) — but it was registered ONLY in
+        # legacy_cron (see legacy_cron block above), so in EDLI event-driven modes
+        # NOTHING refreshed the EMS substrate across the candidate universe. The
+        # edli_market_channel_ingestor (#52) writes execution_feasibility_evidence
+        # for the PRE-SUBMIT witness, NOT executable_market_snapshots, which the
+        # cert build's QUOTE_FEASIBILITY / executable-snapshot selection requires
+        # (src/engine/event_reactor_adapter.py::_latest_snapshot_rows_for_event_family
+        # → _passive_maker_context_from_authorities reads orderbook_top_bid/ask off
+        # the selected EMS row). With EMS frozen/aging, candidate families lost a
+        # fresh active-open snapshot for the selected bin → every live cert build
+        # failed EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED
+        # (and intermittently EXECUTABLE_SNAPSHOT_BLOCKED) → proof_accepted=0.
+        # market_discovery is a DATA-ONLY substrate writer: it submits no orders and
+        # touches no arming flags. Gated by market_substrate_refresh_enabled
+        # (default True) so the operator can disable without code change.
+        if edli_cfg.get("market_substrate_refresh_enabled", True):
+            scheduler.add_job(
+                _market_discovery_cycle,
+                "interval",
+                minutes=5,
+                id="market_discovery",
+                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 35.0),
+                max_instances=1,
+                coalesce=True,
+            )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("market_channel_ingestor_enabled"):
         scheduler.add_job(
             _edli_market_channel_ingestor_cycle,
