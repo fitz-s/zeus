@@ -3364,76 +3364,95 @@ def _edli_event_reactor_cycle() -> None:
     except Exception as _bk_exc:  # noqa: BLE001
         logger.warning("EDLI reactor: bankroll cache warm failed (non-fatal): %r", _bk_exc)
     try:
+        from src.state.db import world_write_mutex as _world_write_mutex
+
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
         forecast_emit_limit = _edli_bounded_positive_int(edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50)
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
         proof_limit = _edli_bounded_positive_int(edli_cfg, "no_submit_proof_limit", default=10, maximum=50)
-        if edli_cfg.get("forecast_snapshot_trigger_enabled"):
-            # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
-            # opportunity_events to the WAL world DB shared with the market-channel
-            # ingestor and CollateralLedger heartbeat. Under live load that DB hits
-            # transient "database is locked" past the 30s busy_timeout. A locked-out
-            # emit must NOT crash the whole reactor cycle — the cycle should still drain
-            # candidates already queued from prior cycles. Catch ONLY the transient lock
-            # (narrow, by message) and continue; real schema/logic faults still propagate.
-            try:
-                _edli_emit_forecast_snapshot_events(
-                    conn,
-                    decision_time=now,
-                    received_at=received_at,
-                    limit=forecast_emit_limit,
-                )
-            except sqlite3.OperationalError as _emit_lock_exc:
-                if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
-                    logger.warning(
-                        "EDLI reactor: forecast-snapshot emit hit transient world-DB lock "
-                        "(%r) — skipping emit this cycle, draining already-queued candidates.",
-                        _emit_lock_exc,
+        # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
+        # EMIT block writes opportunity_events to the WAL zeus-world.db shared
+        # in-process with the market-channel ingestor. Serialize the whole
+        # emit+commit unit under the process-global world-DB write mutex so it
+        # never holds the WAL write lock concurrently with the ingestor (no HTTP
+        # is done inside this block — the emit reads forecasts/trade DBs and
+        # writes world — so the mutex stays short and never spans a venue fetch).
+        # Explicit acquire/finally (not ``with``) to avoid reindenting the block.
+        _emit_mutex = _world_write_mutex()
+        _emit_mutex.acquire()
+        try:
+            if edli_cfg.get("forecast_snapshot_trigger_enabled"):
+                # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
+                # opportunity_events to the WAL world DB shared with the market-channel
+                # ingestor and CollateralLedger heartbeat. Under live load that DB hits
+                # transient "database is locked" past the 30s busy_timeout. A locked-out
+                # emit must NOT crash the whole reactor cycle — the cycle should still drain
+                # candidates already queued from prior cycles. Catch ONLY the transient lock
+                # (narrow, by message) and continue; real schema/logic faults still propagate.
+                try:
+                    _edli_emit_forecast_snapshot_events(
+                        conn,
+                        decision_time=now,
+                        received_at=received_at,
+                        limit=forecast_emit_limit,
                     )
-                else:
-                    raise
-        # Continuous re-decision (DEFAULT OFF — redecision_continuous_enabled): re-emit
-        # FSR-equivalent events for committed market-backed families each cycle, with a per-cycle
-        # distinct source so they do NOT dedup to the consumed FSR. Routing through the pending path
-        # makes _refresh_pending_family_snapshots capture fresh prices just-in-time → the reactor
-        # re-decides every ~60s instead of once per 12h forecast. Fixes EDLI-mode "hours per order".
-        # already_pending skip + cap bound the queue. Non-fatal: never breaks the reactor cycle.
-        if bool(edli_cfg.get("redecision_continuous_enabled", False)):
-            try:
-                _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
-                _rd_source = f"edli_redecision:{now.isoformat()}"
-                _rd_pending = _edli_pending_entity_keys(conn)
-                _rd_n = _edli_emit_forecast_snapshot_events(
-                    conn,
-                    decision_time=now,
-                    received_at=received_at,
-                    limit=_rd_cap,
-                    source=_rd_source,
-                    already_pending_keys=_rd_pending,
-                )
-                logger.info(
-                    "edli_redecision: enqueued=%d cap=%d skipped_pending=%d",
-                    _rd_n, _rd_cap, len(_rd_pending),
-                )
-            except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
-                logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
-        if (
-            edli_cfg.get("day0_extreme_trigger_enabled")
-            and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
-        ):
-            _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
-            try:
-                _edli_emit_day0_extreme_events(
-                    conn,
-                    _day0_trade_conn,
-                    decision_time=now,
-                    received_at=received_at,
-                    limit=day0_emit_limit,
-                )
-            finally:
-                _day0_trade_conn.close()
-        conn.commit()
+                except sqlite3.OperationalError as _emit_lock_exc:
+                    if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
+                        logger.warning(
+                            "EDLI reactor: forecast-snapshot emit hit transient world-DB lock "
+                            "(%r) — skipping emit this cycle, draining already-queued candidates.",
+                            _emit_lock_exc,
+                        )
+                    else:
+                        raise
+            # Continuous re-decision (DEFAULT OFF — redecision_continuous_enabled): re-emit
+            # FSR-equivalent events for committed market-backed families each cycle, with a per-cycle
+            # distinct source so they do NOT dedup to the consumed FSR. Routing through the pending path
+            # makes _refresh_pending_family_snapshots capture fresh prices just-in-time → the reactor
+            # re-decides every ~60s instead of once per 12h forecast. Fixes EDLI-mode "hours per order".
+            # already_pending skip + cap bound the queue. Non-fatal: never breaks the reactor cycle.
+            if bool(edli_cfg.get("redecision_continuous_enabled", False)):
+                try:
+                    _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
+                    _rd_source = f"edli_redecision:{now.isoformat()}"
+                    _rd_pending = _edli_pending_entity_keys(conn)
+                    _rd_n = _edli_emit_forecast_snapshot_events(
+                        conn,
+                        decision_time=now,
+                        received_at=received_at,
+                        limit=_rd_cap,
+                        source=_rd_source,
+                        already_pending_keys=_rd_pending,
+                    )
+                    logger.info(
+                        "edli_redecision: enqueued=%d cap=%d skipped_pending=%d",
+                        _rd_n, _rd_cap, len(_rd_pending),
+                    )
+                except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
+                    logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
+            if (
+                edli_cfg.get("day0_extreme_trigger_enabled")
+                and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+            ):
+                _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
+                try:
+                    _edli_emit_day0_extreme_events(
+                        conn,
+                        _day0_trade_conn,
+                        decision_time=now,
+                        received_at=received_at,
+                        limit=day0_emit_limit,
+                    )
+                finally:
+                    _day0_trade_conn.close()
+            # Commit the emit WRITE UNIT (FSR + redecision + day0 → opportunity_events)
+            # while still holding the world-DB write mutex, so the WAL write lock is
+            # released by the COMMIT before any other writer (ingestor / collateral
+            # heartbeat) can interleave. No HTTP/venue work runs inside this block.
+            conn.commit()
+        finally:
+            _emit_mutex.release()
         # Targeted, cache-aware refresh of executable snapshots for pending families.
         # Opens its own write trade connection and commits before trade_conn is opened,
         # ensuring WAL read visibility for the gate below.

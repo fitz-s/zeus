@@ -3546,9 +3546,35 @@ def refresh_executable_market_substrate_snapshots(
                 # proof can be assembled.  Illiquid bins are persisted non-tradeable.
                 tolerate_missing_book=True,
             )
+            # EDLI live-canary WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
+            # capture_executable_market_snapshot does per-outcome venue HTTP
+            # (_fetch_clob_market_info + the GET /book fallback + _fetch_fee_details)
+            # BEFORE its insert_snapshot.  With sqlite3 isolation_level="" the first
+            # insert opens an implicit DEFERRED txn that upgrades to the single WAL
+            # *write* lock and — without this commit — held it across EVERY later
+            # iteration's HTTP fetch (the function used to commit only once, trailing,
+            # in the caller).  That starved the other in-process trade-DB writers
+            # (executor submit path, exit lifecycle) past the 30 s busy_timeout →
+            # "database is locked".  Committing the row's write unit HERE releases the
+            # WAL write lock BEFORE the next outcome's HTTP runs, so no write txn ever
+            # spans an HTTP call.  The trailing conn.commit() in the callers is now a
+            # harmless no-op (nothing left open).  INV-37: this conn is the
+            # trades-rooted live connection that OWNS executable_market_snapshots and
+            # book_hash_transitions (db_table_ownership.yaml: both db=trade); committing
+            # per row releases the trade-DB WAL write lock and preserves the
+            # caller-managed single-connection transaction contract (no new connection,
+            # no cross-DB independent write).
+            conn.commit()
             inserted += 1
             inserted_cities.add(_snapshot_refresh_city_key(market))
         except Exception as exc:
+            # Roll back this row's partial write unit so a failed capture never leaves
+            # an open trade-DB write txn holding the WAL write lock across the next
+            # iteration's HTTP (same starvation the per-item commit prevents).
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001 - rollback best-effort; never mask the real failure
+                pass
             failed += 1
             if len(failures) < 3:
                 failures.append({"condition_id": condition_id, "error": str(exc)})

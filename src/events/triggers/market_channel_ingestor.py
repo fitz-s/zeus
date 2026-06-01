@@ -18,6 +18,22 @@ UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
 
+def _world_write_mutex():
+    """Lazily resolve the process-global zeus-world.db write mutex.
+
+    Imported lazily (not at module top) to avoid an import cycle with
+    ``src.state.db``. EDLI live-canary contention fix (2026-05-31): the
+    market-channel ingestor and the EDLI reactor are two in-process WAL writers
+    on zeus-world.db; serializing each write+commit unit under this mutex
+    guarantees they never hold the SQLite write lock concurrently, so a contended
+    write waits cleanly on the Python mutex instead of crashing on a 30 s
+    busy_timeout "database is locked".
+    """
+    from src.state.db import world_write_mutex
+
+    return world_write_mutex()
+
+
 class MarketChannelAuthorityError(ValueError):
     pass
 
@@ -551,12 +567,21 @@ class MarketChannelOnlineService:
 
         import websockets
 
+        # EDLI live-canary contention fix (2026-05-31): serialize every world-DB
+        # write+commit unit in this loop against the EDLI reactor via the
+        # process-global world-DB write mutex. Held ONLY around the DB
+        # write+commit (never across the WS recv / network I/O), so it stays
+        # short and the reactor's per-event writes are never lock-starved.
+        _world_mutex = _world_write_mutex()
+
         while stop_event is None or not stop_event.is_set():
             received_at = datetime.now(UTC).isoformat()
             try:
-                self.on_connect(received_at=received_at)
-                if commit is not None:
-                    commit()
+                # Seed-on-connect write unit (REST book seed → event/feasibility rows).
+                with _world_mutex:
+                    self.on_connect(received_at=received_at)
+                    if commit is not None:
+                        commit()
                 async with websockets.connect(endpoint, ping_interval=20, ping_timeout=20) as ws:
                     await ws.send(
                         json.dumps(
@@ -574,16 +599,28 @@ class MarketChannelOnlineService:
                             len(self.ingestor._active_token_ids),
                         )
                     async for raw_message in ws:
-                        for message in _parse_channel_messages(raw_message):
-                            action_or_result = self.ingestor.handle_message(
-                                message,
-                                received_at=datetime.now(UTC).isoformat(),
-                            )
-                            if isinstance(action_or_result, MarketChannelAction):
-                                self._handle_action(action_or_result)
-                        self.ingestor.flush_coalesced(market_budget=100)
-                        if commit is not None:
-                            commit()
+                        # Hold the world-DB write mutex ONLY around the DB
+                        # write+commit unit for this message batch — never across
+                        # the ``async for`` recv (network I/O) nor across
+                        # _handle_action (which runs refresh/invalidate callbacks
+                        # doing HTTP + zeus_trades.db writes, a DIFFERENT DB / K1
+                        # split). Actions are COLLECTED under the lock and executed
+                        # AFTER release so the world mutex stays short and never
+                        # spans a venue fetch.
+                        pending_actions: list[MarketChannelAction] = []
+                        with _world_mutex:
+                            for message in _parse_channel_messages(raw_message):
+                                action_or_result = self.ingestor.handle_message(
+                                    message,
+                                    received_at=datetime.now(UTC).isoformat(),
+                                )
+                                if isinstance(action_or_result, MarketChannelAction):
+                                    pending_actions.append(action_or_result)
+                            self.ingestor.flush_coalesced(market_budget=100)
+                            if commit is not None:
+                                commit()
+                        for _action in pending_actions:
+                            self._handle_action(_action)
             except Exception as exc:  # noqa: BLE001 - network loop must retry
                 gap_start = datetime.now(UTC).isoformat()
                 self.on_disconnect(gap_start=gap_start)
@@ -604,9 +641,14 @@ class MarketChannelOnlineService:
                         pass
                 await asyncio.sleep(reconnect_delay_seconds)
                 try:
-                    self.on_reconnect(received_at=datetime.now(UTC).isoformat())
-                    if commit is not None:
-                        commit()
+                    # Reconnect seed write unit — serialized against the reactor.
+                    # Rare error-path; on_reconnect does per-token REST seeds but
+                    # this path is not the steady-state hot loop, so guarding the
+                    # whole seed+commit keeps the in-process serialization simple.
+                    with _world_mutex:
+                        self.on_reconnect(received_at=datetime.now(UTC).isoformat())
+                        if commit is not None:
+                            commit()
                 except Exception as seed_exc:  # noqa: BLE001
                     # Reconnect seed failed (e.g. REST 404). Rollback any partial
                     # transaction from the seed attempt for the same reason above.

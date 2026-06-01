@@ -16,6 +16,7 @@ from typing import Any, Callable
 from src.decision_kernel import claims
 from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
+from src.state.db import world_write_mutex
 
 UTC = timezone.utc
 DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
@@ -162,10 +163,43 @@ class OpportunityEventReactor:
 
     def process_pending(self, *, decision_time: datetime, limit: int = 100) -> ReactorResult:
         result = ReactorResult()
+        # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
+        # taken under the world-DB write mutex.
         events = self._store.fetch_pending(decision_time=decision_time.astimezone(UTC).isoformat(), limit=limit)
         for event in events:
+            self._process_event_unit(event, decision_time=decision_time, result=result)
+        return result
+
+    def _process_event_unit(
+        self,
+        event: OpportunityEvent,
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+    ) -> None:
+        """Process ONE event as a single serialized world-DB write unit.
+
+        EDLI live-canary contention fix (2026-05-31): the EDLI reactor and the
+        market-channel ingestor are two in-process WAL writers on zeus-world.db.
+        This method serializes the event's WRITE UNIT (claim → ledger writes →
+        mark → commit) against the ingestor via the process-global world-DB write
+        mutex (``world_write_mutex`` in db.py). Without it a contended write waited
+        out the 30 s busy_timeout → "database is locked" → the reactor cycle
+        hung/skipped (status=FAILED).
+
+        The mutex is held PER EVENT (bounded to one event's claim/submit/mark —
+        NOT the whole ~330 s cycle), and ``_commit_event_unit`` commits per event
+        so the WAL write lock is released between events and the ingestor gets
+        frequent write windows. ``fetch_pending`` (a read) stays OUTSIDE the lock.
+        """
+        mutex = world_write_mutex()
+        mutex.acquire()
+        try:
             if not self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat()):
-                continue
+                # Claim lost (another worker / lease not yet stale): release any
+                # open txn and the mutex; nothing to process this cycle.
+                self._commit_event_unit()
+                return
             try:
                 self._store.conn.execute("SAVEPOINT edli_reactor_event")
                 disposition = self._process_one(event, decision_time=decision_time, result=result)
@@ -173,7 +207,8 @@ class OpportunityEventReactor:
                     # PARTIAL FSR: reject + dead_letter writes already committed by _process_one.
                     # Only release the savepoint; do NOT call mark_processed.
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                    continue
+                    self._commit_event_unit()
+                    return
                 if disposition == _EXECUTABLE_SNAPSHOT_RETRY:
                     attempts = self._store.attempt_count(event.event_id)
                     if attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES:
@@ -186,16 +221,19 @@ class OpportunityEventReactor:
                             created_at=decision_time.astimezone(UTC).isoformat(),
                         )
                         self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                        self._commit_event_unit()
                         result.dead_lettered += 1
                     else:
                         # Transient block: requeue for retry next cycle (after capture completes).
                         # Do NOT consume the event the way mark_processed would.
                         self._store.requeue_pending(event.event_id)
                         self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                        self._commit_event_unit()
                         result.retried += 1
-                    continue
+                    return
                 self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
                 self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                self._commit_event_unit()
                 result.processed += 1
             except Exception as exc:
                 with contextlib.suppress(Exception):
@@ -215,8 +253,38 @@ class OpportunityEventReactor:
                     error_message=str(exc),
                     created_at=decision_time.astimezone(UTC).isoformat(),
                 )
+                self._commit_event_unit()
                 result.dead_lettered += 1
-        return result
+        finally:
+            mutex.release()
+
+    def _commit_event_unit(self) -> None:
+        """Commit the current event's world-DB write unit and release the WAL write lock.
+
+        EDLI live-canary contention fix (2026-05-31): the reactor and the
+        market-channel ingestor are two in-process writers on the same WAL
+        zeus-world.db. Previously the reactor opened one implicit DEFERRED
+        transaction at the first ``claim()`` and held the single WAL *write* lock
+        for the WHOLE cycle (~330 s, incl. HTTP submit work), committing only at
+        cycle end. The ingestor thread then blocked the full 30 s busy_timeout on
+        every write → "database is locked" → the reactor cycle hung/skipped.
+
+        Committing PER EVENT releases the WAL write lock between events so the
+        ingestor (and any other world writer) gets frequent windows to write,
+        instead of waiting out a cycle-long lock. The process-global world-DB
+        write mutex (``world_write_lock`` in db.py) additionally guarantees the
+        two threads never hold the SQLite write lock concurrently, so a contended
+        write waits cleanly on the Python mutex rather than crashing on a
+        busy_timeout "database is locked".
+
+        Real sqlite3 connections implement ``.commit()``; test doubles may not, so
+        we tolerate AttributeError. Failure-soft: a commit error here is logged by
+        the caller's exception path (the savepoint write already succeeded; the
+        next cycle re-commits or the lease reclaims).
+        """
+        commit = getattr(self._store.conn, "commit", None)
+        if callable(commit):
+            commit()
 
     def _process_one(self, event: OpportunityEvent, *, decision_time: datetime, result: ReactorResult) -> str | None:
         assert_available_for_decision(event, decision_time)
