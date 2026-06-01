@@ -59,6 +59,8 @@ from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
+from src.strategy.market_phase import MarketPhase
+from src.strategy import market_phase_evidence as _market_phase_evidence
 from src.types.market import Bin
 
 
@@ -477,6 +479,65 @@ def _run_live_order_build_savepoint(
     return result
 
 
+# --------------------------------------------------------------------------- #
+# forecast_only market-phase admission gate (#98).
+#
+# forecast_only is BLIND to observation: the instant a market's target LOCAL
+# DAY begins, its daily extremum starts realizing and a forecast-only decision
+# can land on the already-observed (losing) side — the Paris 2026-06-01 buy_no
+# on observed low=14°C incident. Category-killing rule (STRONGER than
+# DAY0_OBSERVATION_WRONGSIDE_ROOT §4.1; see DESIGN_CRITIC_2026-06-01 MAJOR-4):
+# admit ONLY MarketPhase.PRE_SETTLEMENT_DAY (the whole target local day still
+# in the future). SETTLEMENT_DAY / POST_TRADING / RESOLVED / unknown all reject
+# fail-closed. Same-day edge belongs to the disjoint day0 observation-aware
+# scope, never forecast_only. Authority: src/strategy/market_phase.py.
+# --------------------------------------------------------------------------- #
+
+_FORECAST_ONLY_ADMIT_PHASES: frozenset[MarketPhase] = frozenset({MarketPhase.PRE_SETTLEMENT_DAY})
+
+
+def _edli_forecast_only_phase_evidence(
+    *,
+    city: str,
+    target_date: str,
+    decision_time: datetime,
+    selected_market_row: Mapping[str, Any] | None,
+    uma_resolved_source: str | None = None,
+) -> "_market_phase_evidence.MarketPhaseEvidence":
+    """Phase evidence for a forecast_only family at decision_time.
+
+    Fail-closed: when the city has no resolvable timezone the phase is
+    undeterminable and the returned evidence carries phase=None (the caller then
+    rejects). The selected snapshot row supplies an explicit endDate when
+    present; otherwise the F1 12:00-UTC fallback applies (per market_phase.py).
+    """
+    city_config = runtime_cities_by_name().get(city)
+    tz = getattr(city_config, "timezone", None) if city_config is not None else None
+    if not tz:
+        return _market_phase_evidence.MarketPhaseEvidence(
+            phase=None,
+            phase_source="unknown",
+            market_start_at=None,
+            market_end_at=None,
+            settlement_day_entry_utc=None,
+            failure_reason=f"city_timezone_missing:{city}",
+        )
+    market = dict(selected_market_row) if selected_market_row else {}
+    return _market_phase_evidence.from_market_dict(
+        market=market,
+        city_timezone=tz,
+        target_date_str=str(target_date),
+        decision_time_utc=decision_time.astimezone(UTC),
+        uma_resolved_source=uma_resolved_source,
+    )
+
+
+def _forecast_only_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvidence") -> bool:
+    """True iff the family may be admitted in forecast_only scope: ONLY when the
+    whole target local day is still future (PRE_SETTLEMENT_DAY). Fail-closed."""
+    return evidence.phase in _FORECAST_ONLY_ADMIT_PHASES
+
+
 def build_event_bound_no_submit_receipt(
     event: OpportunityEvent,
     *,
@@ -555,6 +616,36 @@ def build_event_bound_no_submit_receipt(
             reason=decision.rejection_reason or "EVENT_BOUND_CANDIDATE_BINDING_FAILED",
         )
     family = decision.candidate_family
+    # forecast_only market-phase admission gate (#98): reject families whose
+    # target local day has begun or whose market has closed — forecast_only is
+    # blind to the already-realizing/observed extremum (wrong-side risk, Paris
+    # 2026-06-01). Scoped to FORECAST_SNAPSHOT_READY; the day0 observation-aware
+    # scope owns same-day. Placed before scoring so closed families never reach
+    # q/FDR/Kelly and never re-fire through continuous re-decision.
+    if event.event_type == "FORECAST_SNAPSHOT_READY":
+        _phase_evidence = _edli_forecast_only_phase_evidence(
+            city=family.city,
+            target_date=family.target_date,
+            decision_time=decision_time,
+            selected_market_row=row,
+        )
+        if not _forecast_only_phase_admits(_phase_evidence):
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=(
+                    "EVENT_BOUND_MARKET_PHASE_CLOSED:"
+                    f"{(_phase_evidence.phase.value if _phase_evidence.phase else 'unknown')}:"
+                    f"{_phase_evidence.phase_source}"
+                ),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+                source_status="MATCH",
+                family_complete=True,
+            )
     try:
         proofs = _generate_candidate_proofs(
             event=event,
