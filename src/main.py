@@ -3453,10 +3453,19 @@ def _edli_event_reactor_cycle() -> None:
             conn.commit()
         finally:
             _emit_mutex.release()
-        # Targeted, cache-aware refresh of executable snapshots for pending families.
-        # Opens its own write trade connection and commits before trade_conn is opened,
-        # ensuring WAL read visibility for the gate below.
-        _refresh_pending_family_snapshots(conn, forecasts_conn)
+        # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
+        # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
+        # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
+        # so it re-ran nearly every cycle) + per-token CLOB /book capture across all
+        # pending-family bins. Running it INLINE here made the reactor cycle wall-clock
+        # blow past the 1-min APScheduler interval (overlapping triggers coalesced/
+        # skipped → 0 completed cycles → 0 receipts/trades despite the live submit path
+        # being CODE-CLEAR to the venue POST boundary). It is now DECOUPLED into the
+        # dedicated _edli_market_substrate_warm_cycle job (mirroring _edli_bankroll_warm_cycle,
+        # #45), so this reactor cycle reads ALREADY-captured snapshots (DB-only,
+        # microseconds) and reaches process_pending → submit in seconds. Decision
+        # semantics are UNCHANGED: a family not yet captured by the warm job still
+        # requeues via the reactor's existing EXECUTABLE_SNAPSHOT_RETRY path (fail-closed).
         trade_conn = get_trade_connection_with_world_required(write_class=None)
         store = EventStore(conn)
         regret_ledger = NoTradeRegretLedger(conn)
@@ -3607,6 +3616,77 @@ def _edli_bankroll_warm_cycle() -> None:
             "EDLI bankroll warm: current() returned None — on-chain wallet fetch is "
             "failing; cached() will fail closed (KELLY_PROOF_MISSING) until it recovers."
         )
+
+
+@_scheduler_job("edli_market_substrate_warm")
+def _edli_market_substrate_warm_cycle() -> None:
+    """Dedicated EDLI executable-snapshot substrate warmer, DECOUPLED from the reactor.
+
+    THROUGHPUT STRUCTURAL FIX (2026-06-01): _refresh_pending_family_snapshots makes a
+    full-universe Gamma scan (find_weather_markets → _get_active_events, benchmarked
+    ~76s COLD; TTL 300s so it re-ran nearly every cycle) + per-token CLOB /book capture
+    across all pending-family bins. Running it INLINE at the top of
+    _edli_event_reactor_cycle made the reactor's wall-clock blow past its 1-min
+    APScheduler interval — with max_instances=1/coalesce=True, every overlapping trigger
+    was skipped, so process_pending essentially never ran (23 min with ZERO completed
+    cycles / ZERO trades observed on the live daemon, even though the submit path is
+    CODE-CLEAR to the venue POST boundary).
+
+    Moving the refresh here (mirroring _edli_bankroll_warm_cycle, #45) puts the expensive
+    venue-I/O on its OWN cadence so the reactor reads ALREADY-captured snapshots
+    (DB-only, microseconds) and reaches submit in seconds. This changes NO decision: the
+    reactor's no-submit proof, full gate chain, and just-in-time submit /book are
+    byte-for-byte unchanged — they just consume snapshots a background job produced.
+    Fail-closed is preserved: a family not yet captured this tick requeues via the
+    reactor's existing EXECUTABLE_SNAPSHOT_RETRY path.
+
+    Not a DB writer of its own ledger — it delegates to _refresh_pending_family_snapshots,
+    which owns its write trade connection + commit. The @_scheduler_job decorator is the
+    only wiring needed (B047). Fail-soft: a transient Gamma/CLOB failure logs but never
+    crashes this job (the next tick retries; consumers stay fail-closed in the interim).
+    """
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
+
+    conn = get_world_connection()
+    # K1: the snapshot refresh reads market topology off the forecasts DB (market_events).
+    # Attach read-only (idempotent) so the family-topology lookup resolves, mirroring the
+    # reactor's own ATTACH. _refresh_pending_family_snapshots opens its own WRITE trade
+    # connection internally and commits — this conn is only the world-side pending-event
+    # reader.
+    try:
+        _attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "forecasts" not in _attached:
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+    except Exception as _attach_exc:  # noqa: BLE001 — non-fatal; refresh logs+skips on topology miss
+        logger.warning(
+            "EDLI market-substrate warm: ATTACH forecasts failed (non-fatal): %r", _attach_exc
+        )
+    forecasts_conn = get_forecasts_connection_read_only()
+    try:
+        # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
+        # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
+        # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
+        summary = _refresh_pending_family_snapshots(conn, forecasts_conn)
+        logger.info("EDLI market-substrate warm: refresh summary=%r", summary)
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
+        logger.error(
+            "EDLI market-substrate warm: refresh raised (non-fatal, snapshots did not "
+            "advance this tick): %r",
+            exc,
+        )
+    finally:
+        try:
+            forecasts_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
@@ -5024,6 +5104,25 @@ def main():
             seconds=60,
             id="edli_bankroll_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 30.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # THROUGHPUT STRUCTURAL FIX (2026-06-01): dedicated executable-snapshot substrate
+        # warmer, DECOUPLED from the reactor decision cycle. The refresh
+        # (_refresh_pending_family_snapshots) does a ~76s-cold universe Gamma scan +
+        # per-token CLOB capture; running it inline in _edli_event_reactor_cycle blew the
+        # reactor's 1-min interval (overlapping triggers coalesced/skipped → 0 completed
+        # cycles → 0 trades). On its own cadence the reactor reads already-captured
+        # snapshots (DB-only) and reaches submit in seconds. Runs on a longer interval than
+        # the reactor (the universe scan is TTL-cached 300s; ~90s keeps pending families
+        # fresh without re-scanning every reactor tick). max_instances=1/coalesce so a slow
+        # warm never stacks. Data-only (no orders); fail-soft.
+        scheduler.add_job(
+            _edli_market_substrate_warm_cycle,
+            "interval",
+            seconds=90,
+            id="edli_market_substrate_warm",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 25.0),
             max_instances=1,
             coalesce=True,
         )
