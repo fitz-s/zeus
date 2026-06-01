@@ -3314,6 +3314,7 @@ def _edli_event_reactor_cycle() -> None:
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
+    import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
         event_bound_live_adapter_from_trade_conn,
@@ -3369,12 +3370,29 @@ def _edli_event_reactor_cycle() -> None:
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
         proof_limit = _edli_bounded_positive_int(edli_cfg, "no_submit_proof_limit", default=10, maximum=50)
         if edli_cfg.get("forecast_snapshot_trigger_enabled"):
-            _edli_emit_forecast_snapshot_events(
-                conn,
-                decision_time=now,
-                received_at=received_at,
-                limit=forecast_emit_limit,
-            )
+            # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
+            # opportunity_events to the WAL world DB shared with the market-channel
+            # ingestor and CollateralLedger heartbeat. Under live load that DB hits
+            # transient "database is locked" past the 30s busy_timeout. A locked-out
+            # emit must NOT crash the whole reactor cycle — the cycle should still drain
+            # candidates already queued from prior cycles. Catch ONLY the transient lock
+            # (narrow, by message) and continue; real schema/logic faults still propagate.
+            try:
+                _edli_emit_forecast_snapshot_events(
+                    conn,
+                    decision_time=now,
+                    received_at=received_at,
+                    limit=forecast_emit_limit,
+                )
+            except sqlite3.OperationalError as _emit_lock_exc:
+                if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
+                    logger.warning(
+                        "EDLI reactor: forecast-snapshot emit hit transient world-DB lock "
+                        "(%r) — skipping emit this cycle, draining already-queued candidates.",
+                        _emit_lock_exc,
+                    )
+                else:
+                    raise
         # Continuous re-decision (DEFAULT OFF — redecision_continuous_enabled): re-emit
         # FSR-equivalent events for committed market-backed families each cycle, with a per-cycle
         # distinct source so they do NOT dedup to the consumed FSR. Routing through the pending path

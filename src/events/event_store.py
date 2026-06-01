@@ -50,9 +50,21 @@ class EventStore:
                 row,
             )
         except sqlite3.OperationalError as exc:
-            raise EventStoreSchemaError(
-                "opportunity_events table missing from supplied connection; open the world DB"
-            ) from exc
+            # Distinguish a GENUINE schema fault ("no such table") from TRANSIENT
+            # write contention ("database is locked" / "database is busy"). The world
+            # DB is a WAL multi-writer (market-channel ingestor + CollateralLedger +
+            # reactor emit) and a >busy_timeout lock here is a transient blip, NOT a
+            # missing table. Mislabeling a locked DB as "table missing" raised a fatal-
+            # looking EventStoreSchemaError that crashed the whole reactor cycle and
+            # mis-led every diagnosis (the table demonstrably exists). Re-raise the
+            # transient lock as-is so the caller can treat it as retryable; only the
+            # real schema fault becomes EventStoreSchemaError.
+            message = str(exc).lower()
+            if "no such table" in message:
+                raise EventStoreSchemaError(
+                    "opportunity_events table missing from supplied connection; open the world DB"
+                ) from exc
+            raise
 
         inserted = cur.rowcount == 1
         if inserted:
