@@ -48,9 +48,13 @@ from tests.decision_kernel.test_execution_command_certificate import (
 from src.decision_kernel import claims
 
 
+_UNSET = object()
+
+
 def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None = None,
                  quote_overrides: dict | None = None, return_parents: bool = False,
-                 taker_fok_fak_live_enabled: bool = True):
+                 taker_fok_fak_live_enabled: bool = True,
+                 passive_maker_context=_UNSET):
     """Build a final-intent + expressibility chain through the (parameterized) builder.
 
     Mirrors ``test_execution_command_certificate.builder_chain`` but threads an
@@ -153,16 +157,17 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         },
     )
 
-    passive_maker_context = {
-        "spread_usd": float(quote_payload["best_ask"]) - float(quote_payload["best_bid"]),
-        "quote_age_ms": 0,
-        "expected_fill_probability": str(actionable_payload["p_fill_lcb"]),
-        "queue_depth_ahead": None,
-        "adverse_selection_score": None,
-        "orderbook_hash_age_ms": 0,
-        "best_bid": float(quote_payload["best_bid"]),
-        "best_ask": float(quote_payload["best_ask"]),
-    }
+    if passive_maker_context is _UNSET:
+        passive_maker_context = {
+            "spread_usd": float(quote_payload["best_ask"]) - float(quote_payload["best_bid"]),
+            "quote_age_ms": 0,
+            "expected_fill_probability": str(actionable_payload["p_fill_lcb"]),
+            "queue_depth_ahead": None,
+            "adverse_selection_score": None,
+            "orderbook_hash_age_ms": 0,
+            "best_bid": float(quote_payload["best_bid"]),
+            "best_ask": float(quote_payload["best_ask"]),
+        }
 
     final_intent = build_final_intent_certificate_from_actionable(
         actionable_cert=actionable,
@@ -234,6 +239,82 @@ def test_taker_price_is_marketable_capped_by_reservation():
     _, _, final_intent = _taker_chain(order_mode="TAKER")
     # best_ask=0.45 < reservation c_fee_adjusted=0.50 -> price at best_ask
     assert final_intent.payload["limit_price"] == pytest.approx(0.45)
+
+
+# --------------------------------------------------------------------------
+# WALL #1 (2026-06-01): passive_maker_context is MAKER-ONLY across ALL FOUR layers.
+#
+# Cross-module invariant (the live first-fill wall): a TAKER FOK/FAK carries NO
+# passive_maker_context. The dominant live rejection (QUOTE_FEASIBILITY_BID_ASK_
+# REQUIRED, 713/2h) was the reactor adapter building the maker context UNCONDITIONALLY
+# and raising when the elected snapshot had no captured book. The same maker-only
+# coupling was duplicated at FOUR layers, each independently killing a taker order:
+#   L1 reactor adapter  (_passive_maker_context_from_authorities, unconditional)
+#   L2 cert builder      (execution.py _context_payload rejects None)
+#   L3 executor xlator   (event_bound_final_intent requires dict before is_taker)
+#   L4 verifier          (verifier.py final-intent required-field loop)
+#
+# These tests pin that a taker order with passive_maker_context=None (the book-less
+# scenario) flows through L2->L4 unblocked, AND that a MAKER order with None still
+# fail-closes at every layer (maker genuinely needs the book). Reverting ANY of the
+# four conditioning edits re-fails the corresponding assertion below.
+# --------------------------------------------------------------------------
+def test_taker_with_no_passive_maker_context_passes_all_layers():
+    """TAKER + passive_maker_context=None -> builder/verifier/executor all accept.
+
+    This is the book-less-snapshot scenario that produced the dominant live wall.
+    """
+    actionable, executable, final_intent, parents = _taker_chain(
+        order_mode="TAKER", passive_maker_context=None, return_parents=True
+    )
+    # L2: cert builder emitted a taker tuple and recorded NO maker context.
+    assert final_intent.payload["order_mode"] == "TAKER"
+    assert final_intent.payload["passive_maker_context"] is None
+    assert final_intent.payload["post_only"] is False
+
+    # L4: verifier accepts the taker final intent despite the absent maker context.
+    verify_final_intent(final_intent, parents)
+
+    # L3: executor-expressibility translator constructs a submittable native intent.
+    native_hash = validate_final_intent_cert_for_existing_executor(final_intent)
+    assert native_hash
+
+    live_cap = _cert(claims.LIVE_CAP, "live-cap:cap-1", _live_cap_payload())
+    expressibility = build_executor_expressibility_certificate(
+        final_intent_cert=final_intent,
+        executable_snapshot_cert=executable,
+        live_cap_cert=live_cap,
+        decision_time=NOW,
+        executor_native_intent_hash=native_hash,
+    )
+    verify_executor_expressibility(expressibility, (final_intent, executable, live_cap))
+
+
+def test_maker_with_no_passive_maker_context_fail_closes_at_builder():
+    """Sed-break antibody: MAKER + None maker context MUST still raise at the builder.
+
+    Pins that the wall-#1 fix did NOT weaken the maker fail-closed law — a resting
+    maker order genuinely needs the book, so the builder must reject a None context.
+    """
+    with pytest.raises(ValueError, match="passive_maker_context required"):
+        _taker_chain(order_mode="MAKER", passive_maker_context=None)
+
+
+def test_maker_still_requires_passive_maker_context_at_verifier():
+    """Sed-break antibody: a MAKER final intent missing passive_maker_context MUST be
+    rejected by the verifier (the maker-only field stays required for maker)."""
+    actionable, executable, final_intent, parents = _taker_chain(
+        order_mode="MAKER", return_parents=True
+    )
+    # Strip the maker context from the verified maker payload and re-verify.
+    stripped = dict(final_intent.payload)
+    stripped["passive_maker_context"] = None
+    object.__setattr__(final_intent, "payload", stripped)
+    with pytest.raises(
+        CertificateVerificationError,
+        match="missing executor-native field: passive_maker_context",
+    ):
+        verify_final_intent(final_intent, parents)
 
 
 # --------------------------------------------------------------------------

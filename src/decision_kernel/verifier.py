@@ -528,13 +528,24 @@ def _verify_final_intent_payload(
     _assert_order_type_tuple_coherent(payload, surface="final intent")
     if payload.get("source") != "existing_final_intent_builder":
         raise CertificateVerificationError("final intent source must be existing_final_intent_builder")
-    for field in (
+    # WALL #1 (2026-06-01): passive_maker_context is a MAKER-ONLY executor-native field.
+    # A taker FOK/FAK carries no maker context (the cert builder emits None for taker);
+    # requiring it for taker was the verifier-layer instance of the same maker-only
+    # coupling that produced the dominant live wall. Derive the mode from the (already
+    # coherence-checked) order-type tuple and require the maker context iff maker.
+    _is_taker_intent = (
+        payload.get("order_type") in _TAKER_ORDER_TYPES
+        or payload.get("time_in_force") in _TAKER_TIF
+    )
+    required_executor_native_fields = [
         "executable_snapshot_hash",
         "cost_basis_hash",
         "cost_basis_id",
         "decision_source_context",
-        "passive_maker_context",
-    ):
+    ]
+    if not _is_taker_intent:
+        required_executor_native_fields.append("passive_maker_context")
+    for field in required_executor_native_fields:
         if payload.get(field) in (None, "", {}):
             raise CertificateVerificationError(f"final intent missing executor-native field: {field}")
     expected_cost_basis_id = "cost_basis:" + str(payload["cost_basis_hash"])[:16]

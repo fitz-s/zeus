@@ -66,7 +66,18 @@ def build_final_intent_certificate_from_actionable(
     executable_snapshot_hash = _required_text(executable_snapshot_cert.payload, "executable_snapshot_hash")
     cost_basis_hash = _required_text(cost_model_cert.payload, "cost_basis_hash")
     decision_source_context_payload = _context_payload(decision_source_context, "decision_source_context")
-    passive_maker_context_payload = _context_payload(passive_maker_context, "passive_maker_context")
+    # WALL #1 (2026-06-01): passive_maker_context is MAKER-ONLY. A taker FOK/FAK
+    # crosses the JIT book at submit and never rests, so it carries no maker context.
+    # Requiring it for taker was the design coupling that produced the dominant live
+    # wall (QUOTE_FEASIBILITY_BID_ASK_REQUIRED). For a taker tuple the context is
+    # absent (None) and the FINAL_INTENT payload records it as None; the downstream
+    # executor-expressibility translator and verifier accept None iff the tuple is
+    # taker. For maker the context remains REQUIRED (fail-closed — a resting maker
+    # order genuinely needs the book).
+    if order_spec.mode == "TAKER":
+        passive_maker_context_payload = None
+    else:
+        passive_maker_context_payload = _context_payload(passive_maker_context, "passive_maker_context")
     payload = {
         "event_id": action["event_id"],
         "actionable_certificate_hash": actionable_cert.certificate_hash,

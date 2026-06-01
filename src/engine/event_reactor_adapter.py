@@ -1043,6 +1043,30 @@ def _build_live_execution_command_certificates(
             executable_snapshot=executable_snapshot,
             canary_force_taker=canary_force_taker,
         )
+        # WALL #1 (GATE #85 follow-on, 2026-06-01): the passive-maker context is a
+        # MAKER-ONLY structural input. ``FinalExecutionIntent`` only requires it when
+        # ``order_policy == "post_only_passive_limit"`` (execution_intent.py:1735); a
+        # taker FOK/FAK crosses the JIT book at submit and never rests, so its
+        # economics do not depend on the snapshot's top-of-book maker context.
+        #
+        # The pre-#85 path built ``_passive_maker_context_from_authorities``
+        # UNCONDITIONALLY, which raises QUOTE_FEASIBILITY_BID_ASK_REQUIRED whenever the
+        # elected snapshot has no captured book — killing every taker candidate whose
+        # snapshot happened to be book-less (the DOMINANT live wall: 713/2h). Conditioning
+        # the construction on order_mode makes that rejection CATEGORY impossible for
+        # taker orders (Fitz #1: make the category impossible, not the instance). MAKER
+        # still requires the maker context (and still raises if bid/ask are absent — the
+        # correct fail-closed behavior, since a resting maker order genuinely needs a book).
+        passive_maker_context = (
+            _passive_maker_context_from_authorities(
+                actionable=actionable,
+                quote_feasibility_cert=quote_feasibility,
+                executable_snapshot_cert=executable_snapshot,
+                decision_time=decision_time,
+            )
+            if str(order_mode).strip().upper() == "MAKER"
+            else None
+        )
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -1050,12 +1074,7 @@ def _build_live_execution_command_certificates(
             cost_model_cert=cost_model,
             forecast_authority_cert=forecast_authority,
             decision_source_context=forecast_authority.payload,
-            passive_maker_context=_passive_maker_context_from_authorities(
-                actionable=actionable,
-                quote_feasibility_cert=quote_feasibility,
-                executable_snapshot_cert=executable_snapshot,
-                decision_time=decision_time,
-            ),
+            passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
             tick_size=_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),

@@ -169,30 +169,40 @@ def _final_execution_intent_from_payload(final_payload: dict):
     decision_source_context = DecisionSourceContext.from_forecast_context(decision_source_payload)
     if decision_source_context is None:
         raise EventBoundExecutorExpressibilityError("decision_source_context missing")
-    passive_payload = final_payload.get("passive_maker_context")
-    if not isinstance(passive_payload, dict):
-        raise EventBoundExecutorExpressibilityError("passive_maker_context missing")
-    passive_maker_context = PassiveMakerExecutionContext(
-        spread_usd=_decimal(passive_payload.get("spread_usd"), "passive_maker_context.spread_usd"),
-        quote_age_ms=int(passive_payload.get("quote_age_ms", 0)),
-        expected_fill_probability=_decimal(
-            passive_payload.get("expected_fill_probability"),
-            "passive_maker_context.expected_fill_probability",
-        ),
-        queue_depth_ahead=_optional_decimal(passive_payload.get("queue_depth_ahead")),
-        adverse_selection_score=_optional_decimal(passive_payload.get("adverse_selection_score")),
-        orderbook_hash_age_ms=(
-            None
-            if passive_payload.get("orderbook_hash_age_ms") is None
-            else int(passive_payload["orderbook_hash_age_ms"])
-        ),
-    )
     executor_order_type = str(final_payload.get("executor_order_type") or final_payload.get("time_in_force") or "")
     is_taker = (
         final_payload.get("post_only") is False
         and final_payload.get("maker_intent") is False
         and executor_order_type in {"FOK", "FAK"}
     )
+    # WALL #1 (2026-06-01): passive_maker_context is MAKER-ONLY. A taker FOK/FAK
+    # crosses the JIT book at submit and carries no maker context (the cert builder
+    # emits None for taker). Require/parse it ONLY for the maker tuple; a taker order
+    # passes None through to FinalExecutionIntent, which accepts None for the
+    # marketable_limit_depth_bound order_policy (execution_intent.py:1735 requires the
+    # context only for post_only_passive_limit). This is the executor-translator
+    # instance of the same maker-only coupling that produced the dominant live wall.
+    passive_payload = final_payload.get("passive_maker_context")
+    if is_taker:
+        passive_maker_context = None
+    else:
+        if not isinstance(passive_payload, dict):
+            raise EventBoundExecutorExpressibilityError("passive_maker_context missing")
+        passive_maker_context = PassiveMakerExecutionContext(
+            spread_usd=_decimal(passive_payload.get("spread_usd"), "passive_maker_context.spread_usd"),
+            quote_age_ms=int(passive_payload.get("quote_age_ms", 0)),
+            expected_fill_probability=_decimal(
+                passive_payload.get("expected_fill_probability"),
+                "passive_maker_context.expected_fill_probability",
+            ),
+            queue_depth_ahead=_optional_decimal(passive_payload.get("queue_depth_ahead")),
+            adverse_selection_score=_optional_decimal(passive_payload.get("adverse_selection_score")),
+            orderbook_hash_age_ms=(
+                None
+                if passive_payload.get("orderbook_hash_age_ms") is None
+                else int(passive_payload["orderbook_hash_age_ms"])
+            ),
+        )
     if is_taker:
         # Taker path is authorized ONLY when the governor-decided cert carries the
         # full taker tuple (post_only False, maker_intent False, FOK/FAK). The
