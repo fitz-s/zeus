@@ -499,5 +499,111 @@ def test_taker_kill_lever_true_allows_submission():
     assert maker_hash  # maker unaffected — kill-lever does not touch the passive path
 
 
+# --------------------------------------------------------------------------
+# WALL #2 (2026-06-01): neg_risk cross-cert provenance gap.
+#
+# Root cause: EventSubmissionReceipt had no neg_risk field.
+# _actionable_payload_from_receipt read action.get("neg_risk", False) → always False.
+# executable_snapshot cert read selected_snapshot_row.get("neg_risk") → True for
+# neg-risk markets.  verifier.py:579 compared False != True → raised.
+#
+# Fix: propagate neg_risk through raw_receipt → EventSubmissionReceipt.neg_risk →
+# _actionable_payload_from_receipt → actionable cert → final_intent cert.
+# Single source of truth: the selected_snapshot_row.  Both certs now carry the
+# same value.  The verifier's cross-cert equality check (line 579) is the correct
+# ongoing antibody for divergence.
+# --------------------------------------------------------------------------
+def test_neg_risk_consistent_across_certs_for_neg_risk_market():
+    """Cross-cert invariant: final_intent.neg_risk == executable_snapshot.neg_risk.
+
+    For a neg-risk market (neg_risk=True) the verifier must not raise.
+    Proves the fix: actionable carries neg_risk from the snapshot, not a hard False.
+
+    Sed-break antibody: if execution.py line 108 is reverted to
+        "neg_risk": bool(action.get("neg_risk", False)),
+    while the executable cert still carries True, the verifier will raise
+    "executor expressibility neg_risk mismatch" and this test will be RED.
+    """
+    actionable, executable, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        passive_maker_context=None,
+        actionable_overrides={"neg_risk": True},
+        return_parents=True,
+    )
+    # Both certs must carry the SAME neg_risk — the executable_snapshot fixture
+    # and the actionable override both say True, so final_intent must also say True.
+    assert final_intent.payload["neg_risk"] is True
+
+    # Build the expressibility cert and verify it: neg_risk parity check at verifier:579
+    verify_final_intent(final_intent, parents)
+    native_hash = validate_final_intent_cert_for_existing_executor(final_intent)
+    assert native_hash
+
+    # Make the executable cert also carry True (matching the actionable), then verify.
+    # This is the parity scenario: same value flows end-to-end without mismatch.
+    executable_true = _cert(
+        claims.EXECUTABLE_SNAPSHOT,
+        "executable:exec-1",
+        {
+            "executable_snapshot_hash": "a" * 64,
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "neg_risk": True,
+        },
+    )
+    live_cap = _cert(claims.LIVE_CAP, "live-cap:cap-1", _live_cap_payload())
+    expressibility = build_executor_expressibility_certificate(
+        final_intent_cert=final_intent,
+        executable_snapshot_cert=executable_true,
+        live_cap_cert=live_cap,
+        decision_time=NOW,
+        executor_native_intent_hash=native_hash,
+    )
+    # Must not raise — both certs agree neg_risk=True
+    verify_executor_expressibility(expressibility, (final_intent, executable_true, live_cap))
+
+
+def test_neg_risk_mismatch_still_fail_closes_at_verifier():
+    """Genuine provenance divergence (snapshot True vs actionable False) must still raise.
+
+    This is the antibody for the category: if the fix were "coerce at verifier" instead of
+    "propagate from single source", a real provenance disagreement would be silently swallowed.
+    The verifier's check at line 579 must catch that residual divergence.
+    """
+    # Build a final_intent with neg_risk=False (actionable default)
+    _, _, final_intent = _taker_chain(
+        order_mode="TAKER",
+        passive_maker_context=None,
+        actionable_overrides={"neg_risk": False},
+    )
+    assert final_intent.payload["neg_risk"] is False
+
+    # But the executable cert claims neg_risk=True (genuine snapshot-vs-actionable drift)
+    executable_mismatch = _cert(
+        claims.EXECUTABLE_SNAPSHOT,
+        "executable:exec-1",
+        {
+            "executable_snapshot_hash": "a" * 64,
+            "condition_id": "condition-1",
+            "token_id": "yes-1",
+            "neg_risk": True,
+        },
+    )
+    native_hash = validate_final_intent_cert_for_existing_executor(final_intent)
+    live_cap = _cert(claims.LIVE_CAP, "live-cap:cap-1", _live_cap_payload())
+    expressibility = build_executor_expressibility_certificate(
+        final_intent_cert=final_intent,
+        executable_snapshot_cert=executable_mismatch,
+        live_cap_cert=live_cap,
+        decision_time=NOW,
+        executor_native_intent_hash=native_hash,
+    )
+    with pytest.raises(
+        CertificateVerificationError,
+        match="executor expressibility neg_risk mismatch",
+    ):
+        verify_executor_expressibility(expressibility, (final_intent, executable_mismatch, live_cap))
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -79,6 +79,7 @@ class EventSubmissionReceipt:
     kelly_decision_id: str | None = None
     risk_decision_id: str | None = None
     final_intent_id: str | None = None
+    neg_risk: bool = False
     side_effect_status: str = "NO_SUBMIT"
     reason: str = ""
     proof_accepted: bool | None = None
