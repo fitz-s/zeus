@@ -1,8 +1,13 @@
+# Created: 2026-05-01
+# Last reused or audited: 2026-06-01
+# Authority basis: GOAL#36 pre-arm parity — Bug A/B fix: tick_size from DB snap (str),
+#   sweep_expected_fill_price as Decimal string (not float).
 """Execution certificate builders and verifier entrypoints."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from collections.abc import Mapping
 from typing import Iterable
 
@@ -32,14 +37,14 @@ def build_final_intent_certificate_from_actionable(
     order_mode: str = "MAKER",
     order_type: str | None = None,
     time_in_force: str | None = None,
-    tick_size: float = 0.01,
+    tick_size: float | str = 0.01,
     min_order_size: float = 1.0,
     fee_rate: float = 0.0,
     best_bid: float | None = None,
     best_ask: float | None = None,
     taker_fok_fak_live_enabled: bool = False,
     available_crossable_shares: float | None = None,
-    sweep_expected_fill_price: float | None = None,
+    sweep_expected_fill_price: str | None = None,
 ) -> DecisionCertificate:
     action = actionable_cert.payload
     # The governor-decided ``order_mode`` is the SOLE authority for the order-type
@@ -134,7 +139,7 @@ def build_final_intent_certificate_from_actionable(
         "decision_source_context": decision_source_context_payload,
         "passive_maker_context": passive_maker_context_payload,
         "neg_risk": bool(action.get("neg_risk", False)),
-        "tick_size": float(tick_size),
+        "tick_size": str(Decimal(str(tick_size))),
         "min_order_size": float(min_order_size),
         "fee_rate": float(fee_rate),
         "live_cap_usage_id": action["live_cap_usage_id"],

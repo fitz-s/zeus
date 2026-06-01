@@ -1086,6 +1086,13 @@ def _build_live_execution_command_certificates(
         # If no trade_conn is available, or order is MAKER, skip (legacy behaviour).
         available_crossable_shares: float | None = None
         sweep_expected_fill_price: float | None = None
+        # MUST be initialized before the TAKER block: the final_intent build below
+        # (Bug A tick_size source) references `_snap_for_depth` for ALL order modes,
+        # but it is only assigned inside the TAKER+trade_conn block. Without this
+        # initialization a MAKER order (or taker without trade_conn) raises
+        # UnboundLocalError at cert build. None → tick_size falls back to the
+        # executable_snapshot payload default, which is correct for the MAKER path.
+        _snap_for_depth = None
         if str(order_mode).strip().upper() == "TAKER" and trade_conn is not None:
             from src.contracts.execution_intent import simulate_clob_sweep
             _snap_id_for_depth = str(
@@ -1121,7 +1128,20 @@ def _build_live_execution_command_certificates(
                     or _action_payload.get("kelly_size_usd")
                     or "0"
                 ))
-                _desired_shares = max(_min_order_size_d, _reserved_notional / _limit_price_d) if _limit_price_d > 0 else _min_order_size_d
+                # Bug B fix (2026-06-01): compute desired_shares using float arithmetic
+                # so the value matches exactly what the cert builder will compute for
+                # `size = max(float(min_order_size), reserved_notional / limit_price)`.
+                # Using Decimal division here produced a different number of shares than
+                # the cert builder's float division (e.g. 8.333...333 vs 8.333333333333334),
+                # causing the guard's re-sweep to get a different VWAP → parity rejection.
+                _min_order_size_f = float(_min_order_size_d)
+                _reserved_notional_f = float(_reserved_notional)
+                _limit_price_f = float(_limit_price_d)
+                _desired_shares_f = (
+                    max(_min_order_size_f, _reserved_notional_f / _limit_price_f)
+                    if _limit_price_f > 0 else _min_order_size_f
+                )
+                _desired_shares = Decimal(str(_desired_shares_f))
                 _depth_sweep = simulate_clob_sweep(
                     snapshot=_snap_for_depth,
                     direction=str(_action_payload.get("direction") or "buy_no"),
@@ -1131,7 +1151,47 @@ def _build_live_execution_command_certificates(
                 )
                 if _depth_sweep.filled_shares > 0:
                     available_crossable_shares = float(_depth_sweep.filled_shares)
-                    sweep_expected_fill_price = float(_depth_sweep.average_price) if _depth_sweep.average_price is not None else None
+                    # SEV-1.1 fix (2026-06-01): the cert builder caps size to
+                    # available_crossable_shares.  The executor guard re-sweeps on
+                    # the CAPPED submitted_shares and asserts exact VWAP equality.
+                    # If we store the VWAP from the uncapped _desired_shares sweep,
+                    # the two VWAPs diverge on any multi-level book where desired >
+                    # crossable → parity rejection on first armed TAKER order.
+                    # Fix: re-sweep on the capped size to get the VWAP that the
+                    # executor will actually see.  The cert builder's
+                    #   size = min(desired_shares, available_crossable_shares)
+                    # is mirrored here as min(_desired_shares_f, available_crossable_shares).
+                    # Single-source principle: ONE sweep result drives both the cert
+                    # fill price and the executor guard re-sweep (same snap, same
+                    # size, same limit → bitwise identical VWAP Decimal).
+                    _capped_shares_f = min(
+                        _desired_shares_f,
+                        available_crossable_shares,
+                    )
+                    _capped_shares = Decimal(str(_capped_shares_f))
+                    if _capped_shares < _desired_shares:
+                        # Capped by depth — re-sweep on the capped size so the
+                        # stored VWAP matches what the executor guard will compute.
+                        _capped_sweep = simulate_clob_sweep(
+                            snapshot=_snap_for_depth,
+                            direction=str(_action_payload.get("direction") or "buy_no"),
+                            requested_size_kind="shares",
+                            requested_size_value=_capped_shares,
+                            limit_price=_limit_price_d,
+                        )
+                        sweep_expected_fill_price = (
+                            str(_capped_sweep.average_price)
+                            if _capped_sweep.average_price is not None else None
+                        )
+                    else:
+                        # Not capped — original sweep VWAP is already correct.
+                        # Bug B fix: store exact Decimal string, not float, so the
+                        # cert payload round-trips via _decimal(str) without losing
+                        # precision.
+                        sweep_expected_fill_price = (
+                            str(_depth_sweep.average_price)
+                            if _depth_sweep.average_price is not None else None
+                        )
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -1142,7 +1202,11 @@ def _build_live_execution_command_certificates(
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
-            tick_size=_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
+            # Bug A fix (2026-06-01): source tick_size from the DB snapshot (Decimal)
+            # rather than the cert payload float.  The cert payload may carry "0.01"
+            # (the default) while the DB snapshot has "0.001" for binary Polymarket
+            # markets, causing executor parity rejection (intent.tick_size ≠ snapshot.min_tick_size).
+            tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
             best_bid=best_bid,
             best_ask=best_ask,
