@@ -154,20 +154,51 @@ def _float_or_none(value: Any) -> float | None:
 
 
 def _confirmed_fill_payloads(events: list[tuple[str, dict[str, Any]]]) -> list[dict[str, Any]]:
-    """All UserTradeObserved payloads that represent a CONFIRMED fill.
+    """One UserTradeObserved payload per DISTINCT venue fill (deduped by trade_id).
 
-    A position is materialised only once at least one confirmed fill exists; the
-    economics, however, aggregate over EVERY fill-bearing UserTradeObserved
-    (MATCHED / MINED / CONFIRMED all carry fill economics — see
-    user_channel ingest TRADE_FILL_ECONOMICS_STATUSES) so a confirmed multi-leg
-    fill sums correctly. We gate the existence of the bridge on FILL_CONFIRMED
-    but sum economics across the realised legs.
+    MF-2 phantom over-materialization fix. A SINGLE venue fill is re-reported by
+    the user channel as several ``UserTradeObserved`` legs sharing one
+    ``trade_id`` as it advances MATCHED -> MINED -> CONFIRMED (the production
+    shape proven at tests/test_user_channel_ingest.py:920-926 — three rows, each
+    ``filled_size=100``, one fill). Summing economics across every leg would
+    triple-count that one fill (300 shares for a real 100-share / $40 fill).
+
+    So we collapse re-reports of one fill to exactly ONE payload per DISTINCT
+    ``trade_id``, preferring the CONFIRMED leg's economics (fall back to the
+    latest-status leg if no CONFIRMED leg exists yet). Legs WITHOUT a
+    ``trade_id`` cannot be deduped — they are kept individually so genuine
+    multi-partial fills that lack a per-fill id still sum (DEFECT-4 forward-proof).
+    The downstream ``_aggregate_fill_economics`` then sums only across these
+    DISTINCT fills: two distinct ``trade_id``s still sum correctly.
+
+    Order is preserved (first-seen position per ``trade_id``) so the
+    size-weighted VWAP is deterministic.
     """
-    return [
-        payload
-        for event_type, payload in events
-        if event_type == "UserTradeObserved"
-    ]
+    fills = [payload for event_type, payload in events if event_type == "UserTradeObserved"]
+
+    deduped: list[dict[str, Any]] = []
+    # trade_id -> index into `deduped` of the leg currently chosen for that id.
+    chosen_index: dict[str, int] = {}
+    for payload in fills:
+        trade_id = str(payload.get("trade_id") or "").strip()
+        if not trade_id:
+            # No disambiguating id: cannot be a re-report we can collapse. Keep
+            # it as its own fill so id-less genuine partials continue to sum.
+            deduped.append(payload)
+            continue
+        is_confirmed = str(payload.get("fill_authority_state") or "") == EDLI_FILL_CONFIRMED_STATE
+        if trade_id not in chosen_index:
+            chosen_index[trade_id] = len(deduped)
+            deduped.append(payload)
+            continue
+        # Already saw this fill. Upgrade to the CONFIRMED leg's economics, or to
+        # the latest-status leg when none is confirmed yet. Replacing the prior
+        # entry (rather than appending) is the latest-wins fallback.
+        prior = deduped[chosen_index[trade_id]]
+        prior_confirmed = str(prior.get("fill_authority_state") or "") == EDLI_FILL_CONFIRMED_STATE
+        if is_confirmed or not prior_confirmed:
+            deduped[chosen_index[trade_id]] = payload
+    return deduped
 
 
 def _has_confirmed_fill(events: list[tuple[str, dict[str, Any]]]) -> bool:
@@ -178,12 +209,16 @@ def _has_confirmed_fill(events: list[tuple[str, dict[str, Any]]]) -> bool:
 
 
 def _aggregate_fill_economics(fill_payloads: list[dict[str, Any]]) -> tuple[float, float, float]:
-    """Sum filled_size, size-weight avg_fill_price, sum fees across fills.
+    """Sum filled_size, size-weight avg_fill_price, sum fees across DISTINCT fills.
 
-    Forward-proofs DEFECT-4: FOK gives one fill today, but two partial
-    UserTradeObserved messages must sum. Each leg's price defaults to its own
-    ``avg_fill_price`` (or ``fill_price``); the position-level price is the
-    size-weighted mean so cost_basis = sum(size_i * price_i) exactly.
+    The caller (``_confirmed_fill_payloads``) has already collapsed the
+    MATCHED/MINED/CONFIRMED re-reports of one venue fill to a single payload per
+    distinct ``trade_id`` (MF-2 phantom-fix), so this function sums one entry per
+    real fill. Forward-proofs DEFECT-4: FOK gives one fill today, but two genuine
+    partial fills (two distinct ``trade_id``s, or two id-less legs) still sum.
+    Each leg's price defaults to its own ``avg_fill_price`` (or ``fill_price``);
+    the position-level price is the size-weighted mean so cost_basis =
+    sum(size_i * price_i) exactly.
     """
     total_size = 0.0
     total_notional = 0.0
