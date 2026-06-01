@@ -589,12 +589,32 @@ class MarketChannelOnlineService:
                 self.on_disconnect(gap_start=gap_start)
                 if logger is not None:
                     logger.warning("EDLI market-channel disconnected: %s", exc, exc_info=True)
+                # ROLLBACK-ON-DISCONNECT (2026-05-31): if on_connect/seed_from_rest or
+                # the WS message loop raised mid-transaction (e.g. 404 on the first
+                # REST-seed token), Python's sqlite3 implicit-BEGIN may have left an
+                # open write transaction on the world_conn, holding the WAL write lock
+                # indefinitely across the reconnect sleep. Any other writer (the reactor
+                # claim(), CollateralLedger heartbeat) then blocks for the full 30s
+                # busy_timeout, crashing the reactor cycle. Rollback here releases the
+                # lock immediately so the sleep period is lock-free.
+                if commit is not None:
+                    try:
+                        self.ingestor._writer.conn.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
                 await asyncio.sleep(reconnect_delay_seconds)
                 try:
                     self.on_reconnect(received_at=datetime.now(UTC).isoformat())
                     if commit is not None:
                         commit()
                 except Exception as seed_exc:  # noqa: BLE001
+                    # Reconnect seed failed (e.g. REST 404). Rollback any partial
+                    # transaction from the seed attempt for the same reason above.
+                    if commit is not None:
+                        try:
+                            self.ingestor._writer.conn.rollback()
+                        except Exception:  # noqa: BLE001
+                            pass
                     if logger is not None:
                         logger.warning(
                             "EDLI market-channel reconnect seed failed: %s",
