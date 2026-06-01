@@ -3496,7 +3496,17 @@ def _edli_event_reactor_cycle() -> None:
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
                 canary_force_taker_provider=_edli_canary_force_taker_provider(conn, edli_cfg),
-                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(conn, edli_cfg),
+                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(
+                    conn,
+                    edli_cfg,
+                    # GATE #84: in live-submit mode the pre-submit authority pulls a
+                    # just-in-time live book for the selected candidate so quote_age
+                    # reflects observation-to-submit latency, not the venue's coarse
+                    # book-change stamp on the shared feasibility feed.
+                    book_quote_provider=(
+                        _edli_pre_submit_jit_book_quote_provider() if live_submit_effective else None
+                    ),
+                ),
                 executor_submit=lambda final_intent_cert, execution_command_cert: submit_event_bound_final_intent_via_existing_executor(
                     final_intent_cert=final_intent_cert,
                     execution_command_cert=execution_command_cert,
@@ -3789,12 +3799,94 @@ def _edli_canary_force_taker_provider(world_conn, edli_cfg):
     return _provider
 
 
-def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
-    """Build EDLI's production read-only pre-submit authority provider.
+def _edli_pre_submit_jit_book_quote_provider():
+    """Build the just-in-time single-token ``/book`` fetcher for the pre-submit
+    authority (GATE #84). Returns a ``token_id -> dict`` callable that pulls the
+    live CLOB book for exactly the selected candidate at submit time, or ``None``
+    if a CLOB client cannot be constructed (caller then falls back to the DB row).
 
-    The provider is intentionally read-only: it consumes quote evidence,
-    heartbeat/user-channel guards, and wallet allowance truth. Missing
-    authority remains fail-closed before command creation.
+    The client is constructed per call so the provider holds no long-lived
+    connection across reactor cycles; the call only fires for an actual submit
+    candidate (rare, fully gated), so the per-call cost is negligible.
+    """
+
+    def _fetch(token_id: str) -> dict:
+        from src.data.polymarket_client import PolymarketClient
+
+        with PolymarketClient() as clob:
+            return clob.get_orderbook_snapshot(token_id)
+
+    return _fetch
+
+
+def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
+    """JIT single-token book fetch for the SELECTED candidate at submit time.
+
+    GATE #84 root cause: the shared market-channel feasibility feed stamps
+    ``quote_seen_at`` with the venue book-CHANGE timestamp (1s resolution, often
+    minutes stale for slow weather books), and only refreshes a given token when
+    its WS tick arrives (median per-candidate gap ~11s). The 1000ms pre-submit
+    bound is a SUBMIT-TIME observation-freshness bound, so for the one selected
+    candidate we pull its live book ``now`` and anchor freshness to OUR
+    observation time — the FOK crosses against exactly this book.
+
+    Returns ``(best_bid, best_ask, book_hash)`` on a usable two-sided book, or
+    ``None`` when the fetch fails or the book is empty/crossed (fail-closed —
+    the caller then falls back to a genuinely-fresh DB row or raises).
+    """
+
+    if book_quote_provider is None:
+        return None
+    try:
+        message = dict(book_quote_provider(token_id))
+    except Exception as exc:  # noqa: BLE001 - JIT fetch failure must not fabricate freshness
+        logger.warning("EDLI pre-submit JIT book fetch failed for %s: %s", token_id, exc)
+        return None
+    best_bid = _edli_book_best_price(message.get("bids"), best="bid")
+    best_ask = _edli_book_best_price(message.get("asks"), best="ask")
+    book_hash = str(message.get("hash") or "")
+    if best_bid is None or best_ask is None or not book_hash:
+        return None
+    if best_bid >= best_ask:
+        # Crossed/locked book is not a usable pre-submit authority.
+        return None
+    return best_bid, best_ask, book_hash
+
+
+def _edli_book_best_price(levels, *, best: str):
+    if not levels:
+        return None
+    parsed = []
+    for level in levels:
+        raw = level.get("price") if isinstance(level, dict) else (level[0] if level else None)
+        if raw in (None, ""):
+            continue
+        try:
+            parsed.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    if not parsed:
+        return None
+    return max(parsed) if best == "bid" else min(parsed)
+
+
+def _edli_pre_submit_authority_provider_from_world_conn(
+    world_conn, edli_cfg, *, book_quote_provider=None
+):
+    """Build EDLI's production pre-submit authority provider.
+
+    The provider consumes quote evidence, heartbeat/user-channel guards, and
+    wallet allowance truth; missing authority remains fail-closed before command
+    creation.
+
+    ``book_quote_provider`` (GATE #84) is an optional just-in-time single-token
+    ``/book`` fetch (``token_id -> dict``). When wired in live/canary mode it is
+    the PRIMARY book authority: for the selected candidate at submit time we pull
+    its live book and anchor ``quote_seen_at`` to our observation instant
+    (``checked_at``), so the 1000ms freshness bound reflects observation-to-submit
+    latency rather than the venue's coarse book-change stamp. The DB feasibility
+    row is the fail-closed fallback and is only accepted when it is itself within
+    ``max_quote_age_ms`` — a stale row never leaks through as a fresh quote.
     """
 
     from src.engine.event_reactor_adapter import PreSubmitAuthorityWitness
@@ -3805,19 +3897,45 @@ def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
     def _provider(final_intent, _executable_snapshot, decision_time):
         checked_at = decision_time.astimezone(timezone.utc)
         intent = final_intent.payload
-        row = _edli_latest_pre_submit_book_row(
-            world_conn,
-            token_id=str(intent["token_id"]),
-            decision_time=checked_at,
-        )
-        if row is None:
-            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_MISSING")
-        quote_seen_at = str(_row_get(row, "quote_seen_at") or "")
-        book_hash = str(_row_get(row, "book_hash_before") or "")
-        best_bid = _row_float(row, "best_bid_before")
-        best_ask = _row_float(row, "best_ask_before")
-        if not quote_seen_at or not book_hash or best_bid is None or best_ask is None:
-            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+        token_id = str(intent["token_id"])
+
+        # PRIMARY: just-in-time live book for the selected candidate. Freshness is
+        # anchored to OUR observation time (checked_at) — the FOK crosses against
+        # exactly this book — so quote_age_ms is the observation-to-submit latency.
+        jit = _edli_pre_submit_book_from_jit_fetch(book_quote_provider, token_id=token_id)
+        if jit is not None:
+            best_bid, best_ask, book_hash = jit
+            quote_seen_at = checked_at.isoformat()
+            book_authority_id = "clob_jit_book"
+        else:
+            # FAIL-CLOSED FALLBACK: the shared feasibility feed. Accept the latest
+            # row ONLY if it is itself within the freshness bound; a venue-stale row
+            # (the GATE #84 pathology) must NOT be emitted as a fresh quote.
+            row = _edli_latest_pre_submit_book_row(
+                world_conn,
+                token_id=token_id,
+                decision_time=checked_at,
+            )
+            if row is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_MISSING")
+            quote_seen_at = str(_row_get(row, "quote_seen_at") or "")
+            book_hash = str(_row_get(row, "book_hash_before") or "")
+            best_bid = _row_float(row, "best_bid_before")
+            best_ask = _row_float(row, "best_ask_before")
+            if not quote_seen_at or not book_hash or best_bid is None or best_ask is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+            try:
+                row_quote_dt = datetime.fromisoformat(quote_seen_at.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+            if row_quote_dt.tzinfo is None:
+                row_quote_dt = row_quote_dt.replace(tzinfo=timezone.utc)
+            row_age_ms = (checked_at - row_quote_dt.astimezone(timezone.utc)).total_seconds() * 1000.0
+            if row_age_ms > max_quote_age_ms:
+                # No fresh JIT book and the only stored quote is stale: do not
+                # leak a stale quote that the downstream gate would have to catch.
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_STALE")
+            book_authority_id = "execution_feasibility_evidence"
 
         heartbeat_summary = _edli_heartbeat_authority_summary()
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)
@@ -3840,7 +3958,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
             user_ws_status="OK" if user_ws_summary["allow_submit"] else "BLOCKED",
             venue_connectivity_status="OK" if venue_summary["allow_submit"] else "BLOCKED",
             balance_allowance_status=balance_status,
-            book_authority_id="execution_feasibility_evidence",
+            book_authority_id=book_authority_id,
             book_captured_at=quote_seen_at,
             heartbeat_authority_id=str(heartbeat_summary["authority_id"]),
             heartbeat_checked_at=checked_at.isoformat(),

@@ -1345,3 +1345,199 @@ def _pre_submit_authority_witness(
         checked_at=checked_at.isoformat(),
         max_quote_age_ms=1000,
     )
+
+
+# ---------------------------------------------------------------------------
+# GATE #84 — pre-submit book authority freshness root cause
+# Created: 2026-06-01
+# Last reused/audited: 2026-06-01
+# Authority basis: Task #84 — quote_age_ms exceeds max_quote_age_ms root cause.
+#
+# Root cause (evidence-first, against live state/ DBs 2026-06-01):
+#   The feasibility feed (execution_feasibility_evidence) IS alive and writes
+#   continuously, BUT its `quote_seen_at` is the venue book-change timestamp
+#   (1s resolution, frequently MINUTES stale for slow weather books — measured
+#   created_at − quote_seen_at ≈ 71s on live rows). The pre-submit gate measures
+#   quote_age_ms = decision_time − quote_seen_at, so it rejects with
+#   "quote_age_ms exceeds max_quote_age_ms" even though the book CONTENT is current.
+#   Per-token WS tick gaps (median ~11s for candidates) and the venue-stamp lag
+#   make the 1000ms bound unsatisfiable from the shared-feed DB row.
+#
+# Correct design: the 1000ms bound is a SUBMIT-TIME observation freshness bound.
+#   For the ONE selected candidate at submit, JIT-fetch its book and anchor
+#   quote_seen_at to OUR observation time (when we pulled the live book the FOK
+#   will cross against). The venue hash stays as book_hash provenance. Fail-closed
+#   if no fresh observation is obtainable.
+# ---------------------------------------------------------------------------
+
+
+def _gate84_world_conn_with_stale_row(*, quote_seen_at: str):
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE execution_feasibility_evidence (
+            token_id TEXT,
+            quote_seen_at TEXT,
+            book_hash_before TEXT,
+            best_bid_before REAL,
+            best_ask_before REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO execution_feasibility_evidence
+            (token_id, quote_seen_at, book_hash_before, best_bid_before, best_ask_before)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        ("yes-1", quote_seen_at, "venue-book-hash-STALE", 0.39, 0.41),
+    )
+    return conn
+
+
+def _gate84_final_intent():
+    return SimpleNamespace(
+        payload={
+            "token_id": "yes-1",
+            "side": "BUY",
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 5.0,
+        }
+    )
+
+
+def _gate84_patch_authority_guards(monkeypatch):
+    import src.control.heartbeat_supervisor as heartbeat_supervisor
+    import src.control.ws_gap_guard as ws_gap_guard
+    import src.data.polymarket_client as polymarket_client
+
+    monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
+    monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+
+    class FakePolymarketClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def v2_preflight(self):
+            return {"ok": True}
+
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_collateral_payload(self):
+            return {
+                "pusd_balance_micro": 25_000_000,
+                "pusd_allowance_micro": 25_000_000,
+                "ctf_token_balances_units": {"yes-1": 25.0},
+                "ctf_token_allowances_units": {"yes-1": 25.0},
+            }
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+
+
+def test_gate84_jit_book_quote_makes_quote_age_satisfiable_for_stale_db_row(monkeypatch):
+    """RED: a venue-stale DB row (quote_seen_at 71s old) must NOT doom the order.
+
+    With a just-in-time single-token book provider available, the witness must
+    anchor freshness to OUR observation time (now), yielding quote_age_ms ~0
+    against decision_time — i.e. <= max_quote_age_ms — and carry the freshly
+    fetched best bid/ask. This is the structural fix for
+    'quote_age_ms exceeds max_quote_age_ms'.
+    """
+    import src.main as main
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    # DB row carries the venue book-change stamp from 71s earlier (the live pathology).
+    conn = _gate84_world_conn_with_stale_row(
+        quote_seen_at=(decision_time - timedelta(seconds=71)).isoformat()
+    )
+    _gate84_patch_authority_guards(monkeypatch)
+
+    jit_calls: list[str] = []
+
+    def _jit_book(token_id: str) -> dict:
+        jit_calls.append(token_id)
+        # Live /book shape: bids/asks lists + venue hash + (coarse) timestamp.
+        return {
+            "asset_id": token_id,
+            "market": "cond-1",
+            "hash": "fresh-jit-book-hash",
+            "bids": [{"price": "0.40", "size": "50"}],
+            "asks": [{"price": "0.42", "size": "50"}],
+            "timestamp": str(int((decision_time - timedelta(seconds=71)).timestamp() * 1000)),
+        }
+
+    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=_jit_book,
+    )
+
+    witness = provider(_gate84_final_intent(), object(), decision_time)
+
+    # JIT fetch for the selected token must have fired.
+    assert jit_calls == ["yes-1"]
+    # Freshness anchored to observation time -> age within bound.
+    quote_seen = datetime.fromisoformat(witness.quote_seen_at)
+    age_ms = (decision_time - quote_seen).total_seconds() * 1000.0
+    assert 0.0 <= age_ms <= witness.max_quote_age_ms, f"age_ms={age_ms} must be <= {witness.max_quote_age_ms}"
+    # Fresh book content carried (the JIT book, not the stale DB best bid/ask).
+    assert witness.current_best_bid == 0.40
+    assert witness.current_best_ask == 0.42
+    assert witness.book_hash == "fresh-jit-book-hash"
+
+
+def test_gate84_jit_unavailable_and_db_row_stale_fails_closed(monkeypatch):
+    """RED: when the JIT fetch is unavailable/fails AND the only DB row is genuinely
+    stale (> max_quote_age_ms), the provider must FAIL CLOSED — never emit a witness
+    carrying a stale quote that would pass the gate. No fabricated freshness.
+    """
+    import src.main as main
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(
+        quote_seen_at=(decision_time - timedelta(seconds=71)).isoformat()
+    )
+    _gate84_patch_authority_guards(monkeypatch)
+
+    def _jit_book_fails(token_id: str) -> dict:
+        raise RuntimeError("CLOB /book 503")
+
+    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+        book_quote_provider=_jit_book_fails,
+    )
+
+    with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY"):
+        provider(_gate84_final_intent(), object(), decision_time)
+
+
+def test_gate84_jit_unavailable_but_db_row_fresh_uses_db_row(monkeypatch):
+    """GREEN-guard: when no JIT provider is wired but the DB row is genuinely fresh
+    (within bound), the existing DB-row path still works (backward compatible).
+    """
+    import src.main as main
+
+    decision_time = datetime(2026, 6, 1, 6, 21, 0, tzinfo=timezone.utc)
+    conn = _gate84_world_conn_with_stale_row(
+        quote_seen_at=(decision_time - timedelta(milliseconds=200)).isoformat()
+    )
+    _gate84_patch_authority_guards(monkeypatch)
+
+    provider = main._edli_pre_submit_authority_provider_from_world_conn(
+        conn,
+        {"pre_submit_max_quote_age_ms": 1000, "pre_submit_balance_allowance_check_enabled": True},
+    )
+
+    witness = provider(_gate84_final_intent(), object(), decision_time)
+    quote_seen = datetime.fromisoformat(witness.quote_seen_at)
+    age_ms = (decision_time - quote_seen).total_seconds() * 1000.0
+    assert 0.0 <= age_ms <= witness.max_quote_age_ms
+    assert witness.book_hash == "venue-book-hash-STALE"  # DB-row path preserved
