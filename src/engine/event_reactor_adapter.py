@@ -55,6 +55,7 @@ from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_ke
 from src.events.opportunity_event import OpportunityEvent
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.riskguard.risk_level import RiskLevel
+from src.sizing.sizing_context import SizingContext
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -819,11 +820,24 @@ def build_event_bound_no_submit_receipt(
             _bias_decay_native,
             _bias_decay_reason,
         ) = _maybe_bias_decay_kelly_haircut(kelly_multiplier, family=family)
+        # S3 (variance-required Kelly, task #103/#111): carry the candidate's
+        # posterior CI width and forecast lead into Kelly so a wider-CI edge
+        # sizes STRICTLY smaller. The config/bias-decay multiplier above is the
+        # BASE; SizingContext adds the CI/lead variance haircut on top. lead_days
+        # derivation can raise ValueError (CALIBRATION_AUTHORITY_MISSING) — that
+        # routes through the except envelope below to KELLY_PROOF_MISSING
+        # fail-closed, never silent.
+        sizing_context = SizingContext.from_candidate_proof(
+            q_posterior=proof.q_posterior,
+            q_lcb_5pct=proof.q_lcb_5pct,
+            lead_days=_snapshot_lead_days(snapshot=row, family=family, payload=payload),
+        )
         kelly = evaluate_kelly(
             kelly_decision_id=f"edli_kelly:{event.event_id}:{selected_token_id}",
             p_posterior=proof.q_posterior,
             execution_price=execution_price,
             bankroll_usd=bankroll_usd,
+            sizing_context=sizing_context,
             kelly_multiplier=kelly_multiplier,
         )
     except (TypeError, ValueError) as exc:
