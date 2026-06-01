@@ -1869,20 +1869,34 @@ def execute_final_intent(
             "execute_final_intent requires FinalExecutionIntent, "
             f"got {type(intent).__name__}"
         )
-    intent.assert_no_recompute_inputs()
-    intent.assert_submit_ready()
-    submitted_shares = _final_intent_submit_shares(intent)
-    market_id, event_id = _final_intent_snapshot_metadata(
-        intent,
-        snapshot_conn if snapshot_conn is not None else conn,
-        submitted_shares=submitted_shares,
-    )
-    legacy_intent = _legacy_entry_intent_from_final(
-        intent,
-        market_id=market_id,
-        event_id=event_id,
-        submitted_shares=submitted_shares,
-    )
+    # PRE-VENUE validation span (depth/snapshot identity/intent expressibility).
+    # All of this runs BEFORE _live_order touches the venue. A failure here means
+    # the order PROVABLY never reached the venue; re-raise as PreVenueSubmitError so
+    # the EDLI submit boundary classifies it as a TERMINAL PRE_SUBMIT_ERROR (cap
+    # released, aggregate terminated) instead of an indeterminate POST_SUBMIT_UNKNOWN
+    # that leaves an unresolved-submit + held-cap and crash-loops boot readiness.
+    # Antibody: src/engine/event_bound_final_intent.py::PreVenueSubmitError (2026-06-01).
+    from src.engine.event_bound_final_intent import PreVenueSubmitError as _PreVenueSubmitError
+
+    try:
+        intent.assert_no_recompute_inputs()
+        intent.assert_submit_ready()
+        submitted_shares = _final_intent_submit_shares(intent)
+        market_id, event_id = _final_intent_snapshot_metadata(
+            intent,
+            snapshot_conn if snapshot_conn is not None else conn,
+            submitted_shares=submitted_shares,
+        )
+        legacy_intent = _legacy_entry_intent_from_final(
+            intent,
+            market_id=market_id,
+            event_id=event_id,
+            submitted_shares=submitted_shares,
+        )
+    except _PreVenueSubmitError:
+        raise
+    except (ValueError, TypeError) as exc:
+        raise _PreVenueSubmitError(str(exc)) from exc
     trade_id = str(uuid.uuid4())[:12]
     if not legacy_intent.token_id:
         return OrderResult(

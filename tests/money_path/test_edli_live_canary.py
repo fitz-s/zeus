@@ -634,6 +634,105 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
         adapter.build_event_bound_no_submit_receipt = original_build
 
 
+def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeypatch):
+    """RELATIONSHIP (F-class deadlock antibody, 2026-06-01):
+
+    A live order that FAILS the executor's PRE-VENUE depth validation
+    (DEPTH_INSUFFICIENT, raised before any venue call) must terminate the
+    live-order aggregate AND release its LIVE_CAP reservation — leaving NO
+    unresolved-submit and NO held cap. This is the EXACT state that crash-looped
+    the edli_live_canary boot readiness gate. Contrast with
+    test_live_adapter_records_timeout_unknown_fixture_response, which proves a
+    GENUINE post-venue unknown still leaves cap RESERVED + pending_reconcile.
+
+    The injected executor_submit returns the EXACT EventBoundExecutorSubmitResult
+    that the real submit boundary produces for a PreVenueSubmitError
+    (status=PRE_SUBMIT_ERROR, venue_call_started=False). The companion unit test
+    tests/engine/test_pre_venue_rejection_terminal.py proves the boundary derives
+    that result from a PreVenueSubmitError; this test proves that result then
+    drives the aggregate + cap to a terminal RELEASED state (no deadlock).
+    """
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(
+        _accepted_receipt(event),
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, _accepted_receipt(event), decision_time=decision_time),
+    )
+
+    def _boundary_submit(_final_intent, _command):
+        # Canonical pre-venue rejection result (what the real boundary emits for
+        # PreVenueSubmitError: terminal, venue never reached, side effect known).
+        return EventBoundExecutorSubmitResult(
+            status="PRE_SUBMIT_ERROR",
+            reason_code="EXECUTOR_PRE_VENUE_REJECTED:FinalExecutionIntent executable depth validation failed: DEPTH_INSUFFICIENT",
+            submit_started_at="2026-05-24T18:10:00+00:00",
+            submit_finished_at="2026-05-24T18:10:00+00:00",
+            raw_response={"error": "DEPTH_INSUFFICIENT", "stage": "existing_executor_pre_venue"},
+            reconciliation_followup_required=False,
+            venue_call_started=False,
+            venue_ack_received=False,
+            side_effect_known=True,
+        )
+
+    original_build = adapter.build_event_bound_no_submit_receipt
+    adapter.build_event_bound_no_submit_receipt = lambda *_args, **_kwargs: accepted
+    try:
+        submit = adapter.event_bound_live_adapter_from_trade_conn(
+            conn,
+            live_cap_conn=conn,
+            get_current_level=lambda: RiskLevel.GREEN,
+            real_order_submit_enabled=True,
+            live_canary_enabled=True,
+            durable_submit_outbox_enabled=True,
+            taker_fok_fak_live_enabled=True,
+            executor_submit=_boundary_submit,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+        )
+
+        receipt = submit(event, decision_time)
+
+        assert receipt.submitted is False
+        assert receipt.side_effect_status == "PRE_SUBMIT_ERROR"
+        assert _receipt_status(receipt) == "PRE_SUBMIT_ERROR"
+
+        # Cap RELEASED (not RESERVED) — no held-cap deadlock.
+        assert conn.execute(
+            "SELECT reservation_status FROM edli_live_cap_usage"
+        ).fetchone()["reservation_status"] == "RELEASED"
+        assert _cap_transition_status(receipt) == "RELEASED"
+        assert _cap_transition_projection_status(receipt) == "RELEASED"
+
+        # Aggregate terminal: SubmitRejected (not SubmitUnknown), no pending_reconcile.
+        event_types = [row["event_type"] for row in conn.execute(
+            "SELECT event_type FROM edli_live_order_events ORDER BY event_sequence"
+        )]
+        assert "SubmitRejected" in event_types
+        assert "SubmitUnknown" not in event_types
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection"
+        ).fetchone()
+        assert bool(projection["pending_reconcile"]) is False
+
+        # Boot readiness counts (the exact gate queries) are clear → no deadlock.
+        unresolved = conn.execute(
+            "SELECT COUNT(*) c FROM edli_live_order_projection WHERE pending_reconcile = 1"
+        ).fetchone()["c"]
+        reserved = conn.execute(
+            "SELECT COUNT(*) c FROM edli_live_cap_usage WHERE reservation_status = 'RESERVED'"
+        ).fetchone()["c"]
+        assert unresolved == 0
+        assert reserved == 0
+    finally:
+        adapter.build_event_bound_no_submit_receipt = original_build
+
+
 def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult

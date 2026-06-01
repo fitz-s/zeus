@@ -87,6 +87,23 @@ class EventBoundExecutorExpressibilityError(ValueError):
     """Raised when EDLI proof cannot be expressed as the existing executor intent."""
 
 
+class PreVenueSubmitError(ValueError):
+    """Raised by the executor when a submit is rejected BEFORE any venue call.
+
+    F-class deadlock antibody (2026-06-01): the executor validates executable
+    depth / snapshot identity BEFORE contacting the venue (execute_final_intent
+    runs _final_intent_snapshot_metadata + _legacy_entry_intent_from_final prior
+    to _live_order). A failure there means the order PROVABLY never reached the
+    venue — there is no indeterminate side effect to reconcile. The EDLI submit
+    boundary classifies this as a TERMINAL ``PRE_SUBMIT_ERROR`` (venue_call_started
+    =False), which releases the LIVE_CAP reservation and terminates the aggregate.
+    Without this type, such pre-venue rejections were swept into the generic
+    ``except Exception`` and mislabeled ``POST_SUBMIT_UNKNOWN`` (venue_call_started
+    =True), leaving an unresolved-submit + held-cap that crash-loops boot at the
+    edli_live_canary readiness gate.
+    """
+
+
 def submit_event_bound_final_intent_via_existing_executor(
     *,
     final_intent_cert: DecisionCertificate,
@@ -119,6 +136,22 @@ def submit_event_bound_final_intent_via_existing_executor(
         )
     except EventBoundExecutorExpressibilityError:
         raise
+    except PreVenueSubmitError as exc:
+        # PRE-VENUE rejection: the executor failed validation (e.g. executable
+        # depth DEPTH_INSUFFICIENT) BEFORE any venue call. The order provably
+        # never reached the venue, so the side effect is KNOWN (none) and there
+        # is nothing to reconcile. Terminal PRE_SUBMIT_ERROR → cap RELEASED.
+        return EventBoundExecutorSubmitResult(
+            status="PRE_SUBMIT_ERROR",
+            reason_code=f"EXECUTOR_PRE_VENUE_REJECTED:{exc}",
+            submit_started_at=started_at,
+            submit_finished_at=datetime.now(timezone.utc).isoformat(),
+            raw_response={"error": str(exc), "stage": "existing_executor_pre_venue"},
+            reconciliation_followup_required=False,
+            venue_call_started=False,
+            venue_ack_received=False,
+            side_effect_known=True,
+        )
     except Exception as exc:
         return EventBoundExecutorSubmitResult(
             status="POST_SUBMIT_UNKNOWN",
