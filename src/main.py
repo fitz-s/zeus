@@ -4323,6 +4323,110 @@ def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
     )
 
 
+def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
+    """MF-1: durable, idempotent, self-healing EDLI fill -> position_current scan.
+
+    THE authoritative bridge trigger (replaces the transient
+    ``_edli_fill_bridge_aggregate_ids`` set as the source of truth). Finds every
+    aggregate in ``edli_live_order_events`` carrying a ``UserTradeObserved`` with
+    ``fill_authority_state == 'FILL_CONFIRMED'`` whose deterministic
+    ``edli_bridge_position_id`` has NO ``position_current`` row, and materialises
+    each via the idempotent canonical bridge.
+
+    Why this closes the orphan window (the verified DEFECT): the old path only
+    bridged aggregates that went PENDING->PROCESSED *this cycle*, holding them in
+    an in-memory set. A daemon death OR a swallowed bridge exception between the
+    inbox PROCESSED commit and the separate bridge commit left a FILL_CONFIRMED
+    aggregate with no position_current row; on restart the set was empty and
+    nothing re-bridged it -> capital orphaned. This scan re-derives the work set
+    durably from ``edli_live_order_events`` (the persisted truth), so it heals any
+    such orphan on the very next cycle AND at boot, regardless of process restarts.
+
+    Idempotency: ``materialize_position_current_from_edli_fill`` upserts
+    ``position_current`` (ON CONFLICT(position_id) DO UPDATE) and appends
+    ``position_events`` keyed UNIQUE(position_id, sequence_no) — re-bridging an
+    already-bridged fill is a no-op for events and a safe UPDATE for the
+    projection. The absence filter below ALSO skips already-bridged aggregates so
+    a healthy daemon does no redundant work.
+
+    INV-37 / transaction ownership: reads ``edli_live_order_events`` and writes
+    ``position_current`` / ``position_events`` ON THE SAME connection ``conn``
+    (in production a trade connection with ``world`` ATTACHed). Performs NO
+    independent connection and does NOT commit — the caller owns the transaction
+    boundary (the cycle / boot wrapper commits once after the scan).
+
+    Returns the number of orphaned fills bridged this pass.
+    """
+    from src.events.edli_position_bridge import (
+        _edli_events_table,
+        edli_bridge_position_id,
+        materialize_position_current_from_edli_fill,
+    )
+
+    table = _edli_events_table(conn)
+    try:
+        candidate_rows = conn.execute(
+            f"""
+            SELECT DISTINCT aggregate_id
+            FROM {table}
+            WHERE event_type = 'UserTradeObserved'
+              AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+            ORDER BY aggregate_id ASC
+            """
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        # Missing table / attach (e.g. a degraded boot) must not crash the
+        # caller — the EDLI events persist and the next cycle retries.
+        logger.error(
+            "EDLI durable fill-bridge scan: candidate query failed "
+            "(non-fatal; retries next cycle): %s",
+            exc,
+            exc_info=True,
+        )
+        return 0
+
+    bridged = 0
+    scanned = 0
+    for row in candidate_rows:
+        if scanned >= max(0, limit):
+            break
+        scanned += 1
+        aggregate_id = str(_row_get(row, "aggregate_id"))
+        position_id = edli_bridge_position_id(aggregate_id)
+        existing = conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
+            (position_id,),
+        ).fetchone()
+        if existing is not None:
+            # Already bridged — idempotent skip (no redundant canonical write).
+            continue
+        try:
+            result = materialize_position_current_from_edli_fill(
+                conn, aggregate_id, now=now
+            )
+            if result is not None:
+                bridged += 1
+                logger.warning(
+                    "EDLI durable fill-bridge: HEALED orphaned confirmed fill "
+                    "aggregate=%s -> position_id=%s shares=%s cost_basis_usd=%s",
+                    aggregate_id,
+                    result.get("position_id"),
+                    result.get("shares"),
+                    result.get("cost_basis_usd"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            # One bad aggregate must not block healing the rest. The EDLI events
+            # persist; the next scan retries this aggregate.
+            logger.error(
+                "EDLI durable fill-bridge: failed to bridge aggregate %s "
+                "(non-fatal; EDLI events persist, next scan retries): %s",
+                aggregate_id,
+                exc,
+                exc_info=True,
+            )
+    return bridged
+
+
 @_scheduler_job("edli_user_channel_reconcile")
 def _edli_user_channel_reconcile_cycle() -> None:
     """EDLI user-channel/reconcile service boundary.
@@ -4454,18 +4558,31 @@ def _edli_user_channel_reconcile_cycle() -> None:
     finally:
         conn.close()
 
-    # DEFECT-1 bridge pass (capital recoverability). The EDLI events are now
-    # durable on world.db. Materialise a canonical position_current row for any
-    # aggregate that reached FILL_CONFIRMED this cycle so the legacy lifecycle
+    # MF-1 / DEFECT-1 bridge pass (capital recoverability). The EDLI events are
+    # now durable on world.db. Materialise a canonical position_current row for
+    # any aggregate that reached FILL_CONFIRMED so the legacy lifecycle
     # (chain-reconciliation / exit / harvester / redeem) can see and recover the
-    # position. INV-37: runs on a trade connection with world ATTACHed — the
-    # bridge reads world.edli_live_order_events and writes position_current /
-    # position_events on the SAME connection (ATTACH + SAVEPOINT, no independent
-    # connection). Idempotent: replay UPDATEs the same row, never duplicates.
+    # position.
+    #
+    # AUTHORITATIVE TRIGGER = the durable, idempotent scan
+    # (_edli_durable_fill_bridge_scan): it re-derives the work set from the
+    # persisted edli_live_order_events on EVERY cycle, so a confirmed fill orphaned
+    # by a daemon death / swallowed exception between the inbox PROCESSED commit
+    # and this bridge commit is healed on the next cycle regardless of process
+    # restarts. The transient `_edli_fill_bridge_aggregate_ids` set is kept ONLY
+    # as a fast in-cycle optimisation (bridges the just-processed fills with zero
+    # extra scan cost); it is NO LONGER the source of truth, so the orphan window
+    # is closed. Both run on the SAME bridge connection within the SAME commit.
+    #
+    # INV-37: runs on a trade connection with world ATTACHed — the bridge reads
+    # world.edli_live_order_events and writes position_current / position_events on
+    # the SAME connection (ATTACH + SAVEPOINT, no independent connection).
+    # Idempotent: replay UPDATEs the same row, never duplicates; the durable scan
+    # skips aggregates that already have a position_current row.
     # Fail-safe: a bridge error must not crash the scheduler job — log and retry
-    # next cycle (the EDLI events persist; the next confirmed-fill scan re-runs).
+    # next cycle (the EDLI events persist; the next durable scan re-runs).
     bridged_positions = 0
-    if _edli_fill_bridge_aggregate_ids:
+    if True:  # always run the durable scan; the fast set is an optimisation only
         from src.events.edli_position_bridge import (
             materialize_position_current_from_edli_fill,
         )
@@ -4474,6 +4591,9 @@ def _edli_user_channel_reconcile_cycle() -> None:
         bridge_conn = None
         try:
             bridge_conn = get_trade_connection_with_world_required(write_class="live")
+            # Fast in-cycle path: bridge the fills processed THIS cycle first
+            # (zero extra scan). These will already exist by the time the durable
+            # scan runs, so the scan's absence filter skips them — no double work.
             for _agg_id in sorted(_edli_fill_bridge_aggregate_ids):
                 try:
                     result = materialize_position_current_from_edli_fill(
@@ -4484,11 +4604,14 @@ def _edli_user_channel_reconcile_cycle() -> None:
                 except Exception as exc:  # noqa: BLE001
                     logger.error(
                         "EDLI position bridge failed for aggregate %s (non-fatal; "
-                        "EDLI events persist, next cycle retries): %s",
+                        "EDLI events persist, durable scan retries): %s",
                         _agg_id,
                         exc,
                         exc_info=True,
                     )
+            # Authoritative durable scan: heal ANY orphaned confirmed fill,
+            # including ones stranded by a prior restart / swallowed exception.
+            bridged_positions += _edli_durable_fill_bridge_scan(bridge_conn, now=now)
             bridge_conn.commit()
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -4513,6 +4636,61 @@ def _edli_user_channel_reconcile_cycle() -> None:
             "edli_positions_bridged": bridged_positions,
         },
     )
+
+
+def _edli_boot_fill_bridge_recovery() -> None:
+    """MF-1: heal orphaned EDLI confirmed fills AT BOOT, before any new trading.
+
+    The durable scan also runs every reconcile cycle, but running it once at boot
+    closes the restart-specific orphan window immediately: if the daemon died
+    between the inbox PROCESSED commit and the bridge commit on the prior run, the
+    confirmed fill is stranded (no position_current, in-memory set empty). Without
+    a boot pass, that capital stays invisible to chain-reconcile / exit / harvester
+    / redeem until the first reconcile cycle fires (and only if the cycle is even
+    enabled). Bridging at boot guarantees recovery precedes the next entry wave.
+
+    Gate: same as the reconcile cycle — only in EDLI event-driven modes with the
+    user-channel/reconcile boundary enabled. Fully fail-open: any error is logged,
+    never fatal (boot must not be blocked by a recovery hiccup; the cycle retries).
+    """
+    try:
+        edli_cfg = _settings_section("edli_v1", {})
+        if not edli_cfg.get("enabled") or not edli_cfg.get(
+            "edli_user_channel_reconcile_enabled", False
+        ):
+            return
+        now = datetime.now(timezone.utc)
+        from src.state.db import get_trade_connection_with_world_required
+
+        bridge_conn = None
+        bridged = 0
+        try:
+            bridge_conn = get_trade_connection_with_world_required(write_class="live")
+            bridged = _edli_durable_fill_bridge_scan(bridge_conn, now=now)
+            bridge_conn.commit()
+        finally:
+            if bridge_conn is not None:
+                try:
+                    bridge_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        if bridged:
+            logger.warning(
+                "EDLI boot fill-bridge recovery: healed %d orphaned confirmed "
+                "fill(s) into position_current before entering the trading loop",
+                bridged,
+            )
+        else:
+            logger.info("EDLI boot fill-bridge recovery: no orphaned confirmed fills")
+    except Exception as exc:  # noqa: BLE001
+        # Boot recovery is best-effort: the per-cycle durable scan is the safety
+        # net, so a boot-time hiccup must never block the daemon from starting.
+        logger.error(
+            "EDLI boot fill-bridge recovery failed (non-fatal; per-cycle scan "
+            "retries): %s",
+            exc,
+            exc_info=True,
+        )
 
 
 def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> set[str]:
@@ -5067,6 +5245,14 @@ def main():
     # GATE SPLIT (§3.7): wallet failure is ALWAYS fatal, no operator override.
     _startup_wallet_check()
     _start_user_channel_ingestor_if_enabled()
+
+    # MF-1: durable self-healing capital spine — AT BOOT, before any new trading,
+    # bridge any EDLI confirmed fill that was orphaned (no position_current) by a
+    # prior daemon death / swallowed bridge exception. Closes the restart-specific
+    # orphan window immediately so stuck capital is visible to chain-reconcile /
+    # exit / harvester / redeem before the first entry wave. Fail-open (never
+    # blocks boot); the per-cycle durable scan is the continuous safety net.
+    _edli_boot_fill_bridge_recovery()
 
     if once:
         run_single_cycle()
