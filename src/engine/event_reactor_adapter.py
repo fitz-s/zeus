@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from collections.abc import Mapping
@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -1905,6 +1906,65 @@ def _require_snapshot_hash(snapshot: object) -> str:
     return h
 
 
+def _require_cost_basis(
+    snapshot: object,
+    *,
+    direction: str,
+    size_usd: float,
+    execution_price: "ExecutionPrice",
+) -> "ExecutableCostBasis":
+    """Build canonical ExecutableCostBasis from a hydrated snapshot.
+
+    Uses the fee-adjusted execution_price.value as final_limit_price /
+    expected_fill_price_before_fee — for the no-submit passive path the limit
+    price IS the pre-fee ask (fee is added on top inside from_snapshot).
+    We pass fee_adjusted_execution_price to let from_snapshot verify consistency.
+
+    Raises a clear COST_BASIS_HASH_UNAVAILABLE error on any failure so the cert
+    pipeline fails closed rather than emitting a blank hash.
+    """
+    if snapshot is None:
+        raise ValueError("COST_BASIS_HASH_UNAVAILABLE: snapshot not found in trade DB")
+    try:
+        # For the no-submit adapter path the limit is a passive post-only order.
+        # execution_price.value is fee-adjusted; snapshot.orderbook_top_ask (for
+        # buy) is the canonical pre-fee price used as limit/expected_fill.
+        # Fall back to execution_price.value if top_ask/bid unavailable.
+        snap = snapshot  # type: ignore[union-attr]
+        # Strip selected_outcome_token_id / outcome_label so from_snapshot does not
+        # raise a direction-mismatch when the snapshot row was fetched for the other
+        # side of the same condition (the adapter reuses one row for both buy_yes and
+        # buy_no proofs of the same condition).
+        if snap.selected_outcome_token_id or snap.outcome_label:
+            snap = dataclass_replace(snap, selected_outcome_token_id=None, outcome_label=None)  # type: ignore[arg-type]
+        if direction.startswith("buy_"):
+            pre_fee_limit = (
+                snap.orderbook_top_ask
+                if snap.orderbook_top_ask is not None
+                else Decimal(str(execution_price.value))
+            )
+        else:
+            pre_fee_limit = (
+                snap.orderbook_top_bid
+                if snap.orderbook_top_bid is not None
+                else Decimal(str(execution_price.value))
+            )
+        pre_fee_limit = Decimal(str(pre_fee_limit))
+        requested_size = Decimal(str(max(size_usd, 0.01)))
+        return ExecutableCostBasis.from_snapshot(
+            snapshot=snap,
+            direction=direction,
+            order_policy="post_only_passive_limit",
+            requested_size_kind="notional_usd",
+            requested_size_value=requested_size,
+            final_limit_price=pre_fee_limit,
+            expected_fill_price_before_fee=pre_fee_limit,
+            depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+        )
+    except Exception as exc:
+        raise ValueError(f"COST_BASIS_HASH_UNAVAILABLE: {exc}") from exc
+
+
 def _build_no_submit_proof_bundle_from_adapter_evidence(
     *,
     event: OpportunityEvent,
@@ -1971,6 +2031,17 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             "family_id": family.family_id,
         }
     )
+    _hydrated_snapshot = get_snapshot(trade_conn, str(proof.executable_snapshot_id or ""))
+    _canonical_cost_basis = _require_cost_basis(
+        _hydrated_snapshot,
+        direction=proof.direction,
+        size_usd=kelly.size_usd,
+        execution_price=execution_price,
+    )
+    # Align kelly_cost_basis_id in raw_receipt to the canonical cost_basis:{hash[:16]} form.
+    # DecisionCompiler validates kelly.cost_basis_id == cost_model.cost_basis_id; both
+    # must use the canonical form.
+    raw_receipt["kelly_cost_basis_id"] = _canonical_cost_basis.cost_basis_id
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(
@@ -2125,7 +2196,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "freshness_deadline": selected_snapshot_row.get("freshness_deadline"),
                 "active": selected_snapshot_row.get("active"),
                 "closed": selected_snapshot_row.get("closed"),
-                "executable_snapshot_hash": _require_snapshot_hash(get_snapshot(trade_conn, str(proof.executable_snapshot_id or ""))),
+                "executable_snapshot_hash": _require_snapshot_hash(_hydrated_snapshot),
             },
             quote_clock,
             "zeus.trades.executable_market_snapshots",
@@ -2171,8 +2242,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             "cost_model",
             "cost_model",
             {
-                "identity": str(raw_receipt.get("kelly_cost_basis_id") or hypothesis_id),
-                "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
+                "identity": _canonical_cost_basis.cost_basis_id,
+                "cost_basis_id": _canonical_cost_basis.cost_basis_id,
+                "cost_basis_hash": _canonical_cost_basis.cost_basis_hash,
                 "condition_id": raw_receipt.get("condition_id"),
                 "token_id": raw_receipt.get("token_id"),
                 "cost_source": _native_cost_source_for_direction(proof.direction),
