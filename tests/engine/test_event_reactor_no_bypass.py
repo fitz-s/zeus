@@ -16,6 +16,7 @@ import pytest
 
 from src.decision_kernel import claims
 from src.decision_kernel.compiler import DecisionCompiler
+from src.state.snapshot_repo import init_snapshot_schema
 from src.engine.event_reactor_adapter import (
     build_event_bound_no_submit_receipt,
     edli_source_truth_gate,
@@ -216,96 +217,157 @@ def _trade_conn_with_snapshot(
     no_selected_ask: str = "0.80",
     condition_count: int = 2,
     snapshot_condition_count: int | None = None,
+    include_no_snapshot: bool = True,
+    freshness_deadline: str = "2026-05-25T00:00:00+00:00",
+    captured_at: str = "2026-05-24T08:12:00+00:00",
+    depth_json: str | None = None,
 ):
     if snapshot_condition_count is None:
         snapshot_condition_count = condition_count
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    conn.execute(
-        """
-        CREATE TABLE executable_market_snapshots (
-            snapshot_id TEXT PRIMARY KEY,
-            condition_id TEXT NOT NULL,
-            yes_token_id TEXT NOT NULL,
-            no_token_id TEXT NOT NULL,
-            selected_outcome_token_id TEXT,
-            outcome_label TEXT,
-            orderbook_top_ask TEXT NOT NULL,
-            orderbook_top_bid TEXT NOT NULL DEFAULT '0.39',
-            orderbook_depth_json TEXT NOT NULL DEFAULT '{}',
-            min_tick_size TEXT NOT NULL DEFAULT '0.01',
-            min_order_size TEXT NOT NULL DEFAULT '5',
-            fee_details_json TEXT NOT NULL DEFAULT '{}',
-            neg_risk INTEGER NOT NULL DEFAULT 0,
-            freshness_deadline TEXT NOT NULL,
-            captured_at TEXT NOT NULL,
-            active INTEGER NOT NULL,
-            closed INTEGER NOT NULL,
-            event_slug TEXT
-        )
-        """
+    init_snapshot_schema(conn)
+    _depth_yes_no = depth_json if depth_json is not None else json.dumps(
+        {
+            "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": "0.39", "size": "100"}]},
+            "NO": {"asks": [{"price": no_selected_ask, "size": "100"}], "bids": [{"price": "0.19", "size": "100"}]},
+        },
+        separators=(",", ":"),
+    )
+    _SNAP_BASE = dict(
+        gamma_market_id="gamma-mkt-1",
+        event_id="event-1",
+        event_slug="chicago-temperature-high",
+        question_id="q-1",
+        enable_orderbook=1,
+        accepting_orders=1,
+        market_start_at=None,
+        market_end_at=None,
+        market_close_at=None,
+        sports_start_at=None,
+        token_map_json='{"yes":"yes-1","no":"no-1"}',
+        rfqe=None,
+        raw_gamma_payload_hash="a" * 64,
+        raw_clob_market_info_hash="b" * 64,
+        raw_orderbook_hash="c" * 64,
+        authority_tier="CLOB",
+        wide_spread_display_substitution=0,
+        depth_at_best_ask=0,
+        tradeability_status_json="{}",
     )
     conn.execute(
         """
-        INSERT INTO executable_market_snapshots VALUES (
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, yes_token_id, no_token_id,
+            selected_outcome_token_id, outcome_label,
+            orderbook_top_ask, orderbook_top_bid, orderbook_depth_json,
+            min_tick_size, min_order_size, fee_details_json, neg_risk,
+            freshness_deadline, captured_at, active, closed,
+            gamma_market_id, event_id, event_slug, question_id,
+            enable_orderbook, accepting_orders,
+            market_start_at, market_end_at, market_close_at, sports_start_at,
+            token_map_json, rfqe,
+            raw_gamma_payload_hash, raw_clob_market_info_hash, raw_orderbook_hash,
+            authority_tier,
+            wide_spread_display_substitution, depth_at_best_ask,
+            tradeability_status_json
+        ) VALUES (
             'snapshot-exec-1', 'condition-1', 'yes-1', 'no-1', 'yes-1', 'YES',
-            ?, '0.39', ?, '0.01', '5', '{"fee_rate_fraction":0.0}', 0, '2026-05-25T00:00:00+00:00',
-            '2026-05-24T08:12:00+00:00', 1, 0, 'chicago-temperature-high'
+            :ask, '0.39', :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
+            :freshness_deadline, :captured_at, 1, 0,
+            :gamma_market_id, :event_id, :event_slug, :question_id,
+            :enable_orderbook, :accepting_orders,
+            :market_start_at, :market_end_at, :market_close_at, :sports_start_at,
+            :token_map_json, :rfqe,
+            :raw_gamma_payload_hash, :raw_clob_market_info_hash, :raw_orderbook_hash,
+            :authority_tier,
+            :wide_spread_display_substitution, :depth_at_best_ask,
+            :tradeability_status_json
         )
         """,
-        (
-            selected_ask,
-            json.dumps(
-                {
-                    "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": "0.39", "size": "100"}]},
-                    "NO": {"asks": [{"price": no_selected_ask, "size": "100"}], "bids": [{"price": "0.19", "size": "100"}]},
-                },
-                separators=(",", ":"),
-            ),
-        ),
+        {"ask": selected_ask, "depth": _depth_yes_no, "freshness_deadline": freshness_deadline, "captured_at": captured_at, **_SNAP_BASE},
     )
-    conn.execute(
-        """
-        INSERT INTO executable_market_snapshots VALUES (
-            'snapshot-exec-1-no', 'condition-1', 'yes-1', 'no-1', 'no-1', 'NO',
-            ?, '0.19', ?, '0.01', '5', '{"fee_rate_fraction":0.0}', 0, '2026-05-25T00:00:00+00:00',
-            '2026-05-24T08:12:00+00:00', 1, 0, 'chicago-temperature-high'
-        )
-        """,
-        (
-            no_selected_ask,
-            json.dumps(
-                {
-                    "YES": {"asks": [{"price": selected_ask, "size": "100"}], "bids": [{"price": "0.39", "size": "100"}]},
-                    "NO": {"asks": [{"price": no_selected_ask, "size": "100"}], "bids": [{"price": "0.19", "size": "100"}]},
-                },
-                separators=(",", ":"),
-            ),
-        ),
-    )
-    for index in range(2, snapshot_condition_count + 1):
+    if include_no_snapshot:
         conn.execute(
             """
-            INSERT INTO executable_market_snapshots VALUES (
-                ?, ?, ?, ?, ?, 'YES',
-                '0.48', '0.47', ?, '0.01', '5', '{"fee_rate_fraction":0.0}', 0, '2026-05-25T00:00:00+00:00',
-                '2026-05-24T08:12:00+00:00', 1, 0, 'chicago-temperature-high'
+            INSERT INTO executable_market_snapshots (
+                snapshot_id, condition_id, yes_token_id, no_token_id,
+                selected_outcome_token_id, outcome_label,
+                orderbook_top_ask, orderbook_top_bid, orderbook_depth_json,
+                min_tick_size, min_order_size, fee_details_json, neg_risk,
+                freshness_deadline, captured_at, active, closed,
+                gamma_market_id, event_id, event_slug, question_id,
+                enable_orderbook, accepting_orders,
+                market_start_at, market_end_at, market_close_at, sports_start_at,
+                token_map_json, rfqe,
+                raw_gamma_payload_hash, raw_clob_market_info_hash, raw_orderbook_hash,
+                authority_tier,
+                wide_spread_display_substitution, depth_at_best_ask,
+                tradeability_status_json
+            ) VALUES (
+                'snapshot-exec-1-no', 'condition-1', 'yes-1', 'no-1', 'no-1', 'NO',
+                :ask, '0.19', :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
+                :freshness_deadline, :captured_at, 1, 0,
+                :gamma_market_id, :event_id, :event_slug, :question_id,
+                :enable_orderbook, :accepting_orders,
+                :market_start_at, :market_end_at, :market_close_at, :sports_start_at,
+                :token_map_json, :rfqe,
+                :raw_gamma_payload_hash, :raw_clob_market_info_hash, :raw_orderbook_hash,
+                :authority_tier,
+                :wide_spread_display_substitution, :depth_at_best_ask,
+                :tradeability_status_json
             )
             """,
-            (
-                f"snapshot-exec-{index}",
-                f"condition-{index}",
-                f"yes-{index}",
-                f"no-{index}",
-                f"yes-{index}",
-                json.dumps(
-                    {
-                        "YES": {"asks": [{"price": "0.48", "size": "100"}], "bids": [{"price": "0.47", "size": "100"}]},
-                        "NO": {"asks": [{"price": "0.60", "size": "100"}], "bids": [{"price": "0.40", "size": "100"}]},
-                    },
-                    separators=(",", ":"),
-                ),
-            ),
+            {"ask": no_selected_ask, "depth": _depth_yes_no, "freshness_deadline": freshness_deadline, "captured_at": captured_at, **_SNAP_BASE},
+        )
+    for index in range(2, snapshot_condition_count + 1):
+        _depth_extra = json.dumps(
+            {
+                "YES": {"asks": [{"price": "0.48", "size": "100"}], "bids": [{"price": "0.47", "size": "100"}]},
+                "NO": {"asks": [{"price": "0.60", "size": "100"}], "bids": [{"price": "0.40", "size": "100"}]},
+            },
+            separators=(",", ":"),
+        )
+        _extra_base = {**_SNAP_BASE, "gamma_market_id": f"gamma-mkt-{index}", "question_id": f"q-{index}",
+                       "token_map_json": json.dumps({"yes": f"yes-{index}", "no": f"no-{index}"}, separators=(",", ":"))}
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshots (
+                snapshot_id, condition_id, yes_token_id, no_token_id,
+                selected_outcome_token_id, outcome_label,
+                orderbook_top_ask, orderbook_top_bid, orderbook_depth_json,
+                min_tick_size, min_order_size, fee_details_json, neg_risk,
+                freshness_deadline, captured_at, active, closed,
+                gamma_market_id, event_id, event_slug, question_id,
+                enable_orderbook, accepting_orders,
+                market_start_at, market_end_at, market_close_at, sports_start_at,
+                token_map_json, rfqe,
+                raw_gamma_payload_hash, raw_clob_market_info_hash, raw_orderbook_hash,
+                authority_tier,
+                wide_spread_display_substitution, depth_at_best_ask,
+                tradeability_status_json
+            ) VALUES (
+                :snap_id, :cond_id, :yes_id, :no_id, :yes_id, 'YES',
+                '0.48', '0.47', :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
+                '2026-05-25T00:00:00+00:00', '2026-05-24T08:12:00+00:00', 1, 0,
+                :gamma_market_id, :event_id, :event_slug, :question_id,
+                :enable_orderbook, :accepting_orders,
+                :market_start_at, :market_end_at, :market_close_at, :sports_start_at,
+                :token_map_json, :rfqe,
+                :raw_gamma_payload_hash, :raw_clob_market_info_hash, :raw_orderbook_hash,
+                :authority_tier,
+                :wide_spread_display_substitution, :depth_at_best_ask,
+                :tradeability_status_json
+            )
+            """,
+            {
+                "snap_id": f"snapshot-exec-{index}",
+                "cond_id": f"condition-{index}",
+                "yes_id": f"yes-{index}",
+                "no_id": f"no-{index}",
+                "depth": _depth_extra,
+                **_extra_base,
+            },
         )
     conn.execute(
         """
@@ -1374,17 +1436,52 @@ def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask():
 
 
 def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists():
+    # Build a conn with only the YES-selected snapshot; the orderbook has no NO asks.
+    # The reactor must select the YES snapshot (only one for condition-1) but
+    # cannot find a NO ask → EXECUTABLE_NATIVE_ASK_MISSING.
     event = _bound_forecast_event(token_id="no-1")
-    conn = _trade_conn_with_snapshot()
-    conn.execute("DELETE FROM executable_market_snapshots WHERE selected_outcome_token_id = 'no-1'")
+    conn = _trade_conn_with_snapshot(
+        include_no_snapshot=False,
+        selected_ask="0.40",
+    )
+    # Override the YES snapshot's orderbook to omit NO asks.
+    # Table is append-only via trigger; use a fresh connection approach:
+    # Insert a SECOND yes-side snapshot with the desired depth that becomes the
+    # latest (same condition_id, later captured_at).
+    from src.state.snapshot_repo import init_snapshot_schema as _iss  # already imported at module level, but local ref for clarity
+    _no_bid_depth = json.dumps({"YES": {"asks": [{"price": "0.40", "size": "100"}], "bids": []}}, separators=(",", ":"))
     conn.execute(
         """
-        UPDATE executable_market_snapshots
-        SET orderbook_depth_json = ?
-        WHERE selected_outcome_token_id = 'yes-1'
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, yes_token_id, no_token_id,
+            selected_outcome_token_id, outcome_label,
+            orderbook_top_ask, orderbook_top_bid, orderbook_depth_json,
+            min_tick_size, min_order_size, fee_details_json, neg_risk,
+            freshness_deadline, captured_at, active, closed,
+            gamma_market_id, event_id, event_slug, question_id,
+            enable_orderbook, accepting_orders,
+            market_start_at, market_end_at, market_close_at, sports_start_at,
+            token_map_json, rfqe,
+            raw_gamma_payload_hash, raw_clob_market_info_hash, raw_orderbook_hash,
+            authority_tier,
+            wide_spread_display_substitution, depth_at_best_ask,
+            tradeability_status_json
+        ) VALUES (
+            'snapshot-exec-1-yes-v2', 'condition-1', 'yes-1', 'no-1', 'yes-1', 'YES',
+            '0.40', '0.39', :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
+            '2026-05-26T00:00:00+00:00', '2026-05-25T09:00:00+00:00', 1, 0,
+            'gamma-mkt-1', 'event-1', 'chicago-temperature-high', 'q-1',
+            1, 1,
+            NULL, NULL, NULL, NULL,
+            '{"yes":"yes-1","no":"no-1"}', NULL,
+            :gh, :ch, :oh,
+            'CLOB',
+            0, 0, '{}'
+        )
         """,
-        (json.dumps({"YES": {"asks": [{"price": "0.40", "size": "100"}], "bids": []}}, separators=(",", ":")),),
+        {"depth": _no_bid_depth, "gh": "a" * 64, "ch": "b" * 64, "oh": "d" * 64},
     )
+    conn.commit()
 
     receipt = _receipt(event, conn)
 
@@ -1469,11 +1566,10 @@ def test_executable_snapshot_gate_ignores_price_freshness_window_binds_identity(
     bin is now enforced only at submission (assert_snapshot_executable).
     """
     event = _bound_forecast_event()
-    trade_conn = _trade_conn_with_snapshot()
+    trade_conn = _trade_conn_with_snapshot(freshness_deadline="2026-05-24T08:12:30+00:00")
     forecast_conn = _trade_conn_with_snapshot()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
     trade_conn.execute("DROP TABLE market_events")
-    trade_conn.execute("UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:12:30+00:00'")
     gate = executable_snapshot_gate_from_trade_conn(
         trade_conn,
         topology_conn=forecast_conn,
@@ -1500,15 +1596,16 @@ def test_entry_gate_binds_on_identity_not_price_freshness_across_slow_family_cap
     large-family decisions structurally impossible (decision_events stuck at 0).
     """
     event = _bound_forecast_event()
-    trade_conn = _trade_conn_with_snapshot()
+    # Whole family present (identity intact) but EVERY bin price-stale relative to the
+    # decision clock — simulates a >30s full-family capture where early bins expired.
+    # captured_at (08:10) before freshness_deadline (08:11) < decision clock (08:12).
+    trade_conn = _trade_conn_with_snapshot(
+        captured_at="2026-05-24T08:10:00+00:00",
+        freshness_deadline="2026-05-24T08:11:00+00:00",
+    )
     forecast_conn = _trade_conn_with_snapshot()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
     trade_conn.execute("DROP TABLE market_events")
-    # Whole family present (identity intact) but EVERY bin price-stale relative to the
-    # decision clock — simulates a >30s full-family capture where early bins expired.
-    trade_conn.execute(
-        "UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:11:00+00:00'"
-    )
     gate = executable_snapshot_gate_from_trade_conn(trade_conn, topology_conn=forecast_conn)
 
     # NEW invariant: identity present for the full family -> gate PASSES regardless of price age.
@@ -1802,8 +1899,7 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
 
 def test_executable_snapshot_freshness_uses_reactor_decision_time():
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:12:30+00:00'")
+    conn = _trade_conn_with_snapshot(freshness_deadline="2026-05-24T08:12:30+00:00")
 
     receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
 
@@ -1820,8 +1916,12 @@ def test_price_stale_family_passes_entry_freshness_deferred_to_submission():
     EDLI kernel, not on price-staleness.)
     """
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    conn.execute("UPDATE executable_market_snapshots SET freshness_deadline = '2026-05-24T08:11:59+00:00'")
+    # captured_at before freshness_deadline (invariant: deadline >= captured);
+    # freshness_deadline is before decision_time (08:12) — simulates price-stale snapshot.
+    conn = _trade_conn_with_snapshot(
+        captured_at="2026-05-24T08:10:00+00:00",
+        freshness_deadline="2026-05-24T08:11:59+00:00",
+    )
 
     receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
 
@@ -1855,14 +1955,7 @@ def test_coverage_expired_between_event_available_and_decision_blocks_receipt(mo
 
 def test_top_ask_without_depth_does_not_create_fillable_quote():
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot(selected_ask="0.40")
-    conn.execute(
-        """
-        UPDATE executable_market_snapshots
-        SET orderbook_depth_json = '{}'
-        WHERE condition_id = 'condition-1'
-        """
-    )
+    conn = _trade_conn_with_snapshot(selected_ask="0.40", depth_json="{}")
 
     receipt = _receipt(event, conn)
 

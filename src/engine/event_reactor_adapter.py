@@ -45,6 +45,7 @@ from src.engine.event_bound_final_intent import (
     serialize_event_bound_final_intent_receipt,
     validate_final_intent_cert_for_existing_executor,
 )
+from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore
@@ -853,6 +854,7 @@ def build_event_bound_no_submit_receipt(
         family_topology_rows=family_topology_rows,
         family_snapshot_rows=family_rows,
         selected_snapshot_row=row,
+        trade_conn=trade_conn,
         forecast_conn=source_conn,
         calibration_conn=calibration_conn,
         proof=proof,
@@ -1893,6 +1895,16 @@ def _required_cert(certs: tuple[DecisionCertificate, ...], certificate_type: str
     raise ValueError(f"missing required certificate: {certificate_type}")
 
 
+def _require_snapshot_hash(snapshot: object) -> str:
+    """Return executable_snapshot_hash from a hydrated snapshot; raise if absent."""
+    if snapshot is None:
+        raise ValueError("EXECUTABLE_SNAPSHOT_HASH_UNAVAILABLE: snapshot not found in trade DB")
+    h = snapshot.executable_snapshot_hash  # type: ignore[union-attr]
+    if not h:
+        raise ValueError("EXECUTABLE_SNAPSHOT_HASH_UNAVAILABLE: hash is empty")
+    return h
+
+
 def _build_no_submit_proof_bundle_from_adapter_evidence(
     *,
     event: OpportunityEvent,
@@ -1902,6 +1914,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     family_topology_rows: list[dict[str, Any]],
     family_snapshot_rows: list[dict[str, Any]],
     selected_snapshot_row: dict[str, Any],
+    trade_conn: sqlite3.Connection,
     forecast_conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
     proof: _CandidateProof,
@@ -2112,6 +2125,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "freshness_deadline": selected_snapshot_row.get("freshness_deadline"),
                 "active": selected_snapshot_row.get("active"),
                 "closed": selected_snapshot_row.get("closed"),
+                "executable_snapshot_hash": _require_snapshot_hash(get_snapshot(trade_conn, str(proof.executable_snapshot_id or ""))),
             },
             quote_clock,
             "zeus.trades.executable_market_snapshots",

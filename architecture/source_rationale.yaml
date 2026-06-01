@@ -1368,6 +1368,13 @@ files:
     - DERIVED_ONLY
     write_routes:
     - backtest_diagnostic_write
+  src/engine/event_reactor_adapter.py:
+    zone: K2_runtime
+    authority_role: edli_event_reactor_adapter
+    why: Connects EDLI opportunity events to the event-bound no-submit proof kernel; builds AuthorityEvidence certs (EXECUTABLE_SNAPSHOT, FORECAST, etc.) and drives the decision compiler without crossing the executor/venue boundary.
+    downstream:
+    - src/events/reactor.py
+    - src/engine/event_bound_final_intent.py
   src/engine/time_context.py:
     zone: K2_runtime
     authority_role: time_semantics

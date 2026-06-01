@@ -1,9 +1,9 @@
 # Created: 2026-05-31
 # Last reused/audited: 2026-05-31
-# Authority basis: src/runtime/bankroll_provider.py (cached() 300s fail-closed window)
-#   + src/main.py:_edli_event_reactor_cycle bankroll-warm coupling defect
-#   (warm-once-at-cycle-start vs ~330s cycle → cached() STALE near cycle end →
-#   KELLY_PROOF_MISSING:bankroll_provider_unavailable on every candidate).
+# Authority basis: src/runtime/bankroll_provider.py (cached() RESILIENT bound, KILLER 1
+#   2026-05-31: default 1800s, supersedes the prior 300s fail-closed window that blanked
+#   last-good across transient wallet-RPC blip clusters) + src/main.py:_edli_event_reactor_cycle
+#   bankroll-warm coupling (warm-once-at-cycle-start vs ~330s cycle).
 """Relationship test for the dedicated EDLI bankroll-warm cycle.
 
 Cross-module invariant under test (Fitz methodology — test the boundary, not a
@@ -94,32 +94,45 @@ def _install_real_refresh_current(monkeypatch, *, fresh_value_usd: float, call_l
     monkeypatch.setattr(bankroll_provider, "current", _refreshing_current)
 
 
-def test_cached_is_none_after_300s_without_warm(monkeypatch):
-    """BUG PROOF (RED-before-fix): no warm tick → cached() STALE → None after 300s.
+def test_cached_resilient_within_bound_failclosed_beyond(monkeypatch):
+    """RESILIENCE CONTRACT (KILLER 1, 2026-05-31): a value 320s old — past the OLD
+    300s window — now STILL serves via cached()'s resilient bound (default 1800s);
+    only a value beyond the resilient bound fails closed.
 
-    Reproduces the exact live failure: the cache was last fetched >300s ago (the
-    slow-cycle condition) and nothing refreshed it, so the per-event Kelly read
-    via cached() returns None → KELLY_PROOF_MISSING:bankroll_provider_unavailable.
+    This SUPERSEDES the prior `test_cached_is_none_after_300s_without_warm`, which
+    encoded the defective 300s-blanking contract. The on-chain wallet RPC fails in
+    clusters (~38/hr); blanking cached() to None after one >300s cluster killed
+    161/308 positive-edge candidates with KELLY_PROOF_MISSING. Wallet balance moves
+    only on our own fills/settlements, so a 320s-old last-good value is faithful.
     """
     try:
-        # Last successful fetch was 320s ago (matches live log age=320.4s).
+        # 320s old (matches live log age=320.4s) — within the resilient bound.
         _set_cache(value_usd=199.40, fetched_age_seconds=320.0)
-        assert bankroll_provider.cached() is None  # the live failure mode
+        record = bankroll_provider.cached()
+        assert record is not None, (
+            "cached() must NOT blank at 320s — the resilient bound serves last-good "
+            "(this was the KILLER-1 KELLY_PROOF_MISSING defect)."
+        )
+        assert record.value_usd == 199.40
+
+        # Beyond the resilient bound (2000s > 1800s default) → genuine fail-closed.
+        _set_cache(value_usd=199.40, fetched_age_seconds=2000.0)
+        assert bankroll_provider.cached() is None
     finally:
         bankroll_provider.reset_cache_for_tests()
 
 
-def test_warm_cycle_refreshes_stale_cache_so_cached_is_fresh(monkeypatch):
-    """GREEN-after-fix: warm tick after a >300s-old fetch makes cached() non-None.
+def test_warm_cycle_refreshes_aged_cache_so_cached_is_fresh(monkeypatch):
+    """GREEN-after-fix: warm tick after a beyond-resilient-bound fetch recovers cached().
 
-    This is the boundary the fix must hold: the warm job forces a fresh on-chain
-    fetch (current(max_age_seconds=0.0)) which advances _last_fetched_at, so the
-    downstream cached() (300s window) resolves even though the PRIOR warm aged out.
+    The boundary the warm job must hold: it forces a fresh on-chain fetch
+    (current(max_age_seconds=0.0)) which advances _last_fetched_at, so the downstream
+    cached() resolves even though the PRIOR warm aged past the resilient bound.
     """
     try:
-        # Simulate the slow-cycle condition: prior warm was 320s ago.
-        _set_cache(value_usd=199.40, fetched_age_seconds=320.0)
-        assert bankroll_provider.cached() is None  # pre-warm: stale → None
+        # Prior warm aged PAST the resilient bound (2000s) → cached() fails closed.
+        _set_cache(value_usd=199.40, fetched_age_seconds=2000.0)
+        assert bankroll_provider.cached() is None  # pre-warm: genuinely stale → None
 
         # The warm calls current(max_age_seconds=0.0); install a current() that
         # actually refreshes the module cache (real-fetch semantics, no live wallet).
@@ -133,9 +146,7 @@ def test_warm_cycle_refreshes_stale_cache_so_cached_is_fresh(monkeypatch):
         # The warm forced exactly one fresh fetch (max_age_seconds=0.0).
         assert call_log == [1]
 
-        # Now cached() resolves non-None and reflects the fresh fetch — the boundary
-        # the structural fix must hold: warm tick → cached() fresh even though the
-        # PRIOR warm was >300s ago.
+        # cached() now resolves non-None and reflects the fresh fetch.
         record = bankroll_provider.cached()
         assert record is not None
         assert record.value_usd == 201.10
