@@ -192,7 +192,11 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     assert not any(job_id.startswith("update_reaction_") for job_id in job_ids)
     assert "day0_capture" not in job_ids
     assert "imminent_open_capture" not in job_ids
-    assert "market_discovery" not in job_ids
+    # market_discovery is registered in EDLI event-driven modes as a DATA-ONLY substrate
+    # refresh for executable_market_snapshots (structural fix: EMS substrate must stay
+    # fresh in EDLI modes; market_discovery is the only EMS writer). Gated by
+    # market_substrate_refresh_enabled (default True). Not a legacy-cron arming job.
+    assert "market_discovery" in job_ids
     assert "harvester" not in job_ids
     assert "heartbeat" in job_ids
     assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_submit_disabled_bridge"
