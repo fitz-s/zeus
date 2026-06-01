@@ -12,6 +12,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
+from collections.abc import Mapping
 from typing import Any, Callable
 
 import numpy as np
@@ -266,6 +267,8 @@ def event_bound_live_adapter_from_trade_conn(
     executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     durable_submit_outbox_enabled: bool = False,
+    canary_force_taker_provider: Callable[[], bool] | None = None,
+    taker_fok_fak_live_enabled: bool = False,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -311,6 +314,19 @@ def event_bound_live_adapter_from_trade_conn(
                 reason="EXECUTOR_BOUNDARY_MISSING",
                 proof_accepted=False,
             )
+        # Canary knob (§7): force the taker branch (bypassing the governor's
+        # maker/taker CHOICE, never its NO_TRADE/risk gates) while the canary is
+        # active and below its min fill count. main.py owns the count gate via
+        # ``canary_force_taker_provider``; absent a provider, the canary stage
+        # flag itself drives the force (the count gate lives upstream in the
+        # stage-readiness check).
+        if canary_force_taker_provider is not None:
+            try:
+                canary_force_taker = bool(canary_force_taker_provider())
+            except Exception:
+                canary_force_taker = bool(live_canary_enabled)
+        else:
+            canary_force_taker = bool(live_canary_enabled)
         try:
             if real_order_submit_enabled:
                 build_conn = live_cap_conn or trade_conn
@@ -323,6 +339,8 @@ def event_bound_live_adapter_from_trade_conn(
                         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                         live_cap_conn=build_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
+                        canary_force_taker=canary_force_taker,
+                        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
                     ),
                 )
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -379,6 +397,8 @@ def event_bound_live_adapter_from_trade_conn(
                         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                         live_cap_conn=build_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
+                        canary_force_taker=canary_force_taker,
+                        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
                     ),
                 )
                 side_effect_status = "SUBMIT_DISABLED"
@@ -922,6 +942,8 @@ def _build_submit_disabled_live_certificates(
     tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
+    canary_force_taker: bool = False,
+    taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     command_certificates = _build_live_execution_command_certificates(
         event=event,
@@ -930,6 +952,8 @@ def _build_submit_disabled_live_certificates(
         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
         live_cap_conn=live_cap_conn,
         pre_submit_authority_provider=pre_submit_authority_provider,
+        canary_force_taker=canary_force_taker,
+        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
     receipt_cert = build_execution_receipt_certificate(
@@ -955,6 +979,8 @@ def _build_live_execution_command_certificates(
     tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
+    canary_force_taker: bool = False,
+    taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     proof_bundle = receipt.decision_proof_bundle
     compile_result = DecisionCompiler().compile_no_submit(
@@ -989,6 +1015,17 @@ def _build_live_execution_command_certificates(
         forecast_authority = _required_cert(base_certs, claims.FORECAST_AUTHORITY)
         quote_feasibility = _required_cert(base_certs, claims.QUOTE_FEASIBILITY)
         cost_model = _required_cert(base_certs, claims.COST_MODEL)
+        quote_payload = quote_feasibility.payload
+        best_bid = _optional_float(quote_payload.get("best_bid"))
+        best_ask = _optional_float(quote_payload.get("best_ask"))
+        order_mode = _select_edli_order_mode(
+            actionable_payload=actionable.payload,
+            quote_payload=quote_payload,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            executable_snapshot=executable_snapshot,
+            canary_force_taker=canary_force_taker,
+        )
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -1003,8 +1040,12 @@ def _build_live_execution_command_certificates(
                 decision_time=decision_time,
             ),
             decision_time=decision_time,
+            order_mode=order_mode,
             tick_size=_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
+            best_bid=best_bid,
+            best_ask=best_ask,
+            taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
         )
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
         aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
@@ -1633,14 +1674,186 @@ def _passive_maker_context_from_authorities(
         raise ValueError("EXECUTABLE_SNAPSHOT_SOURCE_AVAILABLE_AT_REQUIRED")
     spread_usd = max(0.0, float(best_ask) - float(best_bid))
     p_fill_lcb = float(actionable.payload.get("p_fill_lcb") or 0.0)
+    # Adverse-selection proxy (§4 Dim 4.2): A ~= recent belief volatility x spread.
+    # Belief volatility is sourced from the actionable's prior-cycle posterior when
+    # available (|q_posterior - q_posterior_prev|); absent a trustworthy prior we
+    # fall back to A = 0, which biases the §2 boundary toward maker (the
+    # conservative, documented default — never fabricate adverse cost we can't
+    # source). queue_depth_ahead uses the quote's visible depth when present.
+    adverse_selection_score = _adverse_selection_proxy(
+        actionable_payload=actionable.payload,
+        spread_usd=spread_usd,
+    )
+    queue_depth_ahead = _queue_depth_ahead_from_quote(quote_payload)
     return {
         "spread_usd": spread_usd,
         "quote_age_ms": int(max(0.0, (decision_time - quote_available_at).total_seconds() * 1000.0)),
         "expected_fill_probability": str(max(min(p_fill_lcb, 1.0), 0.0001)),
-        "queue_depth_ahead": None,
-        "adverse_selection_score": None,
+        "queue_depth_ahead": queue_depth_ahead,
+        "adverse_selection_score": adverse_selection_score,
         "orderbook_hash_age_ms": int(max(0.0, (decision_time - snapshot_available_at).total_seconds() * 1000.0)),
+        "best_bid": float(best_bid),
+        "best_ask": float(best_ask),
     }
+
+
+def _adverse_selection_proxy(*, actionable_payload: Mapping[str, object], spread_usd: float) -> str | None:
+    """A ~= |q_posterior - q_posterior_prev| * spread (Dim 4.2 cheap proxy).
+
+    Returns None (the conservative default that biases toward maker) when no
+    trustworthy prior-cycle belief is available — Fitz #4: do not fabricate an
+    adverse-selection cost from data we do not have.
+    """
+    q_now = actionable_payload.get("q_live")
+    q_prev = actionable_payload.get("q_live_prev_cycle")
+    if q_now in (None, "") or q_prev in (None, ""):
+        return None
+    try:
+        belief_move = abs(float(q_now) - float(q_prev))
+    except (TypeError, ValueError):
+        return None
+    return str(max(0.0, belief_move * float(spread_usd)))
+
+
+def _queue_depth_ahead_from_quote(quote_payload: Mapping[str, object]) -> str | None:
+    """Best-effort queue-ahead size from the quote's visible depth, else None."""
+    for key in ("queue_depth_ahead", "bid_queue_size", "visible_depth"):
+        raw = quote_payload.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            return str(max(0.0, float(raw)))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _select_edli_order_mode(
+    *,
+    actionable_payload: Mapping[str, object],
+    quote_payload: Mapping[str, object],
+    best_bid: float | None,
+    best_ask: float | None,
+    executable_snapshot: DecisionCertificate,
+    canary_force_taker: bool = False,
+    canary_edge_floor: float | None = None,
+) -> str:
+    """Select MAKER/TAKER for the entry per design §1-§2 (governor + EV override).
+
+    Authority order (Fitz #4 provenance):
+      1. Canary knob (§7): when ``canary_force_taker`` and the post-cross edge
+         clears the 5c floor, FORCE taker. This bypasses the governor's
+         maker/taker CHOICE but never its NO_TRADE/risk gates (those gate the
+         candidate upstream before this point and remain in force).
+      2. Governor (§1): consult ``maker_or_taker`` when a global governor is
+         configured. NO_TRADE is impossible here (the candidate already cleared
+         the gates) but is mapped to MAKER (the conservative resting default).
+      3. EV override (§2): even when the governor says MAKER, cross if the
+         economic boundary ``e*(1-P_fill) >= s/2*(1+P_fill) + f - A`` holds.
+
+    Defaults to MAKER (the pre-change passive law) whenever inputs are missing —
+    a partial/uncertain signal must never silently produce a taker cross.
+    """
+    side = "BUY" if str(actionable_payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
+    reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+
+    # --- 1. Canary force-taker (with 5c post-cross edge floor) ---
+    if canary_force_taker:
+        floor = 0.05 if canary_edge_floor is None else float(canary_edge_floor)
+        post_cross_edge = _post_cross_edge(
+            actionable_payload=actionable_payload, best_bid=best_bid, best_ask=best_ask, side=side
+        )
+        if post_cross_edge is not None and post_cross_edge >= floor:
+            return "TAKER"
+        # Floor not met: fall through to governor/EV (do NOT force a sub-floor cross).
+
+    # --- 2. Governor maker_or_taker ---
+    governor_mode = _governor_mode_for_snapshot(executable_snapshot)
+    if governor_mode == "TAKER":
+        return "TAKER"
+
+    # --- 3. Economic EV override (§2 boundary) ---
+    if _ev_boundary_favors_cross(
+        actionable_payload=actionable_payload,
+        quote_payload=quote_payload,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        reservation=reservation,
+        side=side,
+    ):
+        return "TAKER"
+    return "MAKER"
+
+
+def _governor_mode_for_snapshot(executable_snapshot: DecisionCertificate) -> str:
+    """Return the global governor's maker/taker mode, or MAKER if unavailable.
+
+    The candidate has already passed the upstream NO_TRADE/risk gates, so a
+    NO_TRADE here (or an unconfigured governor) maps to the conservative MAKER
+    resting default rather than blocking — the design routes order-TYPE only.
+    """
+    try:
+        from src.risk_allocator import select_global_order_type
+
+        order_type = select_global_order_type(executable_snapshot.payload)
+    except Exception:
+        return "MAKER"
+    return "TAKER" if str(order_type).strip().upper() in {"FOK", "FAK"} else "MAKER"
+
+
+def _post_cross_edge(
+    *,
+    actionable_payload: Mapping[str, object],
+    best_bid: float | None,
+    best_ask: float | None,
+    side: str,
+) -> float | None:
+    """q_posterior - far_touch - fee  (the §7 canary edge floor numerator)."""
+    q = _optional_float(actionable_payload.get("q_live"))
+    fee = _optional_float(actionable_payload.get("fee_rate")) or 0.0
+    if q is None:
+        return None
+    if side == "BUY":
+        if best_ask is None:
+            return None
+        return q - best_ask - fee
+    if best_bid is None:
+        return None
+    return best_bid - q - fee
+
+
+def _ev_boundary_favors_cross(
+    *,
+    actionable_payload: Mapping[str, object],
+    quote_payload: Mapping[str, object],
+    best_bid: float | None,
+    best_ask: float | None,
+    reservation: float | None,
+    side: str,
+) -> bool:
+    """§2 boundary: cross iff e*(1-P_fill) >= s/2*(1+P_fill) + f - A.
+
+    Conservative: returns False (rest as maker) on any missing input.
+    """
+    e = _optional_float(actionable_payload.get("trade_score"))
+    if e is None:
+        e = _optional_float(actionable_payload.get("q_live"))
+        c = _optional_float(actionable_payload.get("c_fee_adjusted"))
+        if e is not None and c is not None:
+            e = (e - c) if side == "BUY" else (c - e)
+    if e is None or best_bid is None or best_ask is None:
+        return False
+    spread = max(0.0, best_ask - best_bid)
+    p_fill = _optional_float(actionable_payload.get("p_fill_lcb"))
+    if p_fill is None:
+        return False
+    p_fill = max(0.0, min(1.0, p_fill))
+    fee = _optional_float(actionable_payload.get("fee_rate")) or 0.0
+    adverse = _adverse_selection_proxy(actionable_payload=actionable_payload, spread_usd=spread)
+    a = float(adverse) if adverse is not None else 0.0
+    lhs = e * (1.0 - p_fill)
+    rhs = (spread / 2.0) * (1.0 + p_fill) + fee - a
+    return lhs >= rhs
 
 
 def _release_live_cap_certificate(

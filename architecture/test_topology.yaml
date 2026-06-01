@@ -61,6 +61,7 @@ test_trust_policy:
     tests/events/test_reactor.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/events/test_continuous_redecision_exit.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/engine/test_substrate_illiquid_bin_capture.py: {created: "2026-05-30", last_used: "2026-05-30"}
     tests/engine/test_trade_score_direction_semantics.py: {created: "2026-05-30", last_used: "2026-05-30"}
@@ -78,6 +79,8 @@ test_trust_policy:
     tests/decision_kernel/test_certificate_ledger.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_actionable_trade_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_execution_command_certificate.py: {created: "2026-05-25", last_used: "2026-05-25"}
+    tests/decision_kernel/test_taker_execution_law.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/decision_kernel/test_canary_force_taker_gate.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/decision_kernel/test_no_submit_compiler.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_forecast_authority_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_quote_adapter.py: {created: "2026-05-25", last_used: "2026-05-25"}

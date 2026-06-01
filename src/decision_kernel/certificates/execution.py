@@ -29,14 +29,37 @@ def build_final_intent_certificate_from_actionable(
     decision_source_context,
     passive_maker_context,
     decision_time: datetime,
-    order_type: str = "POST_ONLY_LIMIT",
-    time_in_force: str = "GTC",
+    order_mode: str = "MAKER",
+    order_type: str | None = None,
+    time_in_force: str | None = None,
     tick_size: float = 0.01,
     min_order_size: float = 1.0,
     fee_rate: float = 0.0,
+    best_bid: float | None = None,
+    best_ask: float | None = None,
+    taker_fok_fak_live_enabled: bool = False,
 ) -> DecisionCertificate:
     action = actionable_cert.payload
-    limit_price = float(action["c_fee_adjusted"])
+    # The governor-decided ``order_mode`` is the SOLE authority for the order-type
+    # tuple (Fitz #4 provenance): this builder is the only authorized emitter of a
+    # taker tuple, and it only emits one when order_mode == "TAKER". A partial
+    # change across the three layers ships a broken order type, so the mode drives
+    # order_type / time_in_force / post_only / maker_intent together here.
+    order_spec = _order_spec_for_mode(
+        order_mode=order_mode,
+        order_type=order_type,
+        time_in_force=time_in_force,
+    )
+    reservation = float(action["c_fee_adjusted"])
+    limit_price = _branch_limit_price(
+        side=_side_for_direction(str(action["direction"])),
+        order_mode=order_spec.mode,
+        reservation=reservation,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        tick_size=float(tick_size),
+        passive_maker_context=passive_maker_context,
+    )
     reserved_notional = float(action.get("live_cap_reserved_notional_usd") or action.get("kelly_size_usd") or 0.0)
     size = max(float(min_order_size), reserved_notional / limit_price)
     notional = size * limit_price
@@ -54,11 +77,12 @@ def build_final_intent_certificate_from_actionable(
         "token_id": action["token_id"],
         "direction": action["direction"],
         "side": _side_for_direction(str(action["direction"])),
-        "order_type": order_type,
-        "executor_order_type": time_in_force,
-        "time_in_force": time_in_force,
-        "post_only": True,
-        "maker_intent": True,
+        "order_type": order_spec.order_type,
+        "executor_order_type": order_spec.time_in_force,
+        "time_in_force": order_spec.time_in_force,
+        "post_only": order_spec.post_only,
+        "maker_intent": order_spec.maker_intent,
+        "order_mode": order_spec.mode,
         "limit_price": limit_price,
         "size": size,
         "notional_usd": notional,
@@ -78,6 +102,7 @@ def build_final_intent_certificate_from_actionable(
         "source": "existing_final_intent_builder",
         "submitted": False,
         "venue_order_id": None,
+        "taker_fok_fak_live_enabled": bool(taker_fok_fak_live_enabled),
     }
     return _build_cert(
         claims.FINAL_INTENT,
@@ -344,6 +369,135 @@ def _build_cert(
         algorithm_id="edli.event_bound_execution_certificate_builder",
         algorithm_version="v1",
     )
+
+
+class _OrderSpec:
+    """Resolved order-type tuple for a governor-decided mode.
+
+    The four fields move together: a maker tuple is post-only GTC/GTD; a taker
+    tuple is FOK/FAK marketable-limit with post_only=False. Emitting any mixed
+    tuple is a defect the three verifier layers will reject.
+    """
+
+    __slots__ = ("mode", "order_type", "time_in_force", "post_only", "maker_intent")
+
+    def __init__(self, *, mode: str, order_type: str, time_in_force: str, post_only: bool, maker_intent: bool):
+        self.mode = mode
+        self.order_type = order_type
+        self.time_in_force = time_in_force
+        self.post_only = post_only
+        self.maker_intent = maker_intent
+
+
+_TAKER_ORDER_TYPES = {"FOK_LIMIT", "FAK_LIMIT"}
+_TAKER_TIF = {"FOK", "FAK"}
+_MAKER_ORDER_TYPES = {"LIMIT", "GTC_LIMIT", "POST_ONLY_LIMIT"}
+_MAKER_TIF = {"GTC", "GTD"}
+
+
+def _order_spec_for_mode(*, order_mode: str, order_type: str | None, time_in_force: str | None) -> _OrderSpec:
+    mode = str(order_mode or "MAKER").strip().upper()
+    if mode == "TAKER":
+        resolved_tif = str(time_in_force or "FOK").strip().upper()
+        if resolved_tif not in _TAKER_TIF:
+            raise ValueError(f"taker mode requires FOK/FAK time_in_force, got {resolved_tif!r}")
+        resolved_order_type = str(order_type or f"{resolved_tif}_LIMIT").strip().upper()
+        if resolved_order_type not in _TAKER_ORDER_TYPES:
+            raise ValueError(f"taker mode requires FOK_LIMIT/FAK_LIMIT order_type, got {resolved_order_type!r}")
+        return _OrderSpec(
+            mode="TAKER",
+            order_type=resolved_order_type,
+            time_in_force=resolved_tif,
+            post_only=False,
+            maker_intent=False,
+        )
+    if mode == "MAKER":
+        resolved_tif = str(time_in_force or "GTC").strip().upper()
+        if resolved_tif not in _MAKER_TIF:
+            raise ValueError(f"maker mode requires GTC/GTD time_in_force, got {resolved_tif!r}")
+        resolved_order_type = str(order_type or "POST_ONLY_LIMIT").strip().upper()
+        if resolved_order_type not in _MAKER_ORDER_TYPES:
+            raise ValueError(f"maker mode requires passive order_type, got {resolved_order_type!r}")
+        return _OrderSpec(
+            mode="MAKER",
+            order_type=resolved_order_type,
+            time_in_force=resolved_tif,
+            post_only=True,
+            maker_intent=True,
+        )
+    raise ValueError(f"unsupported order_mode {order_mode!r}; expected MAKER or TAKER")
+
+
+def _branch_limit_price(
+    *,
+    side: str,
+    order_mode: str,
+    reservation: float,
+    best_bid: float | None,
+    best_ask: float | None,
+    tick_size: float,
+    passive_maker_context,
+) -> float:
+    """Branch-correct, reservation-capped limit price.
+
+    RESERVATION-CAP INVARIANT: no order, maker or taker, is ever priced worse
+    than ``reservation`` (= c_fee_adjusted). This is the structural anti-anti-
+    alpha guard — a cross can never be -EV.
+
+    BUY:  taker -> min(best_ask, reservation); maker -> min(best_bid+tick, reservation)
+    SELL: taker -> max(best_bid, reservation); maker -> max(best_ask-tick, reservation)
+
+    When bid/ask are unavailable, the price falls back to ``reservation`` (the
+    pre-change behavior — rest at the reservation), which is always within cap.
+    """
+    bid = _coerce_price(best_bid, passive_maker_context, "best_bid")
+    ask = _coerce_price(best_ask, passive_maker_context, "best_ask")
+    if order_mode == "TAKER":
+        if side == "BUY":
+            far = ask if ask is not None else reservation
+            return _tick_round_down(min(far, reservation), tick_size)
+        near = bid if bid is not None else reservation
+        return _tick_round_up(max(near, reservation), tick_size)
+    # maker: improve the touch by one tick, capped by reservation
+    if side == "BUY":
+        improved = (bid + tick_size) if bid is not None else reservation
+        return _tick_round_down(min(improved, reservation), tick_size)
+    improved = (ask - tick_size) if ask is not None else reservation
+    return _tick_round_up(max(improved, reservation), tick_size)
+
+
+def _coerce_price(value, passive_maker_context, key: str) -> float | None:
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(passive_maker_context, Mapping):
+        raw = passive_maker_context.get(key)
+    else:
+        raw = getattr(passive_maker_context, key, None)
+    if raw in (None, ""):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tick_round_down(price: float, tick_size: float) -> float:
+    if tick_size <= 0:
+        return price
+    import math
+
+    return round(math.floor(price / tick_size + 1e-9) * tick_size, 10)
+
+
+def _tick_round_up(price: float, tick_size: float) -> float:
+    if tick_size <= 0:
+        return price
+    import math
+
+    return round(math.ceil(price / tick_size - 1e-9) * tick_size, 10)
 
 
 def _side_for_direction(direction: str) -> str:

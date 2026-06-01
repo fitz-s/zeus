@@ -187,11 +187,30 @@ def _final_execution_intent_from_payload(final_payload: dict):
             else int(passive_payload["orderbook_hash_age_ms"])
         ),
     )
-    if final_payload.get("post_only") is not True or final_payload.get("maker_intent") is not True:
-        raise EventBoundExecutorExpressibilityError("current executor law requires post_only maker intent")
     executor_order_type = str(final_payload.get("executor_order_type") or final_payload.get("time_in_force") or "")
-    if executor_order_type not in {"GTC", "GTD"}:
-        raise EventBoundExecutorExpressibilityError("post_only maker final intent requires GTC/GTD executor_order_type")
+    is_taker = (
+        final_payload.get("post_only") is False
+        and final_payload.get("maker_intent") is False
+        and executor_order_type in {"FOK", "FAK"}
+    )
+    if is_taker:
+        # Taker path is authorized ONLY when the governor-decided cert carries the
+        # full taker tuple (post_only False, maker_intent False, FOK/FAK). The
+        # currently-dead config flag finally gates taker submission here.
+        from src.strategy.live_inference.trade_score import assert_taker_live_allowed
+
+        assert_taker_live_allowed(
+            taker_fok_fak_live_enabled=bool(final_payload.get("taker_fok_fak_live_enabled", False))
+        )
+        order_policy = "marketable_limit_depth_bound"
+        post_only = False
+    else:
+        if final_payload.get("post_only") is not True or final_payload.get("maker_intent") is not True:
+            raise EventBoundExecutorExpressibilityError("current executor law requires post_only maker intent")
+        if executor_order_type not in {"GTC", "GTD"}:
+            raise EventBoundExecutorExpressibilityError("post_only maker final intent requires GTC/GTD executor_order_type")
+        order_policy = "post_only_passive_limit"
+        post_only = True
     size = _decimal(final_payload.get("size"), "size")
     limit_price = _decimal(final_payload.get("limit_price"), "limit_price")
     return FinalExecutionIntent(
@@ -204,9 +223,9 @@ def _final_execution_intent_from_payload(final_payload: dict):
         final_limit_price=limit_price,
         expected_fill_price_before_fee=limit_price,
         fee_adjusted_execution_price=limit_price,
-        order_policy="post_only_passive_limit",
+        order_policy=order_policy,
         order_type=executor_order_type,
-        post_only=True,
+        post_only=post_only,
         cancel_after=_cancel_after(final_payload),
         snapshot_id=str(final_payload["executable_snapshot_id"]),
         snapshot_hash=snapshot_hash,

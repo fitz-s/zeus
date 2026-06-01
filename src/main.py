@@ -3454,9 +3454,11 @@ def _edli_event_reactor_cycle() -> None:
                 get_current_level=get_current_level,
                 real_order_submit_enabled=real_order_submit_enabled if reactor_mode == "live" else False,
                 live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
+                taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
+                canary_force_taker_provider=_edli_canary_force_taker_provider(conn, edli_cfg),
                 pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(conn, edli_cfg),
                 executor_submit=lambda final_intent_cert, execution_command_cert: submit_event_bound_final_intent_via_existing_executor(
                     final_intent_cert=final_intent_cert,
@@ -3708,6 +3710,46 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
         ):
             filtered.append(market)
     return filtered
+
+
+def _edli_canary_force_taker_provider(world_conn, edli_cfg):
+    """Build the canary force-taker gate: True iff canary-active AND fills < min.
+
+    Design §4 item 7: the canary FORCES the taker branch (bypassing the
+    governor's maker/taker CHOICE, never its NO_TRADE/risk gates) only while the
+    live-canary stage is enabled AND the proven canary fill count is still below
+    ``edli_live_min_canary_count``. Once the min fills land, the gate returns
+    False and order-type selection reverts to the governor + EV boundary (§1-§2).
+
+    The confirmed-fill count is sourced from the world DB EDLI live-order audit
+    (``edli_live_profit_audit`` / ``edli_live_order_events``, db: world). When the
+    count cannot be computed (tables absent at canary genesis, or a read error),
+    the gate fails OPEN to force-taker: the canary stage is, by definition, not
+    yet proven, so forcing the deterministic FOK proof is the conservative
+    canary-stage default (Fitz #4: do not infer "canary complete" from a missing
+    count).
+    """
+
+    if not bool(edli_cfg.get("live_canary_enabled", False)):
+        return lambda: False
+    min_canary_count = int(edli_cfg.get("edli_live_min_canary_count", 1))
+
+    def _provider() -> bool:
+        try:
+            from src.events.live_profit_audit import (
+                _canonical_promotion_rows,
+                _promotion_summary_from_rows,
+            )
+
+            rows = _canonical_promotion_rows(world_conn)
+            summary = _promotion_summary_from_rows(world_conn, rows)
+            confirmed = int(summary.confirmed_fill_count)
+        except Exception:
+            # Count unavailable -> canary not proven -> force the taker proof.
+            return True
+        return confirmed < min_canary_count
+
+    return _provider
 
 
 def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
