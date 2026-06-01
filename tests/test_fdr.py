@@ -154,7 +154,14 @@ class TestFDRFilter:
         p_values = [0.005, 0.01, 0.025, 0.05, 0.08, 0.12, 0.15, 0.30, 0.50, 0.90]
         edges = [_make_edge(p) for p in p_values]
 
-        result = fdr_filter(edges, fdr_alpha=0.10)
+        # S6 (2026-06-01): these 10 edges ARE the complete tested family for
+        # this fixture. Q4 structural contract (2026-06-01) requires BOTH the
+        # family_complete=True provenance assertion AND full_family_size equal
+        # to len(edges); the assert len(edges) == full_family_size proves the
+        # attestation is not over a subset. Assertions below are unchanged.
+        result = fdr_filter(
+            edges, fdr_alpha=0.10, family_complete=True, full_family_size=len(edges)
+        )
 
         # k=1: p=0.005 <= 0.01 ✓
         # k=2: p=0.01  <= 0.02 ✓
@@ -168,26 +175,34 @@ class TestFDRFilter:
     def test_all_significant(self):
         """All p-values very low → all pass."""
         edges = [_make_edge(0.001) for _ in range(5)]
-        result = fdr_filter(edges, fdr_alpha=0.10)
+        result = fdr_filter(
+            edges, fdr_alpha=0.10, family_complete=True, full_family_size=len(edges)
+        )
         assert len(result) == 5
 
     def test_none_significant(self):
         """All p-values high → none pass."""
         edges = [_make_edge(0.50) for _ in range(5)]
-        result = fdr_filter(edges, fdr_alpha=0.10)
+        result = fdr_filter(
+            edges, fdr_alpha=0.10, family_complete=True, full_family_size=len(edges)
+        )
         assert len(result) == 0
 
     def test_empty_input(self):
-        assert fdr_filter([], fdr_alpha=0.10) == []
+        assert fdr_filter([], fdr_alpha=0.10, family_complete=True, full_family_size=0) == []
 
     def test_single_edge_passes(self):
         """Single edge with p=0.05, fdr=0.10 → passes (0.05 <= 0.10 * 1/1)."""
-        result = fdr_filter([_make_edge(0.05)], fdr_alpha=0.10)
+        result = fdr_filter(
+            [_make_edge(0.05)], fdr_alpha=0.10, family_complete=True, full_family_size=1
+        )
         assert len(result) == 1
 
     def test_single_edge_fails(self):
         """Single edge with p=0.15, fdr=0.10 → fails (0.15 > 0.10)."""
-        result = fdr_filter([_make_edge(0.15)], fdr_alpha=0.10)
+        result = fdr_filter(
+            [_make_edge(0.15)], fdr_alpha=0.10, family_complete=True, full_family_size=1
+        )
         assert len(result) == 0
 
 
@@ -738,9 +753,18 @@ class TestSelectionFamilySubstrate:
         # S4 R9 P10B: temperature_metric inserted after target_date.
         assert family_ids == ["hyp|update_reaction|NYC|2026-04-01|high|update_reaction|snap=snap-1"]
         assert family_strategy_keys == [""]
+        # S6-FDR (2026-06-01): the buy_no shoulder hypothesis classifies as
+        # shoulder_impossible_tail_capture, NOT the retired/refuted
+        # shoulder_sell. Commit d07fed213a (2026-05-22, "retire shoulder_sell
+        # (refuted) + add shoulder_impossible_tail_capture") made shoulder_sell
+        # dead law; _classify_via_registry now routes a shoulder buy_no
+        # hypothesis to the current physical-bound key. This test assertion
+        # carried the stale strategy name (legacy-until-audited); updated to the
+        # authoritative production classification. Assertion strength unchanged
+        # — still an exact two-key set, just with the current key.
         assert {meta["hypothesis_strategy_key"] for meta in hypothesis_meta} == {
             "center_buy",
-            "shoulder_sell",
+            "shoulder_impossible_tail_capture",
         }
 
     def test_full_family_selection_keeps_family_strategy_blank_when_partially_unclassified(self, tmp_path):

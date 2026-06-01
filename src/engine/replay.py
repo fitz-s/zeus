@@ -1489,6 +1489,62 @@ def resolve_trade_history_subject(conn, subject_ref: str) -> TradeHistorySubject
 # Core replay engine
 # ---------------------------------------------------------------------------
 
+def _selected_keys_from_full_family_for_replay(
+    hypotheses: list,
+    *,
+    city_name: str,
+    target_date: str,
+    temperature_metric: str,
+    decision_snapshot_id: str,
+) -> set[tuple[int, str]]:
+    """Replay full-family BH selector (mirror of the live evaluator path).
+
+    S6-FDR (2026-06-01): replay must run Benjamini-Hochberg over the FULL
+    tested family (every bin/direction hypothesis from
+    ``scan_full_hypothesis_family``), not the ``find_edges`` survivor subset.
+    Returns the set of ``(support_index, direction)`` keys selected post-FDR
+    AND passing the per-hypothesis prefilter — identical selection contract to
+    ``evaluator._selected_edge_keys_from_full_family``.
+
+    The BH denominator ``m`` is ``len(hypotheses)`` (the complete family), so
+    the significance threshold is NOT inflated by a shrunken survivor count.
+    """
+    from src.strategy.selection_family import apply_familywise_fdr, make_hypothesis_family_id
+    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+    if not hypotheses:
+        return set()
+    # Replay is a single-candidate/single-snapshot family. The discovery_mode
+    # string is not load-bearing here (one family per call); use a stable
+    # replay scope so the BH budget is per-candidate × snapshot.
+    family_id = make_hypothesis_family_id(
+        cycle_mode="replay_audit",
+        city=city_name,
+        target_date=target_date,
+        temperature_metric=temperature_metric,
+        discovery_mode="replay_audit",
+        decision_snapshot_id=decision_snapshot_id,
+    )
+    rows = [
+        {
+            "family_id": family_id,
+            "hypothesis_id": f"{family_id}|{h.range_label}|{h.direction}",
+            "p_value": h.p_value,
+            "tested": True,
+            "passed_prefilter": h.passed_prefilter,
+            "support_index": int(h.index),
+            "direction": h.direction,
+        }
+        for h in hypotheses
+    ]
+    selected_rows = apply_familywise_fdr(rows, q=DEFAULT_FDR_ALPHA)
+    return {
+        (int(row["support_index"]), str(row["direction"]))
+        for row in selected_rows
+        if bool(row.get("selected_post_fdr")) and bool(row.get("passed_prefilter"))
+    }
+
+
 def _replay_one_settlement(
     ctx: ReplayContext,
     city: City,
@@ -1510,7 +1566,7 @@ def _replay_one_settlement(
     if False:
         _ = None.selected_method
     from src.calibration.manager import get_calibrator
-    from src.strategy.fdr_filter import fdr_filter
+    from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
     from src.strategy.kelly import dynamic_kelly_mult
     from src.engine.evaluator import _default_weather_fee_rate, _size_at_execution_price_boundary
     from src.contracts.execution_price import polymarket_fee
@@ -1676,8 +1732,41 @@ def _replay_one_settlement(
             round_fn=_round_fn,
             posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         )
-        edges = analysis.find_edges(n_bootstrap=edge_n_bootstrap())
-        filtered = fdr_filter(edges)
+        _n_bootstrap = edge_n_bootstrap()
+        edges = analysis.find_edges(n_bootstrap=_n_bootstrap)
+        # S6-FDR (2026-06-01): replay selection runs BH over the FULL tested
+        # family, NOT the find_edges() positive-CI survivor subset. The prior
+        # `fdr_filter(edges)` here ran BH with m=len(survivors) — an inflated
+        # denominator (fewer hypotheses → looser threshold → more false
+        # accepts). That diverged from the live evaluator, which selects via
+        # scan_full_hypothesis_family + apply_familywise_fdr over every tested
+        # bin/direction hypothesis. Replay must use the same full-family
+        # denominator so its FDR verdict matches production.
+        full_family_hypotheses = scan_full_hypothesis_family(
+            analysis, n_bootstrap=_n_bootstrap
+        )
+        selected_edge_keys = _selected_keys_from_full_family_for_replay(
+            full_family_hypotheses,
+            city_name=city.name,
+            target_date=target_date,
+            temperature_metric=temperature_metric,
+            decision_snapshot_id=str(decision_ref.get("snapshot_id") or ""),
+        )
+        edge_keys = {
+            (int(edge.support_index), edge.direction)
+            for edge in edges
+            if edge.support_index is not None
+        }
+        # The full-family selector may only ever pick hypotheses that ALSO
+        # materialized as executable edges in find_edges(); intersect so a
+        # selected-but-unexecutable hypothesis cannot leak a phantom trade.
+        selected_executable = selected_edge_keys & edge_keys
+        filtered = [
+            edge
+            for edge in edges
+            if edge.support_index is not None
+            and (int(edge.support_index), edge.direction) in selected_executable
+        ]
     else:
         edges = []
         filtered = []
