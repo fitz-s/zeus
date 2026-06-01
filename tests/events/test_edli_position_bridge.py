@@ -381,6 +381,111 @@ def test_defect2_bridged_position_is_exit_eligible_via_legacy_path(conn):
 
 
 # --------------------------------------------------------------------------- #
+# WALL-D: relationship test — bridged position + fresh chain observation →
+# chain_shares populated via _append_canonical_chain_observation_if_available
+# (the no-size-mismatch branch added by task #56).
+#
+# RED baseline: after bridge materialisation, chain_shares in position_current
+# is NULL/0.0 (never set by the bridge itself — chain_state='local_only').
+# GREEN: one reconcile cycle with a matching chain observation populates it.
+# Uses _position_from_projection_row (the real daemon load path) to ensure the
+# full DB round-trip is covered, not just the in-memory position graph.
+# --------------------------------------------------------------------------- #
+
+def test_wall_d_bridged_position_chain_shares_null_before_reconcile(conn):
+    """RED baseline: bridge materialises position_current with chain_shares NULL/0.
+
+    The bridge sets chain_state='local_only' (no chain observation yet).
+    position_current.chain_shares must be NULL (or 0.0, indistinguishable from
+    NULL in the DB projection) — chain_shares is NOT set by the bridge itself.
+    This is the stuck-capital gap: without reconcile, chain grading is blind.
+    """
+    aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
+    materialize_position_current_from_edli_fill(conn, aggregate_id)
+    conn.commit()
+
+    raw = conn.execute(
+        "SELECT chain_shares, chain_state FROM position_current WHERE position_id = ?",
+        (edli_bridge_position_id(aggregate_id),),
+    ).fetchone()
+    # chain_state='local_only' — chain observation not yet arrived.
+    assert raw["chain_state"] == "local_only"
+    # chain_shares is NULL or 0.0 (stored as REAL 0.0 from the Position default;
+    # logically equivalent to "not yet chain-observed" for the reconciler).
+    # In either case it is NOT the authoritative chain value.
+    assert raw["chain_shares"] in (None, 0.0), (
+        f"Expected NULL/0.0 (not yet chain-observed) but got {raw['chain_shares']}"
+    )
+
+
+def test_wall_d_bridged_position_chain_shares_populated_after_reconcile(conn):
+    """GREEN: bridged position + matching chain observation → chain_shares populated.
+
+    This is the RELATIONSHIP TEST demanded by Wall-D:
+      bridge fill → position_current (phase=active, chain_state=local_only)
+      reconcile (chain returns elected NO token with fill size, no-size-mismatch)
+      → _append_canonical_chain_observation_if_available fires
+      → position_current.chain_shares = chain.size (16.75)
+
+    Uses _position_from_projection_row (the real daemon load path) via
+    query_portfolio_loader_view + PortfolioState construction to prove the
+    full DB round-trip: bridge write → DB → load → reconcile → DB write.
+    """
+    from src.state.chain_reconciliation import reconcile, ChainPosition
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import Position, PortfolioState
+
+    aggregate_id = _seed_confirmed_buy_no_aggregate(conn)
+    materialize_position_current_from_edli_fill(conn, aggregate_id)
+    conn.commit()
+
+    # Load via the real DB-first path (same as _position_from_projection_row in daemon).
+    snapshot = query_portfolio_loader_view(conn)
+    assert snapshot["status"] in ("ok", "partial_stale")
+    assert len(snapshot["positions"]) == 1
+
+    # Build Position exactly as _position_from_projection_row does (matches daemon load).
+    row = dict(snapshot["positions"][0])
+    from src.state.portfolio import _position_from_projection_row
+    pos = _position_from_projection_row(row, current_mode="live")
+    assert pos.chain_state == "local_only"
+    # chain_shares from DB (NULL → 0.0 via float(row.get("chain_shares") or 0.0)).
+    assert pos.chain_shares == 0.0, f"pre-reconcile chain_shares must be 0.0, got {pos.chain_shares}"
+    # no_token_id is the chain-match key for buy_no.
+    assert pos.no_token_id == ELECTED_NO_TOKEN
+
+    from src.state.portfolio import PortfolioState
+    portfolio = PortfolioState(positions=[pos], bankroll=1000.0, daily_baseline_total=1000.0, weekly_baseline_total=1000.0)
+
+    # Reconcile: chain API returns the elected NO token with the fill size.
+    # chain.size == pos.shares (16.75) → no-size-mismatch path → observation write.
+    chain_positions = [ChainPosition(
+        token_id=ELECTED_NO_TOKEN, size=16.75, avg_price=0.42,
+        cost=16.75 * 0.42, condition_id=CONDITION_ID,
+    )]
+    stats = reconcile(portfolio, chain_positions, conn=conn)
+    conn.commit()
+
+    # The canonical write must have fired (chain_observation_persisted counter).
+    assert stats.get("chain_observation_persisted", 0) >= 1, (
+        "expected _append_canonical_chain_observation_if_available to write at least once"
+    )
+    assert stats.get("voided", 0) == 0, "chain-backed position must NOT be voided"
+
+    # position_current.chain_shares is now the chain value (NOT NULL/0.0).
+    row_after = conn.execute(
+        "SELECT chain_shares, chain_state, chain_seen_at FROM position_current WHERE position_id = ?",
+        (edli_bridge_position_id(aggregate_id),),
+    ).fetchone()
+    assert row_after["chain_shares"] is not None, "chain_shares must be populated after reconcile"
+    assert abs(float(row_after["chain_shares"]) - 16.75) < 1e-6, (
+        f"chain_shares must equal chain.size=16.75, got {row_after['chain_shares']}"
+    )
+    assert row_after["chain_state"] == "synced"
+    assert row_after["chain_seen_at"], "chain_seen_at must be set after observation write"
+
+
+# --------------------------------------------------------------------------- #
 # 9. INV-37: cross-DB ATTACH wiring (the production connection topology).
 #    EDLI events live on world.db; position_current is authoritative on trade.db.
 #    The bridge must read world.edli_live_order_events and write trade
