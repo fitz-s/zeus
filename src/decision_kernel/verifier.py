@@ -448,8 +448,13 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation aggregate_event_hash missing")
     if not command.get("aggregate_execution_command_event_hash"):
         raise CertificateVerificationError("execution command aggregate_execution_command_event_hash missing")
-    if pre_submit.get("would_cross_book") is not False:
-        raise CertificateVerificationError("pre-submit revalidation would_cross_book must be false")
+    # would_cross_book must be false for post-only MAKER orders (a crossing post-only
+    # would take, violating maker intent / venue post-only rejection). A TAKER
+    # (FOK/FAK, post_only is False) is designed to cross to fill immediately, so a
+    # crossing book is expected and must not be rejected here.
+    if pre_submit.get("post_only") is not False:  # True or missing/None → maker-or-unknown → enforce
+        if pre_submit.get("would_cross_book") is not False:
+            raise CertificateVerificationError("pre-submit revalidation would_cross_book must be false")
     if pre_submit.get("tick_aligned") is not True:
         raise CertificateVerificationError("pre-submit revalidation tick_aligned must be true")
     if pre_submit.get("size_ok") is not True:

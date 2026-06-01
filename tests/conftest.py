@@ -276,6 +276,7 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     "scripts/quarantine_bad_forecast_decisions.py",  # pending_track_a6: standalone quarantine CLI; PR-E work in progress
     "scripts/build_ft_staging_db.py",               # pending_track_a6: Zeus #64 FT-ship operator staging script; one-shot CLI, not daemon src/
     "scripts/promote_model_bias_ens.py",         # pending_track_a6: Zeus #64 FT-ship F3 promote CLI; --db override path only, not daemon src/
+    "scripts/probe_full_live_path_to_submit.py", # pending_track_a6: standalone live-path probe script; operator diagnostic tool, not daemon src/
 })
 
 # Effective allowlist: canonical infra + residual (Track A.6 daemon sites only;

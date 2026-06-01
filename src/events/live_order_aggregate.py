@@ -594,8 +594,13 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     missing = [field for field in PRE_SUBMIT_REQUIRED_FIELDS if field not in payload]
     if missing:
         raise LiveOrderAggregateError("PreSubmitRevalidated missing required fields: " + ",".join(missing))
-    if payload.get("would_cross_book") is not False:
-        raise LiveOrderAggregateError("PreSubmitRevalidated requires would_cross_book=false")
+    # would_cross_book must be false for post-only MAKER orders (a crossing post-only
+    # would take, violating maker intent / venue post-only rejection). A TAKER
+    # (FOK/FAK, post_only is False) is designed to cross to fill immediately, so a
+    # crossing book is expected and must not be rejected here.
+    if payload.get("post_only") is not False:  # True or missing/None → maker-or-unknown → enforce
+        if payload.get("would_cross_book") is not False:
+            raise LiveOrderAggregateError("PreSubmitRevalidated requires would_cross_book=false")
     if payload.get("tick_aligned") is not True:
         raise LiveOrderAggregateError("PreSubmitRevalidated requires tick_aligned=true")
     if payload.get("size_ok") is not True:
