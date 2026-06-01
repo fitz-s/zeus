@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from src.events.idempotency import stable_event_id
 
 UTC = timezone.utc
 MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+_logger = logging.getLogger(__name__)
 
 
 def _world_write_mutex():
@@ -150,7 +152,16 @@ class MarketChannelIngestor:
 
         results: list[EventWriteResult] = []
         for token_id in sorted(self._active_token_ids):
-            message = dict(fetch_orderbook(token_id))
+            try:
+                message = dict(fetch_orderbook(token_id))
+            except Exception as exc:
+                _logger.warning(
+                    "seed_from_rest: skipping token %s — fetch failed (%s: %s)",
+                    token_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
             message.setdefault("event_type", "book")
             message.setdefault("asset_id", token_id)
             message.setdefault("timestamp", received_at)
@@ -535,7 +546,16 @@ class MarketChannelOnlineService:
             return []
         results = []
         for token_id in sorted(self.ingestor._active_token_ids):
-            message = dict(self.fetch_orderbook(token_id))
+            try:
+                message = dict(self.fetch_orderbook(token_id))
+            except Exception as exc:
+                _logger.warning(
+                    "on_reconnect: skipping token %s — fetch failed (%s: %s)",
+                    token_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
             message.setdefault("event_type", "book")
             message.setdefault("asset_id", token_id)
             event = self.ingestor.reconnect_gap_snapshot(
