@@ -256,6 +256,14 @@ def _final_execution_intent_from_payload(final_payload: dict):
         post_only = True
     size = _decimal(final_payload.get("size"), "size")
     limit_price = _decimal(final_payload.get("limit_price"), "limit_price")
+    # Wall C (2026-06-01): for TAKER FOK orders the sweep VWAP (expected fill) may
+    # differ from limit_price (multi-level book).  The cert builder stores the
+    # pre-computed sweep average as "expected_fill_price_before_fee"; fall back to
+    # limit_price for maker/passive certs that omit it.
+    expected_fill = _decimal(
+        final_payload.get("expected_fill_price_before_fee", final_payload.get("limit_price")),
+        "expected_fill_price_before_fee",
+    )
     return FinalExecutionIntent(
         hypothesis_id=str(final_payload.get("candidate_id") or final_payload["final_intent_id"]),
         selected_token_id=str(final_payload["token_id"]),
@@ -264,7 +272,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         size_value=size,
         submitted_shares=size,
         final_limit_price=limit_price,
-        expected_fill_price_before_fee=limit_price,
+        expected_fill_price_before_fee=expected_fill,
         fee_adjusted_execution_price=limit_price,
         order_policy=order_policy,
         order_type=executor_order_type,

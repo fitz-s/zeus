@@ -340,6 +340,7 @@ def event_bound_live_adapter_from_trade_conn(
                         decision_time=decision_time.astimezone(UTC),
                         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                         live_cap_conn=build_conn,
+                        trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
                         canary_force_taker=canary_force_taker,
                         taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
@@ -398,6 +399,7 @@ def event_bound_live_adapter_from_trade_conn(
                         decision_time=decision_time.astimezone(UTC),
                         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                         live_cap_conn=build_conn,
+                        trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
                         canary_force_taker=canary_force_taker,
                         taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
@@ -947,6 +949,7 @@ def _build_submit_disabled_live_certificates(
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
+    trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     canary_force_taker: bool = False,
     taker_fok_fak_live_enabled: bool = False,
@@ -957,6 +960,7 @@ def _build_submit_disabled_live_certificates(
         decision_time=decision_time,
         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
         live_cap_conn=live_cap_conn,
+        trade_conn=trade_conn,
         pre_submit_authority_provider=pre_submit_authority_provider,
         canary_force_taker=canary_force_taker,
         taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
@@ -984,6 +988,7 @@ def _build_live_execution_command_certificates(
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
+    trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     canary_force_taker: bool = False,
     taker_fok_fak_live_enabled: bool = False,
@@ -1070,6 +1075,63 @@ def _build_live_execution_command_certificates(
             if str(order_mode).strip().upper() == "MAKER"
             else None
         )
+        # SIZE-TO-DEPTH + SWEEP-VWAP (Wall B / Wall C, 2026-06-01):
+        # For TAKER FOK orders, compute the crossable depth and sweep VWAP from
+        # the elected snapshot's live book BEFORE building the cert.  This ensures:
+        #   (a) size is capped at available depth (FOK semantics preserved on the
+        #       sized amount → no DEPTH_INSUFFICIENT at executor validation).
+        #   (b) expected_fill_price_before_fee = sweep VWAP, not limit_price, so
+        #       the executor sweep-average check (executor.py:1778) passes on
+        #       multi-level books.
+        # If no trade_conn is available, or order is MAKER, skip (legacy behaviour).
+        available_crossable_shares: float | None = None
+        sweep_expected_fill_price: float | None = None
+        if str(order_mode).strip().upper() == "TAKER" and trade_conn is not None:
+            from src.contracts.execution_intent import simulate_clob_sweep
+            _snap_id_for_depth = str(
+                executable_snapshot.payload.get("identity")
+                or executable_snapshot.payload.get("selected_snapshot_id")
+                or ""
+            )
+            try:
+                _snap_for_depth = get_snapshot(trade_conn, _snap_id_for_depth) if _snap_id_for_depth else None
+            except Exception:
+                _snap_for_depth = None
+            if _snap_for_depth is not None:
+                _action_payload = actionable.payload
+                _min_order_size_d = Decimal(str(
+                    executable_snapshot.payload.get("min_order_size") or "1.0"
+                ))
+                _tick_size_d = Decimal(str(
+                    executable_snapshot.payload.get("min_tick_size") or "0.01"
+                ))
+                _reservation = Decimal(str(_action_payload.get("c_fee_adjusted") or "0"))
+                _ask_for_limit = (
+                    Decimal(str(best_ask)) if best_ask is not None else _reservation
+                )
+                _limit_price_d = min(_ask_for_limit, _reservation)
+                # Tick-align limit price (floor) using the canonical tick_size
+                import math as _math
+                if _tick_size_d > 0:
+                    _limit_price_d = Decimal(str(
+                        round(_math.floor(float(_limit_price_d) / float(_tick_size_d) + 1e-9) * float(_tick_size_d), 10)
+                    ))
+                _reserved_notional = Decimal(str(
+                    _action_payload.get("live_cap_reserved_notional_usd")
+                    or _action_payload.get("kelly_size_usd")
+                    or "0"
+                ))
+                _desired_shares = max(_min_order_size_d, _reserved_notional / _limit_price_d) if _limit_price_d > 0 else _min_order_size_d
+                _depth_sweep = simulate_clob_sweep(
+                    snapshot=_snap_for_depth,
+                    direction=str(_action_payload.get("direction") or "buy_no"),
+                    requested_size_kind="shares",
+                    requested_size_value=_desired_shares,
+                    limit_price=_limit_price_d,
+                )
+                if _depth_sweep.filled_shares > 0:
+                    available_crossable_shares = float(_depth_sweep.filled_shares)
+                    sweep_expected_fill_price = float(_depth_sweep.average_price) if _depth_sweep.average_price is not None else None
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -1085,6 +1147,8 @@ def _build_live_execution_command_certificates(
             best_bid=best_bid,
             best_ask=best_ask,
             taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
+            available_crossable_shares=available_crossable_shares,
+            sweep_expected_fill_price=sweep_expected_fill_price,
         )
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
         aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
@@ -2212,9 +2276,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
                 "orderbook_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
                 "fee_details_hash": _hash_jsonish(selected_snapshot_row.get("fee_details_json") or selected_snapshot_row.get("fee_details")),
-                "min_tick_size": selected_snapshot_row.get("min_tick_size"),
-                "min_order_size": selected_snapshot_row.get("min_order_size"),
-                "neg_risk": selected_snapshot_row.get("neg_risk"),
+                "min_tick_size": str(_hydrated_snapshot.min_tick_size),
+                "min_order_size": str(_hydrated_snapshot.min_order_size),
+                "neg_risk": bool(_hydrated_snapshot.neg_risk),
                 "captured_at": selected_snapshot_row.get("captured_at"),
                 "freshness_deadline": selected_snapshot_row.get("freshness_deadline"),
                 "active": selected_snapshot_row.get("active"),

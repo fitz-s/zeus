@@ -38,6 +38,8 @@ def build_final_intent_certificate_from_actionable(
     best_bid: float | None = None,
     best_ask: float | None = None,
     taker_fok_fak_live_enabled: bool = False,
+    available_crossable_shares: float | None = None,
+    sweep_expected_fill_price: float | None = None,
 ) -> DecisionCertificate:
     action = actionable_cert.payload
     # The governor-decided ``order_mode`` is the SOLE authority for the order-type
@@ -61,7 +63,26 @@ def build_final_intent_certificate_from_actionable(
         passive_maker_context=passive_maker_context,
     )
     reserved_notional = float(action.get("live_cap_reserved_notional_usd") or action.get("kelly_size_usd") or 0.0)
+    if limit_price <= 0.0:
+        raise ValueError(
+            f"CERT_BUILD_ZERO_LIMIT_PRICE: limit_price={limit_price!r} after tick-floor "
+            f"(c_fee_adjusted={reservation!r}, tick_size={float(tick_size)!r}); "
+            "candidate reservation below minimum tradeable price — skip"
+        )
     size = max(float(min_order_size), reserved_notional / limit_price)
+    # SIZE-TO-AVAILABLE-DEPTH (Wall B / 2026-06-01): for TAKER FOK orders cap the
+    # requested size to the crossable book depth so the FOK can fully fill on a thin
+    # book.  available_crossable_shares is computed by the caller (ERA) via
+    # simulate_clob_sweep on the elected snapshot before cert build.  If the capped
+    # size falls below min_order_size the book is too thin → raise so the candidate
+    # correctly skips (fail-closed, no -EV order).
+    if available_crossable_shares is not None and order_spec.mode == "TAKER":
+        size = min(size, float(available_crossable_shares))
+        if size < float(min_order_size):
+            raise ValueError(
+                f"DEPTH_BELOW_MIN_ORDER_SIZE: available_crossable_shares="
+                f"{available_crossable_shares:.4f} < min_order_size={min_order_size:.4f}"
+            )
     notional = size * limit_price
     executable_snapshot_hash = _required_text(executable_snapshot_cert.payload, "executable_snapshot_hash")
     cost_basis_hash = _required_text(cost_model_cert.payload, "cost_basis_hash")
@@ -95,6 +116,13 @@ def build_final_intent_certificate_from_actionable(
         "maker_intent": order_spec.maker_intent,
         "order_mode": order_spec.mode,
         "limit_price": limit_price,
+        # WALL C (2026-06-01): for multi-level TAKER fills the sweep VWAP (average
+        # fill price) differs from limit_price.  executor.py:1778 checks
+        # sweep.average_price == intent.expected_fill_price_before_fee; storing the
+        # pre-computed sweep VWAP here makes the executor validation pass without any
+        # DB re-query.  When sweep_expected_fill_price is None (maker / passive path)
+        # the field falls back to limit_price — identical to the legacy behaviour.
+        "expected_fill_price_before_fee": sweep_expected_fill_price if sweep_expected_fill_price is not None else limit_price,
         "size": size,
         "notional_usd": notional,
         "executable_snapshot_id": action["executable_snapshot_id"],
