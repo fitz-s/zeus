@@ -61,3 +61,13 @@ paths = [
     '''src/strategy/candidates/c1_joint_tail_bayes\.py''',
     '''src/strategy/candidates/c2_opening_stale_fok\.py''',
 ]
+
+[[allowlists]]
+description = "DOCS_OUTCOME_LABEL — docs/operations markdown files contain inline code examples showing outcome_label=NO and outcome_label=YES (Polymarket token outcome labels). These are domain vocabulary in prose, not credentials. The generic-api-key rule pattern-matches 'key=VALUE' constructs with sufficient entropy. Operator ruling 2026-06-01. See SECURITY-FALSE-POSITIVES.md [REVIEW-SAFE: DOCS_OUTCOME_LABEL]."
+regexes = [
+    '''outcome_label=NO''',
+    '''outcome_label=YES''',
+]
+paths = [
+    '''docs/operations/.*\.md''',
+]
