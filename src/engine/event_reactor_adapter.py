@@ -3871,6 +3871,29 @@ def _write_emos_shadow_ledger(
             bool(robust_score_raw_buy_no > 0) if robust_score_raw_buy_no is not None else None
         )
 
+        # FIX B — write-boundary staleness reject.
+        # Reject rows whose decision_time is far from wall-clock now.
+        # Catches replay/fixture-contamination leaks at the write boundary:
+        # live daemon rows are written within seconds of the event; a row with
+        # decision_time 2+ days old is from a replay or a test fixture that
+        # slipped through the path seam.
+        # FAIL-OPEN: any exception in this check is silently swallowed; the
+        # row is rejected on stale detection but never raises into the hot path.
+        _STALE_BOUNDARY_DAYS = 2
+        try:
+            from datetime import timezone as _tz_b
+            _now_utc = datetime.now(_tz_b.utc)
+            _age_seconds = abs((_now_utc - decision_time.astimezone(_tz_b.utc)).total_seconds())
+            if _age_seconds > _STALE_BOUNDARY_DAYS * 86400:
+                import logging as _lg_b
+                _lg_b.getLogger(__name__).debug(
+                    "emos_ledger: skipping stale row (age=%.0fs > %dd) for %s/%s",
+                    _age_seconds, _STALE_BOUNDARY_DAYS, family.city, str(family.target_date),
+                )
+                continue
+        except Exception:
+            pass  # fail-open: if we can't check age, proceed with write
+
         row = {
             "ts": ts,
             "city": family.city,
