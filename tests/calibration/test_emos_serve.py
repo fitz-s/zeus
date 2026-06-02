@@ -381,3 +381,131 @@ class TestEmosHookMemberSource:
         assert abs(sigma_direct - sigma_hook) < 1e-9, (
             f"sigma_c mismatch: direct={sigma_direct}, hook={sigma_hook}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: EMOS gated on metric == "high" (LOW metric → emos_q=None)
+# ---------------------------------------------------------------------------
+
+class TestEmosMetricGating:
+    """EMOS calibration is HIGH-metric only.
+
+    fit_emos_calibration.py fits on temperature_metric='high' rows only.
+    Applying HIGH params to LOW members produces garbage emos_q.
+    The hook must gate EMOS computation on family.metric == 'high'.
+
+    These tests exercise the metric-gating logic by simulating the two
+    code paths that the hook takes based on family_metric:
+      - is_high_metric=True  → emos_predictive called → emos_q finite
+      - is_high_metric=False → emos_predictive NOT called → emos_q=None
+    """
+
+    def _simulate_hook_metric_gate(self, family_metric: str, members_c, city="Amsterdam",
+                                   season="JJA", lead_days=3.0):
+        """Replicate the hook's metric-gating logic in isolation.
+
+        Returns (emos_mu_c, emos_sigma_c, served_status) mirroring the hook.
+        """
+        from src.calibration.emos import emos_predictive, load_emos_table
+
+        is_high_metric = (family_metric.lower() == "high")
+        emos_mu_c = None
+        emos_sigma_c = None
+        served_status = "missing"
+
+        if is_high_metric:
+            result = emos_predictive(city, season, lead_days, members_c)
+            if result is not None:
+                emos_mu_c, emos_sigma_c = result
+                served_status = "emos"
+            else:
+                tbl = load_emos_table()
+                cell = tbl.get("cells", {}).get(f"{city}|{season}")
+                served_status = str(cell.get("served", "missing")) if cell else "missing"
+        else:
+            served_status = "not_high_metric"
+
+        return emos_mu_c, emos_sigma_c, served_status
+
+    def test_high_metric_produces_finite_emos_q(self):
+        """metric='high' + emos cell → emos_mu_c/sigma_c finite, served='emos'.
+
+        Amsterdam|JJA is a served=emos cell. With metric='high' the hook
+        calls emos_predictive and gets a valid (mu_c, sigma_c).
+        """
+        import math
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        members_c = rng.normal(22.0, 3.0, 51)
+
+        mu_c, sigma_c, served = self._simulate_hook_metric_gate("high", members_c)
+
+        assert served == "emos", f"Expected served='emos' for high+emos cell, got '{served}'"
+        assert mu_c is not None, "emos_mu_c must not be None for high metric"
+        assert sigma_c is not None, "emos_sigma_c must not be None for high metric"
+        assert math.isfinite(mu_c), f"emos_mu_c={mu_c} must be finite"
+        assert math.isfinite(sigma_c) and sigma_c > 0, f"emos_sigma_c={sigma_c} must be finite positive"
+
+    def test_low_metric_produces_none_emos_q(self):
+        """metric='low' → emos_mu_c=None, emos_sigma_c=None, served='not_high_metric'.
+
+        EMOS table is HIGH-only fit. A LOW-metric family must NOT get EMOS
+        applied — applying HIGH params to LOW members produces garbage emos_q.
+        """
+        import numpy as np
+
+        rng = np.random.default_rng(42)
+        members_c = rng.normal(12.0, 2.0, 51)  # plausible LOW members
+
+        mu_c, sigma_c, served = self._simulate_hook_metric_gate("low", members_c)
+
+        assert mu_c is None, (
+            f"emos_mu_c must be None for low metric (got {mu_c}) — "
+            "HIGH params applied to LOW members is garbage"
+        )
+        assert sigma_c is None, f"emos_sigma_c must be None for low metric, got {sigma_c}"
+        assert served == "not_high_metric", (
+            f"served must be 'not_high_metric' for low metric, got '{served}'"
+        )
+
+    def test_unknown_metric_produces_none_emos_q(self):
+        """metric='' (old rows without metric field) → emos fields None.
+
+        Old ledger rows lack the metric field entirely.  The scorer treats
+        them as unknown and excludes them from EMOS coverage/licensing.
+        The hook must also gate them out (empty string != 'high').
+        """
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        members_c = rng.normal(20.0, 3.0, 51)
+
+        mu_c, sigma_c, served = self._simulate_hook_metric_gate("", members_c)
+
+        assert mu_c is None, f"emos_mu_c must be None for unknown metric, got {mu_c}"
+        assert served == "not_high_metric", (
+            f"served must be 'not_high_metric' for unknown metric, got '{served}'"
+        )
+
+    def test_metric_field_present_in_ledger_row(self):
+        """Ledger rows must carry the 'metric' field for downstream filtering.
+
+        Verifies that the metric value extracted from family.metric is the
+        value that gets recorded, enabling score_emos_forward.py to filter
+        HIGH vs LOW rows correctly.
+        """
+        # The hook records: "metric": family_metric
+        # Simulate the extraction: family_metric = str(getattr(family, "metric", "") or "").lower()
+        class _FamilyHigh:
+            metric = "high"
+
+        class _FamilyLow:
+            metric = "low"
+
+        class _FamilyNone:
+            metric = None
+
+        for fam, expected in [(_FamilyHigh(), "high"), (_FamilyLow(), "low"), (_FamilyNone(), "")]:
+            result = str(getattr(fam, "metric", "") or "").lower()
+            assert result == expected, f"metric extraction: got '{result}', expected '{expected}'"

@@ -3726,22 +3726,33 @@ def _write_emos_shadow_ledger(
     raw_mu_c = float(np.mean(members_c)) if members_c.size > 0 else float("nan")
     raw_sigma_c = float(np.std(members_c, ddof=1)) if members_c.size > 1 else float("nan")
 
-    emos_result = emos_predictive(family.city, season, lead_days, members_c)
+    # EMOS calibration table is HIGH-metric only (fit_emos_calibration.py:68 WHERE
+    # temperature_metric='high').  Applying HIGH params to LOW members produces garbage
+    # emos_q.  Gate the entire EMOS computation on metric == "high".
+    family_metric = str(getattr(family, "metric", "") or "").lower()
+    is_high_metric = (family_metric == "high")
+
     emos_mu_c: float | None = None
     emos_sigma_c: float | None = None
     served_status = "missing"
-    if emos_result is not None:
-        emos_mu_c, emos_sigma_c = emos_result
-        served_status = "emos"
-    else:
-        # Distinguish raw vs missing by checking table directly
-        from src.calibration.emos import load_emos_table
-        tbl = load_emos_table()
-        cell = tbl.get("cells", {}).get(f"{family.city}|{season}")
-        if cell is not None:
-            served_status = str(cell.get("served", "missing"))
+    if is_high_metric:
+        emos_result = emos_predictive(family.city, season, lead_days, members_c)
+        if emos_result is not None:
+            emos_mu_c, emos_sigma_c = emos_result
+            served_status = "emos"
         else:
-            served_status = "missing"
+            # Distinguish raw vs missing by checking table directly
+            from src.calibration.emos import load_emos_table
+            tbl = load_emos_table()
+            cell = tbl.get("cells", {}).get(f"{family.city}|{season}")
+            if cell is not None:
+                served_status = str(cell.get("served", "missing"))
+            else:
+                served_status = "missing"
+    else:
+        # LOW or unknown metric: EMOS not applicable; served_status remains "missing"
+        # raw fields (raw_mu_c, raw_sigma_c) still recorded for completeness.
+        served_status = "not_high_metric"
 
     # p_raw is the raw ensemble vector (before Platt); p_cal is after Platt.
     # raw_q (stored below) records p_cal[index] — the Platt-calibrated probability.
@@ -3866,6 +3877,7 @@ def _write_emos_shadow_ledger(
             "target_date": str(family.target_date),
             "season": season,
             "lead_days": lead_days,
+            "metric": family_metric,  # "high" / "low" / "" — EMOS only valid for "high"
             "bin_label": b.label,
             "bin_low": bin_low,
             "bin_high": bin_high,

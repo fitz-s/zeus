@@ -278,27 +278,41 @@ def main() -> None:
     total_rows = len(all_rows)
     print(f"Ledger rows: {total_rows}")
 
-    # 2. Settled rows
-    settled_rows = [
+    # 2. Settled rows — split by metric
+    settled_rows_all = [
         r for r in all_rows
         if r.get("target_date") and r["target_date"] < str(TODAY)
     ]
-    print(f"  settled rows (target_date < {TODAY}): {len(settled_rows)}")
-    print(f"  unsettled rows (future / today):    {total_rows - len(settled_rows)}")
+    n_settled_all = len(settled_rows_all)
+    # §4i/§4ii/§5 require metric=="high": EMOS table is HIGH-only; settlement truth is
+    # observation_instants.running_max which is the daily HIGH.  LOW rows and rows
+    # lacking the metric field are excluded from EMOS coverage/licensing.
+    settled_rows = [r for r in settled_rows_all if r.get("metric", "") == "high"]
+    n_settled_low = sum(1 for r in settled_rows_all if r.get("metric", "") == "low")
+    n_settled_unknown = sum(1 for r in settled_rows_all if r.get("metric", "") == "")
+    print(f"  settled rows (target_date < {TODAY}): {n_settled_all}")
+    print(f"    metric=high (EMOS-eligible):        {len(settled_rows)}")
+    print(f"    metric=low  (out of scope):         {n_settled_low}  [needs #54 LOW Platt]")
+    print(f"    metric=unknown (old rows, excluded):{n_settled_unknown}")
+    print(f"  unsettled rows (future / today):      {total_rows - n_settled_all}")
     print()
 
     if not settled_rows:
-        print("No settled rows yet — check back after target dates have passed.")
-        print(f"  Earliest target_date in ledger: "
-              f"{min(r.get('target_date','?') for r in all_rows)}")
+        if settled_rows_all:
+            print("No HIGH-metric settled rows yet (only LOW or unknown-metric rows exist).")
+            print("  Collect more data with the flag enabled, or wait for HIGH-metric target dates.")
+        else:
+            print("No settled rows yet — check back after target dates have passed.")
+            print(f"  Earliest target_date in ledger: "
+                  f"{min(r.get('target_date','?') for r in all_rows)}")
         return
 
-    # 3. Fetch live truth
+    # 3. Fetch live truth (HIGH metric only — running_max is the daily HIGH)
     settled_pairs = {(r["city"], r["target_date"]) for r in settled_rows}
     truth_map = _live_truth_by_city_date(settled_pairs)
     pairs_with_truth = sum(1 for v in truth_map.values() if v is not None)
-    print(f"  distinct (city, date) pairs:  {len(settled_pairs)}")
-    print(f"  with live-truth in obs table: {pairs_with_truth}")
+    print(f"  distinct HIGH (city, date) pairs:  {len(settled_pairs)}")
+    print(f"  with live-truth in obs table:      {pairs_with_truth}")
     print()
 
     if pairs_with_truth == 0:
@@ -438,6 +452,7 @@ def main() -> None:
     # ---------------------------------------------------------------------------
     print("-" * 70)
     print("§4i EMOS PREDICTIVE BAND COVERAGE (PIT / cov90 / k_cov per city)")
+    print("    HIGH metric only — LOW metric excluded (needs #54 LOW Platt)")
     print("-" * 70)
     city_k_cov: dict[str, float] = {}
     city_verdict: dict[str, str] = {}
