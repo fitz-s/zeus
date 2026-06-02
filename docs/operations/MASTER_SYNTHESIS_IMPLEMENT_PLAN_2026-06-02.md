@@ -34,7 +34,15 @@ The real collapse is **downstream event-emission**: `source_run.status` = **SUCC
 
 ---
 
-## 2. FINAL CALIBRATION STATE — BLOCKED: scorecard SUPERSEDED (critic trust=FALSE)
+## 2. FINAL CALIBRATION STATE — CORRECTED (v2 bake-off, commit 5f9d7002)
+
+**Resolved.** The corrected scorer (`scripts/calibration_bakeoff_v2.py`, `docs/operations/CALIB_BAKEOFF_SCORECARD_V2_2026-06-02.json`) scores RAW on its real live-served `calibration_pairs.p_raw` vector, all methods one pipeline, asserted OOS gate (EMOS fit≤2024 < target), LOW excluded, GRID_REP/BIAS omitted (leaky fit windows). Self-verified: RAW reproduces the critic's independent numbers to 3 decimals.
+- **VERDICT (48 head-to-head cells): EMOS 30 / RAW 18 (~63/37), NOT 49-0.** EMOS wins **cold-biased Asian cities** (Singapore −2.85, Taipei −2.29, Wuhan −1.75, Shanghai −1.52); **RAW wins hot/tropical** (Jeddah +1.87, Guangzhou +1.24, Jakarta +1.14) where EMOS warm-shift extrapolation hurts. London/Amsterdam near-ties.
+- **FINAL STATE = per-city selection:** serve EMOS for the ~30 cold cities, RAW for the ~18 hot/tropical + **ALL `low` markets** (EMOS unlicensed on low). NOT a blanket promotion. Recommend one confirmation critic on v2 before live wiring (the self-verification vs the critic's proper-RAW is strong but a fresh adversarial pass closes it).
+- This realizes #110 evidence-based; retire full-transport (never competitive) + the flag-maze.
+
+### (superseded v1 detail — kept for the lesson)
+The v1 "EMOS wins 49" was an artifact (critic trust=FALSE):
 
 The bake-off "EMOS wins 49 cities" **cannot be trusted** (critic ae0e509c). Defects:
 1. **RAW handicapped / RawLL non-reproducible** — published RAW LogLoss inflated 1.3-4.5× (London 2.22 published vs 1.50 proper; Amsterdam 7.20 vs 1.60). The scorer's RAW path does NOT query the calibration_pairs MC vector RAW actually serves live; scored as a 0.5-floored mixture vs EMOS's single fitted Gaussian (different families = sharpness artifact, not skill).
