@@ -30,6 +30,7 @@ and `authority="canonical"` so callers can assert before consuming.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -39,6 +40,46 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_AGE_SECONDS = 30.0
 _DEFAULT_FAIL_CLOSED_AFTER_SECONDS = 300.0
+
+# Resilient staleness bound for cached() — the proof-only / no-submit read path.
+#
+# RESILIENCE FIX (2026-05-31, follow-up to #45/#64): the on-chain wallet RPC fails
+# intermittently (~38/hr observed) and those failures CLUSTER. A single warm tick's
+# failure does NOT blank the module global (current() retains _last_value_usd on a
+# failed fetch — it only returns None without overwriting), but cached() independently
+# re-checked age against the tight 300s _DEFAULT_FAIL_CLOSED_AFTER_SECONDS window. A
+# burst of consecutive RPC blips spanning >300s therefore aged a perfectly-good last
+# value out of cached() → None → KELLY_PROOF_MISSING:bankroll_provider_unavailable on
+# every positive-edge candidate (161/308 lost in 24h).
+#
+# Wallet balance changes SLOWLY (only on our own fills / settlements, never venue-side
+# between cycles), so serving the last good value for a generous window across a
+# transient RPC outage is SAFE and strictly better than fail-closing the whole canary.
+# The genuine fail-closed semantics are preserved: never-fetched → None, and stale
+# beyond this generous bound → None. This decouples cached()'s resilient bound from
+# current()'s tighter refresh bound. Override via env for ops tuning.
+_DEFAULT_CACHED_RESILIENT_BOUND_SECONDS = 1800.0  # 30 min — survives RPC blip clusters
+
+
+def _resilient_cached_bound_seconds() -> float:
+    raw = os.environ.get("ZEUS_BANKROLL_CACHED_BOUND_SECONDS")
+    if raw is None:
+        return _DEFAULT_CACHED_RESILIENT_BOUND_SECONDS
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "ZEUS_BANKROLL_CACHED_BOUND_SECONDS=%r is not a float; using default %.0fs",
+            raw, _DEFAULT_CACHED_RESILIENT_BOUND_SECONDS,
+        )
+        return _DEFAULT_CACHED_RESILIENT_BOUND_SECONDS
+    if parsed <= 0:
+        logger.warning(
+            "ZEUS_BANKROLL_CACHED_BOUND_SECONDS=%r is non-positive; using default %.0fs",
+            raw, _DEFAULT_CACHED_RESILIENT_BOUND_SECONDS,
+        )
+        return _DEFAULT_CACHED_RESILIENT_BOUND_SECONDS
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -138,13 +179,24 @@ def current(
             )
 
 
-def cached(*, max_age_seconds: float = _DEFAULT_FAIL_CLOSED_AFTER_SECONDS) -> Optional[BankrollOfRecord]:
+def cached(*, max_age_seconds: Optional[float] = None) -> Optional[BankrollOfRecord]:
     """Return a cached bankroll observation without contacting the venue.
 
     This is intentionally weaker than ``current()``: it never refreshes from
     Polymarket.  Proof-only/no-submit paths can use it to fail closed without
     introducing a wallet/API side effect.
+
+    Resilient staleness bound: when ``max_age_seconds`` is None (the default),
+    the bound resolves to ``_resilient_cached_bound_seconds()`` (30 min default,
+    env-overridable). This is DELIBERATELY larger than ``current()``'s 300s
+    refresh window — a last-good on-chain wallet value survives a transient
+    cluster of wallet-RPC blips instead of blanking to None and killing every
+    positive-edge candidate with ``KELLY_PROOF_MISSING:bankroll_provider_unavailable``.
+    Wallet balance only moves on our own fills/settlements, so a 30-min-old value
+    is a faithful bankroll-of-record. Genuine fail-closed is preserved: never
+    fetched → None, and stale beyond the resilient bound → None.
     """
+    bound = _resilient_cached_bound_seconds() if max_age_seconds is None else max_age_seconds
     with _lock:
         if _last_value_usd is None or _last_fetched_at is None:
             logger.error(
@@ -156,11 +208,12 @@ def cached(*, max_age_seconds: float = _DEFAULT_FAIL_CLOSED_AFTER_SECONDS) -> Op
             return None
         now = _now_utc()
         age = (now - _last_fetched_at).total_seconds()
-        if age > max_age_seconds:
+        if age > bound:
             logger.error(
-                "bankroll cached() -> None: STALE age=%.1fs > max=%.1fs (last_fetch=%s). "
-                "Warm fetched once but isn't refreshing.",
-                age, max_age_seconds, _last_fetched_at.isoformat(),
+                "bankroll cached() -> None: STALE age=%.1fs > resilient_bound=%.1fs "
+                "(last_fetch=%s). On-chain wallet RPC has been failing longer than the "
+                "resilient bound; bankroll genuinely unavailable → fail-closed.",
+                age, bound, _last_fetched_at.isoformat(),
             )
             return None
         return BankrollOfRecord(

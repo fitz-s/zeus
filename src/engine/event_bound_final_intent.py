@@ -87,6 +87,23 @@ class EventBoundExecutorExpressibilityError(ValueError):
     """Raised when EDLI proof cannot be expressed as the existing executor intent."""
 
 
+class PreVenueSubmitError(ValueError):
+    """Raised by the executor when a submit is rejected BEFORE any venue call.
+
+    F-class deadlock antibody (2026-06-01): the executor validates executable
+    depth / snapshot identity BEFORE contacting the venue (execute_final_intent
+    runs _final_intent_snapshot_metadata + _legacy_entry_intent_from_final prior
+    to _live_order). A failure there means the order PROVABLY never reached the
+    venue — there is no indeterminate side effect to reconcile. The EDLI submit
+    boundary classifies this as a TERMINAL ``PRE_SUBMIT_ERROR`` (venue_call_started
+    =False), which releases the LIVE_CAP reservation and terminates the aggregate.
+    Without this type, such pre-venue rejections were swept into the generic
+    ``except Exception`` and mislabeled ``POST_SUBMIT_UNKNOWN`` (venue_call_started
+    =True), leaving an unresolved-submit + held-cap that crash-loops boot at the
+    edli_live_canary readiness gate.
+    """
+
+
 def submit_event_bound_final_intent_via_existing_executor(
     *,
     final_intent_cert: DecisionCertificate,
@@ -119,6 +136,22 @@ def submit_event_bound_final_intent_via_existing_executor(
         )
     except EventBoundExecutorExpressibilityError:
         raise
+    except PreVenueSubmitError as exc:
+        # PRE-VENUE rejection: the executor failed validation (e.g. executable
+        # depth DEPTH_INSUFFICIENT) BEFORE any venue call. The order provably
+        # never reached the venue, so the side effect is KNOWN (none) and there
+        # is nothing to reconcile. Terminal PRE_SUBMIT_ERROR → cap RELEASED.
+        return EventBoundExecutorSubmitResult(
+            status="PRE_SUBMIT_ERROR",
+            reason_code=f"EXECUTOR_PRE_VENUE_REJECTED:{exc}",
+            submit_started_at=started_at,
+            submit_finished_at=datetime.now(timezone.utc).isoformat(),
+            raw_response={"error": str(exc), "stage": "existing_executor_pre_venue"},
+            reconciliation_followup_required=False,
+            venue_call_started=False,
+            venue_ack_received=False,
+            side_effect_known=True,
+        )
     except Exception as exc:
         return EventBoundExecutorSubmitResult(
             status="POST_SUBMIT_UNKNOWN",
@@ -169,31 +202,68 @@ def _final_execution_intent_from_payload(final_payload: dict):
     decision_source_context = DecisionSourceContext.from_forecast_context(decision_source_payload)
     if decision_source_context is None:
         raise EventBoundExecutorExpressibilityError("decision_source_context missing")
-    passive_payload = final_payload.get("passive_maker_context")
-    if not isinstance(passive_payload, dict):
-        raise EventBoundExecutorExpressibilityError("passive_maker_context missing")
-    passive_maker_context = PassiveMakerExecutionContext(
-        spread_usd=_decimal(passive_payload.get("spread_usd"), "passive_maker_context.spread_usd"),
-        quote_age_ms=int(passive_payload.get("quote_age_ms", 0)),
-        expected_fill_probability=_decimal(
-            passive_payload.get("expected_fill_probability"),
-            "passive_maker_context.expected_fill_probability",
-        ),
-        queue_depth_ahead=_optional_decimal(passive_payload.get("queue_depth_ahead")),
-        adverse_selection_score=_optional_decimal(passive_payload.get("adverse_selection_score")),
-        orderbook_hash_age_ms=(
-            None
-            if passive_payload.get("orderbook_hash_age_ms") is None
-            else int(passive_payload["orderbook_hash_age_ms"])
-        ),
-    )
-    if final_payload.get("post_only") is not True or final_payload.get("maker_intent") is not True:
-        raise EventBoundExecutorExpressibilityError("current executor law requires post_only maker intent")
     executor_order_type = str(final_payload.get("executor_order_type") or final_payload.get("time_in_force") or "")
-    if executor_order_type not in {"GTC", "GTD"}:
-        raise EventBoundExecutorExpressibilityError("post_only maker final intent requires GTC/GTD executor_order_type")
+    is_taker = (
+        final_payload.get("post_only") is False
+        and final_payload.get("maker_intent") is False
+        and executor_order_type in {"FOK", "FAK"}
+    )
+    # WALL #1 (2026-06-01): passive_maker_context is MAKER-ONLY. A taker FOK/FAK
+    # crosses the JIT book at submit and carries no maker context (the cert builder
+    # emits None for taker). Require/parse it ONLY for the maker tuple; a taker order
+    # passes None through to FinalExecutionIntent, which accepts None for the
+    # marketable_limit_depth_bound order_policy (execution_intent.py:1735 requires the
+    # context only for post_only_passive_limit). This is the executor-translator
+    # instance of the same maker-only coupling that produced the dominant live wall.
+    passive_payload = final_payload.get("passive_maker_context")
+    if is_taker:
+        passive_maker_context = None
+    else:
+        if not isinstance(passive_payload, dict):
+            raise EventBoundExecutorExpressibilityError("passive_maker_context missing")
+        passive_maker_context = PassiveMakerExecutionContext(
+            spread_usd=_decimal(passive_payload.get("spread_usd"), "passive_maker_context.spread_usd"),
+            quote_age_ms=int(passive_payload.get("quote_age_ms", 0)),
+            expected_fill_probability=_decimal(
+                passive_payload.get("expected_fill_probability"),
+                "passive_maker_context.expected_fill_probability",
+            ),
+            queue_depth_ahead=_optional_decimal(passive_payload.get("queue_depth_ahead")),
+            adverse_selection_score=_optional_decimal(passive_payload.get("adverse_selection_score")),
+            orderbook_hash_age_ms=(
+                None
+                if passive_payload.get("orderbook_hash_age_ms") is None
+                else int(passive_payload["orderbook_hash_age_ms"])
+            ),
+        )
+    if is_taker:
+        # Taker path is authorized ONLY when the governor-decided cert carries the
+        # full taker tuple (post_only False, maker_intent False, FOK/FAK). The
+        # currently-dead config flag finally gates taker submission here.
+        from src.strategy.live_inference.trade_score import assert_taker_live_allowed
+
+        assert_taker_live_allowed(
+            taker_fok_fak_live_enabled=bool(final_payload.get("taker_fok_fak_live_enabled", False))
+        )
+        order_policy = "marketable_limit_depth_bound"
+        post_only = False
+    else:
+        if final_payload.get("post_only") is not True or final_payload.get("maker_intent") is not True:
+            raise EventBoundExecutorExpressibilityError("current executor law requires post_only maker intent")
+        if executor_order_type not in {"GTC", "GTD"}:
+            raise EventBoundExecutorExpressibilityError("post_only maker final intent requires GTC/GTD executor_order_type")
+        order_policy = "post_only_passive_limit"
+        post_only = True
     size = _decimal(final_payload.get("size"), "size")
     limit_price = _decimal(final_payload.get("limit_price"), "limit_price")
+    # Wall C (2026-06-01): for TAKER FOK orders the sweep VWAP (expected fill) may
+    # differ from limit_price (multi-level book).  The cert builder stores the
+    # pre-computed sweep average as "expected_fill_price_before_fee"; fall back to
+    # limit_price for maker/passive certs that omit it.
+    expected_fill = _decimal(
+        final_payload.get("expected_fill_price_before_fee", final_payload.get("limit_price")),
+        "expected_fill_price_before_fee",
+    )
     return FinalExecutionIntent(
         hypothesis_id=str(final_payload.get("candidate_id") or final_payload["final_intent_id"]),
         selected_token_id=str(final_payload["token_id"]),
@@ -202,11 +272,11 @@ def _final_execution_intent_from_payload(final_payload: dict):
         size_value=size,
         submitted_shares=size,
         final_limit_price=limit_price,
-        expected_fill_price_before_fee=limit_price,
+        expected_fill_price_before_fee=expected_fill,
         fee_adjusted_execution_price=limit_price,
-        order_policy="post_only_passive_limit",
+        order_policy=order_policy,
         order_type=executor_order_type,
-        post_only=True,
+        post_only=post_only,
         cancel_after=_cancel_after(final_payload),
         snapshot_id=str(final_payload["executable_snapshot_id"]),
         snapshot_hash=snapshot_hash,

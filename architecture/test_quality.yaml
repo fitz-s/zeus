@@ -61,3 +61,21 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "Order lifecycle proof vocabulary keeps accepted/resting/fill/timeout states distinct before live execution wiring."
+  tests/money_path/test_edli_bankroll_warm_cycle.py:
+    category: money_path
+    protects: [MP-SCH-001, MP-ECO-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Bankroll freshness for per-event Kelly proof must be decoupled from the slow reactor cycle; a dedicated warm job prevents cached() returning None at cycle end."
+  tests/money_path/test_edli_live_bridge_allocator_refresh.py:
+    category: money_path
+    protects: [MP-SCH-001, MP-ECO-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "EDLI live-bridge cycle must configure the global risk-allocator singletons before submit; absence causes AllocationDenied(allocator_not_configured) on every candidate."
+  tests/money_path/test_edli_market_substrate_warm_cycle.py:
+    category: money_path
+    protects: [MP-SCH-001, MP-ECO-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Expensive market-substrate refresh must be decoupled from the per-cycle reactor decision loop; inline refresh blocks process_pending and produces zero completed cycles."

@@ -2468,3 +2468,42 @@ tables:
       world.db sqlite_master state for migration regression tests. Never
       created in production DBs; the _v2 suffix is intentional artifact
       of the era this snapshot was taken. (PR #359)
+
+  # EDLI live-order aggregate tables: authoritative in zeus-world.db (db: world above,
+  # lines 998-1079). These 4 tables were also created on zeus_trades.db because the
+  # EDLI full-live split (2026-05-25) added them via init_schema() which was called
+  # with trade_conn during an intermediate boot. They are ghost copies on trade.db —
+  # declared legacy_archived to satisfy assert_db_matches_registry(TRADE).
+  # Drop after 2026-08-30 (90d from 2026-06-01).
+
+  - name: edli_live_order_events
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: edli_live_split_trade_ghost
+    pk_col: null
+    notes: Ghost on zeus_trades.db from EDLI full-live split (2026-05-25). Authoritative copy in zeus-world.db. Drop after 2026-08-30.
+
+  - name: edli_live_order_projection
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: edli_live_split_trade_ghost
+    pk_col: null
+    notes: Ghost on zeus_trades.db from EDLI full-live split (2026-05-25). Authoritative copy in zeus-world.db. Drop after 2026-08-30.
+
+  - name: edli_user_channel_message_dedup
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: edli_live_split_trade_ghost
+    pk_col: null
+    notes: Ghost on zeus_trades.db from EDLI full-live split (2026-05-25). Authoritative copy in zeus-world.db. Drop after 2026-08-30.
+
+  - name: edli_user_channel_inbox
+    db: trade
+    schema_class: legacy_archived
+    schema_version_owner: null
+    created_by: edli_live_split_trade_ghost
+    pk_col: null
+    notes: Ghost on zeus_trades.db from EDLI full-live split (2026-05-25). Authoritative copy in zeus-world.db. Drop after 2026-08-30.

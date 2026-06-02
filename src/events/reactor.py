@@ -5,6 +5,13 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 `src.execution`.
 """
 
+# Last reused/audited: 2026-06-01
+# Authority basis: #95 SEV-2.1 — world_write_mutex MUST NOT be held across the
+#   injected submit callable's network I/O (JIT /book HTTP fetch + venue order
+#   POST). _process_event_unit split into two committed world-DB write windows
+#   around the network submit boundary; contract is db.py world_write_lock /
+#   world_write_mutex ("never hold across HTTP") + INV-37.
+
 from __future__ import annotations
 
 import contextlib
@@ -16,6 +23,7 @@ from typing import Any, Callable
 from src.decision_kernel import claims
 from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
+from src.state.db import world_write_mutex
 
 UTC = timezone.utc
 DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
@@ -78,6 +86,7 @@ class EventSubmissionReceipt:
     kelly_decision_id: str | None = None
     risk_decision_id: str | None = None
     final_intent_id: str | None = None
+    neg_risk: bool = False
     side_effect_status: str = "NO_SUBMIT"
     reason: str = ""
     proof_accepted: bool | None = None
@@ -162,67 +171,256 @@ class OpportunityEventReactor:
 
     def process_pending(self, *, decision_time: datetime, limit: int = 100) -> ReactorResult:
         result = ReactorResult()
+        # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
+        # taken under the world-DB write mutex.
         events = self._store.fetch_pending(decision_time=decision_time.astimezone(UTC).isoformat(), limit=limit)
         for event in events:
+            self._process_event_unit(event, decision_time=decision_time, result=result)
+        return result
+
+    def _process_event_unit(
+        self,
+        event: OpportunityEvent,
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+    ) -> None:
+        """Process ONE event as TWO serialized world-DB write units around the
+        network submit boundary (#95 SEV-2.1).
+
+        EDLI live-canary contention fix (2026-05-31): the EDLI reactor and the
+        market-channel ingestor are two in-process WAL writers on zeus-world.db.
+        Each event's world WRITE UNIT (claim → ledger writes → mark → commit) is
+        serialized against the ingestor via the process-global world-DB write
+        mutex (``world_write_mutex`` in db.py). Without it a contended write waited
+        out the 30 s busy_timeout → "database is locked" → the reactor cycle
+        hung/skipped (status=FAILED).
+
+        SEV-2.1 split (2026-06-01): the injected ``self._submit`` callable performs
+        NETWORK I/O — the JIT ``/book`` HTTP fetch (main._edli_pre_submit_jit_book_
+        quote_provider) and the venue order POST (executor). Holding the world
+        mutex AND an open world-DB transaction (the WAL write lock, opened by
+        ``claim()``) across that I/O serialized every world write behind slow
+        network calls → WAL lock starvation. The contract on ``world_write_lock`` /
+        ``world_write_mutex`` (db.py) is explicit: NEVER hold across HTTP. We honour
+        it by committing the pre-submit world write unit (claim + gate/reject
+        writes) and releasing the mutex BEFORE the network submit, running
+        ``self._submit`` with NO mutex and NO open world txn, then re-acquiring the
+        mutex for a SECOND world write unit (post-submit ledger writes + mark).
+
+        Per-window ``_commit_event_unit`` commits so the WAL write lock is released
+        between windows (and between events) and the ingestor gets frequent write
+        windows. ``fetch_pending`` (a read) stays OUTSIDE the lock.
+        """
+        # ---- Window A: pre-submit world write unit (claim + gates) under mutex ----
+        mutex = world_write_mutex()
+        mutex.acquire()
+        pre_disposition: str | None
+        should_submit = False
+        try:
             if not self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat()):
-                continue
+                # Claim lost (another worker / lease not yet stale): release any
+                # open txn and the mutex; nothing to process this cycle.
+                self._commit_event_unit()
+                return
             try:
                 self._store.conn.execute("SAVEPOINT edli_reactor_event")
-                disposition = self._process_one(event, decision_time=decision_time, result=result)
-                if disposition == _FSR_PARTIAL_DEAD_LETTER:
-                    # PARTIAL FSR: reject + dead_letter writes already committed by _process_one.
-                    # Only release the savepoint; do NOT call mark_processed.
+                pre_disposition, should_submit = self._process_one_pre_submit(
+                    event, decision_time=decision_time, result=result
+                )
+                if not should_submit:
+                    self._finalize_disposition(
+                        event, pre_disposition, decision_time=decision_time, result=result
+                    )
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                    continue
-                if disposition == _EXECUTABLE_SNAPSHOT_RETRY:
-                    attempts = self._store.attempt_count(event.event_id)
-                    if attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES:
-                        # Genuinely uncapturable after repeated cycles → terminal.
-                        self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result, decision_time=decision_time)
-                        self._store.mark_dead_letter(
-                            event,
-                            failure_stage="EXECUTABLE_SNAPSHOT_BLOCKED",
-                            error_message=f"executable snapshot not captured after {attempts} attempts",
-                            created_at=decision_time.astimezone(UTC).isoformat(),
-                        )
-                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                        result.dead_lettered += 1
-                    else:
-                        # Transient block: requeue for retry next cycle (after capture completes).
-                        # Do NOT consume the event the way mark_processed would.
-                        self._store.requeue_pending(event.event_id)
-                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                        result.retried += 1
-                    continue
-                self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
+                    self._commit_event_unit()
+                    return
+                # All gates passed: commit the claim/pre-submit write unit so the
+                # WAL write lock is released BEFORE we touch the network. No world
+                # writes happened in the pre-submit gate-pass path beyond claim.
                 self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                result.processed += 1
+                self._commit_event_unit()
+            except Exception as exc:
+                self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
+                return
+        finally:
+            mutex.release()
+
+        # ---- Network submit: NO mutex held, NO open world txn (WAL lock free) ----
+        # In production self._submit performs the JIT /book HTTP fetch and the
+        # venue order POST. This MUST run outside the world write lock (#95).
+        try:
+            submit_result = self._submit(event, decision_time.astimezone(UTC))
+        except Exception as exc:
+            mutex.acquire()
+            try:
+                self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
+            finally:
+                mutex.release()
+            return
+
+        # ---- Window B: post-submit world write unit (ledgers + mark) under mutex ----
+        mutex.acquire()
+        try:
+            try:
+                # Window A committed and released the WAL write lock; this conn has
+                # no open txn. Open one with BEGIN IMMEDIATE so the WAL write lock is
+                # acquired DETERMINISTICALLY up front (under busy_timeout) rather
+                # than lazily on the first DML — mirrors the claim()-first discipline
+                # of Window A and avoids an immediate "database is locked" when a
+                # concurrent writer holds the WAL write lock at first-DML time.
+                if not self._store.conn.in_transaction:
+                    self._store.conn.execute("BEGIN IMMEDIATE")
+                self._store.conn.execute("SAVEPOINT edli_reactor_event")
+                post_disposition = self._process_one_post_submit(
+                    event, submit_result, decision_time=decision_time, result=result
+                )
+                # Honour the post-submit disposition exactly as the legacy
+                # single-pass flow did: a transient (_EXECUTABLE_SNAPSHOT_RETRY)
+                # requeues without consuming; a terminal accept/reject (None) marks
+                # the event processed and counts it. ``_finalize_disposition`` runs
+                # inside this open savepoint.
+                self._finalize_disposition(
+                    event, post_disposition, decision_time=decision_time, result=result
+                )
+                self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                self._commit_event_unit()
             except Exception as exc:
                 with contextlib.suppress(Exception):
                     self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
-                self._reject(event, "UNKNOWN_REVIEW_REQUIRED", str(exc))
-                self._write_compile_failure(
-                    event,
-                    "UNKNOWN_REVIEW_REQUIRED",
-                    str(exc),
-                    decision_time=decision_time,
-                )
-                self._write_regret(event, "UNKNOWN_REVIEW_REQUIRED", str(exc), decision_time=decision_time)
+                self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
+        finally:
+            mutex.release()
+
+    def _finalize_disposition(
+        self,
+        event: OpportunityEvent,
+        disposition: str | None,
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+    ) -> None:
+        """Apply the terminal/retry book-keeping for a window disposition.
+
+        Runs INSIDE the caller's open savepoint (Window A or Window B, mutex
+        held). The gate/reject/decision ledger writes for these dispositions were
+        already emitted by ``_process_one_pre_submit`` / ``_process_one_post_submit``;
+        here we only add the retry/dead-letter/mark-processed accounting that the
+        legacy single-pass ``_process_event_unit`` did identically for both phases.
+        """
+        if disposition == _FSR_PARTIAL_DEAD_LETTER:
+            # PARTIAL FSR: reject + dead_letter writes already committed upstream.
+            # Only release the savepoint; do NOT call mark_processed.
+            return
+        if disposition == _EXECUTABLE_SNAPSHOT_RETRY:
+            attempts = self._store.attempt_count(event.event_id)
+            if attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES:
+                # Genuinely uncapturable after repeated cycles → terminal.
+                self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result, decision_time=decision_time)
                 self._store.mark_dead_letter(
                     event,
-                    failure_stage="UNKNOWN_REVIEW_REQUIRED",
-                    error_message=str(exc),
+                    failure_stage="EXECUTABLE_SNAPSHOT_BLOCKED",
+                    error_message=f"executable snapshot not captured after {attempts} attempts",
                     created_at=decision_time.astimezone(UTC).isoformat(),
                 )
                 result.dead_lettered += 1
-        return result
+            else:
+                # Transient block: requeue for retry next cycle (after capture completes).
+                # Do NOT consume the event the way mark_processed would.
+                self._store.requeue_pending(event.event_id)
+                result.retried += 1
+            return
+        # disposition is None: a pre-submit gate rejected the event (its reject
+        # ledgers were written in _process_one_pre_submit). The legacy single-pass
+        # flow marked such drained-rejection events processed and counted them as
+        # ``processed`` (the event is consumed, not retried). Preserve that exactly.
+        self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
+        result.processed += 1
 
-    def _process_one(self, event: OpportunityEvent, *, decision_time: datetime, result: ReactorResult) -> str | None:
+    def _dead_letter_unknown(
+        self,
+        event: OpportunityEvent,
+        exc: BaseException,
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+    ) -> None:
+        """Emit the UNKNOWN_REVIEW_REQUIRED dead-letter world write unit.
+
+        Caller MUST hold the world mutex; this opens no savepoint of its own so it
+        is safe both from Window A's open savepoint (after rollback) and from a
+        freshly-acquired mutex with no open txn.
+        """
+        with contextlib.suppress(Exception):
+            self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
+            self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+        self._reject(event, "UNKNOWN_REVIEW_REQUIRED", str(exc))
+        self._write_compile_failure(
+            event,
+            "UNKNOWN_REVIEW_REQUIRED",
+            str(exc),
+            decision_time=decision_time,
+        )
+        self._write_regret(event, "UNKNOWN_REVIEW_REQUIRED", str(exc), decision_time=decision_time)
+        self._store.mark_dead_letter(
+            event,
+            failure_stage="UNKNOWN_REVIEW_REQUIRED",
+            error_message=str(exc),
+            created_at=decision_time.astimezone(UTC).isoformat(),
+        )
+        self._commit_event_unit()
+        result.dead_lettered += 1
+
+    def _commit_event_unit(self) -> None:
+        """Commit the current event's world-DB write unit and release the WAL write lock.
+
+        EDLI live-canary contention fix (2026-05-31): the reactor and the
+        market-channel ingestor are two in-process writers on the same WAL
+        zeus-world.db. Previously the reactor opened one implicit DEFERRED
+        transaction at the first ``claim()`` and held the single WAL *write* lock
+        for the WHOLE cycle (~330 s, incl. HTTP submit work), committing only at
+        cycle end. The ingestor thread then blocked the full 30 s busy_timeout on
+        every write → "database is locked" → the reactor cycle hung/skipped.
+
+        Committing PER EVENT releases the WAL write lock between events so the
+        ingestor (and any other world writer) gets frequent windows to write,
+        instead of waiting out a cycle-long lock. The process-global world-DB
+        write mutex (``world_write_lock`` in db.py) additionally guarantees the
+        two threads never hold the SQLite write lock concurrently, so a contended
+        write waits cleanly on the Python mutex rather than crashing on a
+        busy_timeout "database is locked".
+
+        Real sqlite3 connections implement ``.commit()``; test doubles may not, so
+        we tolerate AttributeError. Failure-soft: a commit error here is logged by
+        the caller's exception path (the savepoint write already succeeded; the
+        next cycle re-commits or the lease reclaims).
+        """
+        commit = getattr(self._store.conn, "commit", None)
+        if callable(commit):
+            commit()
+
+    def _process_one_pre_submit(
+        self, event: OpportunityEvent, *, decision_time: datetime, result: ReactorResult
+    ) -> tuple[str | None, bool]:
+        """Pre-submit gate phase (#95 SEV-2.1).
+
+        Runs every gate that does NOT require the network submit. Returns
+        ``(disposition, should_submit)``:
+          * ``should_submit is True`` (disposition ``None``) → all gates passed;
+            the caller commits the pre-submit world write unit, releases the
+            mutex, and invokes the (network) submit OUTSIDE the lock.
+          * ``should_submit is False`` → terminal/retry; ``disposition`` is one of
+            ``None`` (a gate reject, its ledgers already written here),
+            ``_FSR_PARTIAL_DEAD_LETTER`` or ``_EXECUTABLE_SNAPSHOT_RETRY``.
+
+        Any world-DB ledger write here happens inside Window A (mutex held,
+        savepoint open) — none of these paths touch the network.
+        """
         assert_available_for_decision(event, decision_time)
         if event.event_type in {"BOOK_SNAPSHOT", "BEST_BID_ASK_CHANGED", "NEW_MARKET_DISCOVERED"}:
             self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result, decision_time=decision_time)
-            return
+            return None, False
         if event.event_type == "FORECAST_SNAPSHOT_READY":
             # Dead-letter immediately if the source_run is not COMPLETE — a PARTIAL-payload FSR
             # event can never satisfy the NO_SUBMIT_CERTIFICATE gate (which requires COMPLETE).
@@ -243,25 +441,41 @@ class OpportunityEventReactor:
                     created_at=decision_time.astimezone(UTC).isoformat(),
                 )
                 result.dead_lettered += 1
-                return _FSR_PARTIAL_DEAD_LETTER
+                return _FSR_PARTIAL_DEAD_LETTER, False
         if self._config.reactor_mode not in EDLI_PROCESSING_REACTOR_MODES:
             self._reject_event(event, "LIVE_CAP", "REACTOR_NOT_LIVE", result, decision_time=decision_time)
-            return
+            return None, False
         if event.event_type == "DAY0_EXTREME_UPDATED" and not _day0_hard_fact_payload_live_eligible(event):
             self._reject_event(event, "SOURCE_TRUTH", "DAY0_HARD_FACT_AUTHORITY_BLOCKED", result, decision_time=decision_time)
-            return
+            return None, False
         if not self._source_truth_gate(event):
             self._reject_event(event, "SOURCE_TRUTH", "SOURCE_TRUTH_BLOCKED", result, decision_time=decision_time)
-            return
+            return None, False
         if not self._executable_snapshot_gate(event, decision_time.astimezone(UTC)):
             # Transient: the family's executable snapshots may not be captured yet this cycle.
             # Signal a retry instead of consuming the event (see process_pending).
-            return _EXECUTABLE_SNAPSHOT_RETRY
+            return _EXECUTABLE_SNAPSHOT_RETRY, False
         self._log_family_once(event)
         if not self._riskguard_gate(event):
             self._reject_event(event, "RISK_GUARD", "RISK_GUARD_BLOCKED", result, decision_time=decision_time)
-            return
-        submit_result = self._submit(event, decision_time.astimezone(UTC))
+            return None, False
+        return None, True
+
+    def _process_one_post_submit(
+        self,
+        event: OpportunityEvent,
+        submit_result: "bool | None | EventSubmissionReceipt",
+        *,
+        decision_time: datetime,
+        result: ReactorResult,
+    ) -> str | None:
+        """Post-submit phase (#95 SEV-2.1): consumes the submit receipt and writes
+        the decision/receipt ledgers. Runs inside Window B (mutex held, savepoint
+        open). ``submit_result`` was produced by the network submit OUTSIDE the
+        lock. Returns a disposition (``None`` for terminal/accepted,
+        ``_EXECUTABLE_SNAPSHOT_RETRY`` for a transient requeue) interpreted by the
+        caller exactly as the legacy single-pass flow did.
+        """
         receipt = _submission_receipt(event, submit_result)
         if receipt is None or not _receipt_matches_event(event, receipt):
             reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"
@@ -309,11 +523,25 @@ class OpportunityEventReactor:
             self._decision_certificate_ledger.persist_all(compile_result.certificates)
             self._decision_certificate_ledger.persist_failures(compile_result.failures)
             if compile_result.status != "VERIFIED":
-                reason = (
-                    compile_result.failures[0].reason_code
-                    if compile_result.failures
-                    else "NO_SUBMIT_CERTIFICATE_REJECTED"
-                )
+                # KILLER 2 (2026-05-31): surface the UNDERLYING failing assertion
+                # (CompileFailure.reason_detail), not just the opaque stage reason_code.
+                # 147/308 positive-edge contested candidates died here as bare
+                # NO_SUBMIT_CERTIFICATE_REJECTED with no diagnosable sub-reason in the
+                # regret stream; the real reason was only in decision_compile_failures.
+                failure = compile_result.failures[0] if compile_result.failures else None
+                detail = getattr(failure, "reason_detail", None) if failure else None
+                # TRANSIENT causality class (same family as SOURCE_CAPTURED_AFTER_DECISION_TIME,
+                # #43): a parent certificate's source_available_at was bumped past this cycle's
+                # decision_time by a later forecast re-ingest. This is NOT a terminal safety
+                # rejection — on the next cycle decision_time advances past the source's
+                # available time and the proof verifies. Requeue (bounded by retry cap →
+                # dead-letter) instead of terminally dropping the positive-edge candidate.
+                # 129/174 of the DECISION_CERTIFICATE rejections are exactly this.
+                if detail and "after decision_time" in detail:
+                    return _EXECUTABLE_SNAPSHOT_RETRY
+                reason = failure.reason_code if failure else "NO_SUBMIT_CERTIFICATE_REJECTED"
+                if detail:
+                    reason = f"{reason}:{detail}"
                 self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt, decision_time=decision_time)
                 return
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)

@@ -95,6 +95,30 @@
 
 ---
 
+## [REVIEW-SAFE: DOCS_OUTCOME_LABEL] — `outcome_label=NO` / `outcome_label=YES` in docs/operations markdown
+
+**Pattern**: inline code examples in investigation docs showing Polymarket token-outcome label assignments, e.g.:
+```
+`selected=949069429050592600=no_token_id, outcome_label=NO`
+`selected=281357327553801178=yes_token_id, outcome_label=YES`
+```
+
+**Location**: `docs/operations/POLARITY_TOKEN_2026-06-01.md` lines 71-72 (commit `1a25993e0f`). May recur in other `docs/operations/*.md` investigation files containing similar code examples.
+
+**Why scanners flag them**: gitleaks `generic-api-key` rule matches short `key=VALUE` constructs where the value has entropy ≥ 3.5. `outcome_label=NO` / `outcome_label=YES` both satisfy this heuristic.
+
+**Why they are cleared**:
+1. **Domain vocabulary**: `outcome_label` is a Polymarket YES/NO token classification field. `NO` and `YES` are the only legal values. These are not credentials.
+2. **In-prose code examples**: the context is a markdown investigation doc explaining token-polarity correctness. No authentication surface or external API call is involved.
+3. **Deterministic public values**: any Polymarket market has exactly YES and NO outcome tokens; this assignment is public knowledge, not a secret.
+
+**Operator ruling 2026-06-01**: "outcome_label=YES/NO are Polymarket domain vocabulary in a code example, not credentials — docs/operations path-scoped allowlist."
+
+**Durable references**:
+- `.gitleaks.toml` allowlist entry (path-scoped to `docs/operations/.*\.md`, regex `outcome_label=NO|outcome_label=YES`).
+
+---
+
 ## How to add a new entry
 
 When the operator clears another false-positive:

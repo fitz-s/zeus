@@ -400,13 +400,12 @@ def _verify_execution_command_payload(
     for field in ("executor_name", "execution_command_id", "idempotency_key"):
         if payload.get(field) in (None, ""):
             raise CertificateVerificationError(f"execution command {field} missing")
-    if payload.get("order_type") not in {"LIMIT", "GTC_LIMIT", "POST_ONLY_LIMIT"}:
-        raise CertificateVerificationError("execution command order_type unsupported")
-    if payload.get("time_in_force") not in {"GTC", "GTD"}:
-        raise CertificateVerificationError("execution command time_in_force unsupported")
-    maker_flag = payload.get("post_only", payload.get("maker"))
-    if maker_flag is not True:
-        raise CertificateVerificationError("execution command must be post_only maker intent for current executor law")
+    _assert_order_type_tuple_coherent(
+        payload,
+        surface="execution command",
+        post_only_key=("post_only", "maker"),
+        require_executor_order_type=False,
+    )
     if "neg_risk" in actionable and payload.get("neg_risk") != actionable.get("neg_risk"):
         raise CertificateVerificationError("execution command neg_risk mismatch")
 
@@ -428,11 +427,26 @@ def _verify_pre_submit_revalidation_for_command(
         "time_in_force",
         "post_only",
         "limit_price",
-        "tick_size",
         "min_order_size",
         "neg_risk",
     ):
         _require_equal(f"pre_submit.{field}", pre_submit.get(field), f"execution_command.{field}", command.get(field))
+    # tick_size: normalize both sides to Decimal before comparison — the pre-submit
+    # cert carries a float (0.01) while the execution command cert stores a Decimal
+    # string ("0.01"). Strict equality 0.01 != "0.01" would always fail. Both sides
+    # are coerced via Decimal(str(...)) so 0.01 == "0.01" == Decimal("0.01").
+    _ps_tick = pre_submit.get("tick_size")
+    _cmd_tick = command.get("tick_size")
+    try:
+        _ps_tick_d = Decimal(str(_ps_tick)) if _ps_tick is not None else None
+        _cmd_tick_d = Decimal(str(_cmd_tick)) if _cmd_tick is not None else None
+    except InvalidOperation:
+        _ps_tick_d = None
+        _cmd_tick_d = None
+    if _ps_tick_d != _cmd_tick_d:
+        raise CertificateVerificationError(
+            f"pre_submit.tick_size != execution_command.tick_size: {_ps_tick!r} != {_cmd_tick!r}"
+        )
     _require_equal(
         "pre_submit.live_cap_usage_id",
         pre_submit.get("live_cap_usage_id"),
@@ -449,8 +463,13 @@ def _verify_pre_submit_revalidation_for_command(
         raise CertificateVerificationError("pre-submit revalidation aggregate_event_hash missing")
     if not command.get("aggregate_execution_command_event_hash"):
         raise CertificateVerificationError("execution command aggregate_execution_command_event_hash missing")
-    if pre_submit.get("would_cross_book") is not False:
-        raise CertificateVerificationError("pre-submit revalidation would_cross_book must be false")
+    # would_cross_book must be false for post-only MAKER orders (a crossing post-only
+    # would take, violating maker intent / venue post-only rejection). A TAKER
+    # (FOK/FAK, post_only is False) is designed to cross to fill immediately, so a
+    # crossing book is expected and must not be rejected here.
+    if pre_submit.get("post_only") is not False:  # True or missing/None → maker-or-unknown → enforce
+        if pre_submit.get("would_cross_book") is not False:
+            raise CertificateVerificationError("pre-submit revalidation would_cross_book must be false")
     if pre_submit.get("tick_aligned") is not True:
         raise CertificateVerificationError("pre-submit revalidation tick_aligned must be true")
     if pre_submit.get("size_ok") is not True:
@@ -521,23 +540,27 @@ def _verify_final_intent_payload(
     reserved_notional = actionable.get("live_cap_reserved_notional_usd")
     if reserved_notional is not None and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd"):
         raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
-    if payload.get("order_type") not in {"LIMIT", "GTC_LIMIT", "POST_ONLY_LIMIT"}:
-        raise CertificateVerificationError("final intent order_type unsupported")
-    if payload.get("time_in_force") not in {"GTC", "GTD"}:
-        raise CertificateVerificationError("final intent time_in_force unsupported")
-    if payload.get("executor_order_type") not in {"GTC", "GTD"}:
-        raise CertificateVerificationError("final intent executor_order_type unsupported")
-    if payload.get("post_only") is not True or payload.get("maker_intent") is not True:
-        raise CertificateVerificationError("final intent must preserve passive maker executor law")
+    _assert_order_type_tuple_coherent(payload, surface="final intent")
     if payload.get("source") != "existing_final_intent_builder":
         raise CertificateVerificationError("final intent source must be existing_final_intent_builder")
-    for field in (
+    # WALL #1 (2026-06-01): passive_maker_context is a MAKER-ONLY executor-native field.
+    # A taker FOK/FAK carries no maker context (the cert builder emits None for taker);
+    # requiring it for taker was the verifier-layer instance of the same maker-only
+    # coupling that produced the dominant live wall. Derive the mode from the (already
+    # coherence-checked) order-type tuple and require the maker context iff maker.
+    _is_taker_intent = (
+        payload.get("order_type") in _TAKER_ORDER_TYPES
+        or payload.get("time_in_force") in _TAKER_TIF
+    )
+    required_executor_native_fields = [
         "executable_snapshot_hash",
         "cost_basis_hash",
         "cost_basis_id",
         "decision_source_context",
-        "passive_maker_context",
-    ):
+    ]
+    if not _is_taker_intent:
+        required_executor_native_fields.append("passive_maker_context")
+    for field in required_executor_native_fields:
         if payload.get(field) in (None, "", {}):
             raise CertificateVerificationError(f"final intent missing executor-native field: {field}")
     expected_cost_basis_id = "cost_basis:" + str(payload["cost_basis_hash"])[:16]
@@ -583,12 +606,11 @@ def _verify_executor_expressibility_payload(
         raise CertificateVerificationError("executor expressibility limit_price not tick-aligned")
     if size < min_order_size:
         raise CertificateVerificationError("executor expressibility size below min_order_size")
-    if payload.get("order_type") not in {"LIMIT", "GTC_LIMIT", "POST_ONLY_LIMIT"}:
-        raise CertificateVerificationError("executor expressibility order_type unsupported")
-    if payload.get("time_in_force") not in {"GTC", "GTD"}:
-        raise CertificateVerificationError("executor expressibility time_in_force unsupported")
-    if payload.get("post_only") is not True or payload.get("maker_intent") is not True:
-        raise CertificateVerificationError("executor expressibility requires passive maker order")
+    _assert_order_type_tuple_coherent(
+        payload,
+        surface="executor expressibility",
+        require_executor_order_type=False,
+    )
 
 
 def _verify_execution_receipt_payload(
@@ -951,6 +973,61 @@ def _is_tick_aligned(price: float, tick_size: float) -> bool:
         return price_decimal.remainder_near(tick_decimal) == 0
     except (InvalidOperation, ValueError):
         return False
+
+
+_MAKER_ORDER_TYPES = {"LIMIT", "GTC_LIMIT", "POST_ONLY_LIMIT"}
+_MAKER_TIF = {"GTC", "GTD"}
+_TAKER_ORDER_TYPES = {"FOK_LIMIT", "FAK_LIMIT"}
+_TAKER_TIF = {"FOK", "FAK"}
+
+
+def _assert_order_type_tuple_coherent(
+    payload: dict,
+    *,
+    surface: str,
+    post_only_key: tuple[str, ...] = ("post_only",),
+    require_executor_order_type: bool = True,
+) -> None:
+    """Authorize a maker OR taker order-type tuple, never a mixed one.
+
+    The governor-decided mode is the authority (Fitz #4 provenance): the cert
+    builder is the sole emitter of a taker tuple, and it only emits one for
+    order_mode == "TAKER". Here we re-derive the mode from the tuple and demand
+    it be internally consistent — a maker tuple is post-only GTC/GTD; a taker
+    tuple is FOK/FAK marketable with post_only/maker_intent False. Any mixed
+    tuple (e.g. post_only=True with time_in_force=FOK) is rejected, so widening
+    to taker can NEVER blanket-allow a malformed passive order.
+    """
+    order_type = payload.get("order_type")
+    tif = payload.get("time_in_force")
+    post_only = None
+    for key in post_only_key:
+        if key in payload:
+            post_only = payload.get(key)
+            break
+    maker_intent = payload.get("maker_intent", post_only)
+
+    is_taker = (order_type in _TAKER_ORDER_TYPES) or (tif in _TAKER_TIF)
+    if is_taker:
+        if order_type not in _TAKER_ORDER_TYPES:
+            raise CertificateVerificationError(f"{surface} taker order_type unsupported")
+        if tif not in _TAKER_TIF:
+            raise CertificateVerificationError(f"{surface} taker time_in_force unsupported")
+        if post_only is not False:
+            raise CertificateVerificationError(f"{surface} taker order must have post_only=False")
+        if maker_intent not in (False, None):
+            raise CertificateVerificationError(f"{surface} taker order must have maker_intent=False")
+        if require_executor_order_type and payload.get("executor_order_type") not in _TAKER_TIF:
+            raise CertificateVerificationError(f"{surface} taker executor_order_type unsupported")
+        return
+    if order_type not in _MAKER_ORDER_TYPES:
+        raise CertificateVerificationError(f"{surface} order_type unsupported")
+    if tif not in _MAKER_TIF:
+        raise CertificateVerificationError(f"{surface} time_in_force unsupported")
+    if post_only is not True or (maker_intent is not True and "maker_intent" in payload):
+        raise CertificateVerificationError(f"{surface} must preserve passive maker executor law")
+    if require_executor_order_type and payload.get("executor_order_type") not in _MAKER_TIF:
+        raise CertificateVerificationError(f"{surface} executor_order_type unsupported")
 
 
 def _expected_members_extrema_transform(metric: object) -> str:

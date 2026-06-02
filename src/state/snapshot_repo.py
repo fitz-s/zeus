@@ -176,6 +176,12 @@ def latest_snapshot_for_market(
     return _snapshot_from_row(row) if row is not None else None
 
 
+def executable_snapshot_from_row(row: sqlite3.Row) -> ExecutableMarketSnapshot:
+    """Public wrapper so callers outside this module can hydrate a snapshot row
+    without importing the private ``_snapshot_from_row`` symbol."""
+    return _snapshot_from_row(row)
+
+
 def _row_from_snapshot(snapshot: ExecutableMarketSnapshot) -> dict[str, Any]:
     return {
         "snapshot_id": snapshot.snapshot_id,

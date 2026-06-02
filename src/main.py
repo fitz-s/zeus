@@ -50,6 +50,7 @@ except ModuleNotFoundError:  # pragma: no cover - local minimal test env fallbac
 from src.config import cities_by_name, get_mode, settings
 from src.engine.discovery_mode import DiscoveryMode
 from src.observability.scheduler_health import _write_scheduler_health
+from src.runtime import bankroll_provider
 from src.state.db import (
     init_schema,
     init_schema_trade_only,
@@ -57,6 +58,7 @@ from src.state.db import (
     get_trade_connection,
     get_world_connection_read_only,
 )
+from src.state.portfolio import load_portfolio
 
 logger = logging.getLogger("zeus")
 
@@ -3188,6 +3190,118 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
 
+def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
+    """Configure the process-wide risk allocator/governor for the EDLI live path.
+
+    ROOT (see /tmp/edli_submit_gate_trace.md): the live ``_live_order`` submit path
+    calls ``select_global_order_type`` which raises
+    ``AllocationDenied("allocator_not_configured")`` whenever the process singletons
+    ``_GLOBAL_ALLOCATOR`` / ``_GLOBAL_GOVERNOR_STATE`` are None. The legacy discover
+    cycle (``src/engine/cycle_runner.py``) populates them via
+    ``refresh_global_allocator``; the EDLI event-reactor cycle does NOT run that
+    legacy cycle, so without this seam every canary order silently blocks.
+
+    Drawdown sourcing (this drives the governor's drawdown kill-switch — getting it
+    wrong is a live-capital risk):
+      * baseline (``daily_baseline_total``) comes from ``load_portfolio()``.
+        NOTE: ``daily_baseline_total`` is structurally 0.0 system-wide (it equals
+        ``bankroll`` in the canonical DB loader — see ``src/state/portfolio.py:1790``
+        and verified live 2026-05-31). The legacy discover cycle
+        (``src/engine/cycle_runner.py:711``) uses ``_drawdown_pct = ... if _baseline
+        > 0 else 0.0`` — i.e. it tolerates zero baseline by passing drawdown=0.0 and
+        PROCEEDING to configure the allocator. The drawdown-from-baseline kill-switch
+        is therefore inert system-wide; real safety layers are riskguard risk_level
+        (GREEN gate), trailing-loss reference, bankroll truth, $5 canary cap, and
+        Kelly sizing. This seam MUST mirror that same tolerance — a stricter gate
+        here would permanently block the EDLI canary while the legacy cycle runs fine.
+      * current bankroll comes from the on-chain wallet truth via
+        ``bankroll_provider.cached()`` (warmed once per cycle by the EDLI cycle's
+        bankroll warm at the top of ``_edli_event_reactor_cycle``). The on-chain
+        wallet is the only bankroll truth source in live mode.
+      * drawdown_pct mirrors the legacy formula EXACTLY
+        (``src/engine/cycle_runner.py:711``):
+        ``max((baseline - bankroll) / baseline * 100, 0)`` for ``baseline > 0``,
+        ``0.0`` otherwise.
+
+    FAIL-CLOSED: if bankroll cache is None (wallet unreachable) or any exception
+    occurs, this does NOT configure an allow-everything allocator. It leaves the
+    singletons in their submit-blocking state and returns ``{"configured": False,
+    "fail_closed": True, ...}`` so the caller degrades to no-submit this cycle.
+    Zero/negative baseline is NOT a fail-closed trigger — it mirrors the legacy
+    path's drawdown=0.0 tolerance. Mirrors ``src/engine/cycle_runner.py:718-728``.
+    """
+    from src.control.heartbeat_supervisor import summary as _heartbeat_summary
+    from src.control.ws_gap_guard import summary as _ws_gap_summary
+    from src.risk_allocator import refresh_global_allocator
+    from src.riskguard.riskguard import get_current_level
+
+    try:
+        # On-chain wallet is the only bankroll truth. cached() never re-fetches; the
+        # EDLI cycle warms it via current(max_age_seconds=0.0) at cycle start. None →
+        # wallet unreachable / cache cold → drawdown untrustworthy → fail closed.
+        _bk = bankroll_provider.cached()
+        if _bk is None:
+            logger.error(
+                "EDLI live-bridge allocator refresh: on-chain bankroll cache is None "
+                "(wallet unreachable) — drawdown untrustworthy; FAIL-CLOSED, blocking "
+                "live submit this cycle (no fake-0.0 drawdown)."
+            )
+            return {
+                "configured": False,
+                "fail_closed": True,
+                "error": "bankroll_unavailable",
+                "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+            }
+        _current_bankroll = float(getattr(_bk, "value_usd", 0.0) or 0.0)
+
+        _portfolio = load_portfolio()
+        _baseline = float(getattr(_portfolio, "daily_baseline_total", 0.0) or 0.0)
+
+        # Legacy formula EXACTLY (cycle_runner.py:711): drawdown=0.0 when baseline<=0.
+        # baseline is structurally 0.0 system-wide; the legacy cycle runs fine with
+        # this — we must not impose a stricter gate here.
+        _drawdown_pct = (
+            max(((_baseline - _current_bankroll) / _baseline) * 100.0, 0.0)
+            if _baseline > 0.0
+            else 0.0
+        )
+
+        _result = refresh_global_allocator(
+            conn,
+            ledger={"current_drawdown_pct": _drawdown_pct, "risk_level": get_current_level().value},
+            heartbeat=_heartbeat_summary(),
+            ws_status=_ws_gap_summary(),
+        )
+        logger.info(
+            "EDLI live-bridge allocator refresh: CONFIGURED drawdown_pct=%.3f baseline=%.2f "
+            "bankroll=%.2f",
+            _drawdown_pct, _baseline, _current_bankroll,
+        )
+        return _result
+    except Exception as _refresh_exc:  # noqa: BLE001 — fail-closed by contract
+        # Never let a refresh failure leave an unconfigured-but-proceeding live submit.
+        # Reset to the explicit unconfigured (blocking) state so the submit path keeps
+        # raising allocator_not_configured, and signal the caller to degrade to no-submit.
+        from src.risk_allocator import configure_global_allocator
+
+        try:
+            configure_global_allocator(None, None)
+        except Exception:  # noqa: BLE001
+            pass
+        logger.error(
+            "EDLI live-bridge allocator refresh FAILED: %s; FAIL-CLOSED, blocking live "
+            "submit this cycle (degrade to no-submit).",
+            _refresh_exc,
+            exc_info=True,
+        )
+        return {
+            "configured": False,
+            "fail_closed": True,
+            "error": str(_refresh_exc),
+            "entry": {"allow_submit": False, "reason": "allocator_not_configured"},
+        }
+
+
 @_scheduler_job("edli_event_reactor")
 def _edli_event_reactor_cycle() -> None:
     """EDLI event-reactor scheduler hook.
@@ -3200,6 +3314,7 @@ def _edli_event_reactor_cycle() -> None:
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
+    import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
         event_bound_live_adapter_from_trade_conn,
@@ -3249,69 +3364,133 @@ def _edli_event_reactor_cycle() -> None:
     except Exception as _bk_exc:  # noqa: BLE001
         logger.warning("EDLI reactor: bankroll cache warm failed (non-fatal): %r", _bk_exc)
     try:
+        from src.state.db import world_write_mutex as _world_write_mutex
+
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
         forecast_emit_limit = _edli_bounded_positive_int(edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50)
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
         proof_limit = _edli_bounded_positive_int(edli_cfg, "no_submit_proof_limit", default=10, maximum=50)
-        if edli_cfg.get("forecast_snapshot_trigger_enabled"):
-            _edli_emit_forecast_snapshot_events(
-                conn,
-                decision_time=now,
-                received_at=received_at,
-                limit=forecast_emit_limit,
-            )
-        # Continuous re-decision (DEFAULT OFF — redecision_continuous_enabled): re-emit
-        # FSR-equivalent events for committed market-backed families each cycle, with a per-cycle
-        # distinct source so they do NOT dedup to the consumed FSR. Routing through the pending path
-        # makes _refresh_pending_family_snapshots capture fresh prices just-in-time → the reactor
-        # re-decides every ~60s instead of once per 12h forecast. Fixes EDLI-mode "hours per order".
-        # already_pending skip + cap bound the queue. Non-fatal: never breaks the reactor cycle.
-        if bool(edli_cfg.get("redecision_continuous_enabled", False)):
-            try:
-                _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
-                _rd_source = f"edli_redecision:{now.isoformat()}"
-                _rd_pending = _edli_pending_entity_keys(conn)
-                _rd_n = _edli_emit_forecast_snapshot_events(
-                    conn,
-                    decision_time=now,
-                    received_at=received_at,
-                    limit=_rd_cap,
-                    source=_rd_source,
-                    already_pending_keys=_rd_pending,
-                )
-                logger.info(
-                    "edli_redecision: enqueued=%d cap=%d skipped_pending=%d",
-                    _rd_n, _rd_cap, len(_rd_pending),
-                )
-            except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
-                logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
-        if (
-            edli_cfg.get("day0_extreme_trigger_enabled")
-            and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
-        ):
-            _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
-            try:
-                _edli_emit_day0_extreme_events(
-                    conn,
-                    _day0_trade_conn,
-                    decision_time=now,
-                    received_at=received_at,
-                    limit=day0_emit_limit,
-                )
-            finally:
-                _day0_trade_conn.close()
-        conn.commit()
-        # Targeted, cache-aware refresh of executable snapshots for pending families.
-        # Opens its own write trade connection and commits before trade_conn is opened,
-        # ensuring WAL read visibility for the gate below.
-        _refresh_pending_family_snapshots(conn, forecasts_conn)
+        # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
+        # EMIT block writes opportunity_events to the WAL zeus-world.db shared
+        # in-process with the market-channel ingestor. Serialize the whole
+        # emit+commit unit under the process-global world-DB write mutex so it
+        # never holds the WAL write lock concurrently with the ingestor (no HTTP
+        # is done inside this block — the emit reads forecasts/trade DBs and
+        # writes world — so the mutex stays short and never spans a venue fetch).
+        # Explicit acquire/finally (not ``with``) to avoid reindenting the block.
+        _emit_mutex = _world_write_mutex()
+        _emit_mutex.acquire()
+        try:
+            if edli_cfg.get("forecast_snapshot_trigger_enabled"):
+                # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
+                # opportunity_events to the WAL world DB shared with the market-channel
+                # ingestor and CollateralLedger heartbeat. Under live load that DB hits
+                # transient "database is locked" past the 30s busy_timeout. A locked-out
+                # emit must NOT crash the whole reactor cycle — the cycle should still drain
+                # candidates already queued from prior cycles. Catch ONLY the transient lock
+                # (narrow, by message) and continue; real schema/logic faults still propagate.
+                try:
+                    _edli_emit_forecast_snapshot_events(
+                        conn,
+                        decision_time=now,
+                        received_at=received_at,
+                        limit=forecast_emit_limit,
+                    )
+                except sqlite3.OperationalError as _emit_lock_exc:
+                    if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
+                        logger.warning(
+                            "EDLI reactor: forecast-snapshot emit hit transient world-DB lock "
+                            "(%r) — skipping emit this cycle, draining already-queued candidates.",
+                            _emit_lock_exc,
+                        )
+                    else:
+                        raise
+            # Continuous re-decision (DEFAULT OFF — redecision_continuous_enabled): re-emit
+            # FSR-equivalent events for committed market-backed families each cycle, with a per-cycle
+            # distinct source so they do NOT dedup to the consumed FSR. Routing through the pending path
+            # makes _refresh_pending_family_snapshots capture fresh prices just-in-time → the reactor
+            # re-decides every ~60s instead of once per 12h forecast. Fixes EDLI-mode "hours per order".
+            # already_pending skip + cap bound the queue. Non-fatal: never breaks the reactor cycle.
+            if bool(edli_cfg.get("redecision_continuous_enabled", False)):
+                try:
+                    _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
+                    _rd_source = f"edli_redecision:{now.isoformat()}"
+                    _rd_pending = _edli_pending_entity_keys(conn)
+                    _rd_n = _edli_emit_forecast_snapshot_events(
+                        conn,
+                        decision_time=now,
+                        received_at=received_at,
+                        limit=_rd_cap,
+                        source=_rd_source,
+                        already_pending_keys=_rd_pending,
+                    )
+                    logger.info(
+                        "edli_redecision: enqueued=%d cap=%d skipped_pending=%d",
+                        _rd_n, _rd_cap, len(_rd_pending),
+                    )
+                except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
+                    logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
+            if (
+                edli_cfg.get("day0_extreme_trigger_enabled")
+                and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+            ):
+                _day0_trade_conn = get_trade_connection_with_world_required(write_class=None)
+                try:
+                    _edli_emit_day0_extreme_events(
+                        conn,
+                        _day0_trade_conn,
+                        decision_time=now,
+                        received_at=received_at,
+                        limit=day0_emit_limit,
+                    )
+                finally:
+                    _day0_trade_conn.close()
+            # Commit the emit WRITE UNIT (FSR + redecision + day0 → opportunity_events)
+            # while still holding the world-DB write mutex, so the WAL write lock is
+            # released by the COMMIT before any other writer (ingestor / collateral
+            # heartbeat) can interleave. No HTTP/venue work runs inside this block.
+            conn.commit()
+        finally:
+            _emit_mutex.release()
+        # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
+        # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
+        # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
+        # so it re-ran nearly every cycle) + per-token CLOB /book capture across all
+        # pending-family bins. Running it INLINE here made the reactor cycle wall-clock
+        # blow past the 1-min APScheduler interval (overlapping triggers coalesced/
+        # skipped → 0 completed cycles → 0 receipts/trades despite the live submit path
+        # being CODE-CLEAR to the venue POST boundary). It is now DECOUPLED into the
+        # dedicated _edli_market_substrate_warm_cycle job (mirroring _edli_bankroll_warm_cycle,
+        # #45), so this reactor cycle reads ALREADY-captured snapshots (DB-only,
+        # microseconds) and reaches process_pending → submit in seconds. Decision
+        # semantics are UNCHANGED: a family not yet captured by the warm job still
+        # requeues via the reactor's existing EXECUTABLE_SNAPSHOT_RETRY path (fail-closed).
         trade_conn = get_trade_connection_with_world_required(write_class=None)
         store = EventStore(conn)
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
         live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
+        # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
+        # built so the live submit path's select_global_order_type does not raise
+        # AllocationDenied("allocator_not_configured"). The legacy discover cycle wires this
+        # via refresh_global_allocator; the EDLI cycle does not run that cycle, so without
+        # this seam every canary order silently blocks (see /tmp/edli_submit_gate_trace.md).
+        # FAIL-CLOSED: if the refresh cannot source a trustworthy drawdown (wallet unreachable
+        # / baseline undefined / exception), degrade THIS cycle to the no-submit adapter rather
+        # than submit live with an unconfigured-but-proceeding allocator.
+        live_submit_effective = live_bridge_mode
+        if live_bridge_mode:
+            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(conn)
+            if not _alloc_refresh.get("configured"):
+                live_submit_effective = False
+                logger.error(
+                    "EDLI reactor: live-bridge allocator refresh did not configure "
+                    "(fail_closed=%r reason=%r) — degrading to NO-SUBMIT this cycle.",
+                    _alloc_refresh.get("fail_closed"),
+                    _alloc_refresh.get("entry", {}).get("reason"),
+                )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -3321,9 +3500,22 @@ def _edli_event_reactor_cycle() -> None:
                 get_current_level=get_current_level,
                 real_order_submit_enabled=real_order_submit_enabled if reactor_mode == "live" else False,
                 live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
+                taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
+                durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
-                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(conn, edli_cfg),
+                canary_force_taker_provider=_edli_canary_force_taker_provider(conn, edli_cfg),
+                pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(
+                    conn,
+                    edli_cfg,
+                    # GATE #84: in live-submit mode the pre-submit authority pulls a
+                    # just-in-time live book for the selected candidate so quote_age
+                    # reflects observation-to-submit latency, not the venue's coarse
+                    # book-change stamp on the shared feasibility feed.
+                    book_quote_provider=(
+                        _edli_pre_submit_jit_book_quote_provider() if live_submit_effective else None
+                    ),
+                ),
                 executor_submit=lambda final_intent_cert, execution_command_cert: submit_event_bound_final_intent_via_existing_executor(
                     final_intent_cert=final_intent_cert,
                     execution_command_cert=execution_command_cert,
@@ -3332,7 +3524,7 @@ def _edli_event_reactor_cycle() -> None:
                     decision_time=now,
                 ),
             )
-            if live_bridge_mode
+            if live_submit_effective
             else event_bound_no_submit_adapter_from_trade_conn(
                 trade_conn,
                 forecast_conn=forecasts_conn,
@@ -3374,6 +3566,127 @@ def _edli_event_reactor_cycle() -> None:
             pass
         forecasts_conn.close()
         conn.close()
+
+
+@_scheduler_job("edli_bankroll_warm")
+def _edli_bankroll_warm_cycle() -> None:
+    """Dedicated frequent (~60s) on-chain bankroll-of-record cache warmer.
+
+    STRUCTURAL FIX (2026-05-31, follow-up to #45): the per-event no-submit Kelly
+    proof and the live-bridge allocator refresh both read
+    ``bankroll_provider.cached()`` (300s fail-closed window) and MUST NOT live-fetch
+    per decision. The reactor cycle previously warmed that cache ONCE at cycle
+    start, but the canary cycle runs ~330s (heavy MC re-pricing + live /book fetches
+    + submit path), so by the time those consumers ran near cycle END the cache age
+    had exceeded 300s → ``cached()`` returned None → allocator fail-closed
+    (bankroll_unavailable) AND every candidate rejected with
+    ``KELLY_PROOF_MISSING:bankroll_provider_unavailable``. Bankroll freshness was
+    structurally COUPLED to the slow reactor cycle.
+
+    This job DECOUPLES freshness from the reactor cycle: it runs on its own ~60s
+    cadence and forces a fresh on-chain fetch (``current(max_age_seconds=0.0)``),
+    advancing ``_last_fetched_at`` so ``cached()`` (300s window) always resolves
+    regardless of how long the reactor cycle takes. It does NOT widen the
+    ``cached()`` window or weaken any fail-closed semantics — the consumers still
+    fail-closed correctly when bankroll is genuinely unavailable.
+
+    Not a DB writer (no table owned) — the @_scheduler_job decorator is the only
+    wiring needed (B047 observability). Fail-soft: a transient wallet-RPC failure
+    logs an ERROR but never crashes this job; a failed warm simply means this tick's
+    freshness did not advance (the next tick retries in ~60s, and consumers stay
+    fail-closed in the interim).
+    """
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    from src.runtime import bankroll_provider as _bankroll_provider
+
+    try:
+        warm = _bankroll_provider.current(max_age_seconds=0.0)
+    except Exception as exc:  # noqa: BLE001 — fail-soft; consumers fail-closed on None
+        logger.error(
+            "EDLI bankroll warm: on-chain wallet fetch raised (non-fatal, freshness "
+            "did not advance this tick): %r",
+            exc,
+        )
+        return
+    if warm is None:
+        logger.error(
+            "EDLI bankroll warm: current() returned None — on-chain wallet fetch is "
+            "failing; cached() will fail closed (KELLY_PROOF_MISSING) until it recovers."
+        )
+
+
+@_scheduler_job("edli_market_substrate_warm")
+def _edli_market_substrate_warm_cycle() -> None:
+    """Dedicated EDLI executable-snapshot substrate warmer, DECOUPLED from the reactor.
+
+    THROUGHPUT STRUCTURAL FIX (2026-06-01): _refresh_pending_family_snapshots makes a
+    full-universe Gamma scan (find_weather_markets → _get_active_events, benchmarked
+    ~76s COLD; TTL 300s so it re-ran nearly every cycle) + per-token CLOB /book capture
+    across all pending-family bins. Running it INLINE at the top of
+    _edli_event_reactor_cycle made the reactor's wall-clock blow past its 1-min
+    APScheduler interval — with max_instances=1/coalesce=True, every overlapping trigger
+    was skipped, so process_pending essentially never ran (23 min with ZERO completed
+    cycles / ZERO trades observed on the live daemon, even though the submit path is
+    CODE-CLEAR to the venue POST boundary).
+
+    Moving the refresh here (mirroring _edli_bankroll_warm_cycle, #45) puts the expensive
+    venue-I/O on its OWN cadence so the reactor reads ALREADY-captured snapshots
+    (DB-only, microseconds) and reaches submit in seconds. This changes NO decision: the
+    reactor's no-submit proof, full gate chain, and just-in-time submit /book are
+    byte-for-byte unchanged — they just consume snapshots a background job produced.
+    Fail-closed is preserved: a family not yet captured this tick requeues via the
+    reactor's existing EXECUTABLE_SNAPSHOT_RETRY path.
+
+    Not a DB writer of its own ledger — it delegates to _refresh_pending_family_snapshots,
+    which owns its write trade connection + commit. The @_scheduler_job decorator is the
+    only wiring needed (B047). Fail-soft: a transient Gamma/CLOB failure logs but never
+    crashes this job (the next tick retries; consumers stay fail-closed in the interim).
+    """
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
+
+    conn = get_world_connection()
+    # K1: the snapshot refresh reads market topology off the forecasts DB (market_events).
+    # Attach read-only (idempotent) so the family-topology lookup resolves, mirroring the
+    # reactor's own ATTACH. _refresh_pending_family_snapshots opens its own WRITE trade
+    # connection internally and commits — this conn is only the world-side pending-event
+    # reader.
+    try:
+        _attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "forecasts" not in _attached:
+            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+    except Exception as _attach_exc:  # noqa: BLE001 — non-fatal; refresh logs+skips on topology miss
+        logger.warning(
+            "EDLI market-substrate warm: ATTACH forecasts failed (non-fatal): %r", _attach_exc
+        )
+    forecasts_conn = get_forecasts_connection_read_only()
+    try:
+        # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
+        # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
+        # of the scheduler job (the reactor stays decoupled and fail-closed regardless).
+        summary = _refresh_pending_family_snapshots(conn, forecasts_conn)
+        logger.info("EDLI market-substrate warm: refresh summary=%r", summary)
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
+        logger.error(
+            "EDLI market-substrate warm: refresh raised (non-fatal, snapshots did not "
+            "advance this tick): %r",
+            exc,
+        )
+    finally:
+        try:
+            forecasts_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
@@ -3526,12 +3839,134 @@ def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | 
     return filtered
 
 
-def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
-    """Build EDLI's production read-only pre-submit authority provider.
+def _edli_canary_force_taker_provider(world_conn, edli_cfg):
+    """Build the canary force-taker gate: True iff canary-active AND fills < min.
 
-    The provider is intentionally read-only: it consumes quote evidence,
-    heartbeat/user-channel guards, and wallet allowance truth. Missing
-    authority remains fail-closed before command creation.
+    Design §4 item 7: the canary FORCES the taker branch (bypassing the
+    governor's maker/taker CHOICE, never its NO_TRADE/risk gates) only while the
+    live-canary stage is enabled AND the proven canary fill count is still below
+    ``edli_live_min_canary_count``. Once the min fills land, the gate returns
+    False and order-type selection reverts to the governor + EV boundary (§1-§2).
+
+    The confirmed-fill count is sourced from the world DB EDLI live-order audit
+    (``edli_live_profit_audit`` / ``edli_live_order_events``, db: world). When the
+    count cannot be computed (tables absent at canary genesis, or a read error),
+    the gate fails OPEN to force-taker: the canary stage is, by definition, not
+    yet proven, so forcing the deterministic FOK proof is the conservative
+    canary-stage default (Fitz #4: do not infer "canary complete" from a missing
+    count).
+    """
+
+    if not bool(edli_cfg.get("live_canary_enabled", False)):
+        return lambda: False
+    min_canary_count = int(edli_cfg.get("edli_live_min_canary_count", 1))
+
+    def _provider() -> bool:
+        try:
+            from src.events.live_profit_audit import (
+                _canonical_promotion_rows,
+                _promotion_summary_from_rows,
+            )
+
+            rows = _canonical_promotion_rows(world_conn)
+            summary = _promotion_summary_from_rows(world_conn, rows)
+            confirmed = int(summary.confirmed_fill_count)
+        except Exception:
+            # Count unavailable -> canary not proven -> force the taker proof.
+            return True
+        return confirmed < min_canary_count
+
+    return _provider
+
+
+def _edli_pre_submit_jit_book_quote_provider():
+    """Build the just-in-time single-token ``/book`` fetcher for the pre-submit
+    authority (GATE #84). Returns a ``token_id -> dict`` callable that pulls the
+    live CLOB book for exactly the selected candidate at submit time, or ``None``
+    if a CLOB client cannot be constructed (caller then falls back to the DB row).
+
+    The client is constructed per call so the provider holds no long-lived
+    connection across reactor cycles; the call only fires for an actual submit
+    candidate (rare, fully gated), so the per-call cost is negligible.
+    """
+
+    def _fetch(token_id: str) -> dict:
+        from src.data.polymarket_client import PolymarketClient
+
+        with PolymarketClient() as clob:
+            return clob.get_orderbook_snapshot(token_id)
+
+    return _fetch
+
+
+def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
+    """JIT single-token book fetch for the SELECTED candidate at submit time.
+
+    GATE #84 root cause: the shared market-channel feasibility feed stamps
+    ``quote_seen_at`` with the venue book-CHANGE timestamp (1s resolution, often
+    minutes stale for slow weather books), and only refreshes a given token when
+    its WS tick arrives (median per-candidate gap ~11s). The 1000ms pre-submit
+    bound is a SUBMIT-TIME observation-freshness bound, so for the one selected
+    candidate we pull its live book ``now`` and anchor freshness to OUR
+    observation time — the FOK crosses against exactly this book.
+
+    Returns ``(best_bid, best_ask, book_hash)`` on a usable two-sided book, or
+    ``None`` when the fetch fails or the book is empty/crossed (fail-closed —
+    the caller then falls back to a genuinely-fresh DB row or raises).
+    """
+
+    if book_quote_provider is None:
+        return None
+    try:
+        message = dict(book_quote_provider(token_id))
+    except Exception as exc:  # noqa: BLE001 - JIT fetch failure must not fabricate freshness
+        logger.warning("EDLI pre-submit JIT book fetch failed for %s: %s", token_id, exc)
+        return None
+    best_bid = _edli_book_best_price(message.get("bids"), best="bid")
+    best_ask = _edli_book_best_price(message.get("asks"), best="ask")
+    book_hash = str(message.get("hash") or "")
+    if best_bid is None or best_ask is None or not book_hash:
+        return None
+    if best_bid >= best_ask:
+        # Crossed/locked book is not a usable pre-submit authority.
+        return None
+    return best_bid, best_ask, book_hash
+
+
+def _edli_book_best_price(levels, *, best: str):
+    if not levels:
+        return None
+    parsed = []
+    for level in levels:
+        raw = level.get("price") if isinstance(level, dict) else (level[0] if level else None)
+        if raw in (None, ""):
+            continue
+        try:
+            parsed.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    if not parsed:
+        return None
+    return max(parsed) if best == "bid" else min(parsed)
+
+
+def _edli_pre_submit_authority_provider_from_world_conn(
+    world_conn, edli_cfg, *, book_quote_provider=None
+):
+    """Build EDLI's production pre-submit authority provider.
+
+    The provider consumes quote evidence, heartbeat/user-channel guards, and
+    wallet allowance truth; missing authority remains fail-closed before command
+    creation.
+
+    ``book_quote_provider`` (GATE #84) is an optional just-in-time single-token
+    ``/book`` fetch (``token_id -> dict``). When wired in live/canary mode it is
+    the PRIMARY book authority: for the selected candidate at submit time we pull
+    its live book and anchor ``quote_seen_at`` to our observation instant
+    (``checked_at``), so the 1000ms freshness bound reflects observation-to-submit
+    latency rather than the venue's coarse book-change stamp. The DB feasibility
+    row is the fail-closed fallback and is only accepted when it is itself within
+    ``max_quote_age_ms`` — a stale row never leaks through as a fresh quote.
     """
 
     from src.engine.event_reactor_adapter import PreSubmitAuthorityWitness
@@ -3542,19 +3977,45 @@ def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
     def _provider(final_intent, _executable_snapshot, decision_time):
         checked_at = decision_time.astimezone(timezone.utc)
         intent = final_intent.payload
-        row = _edli_latest_pre_submit_book_row(
-            world_conn,
-            token_id=str(intent["token_id"]),
-            decision_time=checked_at,
-        )
-        if row is None:
-            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_MISSING")
-        quote_seen_at = str(_row_get(row, "quote_seen_at") or "")
-        book_hash = str(_row_get(row, "book_hash_before") or "")
-        best_bid = _row_float(row, "best_bid_before")
-        best_ask = _row_float(row, "best_ask_before")
-        if not quote_seen_at or not book_hash or best_bid is None or best_ask is None:
-            raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+        token_id = str(intent["token_id"])
+
+        # PRIMARY: just-in-time live book for the selected candidate. Freshness is
+        # anchored to OUR observation time (checked_at) — the FOK crosses against
+        # exactly this book — so quote_age_ms is the observation-to-submit latency.
+        jit = _edli_pre_submit_book_from_jit_fetch(book_quote_provider, token_id=token_id)
+        if jit is not None:
+            best_bid, best_ask, book_hash = jit
+            quote_seen_at = checked_at.isoformat()
+            book_authority_id = "clob_jit_book"
+        else:
+            # FAIL-CLOSED FALLBACK: the shared feasibility feed. Accept the latest
+            # row ONLY if it is itself within the freshness bound; a venue-stale row
+            # (the GATE #84 pathology) must NOT be emitted as a fresh quote.
+            row = _edli_latest_pre_submit_book_row(
+                world_conn,
+                token_id=token_id,
+                decision_time=checked_at,
+            )
+            if row is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_MISSING")
+            quote_seen_at = str(_row_get(row, "quote_seen_at") or "")
+            book_hash = str(_row_get(row, "book_hash_before") or "")
+            best_bid = _row_float(row, "best_bid_before")
+            best_ask = _row_float(row, "best_ask_before")
+            if not quote_seen_at or not book_hash or best_bid is None or best_ask is None:
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+            try:
+                row_quote_dt = datetime.fromisoformat(quote_seen_at.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE")
+            if row_quote_dt.tzinfo is None:
+                row_quote_dt = row_quote_dt.replace(tzinfo=timezone.utc)
+            row_age_ms = (checked_at - row_quote_dt.astimezone(timezone.utc)).total_seconds() * 1000.0
+            if row_age_ms > max_quote_age_ms:
+                # No fresh JIT book and the only stored quote is stale: do not
+                # leak a stale quote that the downstream gate would have to catch.
+                raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_STALE")
+            book_authority_id = "execution_feasibility_evidence"
 
         heartbeat_summary = _edli_heartbeat_authority_summary()
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)
@@ -3577,7 +4038,7 @@ def _edli_pre_submit_authority_provider_from_world_conn(world_conn, edli_cfg):
             user_ws_status="OK" if user_ws_summary["allow_submit"] else "BLOCKED",
             venue_connectivity_status="OK" if venue_summary["allow_submit"] else "BLOCKED",
             balance_allowance_status=balance_status,
-            book_authority_id="execution_feasibility_evidence",
+            book_authority_id=book_authority_id,
             book_captured_at=quote_seen_at,
             heartbeat_authority_id=str(heartbeat_summary["authority_id"]),
             heartbeat_checked_at=checked_at.isoformat(),
@@ -3879,6 +4340,10 @@ def _edli_user_channel_reconcile_cycle() -> None:
     now = datetime.now(timezone.utc)
     message_count = 0
     reconcile_count = 0
+    # DEFECT-1: aggregates whose user-channel TRADE message was processed this
+    # cycle. After the world-conn commit, the bridge materialises a canonical
+    # position_current row for each that reached FILL_CONFIRMED.
+    _edli_fill_bridge_aggregate_ids: set[str] = set()
     from src.events.live_order_aggregate import LiveOrderAggregateLedger
     from src.events.live_order_reconcile import append_reconciled
     from src.events.triggers.user_channel_ingestor import (
@@ -3942,6 +4407,15 @@ def _edli_user_channel_reconcile_cycle() -> None:
                     processed_at=now,
                 )
                 message_count += 1
+                # DEFECT-1 bridge (capital recoverability): a confirmed EDLI
+                # fill must materialise a canonical position_current row so
+                # chain-reconciliation / exit-lifecycle / harvester / redeem can
+                # see it. The actual cross-DB write happens AFTER this world-conn
+                # commit, on a trade-connection-with-world-attached (INV-37) —
+                # here we only record which aggregates received a trade message.
+                _message_kind = str(message.get("message_type") or message.get("type") or "").lower()
+                if _message_kind == "trade":
+                    _edli_fill_bridge_aggregate_ids.add(aggregate_id)
             except RuntimeError as exc:
                 status = INBOX_STALE_REJECTED if "STALE" in str(exc) else INBOX_FAILED
                 mark_user_channel_inbox_status(
@@ -3979,6 +4453,54 @@ def _edli_user_channel_reconcile_cycle() -> None:
         conn.commit()
     finally:
         conn.close()
+
+    # DEFECT-1 bridge pass (capital recoverability). The EDLI events are now
+    # durable on world.db. Materialise a canonical position_current row for any
+    # aggregate that reached FILL_CONFIRMED this cycle so the legacy lifecycle
+    # (chain-reconciliation / exit / harvester / redeem) can see and recover the
+    # position. INV-37: runs on a trade connection with world ATTACHed — the
+    # bridge reads world.edli_live_order_events and writes position_current /
+    # position_events on the SAME connection (ATTACH + SAVEPOINT, no independent
+    # connection). Idempotent: replay UPDATEs the same row, never duplicates.
+    # Fail-safe: a bridge error must not crash the scheduler job — log and retry
+    # next cycle (the EDLI events persist; the next confirmed-fill scan re-runs).
+    bridged_positions = 0
+    if _edli_fill_bridge_aggregate_ids:
+        from src.events.edli_position_bridge import (
+            materialize_position_current_from_edli_fill,
+        )
+        from src.state.db import get_trade_connection_with_world_required
+
+        bridge_conn = None
+        try:
+            bridge_conn = get_trade_connection_with_world_required(write_class="live")
+            for _agg_id in sorted(_edli_fill_bridge_aggregate_ids):
+                try:
+                    result = materialize_position_current_from_edli_fill(
+                        bridge_conn, _agg_id, now=now
+                    )
+                    if result is not None:
+                        bridged_positions += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "EDLI position bridge failed for aggregate %s (non-fatal; "
+                        "EDLI events persist, next cycle retries): %s",
+                        _agg_id,
+                        exc,
+                        exc_info=True,
+                    )
+            bridge_conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "EDLI position bridge pass failed (non-fatal): %s", exc, exc_info=True
+            )
+        finally:
+            if bridge_conn is not None:
+                try:
+                    bridge_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
     _write_scheduler_health(
         "edli_user_channel_reconcile",
         failed=False,
@@ -3988,8 +4510,49 @@ def _edli_user_channel_reconcile_cycle() -> None:
             "public_market_channel_fill_truth": "forbidden",
             "user_channel_messages": message_count,
             "venue_reconciliations": reconcile_count,
+            "edli_positions_bridged": bridged_positions,
         },
     )
+
+
+def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> set[str]:
+    """Tokens the EDLI reactor has recently decided on — the candidate universe.
+
+    These are the YES/NO tokens of opportunity families the reactor actually
+    evaluates. They MUST be pinned into the market-channel ingestor universe so a
+    fresh ``execution_feasibility_evidence`` row exists for each by the time the
+    reactor decides on it (Blocker #52). ``no_trade_regret_events`` records every
+    reactor decision (incl. the witness-failure rejections we are fixing), so its
+    recent token set is a precise, self-maintaining candidate signal — no
+    cross-DB topology read in the hot path.
+    """
+
+    if world_conn is None:
+        return set()
+    try:
+        has_table = world_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='no_trade_regret_events'"
+        ).fetchone()
+    except Exception:
+        return set()
+    if not has_table:
+        return set()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(0.0, lookback_hours))).isoformat()
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT DISTINCT token_id
+            FROM no_trade_regret_events
+            WHERE token_id IS NOT NULL AND token_id != '' AND token_id != 'None'
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (cutoff, int(limit)),
+        ).fetchall()
+    except Exception:
+        return set()
+    return {str(r[0]) for r in rows if r and r[0]}
 
 
 @_scheduler_job("edli_market_channel_ingestor")
@@ -4018,11 +4581,36 @@ def _edli_market_channel_ingestor_cycle() -> None:
         return
 
     from src.events.triggers.market_channel_ingestor import active_weather_token_metadata_from_snapshots
-    from src.state.db import get_trade_connection
+    from src.state.db import get_trade_connection, get_world_connection
+
+    # Candidate universe (Blocker #52): tokens the reactor recently decided on must
+    # be PINNED into the ingestor universe so each has a fresh execution_feasibility_
+    # evidence row before the pre-submit witness reads it. The full latest-per-market
+    # universe is captured up to the cap; candidates are never dropped by the cap.
+    priority_token_ids: set[str] = set()
+    world_read = get_world_connection(write_class=None)
+    try:
+        priority_token_ids = _edli_candidate_priority_token_ids(world_read)
+    except Exception as exc:  # noqa: BLE001 - priority pinning is best-effort, universe still captured
+        logger.warning("EDLI ingestor candidate-priority read failed (non-fatal): %s", exc)
+    finally:
+        if world_read is not None:
+            world_read.close()
+
+    universe_cap = _edli_bounded_positive_int(
+        edli_cfg,
+        "market_channel_universe_max_tokens",
+        default=2000,
+        maximum=8000,
+    )
 
     trade_conn = get_trade_connection(write_class=None)
     try:
-        token_metadata = active_weather_token_metadata_from_snapshots(trade_conn)
+        token_metadata = active_weather_token_metadata_from_snapshots(
+            trade_conn,
+            limit=universe_cap,
+            priority_token_ids=priority_token_ids,
+        )
         token_ids = set(token_metadata)
     finally:
         trade_conn.close()
@@ -4566,6 +5154,69 @@ def main():
             coalesce=True,
             executor="reactor",
         )
+        # STRUCTURAL FIX (2026-05-31, #45 follow-up): dedicated ~60s on-chain bankroll
+        # cache warmer, DECOUPLED from the slow (~330s) reactor cycle. The reactor's
+        # warm-once-at-cycle-start let _last_fetched_at age past the cached() 300s
+        # window before per-event Kelly / allocator reads ran near cycle END →
+        # KELLY_PROOF_MISSING:bankroll_provider_unavailable on every candidate. This
+        # frequent independent warm keeps cached() fresh. Not a DB writer; fail-soft.
+        scheduler.add_job(
+            _edli_bankroll_warm_cycle,
+            "interval",
+            seconds=60,
+            id="edli_bankroll_warm",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 30.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # THROUGHPUT STRUCTURAL FIX (2026-06-01): dedicated executable-snapshot substrate
+        # warmer, DECOUPLED from the reactor decision cycle. The refresh
+        # (_refresh_pending_family_snapshots) does a ~76s-cold universe Gamma scan +
+        # per-token CLOB capture; running it inline in _edli_event_reactor_cycle blew the
+        # reactor's 1-min interval (overlapping triggers coalesced/skipped → 0 completed
+        # cycles → 0 trades). On its own cadence the reactor reads already-captured
+        # snapshots (DB-only) and reaches submit in seconds. Runs on a longer interval than
+        # the reactor (the universe scan is TTL-cached 300s; ~90s keeps pending families
+        # fresh without re-scanning every reactor tick). max_instances=1/coalesce so a slow
+        # warm never stacks. Data-only (no orders); fail-soft.
+        scheduler.add_job(
+            _edli_market_substrate_warm_cycle,
+            "interval",
+            seconds=90,
+            id="edli_market_substrate_warm",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 25.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # STRUCTURAL FIX (2026-05-31, #52 follow-up): executable_market_snapshots
+        # (EMS) substrate refresh in EDLI modes. market_discovery is the ONLY
+        # universe-wide writer of executable_market_snapshots (architecture/
+        # db_table_ownership.yaml::executable_market_snapshots; failure_chains.yaml::
+        # market_discovery_coverage_collapse) — but it was registered ONLY in
+        # legacy_cron (see legacy_cron block above), so in EDLI event-driven modes
+        # NOTHING refreshed the EMS substrate across the candidate universe. The
+        # edli_market_channel_ingestor (#52) writes execution_feasibility_evidence
+        # for the PRE-SUBMIT witness, NOT executable_market_snapshots, which the
+        # cert build's QUOTE_FEASIBILITY / executable-snapshot selection requires
+        # (src/engine/event_reactor_adapter.py::_latest_snapshot_rows_for_event_family
+        # → _passive_maker_context_from_authorities reads orderbook_top_bid/ask off
+        # the selected EMS row). With EMS frozen/aging, candidate families lost a
+        # fresh active-open snapshot for the selected bin → every live cert build
+        # failed EDLI_LIVE_CERTIFICATE_BUILD_FAILED:QUOTE_FEASIBILITY_BID_ASK_REQUIRED
+        # (and intermittently EXECUTABLE_SNAPSHOT_BLOCKED) → proof_accepted=0.
+        # market_discovery is a DATA-ONLY substrate writer: it submits no orders and
+        # touches no arming flags. Gated by market_substrate_refresh_enabled
+        # (default True) so the operator can disable without code change.
+        if edli_cfg.get("market_substrate_refresh_enabled", True):
+            scheduler.add_job(
+                _market_discovery_cycle,
+                "interval",
+                minutes=5,
+                id="market_discovery",
+                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 35.0),
+                max_instances=1,
+                coalesce=True,
+            )
     if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("market_channel_ingestor_enabled"):
         scheduler.add_job(
             _edli_market_channel_ingestor_cycle,

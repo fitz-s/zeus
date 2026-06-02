@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -221,6 +222,98 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
     INV-37: single-DB read; no ATTACH path.
     """
     return get_forecasts_connection(write_class=None)
+
+
+# --------------------------------------------------------------------------
+# zeus-world.db IN-PROCESS WRITE SERIALIZATION (2026-05-31)
+# --------------------------------------------------------------------------
+# Root (EDLI live canary): zeus-world.db is a WAL database with multiple
+# in-process writers running as apscheduler jobs / daemon threads inside the
+# SAME daemon process — the EDLI reactor (EventStore emit/claim/mark) and the
+# market-channel ingestor (execution_feasibility_evidence + event rows). With
+# sqlite3's default ``isolation_level=""`` (implicit DEFERRED BEGIN), the first
+# DML opens a transaction that upgrades to the single WAL *write* lock and holds
+# it until COMMIT. The reactor's long cycle (~330 s, incl. HTTP/MC re-pricing)
+# left that write lock held for the whole cycle, so the ingestor thread blocked
+# the full 30 s busy_timeout on every write → "database is locked" → the reactor
+# cycle hung/skipped (status=FAILED, no completed cycle).
+#
+# Fix (textbook, in-process): because every writer runs in ONE process, a single
+# process-global ``threading.Lock`` around each world-DB WRITE *transaction*
+# serializes them so SQLite never sees two concurrent writers → no WAL write-lock
+# starvation. WAL still allows concurrent READERS, so reads are NOT taken through
+# this lock. The lock is held ONLY around the DB txn (BEGIN IMMEDIATE → writes →
+# COMMIT), kept short, and released on exception (rollback-then-release) so a
+# failing writer never holds it. It MUST NOT be held across network/HTTP calls.
+#
+# This complements (does not replace) the cross-PROCESS fcntl flock in
+# db_writer_lock.py: that serializes write *intent* across processes; this
+# serializes write *transactions* across THREADS within one process. They are
+# orthogonal and composable.
+_WORLD_DB_WRITE_MUTEX = threading.Lock()
+
+
+def world_write_mutex() -> "threading.Lock":
+    """Return the process-global zeus-world.db write mutex.
+
+    For callers that manage their own transaction lifecycle (e.g. the EDLI
+    reactor's per-event SAVEPOINT + commit boundary) and need only the
+    cross-thread exclusion, not the BEGIN IMMEDIATE/COMMIT wrapper of
+    ``world_write_lock``. Hold it around the write txn only; never across HTTP.
+    """
+    return _WORLD_DB_WRITE_MUTEX
+
+
+@contextlib.contextmanager
+def world_write_lock(
+    conn: sqlite3.Connection,
+    *,
+    immediate: bool = True,
+):
+    """Serialize a single zeus-world.db WRITE transaction across in-process threads.
+
+    Acquire the process-global world-DB write mutex, open an explicit
+    transaction (``BEGIN IMMEDIATE`` by default so the SQLite write lock is taken
+    deterministically up front rather than lazily on the first DML), yield for
+    the caller's writes, then ``COMMIT``. On any exception the transaction is
+    ``ROLLBACK``-ed before the mutex is released, so a failing writer never holds
+    either the mutex or the WAL write lock.
+
+    Contract / scope:
+      * Wrap ONLY the actual DB write txn. Never wrap a venue fetch / HTTP call /
+        long compute inside this block — that would hold both the mutex and the
+        WAL write lock across I/O and re-introduce starvation.
+      * Reads do NOT need this lock (WAL permits concurrent readers). Only writers
+        to zeus-world.db must go through it.
+      * ``immediate=False`` opens a plain ``BEGIN`` (DEFERRED) when the caller has
+        a reason to defer write-lock acquisition; the default ``True`` is correct
+        for live writers and makes acquisition deterministic.
+
+    Idempotent w.r.t. an already-open transaction: if ``conn`` is already inside a
+    transaction (``conn.in_transaction``) we do NOT issue a nested BEGIN (SQLite
+    forbids nested transactions); we still hold the mutex for the duration and
+    COMMIT/ROLLBACK at the end, serializing the caller's write unit.
+    """
+    _WORLD_DB_WRITE_MUTEX.acquire()
+    began = False
+    try:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+            began = True
+        yield conn
+        # Commit the write unit. If we did not open the txn (caller already had
+        # one open), still commit so the WAL write lock + mutex are released
+        # promptly — the caller's write unit is the serialized boundary.
+        conn.commit()
+    except BaseException:
+        # Release the WAL write lock immediately on failure so no other writer
+        # waits out the busy_timeout behind a dead transaction.
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        _ = began  # retained for readability; rollback/commit cover both paths
+        _WORLD_DB_WRITE_MUTEX.release()
 
 
 @contextlib.contextmanager

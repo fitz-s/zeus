@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
+from collections.abc import Mapping
 from typing import Any, Callable
 
 import numpy as np
 
+from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -44,6 +46,7 @@ from src.engine.event_bound_final_intent import (
     serialize_event_bound_final_intent_receipt,
     validate_final_intent_cert_for_existing_executor,
 )
+from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore
@@ -56,6 +59,8 @@ from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
+from src.strategy.market_phase import MarketPhase
+from src.strategy import market_phase_evidence as _market_phase_evidence
 from src.types.market import Bin
 
 
@@ -266,6 +271,8 @@ def event_bound_live_adapter_from_trade_conn(
     executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     durable_submit_outbox_enabled: bool = False,
+    canary_force_taker_provider: Callable[[], bool] | None = None,
+    taker_fok_fak_live_enabled: bool = False,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -311,6 +318,19 @@ def event_bound_live_adapter_from_trade_conn(
                 reason="EXECUTOR_BOUNDARY_MISSING",
                 proof_accepted=False,
             )
+        # Canary knob (§7): force the taker branch (bypassing the governor's
+        # maker/taker CHOICE, never its NO_TRADE/risk gates) while the canary is
+        # active and below its min fill count. main.py owns the count gate via
+        # ``canary_force_taker_provider``; absent a provider, the canary stage
+        # flag itself drives the force (the count gate lives upstream in the
+        # stage-readiness check).
+        if canary_force_taker_provider is not None:
+            try:
+                canary_force_taker = bool(canary_force_taker_provider())
+            except Exception:
+                canary_force_taker = bool(live_canary_enabled)
+        else:
+            canary_force_taker = bool(live_canary_enabled)
         try:
             if real_order_submit_enabled:
                 build_conn = live_cap_conn or trade_conn
@@ -322,7 +342,10 @@ def event_bound_live_adapter_from_trade_conn(
                         decision_time=decision_time.astimezone(UTC),
                         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                         live_cap_conn=build_conn,
+                        trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
+                        canary_force_taker=canary_force_taker,
+                        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
                     ),
                 )
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -378,7 +401,10 @@ def event_bound_live_adapter_from_trade_conn(
                         decision_time=decision_time.astimezone(UTC),
                         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                         live_cap_conn=build_conn,
+                        trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
+                        canary_force_taker=canary_force_taker,
+                        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
                     ),
                 )
                 side_effect_status = "SUBMIT_DISABLED"
@@ -428,6 +454,7 @@ def event_bound_live_adapter_from_trade_conn(
             kelly_decision_id=no_submit_receipt.kelly_decision_id,
             risk_decision_id=no_submit_receipt.risk_decision_id,
             final_intent_id=no_submit_receipt.final_intent_id,
+            neg_risk=no_submit_receipt.neg_risk,
             side_effect_status=side_effect_status,
             reason=reason,
             proof_accepted=True,
@@ -450,6 +477,65 @@ def _run_live_order_build_savepoint(
         raise
     conn.execute("RELEASE SAVEPOINT edli_live_order_build")
     return result
+
+
+# --------------------------------------------------------------------------- #
+# forecast_only market-phase admission gate (#98).
+#
+# forecast_only is BLIND to observation: the instant a market's target LOCAL
+# DAY begins, its daily extremum starts realizing and a forecast-only decision
+# can land on the already-observed (losing) side — the Paris 2026-06-01 buy_no
+# on observed low=14°C incident. Category-killing rule (STRONGER than
+# DAY0_OBSERVATION_WRONGSIDE_ROOT §4.1; see DESIGN_CRITIC_2026-06-01 MAJOR-4):
+# admit ONLY MarketPhase.PRE_SETTLEMENT_DAY (the whole target local day still
+# in the future). SETTLEMENT_DAY / POST_TRADING / RESOLVED / unknown all reject
+# fail-closed. Same-day edge belongs to the disjoint day0 observation-aware
+# scope, never forecast_only. Authority: src/strategy/market_phase.py.
+# --------------------------------------------------------------------------- #
+
+_FORECAST_ONLY_ADMIT_PHASES: frozenset[MarketPhase] = frozenset({MarketPhase.PRE_SETTLEMENT_DAY})
+
+
+def _edli_forecast_only_phase_evidence(
+    *,
+    city: str,
+    target_date: str,
+    decision_time: datetime,
+    selected_market_row: Mapping[str, Any] | None,
+    uma_resolved_source: str | None = None,
+) -> "_market_phase_evidence.MarketPhaseEvidence":
+    """Phase evidence for a forecast_only family at decision_time.
+
+    Fail-closed: when the city has no resolvable timezone the phase is
+    undeterminable and the returned evidence carries phase=None (the caller then
+    rejects). The selected snapshot row supplies an explicit endDate when
+    present; otherwise the F1 12:00-UTC fallback applies (per market_phase.py).
+    """
+    city_config = runtime_cities_by_name().get(city)
+    tz = getattr(city_config, "timezone", None) if city_config is not None else None
+    if not tz:
+        return _market_phase_evidence.MarketPhaseEvidence(
+            phase=None,
+            phase_source="unknown",
+            market_start_at=None,
+            market_end_at=None,
+            settlement_day_entry_utc=None,
+            failure_reason=f"city_timezone_missing:{city}",
+        )
+    market = dict(selected_market_row) if selected_market_row else {}
+    return _market_phase_evidence.from_market_dict(
+        market=market,
+        city_timezone=tz,
+        target_date_str=str(target_date),
+        decision_time_utc=decision_time.astimezone(UTC),
+        uma_resolved_source=uma_resolved_source,
+    )
+
+
+def _forecast_only_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvidence") -> bool:
+    """True iff the family may be admitted in forecast_only scope: ONLY when the
+    whole target local day is still future (PRE_SETTLEMENT_DAY). Fail-closed."""
+    return evidence.phase in _FORECAST_ONLY_ADMIT_PHASES
 
 
 def build_event_bound_no_submit_receipt(
@@ -530,6 +616,36 @@ def build_event_bound_no_submit_receipt(
             reason=decision.rejection_reason or "EVENT_BOUND_CANDIDATE_BINDING_FAILED",
         )
     family = decision.candidate_family
+    # forecast_only market-phase admission gate (#98): reject families whose
+    # target local day has begun or whose market has closed — forecast_only is
+    # blind to the already-realizing/observed extremum (wrong-side risk, Paris
+    # 2026-06-01). Scoped to FORECAST_SNAPSHOT_READY; the day0 observation-aware
+    # scope owns same-day. Placed before scoring so closed families never reach
+    # q/FDR/Kelly and never re-fire through continuous re-decision.
+    if event.event_type == "FORECAST_SNAPSHOT_READY":
+        _phase_evidence = _edli_forecast_only_phase_evidence(
+            city=family.city,
+            target_date=family.target_date,
+            decision_time=decision_time,
+            selected_market_row=row,
+        )
+        if not _forecast_only_phase_admits(_phase_evidence):
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=(
+                    "EVENT_BOUND_MARKET_PHASE_CLOSED:"
+                    f"{(_phase_evidence.phase.value if _phase_evidence.phase else 'unknown')}:"
+                    f"{_phase_evidence.phase_source}"
+                ),
+                city=family.city,
+                target_date=family.target_date,
+                metric=family.metric,
+                family_id=family.family_id,
+                source_status="MATCH",
+                family_complete=True,
+            )
     try:
         proofs = _generate_candidate_proofs(
             event=event,
@@ -820,6 +936,7 @@ def build_event_bound_no_submit_receipt(
             "bias_decay_bias_native": _bias_decay_native,
             "bias_decay_reason": _bias_decay_reason,
             "bias_decay_kelly_factor": float(settings["edli_v1"].get("bias_decay_kelly_factor", 0.5)) if _bias_decay_applied else 1.0,
+            "neg_risk": bool(row.get("neg_risk") or False),
             "native_quote_available": True,
             "source_status": FORECAST_LIVE_ELIGIBLE_STATUS,
             "family_complete": True,
@@ -833,6 +950,7 @@ def build_event_bound_no_submit_receipt(
         family_topology_rows=family_topology_rows,
         family_snapshot_rows=family_rows,
         selected_snapshot_row=row,
+        trade_conn=trade_conn,
         forecast_conn=source_conn,
         calibration_conn=calibration_conn,
         proof=proof,
@@ -907,6 +1025,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         kelly_decision_id=raw_receipt.get("kelly_decision_id"),
         risk_decision_id=raw_receipt.get("risk_decision_id"),
         final_intent_id=raw_receipt.get("final_intent_id"),
+        neg_risk=bool(raw_receipt.get("neg_risk") or False),
         side_effect_status="NO_SUBMIT",
         reason=str(raw_receipt.get("reason") or "event_bound_final_intent_no_submit"),
         proof_accepted=bool(raw_receipt.get("proof_accepted")),
@@ -921,7 +1040,10 @@ def _build_submit_disabled_live_certificates(
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
+    trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
+    canary_force_taker: bool = False,
+    taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     command_certificates = _build_live_execution_command_certificates(
         event=event,
@@ -929,7 +1051,10 @@ def _build_submit_disabled_live_certificates(
         decision_time=decision_time,
         tiny_live_max_notional_usd=tiny_live_max_notional_usd,
         live_cap_conn=live_cap_conn,
+        trade_conn=trade_conn,
         pre_submit_authority_provider=pre_submit_authority_provider,
+        canary_force_taker=canary_force_taker,
+        taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
     )
     command = _required_cert(command_certificates, claims.EXECUTION_COMMAND)
     receipt_cert = build_execution_receipt_certificate(
@@ -954,7 +1079,10 @@ def _build_live_execution_command_certificates(
     decision_time: datetime,
     tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
+    trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
+    canary_force_taker: bool = False,
+    taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
     proof_bundle = receipt.decision_proof_bundle
     compile_result = DecisionCompiler().compile_no_submit(
@@ -964,7 +1092,21 @@ def _build_live_execution_command_certificates(
         proof_bundle=proof_bundle,
     )
     if compile_result.status != "VERIFIED":
-        reason = compile_result.failures[0].reason_code if compile_result.failures else "NO_SUBMIT_CERTIFICATE_REJECTED"
+        # KILLER 2 (2026-05-31): surface the UNDERLYING failing assertion, not just the
+        # generic stage reason_code. compiler._rejected() captures the specific failure
+        # message in CompileFailure.reason_detail (e.g. the exact field/parent that failed
+        # _validate_no_submit_parent_consistency), but only reason_code was propagated —
+        # so 147/308 positive-edge candidates died as opaque NO_SUBMIT_CERTIFICATE_REJECTED
+        # with no diagnosable sub-reason in no_trade_regret_events. Append reason_detail so
+        # the regret row records WHY the no-submit certificate was rejected.
+        if compile_result.failures:
+            failure = compile_result.failures[0]
+            reason = failure.reason_code
+            detail = getattr(failure, "reason_detail", None)
+            if detail:
+                reason = f"{reason}:{detail}"
+        else:
+            reason = "NO_SUBMIT_CERTIFICATE_REJECTED"
         raise ValueError(reason)
     base_certs = tuple(
         cert
@@ -989,6 +1131,158 @@ def _build_live_execution_command_certificates(
         forecast_authority = _required_cert(base_certs, claims.FORECAST_AUTHORITY)
         quote_feasibility = _required_cert(base_certs, claims.QUOTE_FEASIBILITY)
         cost_model = _required_cert(base_certs, claims.COST_MODEL)
+        quote_payload = quote_feasibility.payload
+        best_bid = _optional_float(quote_payload.get("best_bid"))
+        best_ask = _optional_float(quote_payload.get("best_ask"))
+        order_mode = _select_edli_order_mode(
+            actionable_payload=actionable.payload,
+            quote_payload=quote_payload,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            executable_snapshot=executable_snapshot,
+            canary_force_taker=canary_force_taker,
+        )
+        # WALL #1 (GATE #85 follow-on, 2026-06-01): the passive-maker context is a
+        # MAKER-ONLY structural input. ``FinalExecutionIntent`` only requires it when
+        # ``order_policy == "post_only_passive_limit"`` (execution_intent.py:1735); a
+        # taker FOK/FAK crosses the JIT book at submit and never rests, so its
+        # economics do not depend on the snapshot's top-of-book maker context.
+        #
+        # The pre-#85 path built ``_passive_maker_context_from_authorities``
+        # UNCONDITIONALLY, which raises QUOTE_FEASIBILITY_BID_ASK_REQUIRED whenever the
+        # elected snapshot has no captured book — killing every taker candidate whose
+        # snapshot happened to be book-less (the DOMINANT live wall: 713/2h). Conditioning
+        # the construction on order_mode makes that rejection CATEGORY impossible for
+        # taker orders (Fitz #1: make the category impossible, not the instance). MAKER
+        # still requires the maker context (and still raises if bid/ask are absent — the
+        # correct fail-closed behavior, since a resting maker order genuinely needs a book).
+        passive_maker_context = (
+            _passive_maker_context_from_authorities(
+                actionable=actionable,
+                quote_feasibility_cert=quote_feasibility,
+                executable_snapshot_cert=executable_snapshot,
+                decision_time=decision_time,
+            )
+            if str(order_mode).strip().upper() == "MAKER"
+            else None
+        )
+        # SIZE-TO-DEPTH + SWEEP-VWAP (Wall B / Wall C, 2026-06-01):
+        # For TAKER FOK orders, compute the crossable depth and sweep VWAP from
+        # the elected snapshot's live book BEFORE building the cert.  This ensures:
+        #   (a) size is capped at available depth (FOK semantics preserved on the
+        #       sized amount → no DEPTH_INSUFFICIENT at executor validation).
+        #   (b) expected_fill_price_before_fee = sweep VWAP, not limit_price, so
+        #       the executor sweep-average check (executor.py:1778) passes on
+        #       multi-level books.
+        # If no trade_conn is available, or order is MAKER, skip (legacy behaviour).
+        available_crossable_shares: float | None = None
+        sweep_expected_fill_price: float | None = None
+        # MUST be initialized before the TAKER block: the final_intent build below
+        # (Bug A tick_size source) references `_snap_for_depth` for ALL order modes,
+        # but it is only assigned inside the TAKER+trade_conn block. Without this
+        # initialization a MAKER order (or taker without trade_conn) raises
+        # UnboundLocalError at cert build. None → tick_size falls back to the
+        # executable_snapshot payload default, which is correct for the MAKER path.
+        _snap_for_depth = None
+        if str(order_mode).strip().upper() == "TAKER" and trade_conn is not None:
+            from src.contracts.execution_intent import simulate_clob_sweep
+            _snap_id_for_depth = str(
+                executable_snapshot.payload.get("identity")
+                or executable_snapshot.payload.get("selected_snapshot_id")
+                or ""
+            )
+            try:
+                _snap_for_depth = get_snapshot(trade_conn, _snap_id_for_depth) if _snap_id_for_depth else None
+            except Exception:
+                _snap_for_depth = None
+            if _snap_for_depth is not None:
+                _action_payload = actionable.payload
+                _min_order_size_d = Decimal(str(
+                    executable_snapshot.payload.get("min_order_size") or "1.0"
+                ))
+                _tick_size_d = Decimal(str(
+                    executable_snapshot.payload.get("min_tick_size") or "0.01"
+                ))
+                _reservation = Decimal(str(_action_payload.get("c_fee_adjusted") or "0"))
+                _ask_for_limit = (
+                    Decimal(str(best_ask)) if best_ask is not None else _reservation
+                )
+                _limit_price_d = min(_ask_for_limit, _reservation)
+                # Tick-align limit price (floor) using the canonical tick_size
+                import math as _math
+                if _tick_size_d > 0:
+                    _limit_price_d = Decimal(str(
+                        round(_math.floor(float(_limit_price_d) / float(_tick_size_d) + 1e-9) * float(_tick_size_d), 10)
+                    ))
+                _reserved_notional = Decimal(str(
+                    _action_payload.get("live_cap_reserved_notional_usd")
+                    or _action_payload.get("kelly_size_usd")
+                    or "0"
+                ))
+                # Bug B fix (2026-06-01): compute desired_shares using float arithmetic
+                # so the value matches exactly what the cert builder will compute for
+                # `size = max(float(min_order_size), reserved_notional / limit_price)`.
+                # Using Decimal division here produced a different number of shares than
+                # the cert builder's float division (e.g. 8.333...333 vs 8.333333333333334),
+                # causing the guard's re-sweep to get a different VWAP → parity rejection.
+                _min_order_size_f = float(_min_order_size_d)
+                _reserved_notional_f = float(_reserved_notional)
+                _limit_price_f = float(_limit_price_d)
+                _desired_shares_f = (
+                    max(_min_order_size_f, _reserved_notional_f / _limit_price_f)
+                    if _limit_price_f > 0 else _min_order_size_f
+                )
+                _desired_shares = Decimal(str(_desired_shares_f))
+                _depth_sweep = simulate_clob_sweep(
+                    snapshot=_snap_for_depth,
+                    direction=str(_action_payload.get("direction") or "buy_no"),
+                    requested_size_kind="shares",
+                    requested_size_value=_desired_shares,
+                    limit_price=_limit_price_d,
+                )
+                if _depth_sweep.filled_shares > 0:
+                    available_crossable_shares = float(_depth_sweep.filled_shares)
+                    # SEV-1.1 fix (2026-06-01): the cert builder caps size to
+                    # available_crossable_shares.  The executor guard re-sweeps on
+                    # the CAPPED submitted_shares and asserts exact VWAP equality.
+                    # If we store the VWAP from the uncapped _desired_shares sweep,
+                    # the two VWAPs diverge on any multi-level book where desired >
+                    # crossable → parity rejection on first armed TAKER order.
+                    # Fix: re-sweep on the capped size to get the VWAP that the
+                    # executor will actually see.  The cert builder's
+                    #   size = min(desired_shares, available_crossable_shares)
+                    # is mirrored here as min(_desired_shares_f, available_crossable_shares).
+                    # Single-source principle: ONE sweep result drives both the cert
+                    # fill price and the executor guard re-sweep (same snap, same
+                    # size, same limit → bitwise identical VWAP Decimal).
+                    _capped_shares_f = min(
+                        _desired_shares_f,
+                        available_crossable_shares,
+                    )
+                    _capped_shares = Decimal(str(_capped_shares_f))
+                    if _capped_shares < _desired_shares:
+                        # Capped by depth — re-sweep on the capped size so the
+                        # stored VWAP matches what the executor guard will compute.
+                        _capped_sweep = simulate_clob_sweep(
+                            snapshot=_snap_for_depth,
+                            direction=str(_action_payload.get("direction") or "buy_no"),
+                            requested_size_kind="shares",
+                            requested_size_value=_capped_shares,
+                            limit_price=_limit_price_d,
+                        )
+                        sweep_expected_fill_price = (
+                            str(_capped_sweep.average_price)
+                            if _capped_sweep.average_price is not None else None
+                        )
+                    else:
+                        # Not capped — original sweep VWAP is already correct.
+                        # Bug B fix: store exact Decimal string, not float, so the
+                        # cert payload round-trips via _decimal(str) without losing
+                        # precision.
+                        sweep_expected_fill_price = (
+                            str(_depth_sweep.average_price)
+                            if _depth_sweep.average_price is not None else None
+                        )
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -996,15 +1290,20 @@ def _build_live_execution_command_certificates(
             cost_model_cert=cost_model,
             forecast_authority_cert=forecast_authority,
             decision_source_context=forecast_authority.payload,
-            passive_maker_context=_passive_maker_context_from_authorities(
-                actionable=actionable,
-                quote_feasibility_cert=quote_feasibility,
-                executable_snapshot_cert=executable_snapshot,
-                decision_time=decision_time,
-            ),
+            passive_maker_context=passive_maker_context,
             decision_time=decision_time,
-            tick_size=_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
+            order_mode=order_mode,
+            # Bug A fix (2026-06-01): source tick_size from the DB snapshot (Decimal)
+            # rather than the cert payload float.  The cert payload may carry "0.01"
+            # (the default) while the DB snapshot has "0.001" for binary Polymarket
+            # markets, causing executor parity rejection (intent.tick_size ≠ snapshot.min_tick_size).
+            tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
+            best_bid=best_bid,
+            best_ask=best_ask,
+            taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
+            available_crossable_shares=available_crossable_shares,
+            sweep_expected_fill_price=sweep_expected_fill_price,
         )
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
         aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
@@ -1118,7 +1417,7 @@ def _build_live_execution_command_certificates(
             cap_scope="tiny_live_canary",
             requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
             max_notional_usd=float(tiny_live_max_notional_usd),
-            max_orders_per_day=1,
+            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
             final_intent_id=str(final_intent.payload["final_intent_id"]),
             execution_command_id=execution_command_id,
         )
@@ -1158,6 +1457,7 @@ def _actionable_payload_from_receipt(
         "live_cap_usage_id": live_cap_cert.payload["usage_id"],
         "live_cap_reserved_notional_usd": reserved_notional,
         "final_intent_id": receipt.final_intent_id,
+        "neg_risk": receipt.neg_risk,
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
         "native_quote_available": receipt.native_quote_available,
         "submitted": False,
@@ -1322,7 +1622,7 @@ def _build_live_cap_certificate_from_ledger(
             cap_scope="tiny_live_canary",
             requested_notional_usd=float(requested_notional),
             max_notional_usd=float(max_notional_usd),
-            max_orders_per_day=1,
+            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
             final_intent_id=receipt.final_intent_id,
         )
     else:
@@ -1334,7 +1634,7 @@ def _build_live_cap_certificate_from_ledger(
             decision_time=decision_time,
             cap_scope="tiny_live_canary",
             max_notional_usd=float(max_notional_usd),
-            max_orders_per_day=1,
+            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
             reserved_notional_usd=float(requested_notional),
             order_count=1,
             reservation_status="RESERVED",
@@ -1633,14 +1933,186 @@ def _passive_maker_context_from_authorities(
         raise ValueError("EXECUTABLE_SNAPSHOT_SOURCE_AVAILABLE_AT_REQUIRED")
     spread_usd = max(0.0, float(best_ask) - float(best_bid))
     p_fill_lcb = float(actionable.payload.get("p_fill_lcb") or 0.0)
+    # Adverse-selection proxy (§4 Dim 4.2): A ~= recent belief volatility x spread.
+    # Belief volatility is sourced from the actionable's prior-cycle posterior when
+    # available (|q_posterior - q_posterior_prev|); absent a trustworthy prior we
+    # fall back to A = 0, which biases the §2 boundary toward maker (the
+    # conservative, documented default — never fabricate adverse cost we can't
+    # source). queue_depth_ahead uses the quote's visible depth when present.
+    adverse_selection_score = _adverse_selection_proxy(
+        actionable_payload=actionable.payload,
+        spread_usd=spread_usd,
+    )
+    queue_depth_ahead = _queue_depth_ahead_from_quote(quote_payload)
     return {
         "spread_usd": spread_usd,
         "quote_age_ms": int(max(0.0, (decision_time - quote_available_at).total_seconds() * 1000.0)),
         "expected_fill_probability": str(max(min(p_fill_lcb, 1.0), 0.0001)),
-        "queue_depth_ahead": None,
-        "adverse_selection_score": None,
+        "queue_depth_ahead": queue_depth_ahead,
+        "adverse_selection_score": adverse_selection_score,
         "orderbook_hash_age_ms": int(max(0.0, (decision_time - snapshot_available_at).total_seconds() * 1000.0)),
+        "best_bid": float(best_bid),
+        "best_ask": float(best_ask),
     }
+
+
+def _adverse_selection_proxy(*, actionable_payload: Mapping[str, object], spread_usd: float) -> str | None:
+    """A ~= |q_posterior - q_posterior_prev| * spread (Dim 4.2 cheap proxy).
+
+    Returns None (the conservative default that biases toward maker) when no
+    trustworthy prior-cycle belief is available — Fitz #4: do not fabricate an
+    adverse-selection cost from data we do not have.
+    """
+    q_now = actionable_payload.get("q_live")
+    q_prev = actionable_payload.get("q_live_prev_cycle")
+    if q_now in (None, "") or q_prev in (None, ""):
+        return None
+    try:
+        belief_move = abs(float(q_now) - float(q_prev))
+    except (TypeError, ValueError):
+        return None
+    return str(max(0.0, belief_move * float(spread_usd)))
+
+
+def _queue_depth_ahead_from_quote(quote_payload: Mapping[str, object]) -> str | None:
+    """Best-effort queue-ahead size from the quote's visible depth, else None."""
+    for key in ("queue_depth_ahead", "bid_queue_size", "visible_depth"):
+        raw = quote_payload.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            return str(max(0.0, float(raw)))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _select_edli_order_mode(
+    *,
+    actionable_payload: Mapping[str, object],
+    quote_payload: Mapping[str, object],
+    best_bid: float | None,
+    best_ask: float | None,
+    executable_snapshot: DecisionCertificate,
+    canary_force_taker: bool = False,
+    canary_edge_floor: float | None = None,
+) -> str:
+    """Select MAKER/TAKER for the entry per design §1-§2 (governor + EV override).
+
+    Authority order (Fitz #4 provenance):
+      1. Canary knob (§7): when ``canary_force_taker`` and the post-cross edge
+         clears the 5c floor, FORCE taker. This bypasses the governor's
+         maker/taker CHOICE but never its NO_TRADE/risk gates (those gate the
+         candidate upstream before this point and remain in force).
+      2. Governor (§1): consult ``maker_or_taker`` when a global governor is
+         configured. NO_TRADE is impossible here (the candidate already cleared
+         the gates) but is mapped to MAKER (the conservative resting default).
+      3. EV override (§2): even when the governor says MAKER, cross if the
+         economic boundary ``e*(1-P_fill) >= s/2*(1+P_fill) + f - A`` holds.
+
+    Defaults to MAKER (the pre-change passive law) whenever inputs are missing —
+    a partial/uncertain signal must never silently produce a taker cross.
+    """
+    side = "BUY" if str(actionable_payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
+    reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+
+    # --- 1. Canary force-taker (with 5c post-cross edge floor) ---
+    if canary_force_taker:
+        floor = 0.05 if canary_edge_floor is None else float(canary_edge_floor)
+        post_cross_edge = _post_cross_edge(
+            actionable_payload=actionable_payload, best_bid=best_bid, best_ask=best_ask, side=side
+        )
+        if post_cross_edge is not None and post_cross_edge >= floor:
+            return "TAKER"
+        # Floor not met: fall through to governor/EV (do NOT force a sub-floor cross).
+
+    # --- 2. Governor maker_or_taker ---
+    governor_mode = _governor_mode_for_snapshot(executable_snapshot)
+    if governor_mode == "TAKER":
+        return "TAKER"
+
+    # --- 3. Economic EV override (§2 boundary) ---
+    if _ev_boundary_favors_cross(
+        actionable_payload=actionable_payload,
+        quote_payload=quote_payload,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        reservation=reservation,
+        side=side,
+    ):
+        return "TAKER"
+    return "MAKER"
+
+
+def _governor_mode_for_snapshot(executable_snapshot: DecisionCertificate) -> str:
+    """Return the global governor's maker/taker mode, or MAKER if unavailable.
+
+    The candidate has already passed the upstream NO_TRADE/risk gates, so a
+    NO_TRADE here (or an unconfigured governor) maps to the conservative MAKER
+    resting default rather than blocking — the design routes order-TYPE only.
+    """
+    try:
+        from src.risk_allocator import select_global_order_type
+
+        order_type = select_global_order_type(executable_snapshot.payload)
+    except Exception:
+        return "MAKER"
+    return "TAKER" if str(order_type).strip().upper() in {"FOK", "FAK"} else "MAKER"
+
+
+def _post_cross_edge(
+    *,
+    actionable_payload: Mapping[str, object],
+    best_bid: float | None,
+    best_ask: float | None,
+    side: str,
+) -> float | None:
+    """q_posterior - far_touch - fee  (the §7 canary edge floor numerator)."""
+    q = _optional_float(actionable_payload.get("q_live"))
+    fee = _optional_float(actionable_payload.get("fee_rate")) or 0.0
+    if q is None:
+        return None
+    if side == "BUY":
+        if best_ask is None:
+            return None
+        return q - best_ask - fee
+    if best_bid is None:
+        return None
+    return best_bid - q - fee
+
+
+def _ev_boundary_favors_cross(
+    *,
+    actionable_payload: Mapping[str, object],
+    quote_payload: Mapping[str, object],
+    best_bid: float | None,
+    best_ask: float | None,
+    reservation: float | None,
+    side: str,
+) -> bool:
+    """§2 boundary: cross iff e*(1-P_fill) >= s/2*(1+P_fill) + f - A.
+
+    Conservative: returns False (rest as maker) on any missing input.
+    """
+    e = _optional_float(actionable_payload.get("trade_score"))
+    if e is None:
+        e = _optional_float(actionable_payload.get("q_live"))
+        c = _optional_float(actionable_payload.get("c_fee_adjusted"))
+        if e is not None and c is not None:
+            e = (e - c) if side == "BUY" else (c - e)
+    if e is None or best_bid is None or best_ask is None:
+        return False
+    spread = max(0.0, best_ask - best_bid)
+    p_fill = _optional_float(actionable_payload.get("p_fill_lcb"))
+    if p_fill is None:
+        return False
+    p_fill = max(0.0, min(1.0, p_fill))
+    fee = _optional_float(actionable_payload.get("fee_rate")) or 0.0
+    adverse = _adverse_selection_proxy(actionable_payload=actionable_payload, spread_usd=spread)
+    a = float(adverse) if adverse is not None else 0.0
+    lhs = e * (1.0 - p_fill)
+    rhs = (spread / 2.0) * (1.0 + p_fill) + fee - a
+    return lhs >= rhs
 
 
 def _release_live_cap_certificate(
@@ -1666,6 +2138,75 @@ def _required_cert(certs: tuple[DecisionCertificate, ...], certificate_type: str
     raise ValueError(f"missing required certificate: {certificate_type}")
 
 
+def _require_snapshot_hash(snapshot: object) -> str:
+    """Return executable_snapshot_hash from a hydrated snapshot; raise if absent."""
+    if snapshot is None:
+        raise ValueError("EXECUTABLE_SNAPSHOT_HASH_UNAVAILABLE: snapshot not found in trade DB")
+    h = snapshot.executable_snapshot_hash  # type: ignore[union-attr]
+    if not h:
+        raise ValueError("EXECUTABLE_SNAPSHOT_HASH_UNAVAILABLE: hash is empty")
+    return h
+
+
+def _require_cost_basis(
+    snapshot: object,
+    *,
+    direction: str,
+    size_usd: float,
+    execution_price: "ExecutionPrice",
+) -> "ExecutableCostBasis":
+    """Build canonical ExecutableCostBasis from a hydrated snapshot.
+
+    Uses the fee-adjusted execution_price.value as final_limit_price /
+    expected_fill_price_before_fee — for the no-submit passive path the limit
+    price IS the pre-fee ask (fee is added on top inside from_snapshot).
+    We pass fee_adjusted_execution_price to let from_snapshot verify consistency.
+
+    Raises a clear COST_BASIS_HASH_UNAVAILABLE error on any failure so the cert
+    pipeline fails closed rather than emitting a blank hash.
+    """
+    if snapshot is None:
+        raise ValueError("COST_BASIS_HASH_UNAVAILABLE: snapshot not found in trade DB")
+    try:
+        # For the no-submit adapter path the limit is a passive post-only order.
+        # execution_price.value is fee-adjusted; snapshot.orderbook_top_ask (for
+        # buy) is the canonical pre-fee price used as limit/expected_fill.
+        # Fall back to execution_price.value if top_ask/bid unavailable.
+        snap = snapshot  # type: ignore[union-attr]
+        # Strip selected_outcome_token_id / outcome_label so from_snapshot does not
+        # raise a direction-mismatch when the snapshot row was fetched for the other
+        # side of the same condition (the adapter reuses one row for both buy_yes and
+        # buy_no proofs of the same condition).
+        if snap.selected_outcome_token_id or snap.outcome_label:
+            snap = dataclass_replace(snap, selected_outcome_token_id=None, outcome_label=None)  # type: ignore[arg-type]
+        if direction.startswith("buy_"):
+            pre_fee_limit = (
+                snap.orderbook_top_ask
+                if snap.orderbook_top_ask is not None
+                else Decimal(str(execution_price.value))
+            )
+        else:
+            pre_fee_limit = (
+                snap.orderbook_top_bid
+                if snap.orderbook_top_bid is not None
+                else Decimal(str(execution_price.value))
+            )
+        pre_fee_limit = Decimal(str(pre_fee_limit))
+        requested_size = Decimal(str(max(size_usd, 0.01)))
+        return ExecutableCostBasis.from_snapshot(
+            snapshot=snap,
+            direction=direction,
+            order_policy="post_only_passive_limit",
+            requested_size_kind="notional_usd",
+            requested_size_value=requested_size,
+            final_limit_price=pre_fee_limit,
+            expected_fill_price_before_fee=pre_fee_limit,
+            depth_status="NOT_MARKETABLE_PASSIVE_LIMIT",
+        )
+    except Exception as exc:
+        raise ValueError(f"COST_BASIS_HASH_UNAVAILABLE: {exc}") from exc
+
+
 def _build_no_submit_proof_bundle_from_adapter_evidence(
     *,
     event: OpportunityEvent,
@@ -1675,6 +2216,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
     family_topology_rows: list[dict[str, Any]],
     family_snapshot_rows: list[dict[str, Any]],
     selected_snapshot_row: dict[str, Any],
+    trade_conn: sqlite3.Connection,
     forecast_conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
     proof: _CandidateProof,
@@ -1731,6 +2273,17 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             "family_id": family.family_id,
         }
     )
+    _hydrated_snapshot = get_snapshot(trade_conn, str(proof.executable_snapshot_id or ""))
+    _canonical_cost_basis = _require_cost_basis(
+        _hydrated_snapshot,
+        direction=proof.direction,
+        size_usd=kelly.size_usd,
+        execution_price=execution_price,
+    )
+    # Align kelly_cost_basis_id in raw_receipt to the canonical cost_basis:{hash[:16]} form.
+    # DecisionCompiler validates kelly.cost_basis_id == cost_model.cost_basis_id; both
+    # must use the canonical form.
+    raw_receipt["kelly_cost_basis_id"] = _canonical_cost_basis.cost_basis_id
     return NoSubmitProofBundle(
         final_intent_id=str(raw_receipt.get("final_intent_id") or ""),
         source_truth=AuthorityEvidence(
@@ -1878,13 +2431,14 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
                 "orderbook_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
                 "fee_details_hash": _hash_jsonish(selected_snapshot_row.get("fee_details_json") or selected_snapshot_row.get("fee_details")),
-                "min_tick_size": selected_snapshot_row.get("min_tick_size"),
-                "min_order_size": selected_snapshot_row.get("min_order_size"),
-                "neg_risk": selected_snapshot_row.get("neg_risk"),
+                "min_tick_size": str(_hydrated_snapshot.min_tick_size),
+                "min_order_size": str(_hydrated_snapshot.min_order_size),
+                "neg_risk": bool(_hydrated_snapshot.neg_risk),
                 "captured_at": selected_snapshot_row.get("captured_at"),
                 "freshness_deadline": selected_snapshot_row.get("freshness_deadline"),
                 "active": selected_snapshot_row.get("active"),
                 "closed": selected_snapshot_row.get("closed"),
+                "executable_snapshot_hash": _require_snapshot_hash(_hydrated_snapshot),
             },
             quote_clock,
             "zeus.trades.executable_market_snapshots",
@@ -1904,6 +2458,15 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "quote_source_kind": "executable_market_snapshot_native_book",
                 "forbidden_cost_source": False,
                 "selected_token_id": proof.token_id,
+                # Top-of-book is the SAME causally-bound, freshness-gated selected_snapshot_row
+                # that already passed entry gates and from which quote_clock
+                # (source_available_at) is derived. The passive-maker consumer
+                # (_passive_maker_context_from_authorities) requires best_bid/best_ask on this
+                # cert; the production payload previously omitted them, so the live cert build
+                # failed QUOTE_FEASIBILITY_BID_ASK_REQUIRED for every candidate. No quote
+                # newer than decision_time and no relaxed staleness bound is introduced here.
+                "best_bid": _optional_float(selected_snapshot_row.get("orderbook_top_bid")),
+                "best_ask": _optional_float(selected_snapshot_row.get("orderbook_top_ask")),
                 "quote_depth_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
                 "p_fill_lcb_policy_id": "edli_v1.no_submit_visible_depth_fill_lcb",
                 "native_quote_available": proof.native_quote_available,
@@ -1921,8 +2484,9 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
             "cost_model",
             "cost_model",
             {
-                "identity": str(raw_receipt.get("kelly_cost_basis_id") or hypothesis_id),
-                "cost_basis_id": raw_receipt.get("kelly_cost_basis_id"),
+                "identity": _canonical_cost_basis.cost_basis_id,
+                "cost_basis_id": _canonical_cost_basis.cost_basis_id,
+                "cost_basis_hash": _canonical_cost_basis.cost_basis_hash,
                 "condition_id": raw_receipt.get("condition_id"),
                 "token_id": raw_receipt.get("token_id"),
                 "cost_source": _native_cost_source_for_direction(proof.direction),
@@ -2689,6 +3253,34 @@ def _forecast_snapshot_row_for_event(
     return snapshot
 
 
+def _assert_settlement_unit_identity(*, snapshot: dict[str, Any], payload: dict[str, object], city, bins) -> str:
+    """Fail-closed 3-way unit-identity gate at the q seam (#101 / U1).
+
+    The snapshot's unit, the city's settlement unit, and EVERY bin's unit MUST
+    agree — otherwise q is computed in one unit and the market resolves in
+    another (wrong-bin / wrong-SIDE on a KNOWN market, Paris-class). Returns the
+    single agreed unit. Raises ``FORECAST_SETTLEMENT_UNIT_DIVERGENCE`` on any
+    mismatch, empty bins, or mixed bin units (all fail-closed).
+    """
+    snapshot_unit = _snapshot_unit(snapshot, payload)
+    city_unit = getattr(city, "settlement_unit", None)
+    bin_units = {b.unit for b in bins}
+    if len(bin_units) != 1:
+        raise ValueError(
+            "FORECAST_SETTLEMENT_UNIT_DIVERGENCE: family bins carry "
+            f"{'no' if not bin_units else 'mixed'} units {sorted(bin_units)} "
+            f"(city={getattr(city, 'name', '?')})"
+        )
+    (bin_unit,) = tuple(bin_units)
+    if not (snapshot_unit == city_unit == bin_unit):
+        raise ValueError(
+            "FORECAST_SETTLEMENT_UNIT_DIVERGENCE: "
+            f"snapshot_unit={snapshot_unit} city_unit={city_unit} bin_unit={bin_unit} "
+            f"(city={getattr(city, 'name', '?')})"
+        )
+    return snapshot_unit
+
+
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
@@ -2702,8 +3294,31 @@ def _market_analysis_from_event_snapshot(
     from src.config import settings
 
     bins = list(family.bins)
-    members = _snapshot_members(snapshot)
-    p_raw = _snapshot_p_raw(snapshot, family=family, bins=bins, members=members, payload=payload)
+    raw_members = _snapshot_members(snapshot)
+    # §4.1 (CI_HONESTY_AND_SCORE_GATE_RULING_2026-06-01): hoist bias correction so
+    # both the p_raw path AND the bootstrap (member_maxes) consume the SAME corrected
+    # surface.  Pre-fix: correction was applied inside _snapshot_p_raw (local rebind)
+    # and never escaped — MarketAnalysis received uncorrected cold array, placing
+    # q_lcb_5pct ~|eff_bias_c|° below the warm point posterior.
+    city = runtime_cities_by_name().get(family.city)
+    if city is None:
+        raise ValueError(f"city config missing for event-bound forecast inference: {family.city}")
+    # Settlement-unit identity gate (#101 / SETTLEMENT_CORRECTNESS_AUDIT U1): q is
+    # meaningless unless the snapshot members, the city's settlement unit, and the
+    # bin units all agree. Converts the previously-DISCARDED _snapshot_unit() call
+    # into a load-bearing fail-closed assertion at the q seam, so a future ingest
+    # unit-swap (Kelvin leak / source swap / new city) cannot silently invert q
+    # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
+    unit = _assert_settlement_unit_identity(snapshot=snapshot, payload=payload, city=city, bins=bins)
+    members, _bias_corrected = _maybe_apply_edli_bias_correction(
+        raw_members, snapshot=snapshot, family=family, city=city, payload=payload
+    )
+    if _bias_corrected:
+        payload["_edli_bias_corrected"] = True
+    p_raw = _snapshot_p_raw(
+        snapshot, family=family, bins=bins, members=members, payload=payload,
+        members_already_corrected=True,
+    )
     p_cal = _snapshot_p_cal(
         calibration_conn,
         snapshot=snapshot,
@@ -2747,14 +3362,14 @@ def _market_analysis_from_event_snapshot(
         executable_mask=np.asarray(executable_mask, dtype=bool),
         alpha=float(settings["edge"]["base_alpha"]["level1"]),
         bins=bins,
-        member_maxes=members,
-        unit=_snapshot_unit(snapshot, payload),
+        member_maxes=members,  # §4.1: corrected array (hoisted above)
+        unit=unit,  # #101: the unit-identity-asserted agreed unit (snapshot==city==bins)
         precision=float(snapshot.get("members_precision") or 1.0),
         round_fn=None,
         city_name=family.city,
         season="",
         forecast_source=str(snapshot.get("source_id") or payload.get("source_id") or ""),
-        bias_corrected=False,
+        bias_corrected=_bias_corrected,  # §4.1: propagate correction flag
         market_complete=True,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
@@ -2959,6 +3574,7 @@ def _snapshot_p_raw(
     bins: list[Bin],
     members: np.ndarray,
     payload: dict[str, object],
+    members_already_corrected: bool = False,
 ) -> np.ndarray:
     city = runtime_cities_by_name().get(family.city)
     if city is None:
@@ -2968,11 +3584,15 @@ def _snapshot_p_raw(
     semantics = SettlementSemantics.for_city(city)
     # A4 (2026-05-31): per-city promoted bias correction on member maxes BEFORE p_raw.
     # Flag-gated (edli_v1.edli_bias_correction_enabled, default OFF) + FAIL-CLOSED.
-    members, _bias_corrected = _maybe_apply_edli_bias_correction(
-        members, snapshot=snapshot, family=family, city=city, payload=payload
-    )
-    if _bias_corrected:
-        payload["_edli_bias_corrected"] = True
+    # §4.1 guard: skip if caller already hoisted correction (members_already_corrected=True)
+    # to prevent double-application when _snapshot_p_raw is called from
+    # _market_analysis_from_event_snapshot (which now owns the single correction site).
+    if not members_already_corrected:
+        members, _bias_corrected = _maybe_apply_edli_bias_correction(
+            members, snapshot=snapshot, family=family, city=city, payload=payload
+        )
+        if _bias_corrected:
+            payload["_edli_bias_corrected"] = True
     arr = p_raw_vector_from_maxes(members, city, semantics, bins)
     if arr.shape != (len(bins),) or not np.isfinite(arr).all() or np.any(arr < 0.0):
         raise ValueError("event-bound p_raw vector invalid")
@@ -3042,7 +3662,30 @@ def _snapshot_p_cal(
     except (sqlite3.Error, ValueError) as exc:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:calibration store unavailable") from exc
     if cal is None:
-        raise ValueError("CALIBRATION_AUTHORITY_MISSING:no Platt calibrator")
+        # Identity-Platt fallback: no fitted Platt for this (city, season, metric) bucket.
+        # Use normalized p_raw as p_cal (identity passthrough). This is the designed
+        # fail-closed default per platt_oos_resolver.py §P0: identity is the live default;
+        # a fitted Platt is a CANDIDATE that requires OOS proof. Prevents whole-city
+        # blackout when a season boundary is crossed before new Platt rows are fitted.
+        # Tagged for log aggregation: calibration_identity_fallback_no_platt_bucket.
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "calibration_identity_fallback_no_platt_bucket city=%s "
+            "metric=%s target_date=%s cycle=%s source_id=%s "
+            "horizon_profile=%s — no fitted Platt for this bucket; using "
+            "identity (p_cal = normalized p_raw). Fit a Platt to promote.",
+            family.city,
+            family.metric,
+            family.target_date,
+            cycle,
+            calibration_source_id,
+            horizon_profile,
+        )
+        arr = np.asarray(p_raw, dtype=float)
+        total = float(arr.sum())
+        if not _valid_probability_vector(arr, len(bins)) or total <= 0.0:
+            raise ValueError("CALIBRATION_AUTHORITY_MISSING:identity fallback p_raw invalid")
+        return arr / total
     p_cal = calibrate_and_normalize(
         np.asarray(p_raw, dtype=float),
         cal,
@@ -3209,8 +3852,14 @@ def _apply_day0_mask_to_generated_probabilities(
         condition_id = str(candidate.condition_id or "")
         q_value = float(live_state.probabilities[str(index)])
         masked_q_by_condition[condition_id] = q_value
-        yes_lcb = lcb_by_condition[(condition_id, "buy_yes")]
-        no_lcb = lcb_by_condition[(condition_id, "buy_no")]
+        # BLOCKER #3 fix (day0 critic 2026-05-31): direct dict lookup raised KeyError
+        # for any bin-direction with no executable market quote (common in day0 where
+        # some bins are illiquid/delisted), propagating as LIVE_INFERENCE_INPUTS_MISSING
+        # and killing the ENTIRE family (zero candidates) instead of skipping just the
+        # non-executable direction. .get(...,0.0) → that direction gets no fill confidence
+        # (min(0.0,·)=0.0 → not acceptable) while bins WITH quotes still proceed.
+        yes_lcb = lcb_by_condition.get((condition_id, "buy_yes"), 0.0)
+        no_lcb = lcb_by_condition.get((condition_id, "buy_no"), 0.0)
         masked_lcb_by_direction[(condition_id, "buy_yes")] = 0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value)
         masked_lcb_by_direction[(condition_id, "buy_no")] = min(no_lcb, 1.0 - q_value)
     return masked_q_by_condition, masked_lcb_by_direction
@@ -3567,19 +4216,86 @@ def _decimal_from_optional(value: object) -> Decimal | None:
 
 
 def _p_fill_lcb_for_direction(book, *, direction: str, shares: Decimal) -> float:
+    """Lower-confidence bound on the fill probability of a sized-to-depth taker order.
+
+    The order we actually submit is sized to ``shares`` (= book.min_order_size at
+    the call site, then capped to crossable depth by the executor). Its fill
+    probability against the *visible* book is governed by whether the crossing
+    levels hold at least ``shares`` units, NOT by a blanket floor. The previous
+    implementation hard-returned the config floor (0.05) for every candidate with
+    *any* qualifying depth, which pessimized a min-size order fully covered by a
+    100-deep best level down to p_fill=0.05 and crushed every 1-20% robust-positive
+    edge at trade_score = p_fill x edge - penalty (TRADE_SCORE_NON_POSITIVE).
+
+    The correct quantity is the depth-coverage of the sized order. We walk the
+    crossing levels to the depth the order can actually consume, form the coverage
+    cushion (available_depth / sized_size), and return a conservative Wilson-style
+    lower bound on that cushion. Properties (all honest, none inflated):
+
+      * available_depth >= sized_size (book fully covers the order)  -> LCB -> ~1.0
+        and rises toward 1 as the depth cushion grows (more "evidence").
+      * available_depth <  sized_size (genuinely thin book)          -> LCB stays
+        LOW and the candidate is correctly penalized.
+      * available_depth == 0 / unknown (no crossable book)           -> 0.0
+        (fail-closed; the candidate has no executable quote at all).
+
+    The configured ``no_submit_visible_depth_fill_lcb`` value remains the FLOOR
+    when depth is present-but-only-exactly-covering, so a candidate is never
+    scored *below* the historical conservative floor purely because of the new
+    bound. It is never used as the default for a candidate with a real, deep
+    crossable book.
+    """
     levels = {
         "buy_yes": book.yes_asks,
         "buy_no": book.no_asks,
         "sell_yes": book.yes_bids,
         "sell_no": book.no_bids,
     }[direction]
-    available = sum((level.size for level in levels), Decimal("0"))
-    if available < shares:
+    sized = float(shares)
+    if sized <= 0.0:
         return 0.0
-    # Public visible depth is quote feasibility evidence, not fill truth. In
-    # no-submit mode there is no FOK/FAK acceptance or user-channel fill proof,
-    # so cap the fill lower bound at a conservative configured floor.
-    return max(0.0, min(1.0, float(settings["edli_v1"].get("no_submit_visible_depth_fill_lcb", 0.05))))
+    available = float(sum((level.size for level in levels), Decimal("0")))
+    if available <= 0.0:
+        # No crossable visible book on this side -> no executable quote.
+        return 0.0
+    if available < sized:
+        # Genuinely thin: the visible book cannot cover the sized order.
+        # Honest, low (sub-floor) fill probability — correctly penalized.
+        coverage = available / sized
+        return max(0.0, min(1.0, _wilson_depth_fill_lcb(coverage=coverage, depth_cushion=coverage)))
+    # Book fully covers the sized order. The fill-probability lower bound is the
+    # Wilson LCB on a fully-covered crossing (p_hat = 1.0) with the depth cushion
+    # (available / sized) as the evidence count: deeper books -> tighter LCB -> ~1.0.
+    depth_cushion = available / sized
+    floor = max(0.0, min(1.0, float(settings["edli_v1"].get("no_submit_visible_depth_fill_lcb", 0.05))))
+    return max(floor, min(1.0, _wilson_depth_fill_lcb(coverage=1.0, depth_cushion=depth_cushion)))
+
+
+def _wilson_depth_fill_lcb(*, coverage: float, depth_cushion: float) -> float:
+    """Conservative Wilson lower-confidence bound on a depth-coverage proportion.
+
+    ``coverage`` is the observed fill proportion of the sized order against the
+    visible crossing depth (= 1.0 when the book holds >= the sized size). The
+    ``depth_cushion`` (available_depth / sized_size, >= 0) is treated as the
+    binomial evidence count ``n``: a thicker book is stronger evidence that a
+    min-size taker order fills, so the lower bound tightens toward ``coverage``.
+
+    A Wilson interval is used (not Wald) because it is well-behaved at the
+    p_hat -> 1 boundary, returning a value strictly < 1.0 for any finite cushion
+    (honest: the visible book is feasibility evidence, never a fill guarantee) and
+    degrading smoothly as the cushion shrinks.
+    """
+    p_hat = max(0.0, min(1.0, coverage))
+    n = max(0.0, depth_cushion)
+    if n <= 0.0:
+        return 0.0
+    z = float(settings["edli_v1"].get("no_submit_visible_depth_fill_z", 1.645))
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = p_hat + z2 / (2.0 * n)
+    margin = z * float(np.sqrt((p_hat * (1.0 - p_hat) / n) + (z2 / (4.0 * n * n))))
+    lower = (center - margin) / denom
+    return max(0.0, min(1.0, lower))
 
 
 def _robust_trade_score_from_generated_inputs(

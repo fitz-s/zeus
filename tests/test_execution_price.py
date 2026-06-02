@@ -555,6 +555,9 @@ class TestPolymarketFeeRateClient:
     def test_get_fee_rate_reads_token_fee_schedule(self, monkeypatch):
         from src.data import polymarket_client
 
+        # Clear module-level fee-rate cache to prevent cross-test cache bleeding.
+        polymarket_client._FEE_RATE_CACHE.pop("token-1", None)
+
         class Response:
             def raise_for_status(self):
                 pass
@@ -582,6 +585,11 @@ class TestPolymarketFeeRateClient:
 
     def test_get_fee_rate_returns_zero_when_fees_disabled(self, monkeypatch):
         from src.data import polymarket_client
+
+        # Clear module-level fee-rate cache so a prior test's cache entry for
+        # "token-1" (feesEnabled=True, feeRate=0.072) doesn't bleed into this
+        # test via the 30-minute TTL hit.
+        polymarket_client._FEE_RATE_CACHE.pop("token-1", None)
 
         class Response:
             def raise_for_status(self):

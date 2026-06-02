@@ -594,8 +594,13 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     missing = [field for field in PRE_SUBMIT_REQUIRED_FIELDS if field not in payload]
     if missing:
         raise LiveOrderAggregateError("PreSubmitRevalidated missing required fields: " + ",".join(missing))
-    if payload.get("would_cross_book") is not False:
-        raise LiveOrderAggregateError("PreSubmitRevalidated requires would_cross_book=false")
+    # would_cross_book must be false for post-only MAKER orders (a crossing post-only
+    # would take, violating maker intent / venue post-only rejection). A TAKER
+    # (FOK/FAK, post_only is False) is designed to cross to fill immediately, so a
+    # crossing book is expected and must not be rejected here.
+    if payload.get("post_only") is not False:  # True or missing/None → maker-or-unknown → enforce
+        if payload.get("would_cross_book") is not False:
+            raise LiveOrderAggregateError("PreSubmitRevalidated requires would_cross_book=false")
     if payload.get("tick_aligned") is not True:
         raise LiveOrderAggregateError("PreSubmitRevalidated requires tick_aligned=true")
     if payload.get("size_ok") is not True:
@@ -631,10 +636,17 @@ def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
     _non_negative_number(payload.get("current_best_bid"), "current_best_bid")
     _non_negative_number(payload.get("current_best_ask"), "current_best_ask")
     _non_negative_number(payload.get("limit_price"), "limit_price")
-    if payload.get("post_only") is not True:
-        raise LiveOrderAggregateError("PreSubmitRevalidated requires post_only=true for current EDLI executor law")
-    if payload.get("time_in_force") not in {"GTC", "GTD"}:
-        raise LiveOrderAggregateError("PreSubmitRevalidated post_only requires GTC/GTD time_in_force")
+    # GATE#85 fix (2026-06-01): taker orders (post_only is False, FOK/FAK) are exempt
+    # from the post_only=True and GTC/GTD invariants — those are maker-only constraints.
+    # Explicit post_only=False signals taker intent; missing/None → fail-closed as maker.
+    # Mirrors the would_cross_book conditioning at lines 601-603.
+    if payload.get("post_only") is not False:  # True or missing/None → maker-or-unknown
+        # For maker (post_only=True), enforce both the flag and TIF constraints.
+        # For unknown (None/missing), also enforce — fail-closed.
+        if payload.get("post_only") is not True:
+            raise LiveOrderAggregateError("PreSubmitRevalidated requires post_only=true for current EDLI executor law")
+        if payload.get("time_in_force") not in {"GTC", "GTD"}:
+            raise LiveOrderAggregateError("PreSubmitRevalidated post_only requires GTC/GTD time_in_force")
 
 
 def _positive_number(value: Any, name: str) -> float:

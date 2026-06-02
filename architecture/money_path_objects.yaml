@@ -484,6 +484,7 @@ state_machines:
       - PRE_SUBMIT_AUTHORITY_PROVENANCE_REQUIRED
       - PRE_SUBMIT_BOOK_AUTHORITY_MISSING
       - PRE_SUBMIT_BOOK_AUTHORITY_INCOMPLETE
+      - PRE_SUBMIT_BOOK_AUTHORITY_STALE
       - PRE_SUBMIT_BOOK_HASH_REQUIRED
       - PRE_SUBMIT_ALLOWANCE_CHECK_DISABLED
       - PRE_SUBMIT_PUSD_BALANCE_INSUFFICIENT
@@ -663,6 +664,21 @@ state_machines:
       - tests/test_collection_frontier.py
       - tests/test_temporal_provenance_and_lanes.py
       - tests/test_frontier_store.py
+
+  edli_script_diagnostic_labels:
+    description: >
+      Diagnostic/terminal-stage string labels used exclusively in operational
+      scripts (not live-path src/). Registered so the money-path semantic-diff
+      classifier does not reject them as unregistered objects. These labels are
+      NEVER emitted on the live trading path or used to gate a trade.
+      NO_SUBMIT_EXCEPTION: terminal stage tag in scripts/probe_full_live_path_to_submit.py
+        for exception-aborted probe runs.
+      PRE_VENUE_DEPTH_INSUFFICIENT_NEVER_SUBMITTED: resolution reason constant in
+        scripts/resolve_unresolved_edli_submit.py for orders that were never
+        submitted due to insufficient depth.
+    states:
+      - NO_SUBMIT_EXCEPTION
+      - PRE_VENUE_DEPTH_INSUFFICIENT_NEVER_SUBMITTED
 
 schema_objects:
   authority_fabricating_defaults:
