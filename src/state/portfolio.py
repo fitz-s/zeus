@@ -560,6 +560,11 @@ class Position:
 
     # Exit state (persisted across monitor cycles — Blueprint v2 §7)
     neg_edge_count: int = 0
+    # BUG#127: consecutive monitor cycles an adverse flash-crash-magnitude
+    # market velocity has persisted. Drives the persistence path of
+    # flash_crash_should_fire(); reset to 0 the moment velocity recovers above
+    # the arming threshold. Carried across cycles like neg_edge_count.
+    flash_crash_count: int = 0
     last_monitor_prob: float = 0.0
     last_monitor_prob_is_fresh: bool = False
     last_monitor_edge: float = 0.0
@@ -992,12 +997,29 @@ class Position:
                 trigger="MODEL_DIVERGENCE_PANIC",
             )
 
-        if exit_context.market_velocity_1h <= -0.15:
+        # BUG#127 (守護 SEV1): FLASH_CRASH_PANIC is evidence-gated, not a bare
+        # price-delta trigger. Maintain the consecutive-cycle persistence counter
+        # first, then consult the shared gate. Probability authority is guaranteed
+        # present here (missing_authority_fields() already passed above, requiring
+        # fresh_prob + fresh_prob_is_fresh).
+        if exit_context.market_velocity_1h <= flash_crash_velocity():
+            self.flash_crash_count = int(self.flash_crash_count or 0) + 1
+        else:
+            self.flash_crash_count = 0
+        if flash_crash_should_fire(
+            market_velocity_1h=exit_context.market_velocity_1h,
+            divergence_score=exit_context.divergence_score,
+            has_probability_authority=True,
+            flash_crash_count=self.flash_crash_count,
+        ):
             applied.append("flash_crash_trigger")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
                 True,
-                f"FLASH_CRASH_PANIC (velocity={exit_context.market_velocity_1h:.2f}/hr)",
+                (
+                    f"FLASH_CRASH_PANIC (velocity={exit_context.market_velocity_1h:.2f}/hr, "
+                    f"divergence={exit_context.divergence_score:.2f}, cycles={self.flash_crash_count})"
+                ),
                 "immediate",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
@@ -2818,6 +2840,45 @@ _DIVERGENCE_VELOCITY_CONFIRM = ExpiringAssumption[float](
     owner="risk_team",
 )
 
+# BUG#127 (守護 SEV1): flash-crash evidence-gate tunables. The bare velocity
+# threshold only ARMS consideration; firing requires belief confirmation or a
+# persistent deep catastrophe. See flash_crash_should_fire().
+_FLASH_CRASH_VELOCITY = ExpiringAssumption[float](
+    value=float(settings["exit"].get("flash_crash_velocity", -0.15)),
+    fallback=-0.15,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="bug127_flash_crash_evidence_gate",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_id="v2",
+    owner="risk_team",
+)
+
+_FLASH_CRASH_CONFIRMATIONS = ExpiringAssumption[int](
+    value=int(settings["exit"].get("flash_crash_confirmations", 2)),
+    fallback=2,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="bug127_flash_crash_evidence_gate",
+    max_lifespan_days=365,
+    kill_switch_action="revert_to_fallback",
+    semantic_id="v2",
+    owner="risk_team",
+)
+
+_FLASH_CRASH_CATASTROPHE_VELOCITY = ExpiringAssumption[float](
+    value=float(settings["exit"].get("flash_crash_catastrophe_velocity", -0.40)),
+    fallback=-0.40,
+    last_verified_at=_V2_INTRODUCTION_DATE,
+    verified_by="system",
+    verification_source="bug127_flash_crash_evidence_gate",
+    max_lifespan_days=180,
+    kill_switch_action="revert_to_fallback",
+    semantic_id="v2",
+    owner="risk_team",
+)
+
 
 def buy_no_scaling_factor() -> float:
     return _BUY_NO_SCALING.active_value
@@ -2854,6 +2915,81 @@ def divergence_hard_threshold() -> float:
 
 def divergence_velocity_confirm() -> float:
     return _DIVERGENCE_VELOCITY_CONFIRM.active_value
+
+
+def flash_crash_velocity() -> float:
+    return _FLASH_CRASH_VELOCITY.active_value
+
+
+def flash_crash_confirmations() -> int:
+    return _FLASH_CRASH_CONFIRMATIONS.active_value
+
+
+def flash_crash_catastrophe_velocity() -> float:
+    return _FLASH_CRASH_CATASTROPHE_VELOCITY.active_value
+
+
+def flash_crash_should_fire(
+    *,
+    market_velocity_1h: float,
+    divergence_score: float,
+    has_probability_authority: bool,
+    flash_crash_count: int,
+) -> bool:
+    """BUG#127 (守護 SEV1, GOAL#36): evidence gate for FLASH_CRASH_PANIC.
+
+    A bare adverse market-price move is NOT edge reversal. Crossing
+    ``flash_crash_velocity()`` only ARMS consideration; the exit may fire only
+    when the move is *confirmed*:
+
+      (a) BELIEF-confirmed — probability authority is present AND the model/market
+          divergence has reached the soft-divergence threshold (the belief moved in
+          the SAME adverse direction as the price), OR
+      (b) PERSISTENT CATASTROPHE — the adverse velocity has persisted for at least
+          ``flash_crash_confirmations()`` consecutive monitor cycles AND its
+          magnitude exceeds the deep catastrophe bound
+          ``flash_crash_catastrophe_velocity()`` (a genuine sustained crash that we
+          must escape even when the probability refresh is degraded).
+
+    A single-cycle quote wiggle on a thin book / single seller / data gap, with the
+    belief unchanged, satisfies neither path and therefore does NOT exit.
+
+    This is the single source of truth shared by both trigger sites
+    (``exit_triggers.evaluate_exit_triggers`` and ``Position.evaluate_exit``) so they
+    cannot diverge.
+    """
+    arming = flash_crash_velocity()
+    try:
+        velocity = float(market_velocity_1h)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(velocity):
+        return False
+    if velocity > arming:
+        # Not even an adverse move past the arming threshold.
+        return False
+
+    # Path (a): belief confirms the adverse move.
+    if has_probability_authority:
+        try:
+            div = float(divergence_score)
+        except (TypeError, ValueError):
+            div = 0.0
+        if math.isfinite(div) and div >= divergence_soft_threshold():
+            return True
+
+    # Path (b): sustained DEEP catastrophe, belief not required.
+    try:
+        count = int(flash_crash_count)
+    except (TypeError, ValueError):
+        count = 0
+    if (
+        velocity <= flash_crash_catastrophe_velocity()
+        and count >= flash_crash_confirmations()
+    ):
+        return True
+
+    return False
 
 
 def _clamp_negative_threshold(raw: float, floor: float, ceiling: float) -> float:

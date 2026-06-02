@@ -24,6 +24,8 @@ from src.state.portfolio import (
     divergence_hard_threshold,
     divergence_soft_threshold,
     divergence_velocity_confirm,
+    flash_crash_should_fire,
+    flash_crash_velocity,
     near_settlement_hours,
 )
 
@@ -94,12 +96,32 @@ def evaluate_exit_triggers(
             urgency="immediate",
         )
 
-    # Quote-only safety exits stay active when probability refresh is degraded.
-    if current_edge_context.market_velocity_1h <= -0.15:
+    # BUG#127 (守護 SEV1, GOAL#36): FLASH_CRASH_PANIC is evidence-gated — a bare
+    # market-price move is NOT edge reversal. Maintain the consecutive-cycle
+    # persistence counter, then consult the shared gate which consults the
+    # probability-authority of the edge context. A single-cycle quote wiggle with
+    # the belief unchanged no longer exits; firing requires either belief
+    # confirmation (divergence past soft threshold under authority) or a sustained
+    # DEEP catastrophe across flash_crash_confirmations() cycles. The shared helper
+    # is the SAME one used by Position.evaluate_exit so the two sites cannot diverge.
+    if current_edge_context.market_velocity_1h <= flash_crash_velocity():
+        position.flash_crash_count = int(getattr(position, "flash_crash_count", 0) or 0) + 1
+    else:
+        position.flash_crash_count = 0
+    if flash_crash_should_fire(
+        market_velocity_1h=current_edge_context.market_velocity_1h,
+        divergence_score=current_edge_context.divergence_score,
+        has_probability_authority=_edge_context_has_probability_authority(current_edge_context),
+        flash_crash_count=position.flash_crash_count,
+    ):
         return ExitSignal(
             trade_id=position.trade_id,
             trigger="FLASH_CRASH_PANIC",
-            reason=f"Adverse market velocity {current_edge_context.market_velocity_1h:.2f}/hr detected",
+            reason=(
+                f"Confirmed adverse market velocity {current_edge_context.market_velocity_1h:.2f}/hr "
+                f"(divergence={current_edge_context.divergence_score:.2f}, "
+                f"cycles={position.flash_crash_count})"
+            ),
             urgency="immediate"
         )
 
