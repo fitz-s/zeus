@@ -754,7 +754,6 @@ class MarketAnalysis:
             and self._calibrator.fitted
             and len(self._calibrator.bootstrap_params) >= 1
         )
-        platt_params = self._calibrator.bootstrap_params if has_platt else []
 
         rng = self._rng
         bootstrap_edges = np.zeros(n)
@@ -762,16 +761,26 @@ class MarketAnalysis:
         input_space = getattr(self._calibrator, "input_space", "raw_probability") if self._calibrator else "raw_probability"
         is_wnd = input_space == "width_normalized_density"
 
+        # BUG #129 (estimator-mismatch fix, symmetric with _bootstrap_bin_no): use the SAME
+        # current/MAP Platt params (A, B, C) as the point estimate self.p_cal, NOT a random
+        # historical bootstrap-param triple per sample. The historical-param distribution is a
+        # second estimator that can push percentile(q, 5) above the MAP point in the high-q
+        # ceiling regime, bypassing the CI haircut. Live YES bins are low-q so the YES inversion
+        # is latent today, but the defect class is identical — fix it here too. Member resampling
+        # (σ_ensemble) is retained as the legitimate forecast-uncertainty source.
+        map_A = float(self._calibrator.A) if has_platt else 0.0
+        map_B = float(self._calibrator.B) if has_platt else 0.0
+        map_C = float(self._calibrator.C) if has_platt else 0.0
+
         for i in range(n):
             # Layer 1: sample the configured signal probability object for all
             # bins. Generic ENS uses member resampling; Day0 injects the
             # observation-fused signal sampler so CI and p_raw share authority.
             p_raw_all = self._bootstrap_p_raw_all(n_members)
 
-            # Layer 2: sample Platt parameterization for ALL bins
+            # Layer 2: calibrate with the current/MAP Platt parameterization for ALL bins
             if has_platt:
-                params = platt_params[rng.integers(len(platt_params))]
-                A, B, C = params[0], params[1], params[2]
+                A, B, C = map_A, map_B, map_C
                 p_cal_boot_all = np.empty(len(self.bins))
                 for j, bb in enumerate(self.bins):
                     p_input = p_raw_all[j]
@@ -816,6 +825,15 @@ class MarketAnalysis:
         ci_lo = float(np.percentile(bootstrap_edges, 5))
         ci_hi = float(np.percentile(bootstrap_edges, 95))
 
+        # BUG #129 antibody (symmetric with _bootstrap_bin_no): clamp ci_lo so the restored
+        # q_lcb = ci_lo + c_b_point can never exceed the YES-side point q = p_posterior[bin_idx].
+        # Makes "q_lcb > q_point" unconstructable on the YES leg too. c_b_point is the FIXED YES
+        # market price the adapter adds back at restore, so the cancellation is exact.
+        c_b_point = float(self.p_market[bin_idx])
+        point_edge_ceiling = float(self.p_posterior[bin_idx]) - c_b_point
+        ci_lo = min(ci_lo, point_edge_ceiling)
+        ci_hi = max(ci_hi, ci_lo)
+
         result = (ci_lo, ci_hi, p_value)
         self._bootstrap_cache[("yes", bin_idx, n)] = result
         return result
@@ -838,7 +856,6 @@ class MarketAnalysis:
             and self._calibrator.fitted
             and len(self._calibrator.bootstrap_params) >= 1
         )
-        platt_params = self._calibrator.bootstrap_params if has_platt else []
 
         rng = self._rng
         bootstrap_edges = np.zeros(n)
@@ -846,12 +863,23 @@ class MarketAnalysis:
         input_space = getattr(self._calibrator, "input_space", "raw_probability") if self._calibrator else "raw_probability"
         is_wnd = input_space == "width_normalized_density"
 
+        # BUG #129 (estimator-mismatch fix): ground the bootstrap calibration in the SAME
+        # current/MAP Platt params (A, B, C) used to produce the point estimate self.p_cal,
+        # NOT a random HISTORICAL bootstrap-param triple drawn per sample. Drawing historical
+        # params introduces a SECOND estimator whose distribution maps high-q_no bins
+        # systematically higher, so percentile(q_no, 5) lands ABOVE the MAP point and the
+        # designed CI haircut is bypassed at robust_trade_score's min(q_lcb, q_live). With MAP
+        # params, point and LCB share one estimator; member resampling (the legitimate
+        # forecast-uncertainty source) is retained. See PROBABILITY_INTEGRITY_AUDIT_2026-06-02 LEG 1.
+        map_A = float(self._calibrator.A) if has_platt else 0.0
+        map_B = float(self._calibrator.B) if has_platt else 0.0
+        map_C = float(self._calibrator.C) if has_platt else 0.0
+
         for i in range(n):
             p_raw_all = self._bootstrap_p_raw_all(n_members)
 
             if has_platt:
-                params = platt_params[rng.integers(len(platt_params))]
-                A, B, C = params[0], params[1], params[2]
+                A, B, C = map_A, map_B, map_C
                 p_cal_boot_all = np.empty(len(self.bins))
                 for j, bb in enumerate(self.bins):
                     p_input = p_raw_all[j]
@@ -892,6 +920,17 @@ class MarketAnalysis:
         p_value = float(np.mean(bootstrap_edges <= 0))
         ci_lo = float(np.percentile(bootstrap_edges, 5))
         ci_hi = float(np.percentile(bootstrap_edges, 95))
+
+        # BUG #129 antibody (construction-level invariant): the 5th-percentile edge restores to
+        # q_lcb = ci_lo + c_b_point (event_reactor_adapter restore). Clamp ci_lo so q_lcb can NEVER
+        # exceed the NO-side point q_no = 1 - p_posterior[bin_idx]. This makes "q_lcb > q_point"
+        # UNCONSTRUCTABLE regardless of the calibration estimator or sampling skew — a lower bound
+        # that exceeds the point is not a lower bound. c_b_point is the FIXED NO market price (the
+        # same cost the adapter adds back at restore), so the cancellation is exact.
+        c_b_point = float(self.buy_no_market_price(bin_idx))
+        point_edge_ceiling = (1.0 - float(self.p_posterior[bin_idx])) - c_b_point
+        ci_lo = min(ci_lo, point_edge_ceiling)
+        ci_hi = max(ci_hi, ci_lo)
 
         result = (ci_lo, ci_hi, p_value)
         self._bootstrap_cache[("no", bin_idx, n)] = result
