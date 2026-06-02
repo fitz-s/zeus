@@ -411,3 +411,179 @@ class TestCrossModuleParityWithTradeScore:
         live = self._live_edge_bound(q_posterior=0.80, q_5pct=0.59, cost=0.55)
         shadow = self._shadow_edge(q_posterior=0.80, q_5pct=0.59, cost=0.55)
         assert abs(live - shadow) < 1e-12, f"live={live}, shadow={shadow}"
+
+
+# ---------------------------------------------------------------------------
+# (f) forecast-consistency gate: stale rows excluded, consistent rows kept
+# ---------------------------------------------------------------------------
+
+class TestForecastConsistencyGate:
+    """_build_stale_set excludes rows whose raw_mu_c deviates > STALE_MU_TOL_C
+    from the causal snapshot mean, and keeps consistent rows.
+
+    Uses an in-memory SQLite DB that mirrors the ensemble_snapshots schema.
+    """
+
+    @staticmethod
+    def _make_forecasts_db(tmp_path, rows):
+        """Create a temp zeus-forecasts.db with ensemble_snapshots rows.
+
+        rows: list of dicts with keys:
+            city, target_date, temperature_metric, available_at,
+            lead_hours, members_json, members_unit
+        """
+        import json
+        import sqlite3
+        db_path = tmp_path / "zeus-forecasts.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE ensemble_snapshots (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                available_at TEXT,
+                lead_hours INTEGER,
+                members_json TEXT,
+                members_unit TEXT
+            )
+        """)
+        for r in rows:
+            conn.execute(
+                "INSERT INTO ensemble_snapshots VALUES (?,?,?,?,?,?,?)",
+                (r["city"], r["target_date"], r["temperature_metric"],
+                 r["available_at"], r["lead_hours"],
+                 r["members_json"], r["members_unit"]),
+            )
+        conn.commit()
+        conn.close()
+        return str(db_path)
+
+    def test_stale_row_excluded(self, tmp_path):
+        """Row with |raw_mu_c − causal_mean| > 1.0°C is excluded."""
+        import json
+        # Causal snapshot: 51 members all 82.4°F = 28.0°C mean
+        members = [82.4] * 51
+        db_path = self._make_forecasts_db(tmp_path, [{
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "temperature_metric": "high",
+            "available_at": "2026-05-24T00:00:00+00:00",
+            "lead_hours": 24,
+            "members_json": json.dumps(members),
+            "members_unit": "degF",
+        }])
+        # Ledger row with raw_mu_c=21.5°C → delta=6.5°C > 1.0°C → STALE
+        row = {
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "ts": "2026-05-24T08:00:00+00:00",
+            "raw_mu_c": 21.5,
+            "metric": "high",
+        }
+        import scripts.score_emos_forward as scorer
+        orig_forecasts = scorer.FORECASTS
+        try:
+            scorer.FORECASTS = db_path
+            stale_ids, reasons = scorer._build_stale_set([row])
+        finally:
+            scorer.FORECASTS = orig_forecasts
+
+        assert id(row) in stale_ids, "stale row must be in stale_ids"
+        assert len(stale_ids) == 1
+
+    def test_consistent_row_kept(self, tmp_path):
+        """Row with |raw_mu_c − causal_mean| <= 1.0°C is NOT excluded."""
+        import json
+        # Causal snapshot: 51 members all 82.4°F = 28.0°C mean
+        members = [82.4] * 51
+        db_path = self._make_forecasts_db(tmp_path, [{
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "temperature_metric": "high",
+            "available_at": "2026-05-24T00:00:00+00:00",
+            "lead_hours": 24,
+            "members_json": json.dumps(members),
+            "members_unit": "degF",
+        }])
+        # Ledger row with raw_mu_c=28.3°C → delta=0.3°C < 1.0°C → CONSISTENT
+        row = {
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "ts": "2026-05-24T08:00:00+00:00",
+            "raw_mu_c": 28.3,
+            "metric": "high",
+        }
+        import scripts.score_emos_forward as scorer
+        orig_forecasts = scorer.FORECASTS
+        try:
+            scorer.FORECASTS = db_path
+            stale_ids, reasons = scorer._build_stale_set([row])
+        finally:
+            scorer.FORECASTS = orig_forecasts
+
+        assert id(row) not in stale_ids, "consistent row must NOT be in stale_ids"
+        assert len(stale_ids) == 0
+
+    def test_no_causal_snapshot_excludes_row(self, tmp_path):
+        """Row with no causally-available snapshot (available_at > ts) is excluded."""
+        import json
+        # Snapshot only available AFTER decision time
+        members = [82.4] * 51
+        db_path = self._make_forecasts_db(tmp_path, [{
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "temperature_metric": "high",
+            "available_at": "2026-05-25T12:00:00+00:00",  # after ts
+            "lead_hours": 6,
+            "members_json": json.dumps(members),
+            "members_unit": "degF",
+        }])
+        row = {
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "ts": "2026-05-24T08:00:00+00:00",  # before snapshot
+            "raw_mu_c": 28.0,
+            "metric": "high",
+        }
+        import scripts.score_emos_forward as scorer
+        orig_forecasts = scorer.FORECASTS
+        try:
+            scorer.FORECASTS = db_path
+            stale_ids, _ = scorer._build_stale_set([row])
+        finally:
+            scorer.FORECASTS = orig_forecasts
+
+        assert id(row) in stale_ids, "row with no causal snapshot must be excluded"
+
+    def test_mixed_stale_and_consistent(self, tmp_path):
+        """Two rows: one stale, one consistent — only stale is excluded."""
+        import json
+        members = [82.4] * 51  # 28.0°C mean
+        db_path = self._make_forecasts_db(tmp_path, [{
+            "city": "Chicago",
+            "target_date": "2026-05-25",
+            "temperature_metric": "high",
+            "available_at": "2026-05-24T00:00:00+00:00",
+            "lead_hours": 24,
+            "members_json": json.dumps(members),
+            "members_unit": "degF",
+        }])
+        stale_row = {
+            "city": "Chicago", "target_date": "2026-05-25",
+            "ts": "2026-05-24T08:00:00+00:00", "raw_mu_c": 21.5, "metric": "high",
+        }
+        good_row = {
+            "city": "Chicago", "target_date": "2026-05-25",
+            "ts": "2026-05-24T08:00:00+00:00", "raw_mu_c": 27.8, "metric": "high",
+        }
+        import scripts.score_emos_forward as scorer
+        orig_forecasts = scorer.FORECASTS
+        try:
+            scorer.FORECASTS = db_path
+            stale_ids, _ = scorer._build_stale_set([stale_row, good_row])
+        finally:
+            scorer.FORECASTS = orig_forecasts
+
+        assert id(stale_row) in stale_ids
+        assert id(good_row) not in stale_ids
+        assert len(stale_ids) == 1

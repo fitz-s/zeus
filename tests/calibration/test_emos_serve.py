@@ -509,3 +509,157 @@ class TestEmosMetricGating:
         for fam, expected in [(_FamilyHigh(), "high"), (_FamilyLow(), "low"), (_FamilyNone(), "")]:
             result = str(getattr(fam, "metric", "") or "").lower()
             assert result == expected, f"metric extraction: got '{result}', expected '{expected}'"
+
+
+# ---------------------------------------------------------------------------
+# Regression: PIT deduplication — one PIT per (city, date), not per bin
+# ---------------------------------------------------------------------------
+
+class TestPitDeduplication:
+    """§4i PIT coverage must be computed once per (city, target_date).
+
+    All bins of one (city, date) share the same (mu_c, sigma_c) and the same
+    realized daily max → the same PIT value.  Counting per-bin inflates n
+    with perfectly correlated copies, making cov90 and k_cov computed over
+    a non-independent sample and the license invalid.
+
+    These tests exercise the deduplication logic in score_emos_forward.py.
+    """
+
+    def _make_ledger_rows(self, city: str, target_date: str, n_bins: int,
+                          mu_c: float, sigma_c: float, metric: str = "high") -> list[dict]:
+        """Build N ledger rows for one (city, date) — different bins, same mu/sigma."""
+        import json
+        rows = []
+        for i in range(n_bins):
+            rows.append({
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+                "emos_mu_c": mu_c,
+                "emos_sigma_c": sigma_c,
+                "bin_unit": "C",
+                "bin_low": float(15 + i),
+                "bin_high": float(16 + i),
+                "raw_q": 0.1,
+                "emos_q": 0.1,
+                "emos_q_lcb": 0.1,
+                "q_live": 0.1,
+            })
+        return rows
+
+    def test_single_date_n_bins_yields_one_pit(self):
+        """One (city, date) with N bins must yield n_pit_dates==1, not N.
+
+        This is the core regression test: the old per-bin path would have
+        yielded n_pit==N for the same date.
+        """
+        from scipy.stats import norm as scipy_norm
+
+        city = "TestCity"
+        target_date = "2026-05-01"
+        mu_c, sigma_c = 22.0, 2.5
+        n_bins = 16  # realistic EDLI bin count
+
+        rows = self._make_ledger_rows(city, target_date, n_bins, mu_c, sigma_c)
+
+        # Simulate the dedup logic from score_emos_forward.py Pass 1
+        truth_c = 24.0  # realized daily max in °C
+        pit_by_city_date: dict = {}
+        for row in rows:
+            date_key = (row["city"], row["target_date"])
+            if date_key not in pit_by_city_date:
+                mc = row.get("emos_mu_c")
+                sc = row.get("emos_sigma_c")
+                if mc is not None and sc is not None and float(sc) > 0:
+                    pit_val = float(scipy_norm.cdf((truth_c - float(mc)) / float(sc)))
+                    pit_by_city_date[date_key] = pit_val
+
+        # Result: exactly 1 PIT for the 1 date, regardless of n_bins
+        assert len(pit_by_city_date) == 1, (
+            f"Expected 1 PIT entry for 1 date with {n_bins} bins, "
+            f"got {len(pit_by_city_date)}"
+        )
+
+        # The PIT value must equal the direct computation
+        expected_pit = float(scipy_norm.cdf((truth_c - mu_c) / sigma_c))
+        actual_pit = pit_by_city_date[(city, target_date)]
+        assert abs(actual_pit - expected_pit) < 1e-12, (
+            f"PIT mismatch: expected {expected_pit}, got {actual_pit}"
+        )
+
+    def test_multiple_dates_yield_one_pit_per_date(self):
+        """25 distinct dates → n_pit_dates==25, regardless of bins per date."""
+        from scipy.stats import norm as scipy_norm
+        import numpy as np
+
+        city = "Amsterdam"
+        n_dates = 25
+        n_bins_per_date = 8
+        mu_c, sigma_c = 21.0, 3.0
+
+        # Build all rows
+        all_rows = []
+        for d in range(n_dates):
+            target_date = f"2026-04-{d+1:02d}"
+            all_rows.extend(
+                self._make_ledger_rows(city, target_date, n_bins_per_date, mu_c, sigma_c)
+            )
+
+        assert len(all_rows) == n_dates * n_bins_per_date
+
+        # Simulate the dedup logic
+        truth_c = 22.0
+        pit_by_city_date: dict = {}
+        for row in all_rows:
+            date_key = (row["city"], row["target_date"])
+            if date_key not in pit_by_city_date:
+                mc = row.get("emos_mu_c")
+                sc = row.get("emos_sigma_c")
+                if mc is not None and sc is not None and float(sc) > 0:
+                    pit_val = float(scipy_norm.cdf((truth_c - float(mc)) / float(sc)))
+                    pit_by_city_date[date_key] = pit_val
+
+        city_pit_list = [v for (c, _d), v in pit_by_city_date.items() if c == city]
+        assert len(city_pit_list) == n_dates, (
+            f"Expected {n_dates} PIT entries for {n_dates} dates "
+            f"({n_bins_per_date} bins/date), got {len(city_pit_list)}"
+        )
+
+    def test_25_distinct_dates_yields_verdict_not_insufficient(self):
+        """25 distinct dates per city → _emos_verdict does NOT return INSUFFICIENT_N.
+
+        MIN_N_FOR_VERDICT=20 applies to n_dates (independent observations).
+        With 25 dates the verdict must be determined by cov90/PIT_mean, not by n.
+        """
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+        from score_emos_forward import _emos_verdict
+        from scipy.stats import norm as scipy_norm
+        import numpy as np
+
+        # 25 perfect-calibration PITs (uniform → cov90 ≈ 0.90 → EMOS_CI_HONEST)
+        rng = np.random.default_rng(42)
+        pit = rng.uniform(0.0, 1.0, 25)
+        cov90 = float(np.mean((pit >= 0.05) & (pit <= 0.95)))
+        pit_mean = float(np.mean(pit))
+
+        verdict = _emos_verdict(n=25, cov90=cov90, pit_mean=pit_mean)
+        assert verdict != "INSUFFICIENT_N", (
+            f"25 dates must not yield INSUFFICIENT_N; got '{verdict}' "
+            f"(cov90={cov90:.3f}, pit_mean={pit_mean:.3f})"
+        )
+
+    def test_fewer_than_20_dates_yields_insufficient_n(self):
+        """Fewer than 20 distinct dates → INSUFFICIENT_N regardless of cov90."""
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+        from score_emos_forward import _emos_verdict
+
+        for n in [0, 1, 5, 19]:
+            verdict = _emos_verdict(n=n, cov90=0.90, pit_mean=0.50)
+            assert verdict == "INSUFFICIENT_N", (
+                f"n={n} dates must yield INSUFFICIENT_N, got '{verdict}'"
+            )

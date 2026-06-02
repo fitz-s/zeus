@@ -47,6 +47,12 @@ sys.path.insert(0, REPO)
 
 LEDGER = os.path.join(REPO, "state", "emos_shadow_ledger.jsonl")
 WORLD = os.path.join(REPO, "state", "zeus-world.db")
+FORECASTS = os.path.join(REPO, "state", "zeus-forecasts.db")
+
+# Forecast-consistency gate tolerance (°C).
+# A ledger row's raw_mu_c must be within this of the causal snapshot mean.
+# Rows exceeding this delta are stale/inconsistent — excluded from all scoring.
+STALE_MU_TOL_C = 1.0
 
 TODAY = date.today()
 LOG_CLIP = 1e-9
@@ -76,6 +82,99 @@ def _load_ledger():
             except json.JSONDecodeError as exc:
                 print(f"  [WARN] ledger line {lineno} parse error: {exc}")
     return rows
+
+
+def _causal_snapshot_mean_c(
+    forecasts_conn: sqlite3.Connection,
+    city: str,
+    target_date: str,
+    decision_ts: str,
+) -> float | None:
+    """Return the member-mean in °C of the freshest causally-available snapshot.
+
+    'Freshest causally-available' = minimum lead_hours among snapshots with
+    available_at <= decision_ts for (city, target_date, metric='high').
+
+    Returns None if no such snapshot exists (can't verify → row is excluded).
+    Uses string comparison for ISO timestamps (both are UTC +00:00).
+    """
+    try:
+        row = forecasts_conn.execute(
+            """
+            SELECT members_json, members_unit
+            FROM ensemble_snapshots
+            WHERE city = ?
+              AND target_date = ?
+              AND temperature_metric = 'high'
+              AND available_at <= ?
+            ORDER BY lead_hours ASC
+            LIMIT 1
+            """,
+            (city, target_date, decision_ts),
+        ).fetchone()
+        if row is None:
+            return None
+        members = json.loads(row["members_json"])
+        arr = np.array([float(v) for v in members if v is not None], dtype=float)
+        if arr.size == 0:
+            return None
+        unit = (row["members_unit"] or "").lower()
+        if unit in ("degf", "f"):
+            arr = (arr - 32.0) * 5.0 / 9.0
+        return float(arr.mean())
+    except Exception:
+        return None
+
+
+def _build_stale_set(settled_rows: list[dict]) -> tuple[set, dict]:
+    """Return (stale_ids, reason_map) for forecast-inconsistent ledger rows.
+
+    stale_ids: set of id(row) for rows whose raw_mu_c deviates > STALE_MU_TOL_C
+               from the causally-available snapshot mean.
+    reason_map: id(row) → human-readable reason string (for debug).
+
+    Opens zeus-forecasts.db read-only; handles missing DB gracefully (all rows
+    pass — can't gate what we can't verify).
+    """
+    stale_ids: set[int] = set()
+    reason_map: dict[int, str] = {}
+
+    if not os.path.exists(FORECASTS):
+        print(f"  [WARN] zeus-forecasts.db not found — skipping consistency gate")
+        return stale_ids, reason_map
+
+    try:
+        conn = sqlite3.connect(f"file:{FORECASTS}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        for row in settled_rows:
+            raw_mu_c = row.get("raw_mu_c")
+            if raw_mu_c is None or not np.isfinite(float(raw_mu_c)):
+                # No raw_mu_c to compare — exclude (can't verify)
+                stale_ids.add(id(row))
+                reason_map[id(row)] = "raw_mu_c missing/nan"
+                continue
+            decision_ts = row.get("ts", "")
+            city = row.get("city", "")
+            target_date = row.get("target_date", "")
+            causal_mean = _causal_snapshot_mean_c(conn, city, target_date, decision_ts)
+            if causal_mean is None:
+                stale_ids.add(id(row))
+                reason_map[id(row)] = "no causal snapshot found"
+                continue
+            delta = abs(float(raw_mu_c) - causal_mean)
+            if delta > STALE_MU_TOL_C:
+                stale_ids.add(id(row))
+                reason_map[id(row)] = (
+                    f"raw_mu_c={float(raw_mu_c):.2f}°C vs causal_mean={causal_mean:.2f}°C "
+                    f"(delta={delta:.2f}°C > tol={STALE_MU_TOL_C}°C)"
+                )
+        conn.close()
+    except Exception as exc:
+        print(f"  [WARN] consistency gate DB error ({exc}) — skipping gate")
+        stale_ids.clear()
+        reason_map.clear()
+
+    return stale_ids, reason_map
 
 
 def _live_truth_by_city_date(cities_dates: set) -> dict:
@@ -320,6 +419,34 @@ def main() -> None:
         return
 
     # ---------------------------------------------------------------------------
+    # FORECAST-CONSISTENCY GATE
+    # Exclude rows whose raw_mu_c deviates > STALE_MU_TOL_C from the causally-
+    # available snapshot mean (available_at <= row["ts"]).  Stale rows indicate
+    # the ledger was written from a stale/wrong forecast snapshot and must not
+    # enter Brier/PIT/counterfactual scoring.
+    # ---------------------------------------------------------------------------
+    print("Forecast-consistency gate ...")
+    stale_ids, stale_reason_map = _build_stale_set(settled_rows)
+    n_settled_high_total = len(settled_rows)
+    n_excluded_stale = len(stale_ids)
+    n_scored = n_settled_high_total - n_excluded_stale
+    print(f"  n_settled_high_total : {n_settled_high_total}")
+    print(f"  n_excluded_stale     : {n_excluded_stale}"
+          + (" (raw_mu_c mismatch vs causal forecast snapshot)" if n_excluded_stale else ""))
+    print(f"  n_scored             : {n_scored}")
+    if n_excluded_stale > 0 and n_excluded_stale <= 5:
+        for rid, reason in stale_reason_map.items():
+            print(f"    [stale] {reason}")
+    print()
+
+    settled_rows = [r for r in settled_rows if id(r) not in stale_ids]
+
+    if not settled_rows:
+        print("All HIGH settled rows excluded by forecast-consistency gate.")
+        print("  Waiting for fresh ledger rows recorded from live forecast snapshots.")
+        return
+
+    # ---------------------------------------------------------------------------
     # PASS 1: score Brier/log + collect PIT per city
     # (city_k_cov not yet available; counterfactual deferred to Pass 2)
     # ---------------------------------------------------------------------------
@@ -328,7 +455,6 @@ def main() -> None:
         "raw_logprob": [], "emos_logprob": [],
         "raw_q_win": [], "emos_q_win": [],
         "rows_scored": 0, "rows_skipped": 0,
-        "pit": [],
         # Pass-2 counterfactual accumulators (populated after §4i)
         "died_raw_yes": 0, "rescued_emos_yes": 0,
         "rescued_yes_outcomes": [], "rescued_yes_costs": [],
@@ -337,6 +463,11 @@ def main() -> None:
         # k=1 reference column (recorded booleans, kept for comparison)
         "rescued_k1_yes": 0,
     })
+    # PIT deduplication: one PIT per (city, target_date), not per bin.
+    # All bins of a (city, date) share the same (mu_c, sigma_c, y_obs_c).
+    # Keys: (city, target_date) → pit_val float.
+    # Populated once per date (first scored row for that date wins for mu/sigma).
+    pit_by_city_date: dict[tuple, float] = {}
     agg = {
         "raw_brier": [], "emos_brier": [],
         "raw_logprob": [], "emos_logprob": [],
@@ -397,13 +528,20 @@ def main() -> None:
         rows_scored += 1
         per_city[city]["rows_scored"] += 1
 
-        # PIT: use EMOS predictive (in °C)
-        mu_c = row.get("emos_mu_c")
-        sigma_c = row.get("emos_sigma_c")
-        if mu_c is not None and sigma_c is not None and float(sigma_c) > 0:
-            truth_c = _to_celsius(truth_raw, truth_unit)
-            pit_val = float(norm.cdf((truth_c - float(mu_c)) / float(sigma_c)))
-            per_city[city]["pit"].append(pit_val)
+        # PIT: one observation per (city, target_date) — NOT per bin.
+        # All bins of the same date share the same (mu_c, sigma_c) and the same
+        # realized truth, so they produce the same PIT value.  Recording per-bin
+        # inflates n and introduces perfect collinearity (64 copies of one PIT
+        # is not 64 independent observations).  Deduplicate: record only the
+        # first row seen for each (city, target_date).
+        date_key = (city, target_date)
+        if date_key not in pit_by_city_date:
+            mu_c = row.get("emos_mu_c")
+            sigma_c = row.get("emos_sigma_c")
+            if mu_c is not None and sigma_c is not None and float(sigma_c) > 0:
+                truth_c = _to_celsius(truth_raw, truth_unit)
+                pit_val = float(norm.cdf((truth_c - float(mu_c)) / float(sigma_c)))
+                pit_by_city_date[date_key] = pit_val
 
         # k=1 reference: recorded booleans
         cleared_raw_k1 = row.get("cleared_raw_buy_yes")
@@ -448,37 +586,48 @@ def main() -> None:
 
     # ---------------------------------------------------------------------------
     # §4i  EMOS band coverage per city — PIT / cov90 / k_cov
+    # PIT is ONE per (city, target_date) — not per bin (per-bin inflates n with
+    # perfectly correlated copies; all bins of a date share the same predictive).
+    # n_dates = distinct settled dates per city; n_bins = total bin-rows scored.
+    # MIN_N_FOR_VERDICT applies to n_dates (independent observations), not n_bins.
     # (Must complete BEFORE Pass 2 counterfactual; populates city_k_cov)
     # ---------------------------------------------------------------------------
     print("-" * 70)
     print("§4i EMOS PREDICTIVE BAND COVERAGE (PIT / cov90 / k_cov per city)")
     print("    HIGH metric only — LOW metric excluded (needs #54 LOW Platt)")
+    print("    n_dates = distinct settled dates (independent PIT obs); n_bins = bin-rows")
     print("-" * 70)
     city_k_cov: dict[str, float] = {}
     city_verdict: dict[str, str] = {}
     city_cov90: dict[str, float] = {}
-    city_n_pit: dict[str, int] = {}
+    city_n_dates: dict[str, int] = {}
 
-    print(f"  {'City':<20} {'n_pit':>6} {'PIT_mean':>9} {'cov90':>7} {'k_cov':>7} {'verdict'}")
-    print(f"  {'-'*20} {'-'*6} {'-'*9} {'-'*7} {'-'*7} {'-'*15}")
+    # Build per-city PIT lists from the deduplicated pit_by_city_date dict
+    city_pit_dates: dict[str, list[float]] = defaultdict(list)
+    for (city, _date), pit_val in pit_by_city_date.items():
+        city_pit_dates[city].append(pit_val)
+
+    print(f"  {'City':<20} {'n_dates':>8} {'n_bins':>7} {'PIT_mean':>9} {'cov90':>7} {'k_cov':>7} {'verdict'}")
+    print(f"  {'-'*20} {'-'*8} {'-'*7} {'-'*9} {'-'*7} {'-'*7} {'-'*15}")
     for city in sorted(per_city.keys()):
-        pit_list = per_city[city]["pit"]
-        n_pit = len(pit_list)
-        city_n_pit[city] = n_pit
-        if n_pit == 0:
+        pit_list = city_pit_dates.get(city, [])
+        n_dates = len(pit_list)
+        n_bins = per_city[city]["rows_scored"]
+        city_n_dates[city] = n_dates
+        if n_dates == 0:
             city_k_cov[city] = 1.0
             city_verdict[city] = "NO_PIT"
             city_cov90[city] = float("nan")
-            print(f"  {city:<20} {0:>6} {'N/A':>9} {'N/A':>7} {'1.000':>7} NO_PIT")
+            print(f"  {city:<20} {0:>8} {n_bins:>7} {'N/A':>9} {'N/A':>7} {'1.000':>7} NO_PIT")
             continue
         pit_arr = np.array(pit_list, dtype=float)
         stats = _compute_pit_stats(pit_arr)
         k = _solve_k_cov(pit_arr)
-        verdict = _emos_verdict(n_pit, stats["cov90"], stats["mean"])
+        verdict = _emos_verdict(n_dates, stats["cov90"], stats["mean"])
         city_k_cov[city] = k
         city_verdict[city] = verdict
         city_cov90[city] = stats["cov90"]
-        print(f"  {city:<20} {n_pit:>6} {stats['mean']:>9.3f} {stats['cov90']:>7.3f} {k:>7.3f} {verdict}")
+        print(f"  {city:<20} {n_dates:>8} {n_bins:>7} {stats['mean']:>9.3f} {stats['cov90']:>7.3f} {k:>7.3f} {verdict}")
     print()
 
     # ---------------------------------------------------------------------------
