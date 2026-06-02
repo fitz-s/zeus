@@ -3705,10 +3705,19 @@ def _write_emos_shadow_ledger(
     season = season_from_date(str(family.target_date), lat=lat)
     lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=_payload(event))
 
-    # members_c: analysis.member_maxes are already in the settlement unit (C or F after
-    # bias/grid corrections). For EMOS we need °C. Convert if the city is F-settled.
-    members_native = np.asarray(getattr(analysis, "member_maxes", np.array([])), dtype=float)
-    unit = getattr(analysis, "unit", "C")
+    # members_c: read raw members from snapshot["members_json"] — the EXACT source used
+    # in fit_emos_calibration.py (scripts/fit_emos_calibration.py:68-70).  This matches the
+    # EMOS fit (raw 51 members, no bias/grid offset), so forward emos_q is consistent with
+    # the backward coverage license.  The bug: getattr(analysis,"member_maxes",...) returned
+    # an EMPTY array because the attribute is analysis._member_maxes (private, and
+    # uncertainty-adjusted — different from raw fit source anyway).
+    # Option (a) preferred: snapshot already available here; _snapshot_members() is the
+    # same parse path the adapter uses for p_raw computation.
+    try:
+        members_native = _snapshot_members(snapshot).astype(float)
+    except Exception:
+        members_native = np.array([], dtype=float)
+    unit = getattr(analysis, "_unit", "C")
     if unit == "F":
         members_c = (members_native - 32.0) * 5.0 / 9.0
     else:
