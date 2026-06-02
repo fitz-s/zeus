@@ -3329,6 +3329,13 @@ def _market_analysis_from_event_snapshot(
     )
     if _bias_corrected:
         payload["_edli_bias_corrected"] = True
+    # Grid→point representativeness correction (lead-invariant, OOS-validated).
+    # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
+    # Applied on the (potentially bias-corrected) member array so both corrections compose.
+    members, _grid_corrected = _maybe_apply_grid_representativeness_correction(
+        members, snapshot=snapshot, family=family, city=city, payload=payload
+    )
+    # payload['_edli_grid_corrected'] set inside the hook when applied.
     p_raw = _snapshot_p_raw(
         snapshot, family=family, bins=bins, members=members, payload=payload,
         members_already_corrected=True,
@@ -3575,6 +3582,63 @@ def _maybe_apply_edli_bias_correction(
             import logging
             logging.getLogger("zeus.edli_bias").warning(
                 "EDLI bias correction skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return members, False
+
+
+def _maybe_apply_grid_representativeness_correction(
+    members: np.ndarray,
+    *,
+    snapshot: dict[str, Any],
+    family,
+    city,
+    payload: dict[str, object],
+) -> tuple[np.ndarray, bool]:
+    """Per-(city,season) grid→point representativeness offset for the LIVE EDLI p_raw path.
+
+    Subtracts the OOS-validated, shrunk per-(city,season) offset from member maxes BEFORE
+    p_raw is computed. The offset sign convention is ``offset_c = mean(ENS_member_mean −
+    obs_daily_max)`` so subtracting it warms cold-biased members toward the settlement
+    station point (offset_c is negative for cold cities → subtracting warms).
+
+    Flag-gated by ``edli_v1.edli_grid_representativeness_correction_enabled`` (default OFF).
+    FAIL-CLOSED: any missing flag/table/entry/activated=False/error → return raw members
+    with applied=False, so live behavior is byte-identical to today when the flag is absent.
+
+    When applied, sets payload['_edli_grid_corrected']=True so the calibration step uses
+    identity Platt for the corrected p_raw domain (mirrors _edli_bias_corrected semantics).
+
+    Unit convention: offset_c is in °C. For F-settled cities (settlement_unit='F'), the
+    member array is in °F, so offset_native = offset_c × 1.8.
+    """
+    try:
+        if not bool(settings["edli_v1"].get("edli_grid_representativeness_correction_enabled", False)):
+            return members, False
+        from src.calibration.grid_representativeness import get_offset
+        from src.calibration.manager import season_from_date
+
+        season = season_from_date(str(family.target_date), lat=city.lat)
+        entry = get_offset(city.name, season)
+        if entry is None:
+            return members, False
+        offset_c = float(entry["offset_c"])
+        _unit = getattr(city, "settlement_unit", "C")
+        offset_native = offset_c * 1.8 if _unit == "F" else offset_c
+        corrected = np.asarray(members, dtype=float) - offset_native
+        payload["_edli_grid_corrected"] = True
+        import logging
+        logging.getLogger("zeus.grid_repr").info(
+            "EDLI grid-repr correction applied city=%s season=%s unit=%s offset_c=%.3f offset_native=%.3f",
+            city.name, season, _unit, offset_c, offset_native,
+        )
+        return corrected, True
+    except Exception as exc:
+        try:
+            import logging
+            logging.getLogger("zeus.grid_repr").warning(
+                "EDLI grid-repr correction skipped (fail-closed): %s", exc
             )
         except Exception:
             pass

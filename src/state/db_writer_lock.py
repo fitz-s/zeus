@@ -698,6 +698,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/check_edli_live_canary_gate.py",       # read_only_ro_uri (EDLI canary verifier; mode=ro only)
         "scripts/check_full_transport_ship_readiness.py",  # read_only_ro_uri (full_transport ship-readiness gate; SELECT-only, no writes)
         "scripts/audit_error_model_row_reproducibility.py",  # read_only_ro_uri (row reproducibility audit; both DBs opened mode=ro, SELECT-only)
+        "scripts/fit_grid_representativeness_offset.py",    # read_only (SELECT-only; writes only state/grid_representativeness_offset.json, no live-DB writes)
         "scripts/produce_activation_evidence.py",       # in_memory_only (":memory:" only)
         "scripts/replay_correctness_gate.py",           # read_only (SELECT-only)
         "scripts/replay_probability_edge_bin_sanity.py", # read_only (SELECT-only; LIVE-PROB-P0 §D.4 replay)
