@@ -3194,6 +3194,8 @@ def _canonical_probability_and_fdr_proof(
                 analysis=analysis,
                 q_by_condition=q_by_condition,
                 decision_time=decision_time,
+                lcb_by_direction=lcb_by_direction,
+                native_costs=native_costs,
             )
     except Exception as _emos_exc:
         try:
@@ -3675,17 +3677,27 @@ def _write_emos_shadow_ledger(
     analysis: Any,
     q_by_condition: dict[str, float],
     decision_time: datetime,
+    lcb_by_direction: dict | None = None,
+    native_costs: dict | None = None,
 ) -> None:
-    """Write per-bin EMOS shadow ledger rows.
+    """Write per-bin EMOS shadow ledger rows (PIECE 2 + CI extension 2026-06-02).
 
     Called from _canonical_probability_and_fdr_proof ONLY when
     edli_v1.edli_emos_shadow_ledger_enabled is True.  FAIL-OPEN: caller
     wraps in try/except so any raise here is silently absorbed.
+
+    lcb_by_direction: the live q_5pct in probability space, built at adapter:3107.
+        Keys: (condition_id, "buy_yes") / (condition_id, "buy_no").
+        Defaults to None → cost/lcb/score fields recorded as null.
+    native_costs: the executable-ask cost dict from _canonical_probability_and_fdr_proof.
+        native_costs[(cond, dir)][1] is the ExecutionPrice; .value = the live ask.
+        Defaults to None → same fallback.
     """
     import logging as _logging
     from datetime import timezone as _tz
     from src.calibration.emos import emos_predictive, bin_probability, season_for
     from src.calibration.emos_ledger import append_ledger
+    from src.calibration.emos_ci_shadow import compute_robust_edge
     from src.contracts.season import season_from_date
 
     city_obj = runtime_cities_by_name().get(family.city)
@@ -3723,9 +3735,10 @@ def _write_emos_shadow_ledger(
             served_status = "missing"
 
     # p_raw is the raw ensemble vector (before Platt); p_cal is after Platt.
-    # The RAW q for the ledger is the calibrated (Platt) posterior — the live-decision q.
+    # raw_q (stored below) records p_cal[index] — the Platt-calibrated probability.
+    # q_live = q_by_condition[cond] = the post-evaluate_live_bins q (the live trade score q).
+    # The robust score MUST use q_live, not raw_q (q-domain parity, spec §2b/#91/#105).
     p_posterior_vec = np.asarray(getattr(analysis, "p_cal", np.array([])), dtype=float)
-    p_raw_vec = np.asarray(getattr(analysis, "p_raw", np.array([])), dtype=float)
 
     ts = decision_time.astimezone(_tz.utc).isoformat()
 
@@ -3737,7 +3750,14 @@ def _write_emos_shadow_ledger(
         bin_high = b.high
         bin_unit = getattr(b, "unit", unit)
 
+        # q_live: the live q after evaluate_live_bins (the value the trade score uses).
+        q_live: float | None = q_by_condition.get(condition_id)
+
+        # EMOS q and q_lcb — computed in the bin's native unit (unit-correct per spec §5).
         emos_q: float | None = None
+        emos_q_lcb: float | None = None
+        mu_native: float | None = None
+        sigma_native: float | None = None
         if emos_mu_c is not None and emos_sigma_c is not None:
             try:
                 if bin_unit == "F":
@@ -3747,8 +3767,89 @@ def _write_emos_shadow_ledger(
                     mu_native = emos_mu_c
                     sigma_native = emos_sigma_c
                 emos_q = bin_probability(mu_native, sigma_native, bin_low, bin_high)
+                # k_cov=1.0 in shadow: emos_q_lcb = min(emos_q, q(mu, 1.0*sigma)) = emos_q
+                # (harness re-derives k_cov post-hoc from realized coverage)
+                emos_q_lcb = emos_q  # k_cov=1.0 → min(emos_q, emos_q) = emos_q
             except Exception:
                 emos_q = None
+                emos_q_lcb = None
+
+        # LCB values from lcb_by_direction (live MC q_5pct in probability space).
+        raw_q_lcb_buy_yes: float | None = None
+        raw_q_lcb_buy_no: float | None = None
+        if lcb_by_direction is not None:
+            _lcb_yes = lcb_by_direction.get((condition_id, "buy_yes"))
+            _lcb_no = lcb_by_direction.get((condition_id, "buy_no"))
+            raw_q_lcb_buy_yes = float(_lcb_yes) if _lcb_yes is not None else None
+            raw_q_lcb_buy_no = float(_lcb_no) if _lcb_no is not None else None
+
+        # Costs from native_costs (the executable ask the trade score uses).
+        # native_costs[(cond, dir)] is a 5-tuple; index [1] is ExecutionPrice | None.
+        cost_buy_yes: float | None = None
+        cost_buy_no: float | None = None
+        if native_costs is not None:
+            _ep_yes = (native_costs.get((condition_id, "buy_yes")) or (None, None))[1]
+            _ep_no = (native_costs.get((condition_id, "buy_no")) or (None, None))[1]
+            cost_buy_yes = float(_ep_yes.value) if _ep_yes is not None else None
+            cost_buy_no = float(_ep_no.value) if _ep_no is not None else None
+
+        # Robust edge scores (replicate trade_score.py:48-52 using q_live, NOT raw_q).
+        # buy_yes: q_posterior = q_live, q_5pct = raw_q_lcb_buy_yes, cost = cost_buy_yes
+        # buy_no:  q_posterior = 1 - q_live, q_5pct = raw_q_lcb_buy_no, cost = cost_buy_no
+        #          (INV/#106: buy_no lcb is independent, NOT negation of buy_yes lcb)
+        _PENALTY = 0.01  # mirror adapter:4525-4526
+
+        robust_score_raw_buy_yes: float | None = None
+        robust_score_raw_buy_no: float | None = None
+        if q_live is not None and raw_q_lcb_buy_yes is not None and cost_buy_yes is not None:
+            robust_score_raw_buy_yes = compute_robust_edge(
+                q_posterior=q_live,
+                q_5pct=raw_q_lcb_buy_yes,
+                cost=cost_buy_yes,
+                penalty=_PENALTY,
+            )
+        if q_live is not None and raw_q_lcb_buy_no is not None and cost_buy_no is not None:
+            robust_score_raw_buy_no = compute_robust_edge(
+                q_posterior=1.0 - q_live,
+                q_5pct=raw_q_lcb_buy_no,
+                cost=cost_buy_no,
+                penalty=_PENALTY,
+            )
+
+        robust_score_emos_buy_yes: float | None = None
+        robust_score_emos_buy_no: float | None = None
+        if emos_q is not None and emos_q_lcb is not None and cost_buy_yes is not None:
+            # k_cov=1 → both emos_q_lcb and emos_q equal, so min(...) = emos_q
+            robust_score_emos_buy_yes = compute_robust_edge(
+                q_posterior=emos_q,
+                q_5pct=emos_q_lcb,
+                cost=cost_buy_yes,
+                penalty=_PENALTY,
+            )
+        if emos_q is not None and emos_q_lcb is not None and cost_buy_no is not None:
+            # buy_no emos q is the complement: 1 - emos_q (binary complement of YES bin mass)
+            emos_q_no = 1.0 - emos_q
+            emos_q_lcb_no = 1.0 - emos_q  # k_cov=1: lcb = emos_q complement
+            robust_score_emos_buy_no = compute_robust_edge(
+                q_posterior=emos_q_no,
+                q_5pct=emos_q_lcb_no,
+                cost=cost_buy_no,
+                penalty=_PENALTY,
+            )
+
+        # Clearing booleans
+        would_clear_emos_buy_yes = (
+            bool(robust_score_emos_buy_yes > 0) if robust_score_emos_buy_yes is not None else None
+        )
+        would_clear_emos_buy_no = (
+            bool(robust_score_emos_buy_no > 0) if robust_score_emos_buy_no is not None else None
+        )
+        cleared_raw_buy_yes = (
+            bool(robust_score_raw_buy_yes > 0) if robust_score_raw_buy_yes is not None else None
+        )
+        cleared_raw_buy_no = (
+            bool(robust_score_raw_buy_no > 0) if robust_score_raw_buy_no is not None else None
+        )
 
         row = {
             "ts": ts,
@@ -3760,14 +3861,31 @@ def _write_emos_shadow_ledger(
             "bin_low": bin_low,
             "bin_high": bin_high,
             "bin_unit": bin_unit,
-            "raw_q": raw_q,
+            "raw_q": raw_q,           # p_cal[index] (Platt-calibrated, pre-evaluate_live_bins)
+            "q_live": q_live,          # q_by_condition[cond] (post-evaluate_live_bins, trade-score q)
             "emos_q": emos_q,
+            "emos_q_lcb": emos_q_lcb,  # k_cov=1 shadow: == emos_q; harness re-derives k_cov>1
             "raw_mu_c": raw_mu_c,
             "raw_sigma_c": raw_sigma_c,
             "emos_mu_c": emos_mu_c,
             "emos_sigma_c": emos_sigma_c,
             "served": served_status,
             "candidate_id": f"{family.family_id}:{condition_id}" if getattr(family, "family_id", None) else condition_id,
+            # CI extension fields (spec §2b)
+            "raw_q_lcb_buy_yes": raw_q_lcb_buy_yes,
+            "raw_q_lcb_buy_no": raw_q_lcb_buy_no,
+            "cost_buy_yes": cost_buy_yes,
+            "cost_buy_no": cost_buy_no,
+            "robust_score_raw_buy_yes": robust_score_raw_buy_yes,
+            "robust_score_raw_buy_no": robust_score_raw_buy_no,
+            "robust_score_emos_buy_yes": robust_score_emos_buy_yes,
+            "robust_score_emos_buy_no": robust_score_emos_buy_no,
+            "would_clear_emos_buy_yes": would_clear_emos_buy_yes,
+            "would_clear_emos_buy_no": would_clear_emos_buy_no,
+            "cleared_raw_buy_yes": cleared_raw_buy_yes,
+            "cleared_raw_buy_no": cleared_raw_buy_no,
+            "penalty_used": _PENALTY,
+            "kcov_applied": 1.0,
         }
         append_ledger(row)
 
