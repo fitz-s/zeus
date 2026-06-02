@@ -1,0 +1,107 @@
+============================================================================================
+CALIBRATION BAKE-OFF V2 (CORRECTED) — SUPERSEDES v1 (critic trust=FALSE)
+OOS: target_date >= 2025-01-01    n_city_method_cells=106
+RAW = live-SERVED stored calibration_pairs p_raw (MIN lead). EMOS = emos.py over SAME grid.
+============================================================================================
+
+HEAD-TO-HEAD EMOS vs RAW (only cells where BOTH scored; one identical pipeline):
+  cells_both_scored=48   EMOS_wins=30   RAW_wins=18   RAW_only_cells=10
+
+METHOD AGGREGATE (pooled obs; lower logloss=better). NOTE: RAW pool includes low + RAW-only
+cities so RAW n_obs > EMOS; compare via the head-to-head + per-city table, not pooled means alone.
+Method   CitiesWon  MeanLogLoss  MeanCRPS   Cov90    N_obs
+----------------------------------------------------------
+EMOS            30      2.07735    0.9231   0.892     3868
+RAW             28      2.32807    1.2161   0.865     4516
+
+PER-(CITY,METRIC) WINNER TABLE  (E-R = EMOS_LL - RAW_LL; neg = EMOS better; '-' = EMOS not eligible)
+City                   Metric Winner    RawLL  EmosLL     E-R   nR   nE Flag
+----------------------------------------------------------------------------------------
+Amsterdam              high   EMOS      1.596   1.363  -0.233   40   40 
+Ankara                 high   RAW       1.674   1.747  +0.073  107  107 
+Atlanta                high   EMOS      1.821   1.690  -0.131  121  121 
+Austin                 high   RAW       1.952   1.994  +0.042   45   45 
+Beijing                high   EMOS      3.295   3.087  -0.208   48   48 
+Buenos Aires           high   EMOS      1.973   1.914  -0.058  146  146 
+Busan                  high   RAW       3.271   3.348  +0.076   38   38 
+Cape Town              high   EMOS      1.446   1.180  -0.266   29   29 
+Chengdu                high   RAW       3.524     -      -      48    0 
+Chicago                high   RAW       2.118   2.274  +0.157   91   91 
+Chongqing              high   RAW       2.993   3.171  +0.178   47   47 
+Dallas                 high   RAW       1.938   1.940  +0.001  114  114 
+Denver                 high   EMOS      2.313   1.916  -0.397   48   48 
+Guangzhou              high   RAW       4.153   5.389  +1.236   26   26 
+Helsinki               high   RAW       1.498   1.530  +0.031   37   37 
+Hong Kong              high   RAW       5.023     -      -      42    0 
+Hong Kong              low    RAW       1.229     -      -       5    0 LOW_CONF
+Houston                high   EMOS      2.430   1.869  -0.561   45   45 
+Istanbul               high   EMOS      2.804   2.072  -0.732   39   39 
+Jakarta                high   RAW       4.925   6.066  +1.141   38   38 
+Jeddah                 high   RAW       3.442   5.309  +1.866   35   35 
+Karachi                high   EMOS      2.972   2.670  -0.303   26   26 
+Kuala Lumpur           high   EMOS      2.671   2.019  -0.652   40   40 
+Lagos                  high   RAW       2.174   2.986  +0.812   31   31 
+London                 high   EMOS      1.503   1.457  -0.046  459  367 
+London                 low    RAW       2.180     -      -      11    0 LOW_CONF
+Los Angeles            high   RAW       2.073   2.703  +0.630   48   48 
+Lucknow                high   EMOS      3.131   2.469  -0.662   65   65 
+Madrid                 high   RAW       1.663   2.320  +0.657   52   52 
+Manila                 high   EMOS      4.943   4.723  -0.220   27   27 
+Mexico City            high   EMOS      1.958   1.487  -0.471   40   40 
+Miami                  high   RAW       1.761   1.793  +0.032   85   85 
+Miami                  low    RAW       2.442     -      -      13    0 LOW_CONF
+Milan                  high   EMOS      1.612   1.354  -0.258   51   51 
+Moscow                 high   RAW       2.036   2.269  +0.233   38   38 
+Munich                 high   RAW       1.427   1.592  +0.166   65   65 
+NYC                    high   RAW       1.880   2.024  +0.144  417  417 
+NYC                    low    RAW       2.813     -      -       8    0 LOW_CONF
+Panama City            high   EMOS      1.509   1.286  -0.223   37   37 
+Paris                  high   EMOS      2.472   1.558  -0.914  469  469 
+Paris                  low    RAW       1.684     -      -     291    0 
+Qingdao                high   RAW       2.421     -      -      11    0 LOW_CONF
+San Francisco          high   EMOS      1.850   1.818  -0.033   44   44 
+Sao Paulo              high   EMOS      1.801   1.555  -0.246   79   79 
+Seattle                high   RAW       1.783   1.877  +0.094  103   68 
+Seoul                  high   EMOS      3.365   2.248  -1.117  139  139 
+Seoul                  low    RAW       2.819     -      -       9    0 LOW_CONF
+Shanghai               high   EMOS      3.796   2.275  -1.521   57   57 
+Shanghai               low    RAW       2.385     -      -       7    0 LOW_CONF
+Shenzhen               high   EMOS      4.472   3.140  -1.332   33   33 
+Singapore              high   EMOS      5.619   2.769  -2.850   58   58 
+Taipei                 high   EMOS      7.462   5.176  -2.286   39   39 
+Tel Aviv               high   EMOS      2.041   1.597  -0.444   59   59 
+Tokyo                  high   EMOS      2.375   2.314  -0.061   65   65 
+Toronto                high   EMOS      2.708   2.637  -0.071  145   69 
+Warsaw                 high   EMOS      1.788   1.635  -0.153   51   51 
+Wellington             high   EMOS      1.866   1.631  -0.235  108  108 
+Wuhan                  high   EMOS      4.510   2.759  -1.752   47   47 
+
+COUNTERS:
+  settlements_oos              5402
+  no_calibration_pairs_grid    882
+  no_settled_label_in_grid     0
+  raw_scored                   4520
+  emos_low_excluded            348
+  emos_fit_assert_ok           4172
+  emos_fit_leak_skip           0
+  emos_no_cell                 304
+  emos_no_members              0
+  emos_scored                  3868
+
+CORRECTION METHODS (GRID_REP / BIAS) — why omitted from head-to-head:
+  - GRID_REP and BIAS are member-shift correction experiments with NO stored served vector.
+  - Scoring them head-to-head against the stored live RAW would require a recompute family (analytic from members_json) that is NOT what live serves — the apples-vs-oranges defect the critic flagged — so they are OMITTED from the head-to-head.
+  - Their OOS provenance windows post-date nearly all OOS rows anyway: grid-rep window_end=2026-05-28 (offset fit on a 2026 trailing window), bias training_cutoff(s)=['2026-05-29'] (>= nearly all OOS target_dates) => they would be almost entirely leakage-skipped.
+  - Either fit them strictly pre-OOS, or treat RAW vs EMOS as the live-relevant question..
+
+CAVEATS:
+  - RAW = the live-SERVED stored MC p_raw (calibration_pairs.p_raw at MIN lead, training_allowed=1) — VERIFIED to reproduce the critic's proper-RAW to 3 decimals (London 1.503, Amsterdam 1.596, Paris 2.472, NYC 1.880).
+  - The committed v1 scorer recomputed RAW from members_json with a 0.5-NATIVE-unit instrument floor that BOTH over-widened (~1.8x) and mis-centered RAW, inflating its LogLoss 1.3x-4.5x and fabricating EMOS wins.
+  - [D1] ONE identical pipeline: RAW and EMOS score over the SAME per-(city,date,metric) market bin grid (calibration_pairs label set at MIN lead), SAME settled-bin lookup (label whose +-0.5 WMO preimage contains settlement_value), SAME LogLoss/CRPS/cov90, SAME normalization.
+  - EMOS (mu_c,sigma_c from emos.emos_predictive) integrates that grid via emos.bin_probability_settlement.
+  - [D2] EMOS OOS gate ASSERTED per cell: fit_max_date=2024-12-31 < target_date else skip.
+  - [D3] emos_calibration.json is metric='high' ONLY; ALL temperature_metric='low' rows are EXCLUDED from EMOS (RAW-only).
+  - No 'EMOS wins low' line exists.
+  - [D4] OOS target_date>=2025-01-01; truth=settlements authority='VERIFIED'; MIN-lead dedup; unit from settlements.unit (C/F).
+  - Per-city winner needs n>=5 RAW; LOW_CONFIDENCE when winner n<20.
+  - Head-to-head counts only (city,metric) cells where BOTH RAW and EMOS scored..

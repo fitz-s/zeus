@@ -665,6 +665,10 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         # RW only with --commit, gated by BEGIN IMMEDIATE + rollback semantics.
         "scripts/promote_platt.py",       # RO inspect/verify; RW only with --commit (zeus-world.db)
         "scripts/promote_calibration.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
+        # --- calibration bake-off + settlement backfill (2026-06-02, operator-invoked offline) ---
+        "scripts/calibration_bakeoff.py",   # read_only: scores calibrators vs settlements VERIFIED; writes JSON/txt only
+        "scripts/calibration_bakeoff_v2.py",  # read_only: corrected bake-off (RAW on live-served vector, OOS-gated); writes JSON/txt only
+        "scripts/backfill_settlement_outcomes_canonical_2026_06_02.py",  # RO dry-run default; RW settlement_outcomes only with --execute, atomic SAVEPOINT (zeus-forecasts.db)
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
         "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
         "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
