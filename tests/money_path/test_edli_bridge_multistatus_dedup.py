@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused/audited: 2026-06-01
 # Authority basis: MF-2 (capital-real over-materialization). A single 100-share
 #   fill emitted by the venue as THREE UserTradeObserved legs (MATCHED -> MINED ->
 #   CONFIRMED), all sharing one trade_id and each filled_size=100, must NOT be

@@ -207,7 +207,15 @@ def _day0_event(*, token_id: str = "yes-2"):
         causal_snapshot_id="day0-observation-1",
     )
     event_payload = json.loads(event.payload_json)
-    event_payload.update({"condition_id": "condition-2", "token_id": token_id, "unit": "F"})
+    event_payload.update({
+        "condition_id": "condition-2",
+        "token_id": token_id,
+        "unit": "F",
+        # S3 Kelly sizing requires lead_days; executable_market_snapshots has no
+        # lead_hours/issue_time column, so supply it via payload (matches ensemble
+        # snapshot lead_hours=32.0 in the trade fixture).
+        "lead_hours": 32.0,
+    })
     return replace(event, payload_json=json.dumps(event_payload, sort_keys=True, separators=(",", ":")))
 
 
@@ -388,6 +396,22 @@ def _trade_conn_with_snapshot(
     )
     rows = []
     for index in range(1, condition_count + 1):
+        # MECE-valid °F partition: leftmost bin has open-low shoulder (range_low=None),
+        # rightmost bin has open-high shoulder (range_high=None), interior bins width=2.
+        # This satisfies validate_bin_topology (Task #114 S6 law).
+        # Layout for condition_count bins starting at 70:
+        #   index 1:            None → 71  (left shoulder)
+        #   index 2..N-1: 72+(i-2)*2 → 73+(i-2)*2  (interior, width=2)
+        #   index N:      72+(N-2)*2 → None  (right shoulder)
+        if index == 1:
+            range_low_val: float | None = None
+            range_high_val: float | None = 71.0
+        elif index == condition_count:
+            range_low_val = 72.0 + (index - 2) * 2
+            range_high_val = None
+        else:
+            range_low_val = 72.0 + (index - 2) * 2
+            range_high_val = range_low_val + 1.0
         rows.append(
             (
                 f"{70 + index - 1}-{71 + index - 1}°F",
@@ -395,8 +419,8 @@ def _trade_conn_with_snapshot(
                 f"yes-{index}",
                 f"chicago-high-{index}",
                 f"{70 + index - 1}-{71 + index - 1}°F",
-                float(70 + index - 1),
-                float(71 + index - 1),
+                range_low_val,
+                range_high_val,
                 "2026-05-24T08:11:00+00:00",
             )
         )
@@ -2044,8 +2068,10 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
         )
         """,
         [
-            ("70-71°F", "condition-1", "yes-1", "chicago-high-1", "70-71°F", 70.0, 71.0, "2026-05-24T08:11:00+00:00"),
-            ("71-72°F", "condition-2", "yes-2", "chicago-high-2", "71-72°F", 71.0, 72.0, "2026-05-24T08:11:00+00:00"),
+            # MECE-valid °F partition (S6 law): left shoulder (range_low=None → -inf),
+            # right shoulder (range_high=None → +inf), contiguous at 71→72.
+            ("70-71°F", "condition-1", "yes-1", "chicago-high-1", "70-71°F", None, 71.0, "2026-05-24T08:11:00+00:00"),
+            ("71-72°F", "condition-2", "yes-2", "chicago-high-2", "71-72°F", 72.0, None, "2026-05-24T08:11:00+00:00"),
         ],
     )
 

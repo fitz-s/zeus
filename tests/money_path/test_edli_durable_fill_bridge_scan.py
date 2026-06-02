@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused/audited: 2026-06-01
 # Authority basis: MF-1 / DEFECT-1 — durable self-healing EDLI fill -> position_current
 #   bridge. Verified defect: the position bridge in src/main.py was driven SOLELY
 #   by the transient in-memory set ``_edli_fill_bridge_aggregate_ids`` (populated

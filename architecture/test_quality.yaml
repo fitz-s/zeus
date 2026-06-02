@@ -79,3 +79,15 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "Expensive market-substrate refresh must be decoupled from the per-cycle reactor decision loop; inline refresh blocks process_pending and produces zero completed cycles."
+  tests/money_path/test_edli_bridge_multistatus_dedup.py:
+    category: money_path
+    protects: [MP-ORD-001, MP-ORD-002]
+    falsifying_proof:
+      type: property_counterexample
+      description: "A single 100-share fill emitted as three UserTradeObserved legs (MATCHED/MINED/CONFIRMED) sharing one trade_id must collapse to one leg in position_current; re-reports must not be summed into a phantom 3x position while genuine multi-partial fills across distinct trade_ids still sum correctly."
+  tests/money_path/test_edli_durable_fill_bridge_scan.py:
+    category: money_path
+    protects: [MP-ORD-001, MP-ORD-002, MP-ORD-003]
+    falsifying_proof:
+      type: negative_fixture
+      description: "The durable fill->position_current bridge scan must materialise position_current for every FILL_CONFIRMED aggregate even when the transient in-memory trigger set is empty (post-restart or post-swallowed-exception), and must be idempotent across repeated scan invocations."
