@@ -1307,11 +1307,22 @@ def _build_live_execution_command_certificates(
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
-            # Bug A fix (2026-06-01): source tick_size from the DB snapshot (Decimal)
-            # rather than the cert payload float.  The cert payload may carry "0.01"
-            # (the default) while the DB snapshot has "0.001" for binary Polymarket
-            # markets, causing executor parity rejection (intent.tick_size ≠ snapshot.min_tick_size).
-            tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
+            # BUG #92 structural fix (2026-06-02): the intent's tick_size MUST be the
+            # min_tick_size of the SAME snapshot the executor re-hydrates at submit
+            # time (intent.snapshot_id == proof.executable_snapshot_id ==
+            # executable_snapshot.payload['identity']).  Both branches below are bound
+            # to that one snapshot:
+            #   - TAKER: `_snap_for_depth` = get_snapshot(proof.executable_snapshot_id).
+            #   - else : executable_snapshot.payload['min_tick_size'], populated at
+            #            reactor:2448 from `_hydrated_snapshot =
+            #            get_snapshot(proof.executable_snapshot_id)`.
+            # The pre-fix `_float_or_default(..., 0.01)` silent default was an UNBOUND
+            # tick source: when the canonical tick disagreed with a hardcoded 0.01 the
+            # intent diverged from the executor's snapshot (live 2026-06-01: intent
+            # tick=0.001 vs bound snapshot tick=0.01 → 28 EXECUTOR_PRE_VENUE_REJECTED).
+            # Fail closed instead of defaulting — a missing canonical tick is a
+            # provenance fault, not a 0.01 market.
+            tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _required_bound_tick_size(_snap_for_depth, executable_snapshot.payload),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
             best_bid=best_bid,
             best_ask=best_ask,
@@ -4920,6 +4931,38 @@ def _optional_float(value: object) -> float | None:
 def _float_or_default(value: object, default: float) -> float:
     parsed = _optional_float(value)
     return default if parsed is None else parsed
+
+
+def _required_bound_tick_size(snap_for_depth, executable_snapshot_payload) -> str:
+    """Resolve the intent tick_size bound to the executor's hydration target.
+
+    BUG #92 antibody: the tick MUST be the min_tick_size of the snapshot the
+    executor re-hydrates (proof.executable_snapshot_id).  Both candidate sources
+    below are bound to that single snapshot:
+
+      1. ``snap_for_depth`` is ``get_snapshot(proof.executable_snapshot_id)``
+         (TAKER + trade_conn path); its ``min_tick_size`` is the canonical Decimal.
+      2. ``executable_snapshot_payload['min_tick_size']`` is populated at the
+         evidence-build site from ``_hydrated_snapshot =
+         get_snapshot(proof.executable_snapshot_id)`` — the same id.
+
+    There is NO hardcoded default: a tick that is not the bound snapshot's tick
+    is exactly the two-snapshot divergence that produced the live pre-arm wall.
+    If neither source yields a tick, fail closed (provenance fault) rather than
+    silently substituting a fixed 0.01 that the executor's snapshot will reject.
+    """
+    if snap_for_depth is not None and getattr(snap_for_depth, "min_tick_size", None) is not None:
+        return str(snap_for_depth.min_tick_size)
+    payload_tick = executable_snapshot_payload.get("min_tick_size")
+    if payload_tick is None or str(payload_tick).strip() == "":
+        raise ValueError(
+            "BUG#92_TICK_UNBOUND: executable_snapshot evidence carries no "
+            "min_tick_size and no depth snapshot was hydrated; cannot bind "
+            "intent tick_size to the executor's snapshot without a silent "
+            "default — fail closed."
+        )
+    # Already a canonical Decimal string from the evidence builder; normalise.
+    return str(Decimal(str(payload_tick)))
 
 
 def _optional_bool(value: object) -> bool | None:
