@@ -3181,6 +3181,28 @@ def _canonical_probability_and_fdr_proof(
     # audit) — so skipping the write is safe and is the unlock for the first receipt.
     # Re-enable under plan A2 by writing the belief through the reactor's EXISTING
     # connection (same transaction), never a fresh get_world_connection().
+
+    # EMOS shadow ledger (PIECE 2, 2026-06-02): parallel EMOS-calibrated probabilities.
+    # Flag-gated (edli_v1.edli_emos_shadow_ledger_enabled, default OFF).
+    # FAIL-OPEN/SILENT: any error must not affect the live q_by_condition decision.
+    try:
+        if bool(settings["edli_v1"].get("edli_emos_shadow_ledger_enabled", False)):
+            _write_emos_shadow_ledger(
+                event=event,
+                family=family,
+                snapshot=snapshot,
+                analysis=analysis,
+                q_by_condition=q_by_condition,
+                decision_time=decision_time,
+            )
+    except Exception as _emos_exc:
+        try:
+            logging.getLogger("zeus.emos_ledger").warning(
+                "EMOS shadow ledger write failed (non-fatal): %s", _emos_exc
+            )
+        except Exception:
+            pass
+
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 
@@ -3643,6 +3665,111 @@ def _maybe_apply_grid_representativeness_correction(
         except Exception:
             pass
         return members, False
+
+
+def _write_emos_shadow_ledger(
+    *,
+    event: "OpportunityEvent",
+    family,
+    snapshot: dict[str, Any],
+    analysis: Any,
+    q_by_condition: dict[str, float],
+    decision_time: datetime,
+) -> None:
+    """Write per-bin EMOS shadow ledger rows.
+
+    Called from _canonical_probability_and_fdr_proof ONLY when
+    edli_v1.edli_emos_shadow_ledger_enabled is True.  FAIL-OPEN: caller
+    wraps in try/except so any raise here is silently absorbed.
+    """
+    import logging as _logging
+    from datetime import timezone as _tz
+    from src.calibration.emos import emos_predictive, bin_probability, season_for
+    from src.calibration.emos_ledger import append_ledger
+    from src.contracts.season import season_from_date
+
+    city_obj = runtime_cities_by_name().get(family.city)
+    lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+    season = season_from_date(str(family.target_date), lat=lat)
+    lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=_payload(event))
+
+    # members_c: analysis.member_maxes are already in the settlement unit (C or F after
+    # bias/grid corrections). For EMOS we need °C. Convert if the city is F-settled.
+    members_native = np.asarray(getattr(analysis, "member_maxes", np.array([])), dtype=float)
+    unit = getattr(analysis, "unit", "C")
+    if unit == "F":
+        members_c = (members_native - 32.0) * 5.0 / 9.0
+    else:
+        members_c = members_native
+
+    raw_mu_c = float(np.mean(members_c)) if members_c.size > 0 else float("nan")
+    raw_sigma_c = float(np.std(members_c, ddof=1)) if members_c.size > 1 else float("nan")
+
+    emos_result = emos_predictive(family.city, season, lead_days, members_c)
+    emos_mu_c: float | None = None
+    emos_sigma_c: float | None = None
+    served_status = "missing"
+    if emos_result is not None:
+        emos_mu_c, emos_sigma_c = emos_result
+        served_status = "emos"
+    else:
+        # Distinguish raw vs missing by checking table directly
+        from src.calibration.emos import load_emos_table
+        tbl = load_emos_table()
+        cell = tbl.get("cells", {}).get(f"{family.city}|{season}")
+        if cell is not None:
+            served_status = str(cell.get("served", "missing"))
+        else:
+            served_status = "missing"
+
+    # p_raw is the raw ensemble vector (before Platt); p_cal is after Platt.
+    # The RAW q for the ledger is the calibrated (Platt) posterior — the live-decision q.
+    p_posterior_vec = np.asarray(getattr(analysis, "p_cal", np.array([])), dtype=float)
+    p_raw_vec = np.asarray(getattr(analysis, "p_raw", np.array([])), dtype=float)
+
+    ts = decision_time.astimezone(_tz.utc).isoformat()
+
+    for index, candidate in enumerate(family.candidates):
+        condition_id = str(candidate.condition_id or "")
+        raw_q = float(p_posterior_vec[index]) if index < len(p_posterior_vec) else float("nan")
+        b = candidate.bin
+        bin_low = b.low
+        bin_high = b.high
+        bin_unit = getattr(b, "unit", unit)
+
+        emos_q: float | None = None
+        if emos_mu_c is not None and emos_sigma_c is not None:
+            try:
+                if bin_unit == "F":
+                    mu_native = emos_mu_c * 9.0 / 5.0 + 32.0
+                    sigma_native = emos_sigma_c * 9.0 / 5.0
+                else:
+                    mu_native = emos_mu_c
+                    sigma_native = emos_sigma_c
+                emos_q = bin_probability(mu_native, sigma_native, bin_low, bin_high)
+            except Exception:
+                emos_q = None
+
+        row = {
+            "ts": ts,
+            "city": family.city,
+            "target_date": str(family.target_date),
+            "season": season,
+            "lead_days": lead_days,
+            "bin_label": b.label,
+            "bin_low": bin_low,
+            "bin_high": bin_high,
+            "bin_unit": bin_unit,
+            "raw_q": raw_q,
+            "emos_q": emos_q,
+            "raw_mu_c": raw_mu_c,
+            "raw_sigma_c": raw_sigma_c,
+            "emos_mu_c": emos_mu_c,
+            "emos_sigma_c": emos_sigma_c,
+            "served": served_status,
+            "candidate_id": f"{family.family_id}:{condition_id}" if getattr(family, "family_id", None) else condition_id,
+        }
+        append_ledger(row)
 
 
 def _snapshot_p_raw(
