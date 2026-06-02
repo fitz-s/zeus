@@ -501,6 +501,72 @@ def _assert_edli_live_scope(edli_cfg: dict) -> None:
         raise RuntimeError("DAY0_OUT_OF_SCOPE_FOR_PR332")
 
 
+def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
+    """Season-pin boot guard for the EMOS-CI live override (#90 pattern).
+
+    When edli_emos_ci_live_enabled is True, every LICENSED city must have an
+    emos_calibration cell for its CURRENT (city, season) served == "emos".
+    A season rollover (e.g. JJA→SON) can otherwise silently make the override
+    serve an uncalibrated EMOS lcb — the same class of defect as antibody #90.
+
+    Uncovered licensed cities are DROPPED from the effective in-process license
+    (the cache the live override reads), with a WARN. This is FAIL-CLOSED: an
+    uncovered city falls back to the proven MC lcb rather than serving a wrong CI.
+    A WARN (not a fatal raise) keeps every OTHER covered licensed city live and
+    keeps the daemon up across a season boundary — the override is per-city and
+    flag-gated, so a single uncovered city is not a launch blocker.
+
+    Default OFF: when the flag is False the override never fires and this guard
+    is a no-op.
+    """
+    if not bool(edli_cfg.get("edli_emos_ci_live_enabled", False)):
+        return
+    try:
+        from src.calibration.emos_ci_license import load_emos_ci_license
+        from src.calibration.emos import load_emos_table
+        from src.contracts.season import season_from_date
+        from src.config import runtime_cities_by_name
+    except Exception as exc:  # pragma: no cover — import wiring
+        logger.warning("EMOS-CI license boot guard import failed (override left disabled): %s", exc)
+        return
+
+    license_map = load_emos_ci_license()  # cached dict mutated in place to drop uncovered cities
+    if not license_map:
+        logger.warning(
+            "EMOS-CI live override ENABLED but license is empty — override is a no-op "
+            "(no city licensed). Operator must populate state/emos_ci_license.json."
+        )
+        return
+
+    table = load_emos_table()
+    cells = table.get("cells", {}) if isinstance(table, dict) else {}
+    cities_by_name = runtime_cities_by_name()
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    dropped: list[str] = []
+    for city in list(license_map.keys()):
+        city_obj = cities_by_name.get(city)
+        lat = getattr(city_obj, "lat", 90.0) if city_obj is not None else 90.0
+        season = season_from_date(today, lat=lat)
+        cell = cells.get(f"{city}|{season}")
+        served = str(cell.get("served", "")) if isinstance(cell, dict) else ""
+        if served != "emos":
+            dropped.append(f"{city}|{season}(served={served or 'missing'})")
+            del license_map[city]
+
+    if dropped:
+        logger.warning(
+            "EMOS-CI live override: %d licensed city(ies) lack an served==emos cell for the "
+            "current season — DROPPED from the effective license (fail-closed, MC lcb stands): %s",
+            len(dropped), ", ".join(dropped),
+        )
+    covered = sorted(license_map.keys())
+    logger.info(
+        "EMOS-CI live override ENABLED; effective licensed cities (season-covered): %s",
+        covered if covered else "(none)",
+    )
+
+
 def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
     mode = _live_execution_mode(edli_cfg)
     _assert_edli_live_scope(edli_cfg)
@@ -5290,6 +5356,7 @@ def main():
     edli_cfg = _settings_section("edli_v1", {})
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
+    _assert_emos_ci_license_seasonal_coverage(edli_cfg)
     if live_execution_mode == "legacy_cron":
         scheduler.add_job(
             lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",

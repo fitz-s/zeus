@@ -160,6 +160,111 @@ class TestBinProbabilityMECE:
 
 
 # ---------------------------------------------------------------------------
+# bin_probability_settlement: settlement-aware bin probability (wmo_half_up)
+# Antibody for the degenerate point-bin bug (bin_low==bin_high→ empty interval→0).
+# ---------------------------------------------------------------------------
+
+class TestBinProbabilitySettlement:
+    """bin_probability_settlement expands point bins to [X−0.5, X+0.5) before
+    integrating, matching the WMO round-half-up convention used by the live MC path.
+
+    Critical invariant: a MECE family of settlement bins (integer-labeled point bins
+    with open shoulders) must SUM to ~1.0.  Before this fix, every interior bin
+    produced 0 because bin_probability([X,X]) = Φ(X) - Φ(X) = 0.
+    """
+
+    def test_interior_point_bin_nonzero(self):
+        """Interior point bin [21, 21] must produce non-zero probability."""
+        from src.calibration.emos import bin_probability_settlement
+
+        # SãoPaulo fixture: raw_mu_c≈21.5, sigma≈2.0, bin=21°C
+        p = bin_probability_settlement(21.5, 2.0, 21.0, 21.0)
+        assert p > 0.0, f"Interior point bin must be non-zero, got {p}"
+        assert p < 1.0
+
+    def test_interior_bin_matches_expansion(self):
+        """[X, X] → integrates [X−0.5, X+0.5), matching manual expansion."""
+        from src.calibration.emos import bin_probability_settlement
+        from scipy.stats import norm
+
+        mu, sigma = 21.5, 2.0
+        X = 21.0
+        expected = float(norm.cdf((X + 0.5 - mu) / sigma) - norm.cdf((X - 0.5 - mu) / sigma))
+        got = bin_probability_settlement(mu, sigma, X, X)
+        assert abs(got - expected) < 1e-12, f"expected={expected}, got={got}"
+
+    def test_mece_point_bins_sum_to_one(self):
+        """MECE family of settlement point bins + shoulders must sum to ~1.0.
+
+        This is the ANTIBODY for the degenerate-bin category:
+        before the fix, interior bins all returned 0 → sum ≈ 0.
+        """
+        from src.calibration.emos import bin_probability_settlement
+
+        # Realistic settlement family: shoulder(≤18), 19, 20, 21, 22, 23, shoulder(≥24)
+        mu, sigma = 21.5, 2.0
+        # Bins: open-low shoulder = (None, 18), interior = [X,X] for X in 19..23, open-high shoulder = (24, None)
+        bins = [
+            (None, 18.0),   # open-low: all x rounding to ≤ 18
+            (19.0, 19.0),
+            (20.0, 20.0),
+            (21.0, 21.0),
+            (22.0, 22.0),
+            (23.0, 23.0),
+            (24.0, None),   # open-high: all x rounding to ≥ 24
+        ]
+        total = sum(bin_probability_settlement(mu, sigma, lo, hi) for lo, hi in bins)
+        assert abs(total - 1.0) < 5e-3, (
+            f"MECE settlement family must sum to ~1.0, got {total:.6f}. "
+            f"If this fails, interior bins are returning 0 (degenerate-bin bug)."
+        )
+
+    def test_open_low_shoulder_settlement(self):
+        """Open-low shoulder (None, X): integrates (−∞, X+0.5)."""
+        from src.calibration.emos import bin_probability_settlement
+        from scipy.stats import norm
+
+        mu, sigma = 21.5, 2.0
+        X = 18.0
+        expected = float(norm.cdf((X + 0.5 - mu) / sigma))
+        got = bin_probability_settlement(mu, sigma, None, X)
+        assert abs(got - expected) < 1e-12
+
+    def test_open_high_shoulder_settlement(self):
+        """Open-high shoulder (X, None): integrates [X−0.5, +∞)."""
+        from src.calibration.emos import bin_probability_settlement
+        from scipy.stats import norm
+
+        mu, sigma = 21.5, 2.0
+        X = 24.0
+        expected = float(1.0 - norm.cdf((X - 0.5 - mu) / sigma))
+        got = bin_probability_settlement(mu, sigma, X, None)
+        assert abs(got - expected) < 1e-12
+
+    def test_saopaulao_bin21_fixture(self):
+        """SãoPaulo fixture: bin=21°C, mu≈21.50°C → emos_q≈0.140 (not 0)."""
+        from src.calibration.emos import bin_probability_settlement
+
+        # raw_mu_c=21.50°C (causal would be 28.06 but for unit-testing the formula,
+        # we test the math directly with a μ near the bin)
+        p = bin_probability_settlement(21.5, 2.0, 21.0, 21.0)
+        # Should be roughly Φ(0.25) − Φ(−0.25) ≈ 0.197
+        assert p > 0.10, f"SãoPaulo bin=21 near μ=21.5 must be substantial, got {p:.4f}"
+        assert p < 0.50
+
+    def test_never_zero_for_moderate_sigma(self):
+        """No bin in a family should produce exactly 0 for reasonable σ."""
+        from src.calibration.emos import bin_probability_settlement
+
+        mu, sigma = 21.5, 2.0
+        bins = [(None, 18.0), (19.0, 19.0), (20.0, 20.0), (21.0, 21.0),
+                (22.0, 22.0), (23.0, 23.0), (24.0, None)]
+        for lo, hi in bins:
+            p = bin_probability_settlement(mu, sigma, lo, hi)
+            assert p > 0.0, f"bin [{lo}, {hi}] must be > 0 for σ=2, got {p}"
+
+
+# ---------------------------------------------------------------------------
 # (e) unit handling: F-city bin_probability on °F bins
 # ---------------------------------------------------------------------------
 

@@ -3147,6 +3147,24 @@ def _canonical_probability_and_fdr_proof(
                 p_values[(condition_id, direction)] = 1.0
                 lcb_by_direction[(condition_id, direction)] = q_point
                 prefilter[(condition_id, direction)] = False
+
+    # EMOS-CI LIVE OVERRIDE (Option B, 2026-06-02, /tmp/design_emos_ci.md §6).
+    # Replace the MC q_5pct (lcb_by_direction) with the coverage-honest EMOS analytic CI
+    # for LICENSED HIGH-metric cities only. DEFAULT OFF — no live decision change unless
+    # the operator flips edli_v1.edli_emos_ci_live_enabled AND adds the city to
+    # state/emos_ci_license.json. Touches ONLY the q_5pct term the robust trade-score
+    # consumes; hyp.p_value / prefilter (the FDR edge-space gate) stay on the proven MC
+    # engine (lowest blast radius). FAIL-CLOSED: any missing EMOS / exception keeps the
+    # MC lcb (never crash, never substitute a wrong value).
+    _maybe_override_lcb_with_emos_ci(
+        family=family,
+        snapshot=snapshot,
+        analysis=analysis,
+        native_costs=native_costs,
+        payload=_payload(event),
+        lcb_by_direction=lcb_by_direction,
+    )
+
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
 
     prior = tuple(max(q_by_condition[str(candidate.condition_id or "")], 1e-9) for candidate in family.candidates)
@@ -3695,7 +3713,7 @@ def _write_emos_shadow_ledger(
     """
     import logging as _logging
     from datetime import timezone as _tz
-    from src.calibration.emos import emos_predictive, bin_probability, season_for
+    from src.calibration.emos import emos_predictive, bin_probability_settlement as bin_probability, season_for
     from src.calibration.emos_ledger import append_ledger
     from src.calibration.emos_ci_shadow import compute_robust_edge
     from src.contracts.season import season_from_date
@@ -3932,6 +3950,139 @@ def _write_emos_shadow_ledger(
             "kcov_applied": 1.0,
         }
         append_ledger(row)
+
+
+def _maybe_override_lcb_with_emos_ci(
+    *,
+    family,
+    snapshot: dict[str, Any],
+    analysis: Any,
+    native_costs: dict | None,
+    payload: dict[str, object],
+    lcb_by_direction: dict[tuple[str, str], float],
+) -> None:
+    """EMOS-CI LIVE OVERRIDE (Option B, /tmp/design_emos_ci.md §6) — in-place mutate lcb_by_direction.
+
+    For LICENSED HIGH-metric cities only, replace the MC q_5pct
+    (lcb_by_direction[(cond,dir)]) with the coverage-honest EMOS analytic CI:
+
+        emos_q          = bin_probability(mu_native, sigma_native, low, high)
+        q_inflated      = bin_probability(mu_native, k_cov * sigma_native, low, high)
+        buy_yes lcb     = min(emos_q, q_inflated)            # never optimistic (widening σ lowers a peaked bin)
+        buy_no  lcb     = min(1 - emos_q, 1 - q_inflated)    # = 1 - max(emos_q, q_inflated); the INDEPENDENT
+                                                              #   honest NO-mass lower bound (mirrors the shadow
+                                                              #   hook's 1 - emos_q at k_cov=1, never optimistic
+                                                              #   for NO at k_cov>1). NOT 1 - yes_lcb (#106).
+
+    Native unit: °F cities convert (mu_c, sigma_c) to °F exactly as
+    _write_emos_shadow_ledger does (mirror EXACTLY). k_cov comes from the per-city
+    license cell (clamped >= 1.0; sigma is never tightened).
+
+    Gating (all must hold or the override is a no-op, MC lcb stands):
+      - settings["edli_v1"].edli_emos_ci_live_enabled is True (default False)
+      - family.metric == "high"
+      - family.city in the EMOS-CI license (state/emos_ci_license.json)
+      - emos_predictive(city, season, lead_days, members_c) is not None (served == emos)
+
+    FAIL-CLOSED: any missing EMOS / per-bin error / any exception leaves the MC lcb
+    for that key untouched. The function NEVER raises into the hot path and NEVER
+    substitutes a wrong value (a per-bin failure keeps that bin's MC lcb).
+
+    Touches ONLY lcb_by_direction. q_by_condition, p_values, prefilter, and
+    hyp.p_value are unchanged (the FDR edge-space gate stays on the MC engine).
+    """
+    import logging as _logging
+
+    try:
+        if not bool(settings["edli_v1"].get("edli_emos_ci_live_enabled", False)):
+            return
+    except Exception:
+        return
+
+    # Metric gate: EMOS calibration is HIGH-metric only (HIGH params on LOW members = garbage).
+    family_metric = str(getattr(family, "metric", "") or "").lower()
+    if family_metric != "high":
+        return
+
+    # Per-city license gate (operator-armed). Absent city → no-op (fail-closed).
+    try:
+        from src.calibration.emos_ci_license import emos_ci_k_cov
+        k_cov = emos_ci_k_cov(family.city)
+    except Exception:
+        return
+    if k_cov is None:
+        return
+
+    log = _logging.getLogger("zeus.emos_ci_live")
+    try:
+        from src.calibration.emos import emos_predictive, bin_probability_settlement as bin_probability
+        from src.contracts.season import season_from_date
+
+        # Season + lead_days + members_c — EXACT mirror of _write_emos_shadow_ledger
+        # (raw 51 members from snapshot["members_json"], °F→°C convert, season hemisphere-aware).
+        city_obj = runtime_cities_by_name().get(family.city)
+        lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+        season = season_from_date(str(family.target_date), lat=lat)
+        lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
+        try:
+            members_native = _snapshot_members(snapshot).astype(float)
+        except Exception:
+            members_native = np.array([], dtype=float)
+        unit = getattr(analysis, "_unit", "C")
+        if unit == "F":
+            members_c = (members_native - 32.0) * 5.0 / 9.0
+        else:
+            members_c = members_native
+
+        emos_result = emos_predictive(family.city, season, lead_days, members_c)
+        if emos_result is None:
+            # served != emos (raw/missing cell) or insufficient members → fail-closed, MC stands.
+            return
+        emos_mu_c, emos_sigma_c = emos_result
+    except Exception as exc:
+        log.warning("EMOS-CI live override setup failed (non-fatal, MC lcb kept): %s", exc)
+        return
+
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        b = candidate.bin
+        bin_unit = getattr(b, "unit", unit)
+        try:
+            # Native-unit conversion — EXACT mirror of _write_emos_shadow_ledger (3783-3788).
+            if bin_unit == "F":
+                mu_native = emos_mu_c * 9.0 / 5.0 + 32.0
+                sigma_native = emos_sigma_c * 9.0 / 5.0
+            else:
+                mu_native = emos_mu_c
+                sigma_native = emos_sigma_c
+            emos_q = bin_probability(mu_native, sigma_native, b.low, b.high)
+            q_inflated = bin_probability(mu_native, k_cov * sigma_native, b.low, b.high)
+            # buy_yes: never-optimistic lower bound on the YES (in-bin) mass.
+            emos_q_lcb_yes = min(emos_q, q_inflated)
+            # buy_no: independent honest lower bound on the NO (complement) mass.
+            # = 1 - max(emos_q, q_inflated); equals the shadow hook's (1 - emos_q) at k_cov=1.
+            emos_q_lcb_no = min(1.0 - emos_q, 1.0 - q_inflated)
+        except Exception as exc:
+            log.warning(
+                "EMOS-CI live override skipped bin %s/%s (non-fatal, MC lcb kept): %s",
+                family.city, getattr(b, "label", "?"), exc,
+            )
+            continue
+
+        for direction, emos_lcb in (("buy_yes", emos_q_lcb_yes), ("buy_no", emos_q_lcb_no)):
+            key = (condition_id, direction)
+            if key not in lcb_by_direction:
+                # No MC entry for this direction (non-executable side) → nothing to override.
+                continue
+            mc_lcb = lcb_by_direction[key]
+            lcb_by_direction[key] = float(emos_lcb)
+            try:
+                log.info(
+                    "EMOS-CI override city=%s cond=%s dir=%s k_cov=%.3f mc_lcb=%.6f->emos_lcb=%.6f",
+                    family.city, condition_id, direction, k_cov, float(mc_lcb), float(emos_lcb),
+                )
+            except Exception:
+                pass
 
 
 def _snapshot_p_raw(

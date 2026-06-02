@@ -329,7 +329,7 @@ def _bin_prob_from_row(row: dict, k: float = 1.0) -> float | None:
     if mu_c is None or sigma_c is None:
         return None
     try:
-        from src.calibration.emos import bin_probability
+        from src.calibration.emos import bin_probability_settlement
         bin_unit = row.get("bin_unit", "C")
         if bin_unit == "F":
             mu_native = float(mu_c) * 9.0 / 5.0 + 32.0
@@ -339,8 +339,8 @@ def _bin_prob_from_row(row: dict, k: float = 1.0) -> float | None:
             sigma_native = float(sigma_c)
         bin_low = row.get("bin_low")
         bin_high = row.get("bin_high")
-        emos_q = bin_probability(mu_native, sigma_native, bin_low, bin_high)
-        emos_q_k = bin_probability(mu_native, sigma_native * k, bin_low, bin_high)
+        emos_q = bin_probability_settlement(mu_native, sigma_native, bin_low, bin_high)
+        emos_q_k = bin_probability_settlement(mu_native, sigma_native * k, bin_low, bin_high)
         return min(emos_q, emos_q_k)
     except Exception:
         return None

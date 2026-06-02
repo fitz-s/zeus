@@ -253,14 +253,18 @@ class TestScorerPathBinProbFromRow:
 
     def _make_row(self, mu_c: float, sigma_c: float, bin_low, bin_high,
                   bin_unit: str = "C") -> dict:
-        """Synthetic ledger row with EMOS mu/sigma fields."""
-        from src.calibration.emos import bin_probability
+        """Synthetic ledger row with EMOS mu/sigma fields.
+
+        emos_q is pre-computed using bin_probability_settlement (the live formula),
+        matching what _write_emos_shadow_ledger records in production.
+        """
+        from src.calibration.emos import bin_probability_settlement
         if bin_unit == "F":
             mu_native = mu_c * 9.0 / 5.0 + 32.0
             sigma_native = sigma_c * 9.0 / 5.0
         else:
             mu_native, sigma_native = mu_c, sigma_c
-        emos_q = bin_probability(mu_native, sigma_native, bin_low, bin_high)
+        emos_q = bin_probability_settlement(mu_native, sigma_native, bin_low, bin_high)
         return {
             "emos_mu_c": mu_c,
             "emos_sigma_c": sigma_c,
@@ -318,18 +322,23 @@ class TestScorerPathBinProbFromRow:
 
         # Fixture: a batch of rows for an under-covered city (k_cov will be ~2.0)
         # Peaked bin, cost such that k=1 rescues but k=2 does not.
-        # mu=20, sigma=2, bin [19,21), cost=0.30:
-        #   k=1: emos_q_lcb=emos_q≈0.383, edge=0.383-0.30-0.01=0.073 → clears
-        #   k=2: emos_q_lcb≈bin_prob(mu=20, sigma=4, [19,21))≈0.197,
-        #        min(0.383,0.197)=0.197, edge=0.197-0.30-0.01=-0.113 → does NOT clear
-        from src.calibration.emos import bin_probability
+        # Settlement bins: mu=20, sigma=2, bin [19,19] (point bin, settlement interval [18.5,19.5))
+        #   k=1: emos_q = bin_probability_settlement(20, 2, 19, 19)
+        #              ≈ Φ(0.25) - Φ(-0.75) ≈ 0.1974 (mass in the point bin [18.5,19.5))
+        #   With cost=0.10: edge≈0.1974-0.10-0.01=0.087 → clears at k=1
+        #   k=2 sigma=4: Φ(0.125) - Φ(-0.375) ≈ 0.1463
+        #              min(0.1974, 0.1463) = 0.1463, edge≈0.1463-0.10-0.01=0.036 → clears too
+        # Use a narrower bin: bin [20,20] (point bin at mean), cost=0.18
+        #   k=1: Φ(0.25) - Φ(-0.25) ≈ 0.1974, edge≈0.007 → barely clears
+        #   k=2: Φ(0.125) - Φ(-0.125) ≈ 0.0997, edge≈0.0997-0.18-0.01 < 0 → does NOT clear
+        from src.calibration.emos import bin_probability_settlement
         mu_c, sigma_c = 20.0, 2.0
-        bin_low, bin_high = 19.0, 21.0
-        cost = 0.30
+        bin_low, bin_high = 20.0, 20.0  # point bin at mean
+        cost = 0.18
 
-        emos_q = bin_probability(mu_c, sigma_c, bin_low, bin_high)
-        lcb_k1 = min(emos_q, bin_probability(mu_c, 1.0 * sigma_c, bin_low, bin_high))
-        lcb_k2 = min(emos_q, bin_probability(mu_c, 2.0 * sigma_c, bin_low, bin_high))
+        emos_q = bin_probability_settlement(mu_c, sigma_c, bin_low, bin_high)
+        lcb_k1 = min(emos_q, bin_probability_settlement(mu_c, 1.0 * sigma_c, bin_low, bin_high))
+        lcb_k2 = min(emos_q, bin_probability_settlement(mu_c, 2.0 * sigma_c, bin_low, bin_high))
 
         clears_k1 = _robust_edge(emos_q, lcb_k1, cost) > 0
         clears_k2 = _robust_edge(emos_q, lcb_k2, cost) > 0
