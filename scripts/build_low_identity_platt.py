@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Build LOW (identity) Platt calibration rows into the world DB to unblock shadow EDLI LOW-metric gating.
+# Reuse: Run manually/offline; confirm target DB + recorded_at<=frozen_as_of before applying.
+# Authority basis: HANDOFF_2026-06-02_emos_ci.md (W1 LOW identity-Platt registration).
 # Created: 2026-06-03
 # Last reused/audited: 2026-06-03
 # Authority basis: WAVE-1 (unblock-W1) W1-T2. LOW metric returns (None, 4) from

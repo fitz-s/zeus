@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: RED->GREEN test for W1 LOW identity-Platt registration (get_calibrator('low') -> (cal,1)).
+# Reuse: Run with pytest; update if calibration routing constants change.
+# Authority basis: WAVE-1 W1-T2 LOW identity-Platt
 # Created: 2026-06-03
 # Last reused/audited: 2026-06-03
 # Authority basis: docs/operations task WAVE-1 (unblock-W1) W1-T2 — LOW
@@ -14,7 +18,7 @@ CALIBRATION_AUTHORITY_EVIDENCE_MISSING. RED today: with no LOW Platt rows the
 LOW primary-bucket lookup misses and get_calibrator falls to
 ``if temperature_metric == "low": return None, 4``.
 
-The register script (scripts/register_low_identity_platt.py) writes the
+The register script (scripts/build_low_identity_platt.py) writes the
 identity rows; this test invokes its row-registration entry against a temp DB
 (NEVER live world.db) and asserts the resulting (cal, level).
 """
@@ -59,7 +63,7 @@ class TestRT3LowIdentityRoute:
     def test_green_low_returns_identity_level1_after_registration(self, tmp_path):
         """After the register script writes LOW identity rows, get_calibrator('low')
         → (IdentityCalibrator, 1) with calibration_method=identity_full_transport_v1."""
-        from scripts.register_low_identity_platt import register_low_identity_rows
+        from scripts.build_low_identity_platt import register_low_identity_rows
 
         conn = _make_conn(tmp_path)
         # source_id=None → legacy TIGGE LOW data_version bucket (00/tigge_mars/full).
@@ -84,7 +88,7 @@ class TestRT3LowIdentityRoute:
 
     def test_dry_run_writes_nothing(self, tmp_path):
         """--dry-run path must NOT mutate the DB (LOW stays (None, 4))."""
-        from scripts.register_low_identity_platt import register_low_identity_rows
+        from scripts.build_low_identity_platt import register_low_identity_rows
 
         conn = _make_conn(tmp_path)
         planned = register_low_identity_rows(
@@ -105,7 +109,7 @@ class TestRT3LowIdentityRoute:
 
         We assert directly that recorded_at predates the canonical pin instant.
         """
-        from scripts.register_low_identity_platt import (
+        from scripts.build_low_identity_platt import (
             FROZEN_AS_OF,
             register_low_identity_rows,
         )
