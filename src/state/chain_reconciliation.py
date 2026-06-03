@@ -586,7 +586,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             return (True, None, seen_at)
         return (True, float(parsed), seen_at)
 
-    def _append_canonical_chain_observation_if_available(position: Position) -> bool:
+    def _append_canonical_chain_observation_if_available(
+        position: Position,
+        *,
+        prior_chain_state: str = "",
+    ) -> bool:
         """Persist chain economics for a SYNCED (matched, no size-mismatch)
         position whose persisted chain_shares is NULL (first-population), has
         drifted from the freshly-observed chain.size, OR whose persisted
@@ -613,6 +617,28 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         _CHAIN_SEEN_AT_MAX_AGE_SECONDS). When the timestamp is stale the
         observation event is re-emitted (cheap: one SAVEPOINT write per cycle
         per stale position, bounded by the 30-minute window).
+
+        Idempotency guard (fix #121, 2026-06-03): the stale-timestamp re-emit
+        (case d) is restricted to positions whose chain_state was ALREADY
+        "synced" before this reconcile cycle (prior_chain_state == "synced").
+        When a position is transitioning into "synced" for the first time (e.g.
+        prior chain_state was "unknown"), reconcile's matched branch sets
+        corrected.chain_verified_at = now, which propagates to position_current
+        via this write — so a subsequent cycle will see a fresh chain_seen_at
+        and skip. Without this guard, a position corrected with an old
+        chain_verified_at (externally seeded or restored from DB with a stale
+        timestamp) would re-emit on every cycle until the timestamp aged out,
+        causing a repeated CHAIN_SIZE_CORRECTED storm (#121).
+
+        Cases:
+          (a) shares NULL → always write (first-population).
+          (b) shares drifted → always write.
+          (c) shares unchanged + timestamp fresh → skip.
+          (d) shares unchanged + timestamp stale + prior_chain_state == "synced"
+              → write (long-lived synced: genuine refresh needed).
+          (e) shares unchanged + timestamp stale + prior_chain_state != "synced"
+              → skip (transitioning into synced: chain_seen_at will be fresh
+              after this cycle's canonical write from the size-correction path).
 
         Gating mirrors _append_canonical_size_correction_if_available:
           - conn present; skip pending_entry phase (don't fight fill detection);
@@ -660,15 +686,19 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             #   (a) shares need first-population (NULL) → always write.
             #   (b) shares have genuinely drifted → always write.
             #   (c) shares are unchanged AND timestamp is fresh → skip.
-            #   (d) shares are unchanged AND timestamp is stale/missing → write
-            #       to refresh chain_seen_at so classify_chain_state() keeps the
-            #       correct CHAIN_KNOWN classification on restart.
+            #   (d) shares are unchanged AND timestamp is stale AND position was
+            #       already synced before this cycle → write to refresh
+            #       chain_seen_at so classify_chain_state() keeps the correct
+            #       CHAIN_KNOWN classification on restart.
+            #   (e) shares are unchanged AND timestamp is stale AND position was
+            #       NOT already synced → skip (fix #121: transitioning into
+            #       synced; chain_seen_at will be fresh after this write).
             shares_unchanged = (
                 persisted_chain_shares is not None
                 and abs(float(persisted_chain_shares) - float(target_chain_shares)) <= 1e-9
             )
             if shares_unchanged:
-                # Check timestamp freshness (case c vs d).
+                # Check timestamp freshness (case c vs d/e).
                 timestamp_fresh = False
                 if persisted_seen_at:
                     try:
@@ -685,6 +715,10 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                         timestamp_fresh = False  # parse failure → treat as stale
                 if timestamp_fresh:
                     return False  # case c: nothing to write
+                # Case d vs e: stale timestamp. Only re-emit for long-lived
+                # synced positions (fix #121 idempotency guard).
+                if prior_chain_state != "synced":
+                    return False  # case e: transitioning to synced this cycle
 
             from src.engine.lifecycle_events import (
                 build_chain_economics_observed_canonical_write,
@@ -1426,7 +1460,11 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                 # economics). Persist the chain OBSERVATION when chain_shares
                 # needs first-population (NULL) or has drifted. Fail-closed:
                 # the helper never raises; in-memory chain_* below still stands.
-                if _append_canonical_chain_observation_if_available(corrected):
+                _prior_cs = getattr(pos, "chain_state", "") or ""
+                if _append_canonical_chain_observation_if_available(
+                    corrected,
+                    prior_chain_state=getattr(_prior_cs, "value", _prior_cs),
+                ):
                     stats["chain_observation_persisted"] = (
                         stats.get("chain_observation_persisted", 0) + 1
                     )
