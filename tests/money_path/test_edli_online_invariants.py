@@ -235,7 +235,14 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     # fresh in EDLI modes; market_discovery is the only EMS writer). Gated by
     # market_substrate_refresh_enabled (default True). Not a legacy-cron arming job.
     assert "market_discovery" in job_ids
-    assert "harvester" not in job_ids
+    # harvester is registered in EDLI event-driven modes as the settlement P&L +
+    # redeem-intent resolver (守護 fix 2026-06-03). Pre-守護 it was gated to legacy_cron
+    # only, so a FILLED EDLI position that rode to settlement sat phase=active forever and
+    # capital stayed stuck on-chain (memory #56). It is now a REQUIRED poller per
+    # architecture/cascade_liveness_contract.yaml (the boot guard FATALs if it is missing
+    # in a live mode). Shadow-safe: reads VERIFIED settlement_outcomes; the on-chain redeem
+    # POST is the separately-gated _redeem_submitter_cycle, not this resolver.
+    assert "harvester" in job_ids
     assert "heartbeat" in job_ids
     assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_submit_disabled_bridge"
     assert settings_copy["edli_v1"]["forecast_snapshot_trigger_enabled"] is True
