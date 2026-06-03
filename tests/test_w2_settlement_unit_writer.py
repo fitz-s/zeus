@@ -263,10 +263,14 @@ class TestRTW2c:
             else:
                 os.environ["ZEUS_HARVESTER_LIVE_ENABLED"] = old_flag
 
-        # Post-repoint, a read failure surfaces as 'settlement_outcomes_read_error'
-        # (harvester_pnl_resolver.py). Asserting against the OLD 'settlements_read_error'
-        # would false-pass even if the SELECT/FROM seam is still broken (#008/#022).
-        assert result.get("status") != "settlement_outcomes_read_error", (
-            f"resolve_pnl could not read forecasts.settlement_outcomes: {result}. "
-            "The resolver must SELECT FROM settlement_outcomes (not settlements)."
+        # Post-repoint the resolver reaches the empty settlement_outcomes table,
+        # finds no VERIFIED rows, and returns status='awaiting_truth_writer'.
+        # Asserting the exact success status is a stronger antibody than != error:
+        # it false-passes if the resolver regresses to a different error status
+        # or quietly returns an unexpected path (#008/#022).
+        assert result.get("status") == "awaiting_truth_writer", (
+            f"Expected resolve_pnl to return status='awaiting_truth_writer' (empty "
+            f"settlement_outcomes, no VERIFIED rows), got: {result}. "
+            "The resolver must SELECT FROM settlement_outcomes and return the "
+            "awaiting_truth_writer status when no verified rows are found."
         )

@@ -251,7 +251,11 @@ class TestDeadKellyParamsRemoved:
         )
 
     def test_canonical_call_returns_valid_range(self):
-        """The canonical call from the brief must return a value in (0, 0.25*0.7*0.55]."""
+        """The canonical call from the brief must return a value in (0, 0.25*0.7*0.8*0.55].
+
+        Haircut breakdown: base=0.25, ci_width=0.12 (>0.10) → ×0.7,
+        lead_days=4 (≥3) → ×0.8, portfolio_heat=0.45 → ×(1-0.45)=×0.55.
+        Upper bound = 0.25 × 0.7 × 0.8 × 0.55 ≈ 0.0770."""
         from src.strategy.kelly import dynamic_kelly_mult
         m = dynamic_kelly_mult(
             base=0.25,
