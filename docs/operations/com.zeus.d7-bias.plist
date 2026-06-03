@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  PROPOSED — DO NOT LOAD AUTOMATICALLY.
+  Authority basis: D-7 rolling per-city EDLI bias producer
+    (scripts/write_d7_rolling_edli_bias.py). Replaces the stale static-May bias with a
+    causal trailing-7-distinct-settled-day rolling bias, recomputed daily. The producer
+    is a daily-idempotent upsert into model_bias_ens (zeus-world.db), the SAME store the
+    live q-path reads — train==serve. Walk-forward OOS (2026-06-03): bias_d7 MAE 1.882 <
+    static 2.098.
+
+  Cadence: daily at 20:30 UTC — AFTER the daily settlement harvest (observed ~18:46 UTC),
+    so the trailing window always includes the freshest settled day. Idempotent: re-running
+    the same day overwrites the same PK rows (INSERT OR REPLACE). MIN_N=3: a city with
+    fewer than 3 settled days in the window writes NO row (live reader falls back to raw).
+
+  This plist writes to the LIVE model_bias_ens store. The orchestrator critic-reviews the
+  live-q change BEFORE this is loaded. To activate (OPERATOR action — do NOT auto-load):
+    cp docs/operations/com.zeus.d7-bias.plist ~/Library/LaunchAgents/com.zeus.d7-bias.plist
+    plutil -lint ~/Library/LaunchAgents/com.zeus.d7-bias.plist
+    launchctl load ~/Library/LaunchAgents/com.zeus.d7-bias.plist
+    launchctl list com.zeus.d7-bias        # verify loaded (PID/last-exit)
+  First-run smoke (manual, idempotent):
+    cd /Users/leofitz/.openclaw/workspace-venus/zeus && \
+      .venv/bin/python -m scripts.write_d7_rolling_edli_bias            # DRY-RUN
+      .venv/bin/python -m scripts.write_d7_rolling_edli_bias --commit   # write
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zeus.d7-bias</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin/python</string>
+        <string>-m</string>
+        <string>scripts.write_d7_rolling_edli_bias</string>
+        <string>--commit</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/leofitz/.openclaw/workspace-venus/zeus</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/leofitz/.openclaw/workspace-venus/zeus/.venv/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/leofitz/.openclaw/workspace-venus/zeus</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>20</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/leofitz/.openclaw/workspace-venus/zeus/logs/d7-bias.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/leofitz/.openclaw/workspace-venus/zeus/logs/d7-bias.err</string>
+</dict>
+</plist>

@@ -3580,6 +3580,15 @@ def _market_analysis_from_event_snapshot(
         members, snapshot=snapshot, family=family, city=city, payload=payload
     )
     # payload['_edli_grid_corrected'] set inside the hook when applied.
+    # DOUBLE-COUNT STRUCTURAL ANTIBODY (2026-06-03): bias and grid both subtract a per-city
+    # MEAN temperature residual. If BOTH apply to the same members the warm-shift is applied
+    # ~twice (F = E[r_bias] + E[r_grid], over-correction). Today bias=ON / grid=OFF so this is
+    # inert, but the guard makes the wrong composition UNCONSTRUCTABLE — fail CLOSED rather
+    # than silently double-subtract. Make the error category impossible, not the instance.
+    _assert_single_temperature_mean_correction(
+        bias_applied=_bias_corrected, grid_applied=_grid_corrected,
+        city=getattr(city, "name", family.city), target_date=str(family.target_date),
+    )
     p_raw = _snapshot_p_raw(
         snapshot, family=family, bins=bins, members=members, payload=payload,
         members_already_corrected=True,
@@ -3833,6 +3842,43 @@ def _maybe_bias_decay_kelly_haircut(
         except Exception:
             pass
         return kelly_multiplier, False, None, "error_fail_open"
+
+
+class DoubleTemperatureCorrectionError(RuntimeError):
+    """A candidate would be BOTH bias-corrected AND grid-corrected (double mean subtraction).
+
+    Both corrections subtract a per-city MEAN temperature residual from the member array; if
+    both apply, the warm-shift is applied roughly twice (over-correction that inverts q). The
+    adapter fails CLOSED on this rather than silently double-subtracting.
+    """
+
+
+def _assert_single_temperature_mean_correction(
+    *,
+    bias_applied: bool,
+    grid_applied: bool,
+    city: str | None = None,
+    target_date: str | None = None,
+) -> None:
+    """Fail CLOSED if BOTH temperature-domain mean corrections are applied to one candidate.
+
+    Structural antibody (Fitz: make the wrong code unconstructable). The EDLI bias correction
+    (_maybe_apply_edli_bias_correction) and the grid-representativeness correction
+    (_maybe_apply_grid_representativeness_correction) each subtract a per-city MEAN residual.
+    Composing both subtracts E[r_bias] + E[r_grid] — the de-biasing shift is applied ~twice.
+    At most ONE may apply. Today bias=ON / grid=OFF so this never fires, but if a future flag
+    flip ever turns both ON this raises instead of producing a silently over-corrected q.
+    """
+    if bias_applied and grid_applied:
+        raise DoubleTemperatureCorrectionError(
+            "double / mutually-exclusive temperature mean correction: both EDLI bias "
+            "correction AND grid-representativeness correction applied to the same member "
+            f"array (city={city!r} target_date={target_date!r}). Both subtract a per-city "
+            "mean residual; composing them double-subtracts the warm-shift. Exactly one of "
+            "edli_v1.edli_bias_correction_enabled / "
+            "edli_v1.edli_grid_representativeness_correction_enabled may be active. "
+            "Failing closed rather than over-correcting q."
+        )
 
 
 def _maybe_apply_edli_bias_correction(
