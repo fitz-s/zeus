@@ -822,6 +822,15 @@ external_truth_sources:
     authority_tier: chain_truth
     endpoint_patterns: [polygon-rpc, eth_sendRawTransaction, eth_call]
     required_tests: [tests/test_polymarket_v2_adapter_negrisk_redeem.py]
+  open_meteo_mainstream:
+    # Independent mainstream-forecast cross-check for the #135 direction-agreement
+    # gate. Distinct authority from `ecmwf` (our own primary forecast): this is the
+    # external reference our shadow candidate must AGREE with to be arm-eligible.
+    # Fail-closed on staleness (6h TTL); source+authority provenance in
+    # architecture/data_sources_registry_2026_05_08.yaml.
+    authority_tier: mainstream_forecast
+    endpoint_patterns: [open-meteo, api.open-meteo.com]
+    required_tests: [tests/test_mainstream_agreement_gate.py]
 
 side_effect_calls:
   submit_order:
