@@ -2319,3 +2319,41 @@ scripts:
       - src/state/schema/v2_schema.py::_create_settlement_outcomes
     required_tests:
       - tests/test_settlement_unit_trigger_deployment_2026_06_03.py
+
+  measure_arm_gate_settlement.py:
+    class: diagnostic_read
+    status: active
+    lifecycle: long_lived
+    authority_scope: arm_gate_measure
+    dangerous_if_run: false
+    dry_run_default: false
+    apply_flag: null
+    target_db: null
+    read_targets: [state/zeus-world.db, state/zeus-forecasts.db]
+    write_targets: []
+    canonical_command: "python scripts/measure_arm_gate_settlement.py"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Re-run after each new batch of VERIFIED settlements lands to measure after-cost
+      settlement win-rate for EDLI shadow positions. Reports ALL cohort and gate-PASS
+      (mainstream_agreement_pass=1) cohort separately: n, win_rate, breakeven, ROI,
+      mean-EV ± SE, and sigma. ARM verdict: ELIGIBLE only if gate-PASS win_rate > 51%,
+      ev_sigma >= 2.0, n >= 20. ANTI-FABRICATION: prints INSUFFICIENT if gate-PASS
+      cohort is empty. This is the loop MEASURE step (OBSERVE→MEASURE→DIAGNOSE).
+    do_not_use_when: >
+      Does not produce gate-PASS verdict until mainstream_agreement_pass=1 receipts
+      have VERIFIED settlements. Gate deployed ~2026-06-03; gate-PASS receipts target
+      2026-06-04/05 which are not yet settled — verdict stays INSUFFICIENT until those
+      dates settle. Do not use ALL-cohort win_rate as ARM signal (not gate-gated).
+    promotion_barrier: >
+      Read-only. No promotion barrier — purely diagnostic. ARM verdict uses gate-PASS
+      cohort only; do not promote based on ALL cohort regardless of win_rate.
+    unguarded_write_rationale: >
+      No writes. Opens world + forecasts DBs as read-only via file:...?mode=ro URI.
+      Registered in SQLITE_CONNECT_ALLOWLIST for writer-lock antibody compliance.
+    required_helpers:
+      - src/data/market_scanner.py::_parse_temp_range
+      - scripts/measure_arm_gate_settlement.py::is_win
+    required_tests:
+      - tests/test_arm_gate_direction_law.py

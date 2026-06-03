@@ -47,6 +47,7 @@ test_trust_policy:
     tests/test_d7_rolling_edli_bias.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: D-7 rolling bias producer — causality, unit, thin-n, idempotency"}
     tests/test_representativeness_sigma_widens_q_lcb.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: sigma_repr -> wider (lower) q_lcb on corrected domain"}
     tests/test_no_certain_no_ceiling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: no certain-NO (q_no_lcb<1) structural antibody on corrected domain"}
+    tests/test_arm_gate_direction_law.py: {created: "2026-06-03", last_used: "2026-06-03", note: "Direction Law antibody: buy_yes/buy_no win-logic unconstructably correct — all 4 cases + complement + known losses"}
     tests/test_full_predictive_residual_sd.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: full predictive sigma (sigma_resid * sqrt(1+1/n)) producer antibody"}
     tests/test_main_harvester_edli_scheduling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: harvester_cycle scheduled in all EDLI modes (not legacy_cron only)"}
     tests/test_harvester_resolver_settles_and_enqueues_redeem.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: VERIFIED settlement -> position settled + REDEEM_INTENT_CREATED"}
