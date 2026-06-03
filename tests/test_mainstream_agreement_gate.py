@@ -605,3 +605,71 @@ def test_receipt_hash_stable_when_gate_not_evaluated():
     )
     gate_on_json = _receipt_json(gate_on_receipt)
     assert gate_on_json != base_json, "Gate-ON receipt must have different hash (sanity check)"
+
+# ---------------------------------------------------------------------------
+# ANTIBODY TEST C — BUG-3: verdict must survive the producer→consumer boundary.
+# THE LIVE FAILURE (2026-06-03 shadow): ANTIBODY A proves the eval populates a
+# dict you HAND it — but the live producer (`_canonical_probability_and_fdr_proof`)
+# stored the verdict into `_payload(event)`, which RE-PARSES event.payload_json
+# into a FRESH dict every call (src .../event_reactor_adapter.py:_payload). The
+# consumer (`build_event_bound_no_submit_receipt` @605 → @730/@1085) reads a
+# DIFFERENT `_payload(event)` instance. So the verdict evaporated at the A→B
+# boundary: 0 receipts tagged, 0 gate logs, gate silently fail-OPEN despite
+# flag=True. ANTIBODY A stayed GREEN because it tests the eval in isolation with
+# its own dict — it never crosses the boundary. (Fitz constraint #2: the function
+# worked; the RELATIONSHIP across the module boundary lost the semantic.)
+#
+# The structural antibody: the verdict must travel via the CALLER's threaded
+# payload, never a fresh `_payload(event)` re-parse. This makes the
+# instance-divergence category unconstructable.
+# ---------------------------------------------------------------------------
+
+def test_gate_verdict_survives_producer_to_consumer_payload_boundary():
+    """The proof builder must thread the caller's payload to the gate store +
+    read sites — never re-parse `_payload(event)` for the verdict (instance
+    divergence = silent fail-open, the live 2026-06-03 bug)."""
+    import inspect
+    from src.engine import event_reactor_adapter as era
+
+    # (1) Signature contract: the canonical proof builder MUST accept the caller's
+    # payload, so the verdict it stores reaches the receipt builder's dict.
+    sig = inspect.signature(era._canonical_probability_and_fdr_proof)
+    assert "payload" in sig.parameters, (
+        "_canonical_probability_and_fdr_proof must accept the caller's `payload` so "
+        "the mainstream-gate verdict lands in the SAME dict the receipt builder "
+        "reads — not a throwaway _payload(event) re-parse (BUG-3 silent fail-open)."
+    )
+
+    # (2) The gate STORE site must use the threaded payload, never _payload(event).
+    canon_src = inspect.getsource(era._canonical_probability_and_fdr_proof)
+    assert "_evaluate_and_store_mainstream_agreement" in canon_src, (
+        "gate eval must be invoked from the canonical proof builder"
+    )
+    after_call = canon_src.split("_evaluate_and_store_mainstream_agreement", 1)[1][:240]
+    assert "payload=payload" in after_call, (
+        "gate eval must be passed the THREADED payload (payload=payload)"
+    )
+    assert "_payload(event)" not in after_call, (
+        "gate eval must NOT store into a fresh _payload(event) re-parse — that "
+        "fresh dict is discarded and the receipt builder never sees the verdict."
+    )
+
+    # (3) The per-candidate proof-attach must READ the threaded payload, not a
+    # fresh _payload(event) (instance C in the live triage).
+    gen_src = inspect.getsource(era._generate_candidate_proofs)
+    attach = gen_src.split("mainstream_agreement=", 1)[1][:160]
+    assert "_payload(event)" not in attach, (
+        "proof-attach must read the threaded `payload` for the verdict, not a "
+        "fresh _payload(event) — different instance has no verdict (fail-open)."
+    )
+
+    # (4) Threading contract: every _canonical call site in _live_yes_probabilities
+    # must forward the payload.
+    lyp_src = inspect.getsource(era._live_yes_probabilities)
+    canon_calls = lyp_src.count("_canonical_probability_and_fdr_proof(")
+    canon_calls_with_payload = lyp_src.count("payload=payload")
+    assert canon_calls >= 1 and canon_calls_with_payload >= canon_calls, (
+        "_live_yes_probabilities must pass payload=payload to every "
+        f"_canonical_probability_and_fdr_proof call (calls={canon_calls}, "
+        f"with-payload={canon_calls_with_payload})"
+    )

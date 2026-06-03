@@ -3097,7 +3097,7 @@ def _generate_candidate_proofs(
                     p_cal_vector_hash=str(probability_evidence["p_cal_vector_hash"]),
                     p_live_vector_hash=str(probability_evidence["p_live_vector_hash"]),
                     missing_reason=missing_reason,
-                    mainstream_agreement=_payload(event).get(
+                    mainstream_agreement=payload.get(
                         "_mainstream_agreement_verdicts", {}
                     ).get((condition_id, direction)),
                 )
@@ -3164,6 +3164,7 @@ def _live_yes_probabilities(
     if event.event_type == "FORECAST_SNAPSHOT_READY":
         return _canonical_probability_and_fdr_proof(
             event=event,
+            payload=payload,
             family=family,
             conn=conn,
             calibration_conn=calibration_conn,
@@ -3173,6 +3174,7 @@ def _live_yes_probabilities(
     if event.event_type == "DAY0_EXTREME_UPDATED":
         generated = _canonical_probability_and_fdr_proof(
             event=event,
+            payload=payload,
             family=family,
             conn=conn,
             calibration_conn=calibration_conn,
@@ -3247,6 +3249,7 @@ def _forecast_snapshot_probability_and_fdr_proof(
 def _canonical_probability_and_fdr_proof(
     *,
     event: OpportunityEvent,
+    payload: dict[str, object],
     family,
     conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
@@ -3419,7 +3422,7 @@ def _canonical_probability_and_fdr_proof(
                 event=event,
                 family=family,
                 analysis=analysis,
-                payload=_payload(event),
+                payload=payload,
             )
     except Exception as _gate_exc:
         try:
