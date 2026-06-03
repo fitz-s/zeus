@@ -553,7 +553,15 @@ def _build_minimal_db() -> sqlite3.Connection:
             chain_avg_price REAL,
             chain_cost_basis_usd REAL,
             chain_seen_at TEXT,
-            chain_absence_at TEXT
+            chain_absence_at TEXT,
+            -- BUG #128 (SEV1, 2026-06-02): durable realized-P&L columns now part
+            -- of CANONICAL_POSITION_CURRENT_COLUMNS; the upsert INSERT lists them
+            -- so this minimal fixture must declare them too.
+            realized_pnl_usd REAL,
+            exit_price REAL,
+            settlement_price REAL,
+            settled_at TEXT,
+            exit_reason TEXT
         );
         CREATE TABLE IF NOT EXISTS position_events (
             event_id TEXT PRIMARY KEY,

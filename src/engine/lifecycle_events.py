@@ -153,6 +153,39 @@ def projection_updated_at(position: Any) -> str:
     return _max_iso_chronological(*present)
 
 
+_SETTLED_RUNTIME_STATES = frozenset({"settled"})
+
+
+def _is_settled_runtime_state(position: Any) -> bool:
+    """BUG #128: True iff the Position's runtime state is the terminal settled
+    state. compute_settlement_close sets pos.state to the settled runtime state
+    BEFORE the projection is built, so settlement_price / settled_at are only
+    populated for genuinely-settled rows (economic close leaves them NULL)."""
+    state = getattr(position, "state", "")
+    state = getattr(state, "value", state)
+    return str(state or "").strip().lower() in _SETTLED_RUNTIME_STATES
+
+
+def _has_realized_close(position: Any) -> bool:
+    """BUG #128: True iff the position has a recorded close (a non-empty
+    last_exit_at). Open positions carry pnl/exit_price=0.0 by dataclass default;
+    without a close timestamp those zeros are NOT realized economics and must
+    project as NULL so open rows stay distinguishable from a real $0.00 close."""
+    return bool(str(getattr(position, "last_exit_at", "") or "").strip())
+
+
+def _settled_economics_value(position: Any, attr: str) -> object | None:
+    """BUG #128: return the float close-economics attribute (pnl / exit_price)
+    when the position has actually closed, else NULL. This keeps open/legacy
+    position_current rows at NULL rather than a misleading 0.0."""
+    if not _has_realized_close(position):
+        return None
+    value = getattr(position, attr, None)
+    if value is None:
+        return None
+    return float(value)
+
+
 def build_position_current_projection(position: Any) -> dict:
     _position_metric = resolve_position_metric(position)
     return {
@@ -214,6 +247,32 @@ def build_position_current_projection(position: Any) -> dict:
         "chain_cost_basis_usd": _nullable(getattr(position, "chain_cost_basis_usd", None)),
         "chain_seen_at": _nullable(getattr(position, "chain_verified_at", "")),
         "chain_absence_at": _nullable(getattr(position, "last_chain_absence_observed_at", "")),
+        # BUG #128 (SEV1, 2026-06-02): durable realized-P&L projection. These
+        # mirror the close economics that compute_economic_close /
+        # compute_settlement_close (src.state.portfolio) set on the in-memory
+        # Position (pnl / exit_price / exit_reason / last_exit_at). Persisting
+        # them here — through the canonical write path consumed by BOTH the
+        # settlement builder (build_settlement_canonical_write) and the economic-
+        # close builder (build_economic_close_canonical_write) — means a
+        # filled+settled order leaves a durable, queryable P&L record instead of
+        # only the in-memory object + positions.json. Open/legacy positions carry
+        # NULL (pnl/exit_price default 0.0 with no close → coerced to NULL below).
+        "realized_pnl_usd": _settled_economics_value(position, "pnl"),
+        "exit_price": _settled_economics_value(position, "exit_price"),
+        # settlement_price is the resolved settlement value, meaningful ONLY for a
+        # settled position. compute_settlement_close sets pos.exit_price =
+        # settlement_price, so it equals exit_price on settled rows; NULL otherwise.
+        "settlement_price": (
+            _settled_economics_value(position, "exit_price")
+            if _is_settled_runtime_state(position)
+            else None
+        ),
+        "settled_at": (
+            _nullable(getattr(position, "last_exit_at", ""))
+            if _is_settled_runtime_state(position)
+            else None
+        ),
+        "exit_reason": _nullable(getattr(position, "exit_reason", "")),
     }
 
 

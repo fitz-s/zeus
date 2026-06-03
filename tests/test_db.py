@@ -3416,6 +3416,12 @@ def test_append_many_and_project_rejects_missing_env_for_non_settlement_events(t
         "chain_cost_basis_usd": None,
         "chain_seen_at": None,
         "chain_absence_at": None,
+        # BUG #128 durable realized-P&L columns (src/state/projection.py)
+        "realized_pnl_usd": None,
+        "exit_price": None,
+        "settlement_price": None,
+        "settled_at": None,
+        "exit_reason": None,
     }
 
     with pytest.raises(ValueError, match="canonical position event missing env"):

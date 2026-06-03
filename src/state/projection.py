@@ -59,6 +59,19 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "chain_cost_basis_usd",
     "chain_seen_at",
     "chain_absence_at",
+    # BUG #128 (SEV1, 2026-06-02): durable realized-P&L projection. Pre-fix the
+    # realized P&L computed in src.state.portfolio._compute_realized_pnl lived
+    # ONLY on the in-memory Position object + positions.json recent_exits[]; a
+    # filled+settled order left NO queryable position_current P&L record. These
+    # columns persist the close economics through build_position_current_projection
+    # so every canonical close path (settlement + economic close) records P&L
+    # durably. NULL on open/legacy rows; ALTER TABLE ADD COLUMN additive on legacy
+    # DBs via _ensure_position_current_authority_columns.
+    "realized_pnl_usd",
+    "exit_price",
+    "settlement_price",
+    "settled_at",
+    "exit_reason",
 )
 
 

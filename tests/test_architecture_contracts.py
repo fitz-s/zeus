@@ -558,6 +558,12 @@ def _canonical_projection() -> dict:
         "chain_cost_basis_usd": None,
         "chain_seen_at": None,
         "chain_absence_at": None,
+        # BUG #128 durable realized-P&L columns (NULL on open positions).
+        "realized_pnl_usd": None,
+        "exit_price": None,
+        "settlement_price": None,
+        "settled_at": None,
+        "exit_reason": None,
     }
 
 

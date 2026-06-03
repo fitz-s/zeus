@@ -154,7 +154,18 @@ CREATE TABLE IF NOT EXISTS position_current (
     chain_avg_price REAL,
     chain_cost_basis_usd REAL,
     chain_seen_at TEXT,
-    chain_absence_at TEXT
+    chain_absence_at TEXT,
+    -- BUG #128 (SEV1, 2026-06-02): durable realized-P&L projection. Nullable
+    -- columns persist close economics through the canonical write path so a
+    -- filled+settled order leaves a queryable P&L record (GOAL#36 post-fill
+    -- correctness). NULL on open/legacy rows; populated at economic-close /
+    -- settlement. Additive on legacy DBs via
+    -- _ensure_position_current_authority_columns.
+    realized_pnl_usd REAL,
+    exit_price REAL,
+    settlement_price REAL,
+    settled_at TEXT,
+    exit_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS strategy_health (
