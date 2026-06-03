@@ -1,7 +1,19 @@
 # Created: 2026-05-31
-# Last reused or audited: 2026-05-31
+# Last reused or audited: 2026-06-03
+# Lifecycle: created=2026-05-31; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Write static per-city EDLI bias rows from /tmp/canonical_bias_rows.json to
+#   model_bias_ens (zeus-world.db) for the A4 bias-correction path. Also stamps
+#   total_residual_sd_c (full predictive sigma) for honest q_lcb widening (#89).
+# Reuse: verify /tmp/canonical_bias_rows.json is from the current settled dataset and has
+#   been operator-reviewed; confirm zeus-world.db model_bias_ens has total_residual_sd_c
+#   column (SCHEMA_WORLD_VERSION≥8). Superseded by write_d7_rolling_edli_bias.py for
+#   causal rolling bias; retain for static snapshot operator overrides. DRY-RUN default.
 # Authority basis: A4 per-city EDLI bias correction. Writes model_bias_ens rows the LIVE
 #   _snapshot_p_raw reads when edli_v1.edli_bias_correction_enabled is ON.
+#   2026-06-03 (#89 honest q_lcb): now also stamps heterogeneity_var_c2 (mean-estimation
+#   drift = var_resid/n) and total_residual_sd_c (full predictive σ = σ_resid·sqrt(1+1/n)),
+#   the genuine forward predictive uncertainty the live q_lcb inflater reads. Previously
+#   total_residual_sd_c was set == residual_sd_c (in-sample-only), under-stating it.
 """Write per-city EDLI bias rows to model_bias_ens (zeus-world.db) — ALL cities, no exception.
 
 Writes one row per (city, month) for the active trading months (default 5,6 = late-May +
@@ -23,6 +35,10 @@ import numpy as np
 import sys
 ROOT = Path(__file__).resolve().parents[1]; sys.path.insert(0, str(ROOT))
 from src.calibration.ens_bias_repo import write_bias_model, init_ens_bias_schema
+from src.calibration.ens_error_model import (
+    full_predictive_residual_sd,
+    predictive_heterogeneity_var,
+)
 from src.calibration.manager import season_from_date
 from src.config import cities_by_name
 
@@ -52,9 +68,22 @@ def main() -> int:
         cobj = cities_by_name.get(city)
         if cobj is None:
             print(f"  {city}: no city config, skip"); continue
-        errs = np.array(by_city[city], dtype=float)
+        errs_list = [float(e) for e in by_city[city]]
+        errs = np.array(errs_list, dtype=float)
         eff = float(errs.mean())
         sd = float(errs.std(ddof=1)) if len(errs) > 1 else float(errs.std())
+        # HONEST FORWARD PREDICTIVE σ (#89, 2026-06-03). residual_sd_c is the IN-SAMPLE daily
+        # residual std; total_residual_sd_c is the predictive σ for a future out-of-window day,
+        # which inflates the in-sample std by the mean-estimation variance (var_resid/n). The
+        # live q_lcb inflater reads total_residual_sd_c so the deep-NO CI widens honestly. The
+        # seasonal fit↔serve drift (May→June) is a separate component not estimable from this
+        # window alone and is deliberately NOT inflated here (anti-p-hacking).
+        het_var = float(predictive_heterogeneity_var(errs_list))
+        total_sd = float(full_predictive_residual_sd(errs_list))
+        # n<2 degenerate: full_predictive returns 0.0; keep total >= in-sample sd so a
+        # one-day city is never made artificially confident.
+        if total_sd < sd:
+            total_sd = sd
         for mo in months:
             season = season_from_date(f"2026-{mo:02d}-15", lat=cobj.lat)
             rows_out.append(dict(
@@ -64,11 +93,13 @@ def main() -> int:
                 weight_live=1.0, estimator="a4_canonical_per_city_settled",
                 error_model_family=FAMILY, error_model_key=f"{city}|{season}|{mo}|{METRIC}",
                 bias_c=eff, bias_sd_c=sd, residual_sd_c=sd, effective_bias_c=eff,
-                total_residual_sd_c=sd, correction_strength=1.0, authority=args.authority,
+                heterogeneity_var_c2=het_var, total_residual_sd_c=total_sd,
+                correction_strength=1.0, authority=args.authority,
                 gate_set_hash=GATE_SET_HASH, coverage_months=str(mo), month_alias=mo,
                 training_cutoff="2026-05-29", recorded_at="2026-05-31",
             ))
-        print(f"  {city:13s} eff_bias_c={eff:+.2f}C n={len(errs)} months={months}")
+        print(f"  {city:13s} eff_bias_c={eff:+.2f}C n={len(errs)} "
+              f"resid_sd={sd:.3f} total_sd={total_sd:.3f} (het={het_var:.4f}) months={months}")
 
     if not args.commit:
         print(f"\nDRY-RUN: {len(rows_out)} rows. Re-run with --commit.")

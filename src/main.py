@@ -171,6 +171,31 @@ def _live_execution_mode(edli_cfg: dict) -> str:
     return mode
 
 
+def _harvester_should_register(live_execution_mode: str) -> bool:
+    """Whether the settlement P&L + redeem-intent resolver (_harvester_cycle) is
+    scheduled for this live-execution mode.
+
+    守護 blocker (2026-06-03): the harvester was gated to ``legacy_cron`` ONLY, so
+    in EDLI event-driven modes (edli_shadow_no_submit, edli_submit_disabled_bridge,
+    edli_live_canary, edli_live) a FILLED position that rode to market settlement
+    sat phase=active forever — the redeem pollers (its consumers) had nothing to
+    consume, and capital stayed stuck on-chain (memory #56 "settled-target-still-
+    active", reproducing on Shanghai cca68b44).
+
+    The resolver is shadow-safe: ``resolve_pnl_for_settled_markets`` READS VERIFIED
+    settlement_outcomes (read-only) and writes only trade-side close + a durable
+    REDEEM_INTENT_CREATED row. The actual on-chain redeem POST lives in the
+    SEPARATELY-gated _redeem_submitter_cycle (already scheduled in all modes), whose
+    adapter only broadcasts when autonomous redeem is enabled; scheduling the
+    resolver adds ZERO new on-chain surface. The resolver also has its own
+    ZEUS_HARVESTER_LIVE_ENABLED kill-switch (default OFF, no-op when unset).
+
+    The shared predicate keeps the registration gate and the boot-recovery call in
+    lockstep, and is the single source the antibody test asserts against.
+    """
+    return live_execution_mode in EDLI_EVENT_DRIVEN_MODES or live_execution_mode == "legacy_cron"
+
+
 def _settings_section(name: str, default=None):
     source = settings._data if hasattr(settings, "_data") else settings
     if isinstance(source, dict):
@@ -5054,6 +5079,48 @@ def _edli_boot_fill_bridge_recovery() -> None:
         )
 
 
+def _edli_boot_settlement_redeem_recovery() -> None:
+    """守護 (2026-06-03): drain already-stuck settled-but-active positions AT BOOT.
+
+    The harvester now runs hourly in EDLI modes, but on restart we should not wait
+    up to an hour to clear positions whose target_date already has a VERIFIED
+    settlement_outcomes row yet still sit phase=active (memory #56, Shanghai
+    cca68b44). One synchronous _harvester_cycle() pass at boot consumes that truth
+    immediately: marks the positions settled and enqueues their REDEEM_INTENT_CREATED
+    so the redeem pollers can pick them up on their first tick.
+
+    Shadow-safe: _harvester_cycle does no on-chain work (the on-chain redeem POST is
+    the separately-gated _redeem_submitter_cycle), and resolve_pnl_for_settled_markets
+    is itself a no-op unless ZEUS_HARVESTER_LIVE_ENABLED=1, so this boot pass cannot
+    settle anything when the operator has the resolver disabled.
+
+    Gate: same modes as the scheduled job (_harvester_should_register). Fully
+    fail-open — any error is logged, never fatal; the hourly scheduled job retries.
+    """
+    try:
+        edli_cfg = _settings_section("edli_v1", {})
+        live_execution_mode = _live_execution_mode(edli_cfg)
+        if not _harvester_should_register(live_execution_mode):
+            return
+        if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and not edli_cfg.get("enabled"):
+            return
+        _harvester_cycle()
+        logger.info(
+            "守護 boot settlement-redeem recovery: ran one harvester pass before "
+            "entering the trading loop (mode=%s)",
+            live_execution_mode,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Boot recovery is best-effort: the hourly scheduled harvester is the safety
+        # net, so a boot-time hiccup must never block the daemon from starting.
+        logger.error(
+            "守護 boot settlement-redeem recovery failed (non-fatal; hourly harvester "
+            "retries): %s",
+            exc,
+            exc_info=True,
+        )
+
+
 def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> set[str]:
     """Tokens the EDLI reactor has recently decided on — the candidate universe.
 
@@ -5652,6 +5719,13 @@ def main():
     # blocks boot); the per-cycle durable scan is the continuous safety net.
     _edli_boot_fill_bridge_recovery()
 
+    # 守護 (2026-06-03): immediately consume any VERIFIED settlement truth that is
+    # already on disk for FILLED positions still sitting phase=active (memory #56,
+    # Shanghai cca68b44), instead of waiting up to an hour for the scheduled
+    # harvester. Runs AFTER the fill-bridge recovery (so freshly-bridged positions
+    # are visible) and BEFORE the trading loop. Fail-open; no on-chain side effect.
+    _edli_boot_settlement_redeem_recovery()
+
     if once:
         run_single_cycle()
         return
@@ -5837,8 +5911,20 @@ def main():
         max_instances=1,
         coalesce=True,
     )
-    if live_execution_mode == "legacy_cron":
-        scheduler.add_job(_harvester_cycle, "interval", hours=1, id="harvester")
+    # 守護 (2026-06-03): settlement P&L + redeem-intent resolver. Registered in BOTH
+    # legacy_cron AND EDLI event-driven modes (see _harvester_should_register). In EDLI
+    # modes run_cycle() never fires, so this standalone hourly job is the ONLY producer
+    # that consumes VERIFIED settlement_outcomes → marks settled positions closed →
+    # enqueues REDEEM_INTENT_CREATED for the redeem pollers. Without it a FILLED position
+    # rides to settlement and sits phase=active forever (capital stuck). Shadow-safe: the
+    # resolver does no on-chain work; the on-chain redeem POST is the separately-gated
+    # _redeem_submitter_cycle, and the resolver is additionally gated by
+    # ZEUS_HARVESTER_LIVE_ENABLED (default-OFF no-op).
+    if _harvester_should_register(live_execution_mode):
+        scheduler.add_job(
+            _harvester_cycle, "interval", hours=1, id="harvester",
+            max_instances=1, coalesce=True,
+        )
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env

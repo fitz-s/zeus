@@ -40,6 +40,15 @@ test_trust_policy:
     tests/engine/test_executable_snapshot_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/engine/test_cost_basis_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/test_mainstream_agreement_gate.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    # PR #380 honest-q + settlement-unit deployment antibodies (2026-06-03)
+    tests/test_settlement_unit_trigger_deployment_2026_06_03.py: {created: "2026-06-03", last_used: "2026-06-03", note: "deployment RT: settlement_unit VERIFIED triggers on EXISTING DB via migration"}
+    tests/test_d7_rolling_edli_bias.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: D-7 rolling bias producer — causality, unit, thin-n, idempotency"}
+    tests/test_representativeness_sigma_widens_q_lcb.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: sigma_repr -> wider (lower) q_lcb on corrected domain"}
+    tests/test_no_certain_no_ceiling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: no certain-NO (q_no_lcb<1) structural antibody on corrected domain"}
+    tests/test_full_predictive_residual_sd.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: full predictive sigma (sigma_resid * sqrt(1+1/n)) producer antibody"}
+    tests/test_main_harvester_edli_scheduling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: harvester_cycle scheduled in all EDLI modes (not legacy_cron only)"}
+    tests/test_harvester_resolver_settles_and_enqueues_redeem.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: VERIFIED settlement -> position settled + REDEEM_INTENT_CREATED"}
+    tests/engine/test_bias_grid_mutual_exclusion.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: bias-grid mutual-exclusion contract"}
     tests/engine/test_bias_decay_kelly_haircut.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/engine/test_chain_sync_exit_wired_in_edli_mode.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_edli_stage_status_summary_freshness.py: {created: "2026-05-31", last_used: "2026-05-31"}

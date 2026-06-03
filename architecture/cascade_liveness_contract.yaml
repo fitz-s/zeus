@@ -1,6 +1,8 @@
 # Created: 2026-05-16
-# Last reused or audited: 2026-05-16
+# Last reused or audited: 2026-06-03
 # Authority basis: docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/SCAFFOLD_F14_F16.md §G.2 + §K.6 v5
+#   + 守護 2026-06-03: harvester (REDEEM_INTENT_CREATED producer) added to required_pollers
+#     so the boot guard enforces its presence in live modes (memory #56 Shanghai cca68b44).
 #
 # Cascade liveness contract — the registry of state-machine tables in src/
 # that REQUIRE a scheduled APScheduler poller to drive them, plus optional
@@ -33,6 +35,17 @@ state_machines:
         escalation_action: "Path C trigger per SCAFFOLD §I.4 if exceeded; arm manual fallback runbook §3"
         cli_invocation: "python -m scripts.operator_record_redeem <condition_id> <tx_hash>"
     required_pollers:
+      # 守護 (2026-06-03): the PRODUCER of REDEEM_INTENT_CREATED. Reads VERIFIED
+      # forecasts.settlement_outcomes, marks settled positions closed, and enqueues
+      # the redeem intent the submitter/reconciler below consume. Without it
+      # scheduled in EDLI modes, the consumers sit idle forever (memory #56,
+      # Shanghai cca68b44 settled-but-active). mode=producer (NOT liveness_only:
+      # it drives _settle_positions state transitions). Registration gate +
+      # boot-recovery share src/main.py:_harvester_should_register.
+      - id: harvester
+        produced_states: [REDEEM_INTENT_CREATED]
+        owner: src/main.py:_harvester_cycle
+        mode: producer
       - id: redeem_submitter
         watched_states: [REDEEM_INTENT_CREATED]
         owner: src/main.py:_redeem_submitter_cycle

@@ -129,6 +129,52 @@ def correction_strength(*, bias: float, bias_sd: float, heterogeneity_var: float
     return z - 1.0
 
 
+def predictive_heterogeneity_var(residuals: "list[float] | tuple[float, ...]") -> float:
+    """Between-period mean-drift variance of a per-day forecast-vs-settlement residual set.
+
+    Iron-rule-6 honest-σ estimator (2026-06-03, #89 coverage license). A per-city EDLI bias
+    correction is fit as the MEAN of a window of per-day residuals (forecast - settlement) and
+    then SERVED on a future, out-of-window day. The served correction therefore carries the
+    uncertainty of the ESTIMATED MEAN, not just the in-sample scatter: the sample mean of n
+    residuals has variance ``var_resid / n``. That term is the honest LOWER bound on the
+    prior↔live / fit↔serve heterogeneity an in-sample-only std drops entirely.
+
+    Returns ``Var[mean] = var_resid / n`` (degC^2). Degenerate inputs (n < 2) return 0.0 — a
+    one-day residual carries no estimable scatter, so the fallback caller must supply a floor.
+    """
+    n = len(residuals)
+    if n < 2:
+        return 0.0
+    var_resid = statistics.variance(residuals)  # sample variance, ddof=1
+    return var_resid / n
+
+
+def full_predictive_residual_sd(residuals: "list[float] | tuple[float, ...]") -> float:
+    """Honest forward predictive σ for ONE new (out-of-window) day given fit residuals.
+
+    sigma_pred = sqrt( var_resid + var_resid/n ) = sigma_resid * sqrt(1 + 1/n)
+
+    The textbook predictive-interval inflation: a future observation's deviation from the
+    served correction is the in-sample residual scatter (``var_resid``) PLUS the variance of
+    the estimated mean correction (``var_resid / n``, the heterogeneity term above). This is
+    the genuine total predictive uncertainty the live q_lcb inflater must use — NOT the
+    in-sample-only ``residual_sd_c``, which under-states it and yields the over-confident
+    deep-NO tail (#89). For finite n it is strictly wider than the in-sample std; as n grows
+    the mean-estimation term vanishes and the two converge.
+
+    ANTI-P-HACKING: this is the smallest defensible widening (the in-window predictive term).
+    It does NOT manufacture extra σ to make any license pass; the seasonal fit↔serve drift
+    (e.g. May→June) is a SEPARATE component not estimable from in-window data alone and is
+    deliberately NOT inflated here. n < 2 / zero-variance return the honest small value.
+    """
+    n = len(residuals)
+    if n < 2:
+        return 0.0
+    var_resid = statistics.variance(residuals)
+    het = var_resid / n
+    return math.sqrt(var_resid + het)
+
+
 @dataclass(frozen=True)
 class PredictiveErrorModel:
     """Universal location+scale+gate forecast-error model for one bucket."""
