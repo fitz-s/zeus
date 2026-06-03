@@ -9,6 +9,9 @@
 #   on corrected cities; σ_repr=0 is byte-identical (backward compatible).
 # Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
 # Purpose: relationship antibody — representativeness sigma -> wider (lower) q_lcb.
+# Reuse: inspect src/engine/event_reactor_adapter.py:_edli_representativeness_sigma_native
+#   and src/calibration/ens_error_model.py:full_predictive_residual_sd before re-running;
+#   verify sigma_repr path is wired to model_bias_ens.total_residual_sd_c.
 """Representativeness variance widens q_lcb on bias-corrected domain.
 
 The EDLI bias correction (mean-only) subtracts a per-city effective_bias_c from the

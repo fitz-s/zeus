@@ -1,5 +1,11 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
+# Purpose: deployment-level relationship antibody — settlement_unit VERIFIED triggers
+#   installed on EXISTING DB via migration (live-DB category, not fresh-DB category).
+# Reuse: inspect scripts/migrations/202606_install_settlement_unit_verified_triggers.py
+#   and src/state/schema/v2_schema.py:_create_settlement_outcomes before re-running;
+#   verify zeus-forecasts.db schema version and trigger presence match expected shape.
 # Authority basis: W2 settlement-store convergence (HANDOFF_2026-06-02_emos_ci.md).
 #   Closes the blind spot of tests/test_w2_settlement_unit_writer.py (#132): that suite
 #   only exercises a FRESH init_schema_forecasts(:memory:) DB, where the triggers are

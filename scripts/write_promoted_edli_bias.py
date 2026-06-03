@@ -1,5 +1,13 @@
 # Created: 2026-05-31
 # Last reused or audited: 2026-06-03
+# Lifecycle: created=2026-05-31; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Write static per-city EDLI bias rows from /tmp/canonical_bias_rows.json to
+#   model_bias_ens (zeus-world.db) for the A4 bias-correction path. Also stamps
+#   total_residual_sd_c (full predictive sigma) for honest q_lcb widening (#89).
+# Reuse: verify /tmp/canonical_bias_rows.json is from the current settled dataset and has
+#   been operator-reviewed; confirm zeus-world.db model_bias_ens has total_residual_sd_c
+#   column (SCHEMA_WORLD_VERSION≥8). Superseded by write_d7_rolling_edli_bias.py for
+#   causal rolling bias; retain for static snapshot operator overrides. DRY-RUN default.
 # Authority basis: A4 per-city EDLI bias correction. Writes model_bias_ens rows the LIVE
 #   _snapshot_p_raw reads when edli_v1.edli_bias_correction_enabled is ON.
 #   2026-06-03 (#89 honest q_lcb): now also stamps heterogeneity_var_c2 (mean-estimation

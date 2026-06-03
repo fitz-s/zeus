@@ -2,6 +2,21 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
+# Purpose: Install the two BEFORE INSERT / BEFORE UPDATE VERIFIED-unit guard triggers on
+#   an EXISTING settlement_outcomes table in zeus-forecasts.db (the live-DB category that
+#   the fresh-DB init_schema tests cannot cover). Closes the production blind-spot where
+#   283 NULL-unit VERIFIED rows were written before the antibody was deployed.
+# Reuse: run backfill_settlement_unit_2026_06_03.py --commit FIRST; verify trigger absence
+#   with: SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='settlement_outcomes';
+#   migration is idempotent (safe to re-run). Stop ingest daemon before --execute.
+#
+# Migration semantic policy:
+#   DB target: zeus-forecasts.db only (single-DB, no cross-DB ATTACH).
+#   Tables touched: settlement_outcomes — TRIGGER CREATE only (no column/row changes).
+#   Schema class: forecast (K1 forecast-DB owner per db_table_ownership.yaml).
+#   Reversibility: down() DROPs the two triggers; re-running up() re-installs them.
+#   Live impact: fail-closed for any subsequent NULL-unit VERIFIED insert/update (correct
+#   behavior; pre-existing NULL rows are addressed by the backfill script).
 # Authority basis: W2 settlement-store convergence (HANDOFF_2026-06-02_emos_ci.md);
 #   src/state/schema/v2_schema.py:_create_settlement_outcomes (the canonical fresh-DB
 #   trigger shape this migration brings an EXISTING forecasts DB up to).

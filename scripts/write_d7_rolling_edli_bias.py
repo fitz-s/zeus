@@ -1,5 +1,12 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
+# Purpose: Write causal trailing-7-distinct-settled-day rolling per-city EDLI bias rows
+#   to model_bias_ens (zeus-world.db), replacing stale static-May fit. Walk-forward OOS
+#   validation: bias_d7 MAE 1.882 beats static 2.098 and grid_rep 2.193.
+# Reuse: verify zeus-forecasts.db settlement_outcomes has VERIFIED rows with
+#   settlement_unit set (run backfill_settlement_unit_2026_06_03.py first); confirm
+#   zeus-world.db model_bias_ens has total_residual_sd_c column (SCHEMA_WORLD_VERSION≥8).
 # Authority basis: D-7 rolling per-city EDLI bias producer. REPLACES the stale static-May
 #   fit (scripts/write_promoted_edli_bias.py, frozen /tmp/canonical_bias_rows.json) with a
 #   causal trailing-7-distinct-settled-day rolling bias. Walk-forward OOS (this session):

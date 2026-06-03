@@ -2177,3 +2177,145 @@ scripts:
       - src/calibration/manager.py::season_from_date
       - src/config.py::cities_by_name
     required_tests: []
+
+  # PR #380 honest-q + settlement-unit deployment scripts (2026-06-03)
+  write_d7_rolling_edli_bias.py:
+    class: promotion_write
+    status: active
+    lifecycle: long_lived
+    authority_scope: promotion_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--commit"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/write_d7_rolling_edli_bias.py [--commit] [--authority VERIFIED]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Write causal trailing-7-distinct-settled-day rolling per-city EDLI bias rows to
+      model_bias_ens (zeus-world.db), replacing stale static-May fit. Walk-forward OOS
+      validated: bias_d7 MAE 1.882 beats static 2.098. Produces edli_per_city_v1 rows with
+      effective_bias_c, residual_sd_c, total_residual_sd_c (full predictive sigma). Run when
+      sufficient new VERIFIED settlement rows have accumulated (>=7 distinct settled days).
+    do_not_use_when: >
+      Do not run until zeus-forecasts.db settlement_outcomes has VERIFIED rows with
+      settlement_unit set (run backfill_settlement_unit_2026_06_03.py first). Do not run
+      with --commit without confirming zeus-world.db model_bias_ens has total_residual_sd_c
+      column (SCHEMA_WORLD_VERSION>=8).
+    promotion_barrier: >
+      Requires >=7 distinct settled days per city for meaningful rolling window. Supersedes
+      write_promoted_edli_bias.py for causal rolling bias; the static script remains for
+      operator snapshot overrides. Idempotent via model_bias_ens UPSERT.
+    unguarded_write_rationale: >
+      Operator-directed promotion: writes the per-city bias rows the live EDLI reactor reads.
+      Fail-closed in reactor: missing/STAGING row -> no correction applied.
+    required_helpers:
+      - src/calibration/ens_bias_repo.py::write_bias_model
+      - src/calibration/ens_bias_repo.py::init_ens_bias_schema
+      - src/calibration/ens_error_model.py::full_predictive_residual_sd
+      - src/state/db.py::get_forecasts_connection
+      - src/state/db.py::get_world_connection
+    required_tests:
+      - tests/test_d7_rolling_edli_bias.py
+
+  backfill_settlement_unit_2026_06_03.py:
+    class: one_time_repair
+    status: active
+    lifecycle: one_shot
+    authority_scope: settlement_repair
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: "--commit"
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [state/zeus-forecasts.db]
+    canonical_command: "python scripts/backfill_settlement_unit_2026_06_03.py [--commit] [--db-path PATH]"
+    external_inputs: []
+    delete_policy: retain_for_audit
+    reuse_when: >
+      One-time repair: set settlement_outcomes.settlement_unit from cities_by_name[city] for
+      NULL-unit rows (283 May + June rows as of 2026-06-03). Run BEFORE
+      202606_install_settlement_unit_verified_triggers.py migration. Idempotent: re-running
+      touches nothing when all rows already have units set.
+    do_not_use_when: >
+      Do not run after the trigger migration if settlement_outcomes already has units set
+      (verify with SELECT count(*) WHERE settlement_unit IS NULL AND authority='VERIFIED').
+      Trigger migration must run AFTER this backfill, not before (ordering invariant).
+    promotion_barrier: none
+    unguarded_write_rationale: >
+      Standalone operator-invoked backfill using raw sqlite3.connect. Daemon lock unavailable
+      in standalone path (WRITER_LOCK_DEFER_REVIEW=2026-06-03). DRY-RUN default; --commit
+      applies within SAVEPOINT. Stop ingest daemon before running with --commit.
+    required_helpers:
+      - src/config.py::cities_by_name
+    required_tests: []
+
+  backfill_edli_total_residual_sd.py:
+    class: one_time_repair
+    status: active
+    lifecycle: one_shot
+    authority_scope: world_repair
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: "--commit"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python scripts/backfill_edli_total_residual_sd.py [--commit]"
+    external_inputs: []
+    delete_policy: retain_for_audit
+    reuse_when: >
+      Backfill total_residual_sd_c and heterogeneity_var_c2 on existing edli_per_city_v1 rows
+      in model_bias_ens (zeus-world.db). Stamps honest full predictive sigma (sigma_resid *
+      sqrt(1+1/n)) for pre-existing rows, widening q_lcb correctly without waiting for a fresh
+      producer run. Only touches rows still at in-sample-only value (legacy) or NULL. Idempotent.
+    do_not_use_when: >
+      Do not run if zeus-world.db model_bias_ens lacks total_residual_sd_c column
+      (SCHEMA_WORLD_VERSION<8). Superseded for new rows once producers (write_promoted_edli_bias.py
+      or write_d7_rolling_edli_bias.py) have been updated — backfill only needed for pre-existing rows.
+    promotion_barrier: >
+      Requires SCHEMA_WORLD_VERSION>=8 (total_residual_sd_c column). Run after schema migration;
+      before producing new rows.
+    unguarded_write_rationale: >
+      Operator-directed backfill targeting zeus-world.db model_bias_ens ONLY. Idempotent UPDATE;
+      no row deletion or schema changes. Stop ingest daemon before running with --commit.
+    required_helpers:
+      - src/state/db.py::get_world_connection
+    required_tests: []
+
+  202606_install_settlement_unit_verified_triggers.py:
+    class: migration
+    status: active
+    lifecycle: one_shot
+    authority_scope: schema_migration
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: "--execute"
+    target_db: state/zeus-forecasts.db
+    read_targets: [state/zeus-forecasts.db]
+    write_targets: [state/zeus-forecasts.db]
+    canonical_command: "python scripts/migrations/202606_install_settlement_unit_verified_triggers.py [--execute] [--db-path PATH]"
+    external_inputs: []
+    delete_policy: retain_for_audit
+    reuse_when: >
+      Install the two BEFORE INSERT / BEFORE UPDATE VERIFIED-unit guard triggers on settlement_outcomes
+      in zeus-forecasts.db (live-DB deployment category). Run AFTER backfill_settlement_unit_2026_06_03.py
+      --commit. Closes the live-DB gap where init_schema triggers existed only in fresh-DB init path.
+      Idempotent: safe to re-run; drift triggers are DROP+recreated.
+    do_not_use_when: >
+      Do not run --execute before backfill_settlement_unit_2026_06_03.py --commit has completed
+      (existing NULL rows would never be repaired once the trigger blocks future NULLs). Do not run
+      against zeus-world.db or zeus_trades.db — forecasts DB only per K1 split.
+    promotion_barrier: >
+      Run backfill first. Stop ingest daemon before --execute. Verify trigger absence with:
+      SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='settlement_outcomes'.
+    unguarded_write_rationale: >
+      Standalone operator migration using raw sqlite3.connect under --db-path. Daemon lock
+      unavailable (WRITER_LOCK_DEFER_REVIEW=2026-06-03). SAVEPOINT-atomic. Operates on forecasts DB
+      only (K1 forecast-class table; no cross-DB ATTACH). down() DROPs triggers for reversibility.
+    required_helpers:
+      - src/state/schema/v2_schema.py::_create_settlement_outcomes
+    required_tests:
+      - tests/test_settlement_unit_trigger_deployment_2026_06_03.py

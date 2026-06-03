@@ -17,6 +17,9 @@
 #   a 9C-away bin carries material settle risk. Honest, not tuned-to-pass.
 # Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
 # Purpose: structural antibody — no certain NO on the bias-corrected domain.
+# Reuse: inspect src/engine/event_reactor_adapter.py:_edli_q_no_lcb_ceiling and
+#   src/calibration/ens_error_model.py:gaussian_bin_floor before re-running;
+#   verify ceiling is capped at 1 - gaussian_bin_floor(mean_distance, sigma_repr).
 """No certain NO ceiling on the bias-corrected domain.
 
 Contract:

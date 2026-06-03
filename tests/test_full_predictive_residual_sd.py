@@ -10,6 +10,9 @@
 #   This pins the producer-side estimator contract.
 # Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
 # Purpose: producer antibody — full predictive sigma (not in-sample-only) for the q_lcb inflater.
+# Reuse: inspect src/calibration/ens_error_model.py:full_predictive_residual_sd and
+#   scripts/write_promoted_edli_bias.py / scripts/write_d7_rolling_edli_bias.py before
+#   re-running; verify total_residual_sd_c column exists in model_bias_ens rows.
 """Full predictive residual sigma combines in-sample scatter with mean-estimation drift.
 
 The estimator ``full_predictive_residual_sd(residuals)`` returns the honest predictive std

@@ -1,5 +1,12 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
+# Purpose: relationship/TDD antibody suite for scripts/write_d7_rolling_edli_bias.py —
+#   pins causality, unit-correctness (degC not degF), thin-n fallback, and idempotency
+#   across the settlement->residual->model_bias_ens boundary.
+# Reuse: inspect scripts/write_d7_rolling_edli_bias.py and
+#   src/calibration/ens_bias_repo.py before re-running; verify settlement_outcomes has
+#   VERIFIED rows with settlement_unit set (run backfill_settlement_unit first).
 # Authority basis: D-7 rolling per-city bias producer (replaces stale static-May bias).
 #   Walk-forward OOS this session: bias_d7 MAE 1.882 < static 2.098 < grid_rep 2.193.
 #   Relationship tests for the producer's cross-module invariants: strict causality

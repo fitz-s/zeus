@@ -8,6 +8,9 @@
 # Purpose: Cross-module relationship invariant — when a position's target_date has a
 #   VERIFIED settlement_outcomes row, running the resolver marks the position settled
 #   AND enqueues a REDEEM_INTENT_CREATED row (a winning position is claimable).
+# Reuse: inspect src/engine/harvest_cycle.py:_resolve_settlements and
+#   src/state/db.py settlement_outcomes/position_current/settlement_commands tables
+#   before re-running; verify zeus-forecasts.db and zeus_trades.db schemas match.
 """Relationship test: resolver consumes VERIFIED settlement truth -> settle + redeem.
 
 This crosses the exact boundary the scheduling bug broke:

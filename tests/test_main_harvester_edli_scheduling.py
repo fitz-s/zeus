@@ -7,6 +7,9 @@
 #   MUST be scheduled in EDLI event-driven modes, not only legacy_cron. Without it
 #   a FILLED position that rides to market settlement sits phase=active forever:
 #   the redeem pollers (consumers) have nothing to consume.
+# Reuse: inspect src/main.py scheduler.add_job(_harvester_cycle, ...) registration
+#   site and src/engine/harvest_cycle.py before re-running; verify the job appears in
+#   the scheduler for edli_live, edli_live_canary, edli_submit_disabled_bridge modes.
 """Antibody: harvester (settlement→redeem resolver) scheduled in EDLI modes.
 
 RED-first contract:

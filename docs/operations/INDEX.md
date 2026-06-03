@@ -252,3 +252,8 @@ operator decision in the next housekeeping pass:
 - `ENS_ROI_AUDIT_INDEX_2026-05-25.md` — ENS refit ROI audit document index: pointers to all evidence artifacts for the full_transport_v1 ship decision.
 - `ENS_ROUTE6_TRANSPORT_BETA_2026-05-25.md` — ENS Route 6 experiment: day-specific Δ transport β analysis and preliminary results.
 - `V1V2_SUFFIX_INVENTORY_2026-05-25.md` — v1/v2 suffix inventory: eradication feasibility analysis; live-DB + grep cross-check against db_table_ownership.yaml.
+
+## Registered honest-q + settlement-unit artifacts (2026-06-03, PR #380)
+
+- `Q_LCB_HONEST_COVERAGE_2026-06-03.md` — Full predictive sigma (#89) + settlement-unit trigger deployment (W2) evidence: before/after q_lcb widening receipts, EMOS CI degenerate-bin fix, per-city OOS validation, and pre-arm coverage checklist. Authority for PR #380 honest-q consolidation.
+- `com.zeus.d7-bias.plist` — launchd plist for the D-7 rolling EDLI bias producer daemon. Runs `scripts/write_d7_rolling_edli_bias.py --commit` on a daily schedule to keep model_bias_ens current with the trailing 7 settled days. Authority: PR #380.

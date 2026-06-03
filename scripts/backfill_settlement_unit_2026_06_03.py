@@ -1,5 +1,12 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
+# Purpose: Set settlement_outcomes.settlement_unit from cities_by_name[city].settlement_unit
+#   for NULL-unit rows (283 May + June rows as of 2026-06-03). One-time repair; run BEFORE
+#   202606_install_settlement_unit_verified_triggers.py migration.
+# Reuse: verify zeus-forecasts.db settlement_outcomes still has NULL-unit rows
+#   (SELECT count(*) WHERE settlement_unit IS NULL AND authority='VERIFIED') before
+#   re-running; check src.config.cities_by_name for city coverage. DRY-RUN by default.
 # Authority basis: W2 settlement-store convergence (HANDOFF_2026-06-02_emos_ci.md);
 #   src.config.cities_by_name[city].settlement_unit is the per-city authoritative
 #   settlement unit (US cities settle °F, others °C). The settlement VALUES in

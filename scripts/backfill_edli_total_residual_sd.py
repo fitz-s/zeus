@@ -1,5 +1,14 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
+# Purpose: Backfill total_residual_sd_c and heterogeneity_var_c2 on existing
+#   edli_per_city_v1 rows in model_bias_ens (zeus-world.db) to the honest full
+#   predictive sigma (sigma_resid * sqrt(1 + 1/n)), so pre-existing rows widen
+#   q_lcb correctly without waiting for a fresh producer run.
+# Reuse: verify zeus-world.db model_bias_ens has total_residual_sd_c column before
+#   re-running (SCHEMA_WORLD_VERSION≥8); confirm producers (write_promoted_edli_bias.py
+#   or write_d7_rolling_edli_bias.py) have been updated — backfill is idempotent but
+#   a fresh producer run supersedes it for new rows. DRY-RUN by default (--commit to apply).
 # Authority basis: #89 honest q_lcb pre-arm blocker. The live q_lcb inflater now reads
 #   model_bias_ens.total_residual_sd_c (full forward predictive σ). Existing edli_per_city_v1
 #   rows were written with total_residual_sd_c == residual_sd_c (in-sample-only) and
