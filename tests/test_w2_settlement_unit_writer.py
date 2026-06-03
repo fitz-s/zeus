@@ -66,7 +66,40 @@ def _insert_verified_settlement(conn, *, settlement_unit: str | None = "C"):
 # ---------------------------------------------------------------------------
 
 class TestRTW2a:
-    """DB trigger prevents VERIFIED + NULL unit from being persisted."""
+    """DB trigger prevents VERIFIED + NULL unit from being persisted (INSERT and UPDATE paths)."""
+
+    def test_verified_null_unit_raises_on_update(self):
+        """
+        RT-W2a UPDATE-path antibody: INSERT(UNVERIFIED, unit=NULL) succeeds,
+        then UPDATE SET authority='VERIFIED' must be rejected by the BEFORE UPDATE trigger.
+
+        This closes the bypass: INSERT(unverified,NULL) → UPDATE → VERIFIED.
+        """
+        conn = _make_forecasts_conn()
+        # Step 1: INSERT unverified row with NULL unit — must succeed.
+        conn.execute(
+            """
+            INSERT INTO settlement_outcomes
+              (city, target_date, temperature_metric, market_slug,
+               winning_bin, settlement_value, settlement_source,
+               settled_at, authority, settlement_unit)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Warsaw", "2026-07-01", "high",
+                "weather-warsaw-high-2026-07-01",
+                None, None, None, None, "UNVERIFIED", None,
+            ),
+        )
+        conn.commit()
+        # Step 2: UPDATE to VERIFIED with NULL unit — trigger must ABORT.
+        with pytest.raises((sqlite3.IntegrityError, sqlite3.OperationalError)) as exc_info:
+            conn.execute(
+                "UPDATE settlement_outcomes SET authority='VERIFIED' "
+                "WHERE city='Warsaw' AND target_date='2026-07-01'"
+            )
+            conn.commit()
+        assert "VERIFIED_SETTLEMENT_REQUIRES_UNIT" in str(exc_info.value)
 
     def test_verified_null_unit_raises(self):
         """

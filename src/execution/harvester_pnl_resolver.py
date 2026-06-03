@@ -71,7 +71,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
 
     # Read settled rows from forecasts.settlement_outcomes (VERIFIED authority only).
     # W2 (2026-06-03): repointed from legacy settlements table to canonical settlement_outcomes.
-    # Column mapping: legacy `unit` → settlement_unit (now first-class column).
+    # Only the table name changed; the projected columns are unchanged.
     try:
         rows = forecasts_conn.execute(
             """

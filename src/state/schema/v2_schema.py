@@ -73,14 +73,23 @@ def _create_settlement_outcomes(conn: sqlite3.Connection) -> None:
             ON settlement_outcomes(settled_at)
     """)
     # W2 (2026-06-03): VERIFIED rows must carry settlement_unit.
-    # Trigger fires on INSERT only; UPDATE is allowed to leave unit unchanged
-    # (backfill writes are INSERT-on-conflict which hit the trigger path).
+    # Two triggers cover INSERT and UPDATE so the invariant cannot be bypassed
+    # via INSERT(UNVERIFIED, NULL) → UPDATE authority='VERIFIED'.
     # Legacy/UNVERIFIED/QUARANTINED rows are not constrained so existing rows
     # are unaffected. All callers that write VERIFIED rows are updated in the
     # same change (ordering-trap mitigation: no caller-update-lag window).
     conn.execute("""
         CREATE TRIGGER IF NOT EXISTS _settlement_outcomes_verified_unit_check
         BEFORE INSERT ON settlement_outcomes
+        FOR EACH ROW
+        WHEN NEW.authority = 'VERIFIED' AND NEW.settlement_unit IS NULL
+        BEGIN
+            SELECT RAISE(ABORT, 'VERIFIED_SETTLEMENT_REQUIRES_UNIT');
+        END
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS _settlement_outcomes_verified_unit_check_update
+        BEFORE UPDATE ON settlement_outcomes
         FOR EACH ROW
         WHEN NEW.authority = 'VERIFIED' AND NEW.settlement_unit IS NULL
         BEGIN

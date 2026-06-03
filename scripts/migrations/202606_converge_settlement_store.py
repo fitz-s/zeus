@@ -1,7 +1,14 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Authority basis: UNIFICATION-DESIGN data-truth 2026-06-03
-"""Archive ghost Platt tables in zeus-forecasts.db.
+"""Archive ghost Platt/model_bias tables in zeus-forecasts.db.
+
+Scope
+-----
+This migration archives ghost Platt/model_bias tables ONLY.
+It does NOT touch any settlement table (settlements, settlement_outcomes,
+or any settlement-related schema). Settlement store convergence is handled
+entirely by W2's db.py/v2_schema.py changes (schema DDL + triggers).
 
 Background
 ----------

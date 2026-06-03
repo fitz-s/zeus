@@ -88,6 +88,9 @@ def _make_exit_context(
     current_market_price: float,
     hours_to_settlement: float = 48.0,
     best_bid: float = 0.58,
+    entry_posterior: float | None = None,
+    entry_ci: tuple | None = None,
+    current_ci: tuple | None = None,
 ):
     """Minimal ExitContext factory."""
     from src.state.portfolio import ExitContext
@@ -101,6 +104,9 @@ def _make_exit_context(
         position_state="active",
         divergence_score=0.0,
         market_velocity_1h=0.0,
+        entry_posterior=entry_posterior,
+        entry_ci=entry_ci,
+        current_ci=current_ci,
     )
 
 
@@ -108,28 +114,28 @@ class TestCIOverlapHold:
     """RT-W3b: overlapping CI + adverse price must hold, not exit.
 
     GOAL#36 invariant: a large point-move whose CI still overlaps the entry
-    CI is noisy — the system must HOLD. This property must live in
-    Position.evaluate_exit (the ONE live path), not in deleted orphan twins.
-
-    CI_OVERLAP_HOLD fires when:
-      - entry_ci covers [entry_price - ci_width/2, entry_price + ci_width/2]
-      - current CI overlaps entry CI (not fully separated)
-      - price moved adversely (forward_edge negative)
-    → should_exit=False, trigger='CI_OVERLAP_HOLD'
+    CI is noisy — the system must HOLD. This property lives in
+    Position.evaluate_exit via the _ci_intervals_separated gate (~line 1126),
+    which fires when ExitContext carries entry_ci + current_ci + entry_posterior.
+    The gate is the ONE live CI_OVERLAP_HOLD path (no band-gate twin in _buy_yes_exit).
     """
 
     def test_ci_overlap_holds_when_adverse_price_but_ci_overlaps(self):
         """Adverse price move with overlapping CI must not exit.
 
-        entry_price=0.65, entry_ci_width=0.18 → CI = [0.65-0.09, 0.65+0.09] = [0.56, 0.74].
-        fresh_prob=0.58 is inside [0.56, 0.74] (adverse move but still in CI band).
+        entry_ci = (0.56, 0.74), current_ci = (0.52, 0.64) — they overlap.
+        fresh_prob=0.58 is adverse (< entry_posterior=0.65) but CIs are not separated.
+        _ci_intervals_separated returns False → CI_OVERLAP_HOLD fired.
         """
         pos = _make_position(direction="buy_yes", entry_price=0.65, entry_ci_width=0.18)
-        # fresh_prob=0.58 is adverse (< entry_price=0.65) but within CI band [0.56, 0.74]
+        # entry_ci and current_ci overlap → _ci_intervals_separated = False
         ctx = _make_exit_context(
             fresh_prob=0.58,
             current_market_price=0.58,
             best_bid=0.57,
+            entry_posterior=0.65,
+            entry_ci=(0.56, 0.74),   # entry: 0.65 ± 0.09
+            current_ci=(0.52, 0.64), # overlaps entry CI
         )
         decision = pos.evaluate_exit(ctx)
         assert decision.should_exit is False, (
@@ -140,18 +146,57 @@ class TestCIOverlapHold:
         )
 
     def test_ci_separated_adverse_exits(self):
-        """When CI is fully separated AND price is adverse, exit is permitted."""
-        # entry_ci_width=0.02 (tight) + large adverse move → separation guaranteed
+        """When CI is fully separated AND price drops below entry, exit is expected.
+
+        entry_ci = (0.74, 0.76) tight, current_ci = (0.28, 0.32) fully below.
+        _ci_intervals_separated = True; fresh_prob=0.30 < entry_posterior=0.75 → EXIT.
+        MINOR-5: assert should_exit is True (not merely trigger != CI_OVERLAP_HOLD).
+        """
         pos = _make_position(direction="buy_yes", entry_price=0.75, entry_ci_width=0.02)
         ctx = _make_exit_context(
-            fresh_prob=0.30,   # far below entry
+            fresh_prob=0.30,
             current_market_price=0.30,
             best_bid=0.29,
+            entry_posterior=0.75,
+            entry_ci=(0.74, 0.76),   # tight around entry
+            current_ci=(0.28, 0.32), # fully disjoint below entry CI
         )
         decision = pos.evaluate_exit(ctx)
-        # Either exits OR holds for some other reason — but should NOT be CI_OVERLAP_HOLD
+        assert decision.should_exit is True, (
+            f"CI fully separated + adverse move must exit. Got should_exit={decision.should_exit}, "
+            f"trigger={decision.trigger!r}"
+        )
         assert decision.trigger != "CI_OVERLAP_HOLD", (
             "When CI is fully separated, CI_OVERLAP_HOLD must NOT fire"
+        )
+
+    def test_ci_overlap_holds_buy_no_symmetry(self):
+        """buy_no symmetry: overlapping CI with adverse (upward) move must HOLD.
+
+        For buy_no, 'adverse' means fresh_prob rose above entry_posterior.
+        CIs overlap → CI_OVERLAP_HOLD fires regardless of direction.
+        entry_ci = (0.26, 0.44), current_ci = (0.32, 0.50) — they overlap.
+        fresh_prob=0.45 > entry_posterior=0.35 (adverse for buy_no).
+        """
+        pos = _make_position(
+            direction="buy_no",
+            entry_price=0.35,
+            entry_ci_width=0.18,
+        )
+        ctx = _make_exit_context(
+            fresh_prob=0.45,
+            current_market_price=0.45,
+            best_bid=0.44,
+            entry_posterior=0.35,
+            entry_ci=(0.26, 0.44),
+            current_ci=(0.32, 0.50),
+        )
+        decision = pos.evaluate_exit(ctx)
+        assert decision.should_exit is False, (
+            f"buy_no CI_OVERLAP_HOLD: CI still overlaps entry, should HOLD. Got trigger={decision.trigger!r}"
+        )
+        assert decision.trigger == "CI_OVERLAP_HOLD", (
+            f"Expected trigger='CI_OVERLAP_HOLD' for buy_no, got {decision.trigger!r}"
         )
 
 
