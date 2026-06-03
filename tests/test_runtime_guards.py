@@ -480,26 +480,49 @@ def _buy_no_exit_context_for_quote_split(*, p_market_quote: float) -> EdgeContex
 
 
 def test_buy_no_exit_ev_gate_uses_held_token_best_bid_not_p_market_vector():
-    from src.execution.exit_triggers import evaluate_exit_triggers
+    # Wave 3 (2026-06-02): repointed from evaluate_exit_triggers to Position.evaluate_exit.
+    # pos: buy_no, neg_edge_count=1, fresh_prob=0.60, market=0.70 → forward_edge=-0.10.
+    # best_bid=0.20 << p_posterior(fresh_prob=0.60) → hold EV > sell EV → HOLD.
+    # hours_to_settlement=72.0 bypasses near_settlement_gate (fires at <48h).
+    from src.state.portfolio import ExitContext
 
     pos = _buy_no_exit_position_for_quote_split()
-    ctx = _buy_no_exit_context_for_quote_split(p_market_quote=0.95)
-
-    signal = evaluate_exit_triggers(pos, ctx, best_bid=0.20)
-
-    assert signal is None
+    ctx = ExitContext(
+        fresh_prob=0.60,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.70,  # forward_edge = 0.60 - 0.70 = -0.10
+        current_market_price_is_fresh=True,
+        best_bid=0.20,
+        hours_to_settlement=72.0,
+        position_state="active",
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+    decision = pos.evaluate_exit(ctx)
+    assert not decision.should_exit
 
 
 def test_buy_no_exit_ev_gate_allows_sell_when_best_bid_beats_hold_value():
-    from src.execution.exit_triggers import evaluate_exit_triggers
+    # Wave 3 (2026-06-02): repointed from evaluate_exit_triggers to Position.evaluate_exit.
+    # pos: buy_no, neg_edge_count=1, fresh_prob=0.60, market=0.70 → forward_edge=-0.10.
+    # best_bid=0.70 > p_posterior(fresh_prob=0.60) → sell EV > hold EV → EXIT.
+    from src.state.portfolio import ExitContext
 
     pos = _buy_no_exit_position_for_quote_split()
-    ctx = _buy_no_exit_context_for_quote_split(p_market_quote=0.05)
-
-    signal = evaluate_exit_triggers(pos, ctx, best_bid=0.70)
-
-    assert signal is not None
-    assert signal.trigger == "BUY_NO_EDGE_EXIT"
+    ctx = ExitContext(
+        fresh_prob=0.60,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.70,  # forward_edge = 0.60 - 0.70 = -0.10
+        current_market_price_is_fresh=True,
+        best_bid=0.70,
+        hours_to_settlement=72.0,
+        position_state="active",
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
+    )
+    decision = pos.evaluate_exit(ctx)
+    assert decision.should_exit
+    assert decision.trigger == "BUY_NO_EDGE_EXIT"
 
 
 class _MonitorQuoteSplitClob:

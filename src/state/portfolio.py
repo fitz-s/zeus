@@ -1276,6 +1276,26 @@ class Position:
                 applied_validations=list(self.applied_validations),
                 trigger="DAY0_OBSERVATION_REVERSAL",
             )
+        # CI_OVERLAP_HOLD (GOAL#36 invariant, Wave 3): when current probability is still
+        # within the entry CI band, the move is noisy — CI has not separated. Hold
+        # immediately, before accumulating any cycle count toward exit.
+        # entry_ci band: [entry_price - entry_ci_width/2, entry_price + entry_ci_width/2]
+        if self.entry_ci_width > 0.0:
+            half = self.entry_ci_width / 2.0
+            ci_lo = self.entry_price - half
+            ci_hi = self.entry_price + half
+            if ci_lo <= current_p_posterior <= ci_hi:
+                applied.append("ci_overlap_hold")
+                self.neg_edge_count = 0
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    False,
+                    "CI_OVERLAP_HOLD: current probability within entry CI band",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="CI_OVERLAP_HOLD",
+                )
+
         applied.append("consecutive_cycle_check")
         if evidence_edge >= edge_threshold:
             self.neg_edge_count = 0

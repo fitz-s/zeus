@@ -4456,11 +4456,12 @@ def test_runtime_exit_context_uses_fill_authority_cost_basis_for_crowding_exposu
     assert exit_context.portfolio_positions[0][1] != pytest.approx(other.size_usd)
 
 
-def test_legacy_exit_triggers_use_fill_authority_shares(monkeypatch):
-    """Legacy diagnostic exit API must not revive submitted-size share math."""
-    from types import SimpleNamespace
-
-    from src.execution import exit_triggers
+def test_live_exit_path_uses_fill_authority_shares(monkeypatch):
+    """Live exit path (Position.evaluate_exit) must use fill-authority shares not
+    submitted-size math. Wave 3 (2026-06-02): dead _evaluate_buy_yes_exit tests removed;
+    this test directly exercises the live path via ExitContext.
+    """
+    from src.state.portfolio import ExitContext
 
     pos = _make_position(
         direction="buy_yes",
@@ -4476,73 +4477,34 @@ def test_legacy_exit_triggers_use_fill_authority_shares(monkeypatch):
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     )
     pos.neg_edge_count = 2
-    captured: dict[str, float] = {}
+    # effective_shares = shares_filled = 10.0 (not size_usd / entry_price = 200.0)
+    assert pos.effective_shares == pytest.approx(10.0)
+    assert pos.effective_shares != pytest.approx(pos.size_usd / pos.entry_price)
 
-    def capture_hold_value(shares, current_p_posterior):
-        captured["shares"] = shares
-        captured["posterior"] = current_p_posterior
-        return SimpleNamespace(net_value=0.0)
-
-    monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
-    edge_ctx = SimpleNamespace(forward_edge=-0.40, ci_width=0.02, p_posterior=0.10)
-
-    signal = exit_triggers._evaluate_buy_yes_exit(pos, edge_ctx, best_bid=0.49)
-
-    assert signal is not None
-    assert captured["shares"] == pytest.approx(pos.effective_shares)
-    assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
-    assert captured["posterior"] == pytest.approx(edge_ctx.p_posterior)
-    assert captured["posterior"] != pytest.approx(pos.p_posterior)
-
-
-def test_legacy_buy_no_exit_triggers_use_fill_authority_shares(monkeypatch):
-    """Legacy buy-no diagnostic path must preserve corrected shares."""
-    from types import SimpleNamespace
-
-    from src.execution import exit_triggers
-
-    pos = _make_position(
-        direction="buy_no",
-        size_usd=100.0,
-        entry_price=0.50,
-        shares=200.0,
-        cost_basis_usd=100.0,
-        entry_ci_width=0.02,
-        shares_filled=10.0,
-        filled_cost_basis_usd=5.0,
-        entry_price_avg_fill=0.50,
-        entry_economics_authority=ENTRY_ECONOMICS_AVG_FILL_PRICE,
-        fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+    ctx = ExitContext(
+        fresh_prob=0.10,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.50,
+        current_market_price_is_fresh=True,
+        best_bid=0.49,  # below p_posterior=0.10 → EV gate blocks
+        hours_to_settlement=72.0,
+        position_state="active",
+        market_velocity_1h=0.0,
+        divergence_score=0.0,
     )
-    pos.neg_edge_count = 2
-    captured: dict[str, float] = {}
-
-    def capture_hold_value(shares, current_p_posterior):
-        captured["shares"] = shares
-        return SimpleNamespace(net_value=0.0)
-
-    monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
-    edge_ctx = SimpleNamespace(forward_edge=-0.40, ci_width=0.02, p_posterior=0.10)
-
-    signal = exit_triggers._evaluate_buy_no_exit(
-        pos,
-        edge_ctx,
-        hours_to_settlement=None,
-        best_bid=0.49,
-    )
-
-    assert signal is not None
-    assert captured["shares"] == pytest.approx(pos.effective_shares)
-    assert captured["shares"] != pytest.approx(pos.size_usd / pos.entry_price)
+    decision = pos.evaluate_exit(ctx)
+    # EV gate: sell_value = 10 * 0.49 = 4.9; hold_value = 10 * 0.10 = 1.0 → sell > hold → EXIT
+    # (demonstrates effective_shares=10 not 200)
+    assert decision.should_exit
 
 
 def test_exit_paths_do_not_recompute_fill_authority_shares_from_legacy_price():
-    """Static relationship check for corrected economics flowing into exit decisions."""
+    """Static relationship check for corrected economics flowing into exit decisions.
+    Wave 3 (2026-06-02): exit_triggers.py deleted; only portfolio.py and cycle_runtime.py checked.
+    """
     portfolio_source = (ROOT / "src" / "state" / "portfolio.py").read_text(encoding="utf-8")
-    exit_triggers_source = (ROOT / "src" / "execution" / "exit_triggers.py").read_text(encoding="utf-8")
     cycle_runtime_source = (ROOT / "src" / "engine" / "cycle_runtime.py").read_text(encoding="utf-8")
 
-    assert "position.size_usd / position.entry_price" not in exit_triggers_source
     assert portfolio_source.count("self.size_usd / self.entry_price") == 1
     assert "if self.size_usd < 1.0" not in portfolio_source
     assert "(str(p.cluster), float(p.size_usd), str(p.trade_id))" not in cycle_runtime_source

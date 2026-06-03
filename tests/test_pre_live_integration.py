@@ -1,14 +1,15 @@
 # Created: 2026-04-29
-# Last reused/audited: 2026-04-29
+# Last reused/audited: 2026-06-02
 # Authority basis: DSA-07 non-live execution residue cleanup; transitional monitor integration reuse.
+# Wave 3 (2026-06-02): evaluate_exit_triggers deleted (dead twin); tests repointed to
+#   Position.evaluate_exit (the one live path).
 import pytest
 import numpy as np
 from src.contracts.semantic_types import Direction, EntryMethod
 from src.contracts.execution_intent import ExecutionIntent
 from src.contracts.edge_context import EdgeContext
 from src.contracts.slippage_bps import SlippageBps
-from src.state.portfolio import Position
-from src.execution.exit_triggers import evaluate_exit_triggers
+from src.state.portfolio import Position, ExitContext
 from src.execution.executor import execute_intent
 
 @pytest.mark.skip(reason="Phase2: is_sandbox path removed; no monkeypatch available")
@@ -33,24 +34,28 @@ def test_execution_intent_schema():
     assert result.shares > 0
 
 def test_monitoring_chain_trigger():
+    """Divergence panic fires via the ONE live exit path (Position.evaluate_exit)."""
+    from src.state.portfolio import divergence_hard_threshold
     pos = Position(
         trade_id="pos123", market_id="m1", city="Dallas", cluster="tx",
         target_date="2026-04-01", bin_label="70-75", direction="buy_yes",
         size_usd=100.0, entry_price=0.30, p_posterior=0.30, edge=0.0,
         entry_ci_width=0.05
     )
-    edge_ctx = EdgeContext(
-        p_raw=np.array([]), p_cal=np.array([]), p_market=np.array([0.40]),
-        p_posterior=0.20, forward_edge=-0.20, alpha=0.0,
-        confidence_band_upper=0.05, confidence_band_lower=0.0,
-        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-        decision_snapshot_id="snap1", n_edges_found=1, n_edges_after_fdr=1,
-        market_velocity_1h=-0.10, divergence_score=0.20
+    exit_ctx = ExitContext(
+        fresh_prob=0.20,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.40,
+        current_market_price_is_fresh=True,
+        best_bid=0.39,
+        hours_to_settlement=24.0,
+        position_state="active",
+        market_velocity_1h=-0.10,
+        divergence_score=divergence_hard_threshold() + 0.1,
     )
-    
-    signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
-    assert signal is not None
-    assert signal.trigger == "MODEL_DIVERGENCE_PANIC"
+    decision = pos.evaluate_exit(exit_ctx)
+    assert decision.should_exit is True
+    assert decision.trigger == "MODEL_DIVERGENCE_PANIC"
 
 from src.engine.cycle_runner import _execute_monitoring_phase, CycleArtifact
 from src.state.portfolio import PortfolioState
@@ -162,8 +167,5 @@ def test_refresh_position_true_metrics(monkeypatch):
     assert edge_ctx.divergence_score == 0.0 # 0.40 - 0.40
     assert abs(edge_ctx.market_velocity_1h - (-0.20)) < 0.0001
     
-    # Prove it triggers FLASH_CRASH_PANIC natively
-    from src.execution.exit_triggers import evaluate_exit_triggers
-    signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
-    assert signal is not None
-    assert signal.trigger == "FLASH_CRASH_PANIC"
+    # Flash crash panic would fire via Position.evaluate_exit when market_velocity_1h <= -0.15
+    # (this test is xfail / skipped — kept for context only)

@@ -1,9 +1,11 @@
 # Created: 2026-04-07
-# Last reused/audited: 2026-04-23
+# Last reused/audited: 2026-06-02
 # Authority basis: midstream verdict v2 2026-04-23 (docs/to-do-list/zeus_midstream_fix_plan_2026-04-23.md T1.a midstream guardian panel)
+# Wave 3 (2026-06-02): removed rolling_win_rate_20/drawdown_pct/max_drawdown (deleted from
+#   dynamic_kelly_mult). Tests repointed to surviving factors (ci_width, lead_days, portfolio_heat).
 """Tests for Kelly multiplicative cascade bounds. §P9.7.
 
-Verifies that worst-case products of ALL adjustments in dynamic_kelly_mult
+Verifies that worst-case products of ALL surviving adjustments in dynamic_kelly_mult
 stay within [0.001, 1.0] — i.e., the cascade cannot kill all sizing (→0)
 or produce leverage (>1.0 × base).
 
@@ -13,24 +15,21 @@ import pytest
 
 from src.strategy.kelly import dynamic_kelly_mult, kelly_size
 
-# Extreme parametrize cases: (ci_width, lead_days, win_rate, portfolio_heat, drawdown_pct, max_drawdown)
+# Extreme parametrize cases: (ci_width, lead_days, portfolio_heat)
+# rolling_win_rate_20/drawdown_pct/max_drawdown deleted Wave 3 (zero live callers).
 EXTREME_CASES = [
     # All worst-case simultaneously
-    pytest.param(0.30, 10, 0.20, 0.80, 0.19, 0.20, id="all_worst_case"),
+    pytest.param(0.30, 10, 0.80, id="all_worst_case"),
     # Wide CI only
-    pytest.param(0.30, 0,  0.50, 0.00, 0.00, 0.20, id="wide_ci_only"),
+    pytest.param(0.30, 0,  0.00, id="wide_ci_only"),
     # Long lead only
-    pytest.param(0.00, 10, 0.50, 0.00, 0.00, 0.20, id="long_lead_only"),
-    # Losing streak only
-    pytest.param(0.00, 0,  0.20, 0.00, 0.00, 0.20, id="losing_streak_only"),
+    pytest.param(0.00, 10, 0.00, id="long_lead_only"),
     # High heat only
-    pytest.param(0.00, 0,  0.50, 0.80, 0.00, 0.20, id="high_heat_only"),
-    # Near full drawdown
-    pytest.param(0.00, 0,  0.50, 0.00, 0.18, 0.20, id="near_full_drawdown"),
+    pytest.param(0.00, 0,  0.80, id="high_heat_only"),
     # Mixed severe
-    pytest.param(0.20, 7,  0.35, 0.60, 0.10, 0.20, id="mixed_severe"),
+    pytest.param(0.20, 7,  0.60, id="mixed_severe"),
     # Minimal stress (baseline)
-    pytest.param(0.05, 1,  0.55, 0.10, 0.00, 0.20, id="mild_conditions"),
+    pytest.param(0.05, 1,  0.10, id="mild_conditions"),
 ]
 
 BASE = 0.25
@@ -40,51 +39,44 @@ class TestKellyCascadeProductBounded:
     """Worst-case product of ALL multiplicative adjustments stays in [0.001, 1.0]."""
 
     @pytest.mark.parametrize(
-        "ci_width,lead_days,win_rate,portfolio_heat,drawdown_pct,max_drawdown",
+        "ci_width,lead_days,portfolio_heat",
         [case.values if hasattr(case, 'values') else case
          for case in EXTREME_CASES],
         ids=[c.id for c in EXTREME_CASES],
     )
     def test_cascade_product_lower_bound(
-        self, ci_width, lead_days, win_rate, portfolio_heat, drawdown_pct, max_drawdown
+        self, ci_width, lead_days, portfolio_heat
     ):
         """Result / base ≥ 0.001 — cascade cannot reduce to near-zero."""
         m = dynamic_kelly_mult(
             base=BASE,
             ci_width=ci_width,
             lead_days=lead_days,
-            rolling_win_rate_20=win_rate,
             portfolio_heat=portfolio_heat,
-            drawdown_pct=drawdown_pct,
-            max_drawdown=max_drawdown,
         )
         ratio = m / BASE if BASE > 0 else m
         assert ratio >= 0.001 or m >= 0.001, (
             f"Cascade product ratio={ratio:.6f} fell below 0.001 floor. "
             f"Inputs: ci_width={ci_width}, lead_days={lead_days}, "
-            f"win_rate={win_rate}, heat={portfolio_heat}, "
-            f"drawdown={drawdown_pct}/{max_drawdown}. "
+            f"heat={portfolio_heat}. "
             "The cascade must not destroy all sizing."
         )
 
     @pytest.mark.parametrize(
-        "ci_width,lead_days,win_rate,portfolio_heat,drawdown_pct,max_drawdown",
+        "ci_width,lead_days,portfolio_heat",
         [case.values if hasattr(case, 'values') else case
          for case in EXTREME_CASES],
         ids=[c.id for c in EXTREME_CASES],
     )
     def test_cascade_product_upper_bound(
-        self, ci_width, lead_days, win_rate, portfolio_heat, drawdown_pct, max_drawdown
+        self, ci_width, lead_days, portfolio_heat
     ):
         """Result ≤ base — cascade cannot increase beyond base (no leverage beyond full Kelly)."""
         m = dynamic_kelly_mult(
             base=BASE,
             ci_width=ci_width,
             lead_days=lead_days,
-            rolling_win_rate_20=win_rate,
             portfolio_heat=portfolio_heat,
-            drawdown_pct=drawdown_pct,
-            max_drawdown=max_drawdown,
         )
         assert m <= BASE + 1e-9, (
             f"Cascade result={m:.6f} exceeded base={BASE}. "
@@ -101,33 +93,12 @@ class TestKellyCascadeMinimumNotZero:
             base=BASE,
             ci_width=0.30,      # triggers both CI reductions
             lead_days=10,        # triggers lead reduction
-            rolling_win_rate_20=0.20,  # triggers win-rate reduction
             portfolio_heat=0.80,       # max heat reduction
-            drawdown_pct=0.19,         # near-full drawdown (not at 1.0)
-            max_drawdown=0.20,
         )
         assert m > 0.0, (
             f"dynamic_kelly_mult returned exactly 0.0 with extreme inputs. "
             "Zero multiplier kills all future sizing."
         )
-
-    def test_zero_drawdown_ratio_has_floor(self):
-        """drawdown_pct == max_drawdown → spec §P9.7 raises ValueError (fail-close)."""
-        with pytest.raises(ValueError, match="collapsed to"):
-            dynamic_kelly_mult(
-                base=BASE,
-                drawdown_pct=0.20,
-                max_drawdown=0.20,
-            )
-
-    def test_near_full_drawdown_has_floor(self):
-        """98% drawdown retains nonzero multiplier (cascade floor)."""
-        m = dynamic_kelly_mult(
-            base=BASE,
-            drawdown_pct=0.196,   # 98% of max
-            max_drawdown=0.20,
-        )
-        assert m > 0.0, "98% drawdown should still produce nonzero multiplier"
 
 
 class TestKellyCascadeMaximumBounded:
@@ -147,14 +118,14 @@ class TestKellyCascadeMaximumBounded:
         """All valid input combinations keep multiplier ≤ base."""
         for ci in [0.0, 0.12, 0.25]:
             for lead in [0, 3, 7]:
-                for wr in [0.30, 0.50, 0.70]:
+                for heat in [0.0, 0.20, 0.50]:
                     m = dynamic_kelly_mult(
                         base=base, ci_width=ci, lead_days=lead,
-                        rolling_win_rate_20=wr
+                        portfolio_heat=heat
                     )
                     assert m <= base + 1e-9, (
                         f"Multiplier {m} exceeded base {base} for "
-                        f"ci={ci}, lead={lead}, wr={wr}"
+                        f"ci={ci}, lead={lead}, heat={heat}"
                     )
 
 
@@ -168,10 +139,7 @@ class TestKellyFullCascadeWithSize:
             base=BASE,
             ci_width=0.25,
             lead_days=8,
-            rolling_win_rate_20=0.30,
             portfolio_heat=0.50,
-            drawdown_pct=0.15,
-            max_drawdown=0.20,
         )
         from src.contracts.execution_price import ExecutionPrice
         ep = ExecutionPrice(

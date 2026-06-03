@@ -83,19 +83,12 @@ class TestDynamicKellyMult:
         m_long = dynamic_kelly_mult(base=0.25, lead_days=6.0)
         assert m_long < m_short
 
-    def test_losing_streak_reduces(self):
-        m_winning = dynamic_kelly_mult(base=0.25, rolling_win_rate_20=0.60)
-        m_losing = dynamic_kelly_mult(base=0.25, rolling_win_rate_20=0.35)
-        assert m_losing < m_winning
-
-    def test_drawdown_reduces(self):
-        m = dynamic_kelly_mult(base=0.25, drawdown_pct=0.10, max_drawdown=0.20)
-        assert m == pytest.approx(0.25 * 0.5)
-
-    def test_full_drawdown_floors_at_minimum(self):
-        """INV-05 / §P9.7: full drawdown raises ValueError, not silent 0.001."""
-        with pytest.raises(ValueError, match="collapsed to"):
-            dynamic_kelly_mult(base=0.25, drawdown_pct=0.20, max_drawdown=0.20)
+    def test_heat_reduces(self):
+        # rolling_win_rate_20/drawdown_pct/max_drawdown deleted Wave 3 (zero live callers).
+        # portfolio_heat is the surviving concentration haircut.
+        m_cool = dynamic_kelly_mult(base=0.25, portfolio_heat=0.10)
+        m_hot = dynamic_kelly_mult(base=0.25, portfolio_heat=0.80)
+        assert m_hot < m_cool
 
     def test_nan_input_floors_at_minimum(self):
         """NaN from upstream must raise, not produce a floor."""
