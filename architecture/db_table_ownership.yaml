@@ -1171,10 +1171,17 @@ tables:
 
   - name: outcome_fact
     db: world
-    schema_class: world_class
-    schema_version_owner: SCHEMA_VERSION
+    schema_class: legacy_archived
+    schema_version_owner: null
     created_by: init_schema
     pk_col: null
+    notes: >
+      Pre-K1 intent was world_class, but the live writer (harvester.py
+      log_settlement_event) has always written to zeus_trades.db via trade_conn
+      (18 rows confirmed on zeus_trades.db, 0 on zeus-world.db per
+      probe-ownership.md 2026-06-03). Corrected to legacy_archived on world.db;
+      canonical writer is trade_class on trade.db (see entry below).
+      Drop after 2026-08-09.
 
   - name: platt_models
     db: world
@@ -2248,11 +2255,20 @@ tables:
 
   - name: outcome_fact
     db: trade
-    schema_class: legacy_archived
+    schema_class: trade_class
     schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    created_by: apply_architecture_kernel_schema_via_trade_conn
+    pk_col: position_id
+    notes: >
+      Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): canonical writer is
+      harvester.py log_settlement_event → log_outcome_fact, which receives
+      trade_conn (zeus_trades.db). 18 live rows confirmed on zeus_trades.db per
+      probe-ownership.md; world.db had 0 rows. DDL is in
+      architecture/2026_04_02_architecture_kernel.sql (applied to trade.db at boot
+      as a legacy ghost via pre-PR-S4b init_schema; ghost table now the canonical
+      home). Riskguard reads via get_trade_connection_with_world_required —
+      outcome_fact visible on trade.db side. No writer change needed.
+      Formerly declared legacy_archived — corrected to trade_class to match actuals.
 
   - name: platt_models
     db: trade

@@ -88,6 +88,10 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
 EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
     "_migrations_applied",
     "settlement_schema_migrations",  # P1-3 2026-05-19: migration-tracking for ensure_settlement_schema_ready
+    # Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): outcome_fact corrected
+    # to trade_class. Live writer (harvester log_settlement_event) writes to trade_conn;
+    # 18 rows on zeus_trades.db confirmed by probe-ownership.md.
+    "outcome_fact",
 })
 
 # ---------------------------------------------------------------------------
