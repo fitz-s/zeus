@@ -195,6 +195,7 @@ class MarketAnalysis:
         bootstrap_signal_type: str = "generic_ensemble",
         entry_quote_evidence_yes: list | None = None,
         entry_quote_evidence_no: list | None = None,
+        representativeness_sigma: float = 0.0,
     ):
         # Semantic Provenance Guard
         if False: _ = None.selected_method; _ = None.entry_method; _ = None.bias_correction
@@ -270,6 +271,20 @@ class MarketAnalysis:
             lead_days=lead_days,
             ensemble_spread=ensemble_spread,
         )  # centralized forecast-uncertainty seam
+        # REPRESENTATIVENESS VARIANCE (2026-06-03, pre-arm blocker iron rule 6).
+        # A mean-only EDLI bias correction shifts the member array but does NOT widen
+        # spread, so the bootstrap CI is over-confident on corrected cities. σ_repr is
+        # the per-city forecast-vs-settlement residual std (model_bias_ens.residual_sd_c,
+        # converted to the members' NATIVE unit by the adapter) — the irreducible
+        # representativeness uncertainty the ensemble spread does not capture. It is folded
+        # into the MC resampling noise IN QUADRATURE with the instrument/bootstrap sigma so
+        # q_lcb widens HONESTLY (only the LOWER bound; the POINT p_posterior is untouched).
+        # σ_repr=0.0 (no correction applied) => hypot(σ, 0) == σ exactly => bit-identical
+        # legacy behaviour. The adapter gates σ_repr>0 to fire ONLY when the bias correction
+        # was applied (members_already_corrected / _edli_bias_corrected True).
+        self._representativeness_sigma = float(representativeness_sigma)
+        if self._representativeness_sigma < 0 or not np.isfinite(self._representativeness_sigma):
+            raise ValueError("representativeness_sigma must be a finite, non-negative std dev")
         self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
         self._rng = np.random.default_rng(rng_seed)
         self._transfer_logit_sigma = float(transfer_logit_sigma)
@@ -394,7 +409,13 @@ class MarketAnalysis:
                 len(self.bins),
             )
         sample = self._rng.choice(self._member_maxes, size=n_members, replace=True)
-        noised = sample + self._rng.normal(0, self._sigma, n_members)
+        # MC noise = instrument/bootstrap sigma combined with the representativeness
+        # residual sigma IN QUADRATURE. Computed lazily here (not cached at construction)
+        # so a post-construction self._sigma mutation is still honoured. σ_repr=0 =>
+        # hypot(self._sigma, 0) == self._sigma exactly, preserving legacy behaviour
+        # bit-for-bit (including self._sigma=0 -> mc_sigma=0).
+        mc_sigma = float(np.hypot(self._sigma, self._representativeness_sigma))
+        noised = sample + self._rng.normal(0, mc_sigma, n_members)
         measured = self._settle(noised)
         return np.array([self._bin_probability(measured, bb) for bb in self.bins])
 

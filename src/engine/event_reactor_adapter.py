@@ -1579,16 +1579,29 @@ def _build_live_execution_command_certificates(
             pre_submit_revalidation_cert=pre_submit,
             decision_time=decision_time,
         )
-        from src.events.live_cap import LiveCapLedger
+        from src.events.live_cap import LiveCapLedger, cap_explicitly_disabled
 
+        # This is the durable re-reservation of the notional already computed by
+        # _build_live_cap_certificate_from_ledger above; it MUST honour the same
+        # explicit cap-disable sentinel, else an uncapped Kelly size would be
+        # rejected here as "exceeds". Fail-safe: missing/malformed sentinel keeps
+        # the cap enabled (cap_explicitly_disabled returns True only for literal
+        # false). max_orders_per_window (flood-guard) is untouched.
+        _edli_cfg = settings["edli_v1"]
         reserve_result = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
             decision_time=decision_time,
             cap_scope="tiny_live_canary",
             requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
             max_notional_usd=float(tiny_live_max_notional_usd),
-            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
-            max_orders_per_window=int(settings["edli_v1"].get("tiny_live_max_orders_per_window", 1)),
+            max_orders_per_day=int(_edli_cfg.get("tiny_live_max_orders_per_day", 1)),
+            max_orders_per_window=int(_edli_cfg.get("tiny_live_max_orders_per_window", 1)),
+            notional_cap_enabled=not cap_explicitly_disabled(
+                _edli_cfg.get("tiny_live_notional_cap_enabled")
+            ),
+            daily_order_cap_enabled=not cap_explicitly_disabled(
+                _edli_cfg.get("tiny_live_daily_order_cap_enabled")
+            ),
             final_intent_id=str(final_intent.payload["final_intent_id"]),
             execution_command_id=execution_command_id,
         )
@@ -1781,11 +1794,39 @@ def _build_live_cap_certificate_from_ledger(
 ) -> DecisionCertificate:
     if live_cap_conn is None:
         raise ValueError("LIVE_CAP_LEDGER_CONNECTION_REQUIRED")
-    from src.events.live_cap import LiveCapLedger
+    from src.events.live_cap import LiveCapLedger, cap_explicitly_disabled
+
+    # 2026-06-03 operator directive: the artificial $5 notional + 1/day caps may
+    # be EXPLICITLY disabled (config sentinel == literal false) so fractional
+    # Kelly is the sole notional-sizing constraint. FAIL-SAFE: a missing or
+    # malformed sentinel leaves the cap ENABLED (cap_explicitly_disabled returns
+    # True only for the literal Python False). The flood-guard rate window and
+    # the collateral check are untouched by these flags.
+    _edli_cfg = settings["edli_v1"]
+    notional_cap_enabled = not cap_explicitly_disabled(
+        _edli_cfg.get("tiny_live_notional_cap_enabled")
+    )
+    daily_order_cap_enabled = not cap_explicitly_disabled(
+        _edli_cfg.get("tiny_live_daily_order_cap_enabled")
+    )
     price = _float_or_default(receipt.c_fee_adjusted, 0.01)
-    min_order_notional = min(max_notional_usd, max(price, 0.01))
-    requested_notional = max(min(float(receipt.kelly_size_usd or 0.0), max_notional_usd), min_order_notional)
+    kelly_usd = float(receipt.kelly_size_usd or 0.0)
+    if notional_cap_enabled:
+        # Cap ON: clamp Kelly to the ceiling exactly as before.
+        min_order_notional = min(max_notional_usd, max(price, 0.01))
+        requested_notional = max(min(kelly_usd, max_notional_usd), min_order_notional)
+    else:
+        # Cap explicitly OFF: drop the min(kelly, max_notional) clamp so the full
+        # Kelly size passes through. The min-order floor (one tick) still guards
+        # against a sub-tick request; nothing above it is clamped.
+        min_order_notional = max(price, 0.01)
+        requested_notional = max(kelly_usd, min_order_notional)
     usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
+    # Self-consistent recorded ceiling: the actual size when uncapped, else the
+    # configured cap (mirrors LiveCapLedger.reserve's recorded_max_notional_usd).
+    recorded_max_notional_usd = (
+        float(max_notional_usd) if notional_cap_enabled else float(requested_notional)
+    )
     if persist:
         reservation = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
@@ -1793,7 +1834,9 @@ def _build_live_cap_certificate_from_ledger(
             cap_scope="tiny_live_canary",
             requested_notional_usd=float(requested_notional),
             max_notional_usd=float(max_notional_usd),
-            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
+            max_orders_per_day=int(_edli_cfg.get("tiny_live_max_orders_per_day", 1)),
+            notional_cap_enabled=notional_cap_enabled,
+            daily_order_cap_enabled=daily_order_cap_enabled,
             final_intent_id=receipt.final_intent_id,
         )
     else:
@@ -1804,8 +1847,8 @@ def _build_live_cap_certificate_from_ledger(
             event_id=event.event_id,
             decision_time=decision_time,
             cap_scope="tiny_live_canary",
-            max_notional_usd=float(max_notional_usd),
-            max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
+            max_notional_usd=recorded_max_notional_usd,
+            max_orders_per_day=int(_edli_cfg.get("tiny_live_max_orders_per_day", 1)),
             reserved_notional_usd=float(requested_notional),
             order_count=1,
             reservation_status="RESERVED",
@@ -3589,6 +3632,16 @@ def _market_analysis_from_event_snapshot(
         bias_applied=_bias_corrected, grid_applied=_grid_corrected,
         city=getattr(city, "name", family.city), target_date=str(family.target_date),
     )
+    # REPRESENTATIVENESS VARIANCE (iron rule 6, 2026-06-03): when (and only when) the EDLI
+    # bias correction was applied, the member MEAN was shifted but the spread was NOT widened.
+    # Fold the per-city forecast-vs-settlement residual σ (native unit) into the MC bootstrap
+    # noise so q_lcb widens honestly. σ_repr=0.0 when no correction => MarketAnalysis behaviour
+    # is byte-identical. Does NOT touch the POINT q (p_raw / p_posterior below) — only the CI.
+    representativeness_sigma = (
+        _edli_representativeness_sigma_native(snapshot=snapshot, family=family, city=city)
+        if _bias_corrected
+        else 0.0
+    )
     p_raw = _snapshot_p_raw(
         snapshot, family=family, bins=bins, members=members, payload=payload,
         members_already_corrected=True,
@@ -3648,6 +3701,7 @@ def _market_analysis_from_event_snapshot(
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
         bootstrap_signal_type="edli_event_bound_day0" if family.event_type == "DAY0_EXTREME_UPDATED" else "edli_event_bound_forecast",
+        representativeness_sigma=representativeness_sigma,  # iron rule 6: honest q_lcb widening on corrected domain
     )
 
 
@@ -3962,6 +4016,164 @@ def _maybe_apply_edli_bias_correction(
         except Exception:
             pass
         return members, False
+
+
+def _edli_representativeness_sigma_native(
+    *,
+    snapshot: dict[str, Any],
+    family,
+    city,
+) -> float:
+    """Per-city representativeness σ (forecast-vs-settlement residual std), NATIVE unit.
+
+    Iron-rule-6 pre-arm antibody (2026-06-03). The EDLI bias correction shifts the member
+    MEAN but does NOT widen the spread, so the bootstrap CI (q_lcb) is over-confident on
+    corrected cities. This returns the irreducible representativeness uncertainty — the std
+    of the forecast-vs-settlement residual the correction is trained on — so the caller can
+    fold it into the MC resampling noise in QUADRATURE and widen q_lcb honestly.
+
+    Primary source: model_bias_ens.residual_sd_c (edli_per_city_v1, VERIFIED, same row keyed
+    identically to _maybe_apply_edli_bias_correction). residual_sd_c is degC; for F-settled
+    cities the member array is degF so the σ is scaled ×1.8 (degC delta → degF delta).
+
+    Fallback: if the row carries no residual_sd_c, compute the per-city residual std from the
+    trailing-window settled residuals (mean over the last settled days of
+    raw_ens_mean − settlement, in settlement unit). Robust either way.
+
+    FAIL-SAFE: returns 0.0 only when no σ can be sourced (then q_lcb stays at today's
+    behaviour — never tighter). Never raises: a thrown exception here must not break the
+    live decision path, but a 0.0 here is the LEAST conservative outcome, so the primary
+    and fallback are both attempted before giving up.
+    """
+    _unit = getattr(city, "settlement_unit", "C")
+    _scale = 1.8 if _unit == "F" else 1.0
+
+    # ---- Primary: the residual_sd_c stamped on the VERIFIED edli bias row ----
+    try:
+        import contextlib
+        from src.calibration.manager import season_from_date
+        from src.calibration.ens_bias_repo import read_bias_model
+        from src.state.db import get_world_connection
+
+        ldv = _nonnull(
+            snapshot.get("dataset_id")
+            or snapshot.get("data_version")
+            or None
+        )
+        if ldv:
+            season = season_from_date(str(family.target_date), lat=city.lat)
+            _tmonth = int(str(family.target_date)[5:7])
+            with contextlib.closing(get_world_connection()) as conn:
+                conn.row_factory = sqlite3.Row
+                row = read_bias_model(
+                    conn,
+                    city=city.name,
+                    season=season,
+                    metric=family.metric,
+                    live_data_version=str(ldv),
+                    month=_tmonth,
+                    target_month=_tmonth,
+                    authority="VERIFIED",
+                    error_model_family=_EDLI_BIAS_FAMILY,
+                )
+            if row is not None:
+                keys = set(row.keys())
+                resid_c = row["residual_sd_c"] if "residual_sd_c" in keys else None
+                if resid_c is not None and float(resid_c) > 0.0 and np.isfinite(float(resid_c)):
+                    return float(resid_c) * _scale
+    except Exception as exc:
+        try:
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "representativeness σ primary read failed (trying fallback): %s", exc
+            )
+        except Exception:
+            pass
+
+    # ---- Fallback: trailing-window settled residual std (raw_ens_mean − settlement) ----
+    try:
+        sigma_native = _trailing_residual_std_native(family=family, city=city, scale=_scale)
+        if sigma_native is not None and sigma_native > 0.0 and np.isfinite(sigma_native):
+            return float(sigma_native)
+    except Exception as exc:
+        try:
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "representativeness σ fallback failed (σ_repr=0.0): %s", exc
+            )
+        except Exception:
+            pass
+    return 0.0
+
+
+# Trailing window (days) for the fallback per-city residual-std computation.
+_REPRESENTATIVENESS_FALLBACK_WINDOW_DAYS = 7
+_REPRESENTATIVENESS_FALLBACK_MIN_N = 3
+
+
+def _trailing_residual_std_native(*, family, city, scale: float) -> float | None:
+    """Compute per-city residual std (forecast raw_ens_mean − settlement) over the trailing
+    window of settled days, returned in the members' NATIVE unit.
+
+    Joins settlement_outcomes (settlement_value) to ensemble_snapshots (members_json →
+    raw ensemble mean) for the same city/metric. The residual is computed in the SETTLEMENT
+    unit (settlement_value and the snapshot members are both in the settlement unit at this
+    seam), so no per-source conversion is needed; ``scale`` only carries the degC→native
+    factor for callers whose σ source is degC (the primary path). Here the residual is
+    ALREADY native, so scale is NOT re-applied — the std is returned directly.
+
+    Returns None when fewer than _REPRESENTATIVENESS_FALLBACK_MIN_N settled residuals exist
+    (too thin to trust a scale), so the caller falls back to 0.0 (today's behaviour).
+    """
+    import contextlib
+    import json
+    import statistics
+    from src.state.db import get_forecasts_connection
+
+    _ = scale  # residual is already in native settlement unit; scale intentionally unused
+    metric = family.metric
+    target_date = str(family.target_date)
+    with contextlib.closing(get_forecasts_connection()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT s.target_date AS td, s.settlement_value AS sv, e.members_json AS mj
+            FROM settlement_outcomes s
+            JOIN ensemble_snapshots e
+              ON e.city = s.city
+             AND e.target_date = s.target_date
+             AND e.temperature_metric = s.temperature_metric
+            WHERE s.city = ?
+              AND s.temperature_metric = ?
+              AND s.authority = 'VERIFIED'
+              AND s.settlement_value IS NOT NULL
+              AND s.target_date < ?
+            ORDER BY s.target_date DESC
+            LIMIT ?
+            """,
+            (city.name, metric, target_date, _REPRESENTATIVENESS_FALLBACK_WINDOW_DAYS * 4),
+        ).fetchall()
+    residuals: list[float] = []
+    seen_dates: set[str] = set()
+    for r in rows:
+        td = str(r["td"])
+        if td in seen_dates:
+            continue
+        try:
+            members = json.loads(r["mj"]) if r["mj"] else None
+            if not members:
+                continue
+            ens_mean = float(np.mean(np.asarray(members, dtype=float)))
+            settlement = float(r["sv"])
+        except Exception:
+            continue
+        residuals.append(ens_mean - settlement)
+        seen_dates.add(td)
+        if len(seen_dates) >= _REPRESENTATIVENESS_FALLBACK_WINDOW_DAYS:
+            break
+    if len(residuals) < _REPRESENTATIVENESS_FALLBACK_MIN_N:
+        return None
+    return float(statistics.stdev(residuals))
 
 
 def _maybe_apply_grid_representativeness_correction(
