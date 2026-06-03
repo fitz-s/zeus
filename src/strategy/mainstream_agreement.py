@@ -8,18 +8,24 @@
 #   src/types/market.py.
 """Mainstream-forecast direction-agreement gate (#135).
 
-THE STRUCTURAL ANTIBODY. The EDLI reactor ranks candidates by `trade_score`,
-which is *maximized* by the cold/warm-bias failure mode: the worse OUR forecast
-diverges from reality, the higher the false q (and trade_score) on a wrong-side
-bet. With no independent reference, trade_score rank is anti-correlated with
-arm-eligibility for the bias cities (SF, Tel Aviv). This module makes that
-false-positive CATEGORY impossible — not by patching today's instance, but by
-requiring every arm/trade-eligible candidate to AGREE with an independent
-mainstream forecast AND be direction-consistent both with the mainstream and
-with our own modal bin.
+REFERENCE-ONLY (operator directive 2026-06-03). This module computes an
+independent cross-check: does OUR forecast AGREE with an external mainstream
+forecast, and is the traded direction consistent with both the mainstream-implied
+bin and our own modal bin? The verdict is RECORDED on every shadow receipt to
+inform the ARM decision — it lets the operator see, on the forecast's top
+candidate, whether internal and external signals independently agree.
 
-The gate is a STANDARD, not a re-weight: a high enough trade_score can never buy
-back eligibility once any of the four checks fails.
+It takes NO part in production selection. Production trades on the FORECAST
+(trade_score / q_lcb / Kelly); the gate verdict can NEVER exclude a candidate
+(see event_reactor_adapter._selected_candidate_proof). Operator rationale: "if we
+use the forecast for calculation, none of these exist — we just use the forecast
+to trade; the only reason we are in shadow is the candidates do not yet reflect
+real Polymarket trades, not this gate." The real fix for cold/warm-bias false
+positives is the FORECAST (the bias correction itself), not a blocking gate.
+
+The four checks below still compute a meaningful pass/fail SIGNAL (the ARM
+reference); the #135-B independence flag records when a mainstream agreement was
+manufactured by a large bias correction. None of it filters the trade.
 
 DIRECTION LAW (never invert — operator-flagged recurring confusion):
   - buy_yes(bin) ⟺ traded bin ≈ forecast modal bin (we predict it SETTLES here).
@@ -67,11 +73,12 @@ FAIL_NOT_CLOSE = "MAINSTREAM_NOT_CLOSE"
 FAIL_DIR_VS_MAINSTREAM = "DIRECTION_AGREES_MAINSTREAM_SHORTING_LIKELY"
 FAIL_DIR_VS_MAINSTREAM_YES = "DIRECTION_DISAGREES_MAINSTREAM_BUY_YES_OFF_BIN"
 FAIL_DIR_VS_OUR_MODAL = "DIRECTION_INVERSION_VS_OUR_MODAL"
-# The corrected forecast agrees with mainstream ONLY because a large bias
-# correction pulled it there; the RAW (uncorrected) forecast does NOT agree. The
-# agreement is manufactured, not two independent signals confirming each other
-# (the cold-bias HURT-city false positive, e.g. Tel Aviv raw 25.9 +4°→29.9 vs
-# mainstream 29.5). Recorded so the demotion is auditable.
+# RETIRED as a fail path (2026-06-03). Originally demoted candidates whose
+# mainstream agreement existed only because a large bias correction moved the
+# forecast (raw disagreed). The grid-to-point investigation proved those
+# corrections are OOS-validated legitimate (raw is the biased number), so the
+# condition is now recorded as pure provenance (verdict.agreement_correction_dependent)
+# and never sets fail_reason. Constant kept for receipt-vocab back-compat.
 FAIL_BIAS_CORRECTION_DEPENDENT = "AGREEMENT_BIAS_CORRECTION_DEPENDENT"
 PASS = "PASS"
 
@@ -98,9 +105,12 @@ class MainstreamAgreementVerdict:
     direction_agrees_our_modal: bool
     passed: bool
     fail_reason: str
-    # Independence-of-agreement fields (#135-B). raw_our_point is the UNCORRECTED
-    # ensemble mean; when supplied, the gate demotes candidates whose mainstream
-    # agreement exists only because a large bias correction moved our forecast.
+    # Provenance fields (#135-B, demotion retired 2026-06-03). raw_our_point is the
+    # UNCORRECTED ensemble mean. agreement_correction_dependent records when the
+    # mainstream agreement relies on the bias correction (corrected close, raw not).
+    # These are INFORMATIONAL only — the operator reads the raw-vs-corrected
+    # divergence; they never flip `passed` (the correction is OOS-validated
+    # legitimate; we trade on the corrected forecast).
     raw_our_point: float | None = None
     bias_applied: float | None = None          # our_point - raw_our_point
     agrees_on_raw: bool | None = None           # |raw_our_point - mainstream| <= tol
@@ -291,13 +301,19 @@ def evaluate_mainstream_agreement(
     # CHECK 2 — closeness (cold/warm-bias kill switch).
     mainstream_close = abs(forecast_delta) <= tol
 
-    # CHECK 2b — INDEPENDENCE: the agreement must be genuine, not manufactured by a
-    # large bias correction. our_point is the bias-CORRECTED forecast; raw_our_point
-    # is the UNCORRECTED ensemble mean. If the corrected forecast is close to
-    # mainstream but the RAW forecast is NOT, the correction is what created the
-    # agreement (the cold-bias HURT-city false positive: Tel Aviv raw 25.9 +4°→29.9
-    # vs mainstream 29.5). Demote — internal and external are not independently
-    # confirming. When raw_our_point is absent, the check is skipped (never demotes).
+    # CHECK 2b — PROVENANCE ANNOTATION (informational; does NOT demote as of
+    # 2026-06-03). our_point is the bias-CORRECTED forecast; raw_our_point is the
+    # UNCORRECTED ensemble mean. agreement_correction_dependent records WHEN the
+    # corrected forecast is close to mainstream but the raw is not — i.e. the
+    # mainstream agreement relies on the bias correction. This was originally a
+    # demotion (#135-B), on the hypothesis the +4° cold-bias correction was
+    # "manufactured". The 2026-06-03 grid-to-point investigation DISPROVED that:
+    # the correction is OOS-validated legitimate (the raw is the biased number, the
+    # corrected is the better estimate — ECMWF mx2t3 is a grid-cell average, coastal
+    # cells average in cool sea while the settling station is warm/inland). So the
+    # flag is now PURE PROVENANCE the operator can read (raw vs corrected divergence),
+    # NOT a verdict — we trade on the corrected forecast. When raw_our_point is
+    # absent the annotation is simply skipped.
     raw_pt = None if raw_our_point is None else float(raw_our_point)
     bias_applied = None if raw_pt is None else (float(our_point) - raw_pt)
     agrees_on_raw = None if raw_pt is None else (abs(raw_pt - main_pt) <= tol)
@@ -340,9 +356,13 @@ def evaluate_mainstream_agreement(
     #      is the catch that fires when our forecast AGREES with mainstream (so
     #      checks 1-2 pass) yet the assigned direction still contradicts our own
     #      modal bin (the bias-warped-q wrong-side firing the operator flagged).
+    # passed reflects whether the forecast WE TRADE (the bias-corrected point)
+    # agrees with mainstream and is direction-consistent. agreement_correction_dependent
+    # is recorded but does NOT demote (see CHECK 2b — the correction is legitimate;
+    # demoting a city for carrying a validated correction would penalise the correct
+    # forecast). Reference-only either way: this verdict never gates production.
     passed = (
         mainstream_close
-        and not agreement_correction_dependent
         and direction_agrees_mainstream
         and direction_agrees_our_modal
     )
@@ -350,10 +370,6 @@ def evaluate_mainstream_agreement(
         fail_reason = PASS
     elif not mainstream_close:
         fail_reason = FAIL_NOT_CLOSE
-    elif agreement_correction_dependent:
-        # Closeness holds only because of the bias correction (raw disagrees) —
-        # not an independent internal+external match. Ranks just after closeness.
-        fail_reason = FAIL_BIAS_CORRECTION_DEPENDENT
     elif not direction_agrees_mainstream:
         fail_reason = (
             FAIL_DIR_VS_MAINSTREAM if direction == "buy_no" else FAIL_DIR_VS_MAINSTREAM_YES

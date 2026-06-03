@@ -120,7 +120,8 @@
     "edli_live_min_realized_edge_bps": 0,
     "no_submit_visible_depth_fill_lcb": 0.05,
     "tiny_live_max_notional_usd": 5.0,
-    "tiny_live_max_orders_per_day": 1
+    "tiny_live_max_orders_per_day": 1,
+    "mainstream_agreement_gate_enabled": true
   },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",

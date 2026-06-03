@@ -92,7 +92,10 @@ class _CandidateProof:
     p_live_vector_hash: str
     missing_reason: str | None = None
     # Mainstream-agreement gate verdict (Task #135). None = gate not evaluated
-    # (flag OFF or evaluation failed). When populated, `.passed` controls arm-eligibility.
+    # (flag OFF or evaluation failed). REFERENCE-ONLY (operator directive
+    # 2026-06-03): recorded on the receipt to inform the ARM decision; it does
+    # NOT gate production selection (see _selected_candidate_proof). `.passed` is
+    # an arm-decision reference signal, never a selection filter.
     mainstream_agreement: dict | None = None
 
 
@@ -3106,10 +3109,6 @@ def _generate_candidate_proofs(
 
 
 def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_CandidateProof, ...]) -> _CandidateProof | None:
-    from src.config import settings
-
-    gate_enabled = bool(settings["edli_v1"].get("mainstream_agreement_gate_enabled", False))
-
     requested_token = _nonnull(payload.get("token_id"))
     requested_condition = _nonnull(payload.get("condition_id"))
     if requested_token:
@@ -3120,25 +3119,18 @@ def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_Candida
                 continue
             return proof
         return None
-    # When the mainstream-agreement gate is enabled, exclude any proof whose gate verdict
-    # explicitly failed (i.e. the gate ran AND passed=False). Proofs where the verdict is
-    # absent (gate flag off or evaluation error) are treated as eligible — fail-open for
-    # the selector, since the gate-evaluation wrapper already logged the error.
-    def _gate_eligible(proof: _CandidateProof) -> bool:
-        if not gate_enabled:
-            return True
-        v = proof.mainstream_agreement
-        if v is None:
-            return True  # gate not evaluated — admit (fail-open in selector)
-        return bool(v.get("mainstream_agreement_pass", True))
-
-    eligible = [proof for proof in proofs if _gate_eligible(proof)]
-    if not eligible:
-        # All proofs failed the gate — return None so the receipt is a clean no_submit.
-        return None
-    executable = [proof for proof in eligible if proof.execution_price is not None]
+    # REFERENCE-ONLY GATE (operator directive 2026-06-03). The mainstream-agreement
+    # verdict (#135 + #135-B) is computed and recorded on the receipt to inform the
+    # ARM decision — it lets the operator see whether the forecast's top candidate
+    # agrees with an independent mainstream. It takes NO part in production selection:
+    # we trade on the FORECAST. Production picks the forecast's best candidate by
+    # (trade_score, q_lcb); the gate can never exclude a candidate. (The selector used
+    # to drop gate-failed proofs; that exclusion is removed so the forecast's true
+    # pick always reaches the receipt with its verdict annotated. The only reason
+    # these are no_submit is shadow/arm=False, not the mainstream gate.)
+    executable = [proof for proof in proofs if proof.execution_price is not None]
     if not executable:
-        return max(eligible, key=lambda proof: proof.q_lcb_5pct, default=None)
+        return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
     return max(executable, key=lambda proof: (proof.trade_score, proof.q_lcb_5pct))
 
 
