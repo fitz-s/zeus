@@ -28,6 +28,14 @@ test_trust_policy:
   # Machine-readable registry: 122 tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_boot_guard_pin_shape.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_calibration_manager_w0.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_migration_converge_settlement_store.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_unblock_w1_cert_dual_chain.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_unblock_w1_intake_phase_filter.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_unblock_w1_low_identity_platt.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_w2_settlement_unit_writer.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_wave3_rt_exit_kelly.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/engine/test_executable_snapshot_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/engine/test_cost_basis_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/engine/test_bias_decay_kelly_haircut.py: {created: "2026-05-31", last_used: "2026-05-31"}
@@ -903,10 +911,29 @@ categories:
     - tests/test_run_mode_failure_surfaces.py
     # codereview-may19-2 P1-1: ACK facts durable post-SDK-submit (unconditional commit in _live_order).
     - tests/test_live_order_ack_durability.py
+    # EDLI e2e gate-unblock W0-W3 (2026-06-03) — RED->GREEN relationship antibodies.
+    # W0 boot-guards: calibration pin shape is dict + frozen_as_of staleness.
+    - tests/test_boot_guard_pin_shape.py
+    # W0 dead calibration-pin config cleanup in src/calibration/manager.py.
+    - tests/test_calibration_manager_w0.py
+    # W0 ghost-table archive migration (202606_converge_settlement_store).
+    - tests/test_migration_converge_settlement_store.py
+    # W1 certificate dual-chain source_run binding (benign 00Z->12Z passes; fabricated fails).
+    - tests/test_unblock_w1_cert_dual_chain.py
+    # W1 LOW identity-Platt registration: get_calibrator('low') -> (cal, 1).
+    - tests/test_unblock_w1_low_identity_platt.py
+    # W2 settlement_outcomes unit-writer + VERIFIED-unit guard + P&L resolver repoint.
+    - tests/test_w2_settlement_unit_writer.py
+    # W3 exit-path consolidation + Kelly dead-param removal (one exit path, one sizing rule).
+    - tests/test_wave3_rt_exit_kelly.py
 
   useful_regression:
     - tests/test_alpha_target_coherence.py
     - tests/test_auto_pause_entries.py
+    # W1 shared market-phase admissibility predicate (intake + reactor backstop).
+    # Environment-conditional: skips when the runtime registry has no Europe/London
+    # city; a regression guard on the shared predicate, not an unconditional law.
+    - tests/test_unblock_w1_intake_phase_filter.py
     - tests/test_b063_rescue_events.py
     - tests/test_backfill_completeness_guardrails.py
     - tests/test_backfill_openmeteo_previous_runs.py

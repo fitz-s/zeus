@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Relationship tests for W2 settlement_unit writer + VERIFIED=>unit guard + P&L resolver repoint.
+# Reuse: Run with pytest on temp DBs only; update with settlement_outcomes schema/trigger or resolver query changes.
+# Authority basis: W2 settlement-store convergence (HANDOFF_2026-06-02_emos_ci.md).
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Authority basis: W2 settlement-store convergence spec (HANDOFF_2026-06-02_emos_ci.md)
@@ -22,8 +26,6 @@ All fixtures use temp in-memory or tmp-file DBs; never touch live state paths.
 from __future__ import annotations
 
 import sqlite3
-import tempfile
-import os
 from pathlib import Path
 
 import pytest
@@ -212,22 +214,11 @@ class TestRTW2c:
         conn.row_factory = sqlite3.Row
         # Create only settlement_outcomes — NOT the legacy settlements table
         _create_settlement_outcomes(conn)
-        # Insert one VERIFIED row
-        conn.execute(
-            """
-            INSERT INTO settlement_outcomes
-              (city, target_date, temperature_metric, market_slug,
-               winning_bin, settlement_value, settlement_source,
-               settled_at, authority, settlement_unit)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "Warsaw", "2026-06-01", "high",
-                "weather-warsaw-high-2026-06-01",
-                "above-20", 22.5, "wu_EPWA",
-                "2026-06-01T18:00:00Z", "VERIFIED", "C",
-            ),
-        )
+        # NO VERIFIED rows: this test only proves the resolver reads FROM
+        # settlement_outcomes and does not crash when the legacy `settlements`
+        # table is absent. Inserting a VERIFIED row would drive the trading-side
+        # write path (load_portfolio/decision_log/commit_then_export) and break
+        # fixture isolation (RT-W2c #021).
         conn.commit()
         conn.close()
         return db_path
@@ -272,8 +263,14 @@ class TestRTW2c:
             else:
                 os.environ["ZEUS_HARVESTER_LIVE_ENABLED"] = old_flag
 
-        assert result.get("status") != "settlements_read_error", (
-            f"resolve_pnl returned settlements_read_error: {result}. "
-            "The resolver is still reading FROM settlements (legacy table). "
-            "Fix: change FROM settlements → FROM settlement_outcomes."
+        # Post-repoint the resolver reaches the empty settlement_outcomes table,
+        # finds no VERIFIED rows, and returns status='awaiting_truth_writer'.
+        # Asserting the exact success status is a stronger antibody than != error:
+        # it false-passes if the resolver regresses to a different error status
+        # or quietly returns an unexpected path (#008/#022).
+        assert result.get("status") == "awaiting_truth_writer", (
+            f"Expected resolve_pnl to return status='awaiting_truth_writer' (empty "
+            f"settlement_outcomes, no VERIFIED rows), got: {result}. "
+            "The resolver must SELECT FROM settlement_outcomes and return the "
+            "awaiting_truth_writer status when no verified rows are found."
         )

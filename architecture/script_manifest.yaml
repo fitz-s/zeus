@@ -423,6 +423,47 @@ scripts:
     reason: "WU ICAO daily observation backfill; Phase B source-conversion lane derives station identity from config/cities.json and supports explicit start/end date scope."
   baseline_experiment.py: {class: diagnostic_report_writer, write_targets: [state/baseline_results.json, stdout]}
   build_correlation_matrix.py: {class: config_writer, write_targets: [config/city_correlation_matrix.json], target_db: config/city_correlation_matrix.json, unguarded_write_rationale: "Existing generator writes active config without an apply flag; must be packet-reviewed before use."}
+  build_low_identity_platt.py:
+    class: promotion_write
+    status: active
+    lifecycle: long_lived
+    authority_scope: promotion_write
+    dangerous_if_run: true
+    dry_run_default: true
+    apply_flag: "--db"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 scripts/build_low_identity_platt.py [--db state/zeus-world.db] [--clusters ...] [--seasons ...] [--dry-run]"
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    reuse_when: >
+      Build LOW identity-Platt rows (calibration_method=identity_full_transport_v1,
+      authority=VERIFIED, n_samples=0) into platt_models (zeus-world.db) so the LOW
+      live read seam get_calibrator(temperature_metric='low') hits an identity bucket
+      and returns (IdentityCalibrator, 1) instead of (None, 4) ->
+      CALIBRATION_AUTHORITY_EVIDENCE_MISSING. recorded_at/fitted_at are pinned strictly
+      before calibration.pin frozen_as_of so the frozen-pin load filter does not hide
+      them. DRY-RUN by default; writes only when an explicit --db is passed.
+    do_not_use_when: >
+      Do not run with --db (apply) without confirming a verified DB backup and that the
+      target world.db is the intended write surface. Identity LOW is the certified
+      no-trained-Platt route, NOT a missing-Platt fallback; do not use to mask a stale
+      learned-Platt row.
+    promotion_barrier: >
+      Inert on live until the operator runs this against state/zeus-world.db AND the LOW
+      path is exercised; the receipt continues to fail-closed (None, 4) until then.
+      Idempotent via INSERT OR REPLACE on model_key; re-running overwrites same keys.
+    unguarded_write_rationale: >
+      Operator-directed registration: writes the identity LOW calibration rows the live
+      EDLI LOW path reads. Rows are idempotent (INSERT OR REPLACE by model_key) and
+      fail-closed in the reactor (absent row -> None,4 -> no LOW trade).
+    required_helpers:
+      - src/calibration/platt.py::IDENTITY_CALIBRATION_METHOD
+      - src/state/db.py::get_connection
+      - src/contracts/ensemble_snapshot_provenance.py::TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION
+      - src/types/metric_identity.py::LOW_LOCALDAY_MIN
+    required_tests: [tests/test_unblock_w1_low_identity_platt.py]
   capture_replay_artifact.py: {class: shadow_artifact_writer}
   check_advisory_gates.py: {class: enforcement}
   check_forecast_live_e2e.py:
