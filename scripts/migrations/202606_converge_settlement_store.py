@@ -3,12 +3,14 @@
 # Authority basis: UNIFICATION-DESIGN data-truth 2026-06-03
 """Archive ghost Platt/model_bias tables in zeus-forecasts.db.
 
-Scope
------
-This migration archives ghost Platt/model_bias tables ONLY.
-It does NOT touch any settlement table (settlements, settlement_outcomes,
-or any settlement-related schema). Settlement store convergence is handled
-entirely by W2's db.py/v2_schema.py changes (schema DDL + triggers).
+Migration semantic policy:
+  This migration performs ONLY ghost-table cleanup on zeus-forecasts.db.
+  It does NOT touch any settlement table (settlements, settlement_outcomes,
+  or any settlement-related schema). Settlement store convergence is handled
+  entirely by W2's db.py/v2_schema.py changes (schema DDL + triggers).
+  The three tables operated on (platt_models_v2, platt_models, model_bias)
+  carry no live-path reads or writes (0-row ghosts or dead-config artifact).
+  down() recreates empty ghost shells only for reversibility; no data at stake.
 
 Background
 ----------
