@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused or audited: 2026-06-03
 # Authority basis: DEFECT-1 capital-recoverability bridge — EDLI fill → canonical
 #   position_current. Audit: an EDLI FILL_CONFIRMED writes only
 #   edli_live_order_events + edli_live_profit_audit and NEVER a position_current
@@ -80,18 +80,33 @@ def edli_bridge_position_id(aggregate_id: str) -> str:
 
     Width: full SHA-256 hex digest (64 chars) prefixed with "edli" = 68 chars
     total, giving 256 bits of collision resistance.  The former 11-char
-    truncation (``_TRADE_ID_WIDTH = 11``) yielded only 28 effective bits
-    (4-char literal "edli" + 7 hex chars), making silent position_current
-    merge via ON CONFLICT(position_id) DO UPDATE probable at ~10 k fills
-    (birthday bound ≈ 19 % at 10 k).  FIX #96.
+    truncation yielded only 28 effective bits (4-char literal "edli" + 7 hex
+    chars), making silent position_current merge via ON CONFLICT(position_id)
+    DO UPDATE probable at ~10 k fills (birthday bound ≈ 19 % at 10 k).
+    FIX #96.
 
-    Backward-compat: existing rows written with the old short ID keep their
-    IDs unchanged — they are never read via this function again (each
-    aggregate is stable once written).  New fills from this commit onward
-    receive the full-width ID.
+    **Idempotency / legacy-row note**: callers that test for the existence of
+    a ``position_current`` row MUST also probe with ``edli_bridge_position_id_legacy``
+    to handle the 101 rows written before this widening.  See
+    ``_edli_durable_fill_bridge_scan`` in src/main.py for the dual-probe
+    pattern.  New fills written after this commit use the wide 68-char ID.
     """
     digest = hashlib.sha256(str(aggregate_id).encode("utf-8")).hexdigest()
     return "edli" + digest
+
+
+def edli_bridge_position_id_legacy(aggregate_id: str) -> str:
+    """Return the OLD 11-char position_id for ``aggregate_id`` (pre-FIX-#96).
+
+    Used ONLY to detect whether a ``position_current`` row was written before
+    the widening, so that ``_edli_durable_fill_bridge_scan`` does not
+    re-bridge an already-bridged aggregate that has a legacy short ID.
+
+    Do NOT use this to write new rows.  Call ``edli_bridge_position_id``
+    (the 68-char form) for all new writes.
+    """
+    digest = hashlib.sha256(str(aggregate_id).encode("utf-8")).hexdigest()
+    return ("edli" + digest)[:11]
 
 
 def _edli_events_table(conn: sqlite3.Connection) -> str:

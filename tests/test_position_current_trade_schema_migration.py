@@ -1,5 +1,8 @@
 # Created: 2026-06-03
 # Last reused/audited: 2026-06-03
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Antibody — W2 P&L columns must land on zeus_trades.db (init_schema_trade_only), not zeus-world.db.
+# Reuse: Confirm init_schema_trade_only and _ensure_position_current_authority_columns are unchanged; check db_table_ownership.yaml position_current entry.
 # Authority basis: /tmp/probe-ownership.md (K1 design: position_current is
 #   trade_class on zeus_trades.db); architecture/db_table_ownership.yaml;
 #   BUG #128 (W2 P&L columns); fix/prearm-fill-exit-readiness repoint 1.

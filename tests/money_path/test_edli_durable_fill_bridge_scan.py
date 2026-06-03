@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-06-01
+# Last reused/audited: 2026-06-03
 # Authority basis: MF-1 / DEFECT-1 — durable self-healing EDLI fill -> position_current
 #   bridge. Verified defect: the position bridge in src/main.py was driven SOLELY
 #   by the transient in-memory set ``_edli_fill_bridge_aggregate_ids`` (populated
@@ -314,3 +314,67 @@ class TestDurableFillBridgeScan:
         ).fetchone()[0]
         assert row == 0, "MATCHED-only fill must NOT be bridged"
         assert bridged == 0
+
+    def test_legacy_short_id_row_not_rebridged(self):
+        """Relationship test (FIX #96 idempotency): a position_current row written
+        BEFORE the SHA-256 widening (11-char id, e.g. 'edlid75be65') MUST be
+        detected by the durable scan so the same aggregate is NOT re-bridged into
+        a second row.
+
+        RED under naive widening: ``_edli_durable_fill_bridge_scan`` probed only
+        the new 68-char id, missed the legacy 11-char row, and materialised a
+        duplicate — a second position_current row for the same real fill =
+        duplicate capital ownership = live-money hazard.
+
+        GREEN after dual-probe fix: scan checks both the wide AND legacy id;
+        finds the legacy row; skips bridging; no duplicate created.
+
+        Uses the brute-force collision pair aggregate_id 'agg-1508' (legacy id =
+        'edlid75be65') as the known legacy row stand-in.
+        """
+        from src.events.edli_position_bridge import (
+            edli_bridge_position_id,
+            edli_bridge_position_id_legacy,
+        )
+        from src.main import _edli_durable_fill_bridge_scan
+
+        conn = _make_conn()
+        # 'agg-1508' → legacy short id 'edlid75be65' (brute-force verified)
+        aggregate_id = "agg-1508"
+        legacy_id = edli_bridge_position_id_legacy(aggregate_id)
+        wide_id = edli_bridge_position_id(aggregate_id)
+        assert legacy_id == "edlid75be65"
+        assert legacy_id != wide_id, "sanity: legacy and wide ids must differ"
+
+        # Simulate a legacy row: EDLI events present on disk (fill confirmed),
+        # but position_current was written with the OLD short id.
+        _seed_confirmed_fill_aggregate(conn, aggregate_id=aggregate_id)
+        conn.execute(
+            """INSERT INTO position_current
+               (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric)
+               VALUES (?, 'active', ?, 'settlement_capture', '2026-06-01T00:00:00', 'high')""",
+            (legacy_id, legacy_id),
+        )
+        conn.commit()
+
+        # Precondition: exactly one row exists, under the legacy short id.
+        before = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+        assert before == 1, f"precondition: one legacy row; got {before}"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_current WHERE position_id = ?", (legacy_id,)
+        ).fetchone()[0] == 1
+
+        bridged = _edli_durable_fill_bridge_scan(
+            conn, now=__import__("datetime").datetime(2026, 6, 3, tzinfo=__import__("datetime").timezone.utc)
+        )
+        conn.commit()
+
+        # The scan MUST detect the legacy row and skip re-bridging.
+        total = conn.execute("SELECT COUNT(*) FROM position_current").fetchone()[0]
+        assert total == 1, (
+            f"Duplicate row created: scan re-bridged a legacy-id aggregate "
+            f"(expected 1 row, got {total}). Live-money hazard: duplicate capital ownership."
+        )
+        assert bridged == 0, (
+            f"scan reported bridged={bridged} but the legacy row should have been found"
+        )
