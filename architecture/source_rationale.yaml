@@ -1764,6 +1764,12 @@ files:
     downstream:
     - src/engine/evaluator.py
     - src/engine/replay.py
+  src/strategy/mainstream_agreement.py:
+    zone: K3_extension
+    authority_role: arm_reference_crosscheck
+    why: Reference-only mainstream-forecast agreement cross-check (#135). Records a pass/fail signal on the receipt to inform the ARM decision; NEVER gates production selection (we trade on the forecast). Pure — no I/O.
+    downstream:
+    - src/engine/event_reactor_adapter.py
   src/strategy/market_analysis.py:
     zone: K3_extension
     authority_role: edge_bootstrap_engine

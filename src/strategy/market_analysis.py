@@ -227,6 +227,11 @@ class MarketAnalysis:
         self.p_posterior = self._compute_posterior(self.p_cal)
         self.vig = None if self.p_market is None else float(self.p_market.sum())
         raw_member_maxes = _finite_member_extrema(member_maxes)
+        # Preserve the RAW (pre-bias-correction) ensemble so the mainstream gate
+        # (#135-B) can tell whether agreement with mainstream is independent or
+        # only an artifact of a large bias correction. Read-only; adds no
+        # correction — _member_maxes (below) remains the corrected array used by q.
+        self._raw_member_maxes = raw_member_maxes
         self._member_maxes = analysis_member_maxes(
             raw_member_maxes,
             unit=unit,
@@ -345,6 +350,21 @@ class MarketAnalysis:
         hard bug into a fail-open gate (the antibody the gate is meant to be).
         """
         return self._member_maxes
+
+    @property
+    def raw_member_maxes(self) -> "np.ndarray":
+        """Public accessor for the pre-mean-offset ensemble member maxima.
+
+        Returns the _raw_member_maxes array as set at construction time — the
+        per-member values BEFORE the analysis mean-offset is applied
+        (analysis_member_maxes). Note: in the EDLI event-bound runtime path,
+        bias/grid corrections are applied upstream before MarketAnalysis is
+        constructed, so this array already reflects those upstream corrections.
+        It is NOT guaranteed to be a genuinely pre-correction array; callers
+        should treat it as provenance/informational only. Adds no further
+        transformation — it merely exposes what was stored at construction.
+        """
+        return self._raw_member_maxes
 
     @property
     def unit(self) -> str:

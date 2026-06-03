@@ -92,7 +92,10 @@ class _CandidateProof:
     p_live_vector_hash: str
     missing_reason: str | None = None
     # Mainstream-agreement gate verdict (Task #135). None = gate not evaluated
-    # (flag OFF or evaluation failed). When populated, `.passed` controls arm-eligibility.
+    # (flag OFF or evaluation failed). REFERENCE-ONLY (operator directive
+    # 2026-06-03): recorded on the receipt to inform the ARM decision; it does
+    # NOT gate production selection (see _selected_candidate_proof). `.passed` is
+    # an arm-decision reference signal, never a selection filter.
     mainstream_agreement: dict | None = None
 
 
@@ -3097,7 +3100,7 @@ def _generate_candidate_proofs(
                     p_cal_vector_hash=str(probability_evidence["p_cal_vector_hash"]),
                     p_live_vector_hash=str(probability_evidence["p_live_vector_hash"]),
                     missing_reason=missing_reason,
-                    mainstream_agreement=_payload(event).get(
+                    mainstream_agreement=payload.get(
                         "_mainstream_agreement_verdicts", {}
                     ).get((condition_id, direction)),
                 )
@@ -3106,10 +3109,6 @@ def _generate_candidate_proofs(
 
 
 def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_CandidateProof, ...]) -> _CandidateProof | None:
-    from src.config import settings
-
-    gate_enabled = bool(settings["edli_v1"].get("mainstream_agreement_gate_enabled", False))
-
     requested_token = _nonnull(payload.get("token_id"))
     requested_condition = _nonnull(payload.get("condition_id"))
     if requested_token:
@@ -3120,25 +3119,18 @@ def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_Candida
                 continue
             return proof
         return None
-    # When the mainstream-agreement gate is enabled, exclude any proof whose gate verdict
-    # explicitly failed (i.e. the gate ran AND passed=False). Proofs where the verdict is
-    # absent (gate flag off or evaluation error) are treated as eligible — fail-open for
-    # the selector, since the gate-evaluation wrapper already logged the error.
-    def _gate_eligible(proof: _CandidateProof) -> bool:
-        if not gate_enabled:
-            return True
-        v = proof.mainstream_agreement
-        if v is None:
-            return True  # gate not evaluated — admit (fail-open in selector)
-        return bool(v.get("mainstream_agreement_pass", True))
-
-    eligible = [proof for proof in proofs if _gate_eligible(proof)]
-    if not eligible:
-        # All proofs failed the gate — return None so the receipt is a clean no_submit.
-        return None
-    executable = [proof for proof in eligible if proof.execution_price is not None]
+    # REFERENCE-ONLY GATE (operator directive 2026-06-03). The mainstream-agreement
+    # verdict (#135 + #135-B) is computed and recorded on the receipt to inform the
+    # ARM decision — it lets the operator see whether the forecast's top candidate
+    # agrees with an independent mainstream. It takes NO part in production selection:
+    # we trade on the FORECAST. Production picks the forecast's best candidate by
+    # (trade_score, q_lcb); the gate can never exclude a candidate. (The selector used
+    # to drop gate-failed proofs; that exclusion is removed so the forecast's true
+    # pick always reaches the receipt with its verdict annotated. The only reason
+    # these are no_submit is shadow/arm=False, not the mainstream gate.)
+    executable = [proof for proof in proofs if proof.execution_price is not None]
     if not executable:
-        return max(eligible, key=lambda proof: proof.q_lcb_5pct, default=None)
+        return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
     return max(executable, key=lambda proof: (proof.trade_score, proof.q_lcb_5pct))
 
 
@@ -3164,6 +3156,7 @@ def _live_yes_probabilities(
     if event.event_type == "FORECAST_SNAPSHOT_READY":
         return _canonical_probability_and_fdr_proof(
             event=event,
+            payload=payload,
             family=family,
             conn=conn,
             calibration_conn=calibration_conn,
@@ -3173,6 +3166,7 @@ def _live_yes_probabilities(
     if event.event_type == "DAY0_EXTREME_UPDATED":
         generated = _canonical_probability_and_fdr_proof(
             event=event,
+            payload=payload,
             family=family,
             conn=conn,
             calibration_conn=calibration_conn,
@@ -3247,6 +3241,7 @@ def _forecast_snapshot_probability_and_fdr_proof(
 def _canonical_probability_and_fdr_proof(
     *,
     event: OpportunityEvent,
+    payload: dict[str, object],
     family,
     conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
@@ -3411,15 +3406,16 @@ def _canonical_probability_and_fdr_proof(
     # against an independent mainstream forecast point (Open-Meteo standard /v1/forecast).
     # Flag-gated (edli_v1.mainstream_agreement_gate_enabled, default OFF).
     # FAIL-OPEN/SILENT: any evaluation error must not affect the live q_by_condition decision.
-    # Verdicts stored in payload for receipt annotation + arm-ranking filter in
-    # _selected_candidate_proof. Key: (condition_id, direction) → verdict dict.
+    # REFERENCE-ONLY: verdicts stored in payload for receipt provenance annotation only.
+    # They do NOT filter or exclude candidates in _selected_candidate_proof.
+    # Key: (condition_id, direction) → verdict dict.
     try:
         if bool(settings["edli_v1"].get("mainstream_agreement_gate_enabled", False)):
             _evaluate_and_store_mainstream_agreement(
                 event=event,
                 family=family,
                 analysis=analysis,
-                payload=_payload(event),
+                payload=payload,
             )
     except Exception as _gate_exc:
         try:
@@ -3673,6 +3669,16 @@ def _evaluate_and_store_mainstream_agreement(
 
     members = list(float(m) for m in analysis.member_maxes) if analysis.member_maxes is not None else None
     our_point = float(analysis.member_maxes.mean()) if members else None
+    # Provenance: read the raw_member_maxes accessor if available. In the EDLI
+    # event-bound path, bias/grid corrections are applied upstream (before
+    # MarketAnalysis is constructed), so raw_member_maxes already carries those
+    # corrections — it is NOT a genuinely pre-correction array. The resulting
+    # raw_our_point / agrees_on_raw / agreement_correction_dependent fields are
+    # therefore informational annotations only; no demotion or gate action is taken.
+    # Best-effort: older MarketAnalysis without raw accessor leaves this None
+    # (provenance fields will be absent in those cases — backward-safe).
+    _raw = getattr(analysis, "raw_member_maxes", None)
+    raw_our_point = float(_raw.mean()) if (_raw is not None and len(_raw)) else None
     bins = list(analysis.bins)
     unit = str(analysis.unit or "C")
     precision = float(getattr(analysis, "precision", 1.0) or 1.0)
@@ -3699,6 +3705,7 @@ def _evaluate_and_store_mainstream_agreement(
                     direction=direction,
                     members=members,
                     mainstream_point=mainstream_pt,
+                    raw_our_point=raw_our_point,
                     precision=precision,
                 )
                 verdicts[(condition_id, direction)] = verdict.to_dict()

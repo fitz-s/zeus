@@ -32,7 +32,6 @@ from src.strategy.market_fusion import (
 
 ZEUS_ROOT = Path(__file__).parent.parent
 KELLY_PY = ZEUS_ROOT / "src" / "strategy" / "kelly.py"
-EXIT_TRIGGERS_PY = ZEUS_ROOT / "src" / "execution" / "exit_triggers.py"
 PORTFOLIO_PY = ZEUS_ROOT / "src" / "state" / "portfolio.py"
 
 
@@ -184,11 +183,17 @@ class TestHoldValueSeam:
         assert hold.costs_declared == ["fee", "time"]
 
     def test_exit_ev_gate_uses_hold_value_contract(self):
+        # The exit-EV gate was consolidated into portfolio.py in the #133
+        # exit/sizing consolidation (the separate src/execution/exit_triggers.py
+        # module was deleted). The exit decision must still compute hold value
+        # via the cost-aware HoldValue contract (fee + time + crowding), never a
+        # bare-float seam. This asserts the current location of the invariant.
         portfolio_src = PORTFOLIO_PY.read_text()
-        exit_src = EXIT_TRIGGERS_PY.read_text()
 
         assert "HoldValue.compute" in portfolio_src
-        assert "HoldValue.compute" in exit_src
+        # Cost-aware exit gate (HoldValue.compute_with_exit_costs), not the
+        # legacy zero-cost HoldValue.compute alone.
+        assert "HoldValue.compute_with_exit_costs" in portfolio_src
 
 
 class TestTailTreatmentSeam:

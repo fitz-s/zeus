@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-06-03
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 #                  + docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
 #                  + PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md §5.6
@@ -128,6 +128,49 @@ def r3_default_risk_allocator_for_unit_tests():
     finally:
         clear_global_allocator()
         ws_gap_guard.clear_for_test()
+
+
+@pytest.fixture(autouse=True)
+def _mainstream_gate_test_isolation(monkeypatch):
+    """Test-isolation antibody (#135): mainstream-agreement gate OFF by default in
+    tests, and live Open-Meteo fetches forbidden.
+
+    The live reactor reads the MUTABLE operational flag
+    ``settings["edli_v1"]["mainstream_agreement_gate_enabled"]`` and dials
+    ``fetch_mainstream_point`` (Open-Meteo). Without this fixture, flipping that
+    flag ON for live shadow trading silently changed acceptance-suite behaviour:
+    the gate fired against the live network and excluded synthetic proof fixtures
+    (decision_proof_bundle=None). This is the same live-coupling category the
+    ``_bankroll_provider_test_isolation`` fixture above guards against — tests
+    must control their inputs through a seam, never inherit live config/network.
+
+    Default: gate flag OFF — deterministic, independent of the live config value.
+    The gate's own behaviour is fully covered by
+    tests/test_mainstream_agreement_gate.py against the pure
+    ``evaluate_mainstream_agreement`` (no flag, no network). A test that needs the
+    gate ON sets the flag explicitly AND patches fetch_mainstream_point.
+    Belt-and-suspenders: live fetch is forbidden so an opted-in test that forgets
+    to patch fails LOUDLY instead of dialing out.
+    """
+    from src.config import settings
+
+    data = getattr(settings, "_data", None)
+    edli_cfg = data.get("edli_v1") if isinstance(data, dict) else None
+    if isinstance(edli_cfg, dict):
+        monkeypatch.setitem(edli_cfg, "mainstream_agreement_gate_enabled", False)
+
+    import src.data.mainstream_forecast_source as _ms
+
+    def _forbid_live_mainstream(*_args, **_kwargs):
+        raise AssertionError(
+            "fetch_mainstream_point was invoked from a test. Live Open-Meteo "
+            "queries are forbidden in unit tests; a gate-ON test must patch "
+            "src.data.mainstream_forecast_source.fetch_mainstream_point with a "
+            "deterministic stub."
+        )
+
+    monkeypatch.setattr(_ms, "fetch_mainstream_point", _forbid_live_mainstream)
+    yield
 
 
 # ---------------------------------------------------------------------------

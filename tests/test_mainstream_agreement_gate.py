@@ -10,17 +10,24 @@
 #   (feedback_buy_direction_semantic); operator ARM criterion.
 """Relationship + function tests for the mainstream-agreement gate (#135).
 
-The gate is the K-structural antibody that makes the cold/warm-bias
-false-positive CATEGORY impossible: a candidate is arm/trade-eligible ONLY
-if our forecast AGREES with an independent mainstream within tolerance AND
-the traded direction is consistent with BOTH the mainstream-implied bin and
-our own modal bin. trade_score can NEVER buy back eligibility once the gate
-fails — it is a standard, not a re-weight.
+REFERENCE-ONLY (operator directive 2026-06-03). The gate computes an independent
+cross-check — does our forecast AGREE with an external mainstream within tolerance,
+direction-consistent with both the mainstream-implied bin and our own modal bin —
+and RECORDS the verdict on the receipt to inform the ARM decision. It takes NO part
+in production selection: production trades on the FORECAST (trade_score / q_lcb);
+the verdict can never exclude a candidate. The tests verify (a) the pass/fail
+SIGNAL is computed correctly (the ARM reference), and (b) the reference-only
+contract at the selector — a gate-failed candidate is STILL selected when it is the
+forecast's best (test_mainstream_gate_is_reference_only_never_excludes_from_selection).
 
-Per the operator selection-fix rule, every relationship test below uses a
-DISTINCT per-candidate fixture (real SF / Tel Aviv / Wellington / Panama
-numbers from the live shadow board) and asserts the PRE-fix RED behavior is
-impossible under the gate.
+The #135-B provenance fields (raw vs corrected divergence) are recorded but NO
+LONGER demote: the grid-to-point investigation proved the cold-bias corrections are
+OOS-validated legitimate, so a correction-dependent agreement is annotated, not
+failed (test_agreement_via_large_bias_correction_is_recorded_not_demoted).
+
+Per the operator selection-fix rule, every relationship test below uses a DISTINCT
+per-candidate fixture (real SF / Tel Aviv / Wellington / Panama numbers from the
+live shadow board).
 """
 from __future__ import annotations
 
@@ -605,3 +612,234 @@ def test_receipt_hash_stable_when_gate_not_evaluated():
     )
     gate_on_json = _receipt_json(gate_on_receipt)
     assert gate_on_json != base_json, "Gate-ON receipt must have different hash (sanity check)"
+
+# ---------------------------------------------------------------------------
+# ANTIBODY TEST C — BUG-3: verdict must survive the producer→consumer boundary.
+# THE LIVE FAILURE (2026-06-03 shadow): ANTIBODY A proves the eval populates a
+# dict you HAND it — but the live producer (`_canonical_probability_and_fdr_proof`)
+# stored the verdict into `_payload(event)`, which RE-PARSES event.payload_json
+# into a FRESH dict every call (src .../event_reactor_adapter.py:_payload). The
+# consumer (`build_event_bound_no_submit_receipt` @605 → @730/@1085) reads a
+# DIFFERENT `_payload(event)` instance. So the verdict evaporated at the A→B
+# boundary: 0 receipts tagged, 0 gate logs, gate silently fail-OPEN despite
+# flag=True. ANTIBODY A stayed GREEN because it tests the eval in isolation with
+# its own dict — it never crosses the boundary. (Fitz constraint #2: the function
+# worked; the RELATIONSHIP across the module boundary lost the semantic.)
+#
+# The structural antibody: the verdict must travel via the CALLER's threaded
+# payload, never a fresh `_payload(event)` re-parse. This makes the
+# instance-divergence category unconstructable.
+# ---------------------------------------------------------------------------
+
+def test_gate_verdict_survives_producer_to_consumer_payload_boundary():
+    """The proof builder must thread the caller's payload to the gate store +
+    read sites — never re-parse `_payload(event)` for the verdict (instance
+    divergence = silent fail-open, the live 2026-06-03 bug)."""
+    import inspect
+    from src.engine import event_reactor_adapter as era
+
+    # (1) Signature contract: the canonical proof builder MUST accept the caller's
+    # payload, so the verdict it stores reaches the receipt builder's dict.
+    sig = inspect.signature(era._canonical_probability_and_fdr_proof)
+    assert "payload" in sig.parameters, (
+        "_canonical_probability_and_fdr_proof must accept the caller's `payload` so "
+        "the mainstream-gate verdict lands in the SAME dict the receipt builder "
+        "reads — not a throwaway _payload(event) re-parse (BUG-3 silent fail-open)."
+    )
+
+    # (2) The gate STORE site must use the threaded payload, never _payload(event).
+    canon_src = inspect.getsource(era._canonical_probability_and_fdr_proof)
+    assert "_evaluate_and_store_mainstream_agreement" in canon_src, (
+        "gate eval must be invoked from the canonical proof builder"
+    )
+    after_call = canon_src.split("_evaluate_and_store_mainstream_agreement", 1)[1][:240]
+    assert "payload=payload" in after_call, (
+        "gate eval must be passed the THREADED payload (payload=payload)"
+    )
+    assert "_payload(event)" not in after_call, (
+        "gate eval must NOT store into a fresh _payload(event) re-parse — that "
+        "fresh dict is discarded and the receipt builder never sees the verdict."
+    )
+
+    # (3) The per-candidate proof-attach must READ the threaded payload, not a
+    # fresh _payload(event) (instance C in the live triage).
+    gen_src = inspect.getsource(era._generate_candidate_proofs)
+    attach = gen_src.split("mainstream_agreement=", 1)[1][:160]
+    assert "_payload(event)" not in attach, (
+        "proof-attach must read the threaded `payload` for the verdict, not a "
+        "fresh _payload(event) — different instance has no verdict (fail-open)."
+    )
+
+    # (4) Threading contract: every _canonical call site in _live_yes_probabilities
+    # must forward the payload.
+    lyp_src = inspect.getsource(era._live_yes_probabilities)
+    canon_calls = lyp_src.count("_canonical_probability_and_fdr_proof(")
+    canon_calls_with_payload = lyp_src.count("payload=payload")
+    assert canon_calls >= 1 and canon_calls_with_payload >= canon_calls, (
+        "_live_yes_probabilities must pass payload=payload to every "
+        f"_canonical_probability_and_fdr_proof call (calls={canon_calls}, "
+        f"with-payload={canon_calls_with_payload})"
+    )
+
+# ---------------------------------------------------------------------------
+# ANTIBODY TEST D — BUG-4 (RESOLVED): agreement manufactured by a large bias
+# correction — the raw forecast would NOT agree, the corrected one does.
+# THE LIVE FINDING (2026-06-03 shadow): the #1 candidate Tel Aviv 06-04 buy_no
+# 32°C passed the gate with our=29.9 vs mainstream=29.5 (Δ0.4). The RAW ECMWF
+# ensemble mean was 25.9°C — a +4.0°C bias correction pulled the forecast to
+# ~mainstream. The 2026-06-03 grid-to-point investigation proved this correction
+# is OOS-validated legitimate (raw is the biased number; 29.9 is the better
+# estimate). Therefore the gate is REFERENCE-ONLY: correction dependence is
+# RECORDED as provenance (agreement_correction_dependent=True) but does NOT
+# demote. The test below asserts provenance-only semantics, NOT demotion.
+# ---------------------------------------------------------------------------
+
+def test_agreement_via_large_bias_correction_is_recorded_not_demoted():
+    """Live Tel Aviv 06-04: raw 25.9°C, +4°C bias → 29.9°C, mainstream 29.5°C.
+    The correction-dependence is RECORDED (raw disagrees, corrected agrees) as
+    provenance, but does NOT demote: the 2026-06-03 grid-to-point investigation
+    proved the +4°C correction is OOS-validated legitimate (raw is the biased
+    number; 29.9 is the better estimate we trade). Demoting Tel Aviv for carrying
+    a validated correction would penalise the CORRECT forecast — so passed reflects
+    that our traded forecast (29.9) genuinely agrees with mainstream + correct
+    direction. (Reference-only either way — never gates production.)"""
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+
+    bins = _c_point_bins(
+        [28, 29, 30, 31, 32, 33, 34],
+        open_low_label="27°C or below",
+        open_high_label="35°C or higher",
+    )
+    traded = next(b for b in bins if b.label == "32°C")  # far-OTM buy_no
+    v = evaluate_mainstream_agreement(
+        city="Tel Aviv",
+        target_date="2026-06-04",
+        unit="C",
+        our_point=29.9,        # bias-corrected forecast (the one we trade)
+        raw_our_point=25.9,    # raw ECMWF ensemble mean (the biased number)
+        bins=bins,
+        traded_bin=traded,
+        direction="buy_no",
+        members=[29.6, 29.8, 29.9, 30.0, 30.2],  # corrected members → modal 30
+        mainstream_point=29.5,
+    )
+    # Provenance recorded (informational): the agreement relies on the correction.
+    assert v.mainstream_close is True            # corrected IS close to mainstream
+    assert v.agrees_on_raw is False              # raw is NOT close (3.6 > 1.5 tol)
+    assert v.agreement_correction_dependent is True
+    assert v.bias_applied == pytest.approx(4.0)
+    # But NOT demoted — the traded forecast agrees with mainstream + correct dir.
+    assert v.passed is True
+    assert v.fail_reason == "PASS"
+
+def test_agreement_with_small_correction_raw_also_agrees_passes():
+    """Wuhan-like: raw 32.0°C, corrected 31.6°C, mainstream 32.0°C. Both raw and
+    corrected agree with mainstream → NOT correction-dependent → passes (the
+    correction is not what created the agreement)."""
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+
+    bins = _c_point_bins(
+        [30, 31, 32, 33, 34, 35, 36],
+        open_low_label="29°C or below",
+        open_high_label="37°C or higher",
+    )
+    traded = next(b for b in bins if b.label == "34°C")  # buy_no on far bin
+    v = evaluate_mainstream_agreement(
+        city="Wuhan",
+        target_date="2026-06-04",
+        unit="C",
+        our_point=31.6,
+        raw_our_point=32.0,    # raw ALSO close to mainstream
+        bins=bins,
+        traded_bin=traded,
+        direction="buy_no",
+        members=[31.4, 31.6, 31.7, 31.9, 32.1],
+        mainstream_point=32.0,
+    )
+    assert v.agrees_on_raw is True
+    assert v.agreement_correction_dependent is False
+    assert v.passed is True
+
+def test_raw_our_point_absent_skips_correction_check_backward_compatible():
+    """When raw_our_point is not supplied (legacy callers), the correction check is
+    skipped — backward compatible, never spuriously demotes."""
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+
+    bins = _c_point_bins(
+        [13, 14, 15, 16],
+        open_low_label="12°C or below",
+        open_high_label="17°C or higher",
+    )
+    traded = next(b for b in bins if b.label == "15°C")
+    v = evaluate_mainstream_agreement(
+        city="Wellington",
+        target_date="2026-06-04",
+        unit="C",
+        our_point=15.2,
+        bins=bins,
+        traded_bin=traded,
+        direction="buy_yes",
+        members=[15.0, 15.1, 15.2, 15.3, 15.0],
+        mainstream_point=15.8,
+    )
+    assert v.agreement_correction_dependent is False
+    assert v.agrees_on_raw is None
+    assert v.passed is True
+
+
+# ---------------------------------------------------------------------------
+# REFERENCE-ONLY CONTRACT (operator directive 2026-06-03).
+# The mainstream-agreement gate is a REFERENCE for the ARM decision — it
+# annotates the receipt so the operator can see whether the forecast's top
+# candidate agrees with an independent mainstream. It takes NO part in
+# production selection: production trades on the forecast (trade_score/q_lcb).
+# A gate verdict (pass/fail, incl. the #135-B bias-correction-dependent flag)
+# can NEVER exclude a candidate from selection. "We trade on the forecast; the
+# only reason we are in shadow is the candidates don't reflect real Polymarket
+# trades — not the mainstream gate." This relationship test crosses the
+# verdict→selection boundary that prose cannot guarantee.
+# ---------------------------------------------------------------------------
+def test_mainstream_gate_is_reference_only_never_excludes_from_selection(monkeypatch):
+    """A candidate whose gate verdict FAILED must STILL be selected when it is
+    the forecast's best by (trade_score, q_lcb). Pre-fix RED: _gate_eligible
+    dropped the failed proof, so the selector returned the lower-trade_score
+    proof instead of the forecast's true pick."""
+    from types import SimpleNamespace
+    from src.config import settings
+    from src.engine.event_reactor_adapter import _selected_candidate_proof
+
+    # Gate flag ON — under the OLD (excluding) contract this is exactly the
+    # condition that dropped the failed proof. Reference-only must ignore it.
+    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_gate_enabled", True)
+
+    best_but_gate_failed = SimpleNamespace(
+        token_id="tok-best",
+        candidate=SimpleNamespace(condition_id="cond-best"),
+        execution_price=object(),
+        q_lcb_5pct=0.40,
+        trade_score=0.20,
+        mainstream_agreement={
+            "mainstream_agreement_pass": False,
+            "mainstream_agreement_fail_reason": "MAINSTREAM_NOT_CLOSE",
+        },
+    )
+    worse_gate_passed = SimpleNamespace(
+        token_id="tok-worse",
+        candidate=SimpleNamespace(condition_id="cond-worse"),
+        execution_price=object(),
+        q_lcb_5pct=0.30,
+        trade_score=0.05,
+        mainstream_agreement={
+            "mainstream_agreement_pass": True,
+            "mainstream_agreement_fail_reason": "PASS",
+        },
+    )
+
+    selected = _selected_candidate_proof({}, (best_but_gate_failed, worse_gate_passed))
+    assert selected is best_but_gate_failed, (
+        "reference-only gate must NOT exclude the forecast's best candidate; "
+        "production selection trades on trade_score/q_lcb, not the gate verdict"
+    )
+    # The failed verdict is still CARRIED on the selected proof — recorded on the
+    # receipt as the ARM-decision reference annotation, not used to gate.
+    assert selected.mainstream_agreement["mainstream_agreement_pass"] is False
