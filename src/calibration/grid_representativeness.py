@@ -9,7 +9,9 @@
 Loads ``state/grid_representativeness_offset.json`` once (module-level cache) and
 exposes a single query helper.
 
-Schema of the JSON (see fit script for provenance):
+Two JSON schemas are accepted (see fit script / _meta.authority for provenance):
+
+  v1 season-nested (authority grid_point_representativeness_offset_v1):
   {
     "_meta": {...},
     "cities": {
@@ -23,6 +25,20 @@ Schema of the JSON (see fit script for provenance):
       }
     }
   }
+
+  recency_v2 flat (authority grid_point_representativeness_recency_v2,
+  _meta.estimator='recency_trailing'): offset_c lives at the city level and is
+  season-agnostic (a trailing-window estimate is not season-keyed):
+  {
+    "_meta": {...},
+    "cities": {
+      "<CityName>": { "offset_c": float, "activated": bool, ... }
+    }
+  }
+
+get_offset() detects the shape per city. state/grid_representativeness_offset.json
+is a gitignored generated artifact; its producer (hence schema) can drift, so the
+loader tolerates both rather than silently returning None for a whole valid table.
 
 CONVENTION (from spec):
   corrected_member = raw_member - offset_native
@@ -84,6 +100,24 @@ def get_offset(city: str, season: str, metric: str = "high") -> dict[str, Any] |
     wrong physical quantity. To support LOW, fit a separate low-offset table and
     relax this gate explicitly.
 
+    Two table schemas are accepted (SCHEMA-VERSION TOLERANCE, 2026-06-02):
+
+      * ``v1`` season-nested  — ``cities[city][season] = {offset_c, activated, ...}``
+        (producer: ``scripts/fit_grid_representativeness_offset.py``, authority
+        ``grid_point_representativeness_offset_v1``). Resolved by ``season``.
+      * ``recency_v2`` flat   — ``cities[city] = {offset_c, activated, ...}`` with
+        ``offset_c`` at the city level and no season subkeys (authority
+        ``grid_point_representativeness_recency_v2``, ``_meta.estimator=
+        'recency_trailing'``). A trailing-window offset is season-agnostic by
+        construction, so the city-level entry applies to every ``season``.
+
+    The loader detects the shape per city (``'offset_c' in city_data`` ⇒ flat) so a
+    live state-file regenerated under either producer reads correctly. Before this
+    tolerance the loader did ``city_data.get(season)`` unconditionally and silently
+    returned None for an ENTIRE flat table — disabling the grid correction whenever
+    the recency producer had last written ``state/grid_representativeness_offset.json``
+    (the file is a gitignored generated artifact whose producer can drift).
+
     Returns:
         A dict with at least ``{"offset_c": float, "activated": bool}`` if the entry
         exists, is activated, AND metric == 'high'; otherwise ``None`` (FAIL-CLOSED).
@@ -95,10 +129,15 @@ def get_offset(city: str, season: str, metric: str = "high") -> dict[str, Any] |
             return None
         table = _load_table()
         city_data = table.get("cities", {}).get(city)
-        if not city_data:
+        if not isinstance(city_data, dict) or not city_data:
             return None
-        entry = city_data.get(season)
-        if not entry:
+        # Flat recency_v2 schema: offset lives at the city level (season-agnostic).
+        # Season-nested v1 schema: resolve the per-season entry.
+        if "offset_c" in city_data:
+            entry = city_data
+        else:
+            entry = city_data.get(season)
+        if not isinstance(entry, dict) or not entry:
             return None
         if not entry.get("activated", False):
             return None

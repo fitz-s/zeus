@@ -77,11 +77,27 @@ class TestGetOffset:
         result = get_offset("NotARealCity", "MAM")
         assert result is None
 
-    def test_absent_season_returns_none(self):
-        from src.calibration.grid_representativeness import get_offset
+    def test_absent_season_schema_aware(self):
+        """Bogus season behaviour is schema-dependent.
 
+        v1 season-nested: a season that is not a key returns None (fail-closed).
+        recency_v2 flat: the offset is season-agnostic (city-level), so the season
+        argument is correctly ignored and the city's activated offset is returned.
+        Assert the contract that matches the live table's actual schema rather than
+        hard-coding the v1 assumption (the state file is a regenerable artifact whose
+        producer/schema can drift).
+        """
+        from src.calibration.grid_representativeness import get_offset, load_offset_table
+
+        city_data = load_offset_table().get("cities", {}).get("San Francisco")
         result = get_offset("San Francisco", "XXX")
-        assert result is None
+        if isinstance(city_data, dict) and "offset_c" in city_data:
+            # Flat recency_v2: season ignored — activated city offset returned.
+            assert result is not None
+            assert result["activated"] is True
+        else:
+            # Season-nested v1: an absent season key fails closed.
+            assert result is None
 
 
 # ---------------------------------------------------------------------------
