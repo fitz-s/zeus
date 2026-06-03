@@ -1,6 +1,7 @@
 # Created: 2026-05-25
-# Last reused or audited: 2026-05-25
-# Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §10, §12, §13.
+# Last reused or audited: 2026-06-03
+# Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §10, §12, §13;
+#                  BUG#92 tick-binding antibody (event_reactor_adapter.py:_required_bound_tick_size).
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -227,6 +228,15 @@ def build_test_no_submit_proof_bundle(
                 "condition_id": condition_id,
                 "token_id": token_id,
                 "executable_snapshot_hash": executable_snapshot_hash,
+                # BUG#92 antibody contract: the executable_snapshot evidence MUST
+                # carry the bound min_tick_size/min_order_size of the snapshot the
+                # executor re-hydrates (mirrors the live evidence-build at
+                # event_reactor_adapter.py:2460-2461). The non-TAKER cert-build path
+                # calls _required_bound_tick_size() which fail-closes when these are
+                # absent, so the fixture must populate them as a real hydrated
+                # snapshot always does. Canonical Polymarket tick = "0.01".
+                "min_tick_size": "0.01",
+                "min_order_size": "1",
             },
             quote_clock,
             "test.executable_snapshot",
