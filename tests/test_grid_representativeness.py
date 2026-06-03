@@ -237,3 +237,79 @@ class TestHookCCity:
         assert abs(float(corrected.mean()) - expected_mean) < 1e-9
         # Must NOT have applied the F-unit scale
         assert abs(float(corrected.mean()) - (20.0 - offset_c * 1.8)) > 1e-6
+
+
+# ---------------------------------------------------------------------------
+# T6: codex P1 metric gate — LOW family must NOT receive the HIGH offset.
+#     The offset table is fit for metric='high' ONLY (_meta.metric='high').
+#     get_offset must fail closed (return None) for any non-high metric, and the
+#     hook must pass family.metric through so a LOW family never gets a HIGH shift.
+# ---------------------------------------------------------------------------
+
+class TestMetricGate:
+    def test_get_offset_low_metric_fails_closed(self):
+        """get_offset(..., metric='low') must return None even for a city/season
+        that IS activated for 'high'. The HIGH offset is the wrong physical
+        quantity for a LOW member array."""
+        from src.calibration.grid_representativeness import get_offset
+
+        # Pick a city the table activates (any activated entry works for the
+        # contract; the gate fires before the table lookup matters).
+        assert get_offset("San Francisco", "MAM", metric="low") is None
+        assert get_offset("Amsterdam", "MAM", metric="low") is None
+        # Unknown / non-high metrics also fail closed.
+        assert get_offset("San Francisco", "MAM", metric="LOW") is None
+        assert get_offset("San Francisco", "MAM", metric="dewpoint") is None
+
+    def test_get_offset_high_metric_is_the_gated_path(self):
+        """Sanity: metric='high' is the only path that may return data; the gate
+        itself does not block 'high'. (Whether a specific entry resolves depends
+        on the table; here we only assert the gate is metric='high'-permissive
+        by confirming a non-high call is None while a high call is not blocked
+        BY THE METRIC GATE — we mock get_offset's table to isolate the gate.)"""
+        import unittest.mock as _mock
+        import src.calibration.grid_representativeness as gr
+
+        fake_table = {
+            "_meta": {"metric": "high"},
+            "cities": {"TestCity": {"MAM": {"offset_c": -2.0, "activated": True}}},
+        }
+        with _mock.patch.object(gr, "_load_table", return_value=fake_table):
+            # high → returns the entry (gate permits)
+            hi = gr.get_offset("TestCity", "MAM", metric="high")
+            assert hi is not None and hi["offset_c"] == -2.0
+            # low → gated to None even though the entry exists & is activated
+            lo = gr.get_offset("TestCity", "MAM", metric="low")
+            assert lo is None
+
+    def test_hook_low_family_does_not_apply_offset(self):
+        """The reactor hook must pass family.metric to get_offset so a LOW family
+        never receives the HIGH offset — members returned UNCHANGED, applied=False,
+        and the _edli_grid_corrected flag NOT set."""
+        from src.engine.event_reactor_adapter import _maybe_apply_grid_representativeness_correction
+        import src.calibration.grid_representativeness as gr
+        import unittest.mock as _mock
+
+        # Table that WOULD activate this city for 'high'. If the hook failed to
+        # pass metric, it would apply the HIGH offset to the LOW array (the bug).
+        fake_table = {
+            "_meta": {"metric": "high"},
+            "cities": {"San Francisco": {"MAM": {"offset_c": -3.0, "activated": True}}},
+        }
+        city = _make_city("San Francisco", lat=37.7749, settlement_unit="F")
+        family = _make_family("San Francisco", target_date="2026-05-15", metric="low")
+        raw = np.full(50, 60.0)
+        payload: dict = {}
+        snapshot: dict = {}
+
+        with _mock.patch.object(gr, "_load_table", return_value=fake_table), mock.patch(
+            "src.engine.event_reactor_adapter.settings",
+            _patched_settings(flag_on=True),
+        ):
+            corrected, applied = _maybe_apply_grid_representativeness_correction(
+                raw, snapshot=snapshot, family=family, city=city, payload=payload
+            )
+
+        assert applied is False, "LOW family must NOT receive the HIGH grid offset"
+        assert payload.get("_edli_grid_corrected") is not True
+        np.testing.assert_array_equal(corrected, raw)

@@ -3674,7 +3674,13 @@ def _maybe_apply_grid_representativeness_correction(
         from src.calibration.manager import season_from_date
 
         season = season_from_date(str(family.target_date), lat=city.lat)
-        entry = get_offset(city.name, season)
+        # METRIC GATE (codex P1, 2026-06-02): the grid offset table is fit for
+        # metric='high' ONLY (grid_representativeness.py / fit_grid_representativeness_offset.py).
+        # A LOW family must NOT receive a HIGH-derived offset — that would mix the
+        # high/low tracks and shift LOW-market p_raw by the wrong physical quantity.
+        # Pass family.metric and fail closed (get_offset returns None) for any
+        # non-high metric until separate LOW offsets are fit.
+        entry = get_offset(city.name, season, metric=str(getattr(family, "metric", "high")))
         if entry is None:
             return members, False
         offset_c = float(entry["offset_c"])
@@ -4147,15 +4153,20 @@ def _snapshot_p_cal(
     if city is None:
         raise ValueError(f"CALIBRATION_AUTHORITY_MISSING:city config missing for {family.city}")
 
-    # A4 lockstep: when the member maxes were bias-corrected pre-p_raw, the existing
-    # Platt models were fit on UNCORRECTED p_raw and would mis-calibrate the shifted
-    # domain. Use identity Platt (p_cal = normalized p_raw) for the corrected domain
-    # until a Platt is refit on the corrected p_raw_domain. Enforces train/serve match.
-    if bool(payload.get("_edli_bias_corrected")):
+    # A4 lockstep: when the member maxes were bias-corrected OR grid-representativeness
+    # corrected pre-p_raw, the existing Platt models were fit on the UNCORRECTED
+    # (unshifted) p_raw domain and would mis-calibrate the shifted domain. Use identity
+    # Platt (p_cal = normalized p_raw) for the corrected domain until a Platt is refit on
+    # the corrected p_raw_domain. Enforces train/serve match.
+    #   - _edli_bias_corrected: city-specific bias shift (_maybe_apply_edli_bias_correction)
+    #   - _edli_grid_corrected: grid→point representativeness shift
+    #     (codex P1, 2026-06-02): this flag was set but NEVER consumed here, so a
+    #     grid-shifted p_raw was still fed through Platt fits on the unshifted domain.
+    if bool(payload.get("_edli_bias_corrected")) or bool(payload.get("_edli_grid_corrected")):
         arr = np.asarray(p_raw, dtype=float)
         total = float(arr.sum())
         if not _valid_probability_vector(arr, len(bins)) or total <= 0.0:
-            raise ValueError("CALIBRATION_AUTHORITY_MISSING:bias-corrected p_raw invalid")
+            raise ValueError("CALIBRATION_AUTHORITY_MISSING:corrected p_raw invalid")
         return arr / total
 
     source_id = _nonnull(snapshot.get("source_id") or payload.get("source_id"))

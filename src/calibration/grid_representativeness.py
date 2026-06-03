@@ -77,14 +77,22 @@ def load_offset_table() -> dict[str, Any]:
 def get_offset(city: str, season: str, metric: str = "high") -> dict[str, Any] | None:
     """Return the offset entry for (city, season) if activated, else None.
 
-    The current table is fit for ``metric='high'`` only; the ``metric`` parameter
-    is accepted for forward-compatibility and currently only 'high' may return data.
+    The current table is fit for ``metric='high'`` ONLY. The ``metric`` parameter
+    is now LOAD-BEARING (codex P1, 2026-06-02): any non-'high' metric FAILS CLOSED
+    (returns None), because applying a HIGH-derived city/season offset to a LOW
+    member array would mix the high/low tracks and shift LOW-market p_raw by the
+    wrong physical quantity. To support LOW, fit a separate low-offset table and
+    relax this gate explicitly.
 
     Returns:
         A dict with at least ``{"offset_c": float, "activated": bool}`` if the entry
-        exists and ``activated is True``, otherwise ``None`` (FAIL-CLOSED).
+        exists, is activated, AND metric == 'high'; otherwise ``None`` (FAIL-CLOSED).
     """
     try:
+        if str(metric).lower() != "high":
+            # Fail closed: no LOW (or other) offsets are fit; never apply a HIGH
+            # offset to a non-high family.
+            return None
         table = _load_table()
         city_data = table.get("cities", {}).get(city)
         if not city_data:
