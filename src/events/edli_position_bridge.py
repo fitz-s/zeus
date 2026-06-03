@@ -33,11 +33,11 @@ write happens on the single connection passed in, and the canonical write path
 nests its own SAVEPOINT (ATTACH + SAVEPOINT, never an independent connection).
 
 Idempotency: the deterministic ``position_id`` is derived from the EDLI
-``aggregate_id`` (``edli:<aggregate_id>`` truncated to the legacy 11-char
-trade_id width). A re-projected fill UPDATEs the same ``position_current`` row
-(``ON CONFLICT(position_id)``) and skips re-inserting the entry events
-(``position_events`` is append-only, keyed ``UNIQUE(position_id, sequence_no)``
-and ``event_id PRIMARY KEY``), so a replay never duplicates.
+``aggregate_id`` (``"edli" + sha256_hex``, 68 chars).  A re-projected fill
+UPDATEs the same ``position_current`` row (``ON CONFLICT(position_id) DO
+UPDATE``) and skips re-inserting the entry events (``position_events`` is
+append-only, keyed ``UNIQUE(position_id, sequence_no)`` and ``event_id
+PRIMARY KEY``), so a replay never duplicates.
 
 FOK semantics produce a single full fill today, but the economics aggregation
 sums across every ``UserTradeObserved`` (size-weighted avg price, summed fees)
@@ -68,12 +68,6 @@ from src.state.portfolio import FILL_AUTHORITY_VENUE_CONFIRMED_FULL
 # The EDLI lifecycle marker that means "this trade is irrevocably filled".
 EDLI_FILL_CONFIRMED_STATE = "FILL_CONFIRMED"
 
-# Legacy trade_id width (11 chars) — keep the bridged position_id in the same
-# shape downstream JOINs / dedup logic expect (see PR-S3 critic note in
-# portfolio.py about 11-char trade_id vs full-UUID venue_trade_facts.trade_id).
-_TRADE_ID_WIDTH = 11
-
-
 class EdliPositionBridgeError(RuntimeError):
     """Raised when a confirmed EDLI fill cannot be projected to a position."""
 
@@ -82,11 +76,22 @@ def edli_bridge_position_id(aggregate_id: str) -> str:
     """Deterministic canonical position_id for an EDLI aggregate.
 
     Keyed off the aggregate_id so replay/dedup maps to the SAME
-    ``position_current`` row (idempotency floor). 11-char width matches the
-    legacy trade_id shape downstream consumers assume.
+    ``position_current`` row (idempotency floor).
+
+    Width: full SHA-256 hex digest (64 chars) prefixed with "edli" = 68 chars
+    total, giving 256 bits of collision resistance.  The former 11-char
+    truncation (``_TRADE_ID_WIDTH = 11``) yielded only 28 effective bits
+    (4-char literal "edli" + 7 hex chars), making silent position_current
+    merge via ON CONFLICT(position_id) DO UPDATE probable at ~10 k fills
+    (birthday bound ≈ 19 % at 10 k).  FIX #96.
+
+    Backward-compat: existing rows written with the old short ID keep their
+    IDs unchanged — they are never read via this function again (each
+    aggregate is stable once written).  New fills from this commit onward
+    receive the full-width ID.
     """
     digest = hashlib.sha256(str(aggregate_id).encode("utf-8")).hexdigest()
-    return ("edli" + digest)[:_TRADE_ID_WIDTH]
+    return "edli" + digest
 
 
 def _edli_events_table(conn: sqlite3.Connection) -> str:

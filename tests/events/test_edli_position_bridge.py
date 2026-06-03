@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused or audited: 2026-06-03
 # Authority basis: DEFECT-1 capital-recoverability bridge. An EDLI FILL_CONFIRMED
 #   must materialise a canonical position_current row (the seam audited as
 #   missing), idempotently, chain-reconcilable by token, summing partial fills.
@@ -582,3 +582,118 @@ def _portfolio_from_loader(snapshot):
             )
         )
     return PortfolioState(positions=positions, bankroll=1000.0, daily_baseline_total=1000.0, weekly_baseline_total=1000.0)
+
+
+# --------------------------------------------------------------------------- #
+# FIX #96: position_id collision-resistance relationship tests
+# --------------------------------------------------------------------------- #
+
+# Real brute-force collision pair found under the old 28-bit scheme:
+#   ('edli' + sha256_hex)[:11]  for both  'agg-1508' and 'agg-12351'  → 'edlid75be65'
+# These two DISTINCT aggregate_ids map to the SAME old short id, which would
+# cause ON CONFLICT(position_id) DO UPDATE to SILENTLY MERGE two distinct
+# position_current rows — corrupting shares/cost_basis.
+_COLLISION_AGG_A = "agg-1508"
+_COLLISION_AGG_B = "agg-12351"
+
+
+def test_position_id_old_scheme_would_collide():
+    """RED baseline: confirm the 28-bit truncation merges 'agg-1508' and
+    'agg-12351' to the same 11-char id.  This test is not marked xfail — it
+    documents the vulnerability of the old scheme and will pass forever
+    (old_id() is a local helper, not the production function).
+    """
+    import hashlib
+
+    def _old_id(aggregate_id: str) -> str:
+        digest = hashlib.sha256(str(aggregate_id).encode("utf-8")).hexdigest()
+        return ("edli" + digest)[:11]
+
+    id_a = _old_id(_COLLISION_AGG_A)
+    id_b = _old_id(_COLLISION_AGG_B)
+    # Both must collide under the old scheme — this IS the bug.
+    assert id_a == id_b, (
+        f"Expected 28-bit collision but got distinct ids: {id_a!r} vs {id_b!r}"
+    )
+    assert id_a == "edlid75be65"
+
+
+def test_position_id_distinct_for_known_collision_pair():
+    """GREEN (FIX #96): the production edli_bridge_position_id must produce
+    DISTINCT ids for the known collision pair that was identical under the
+    old 28-bit scheme.  Would have FAILED before this fix.
+    """
+    id_a = edli_bridge_position_id(_COLLISION_AGG_A)
+    id_b = edli_bridge_position_id(_COLLISION_AGG_B)
+    assert id_a != id_b, (
+        f"Collision regression: 'agg-1508' and 'agg-12351' produce same id {id_a!r}"
+    )
+    # Width: 4 literal "edli" + 64 hex chars = 68 chars
+    assert len(id_a) == 68
+    assert len(id_b) == 68
+    assert id_a.startswith("edli")
+    assert id_b.startswith("edli")
+
+
+def test_two_distinct_fills_create_two_distinct_position_current_rows(conn):
+    """Relationship test (FIX #96): two CONFIRMED fills with DISTINCT aggregate_ids
+    that would have collided under the old 28-bit scheme MUST create TWO distinct
+    position_current rows — no silent merge via ON CONFLICT DO UPDATE.
+
+    Uses the brute-force-found collision pair ('agg-1508', 'agg-12351') so the
+    test directly exercises the pre-fix vulnerability.  Under the old scheme
+    both produced 'edlid75be65' (28 bits), causing the second
+    materialize_position_current_from_edli_fill to overwrite the first row.
+    """
+    # Seed two full aggregates with distinct condition/token ids (each needs a
+    # PreSubmitRevalidated event for identity resolution).
+    for i, aggregate_id in enumerate((_COLLISION_AGG_A, _COLLISION_AGG_B)):
+        cond = f"0xcond-collision-{i}"
+        token = f"token-yes-collision-{i}"
+        pre_submit = {
+            "event_id": f"evt-{aggregate_id}",
+            "final_intent_id": f"intent-{aggregate_id}",
+            "condition_id": cond,
+            "token_id": token,
+            "side": "BUY",
+            "direction": "buy_yes",
+            "native_token_side": "YES",
+            "outcome_label": "YES",
+            "city": "Shanghai",
+            "target_date": "2026-06-02",
+            "bin_label": "30-32",
+            "metric": "high",
+            "market_id": cond,
+            "q_live": 0.55,
+            "executable_snapshot_id": f"snap-{aggregate_id}",
+        }
+        _insert_edli_event(
+            conn, aggregate_id=aggregate_id, sequence=1,
+            event_type="PreSubmitRevalidated", payload=pre_submit,
+        )
+        _insert_edli_event(
+            conn, aggregate_id=aggregate_id, sequence=2,
+            event_type="UserTradeObserved",
+            payload={
+                "event_id": f"evt-{aggregate_id}",
+                "final_intent_id": f"intent-{aggregate_id}",
+                "fill_authority_state": "FILL_CONFIRMED",
+                "trade_status": "CONFIRMED",
+                "venue_order_id": f"vord-{aggregate_id}",
+                "filled_size": 10.0,
+                "avg_fill_price": 0.55,
+                "fees": 0.01,
+            },
+        )
+        materialize_position_current_from_edli_fill(conn, aggregate_id)
+
+    rows = conn.execute("SELECT position_id FROM position_current ORDER BY position_id").fetchall()
+    ids = [r[0] for r in rows]
+    assert len(ids) == 2, (
+        f"Expected 2 distinct position_current rows; got {len(ids)}: {ids}"
+    )
+    assert ids[0] != ids[1], "Silent merge: two distinct fills produced one position_current row"
+    # Each id must be the full-width 68-char form
+    for pid in ids:
+        assert len(pid) == 68, f"Expected 68-char position_id, got {len(pid)!r}: {pid!r}"
+        assert pid.startswith("edli")
