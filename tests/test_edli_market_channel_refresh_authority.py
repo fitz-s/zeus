@@ -1,8 +1,11 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
-# Authority basis: docs/operations/EXEC_EXIT_AUDIT_2026-06-02.md
+# Authority basis: review finding P1-1 (fix/review-findings-2026-06-03)
 #                  Confirmed P1-1 canary blocker: scan_authority overloaded with trigger reason
 #                  → capture_executable_market_snapshot raises on non-VERIFIED → dead refresh path
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Relationship tests guarding the main.py → market_scanner boundary; enforces that scan_authority is always "VERIFIED" and the trigger reason is carried separately (P1-1 fix).
+# Reuse: Confirm scan_authority contract + capture_executable_market_snapshot schema still match before relying on test as evidence.
 """Relationship tests: main.py _edli_market_channel_refresh_kwargs → market_scanner boundary.
 
 Three tests that cross the main.py → market_scanner module boundary:

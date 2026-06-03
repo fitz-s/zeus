@@ -1,7 +1,10 @@
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
-# Authority basis: fix/review-findings-2026-06-03 P2-2 — surface market_events
-# persistence failure to trading-daemon scheduler health.
+# Authority basis: review finding P2-2 (fix/review-findings-2026-06-03)
+#                  Surface market_events persistence failure to trading-daemon scheduler health.
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Relationship test guarding that a persistence failure in _persist_market_events_to_db is surfaced to the scheduler health signal, not silently swallowed (P2-2 fix).
+# Reuse: Confirm MarketEventsPersistenceResult schema + scheduler_health contract match current production code before relying on test as evidence.
 """Relationship test: market_events persistence failure surfaces to scheduler health.
 
 Invariant: when _market_discovery_cycle() sees >=1 parsed weather event but
