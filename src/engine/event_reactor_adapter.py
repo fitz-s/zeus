@@ -685,6 +685,28 @@ def build_event_bound_no_submit_receipt(
         )
     proof = _selected_candidate_proof(payload, proofs)
     if proof is None:
+        # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
+        # persist the best-scoring family's mainstream verdict on the MISSING receipt so
+        # demotions are auditable (not an invisible hole). Pull from payload verdicts
+        # dict; attach the verdict for the highest trade_score proof that was evaluated.
+        _missing_mav_fields: dict[str, object] = {}
+        _all_verdicts: dict[tuple[str, str], dict] = payload.get("_mainstream_agreement_verdicts", {})  # type: ignore[assignment]
+        if _all_verdicts:
+            best_proof = max(proofs, key=lambda p: p.trade_score, default=None)
+            if best_proof is not None:
+                _best_v = _all_verdicts.get(
+                    (str(best_proof.candidate.condition_id or ""), best_proof.direction)
+                )
+                if _best_v is not None:
+                    _missing_mav_fields = {
+                        "mainstream_agreement_pass": _best_v.get("mainstream_agreement_pass"),
+                        "mainstream_agreement_fail_reason": _best_v.get("mainstream_agreement_fail_reason"),
+                        "mainstream_point": _optional_float(_best_v.get("mainstream_point")),
+                        "mainstream_delta": _optional_float(_best_v.get("forecast_delta")),
+                        "mainstream_bin_label": _best_v.get("mainstream_bin_label"),
+                        "mainstream_source": _best_v.get("mainstream_source"),
+                        "mainstream_fetched_at_utc": _best_v.get("mainstream_fetched_at_utc"),
+                    }
         return EventSubmissionReceipt(
             False,
             event.event_id,
@@ -696,6 +718,7 @@ def build_event_bound_no_submit_receipt(
             family_id=family.family_id,
             source_status="MATCH",
             family_complete=True,
+            **_missing_mav_fields,  # type: ignore[arg-type]
         )
     candidate = proof.candidate
     selected_token_id = proof.token_id

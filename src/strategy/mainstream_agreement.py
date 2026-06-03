@@ -31,11 +31,12 @@ The four checks (ALL must hold; the verdict records each + the deltas):
   2. mainstream_close — |our_point − mainstream_point| ≤ tolerance
      (1.5°C for °C cities, 2°F for °F cities). Diverging beyond tolerance is the
      cold/warm-bias false-positive signature ⇒ FAIL. (Kills SF / Tel Aviv.)
-  3. direction_agrees_mainstream — derive the mainstream-implied bin (the family
-     bin that CONTAINS the mainstream point); buy_yes requires the traded bin to
-     BE that bin (the likely outcome); buy_no requires the traded bin to be a
-     DIFFERENT bin (we're correctly shorting a bin mainstream says won't settle,
-     e.g. Panama ≥31 when mainstream=28).
+  3. direction_agrees_mainstream — tolerance-aware check against the traded bin:
+     buy_yes ⟺ mainstream point is within ±tolerance of the traded bin (mainstream
+     broadly agrees the traded bin is the likely outcome — no rounding knife-edge);
+     buy_no ⟺ mainstream point is NOT within ±tolerance of the traded bin (we're
+     correctly shorting a bin mainstream says won't settle, e.g. Panama ≥31 when
+     mainstream=28). Boundary: X.49 and X.50 classify identically.
   4. direction_agrees_our_modal — buy_yes ⟹ traded bin == our modal bin;
      buy_no ⟹ traded bin ≠ our modal bin. Catches the direction inversion vs our
      OWN forecast (Tel Aviv 06-03 buy_yes on 25°C while our modal is 26°C).
@@ -143,6 +144,30 @@ def bin_containing(
     return None
 
 
+def mainstream_within_tolerance_of_bin(
+    mainstream_point: float, bin_: Bin, tolerance: float
+) -> bool:
+    """True if mainstream_point is within ±tolerance of bin_.
+
+    "Within tolerance of a bin" means the mainstream point lies in the interval
+    [bin.low - tolerance, bin.high + tolerance], where None boundaries are open
+    (−∞ / +∞).  This is the correct check-3 predicate — using single-rounded-bin
+    equality is rounding-brittle: mainstream=15.8 rounds to 16, but is genuinely
+    close to the 15°C traded bin (Δ=0.8 < 1.5°C tolerance).
+
+    For buy_yes: PASS when mainstream is within tolerance of traded bin (i.e. the
+    mainstream broadly agrees the traded bin is the likely outcome).
+    For buy_no: FAIL when mainstream is within tolerance of traded bin (i.e. we'd
+    be shorting a bin mainstream says may actually settle).
+
+    Boundary: X.49 and X.50 classify identically — there is no rounding knife-edge.
+    """
+    pt = float(mainstream_point)
+    low_ok = bin_.low is None or pt >= float(bin_.low) - tolerance
+    high_ok = bin_.high is None or pt <= float(bin_.high) + tolerance
+    return low_ok and high_ok
+
+
 def modal_bin_from_members(
     members: Sequence[float] | None, bins: Sequence[Bin], *, precision: float = 1.0
 ) -> Bin | None:
@@ -242,13 +267,23 @@ def evaluate_mainstream_agreement(
     mainstream_close = abs(forecast_delta) <= tol
 
     # CHECK 3 — direction agrees with the mainstream-implied bin (DIRECTION LAW).
-    #   buy_yes ⟺ traded bin IS the mainstream bin (we predict the likely bin).
-    #   buy_no  ⟺ traded bin is a DIFFERENT bin (we short an unlikely bin).
-    traded_is_mainstream_bin = _same_bin(traded_bin, mainstream_bin)
+    #
+    # Tolerance-aware (fixes rounding-brittleness): mainstream 15.8°C rounds to
+    # 16°C, but the genuine Wellington 15°C buy_yes candidate (Δ=0.8°C) must pass
+    # check-3. Hard bin-equality fails it at the knife-edge; tolerance-aware passes it.
+    #
+    # Semantics (DIRECTION LAW, tolerance-aware):
+    #   buy_yes ⟺ mainstream point is within ±tolerance of traded bin
+    #             (mainstream broadly implies the traded bin is the likely outcome).
+    #   buy_no  ⟺ mainstream point is NOT within ±tolerance of traded bin
+    #             (mainstream says the traded bin is unlikely → safe to short it).
+    #
+    # Boundary: X.49 and X.50 classify identically (no rounding knife-edge).
+    mainstream_near_traded_bin = mainstream_within_tolerance_of_bin(main_pt, traded_bin, tol)
     if direction == "buy_yes":
-        direction_agrees_mainstream = traded_is_mainstream_bin
+        direction_agrees_mainstream = mainstream_near_traded_bin
     else:  # buy_no
-        direction_agrees_mainstream = not traded_is_mainstream_bin
+        direction_agrees_mainstream = not mainstream_near_traded_bin
 
     # CHECK 4 — direction consistent with OUR OWN modal bin (inversion catch).
     #   buy_yes ⟺ traded bin == our modal bin.

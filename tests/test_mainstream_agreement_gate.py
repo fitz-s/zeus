@@ -89,8 +89,10 @@ def test_cold_biased_buy_no_over_warm_bin_fails_mainstream_close():
 
 # ---------------------------------------------------------------------------
 # RELATIONSHIP TEST 2 — agreeing Wellington buy_yes ⇒ gate PASSES.
-# Our 15.2°C ≈ modal 15°C ≈ mainstream 15°C (Δ +0.2°C). Direction correct
-# (buy_yes on the bin our forecast lands in AND the mainstream lands in).
+# Our 15.2°C ≈ modal 15°C ≈ mainstream 15.8°C (Δ=0.6°C; mainstream rounds to 16
+# under the old hard bin-equality, but with tolerance-aware check: 15.8 is 0.8°C
+# from the 15°C point bin ≤ 1.5°C tolerance → direction_agrees_mainstream=True).
+# This is the exact live Wellington 06-04 case the verifier flagged as CRITICAL.
 # ---------------------------------------------------------------------------
 
 
@@ -103,6 +105,9 @@ def test_agreeing_forecast_correct_direction_buy_yes_passes():
         open_high_label="17°C or higher",
     )
     traded_bin = next(b for b in bins if b.label == "15°C")
+    # mainstream=15.8: our_point Δ=0.6°C (close ✓); 15.8 is 0.8°C from 15°C bin ≤ 1.5°C tol;
+    # under old hard-equality: bin_containing(15.8) = 16°C ≠ traded 15°C → direction fail.
+    # Under tolerance-aware: mainstream_within_tolerance_of_bin(15.8, [15,15], 1.5) = True → pass.
     verdict = evaluate_mainstream_agreement(
         city="Wellington",
         target_date="2026-06-04",
@@ -112,11 +117,11 @@ def test_agreeing_forecast_correct_direction_buy_yes_passes():
         traded_bin=traded_bin,
         direction="buy_yes",
         members=[15.0, 15.1, 15.2, 15.3, 15.0],  # modal bin = 15
-        mainstream_point=15.0,
+        mainstream_point=15.8,  # the live Wellington value the verifier flagged
     )
     assert verdict.mainstream_available is True
-    assert verdict.mainstream_close is True
-    assert verdict.direction_agrees_mainstream is True
+    assert verdict.mainstream_close is True     # |15.2 - 15.8| = 0.6 ≤ 1.5
+    assert verdict.direction_agrees_mainstream is True  # 15.8 within ±1.5 of 15°C bin
     assert verdict.direction_agrees_our_modal is True
     assert verdict.passed is True
 
@@ -346,3 +351,89 @@ def test_deltas_recorded_in_verdict():
     assert d["our_point"] == 61.5
     assert d["forecast_delta"] == pytest.approx(-4.5)
     assert d["fail_reason"] == "MAINSTREAM_NOT_CLOSE"
+
+
+# ---------------------------------------------------------------------------
+# RELATIONSHIP TEST 6 — Wellington knife-edge boundary: mainstream 15.49 and 15.50
+# must classify identically (both buy_yes passes for 15°C traded bin with 1.5°C tol).
+# Validates that the tolerance-aware check has no rounding knife-edge.
+# (Previously: mainstream 15.5 rounds to 16 → bin_containing gave 16°C bin ≠ 15 →
+# buy_yes on 15°C was BLOCKED as DIRECTION_DISAGREES_MAINSTREAM_BUY_YES_OFF_BIN.
+# After fix: check is continuous — 15.5 is within 0.5°C of the 15°C bin ≤ 1.5°C
+# tolerance → direction_agrees_mainstream=True → PASSES.)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mainstream_pt", [15.49, 15.50, 15.8, 15.99])
+def test_wellington_buy_yes_tolerance_aware_no_knife_edge(mainstream_pt):
+    """Mainstream 15.x should all PASS for buy_yes on 15°C bin (Δ ≤ 1.5°C from our 15.2°C)."""
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+
+    bins = _c_point_bins(
+        [13, 14, 15, 16],
+        open_low_label="12°C or below",
+        open_high_label="17°C or higher",
+    )
+    traded_bin = next(b for b in bins if b.label == "15°C")
+    verdict = evaluate_mainstream_agreement(
+        city="Wellington",
+        target_date="2026-06-04",
+        unit="C",
+        our_point=15.2,
+        bins=bins,
+        traded_bin=traded_bin,
+        direction="buy_yes",
+        members=[15.0, 15.1, 15.2, 15.3, 15.0],  # modal bin = 15
+        mainstream_point=mainstream_pt,
+    )
+    delta = abs(15.2 - mainstream_pt)
+    assert verdict.mainstream_close is True, (
+        f"mainstream {mainstream_pt} Δ={delta:.2f} should be close (≤1.5°C)"
+    )
+    assert verdict.direction_agrees_mainstream is True, (
+        f"mainstream {mainstream_pt} near 15°C bin (within {1.5}°C tol) → buy_yes must agree. "
+        f"fail_reason={verdict.fail_reason}"
+    )
+    assert verdict.passed is True, (
+        f"Wellington buy_yes on 15°C with mainstream {mainstream_pt} must PASS. "
+        f"fail_reason={verdict.fail_reason}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# RELATIONSHIP TEST 7 — SF cold-bias: with coords now in cities.json, the
+# closeness gate catches SF via actual Δ logic (not coord-gap fail-closed).
+# our_point=61.5°F, mainstream=66°F, Δ=4.5°F > 2°F tolerance → NOT_CLOSE.
+# (Regression: previously SF demoted only because lat/lon=None → fail-closed
+# before closeness check; this test pins that the closeness PATH fires.)
+# ---------------------------------------------------------------------------
+
+
+def test_sf_cold_bias_demoted_by_closeness_not_coord_gap():
+    """SF demotes because closeness fails (Δ=4.5°F > 2°F), not because coords are missing."""
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+
+    bins = _f_bins(
+        [(62, 63), (64, 65)],
+        open_low_label="61°F or below",
+        open_high_label="66°F or higher",
+    )
+    traded_bin = bins[-1]  # "66°F or higher"
+    verdict = evaluate_mainstream_agreement(
+        city="San Francisco",
+        target_date="2026-06-03",
+        unit="F",
+        our_point=61.5,     # our cold ECMWF
+        bins=bins,
+        traded_bin=traded_bin,
+        direction="buy_no",
+        members=[60.0, 61.0, 61.5, 62.0, 61.0],
+        mainstream_point=66.0,  # mainstream agrees with the warm reality
+    )
+    # Gate must have a real mainstream point (NOT fail-closed due to missing coords)
+    assert verdict.mainstream_available is True, (
+        "mainstream_point was provided; gate must evaluate closeness, not fail-closed"
+    )
+    assert verdict.mainstream_close is False  # 4.5°F > 2°F tolerance
+    assert verdict.fail_reason == "MAINSTREAM_NOT_CLOSE"
+    assert verdict.passed is False
