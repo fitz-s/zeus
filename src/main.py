@@ -2714,6 +2714,7 @@ def _market_discovery_cycle() -> None:
     try:
         from src.data.market_scanner import (
             find_weather_markets,
+            get_last_market_events_persistence_result,
             refresh_executable_market_substrate_snapshots,
         )
         from src.data.polymarket_client import PolymarketClient
@@ -2723,6 +2724,18 @@ def _market_discovery_cycle() -> None:
             min_hours_to_resolution=0.0,
             include_slug_pattern=True,
         )
+        persistence = get_last_market_events_persistence_result()
+        if events and persistence is not None and persistence.status == "failed":
+            logger.error(
+                "market_discovery: %d weather events parsed but market_events persistence "
+                "failed — topology substrate will be stale: %s",
+                len(events),
+                persistence.error,
+            )
+            raise RuntimeError(
+                f"market_events persistence failed after {len(events)} active events: "
+                f"{persistence.error}"
+            )
         conn = get_trade_connection(write_class="live")
         try:
             _discovery_clob_timeout = max(
