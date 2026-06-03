@@ -10,7 +10,6 @@ Exit:  2-cycle consecutive confirmation with conservative_forward_edge.
 D4 requires a shared DecisionEvidence contract so both use the same burden.
 """
 import pytest
-from unittest.mock import MagicMock
 import numpy as np
 
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
@@ -72,32 +71,88 @@ def _exit_evidence(sample_size=20, fdr_corrected=True, consecutive=2):
 class TestCurrentExitUsesConsecutiveCycles:
 
     def test_exit_requires_consecutive_confirmations(self):
-        """Single negative cycle does NOT trigger exit via Position.evaluate_exit (live path)."""
-        from src.state.portfolio import Position, ExitContext
-        position = Position(
-            trade_id="TEST-001", market_id="m-sym", city="Dallas", cluster="Dallas",
-            target_date="2026-04-01", bin_label="70-75", direction="buy_no",
-            size_usd=10.0, entry_price=0.50, p_posterior=0.50, edge=0.0,
-            entry_ci_width=0.10,
-            # cost_basis must be >= $1 to avoid micro-position hold path
-            cost_basis_usd=10.0, shares=20.0, shares_filled=20.0,
-            filled_cost_basis_usd=10.0,
+        """The flat BUY_NO_EDGE_EXIT exit requires TWO consecutive negative
+        cycles, not one. Drives the REAL Position.evaluate_exit live path
+        (no MagicMock) with neg_edge_count starting at its 0 default — never
+        pre-seeded — so the test cannot accidentally cross the 2-cycle
+        threshold on the first cycle.
+
+        Invariant guarded (consecutive_confirmations() == 2):
+          cycle 1 (neg_edge_count 0 -> 1)  : MUST NOT exit on BUY_NO_EDGE_EXIT
+          cycle 2 (neg_edge_count 1 -> 2)  : MUST exit, trigger BUY_NO_EDGE_EXIT
+
+        Regression caught: a prior MagicMock rewrite pre-seeded
+        neg_edge_count = 1, so a single negative cycle reached the threshold
+        and returned a real BUY_NO_EDGE_EXIT — yet the weak assertion only
+        checked ``trigger != "EDGE_REVERSAL"``, letting that wrong-side
+        single-cycle exit pass. RED proof: with neg_edge_count pre-seeded to
+        1 the first call returns should_exit=True / BUY_NO_EDGE_EXIT, which
+        the cycle-1 assertion below fails on. GREEN: from the 0 default,
+        cycle 1 holds and only cycle 2 exits.
+        """
+        from src.state.portfolio import (
+            Position,
+            ExitContext,
+            consecutive_confirmations,
+            near_settlement_hours,
         )
-        # First negative cycle only — should not exit
-        exit_ctx = ExitContext(
-            fresh_prob=0.45,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.50,
-            current_market_price_is_fresh=True,
-            best_bid=0.45,
-            hours_to_settlement=24.0,
-            position_state="active",
-            market_velocity_1h=0.0,
-            divergence_score=0.0,
+
+        # The invariant under test is "threshold == 2". If config ever moves
+        # off 2, assert the count rather than silently testing a different
+        # property.
+        assert consecutive_confirmations() == 2, (
+            "This test asserts the 2-consecutive-cycle exit threshold; "
+            f"consecutive_confirmations()={consecutive_confirmations()}."
         )
-        decision = position.evaluate_exit(exit_ctx)
-        assert not decision.should_exit or decision.trigger != "BUY_NO_EDGE_EXIT", (
-            "Single negative cycle triggered BUY_NO_EDGE_EXIT — requires consecutive."
+
+        def _fresh_position() -> Position:
+            # neg_edge_count is the dataclass default (0) — NOT pre-seeded.
+            return Position(
+                trade_id="TEST-001", market_id="m-sym", city="Dallas",
+                cluster="Dallas", target_date="2026-04-01", bin_label="70-75",
+                direction="buy_no", size_usd=10.0, entry_price=0.50,
+                p_posterior=0.50, edge=0.0, entry_ci_width=0.10,
+                # cost_basis >= $1 to avoid the micro-position hold path.
+                cost_basis_usd=10.0, shares=20.0, shares_filled=20.0,
+                filled_cost_basis_usd=10.0,
+            )
+
+        def _negative_cycle_ctx() -> ExitContext:
+            # hours_to_settlement ABOVE near_settlement_hours() so we bypass
+            # the BUY_NO_NEAR_EXIT branch and reach the consecutive_cycle_check.
+            # forward_edge = fresh_prob - current_market_price = 0.20 - 0.50 =
+            # -0.30 -> evidence_edge -0.35 < edge_threshold -0.15 -> a negative
+            # cycle. best_bid (0.55) > fresh_prob (0.20) so the EV gate does NOT
+            # suppress the exit on the confirming cycle.
+            return ExitContext(
+                fresh_prob=0.20, fresh_prob_is_fresh=True,
+                current_market_price=0.50, current_market_price_is_fresh=True,
+                best_bid=0.55,
+                hours_to_settlement=near_settlement_hours() + 100.0,
+                position_state="active",
+                market_velocity_1h=0.0, divergence_score=0.0,
+            )
+
+        position = _fresh_position()
+        assert position.neg_edge_count == 0, "neg_edge_count must start at 0 (not pre-seeded)."
+
+        # Cycle 1 — one negative cycle must NOT exit on the flat edge trigger.
+        first = position.evaluate_exit(_negative_cycle_ctx())
+        assert not (first.should_exit and first.trigger == "BUY_NO_EDGE_EXIT"), (
+            "Single negative cycle triggered BUY_NO_EDGE_EXIT — the flat exit "
+            "requires TWO consecutive confirmations, not one."
+        )
+        assert position.neg_edge_count == 1, (
+            f"After one negative cycle neg_edge_count should be 1, got {position.neg_edge_count}."
+        )
+
+        # Cycle 2 — the second consecutive negative cycle MUST exit. This
+        # proves the threshold is exactly 2 (not <= 1): a never-firing exit
+        # would also satisfy cycle 1, so cycle 2 closes that loophole.
+        second = position.evaluate_exit(_negative_cycle_ctx())
+        assert second.should_exit and second.trigger == "BUY_NO_EDGE_EXIT", (
+            "Two consecutive negative cycles must trigger BUY_NO_EDGE_EXIT; "
+            f"got should_exit={second.should_exit}, trigger={second.trigger!r}."
         )
 
     def test_exit_uses_ci_width_in_evidence_edge(self):
