@@ -2739,6 +2739,7 @@ def _market_discovery_cycle() -> None:
     try:
         from src.data.market_scanner import (
             find_weather_markets,
+            get_last_market_events_persistence_result,
             refresh_executable_market_substrate_snapshots,
         )
         from src.data.polymarket_client import PolymarketClient
@@ -2748,6 +2749,18 @@ def _market_discovery_cycle() -> None:
             min_hours_to_resolution=0.0,
             include_slug_pattern=True,
         )
+        persistence = get_last_market_events_persistence_result()
+        if events and persistence is not None and persistence.status == "failed":
+            logger.error(
+                "market_discovery: %d weather events parsed but market_events persistence "
+                "failed — topology substrate will be stale: %s",
+                len(events),
+                persistence.error,
+            )
+            raise RuntimeError(
+                f"market_events persistence failed after {len(events)} active events: "
+                f"{persistence.error}"
+            )
         conn = get_trade_connection(write_class="live")
         try:
             _discovery_clob_timeout = max(
@@ -5161,6 +5174,30 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
     return {str(r[0]) for r in rows if r and r[0]}
 
 
+def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> dict:
+    """Build refresh_executable_market_substrate_snapshots kwargs for a market-channel action.
+
+    Authority is always VERIFIED (snapshots come from verified Gamma/CLOB data);
+    the EDLI channel trigger reason is carried as non-authoritative refresh_reason
+    metadata so it appears in the summary log without polluting the capture contract.
+
+    Separating these two carriers fixes P1-1: the original code passed
+    ``scan_authority=f"EDLI_MARKET_CHANNEL:{action.reason}"`` which caused
+    capture_executable_market_snapshot to raise ExecutableSnapshotCaptureError on
+    every attempt (it requires scan_authority == "VERIFIED"), making the entire
+    reactive snapshot-refresh path silently dead.
+    """
+    return dict(
+        markets=markets,
+        clob=clob,
+        captured_at=captured_at,
+        scan_authority="VERIFIED",
+        refresh_reason=f"EDLI_MARKET_CHANNEL:{action.reason}",
+        max_outcomes=20,
+        budget_seconds=15.0,
+    )
+
+
 @_scheduler_job("edli_market_channel_ingestor")
 def _edli_market_channel_ingestor_cycle() -> None:
     """EDLI market-channel online data-service bootstrap.
@@ -5287,12 +5324,9 @@ def _edli_market_channel_ingestor_cycle() -> None:
                             return
                     summary = refresh_executable_market_substrate_snapshots(
                         trade_conn,
-                        markets=markets,
-                        clob=clob,
-                        captured_at=datetime.now(timezone.utc),
-                        scan_authority=f"EDLI_MARKET_CHANNEL:{action.reason}",
-                        max_outcomes=20,
-                        budget_seconds=15.0,
+                        **_edli_market_channel_refresh_kwargs(
+                            action, markets, clob, datetime.now(timezone.utc)
+                        ),
                     )
                     trade_conn.commit()
                 finally:
@@ -5404,43 +5438,42 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     summary: dict = {"monitors": 0, "exits": 0}
     try:
         portfolio = load_portfolio()
-        clob = PolymarketClient()
+        with PolymarketClient() as clob:
+            # Phase 1: chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
+            # Degrades gracefully if Keychain funder_address is absent (REST call fails → caught).
+            try:
+                chain_stats, _ = _run_chain_sync(portfolio, clob, conn)
+                if chain_stats:
+                    summary["chain_sync"] = chain_stats
+            except Exception as exc:
+                logger.error(
+                    "chain_sync_and_exit_monitor: chain sync failed (non-fatal): %s", exc, exc_info=True
+                )
+                summary["chain_sync_error"] = str(exc)
 
-        # Phase 1: chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
-        # Degrades gracefully if Keychain funder_address is absent (REST call fails → caught).
-        try:
-            chain_stats, _ = _run_chain_sync(portfolio, clob, conn)
-            if chain_stats:
-                summary["chain_sync"] = chain_stats
-        except Exception as exc:
-            logger.error(
-                "chain_sync_and_exit_monitor: chain sync failed (non-fatal): %s", exc, exc_info=True
+            # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
+            # checks pending exit fills, runs monitor refresh for active positions.
+            # exit_order_submit_enabled=False in shadow/no-submit modes: state
+            # transitions run but no real sell orders are placed.
+            tracker = get_tracker()
+            artifact = CycleArtifact(
+                mode="chain_sync_monitor",
+                started_at=datetime.now(timezone.utc).isoformat(),
+                summary=summary,
             )
-            summary["chain_sync_error"] = str(exc)
-
-        # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
-        # checks pending exit fills, runs monitor refresh for active positions.
-        # exit_order_submit_enabled=False in shadow/no-submit modes: state
-        # transitions run but no real sell orders are placed.
-        tracker = get_tracker()
-        artifact = CycleArtifact(
-            mode="chain_sync_monitor",
-            started_at=datetime.now(timezone.utc).isoformat(),
-            summary=summary,
-        )
-        portfolio_dirty = tracker_dirty = False
-        try:
-            portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
-                conn, clob, portfolio, artifact, tracker, summary,
-                exit_order_submit_enabled=real_order_submit_enabled,
-            )
-        except Exception as exc:
-            logger.error(
-                "chain_sync_and_exit_monitor: monitoring phase failed (non-fatal): %s",
-                exc,
-                exc_info=True,
-            )
-            summary["monitoring_error"] = str(exc)
+            portfolio_dirty = tracker_dirty = False
+            try:
+                portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
+                    conn, clob, portfolio, artifact, tracker, summary,
+                    exit_order_submit_enabled=real_order_submit_enabled,
+                )
+            except Exception as exc:
+                logger.error(
+                    "chain_sync_and_exit_monitor: monitoring phase failed (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
+                summary["monitoring_error"] = str(exc)
 
         # INV-17 / DT#1: commit the DB transaction (chain-sync + monitoring state
         # transitions) FIRST, then export the derived portfolio/tracker JSON with the
