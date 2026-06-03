@@ -107,6 +107,8 @@ class ReactorConfig:
     taker_fok_fak_live_enabled: bool = False
     tiny_live_max_notional_usd: float = 5.0
     tiny_live_max_orders_per_day: int = 1
+    # BUG #99 antibody: order-emission rate limit, independent of the notional cap.
+    tiny_live_max_orders_per_window: int = 1
 
 
 # An executable market snapshot for the family may simply not be captured yet on the cycle

@@ -3617,6 +3617,7 @@ def _edli_event_reactor_cycle() -> None:
                 taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),
+                tiny_live_max_orders_per_window=int(edli_cfg.get("tiny_live_max_orders_per_window", 1)),
             ),
         )
         _rr = reactor.process_pending(decision_time=now, limit=proof_limit)

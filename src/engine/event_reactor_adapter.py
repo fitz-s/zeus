@@ -1443,6 +1443,7 @@ def _build_live_execution_command_certificates(
             requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
             max_notional_usd=float(tiny_live_max_notional_usd),
             max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
+            max_orders_per_window=int(settings["edli_v1"].get("tiny_live_max_orders_per_window", 1)),
             final_intent_id=str(final_intent.payload["final_intent_id"]),
             execution_command_id=execution_command_id,
         )
