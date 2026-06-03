@@ -669,6 +669,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/calibration_bakeoff.py",   # read_only: scores calibrators vs settlements VERIFIED; writes JSON/txt only
         "scripts/calibration_bakeoff_v2.py",  # read_only: corrected bake-off (RAW on live-served vector, OOS-gated); writes JSON/txt only
         "scripts/backfill_settlement_outcomes_canonical_2026_06_02.py",  # RO dry-run default; RW settlement_outcomes only with --execute, atomic SAVEPOINT (zeus-forecasts.db)
+        "scripts/backfill_settlement_unit_2026_06_03.py",  # operator_invoked: RO dry-run default; RW settlement_outcomes.settlement_unit only with --commit, atomic SAVEPOINT (zeus-forecasts.db, W2)
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
         "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
         "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
@@ -728,6 +729,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/migrations/202605_consolidate_observation_instants_v2.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports
         "scripts/migrations/202605_collapse_dataversion_integers.py",  # operator_invoked: db_writer_lock(BULK)+SAVEPOINT, --dry-run default; daemon never imports
         "scripts/migrations/202605_add_settlement_outcomes_station_unit.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports (D-S1)
+        "scripts/migrations/202606_install_settlement_unit_verified_triggers.py",  # operator_invoked: --dry-run default + SAVEPOINT; daemon never imports (W2 antibody-deploy)
         "scripts/migrations/202605_rename_ensemble_snapshots_data_version_to_dataset_id.py",  # operator_invoked: --dry-run default + SAVEPOINT RENAME COLUMN; :memory: canonical ref + --db-path standalone; daemon never imports (Stage-C #26)
         "scripts/migrations/__main__.py",                # operator_invoked: migration runner CLI; daemon never imports
         "scripts/migrations/202605_position_current_bridge_required_trigger.py",  # operator_invoked: idempotent; --dry-run mode
