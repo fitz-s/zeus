@@ -612,6 +612,7 @@ def _write_settlement_truth(
             "authority": authority,
             "provenance": provenance,
             "recorded_at": settled_at,
+            "settlement_unit": city.settlement_unit,
         }
         if _era_result.is_admittable():
             settlement_result = write_settlement_with_era_provenance(
@@ -631,6 +632,7 @@ def _write_settlement_truth(
                 authority=authority,
                 provenance=provenance,
                 recorded_at=settled_at,
+                settlement_unit=city.settlement_unit,
             )
         if authority == "VERIFIED" and resolved_market_outcomes:
             outcomes_v2 = [

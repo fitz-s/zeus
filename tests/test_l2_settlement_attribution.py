@@ -103,7 +103,11 @@ def _insert_shadow_decision(conn: sqlite3.Connection, **overrides) -> str:
 
 
 def _insert_settlement(conn: sqlite3.Connection, **overrides) -> None:
-    """Insert a row into settlement_outcomes in the given (possibly in-memory) DB."""
+    """Insert a row into settlement_outcomes in the given (possibly in-memory) DB.
+
+    W2 (2026-06-03): settlement_unit required for VERIFIED rows (DB trigger
+    _settlement_outcomes_verified_unit_check). Default 'F' for Chicago (US city).
+    """
     defaults = dict(
         city="Chicago",
         target_date="2026-06-15",
@@ -115,16 +119,19 @@ def _insert_settlement(conn: sqlite3.Connection, **overrides) -> None:
         settled_at="2026-06-16T00:00:00+00:00",
         authority="VERIFIED",
         provenance_json="{}",
+        settlement_unit="F",
     )
     defaults.update(overrides)
     conn.execute(
         """
         INSERT INTO settlement_outcomes (
             city, target_date, temperature_metric, market_slug, winning_bin,
-            settlement_value, settlement_source, settled_at, authority, provenance_json
+            settlement_value, settlement_source, settled_at, authority, provenance_json,
+            settlement_unit
         ) VALUES (
             :city, :target_date, :temperature_metric, :market_slug, :winning_bin,
-            :settlement_value, :settlement_source, :settled_at, :authority, :provenance_json
+            :settlement_value, :settlement_source, :settled_at, :authority, :provenance_json,
+            :settlement_unit
         )
         """,
         defaults,
@@ -163,10 +170,17 @@ def _attach_fcst(world_conn: sqlite3.Connection, fcst_conn: sqlite3.Connection) 
     # Open the shared-cache DB using the same URI to populate it
     shared = sqlite3.connect(uri, uri=True, check_same_thread=False)
     init_schema_forecasts(shared)
-    # Insert settlement data into the shared cache
-    for row in fcst_conn.execute("SELECT city, target_date, temperature_metric, market_slug, winning_bin, settlement_value, settlement_source, settled_at, authority, provenance_json FROM settlement_outcomes").fetchall():
+    # Insert settlement data into the shared cache.
+    # W2 (2026-06-03): include settlement_unit so trigger passes on VERIFIED rows.
+    for row in fcst_conn.execute(
+        "SELECT city, target_date, temperature_metric, market_slug, winning_bin, "
+        "settlement_value, settlement_source, settled_at, authority, provenance_json, "
+        "settlement_unit FROM settlement_outcomes"
+    ).fetchall():
         shared.execute(
-            "INSERT OR IGNORE INTO settlement_outcomes (city, target_date, temperature_metric, market_slug, winning_bin, settlement_value, settlement_source, settled_at, authority, provenance_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO settlement_outcomes (city, target_date, temperature_metric, "
+            "market_slug, winning_bin, settlement_value, settlement_source, settled_at, "
+            "authority, provenance_json, settlement_unit) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             row,
         )
     shared.commit()
