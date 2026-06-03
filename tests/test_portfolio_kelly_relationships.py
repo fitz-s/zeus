@@ -1,7 +1,7 @@
-# Created: 2026-06-03
-# Last reused/audited: 2026-06-03
-# Authority basis: Task #107 design spec /tmp/kelly-107-design.md §4 (INV-K1..K8);
-#   AGENTS.md Fractional Kelly / MECE family structure; correlation.py reuse.
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: K1–K8 cross-module relationship tests for portfolio-aware (multi) Kelly sizing (#107)
+# Reuse: verify sizing_context + evaluate_kelly + correlated_committed_usd are all at HEAD;
+#   confirm effective_bankroll / effective_bankroll_raw formulas unchanged before relying on results
 """Relationship tests for portfolio-aware (multi) Kelly sizing — Task #107.
 
 These are CROSS-MODULE relationship tests (Fitz methodology: test the property
@@ -442,3 +442,35 @@ def test_K8_never_amplifies_vs_single_kelly(p_post, held_committed):
             f"empty-portfolio not equal to min(single-Kelly, cap): "
             f"{s_portfolio:.4f} vs min({s_single:.4f}, {cap:.4f})"
         )
+
+
+# ── Input validation — finite check covers NaN AND inf ───────────────────────
+
+@pytest.mark.parametrize("bad_field,bad_value", [
+    # NaN inputs — existing guard
+    ("ci_width",          float("nan")),
+    ("bankroll_usd",      float("nan")),
+    # +inf inputs — the Copilot BUG-1: NaN-only check (x == x) passes inf
+    ("ci_width",          float("inf")),
+    ("lead_days",         float("inf")),
+    ("bankroll_usd",      float("inf")),
+    ("corr_committed_usd", float("inf")),
+    ("raw_committed_usd", float("inf")),
+    # -inf inputs
+    ("ci_width",          float("-inf")),
+    ("bankroll_usd",      float("-inf")),
+    ("corr_committed_usd", float("-inf")),
+])
+def test_sizing_context_rejects_non_finite_inputs(bad_field, bad_value):
+    """SizingContext.__post_init__ must reject NaN AND inf/-inf for every
+    numeric field.  Before the BUG-1 fix the check was ``x == x`` (NaN-only);
+    ``float('inf') == float('inf')`` is True so inf flowed silently into
+    kelly_size and produced nonsensical output.  After the fix (math.isfinite)
+    all three — NaN, +inf, -inf — raise ValueError."""
+    base = dict(ci_width=0.05, lead_days=1.0, bankroll_usd=170.0,
+                corr_committed_usd=0.0, raw_committed_usd=0.0)
+    base[bad_field] = bad_value
+    # sign / range checks can also fire for negative bankroll etc.; the key
+    # requirement is that a ValueError is raised (not a silent pass).
+    with pytest.raises((ValueError, OverflowError)):
+        SizingContext(**base)

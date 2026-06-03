@@ -40,6 +40,7 @@ variance already present on the proof into the sizing multiplier.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -172,22 +173,25 @@ class SizingContext:
     def __post_init__(self) -> None:
         # Fail-closed on nonsense inputs so a corrupted upstream value
         # routes to KELLY_PROOF_MISSING rather than silently sizing on a
-        # negative / NaN haircut.
+        # negative / NaN / infinite haircut.
+        # Use math.isfinite (not x == x): x == x only rejects NaN; it
+        # PASSES inf and -inf, which would produce nonsensical sizes.
+        # math.isfinite rejects NaN, +inf, and -inf, matching the pattern
+        # in src/contracts/execution_price.py.
         ci = float(self.ci_width)
         lead = float(self.lead_days)
         bankroll = float(self.bankroll_usd)
         corr_committed = float(self.corr_committed_usd)
         raw_committed = float(self.raw_committed_usd)
-        finite = (
-            ci == ci
-            and lead == lead
-            and bankroll == bankroll
-            and corr_committed == corr_committed
-            and raw_committed == raw_committed
-        )  # NaN check (NaN != NaN)
-        if not finite:
+        if not (
+            math.isfinite(ci)
+            and math.isfinite(lead)
+            and math.isfinite(bankroll)
+            and math.isfinite(corr_committed)
+            and math.isfinite(raw_committed)
+        ):
             raise ValueError(
-                f"SizingContext requires finite inputs; got "
+                f"SizingContext requires finite inputs (no NaN, no inf); got "
                 f"ci_width={self.ci_width!r}, lead_days={self.lead_days!r}, "
                 f"bankroll_usd={self.bankroll_usd!r}, "
                 f"corr_committed_usd={self.corr_committed_usd!r}, "
