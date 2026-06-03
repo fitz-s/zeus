@@ -5358,43 +5358,42 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     summary: dict = {"monitors": 0, "exits": 0}
     try:
         portfolio = load_portfolio()
-        clob = PolymarketClient()
+        with PolymarketClient() as clob:
+            # Phase 1: chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
+            # Degrades gracefully if Keychain funder_address is absent (REST call fails → caught).
+            try:
+                chain_stats, _ = _run_chain_sync(portfolio, clob, conn)
+                if chain_stats:
+                    summary["chain_sync"] = chain_stats
+            except Exception as exc:
+                logger.error(
+                    "chain_sync_and_exit_monitor: chain sync failed (non-fatal): %s", exc, exc_info=True
+                )
+                summary["chain_sync_error"] = str(exc)
 
-        # Phase 1: chain-truth sync — updates chain_shares / chain_avg_price / chain_state.
-        # Degrades gracefully if Keychain funder_address is absent (REST call fails → caught).
-        try:
-            chain_stats, _ = _run_chain_sync(portfolio, clob, conn)
-            if chain_stats:
-                summary["chain_sync"] = chain_stats
-        except Exception as exc:
-            logger.error(
-                "chain_sync_and_exit_monitor: chain sync failed (non-fatal): %s", exc, exc_info=True
+            # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
+            # checks pending exit fills, runs monitor refresh for active positions.
+            # exit_order_submit_enabled=False in shadow/no-submit modes: state
+            # transitions run but no real sell orders are placed.
+            tracker = get_tracker()
+            artifact = CycleArtifact(
+                mode="chain_sync_monitor",
+                started_at=datetime.now(timezone.utc).isoformat(),
+                summary=summary,
             )
-            summary["chain_sync_error"] = str(exc)
-
-        # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
-        # checks pending exit fills, runs monitor refresh for active positions.
-        # exit_order_submit_enabled=False in shadow/no-submit modes: state
-        # transitions run but no real sell orders are placed.
-        tracker = get_tracker()
-        artifact = CycleArtifact(
-            mode="chain_sync_monitor",
-            started_at=datetime.now(timezone.utc).isoformat(),
-            summary=summary,
-        )
-        portfolio_dirty = tracker_dirty = False
-        try:
-            portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
-                conn, clob, portfolio, artifact, tracker, summary,
-                exit_order_submit_enabled=real_order_submit_enabled,
-            )
-        except Exception as exc:
-            logger.error(
-                "chain_sync_and_exit_monitor: monitoring phase failed (non-fatal): %s",
-                exc,
-                exc_info=True,
-            )
-            summary["monitoring_error"] = str(exc)
+            portfolio_dirty = tracker_dirty = False
+            try:
+                portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
+                    conn, clob, portfolio, artifact, tracker, summary,
+                    exit_order_submit_enabled=real_order_submit_enabled,
+                )
+            except Exception as exc:
+                logger.error(
+                    "chain_sync_and_exit_monitor: monitoring phase failed (non-fatal): %s",
+                    exc,
+                    exc_info=True,
+                )
+                summary["monitoring_error"] = str(exc)
 
         # INV-17 / DT#1: commit the DB transaction (chain-sync + monitoring state
         # transitions) FIRST, then export the derived portfolio/tracker JSON with the
