@@ -109,8 +109,17 @@ def evaluate_kelly(
 
     The legacy ``kelly_multiplier`` flat-scalar parameter remains accepted
     for back-compat with callers not yet migrated (and is the explicit
-    base for ``dynamic_kelly_mult`` when a context IS supplied). Exactly
-    one of ``sizing_context`` / ``kelly_multiplier`` must be provided.
+    base for ``dynamic_kelly_mult`` when a context IS supplied). At least
+    one of ``sizing_context`` / ``kelly_multiplier`` must be provided; the
+    two are NOT mutually exclusive. The supported combinations are:
+
+      * ``sizing_context`` only            → variance-required (preferred);
+        base defaults to 0.25 and is haircut by ``dynamic_kelly_mult``.
+      * ``sizing_context`` + ``kelly_multiplier`` → ``kelly_multiplier`` is
+        the explicit base fed to ``dynamic_kelly_mult`` (still haircut by
+        CI width / lead).
+      * ``kelly_multiplier`` only          → legacy flat scalar, used as-is.
+      * neither                            → ``ValueError`` (fail-closed).
 
     ``KellyProof.passed = size_usd > 0`` — when the variance haircut (or a
     zero edge) collapses the size to 0.0, ``passed`` correctly flips
