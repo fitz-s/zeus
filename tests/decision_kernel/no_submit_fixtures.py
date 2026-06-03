@@ -73,6 +73,11 @@ def build_test_no_submit_proof_bundle(
                 "source_reason_code": None,
                 "derived_from_certificate_type": claims.FORECAST_AUTHORITY,
                 "derived_from_snapshot_id": event.causal_snapshot_id,
+                # WAVE-1 W1-T3: reader-elected executable run. Defaults to the
+                # event's source_run_id so the legacy single-chain happy path is
+                # byte-identical; RT-4 overrides this to exercise the 00Z→12Z
+                # dual-chain rescue.
+                "derived_from_source_run_id": event_payload.get("source_run_id"),
                 "derived_from_reader_status": "LIVE_ELIGIBLE",
                 "causal_snapshot_id": event.causal_snapshot_id,
                 "snapshot_id": event.causal_snapshot_id,

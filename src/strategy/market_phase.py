@@ -263,3 +263,78 @@ def market_end_anchor_source(market: dict) -> str:
     """
     end_str = market.get("market_end_at") or market.get("endDate") or market.get("end_date")
     return "gamma_explicit" if end_str else "f1_12z_fallback"
+
+
+# --------------------------------------------------------------------------- #
+# Shared forecast_only phase-admissibility predicate (WAVE-1 W1-T1).
+#
+# ONE pure predicate, applied at BOTH the FSR intake locus
+# (src/events/triggers/forecast_snapshot_ready.py, gated by
+# ``edli_v1.edli_intake_phase_filter_enabled``) AND the reactor bind-time
+# backstop (src/engine/event_reactor_adapter.py, the
+# EVENT_BOUND_MARKET_PHASE_CLOSED emission). Both sites call THIS function so
+# they cannot diverge (relationship test RT-2 pins identity).
+#
+# Encodes the same rule the reactor already applied: admit ONLY when the whole
+# target local day is still in the future (PRE_SETTLEMENT_DAY). SETTLEMENT_DAY
+# / POST_TRADING / RESOLVED / PRE_TRADING / unknown all reject — fail-closed.
+# Same-day (observed/realizing) extrema belong to the disjoint day0
+# observation-aware scope, never forecast_only.
+# --------------------------------------------------------------------------- #
+
+# Mirrors event_reactor_adapter._FORECAST_ONLY_ADMIT_PHASES. Kept here as the
+# canonical authority; the adapter imports the predicate, not a divergent copy.
+FORECAST_ONLY_ADMIT_PHASES: frozenset[MarketPhase] = frozenset(
+    {MarketPhase.PRE_SETTLEMENT_DAY}
+)
+
+
+def market_phase_admits(
+    *,
+    city: str,
+    target_date: str,
+    metric: str,  # noqa: ARG001 — carried for caller symmetry / future per-metric law
+    decision_time: datetime,
+    market_row: "dict | None",
+    uma_resolved_source: Optional[str] = None,
+) -> bool:
+    """Pure phase-admissibility predicate for a forecast_only family.
+
+    Returns True iff the family may be admitted at ``decision_time`` — i.e. the
+    whole target local day is still future (``MarketPhase.PRE_SETTLEMENT_DAY``).
+    All other phases (including an unresolvable timezone → phase=None) reject,
+    fail-closed.
+
+    Inputs match the reactor's bind-time check so the two sites give an
+    identical verdict for identical inputs:
+      - ``city`` resolves a timezone via the runtime city registry; a missing
+        timezone yields phase=None → reject.
+      - ``market_row`` supplies an explicit endDate/startDate when present;
+        absent timing falls back to the F1 12:00-UTC anchor (per
+        ``market_phase_from_market_dict`` / ``market_phase_evidence``).
+
+    ``metric`` is accepted for caller symmetry and so a future per-metric phase
+    law can hook here without changing call sites; it is not used today (the
+    phase axis is per-market, identical for HIGH/LOW of the same family).
+    """
+    # Lazy imports: market_phase.py is a low-level module; runtime_cities_by_name
+    # (src.config) and market_phase_evidence both sit above it. Importing at
+    # call time avoids an import cycle and keeps this module import-cheap.
+    from src.config import runtime_cities_by_name
+    from src.strategy import market_phase_evidence as _evidence_mod
+
+    city_config = runtime_cities_by_name().get(city)
+    tz = getattr(city_config, "timezone", None) if city_config is not None else None
+    if not tz:
+        # Unresolvable timezone → undeterminable phase → fail-closed reject.
+        return False
+
+    market = dict(market_row) if market_row else {}
+    evidence = _evidence_mod.from_market_dict(
+        market=market,
+        city_timezone=tz,
+        target_date_str=str(target_date),
+        decision_time_utc=decision_time.astimezone(timezone.utc),
+        uma_resolved_source=uma_resolved_source,
+    )
+    return evidence.phase in FORECAST_ONLY_ADMIT_PHASES

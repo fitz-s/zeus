@@ -378,7 +378,9 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
             raise ValueError("source_truth.required_fields_present must be true")
         if source.get("required_steps_present") is not True:
             raise ValueError("source_truth.required_steps_present must be true")
-        _require_equal("source_truth.source_run_id", source.get("source_run_id"), "forecast.source_run_id", forecast.get("source_run_id"))
+        # WAVE-1 W1-T3: dual-chain source_run binding (gated; legacy single-chain
+        # equality preserved when the flag is OFF or derived_from_source_run_id absent).
+        bind_source_run_chains(source, forecast)
         _require_equal("source_truth.source_id", source.get("source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
         _require_equal("source_truth.payload_hash", source.get("payload_hash"), "event.payload_hash", event.payload_hash)
         _require_equal("source_truth.event_source", source.get("event_source"), "event.source", event.source)
@@ -656,6 +658,69 @@ def _require_equal(left_name: str, left: Any, right_name: str, right: Any) -> No
         raise ValueError(f"missing consistency field: {left_name if left in (None, '') else right_name}")
     if str(left) != str(right):
         raise ValueError(f"{left_name} != {right_name}: {left!r} != {right!r}")
+
+
+def _dual_chain_source_run_enabled() -> bool:
+    """Read edli_v1.edli_source_run_dual_chain_enabled (default OFF in code).
+
+    WAVE-1 W1-T3. FAIL-CLOSED to the legacy single-chain binding: any
+    config-access error → False. Shadow-safe — the relaxation is inert until the
+    operator flips the flag in live config.
+    """
+    try:
+        from src.config import settings
+
+        return bool(settings["edli_v1"].get("edli_source_run_dual_chain_enabled", False))
+    except Exception:  # noqa: BLE001 — config glitch must never relax the cert silently
+        return False
+
+
+def bind_source_run_chains(source: dict[str, Any], forecast: dict[str, Any]) -> None:
+    """Bind the source_run identity across the causal + executable chains.
+
+    WAVE-1 W1-T3. The cert historically asserted a SINGLE cross-chain equality
+    ``source_truth.source_run_id == forecast.source_run_id``. When the causal
+    cycle's run (e.g. 00Z) is still re-ingesting members, the reader legitimately
+    elects a fresher fully-captured run (e.g. 12Z) for inference, so the causal
+    run and the executable (forecast) run differ — and 11 benign advances died
+    at NO_SUBMIT_CERTIFICATE.
+
+    With ``edli_source_run_dual_chain_enabled`` ON AND the adapter having stamped
+    ``source_truth.derived_from_source_run_id`` (the reader-elected executable
+    run), we bind BOTH chains independently:
+      - executable chain: derived_from_source_run_id == forecast.source_run_id
+      - causal chain:      source_truth.source_run_id is the event's causal run
+                           (NOT required to equal the forecast run); its causal
+                           integrity is separately asserted via
+                           source_truth.causal_snapshot_id / payload_hash.
+
+    A FABRICATED forecast whose source_run_id differs from the reader-elected
+    derived_from_source_run_id STILL FAILS — causal integrity is not weakened.
+
+    When the flag is OFF (default) OR derived_from_source_run_id is absent, the
+    legacy single-chain equality is enforced — byte-identical to pre-W1-T3.
+    """
+    derived = source.get("derived_from_source_run_id")
+    if _dual_chain_source_run_enabled() and derived not in (None, ""):
+        # Executable chain binds to the reader-elected run.
+        _require_equal(
+            "source_truth.derived_from_source_run_id",
+            derived,
+            "forecast.source_run_id",
+            forecast.get("source_run_id"),
+        )
+        # Causal chain: source_truth.source_run_id must be present (the causal
+        # run) but is NOT bound to the forecast run.
+        if source.get("source_run_id") in (None, ""):
+            raise ValueError("missing consistency field: source_truth.source_run_id")
+        return
+    # Legacy single-chain equality.
+    _require_equal(
+        "source_truth.source_run_id",
+        source.get("source_run_id"),
+        "forecast.source_run_id",
+        forecast.get("source_run_id"),
+    )
 
 
 def _native_side_for_direction(direction: Any) -> str | None:
