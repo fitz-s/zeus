@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: RED->GREEN tests for W0 boot guards (calibration pin shape + frozen_as_of staleness).
+# Reuse: Run with pytest; update with src/main.py boot-guard semantics.
+# Authority basis: unification-design W0 boot-guards 2026-06-03
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Authority basis: unification-design W0 boot-guards 2026-06-03

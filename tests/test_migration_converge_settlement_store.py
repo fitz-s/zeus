@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: RED->GREEN tests for the W0 ghost-table archive migration.
+# Reuse: Run with pytest; update if migration steps/guards change.
+# Authority basis: unification-design W0 ghost-table migration 2026-06-03
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Authority basis: unification-design W0 ghost-table migration 2026-06-03

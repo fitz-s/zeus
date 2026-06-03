@@ -1,3 +1,4 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Authority basis: UNIFICATION-DESIGN data-truth 2026-06-03
@@ -78,7 +79,7 @@ def dry_run_plan(conn: sqlite3.Connection) -> None:
     elif v2_archived_exists:
         print("  STEP 1: SKIP — platt_models_v2_archived_2026_06_03 already exists")
     else:
-        print("  STEP 1: SKIP — platt_models_v2does not exist")
+        print("  STEP 1: SKIP — platt_models_v2 does not exist")
 
     if pm_exists:
         n = _row_count(conn, "platt_models")

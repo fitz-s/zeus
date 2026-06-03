@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: RED->GREEN tests for W0 dead calibration-pin config cleanup in src/calibration/manager.py.
+# Reuse: Run with pytest; update if pin config schema/caching changes.
+# Authority basis: unification-design W0 dead-config cleanup 2026-06-03
 # Created: 2026-06-03
 # Last reused or audited: 2026-06-03
 # Authority basis: unification-design W0 dead-config cleanup 2026-06-03

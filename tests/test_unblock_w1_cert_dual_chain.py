@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: RED test for W1 certificate dual-chain source_run binding (benign 00Z->12Z passes; fabricated still fails).
+# Reuse: Run with pytest; update if no-submit cert schema changes.
+# Authority basis: WAVE-1 W1-T3 cert dual-chain
 # Created: 2026-06-03
 # Last reused/audited: 2026-06-03
 # Authority basis: docs/operations task WAVE-1 (unblock-W1) W1-T3 — certificate

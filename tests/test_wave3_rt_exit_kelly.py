@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Relationship tests for W3 exit-path consolidation + Kelly dead-param removal (CI_OVERLAP_HOLD lives only in Position.evaluate_exit).
+# Reuse: Run with pytest; keep RED->GREEN intent if exit/sizing logic changes.
+# Authority basis: WAVE 3 (2026-06-02) collapse exit+sizing to one path; delete orphan twins + dead Kelly params.
 # Created: 2026-06-02
 # Last reused or audited: 2026-06-02
 # Authority basis: WAVE 3 brief (2026-06-02) — collapse exit+sizing to ONE path each;
@@ -240,7 +244,7 @@ class TestDeadKellyParamsRemoved:
         assert m_with_heat < m_no_heat, (
             f"portfolio_heat=0.45 should reduce sizing: {m_with_heat} >= {m_no_heat}"
         )
-        upper = 0.25 * 0.7 * 0.55  # base * ci_haircut(>0.10) * (1-0.45)
+        upper = 0.25 * 0.7 * 0.8 * 0.55  # base * ci_haircut(>0.10) * lead_days(>=3)->x0.8 * (1-0.45)
         assert 0 < m_with_heat <= upper + 1e-9, (
             f"dynamic_kelly_mult(base=0.25, ci_width=0.12, lead_days=4, portfolio_heat=0.45, city='Warsaw') "
             f"= {m_with_heat} not in (0, {upper}]"
@@ -256,7 +260,7 @@ class TestDeadKellyParamsRemoved:
             portfolio_heat=0.45,
             city="Warsaw",
         )
-        upper = 0.25 * 0.7 * 0.55  # ci_width=0.12→×0.7; lead_days=4→no haircut; heat=0.45→×0.55
+        upper = 0.25 * 0.7 * 0.8 * 0.55  # ci_width=0.12->x0.7; lead_days=4(>=3)->x0.8; heat=0.45->x0.55
         assert 0 < m <= upper + 1e-9, (
             f"Expected in (0, {upper:.4f}], got {m:.6f}"
         )

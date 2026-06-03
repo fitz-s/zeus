@@ -1,3 +1,7 @@
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: RED relationship tests for W1 shared market-phase admissibility predicate (intake + reactor backstop).
+# Reuse: Run with pytest; update if market-phase semantics change.
+# Authority basis: WAVE-1 W1-T1 shared phase predicate
 # Created: 2026-06-03
 # Last reused/audited: 2026-06-03
 # Authority basis: docs/operations task WAVE-1 (unblock-W1) W1-T1 — shared
