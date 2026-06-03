@@ -76,7 +76,9 @@
       "unit": "F",
       "historical_peak_hour": 17.6,
       "diurnal_amplitude_f": 17.3,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "lat": 33.6407,
+      "lon": -84.4277
     },
     {
       "name": "Auckland",
@@ -128,7 +130,9 @@
       "unit": "F",
       "historical_peak_hour": 17.7,
       "diurnal_amplitude_f": 18.0,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "lat": 30.168399,
+      "lon": -97.69712
     },
     {
       "name": "Beijing",
@@ -280,7 +284,9 @@
       "unit": "F",
       "historical_peak_hour": 16.4,
       "diurnal_amplitude_f": 15.0,
-      "weighted_low_calibration_eligible": false
+      "weighted_low_calibration_eligible": false,
+      "lat": 41.9742,
+      "lon": -87.9073
     },
     {
       "name": "Chongqing",
@@ -332,7 +338,9 @@
       "unit": "F",
       "historical_peak_hour": 17.7,
       "diurnal_amplitude_f": 18.6,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "lat": 32.8471,
+      "lon": -96.8518
     },
     {
       "name": "Denver",
@@ -360,7 +368,9 @@
       "unit": "F",
       "historical_peak_hour": 16.1,
       "diurnal_amplitude_f": 18.4,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "lat": 39.698,
+      "lon": -104.777
     },
     {
       "name": "Guangzhou",
@@ -466,7 +476,9 @@
       "unit": "F",
       "historical_peak_hour": 17.4,
       "diurnal_amplitude_f": 15.2,
-      "weighted_low_calibration_eligible": false
+      "weighted_low_calibration_eligible": false,
+      "lat": 29.640176,
+      "lon": -95.232926
     },
     {
       "name": "Istanbul",
@@ -691,7 +703,9 @@
       "unit": "F",
       "historical_peak_hour": 18.1,
       "diurnal_amplitude_f": 11.1,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "lat": 33.9416,
+      "lon": -118.4085
     },
     {
       "name": "Lucknow",
@@ -817,7 +831,9 @@
       "unit": "F",
       "historical_peak_hour": 17.3,
       "diurnal_amplitude_f": 12.1,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "lat": 25.7959,
+      "lon": -80.287
     },
     {
       "name": "Milan",
@@ -924,7 +940,9 @@
       "unit": "F",
       "historical_peak_hour": 15.8,
       "diurnal_amplitude_f": 11.0,
-      "weighted_low_calibration_eligible": false
+      "weighted_low_calibration_eligible": false,
+      "lat": 40.7772,
+      "lon": -73.8726
     },
     {
       "name": "Panama City",
@@ -1010,6 +1028,8 @@
         "san-francisco",
         "sf"
       ],
+      "lat": 37.6213,
+      "lon": -122.379,
       "noaa": {
         "lat": 37.6213,
         "lon": -122.379,
@@ -1082,7 +1102,9 @@
       "unit": "F",
       "historical_peak_hour": 13.8,
       "diurnal_amplitude_f": 12.2,
-      "weighted_low_calibration_eligible": true
+      "weighted_low_calibration_eligible": true,
+      "lat": 47.4502,
+      "lon": -122.3088
     },
     {
       "name": "Seoul",
