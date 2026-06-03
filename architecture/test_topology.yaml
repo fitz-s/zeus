@@ -29,6 +29,7 @@ test_trust_policy:
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_boot_guard_pin_shape.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_boot_guard_settings_object.py: {created: "2026-06-03", last_used: "2026-06-03", note: "W0-T2+T3: Settings-object antibody + --validate-boot"}
     tests/test_calibration_manager_w0.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_migration_converge_settlement_store.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_cert_dual_chain.py: {created: "2026-06-03", last_used: "2026-06-03"}
@@ -921,6 +922,11 @@ categories:
     # EDLI e2e gate-unblock W0-W3 (2026-06-03) — RED->GREEN relationship antibodies.
     # W0 boot-guards: calibration pin shape is dict + frozen_as_of staleness.
     - tests/test_boot_guard_pin_shape.py
+    # W0 boot-guard ANTIBODY: guards run on a REAL Settings object (settings._data
+    # boot accessor) without AttributeError; object form is regression-anchored.
+    # W0-T3: --validate-boot subprocess test + _validate_boot/_run_boot_guards unit
+    # tests: list->exit1, dict->pass, subprocess exits w/o daemon loop (<30s).
+    - tests/test_boot_guard_settings_object.py
     # W0 dead calibration-pin config cleanup in src/calibration/manager.py.
     - tests/test_calibration_manager_w0.py
     # W0 ghost-table archive migration (202606_converge_settlement_store).
