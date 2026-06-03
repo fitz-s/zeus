@@ -85,8 +85,10 @@ PASS = "PASS"
 
 @dataclass(frozen=True)
 class MainstreamAgreementVerdict:
-    """The per-candidate gate result. Every field is recorded on the shadow
-    receipt so a demotion/exclusion is fully auditable (Fitz provenance rule)."""
+    """The per-candidate gate result (reference-only). Every field is recorded
+    on the shadow receipt as provenance annotation (Fitz provenance rule). The
+    verdict never gates or excludes candidates from selection — it is informational
+    only."""
 
     city: str
     target_date: str

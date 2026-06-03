@@ -353,13 +353,16 @@ class MarketAnalysis:
 
     @property
     def raw_member_maxes(self) -> "np.ndarray":
-        """Public accessor for the RAW (uncorrected) ensemble member maxima.
+        """Public accessor for the pre-mean-offset ensemble member maxima.
 
-        This is the ensemble BEFORE bias correction (analysis_member_maxes). The
-        #135-B mainstream-agreement independence check uses it to detect when an
-        agreement with mainstream exists only because a large bias correction
-        moved our forecast (the cold-bias HURT-city false positive). Adds no
-        correction — it merely exposes what was already computed at construction.
+        Returns the _raw_member_maxes array as set at construction time — the
+        per-member values BEFORE the analysis mean-offset is applied
+        (analysis_member_maxes). Note: in the EDLI event-bound runtime path,
+        bias/grid corrections are applied upstream before MarketAnalysis is
+        constructed, so this array already reflects those upstream corrections.
+        It is NOT guaranteed to be a genuinely pre-correction array; callers
+        should treat it as provenance/informational only. Adds no further
+        transformation — it merely exposes what was stored at construction.
         """
         return self._raw_member_maxes
 

@@ -682,18 +682,16 @@ def test_gate_verdict_survives_producer_to_consumer_payload_boundary():
     )
 
 # ---------------------------------------------------------------------------
-# ANTIBODY TEST D — BUG-4: agreement manufactured by a large bias correction is
-# NOT independent agreement and must be demoted.
+# ANTIBODY TEST D — BUG-4 (RESOLVED): agreement manufactured by a large bias
+# correction — the raw forecast would NOT agree, the corrected one does.
 # THE LIVE FINDING (2026-06-03 shadow): the #1 candidate Tel Aviv 06-04 buy_no
-# 32°C passed the gate with our=29.9 vs mainstream=29.5 (Δ0.4). But the RAW ECMWF
-# ensemble mean was 25.9°C — a +4.0°C bias correction is what pulled our forecast
-# up to ~mainstream. The "internal AND external agree" the ARM criterion requires
-# was MANUFACTURED by the correction, not two independent signals confirming each
-# other (raw is 3.6°C from mainstream → would FAIL closeness). The gate compares
-# the bias-CORRECTED forecast to mainstream, so for over-corrected cold-bias cities
-# (Tel Aviv, Tokyo) the agreement is circular. This is the false-positive class the
-# operator flagged. The antibody (no magic threshold): demote when the CORRECTED
-# forecast is close to mainstream BUT the RAW forecast is NOT.
+# 32°C passed the gate with our=29.9 vs mainstream=29.5 (Δ0.4). The RAW ECMWF
+# ensemble mean was 25.9°C — a +4.0°C bias correction pulled the forecast to
+# ~mainstream. The 2026-06-03 grid-to-point investigation proved this correction
+# is OOS-validated legitimate (raw is the biased number; 29.9 is the better
+# estimate). Therefore the gate is REFERENCE-ONLY: correction dependence is
+# RECORDED as provenance (agreement_correction_dependent=True) but does NOT
+# demote. The test below asserts provenance-only semantics, NOT demotion.
 # ---------------------------------------------------------------------------
 
 def test_agreement_via_large_bias_correction_is_recorded_not_demoted():

@@ -3406,8 +3406,9 @@ def _canonical_probability_and_fdr_proof(
     # against an independent mainstream forecast point (Open-Meteo standard /v1/forecast).
     # Flag-gated (edli_v1.mainstream_agreement_gate_enabled, default OFF).
     # FAIL-OPEN/SILENT: any evaluation error must not affect the live q_by_condition decision.
-    # Verdicts stored in payload for receipt annotation + arm-ranking filter in
-    # _selected_candidate_proof. Key: (condition_id, direction) → verdict dict.
+    # REFERENCE-ONLY: verdicts stored in payload for receipt provenance annotation only.
+    # They do NOT filter or exclude candidates in _selected_candidate_proof.
+    # Key: (condition_id, direction) → verdict dict.
     try:
         if bool(settings["edli_v1"].get("mainstream_agreement_gate_enabled", False)):
             _evaluate_and_store_mainstream_agreement(
@@ -3668,10 +3669,14 @@ def _evaluate_and_store_mainstream_agreement(
 
     members = list(float(m) for m in analysis.member_maxes) if analysis.member_maxes is not None else None
     our_point = float(analysis.member_maxes.mean()) if members else None
-    # #135-B independence check: the RAW (uncorrected) ensemble mean. If the gate
-    # agreement with mainstream exists only because a large bias correction moved
-    # our_point, demote. Best-effort: older MarketAnalysis without raw accessor
-    # leaves this None (check then skips — backward-safe).
+    # Provenance: read the raw_member_maxes accessor if available. In the EDLI
+    # event-bound path, bias/grid corrections are applied upstream (before
+    # MarketAnalysis is constructed), so raw_member_maxes already carries those
+    # corrections — it is NOT a genuinely pre-correction array. The resulting
+    # raw_our_point / agrees_on_raw / agreement_correction_dependent fields are
+    # therefore informational annotations only; no demotion or gate action is taken.
+    # Best-effort: older MarketAnalysis without raw accessor leaves this None
+    # (provenance fields will be absent in those cases — backward-safe).
     _raw = getattr(analysis, "raw_member_maxes", None)
     raw_our_point = float(_raw.mean()) if (_raw is not None and len(_raw)) else None
     bins = list(analysis.bins)
