@@ -673,3 +673,103 @@ def test_gate_verdict_survives_producer_to_consumer_payload_boundary():
         f"_canonical_probability_and_fdr_proof call (calls={canon_calls}, "
         f"with-payload={canon_calls_with_payload})"
     )
+
+# ---------------------------------------------------------------------------
+# ANTIBODY TEST D — BUG-4: agreement manufactured by a large bias correction is
+# NOT independent agreement and must be demoted.
+# THE LIVE FINDING (2026-06-03 shadow): the #1 candidate Tel Aviv 06-04 buy_no
+# 32°C passed the gate with our=29.9 vs mainstream=29.5 (Δ0.4). But the RAW ECMWF
+# ensemble mean was 25.9°C — a +4.0°C bias correction is what pulled our forecast
+# up to ~mainstream. The "internal AND external agree" the ARM criterion requires
+# was MANUFACTURED by the correction, not two independent signals confirming each
+# other (raw is 3.6°C from mainstream → would FAIL closeness). The gate compares
+# the bias-CORRECTED forecast to mainstream, so for over-corrected cold-bias cities
+# (Tel Aviv, Tokyo) the agreement is circular. This is the false-positive class the
+# operator flagged. The antibody (no magic threshold): demote when the CORRECTED
+# forecast is close to mainstream BUT the RAW forecast is NOT.
+# ---------------------------------------------------------------------------
+
+def test_agreement_via_large_bias_correction_is_demoted():
+    """Live Tel Aviv 06-04: raw 25.9°C, +4°C bias → 29.9°C, mainstream 29.5°C.
+    Corrected agrees (Δ0.4) but raw is 3.6° off → agreement is correction-
+    manufactured → MUST be demoted (not an independent internal+external match)."""
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+
+    bins = _c_point_bins(
+        [28, 29, 30, 31, 32, 33, 34],
+        open_low_label="27°C or below",
+        open_high_label="35°C or higher",
+    )
+    traded = next(b for b in bins if b.label == "32°C")  # far-OTM buy_no
+    v = evaluate_mainstream_agreement(
+        city="Tel Aviv",
+        target_date="2026-06-04",
+        unit="C",
+        our_point=29.9,        # bias-corrected forecast
+        raw_our_point=25.9,    # raw ECMWF ensemble mean (3.6° from mainstream)
+        bins=bins,
+        traded_bin=traded,
+        direction="buy_no",
+        members=[29.6, 29.8, 29.9, 30.0, 30.2],  # corrected members → modal 30
+        mainstream_point=29.5,
+    )
+    assert v.mainstream_close is True            # corrected IS close to mainstream
+    assert v.agrees_on_raw is False              # raw is NOT close (3.6 > 1.5 tol)
+    assert v.agreement_correction_dependent is True
+    assert v.passed is False
+    assert v.fail_reason == "AGREEMENT_BIAS_CORRECTION_DEPENDENT"
+    assert v.bias_applied == pytest.approx(4.0)
+
+def test_agreement_with_small_correction_raw_also_agrees_passes():
+    """Wuhan-like: raw 32.0°C, corrected 31.6°C, mainstream 32.0°C. Both raw and
+    corrected agree with mainstream → NOT correction-dependent → passes (the
+    correction is not what created the agreement)."""
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+
+    bins = _c_point_bins(
+        [30, 31, 32, 33, 34, 35, 36],
+        open_low_label="29°C or below",
+        open_high_label="37°C or higher",
+    )
+    traded = next(b for b in bins if b.label == "34°C")  # buy_no on far bin
+    v = evaluate_mainstream_agreement(
+        city="Wuhan",
+        target_date="2026-06-04",
+        unit="C",
+        our_point=31.6,
+        raw_our_point=32.0,    # raw ALSO close to mainstream
+        bins=bins,
+        traded_bin=traded,
+        direction="buy_no",
+        members=[31.4, 31.6, 31.7, 31.9, 32.1],
+        mainstream_point=32.0,
+    )
+    assert v.agrees_on_raw is True
+    assert v.agreement_correction_dependent is False
+    assert v.passed is True
+
+def test_raw_our_point_absent_skips_correction_check_backward_compatible():
+    """When raw_our_point is not supplied (legacy callers), the correction check is
+    skipped — backward compatible, never spuriously demotes."""
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+
+    bins = _c_point_bins(
+        [13, 14, 15, 16],
+        open_low_label="12°C or below",
+        open_high_label="17°C or higher",
+    )
+    traded = next(b for b in bins if b.label == "15°C")
+    v = evaluate_mainstream_agreement(
+        city="Wellington",
+        target_date="2026-06-04",
+        unit="C",
+        our_point=15.2,
+        bins=bins,
+        traded_bin=traded,
+        direction="buy_yes",
+        members=[15.0, 15.1, 15.2, 15.3, 15.0],
+        mainstream_point=15.8,
+    )
+    assert v.agreement_correction_dependent is False
+    assert v.agrees_on_raw is None
+    assert v.passed is True

@@ -3676,6 +3676,12 @@ def _evaluate_and_store_mainstream_agreement(
 
     members = list(float(m) for m in analysis.member_maxes) if analysis.member_maxes is not None else None
     our_point = float(analysis.member_maxes.mean()) if members else None
+    # #135-B independence check: the RAW (uncorrected) ensemble mean. If the gate
+    # agreement with mainstream exists only because a large bias correction moved
+    # our_point, demote. Best-effort: older MarketAnalysis without raw accessor
+    # leaves this None (check then skips — backward-safe).
+    _raw = getattr(analysis, "raw_member_maxes", None)
+    raw_our_point = float(_raw.mean()) if (_raw is not None and len(_raw)) else None
     bins = list(analysis.bins)
     unit = str(analysis.unit or "C")
     precision = float(getattr(analysis, "precision", 1.0) or 1.0)
@@ -3702,6 +3708,7 @@ def _evaluate_and_store_mainstream_agreement(
                     direction=direction,
                     members=members,
                     mainstream_point=mainstream_pt,
+                    raw_our_point=raw_our_point,
                     precision=precision,
                 )
                 verdicts[(condition_id, direction)] = verdict.to_dict()

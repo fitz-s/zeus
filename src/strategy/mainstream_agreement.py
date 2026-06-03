@@ -67,6 +67,12 @@ FAIL_NOT_CLOSE = "MAINSTREAM_NOT_CLOSE"
 FAIL_DIR_VS_MAINSTREAM = "DIRECTION_AGREES_MAINSTREAM_SHORTING_LIKELY"
 FAIL_DIR_VS_MAINSTREAM_YES = "DIRECTION_DISAGREES_MAINSTREAM_BUY_YES_OFF_BIN"
 FAIL_DIR_VS_OUR_MODAL = "DIRECTION_INVERSION_VS_OUR_MODAL"
+# The corrected forecast agrees with mainstream ONLY because a large bias
+# correction pulled it there; the RAW (uncorrected) forecast does NOT agree. The
+# agreement is manufactured, not two independent signals confirming each other
+# (the cold-bias HURT-city false positive, e.g. Tel Aviv raw 25.9 +4°→29.9 vs
+# mainstream 29.5). Recorded so the demotion is auditable.
+FAIL_BIAS_CORRECTION_DEPENDENT = "AGREEMENT_BIAS_CORRECTION_DEPENDENT"
 PASS = "PASS"
 
 
@@ -92,6 +98,13 @@ class MainstreamAgreementVerdict:
     direction_agrees_our_modal: bool
     passed: bool
     fail_reason: str
+    # Independence-of-agreement fields (#135-B). raw_our_point is the UNCORRECTED
+    # ensemble mean; when supplied, the gate demotes candidates whose mainstream
+    # agreement exists only because a large bias correction moved our forecast.
+    raw_our_point: float | None = None
+    bias_applied: float | None = None          # our_point - raw_our_point
+    agrees_on_raw: bool | None = None           # |raw_our_point - mainstream| <= tol
+    agreement_correction_dependent: bool = False
 
     def to_dict(self) -> dict:
         """Flat dict for the no_submit receipt tag (`mainstream_agreement_*`).
@@ -118,6 +131,10 @@ class MainstreamAgreementVerdict:
             "tolerance": self.tolerance,
             "traded_bin_label": self.traded_bin_label,
             "direction": self.direction,
+            "raw_our_point": self.raw_our_point,
+            "bias_applied": self.bias_applied,
+            "agrees_on_raw": self.agrees_on_raw,
+            "agreement_correction_dependent": self.agreement_correction_dependent,
         }
 
 
@@ -224,6 +241,7 @@ def evaluate_mainstream_agreement(
     direction: str,
     members: Sequence[float] | None,
     mainstream_point: float | None,
+    raw_our_point: float | None = None,
     precision: float = 1.0,
 ) -> MainstreamAgreementVerdict:
     """Evaluate the four-check mainstream-agreement gate for one candidate.
@@ -273,6 +291,18 @@ def evaluate_mainstream_agreement(
     # CHECK 2 — closeness (cold/warm-bias kill switch).
     mainstream_close = abs(forecast_delta) <= tol
 
+    # CHECK 2b — INDEPENDENCE: the agreement must be genuine, not manufactured by a
+    # large bias correction. our_point is the bias-CORRECTED forecast; raw_our_point
+    # is the UNCORRECTED ensemble mean. If the corrected forecast is close to
+    # mainstream but the RAW forecast is NOT, the correction is what created the
+    # agreement (the cold-bias HURT-city false positive: Tel Aviv raw 25.9 +4°→29.9
+    # vs mainstream 29.5). Demote — internal and external are not independently
+    # confirming. When raw_our_point is absent, the check is skipped (never demotes).
+    raw_pt = None if raw_our_point is None else float(raw_our_point)
+    bias_applied = None if raw_pt is None else (float(our_point) - raw_pt)
+    agrees_on_raw = None if raw_pt is None else (abs(raw_pt - main_pt) <= tol)
+    agreement_correction_dependent = bool(mainstream_close and agrees_on_raw is False)
+
     # CHECK 3 — direction agrees with the mainstream-implied bin (DIRECTION LAW).
     #
     # Tolerance-aware (fixes rounding-brittleness): mainstream 15.8°C rounds to
@@ -312,6 +342,7 @@ def evaluate_mainstream_agreement(
     #      modal bin (the bias-warped-q wrong-side firing the operator flagged).
     passed = (
         mainstream_close
+        and not agreement_correction_dependent
         and direction_agrees_mainstream
         and direction_agrees_our_modal
     )
@@ -319,6 +350,10 @@ def evaluate_mainstream_agreement(
         fail_reason = PASS
     elif not mainstream_close:
         fail_reason = FAIL_NOT_CLOSE
+    elif agreement_correction_dependent:
+        # Closeness holds only because of the bias correction (raw disagrees) —
+        # not an independent internal+external match. Ranks just after closeness.
+        fail_reason = FAIL_BIAS_CORRECTION_DEPENDENT
     elif not direction_agrees_mainstream:
         fail_reason = (
             FAIL_DIR_VS_MAINSTREAM if direction == "buy_no" else FAIL_DIR_VS_MAINSTREAM_YES
@@ -346,4 +381,8 @@ def evaluate_mainstream_agreement(
         direction_agrees_our_modal=direction_agrees_our_modal,
         passed=passed,
         fail_reason=fail_reason,
+        raw_our_point=raw_pt,
+        bias_applied=bias_applied,
+        agrees_on_raw=agrees_on_raw,
+        agreement_correction_dependent=agreement_correction_dependent,
     )

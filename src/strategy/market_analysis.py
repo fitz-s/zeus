@@ -227,6 +227,11 @@ class MarketAnalysis:
         self.p_posterior = self._compute_posterior(self.p_cal)
         self.vig = None if self.p_market is None else float(self.p_market.sum())
         raw_member_maxes = _finite_member_extrema(member_maxes)
+        # Preserve the RAW (pre-bias-correction) ensemble so the mainstream gate
+        # (#135-B) can tell whether agreement with mainstream is independent or
+        # only an artifact of a large bias correction. Read-only; adds no
+        # correction — _member_maxes (below) remains the corrected array used by q.
+        self._raw_member_maxes = raw_member_maxes
         self._member_maxes = analysis_member_maxes(
             raw_member_maxes,
             unit=unit,
@@ -345,6 +350,18 @@ class MarketAnalysis:
         hard bug into a fail-open gate (the antibody the gate is meant to be).
         """
         return self._member_maxes
+
+    @property
+    def raw_member_maxes(self) -> "np.ndarray":
+        """Public accessor for the RAW (uncorrected) ensemble member maxima.
+
+        This is the ensemble BEFORE bias correction (analysis_member_maxes). The
+        #135-B mainstream-agreement independence check uses it to detect when an
+        agreement with mainstream exists only because a large bias correction
+        moved our forecast (the cold-bias HURT-city false positive). Adds no
+        correction — it merely exposes what was already computed at construction.
+        """
+        return self._raw_member_maxes
 
     @property
     def unit(self) -> str:
