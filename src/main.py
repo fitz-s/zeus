@@ -5094,6 +5094,30 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
     return {str(r[0]) for r in rows if r and r[0]}
 
 
+def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> dict:
+    """Build refresh_executable_market_substrate_snapshots kwargs for a market-channel action.
+
+    Authority is always VERIFIED (snapshots come from verified Gamma/CLOB data);
+    the EDLI channel trigger reason is carried as non-authoritative refresh_reason
+    metadata so it appears in the summary log without polluting the capture contract.
+
+    Separating these two carriers fixes P1-1: the original code passed
+    ``scan_authority=f"EDLI_MARKET_CHANNEL:{action.reason}"`` which caused
+    capture_executable_market_snapshot to raise ExecutableSnapshotCaptureError on
+    every attempt (it requires scan_authority == "VERIFIED"), making the entire
+    reactive snapshot-refresh path silently dead.
+    """
+    return dict(
+        markets=markets,
+        clob=clob,
+        captured_at=captured_at,
+        scan_authority="VERIFIED",
+        refresh_reason=f"EDLI_MARKET_CHANNEL:{action.reason}",
+        max_outcomes=20,
+        budget_seconds=15.0,
+    )
+
+
 @_scheduler_job("edli_market_channel_ingestor")
 def _edli_market_channel_ingestor_cycle() -> None:
     """EDLI market-channel online data-service bootstrap.
@@ -5220,12 +5244,9 @@ def _edli_market_channel_ingestor_cycle() -> None:
                             return
                     summary = refresh_executable_market_substrate_snapshots(
                         trade_conn,
-                        markets=markets,
-                        clob=clob,
-                        captured_at=datetime.now(timezone.utc),
-                        scan_authority=f"EDLI_MARKET_CHANNEL:{action.reason}",
-                        max_outcomes=20,
-                        budget_seconds=15.0,
+                        **_edli_market_channel_refresh_kwargs(
+                            action, markets, clob, datetime.now(timezone.utc)
+                        ),
                     )
                     trade_conn.commit()
                 finally:

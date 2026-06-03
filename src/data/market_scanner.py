@@ -3390,6 +3390,7 @@ def refresh_executable_market_substrate_snapshots(
     clob: Any,
     captured_at: datetime | None = None,
     scan_authority: str = "VERIFIED",
+    refresh_reason: str | None = None,
     max_outcomes: int | None = None,
     budget_seconds: float | None = None,
 ) -> dict[str, Any]:
@@ -3607,6 +3608,8 @@ def refresh_executable_market_substrate_snapshots(
     }
     if failures:
         summary["failure_samples"] = failures
+    if refresh_reason is not None:
+        summary["refresh_reason"] = refresh_reason
     if attempted > 0 and inserted == 0:
         logger.warning("Executable market substrate refresh inserted no snapshots: %s", summary)
     return summary
