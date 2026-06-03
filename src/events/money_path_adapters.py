@@ -126,6 +126,8 @@ def evaluate_kelly(
     True -> False.
     """
 
+    from src.config import sizing_defaults
+    from src.sizing.sizing_context import effective_bankroll, effective_bankroll_raw
     from src.strategy.kelly import dynamic_kelly_mult, kelly_size
 
     if sizing_context is None and kelly_multiplier is None:
@@ -136,22 +138,80 @@ def evaluate_kelly(
 
     execution_price.assert_kelly_safe()
 
+    # Task #107 (portfolio/multi Kelly): source portfolio_heat for the existing
+    # kelly.py >0.40 damper (placement B, threshold UNCHANGED). This is a
+    # secondary observable damper, NOT the primary budget (design §3c verdict).
+    portfolio_heat = 0.0
+    if sizing_context is not None and sizing_context.has_portfolio_context:
+        _heat_bankroll = float(sizing_context.bankroll_usd)
+        if _heat_bankroll > 0.0:
+            portfolio_heat = float(sizing_context.corr_committed_usd) / _heat_bankroll
+
     if sizing_context is not None:
         base = 0.25 if kelly_multiplier is None else float(kelly_multiplier)
         effective_multiplier = dynamic_kelly_mult(
             base=base,
             ci_width=float(sizing_context.ci_width),
             lead_days=float(sizing_context.lead_days),
+            portfolio_heat=portfolio_heat,
         )
     else:
         effective_multiplier = float(kelly_multiplier)
 
+    # Task #107 placement A (the budget ENFORCER): size against the bankroll NET
+    # of committed capital. Two limits applied — the binding one (min) is used:
+    #
+    # (corr limit) effective_bankroll: corr-weighted reduction, ensures corr-
+    #   weighted simultaneous stakes ≤ f_cap·B (INV-K1 corr path).
+    #
+    # (raw limit) effective_bankroll_raw: ABSOLUTE raw-dollar floor — total cash
+    #   deployed across ALL positions regardless of correlation. Fixes the
+    #   verifier defect: 15 distant cities at corr=0.10 floor could deploy $254
+    #   against a $170 bankroll because the corr weighting barely reduces the
+    #   effective bankroll for independent bets. Raw constraint: Σ raw deployed
+    #   ≤ max_portfolio_heat_pct·B (0.5·B = $85 at $170). INV-K1b.
+    #
+    # A context with no portfolio fields (the #103 3-arg ``from_candidate_proof``,
+    # ``has_portfolio_context`` False) sizes against the raw bankroll exactly as
+    # before #107 — INV-K8 holds with EQUALITY for the unwired case.
+    sizing_bankroll = float(bankroll_usd)
+    if sizing_context is not None and sizing_context.has_portfolio_context:
+        _sdc = sizing_defaults()
+        _b = float(sizing_context.bankroll_usd)
+        # Corr-weighted limit (existing).
+        _eff_corr = effective_bankroll(
+            _b,
+            float(sizing_context.corr_committed_usd),
+            f_cap=float(effective_multiplier),
+        )
+        # Absolute raw-dollar limit (verifier fix).
+        _eff_raw = effective_bankroll_raw(
+            _b,
+            float(sizing_context.raw_committed_usd),
+            float(_sdc["max_portfolio_heat_pct"]),
+            f_cap=float(effective_multiplier),
+        )
+        sizing_bankroll = min(_eff_corr, _eff_raw)
+
     size_usd = kelly_size(
         float(p_posterior),
         execution_price,
-        float(bankroll_usd),
+        sizing_bankroll,
         kelly_mult=effective_multiplier,
     )
+
+    # Task #107 INV-K3 (the single-bet cap): no single bet may exceed
+    # ``max_single_position_pct·B`` (config 0.10) — the named headline defect
+    # (live receipts showed 25-27%). Effective-bankroll reduction does NOT bound
+    # a first (uncommitted) bet, so this hard clamp against the FULL bankroll is
+    # the second belt. Only ever shrinks (never amplifies, INV-K8). Applied only
+    # on the portfolio-aware path; unwired callers keep exact single-Kelly.
+    if sizing_context is not None and sizing_context.has_portfolio_context:
+        max_single_pct = float(sizing_defaults()["max_single_position_pct"])
+        single_cap_usd = max_single_pct * float(sizing_context.bankroll_usd)
+        if size_usd > single_cap_usd:
+            size_usd = single_cap_usd
+
     return KellyProof(
         kelly_decision_id=kelly_decision_id,
         execution_price=execution_price,
