@@ -2560,6 +2560,62 @@ def city_exposure_for_bankroll(state: PortfolioState, city: str, bankroll: float
     return total / bankroll
 
 
+def correlated_committed_usd(
+    state: PortfolioState,
+    *,
+    new_city: str,
+    extra_reserved: list[tuple[str, float]] | None = None,
+) -> float:
+    """Correlation-weighted committed capital (USD) for a new bet in ``new_city``.
+
+    Task #107 (portfolio/multi Kelly), design §3(a) — the SINGLE structural
+    decision: "committed capital = correlation-weighted open + in-flight
+    exposure". The live EDLI reactor then sizes the new bet against
+    ``effective_bankroll(B, this)`` so simultaneous fractional-Kelly stakes
+    can never sum past ``B·f_cap``.
+
+    Computes ``Σ_i  effective_cost_basis_usd(p_i) · get_correlation(new_city,
+    p_i.city)`` over all runtime-open positions, PLUS the same-cycle
+    ``extra_reserved`` ``(city, usd)`` tuples weighted identically. Reuses the
+    existing primitives verbatim (no parallel system — iron rule 4):
+
+      - ``get_open_positions`` / ``_is_runtime_open_position`` — the open set.
+      - ``_runtime_open_exposure_usd`` — per-position committed USD
+        (``effective_cost_basis_usd``; 0.0 for pending-without-fill).
+      - ``get_correlation`` (correlation.py) — pairwise city correlation in
+        [0,1]; self-correlation (same city, e.g. a sibling MECE bin) = 1.0, so
+        same-family bins are summed at FULL weight (MECE-safe — competing
+        partitions of one event are never sized as independent bets).
+        Distant cities decay to the 0.10 haversine floor.
+
+    ``extra_reserved`` carries the same-cycle in-flight reservations (INV-K7):
+    a just-emitted EDLI entry is ``PENDING_TRACKED`` without fill authority, so
+    its ``effective_cost_basis_usd`` is 0.0 and it is invisible to
+    ``load_portfolio()`` until reconciled. The reactor accumulates each
+    accepted Kelly stake as a ``(city, usd)`` reservation and passes it here so
+    the next same-cycle bet nets it — otherwise the intra-cycle budget is
+    breached.
+
+    Returns a non-negative USD figure. Never amplifies anything downstream:
+    ``effective_bankroll`` only ever subtracts this from the bankroll.
+    """
+    total = 0.0
+    for pos in get_open_positions(state):
+        committed = _runtime_open_exposure_usd(pos)
+        if committed <= 0.0:
+            continue
+        corr = get_correlation(new_city, pos.city)
+        total += committed * corr
+    if extra_reserved:
+        for reserved_city, reserved_usd in extra_reserved:
+            usd = float(reserved_usd)
+            if usd <= 0.0:
+                continue
+            corr = get_correlation(new_city, str(reserved_city))
+            total += usd * corr
+    return total
+
+
 @dataclass(frozen=True)
 class ClusterExposureResult:
     gross_heat: float

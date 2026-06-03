@@ -246,8 +246,20 @@ def event_bound_no_submit_adapter_from_trade_conn(
     calibration_conn: sqlite3.Connection | None = None,
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    portfolio_state_provider: "Callable[[], Any] | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
-    """Build a proof-only final-intent receipt adapter for EDLI events."""
+    """Build a proof-only final-intent receipt adapter for EDLI events.
+
+    Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
+    ``bankroll_usd_provider``) lets Kelly size against the bankroll NET of
+    correlation-weighted committed capital. The per-cycle in-flight reservation
+    accumulator (INV-K7) is CLOSURE-held here — NOT module-global — so parallel
+    cycles / tests stay isolated. One adapter instance == one reactor cycle, so
+    the accumulator is fresh per cycle by construction."""
+
+    # INV-K7 reservation accumulator: closure-held (test-isolation safe), reset
+    # implicitly per adapter instance (== per reactor cycle).
+    portfolio_reservation: list[tuple[str, float]] = []
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         return build_event_bound_no_submit_receipt(
@@ -259,6 +271,8 @@ def event_bound_no_submit_adapter_from_trade_conn(
             calibration_conn=calibration_conn,
             get_current_level=get_current_level,
             bankroll_usd_provider=bankroll_usd_provider,
+            portfolio_state_provider=portfolio_state_provider,
+            portfolio_reservation=portfolio_reservation,
         )
 
     return _submit
@@ -273,6 +287,7 @@ def event_bound_live_adapter_from_trade_conn(
     calibration_conn: sqlite3.Connection | None = None,
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    portfolio_state_provider: "Callable[[], Any] | None" = None,
     real_order_submit_enabled: bool = False,
     live_canary_enabled: bool = False,
     tiny_live_max_notional_usd: float = 5.0,
@@ -287,7 +302,16 @@ def event_bound_live_adapter_from_trade_conn(
     This first full-live increment deliberately stops before executor submit
     when real submit is disabled. It creates the durable proof shape that a
     later live-canary cut can submit through the existing executor seam.
+
+    Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
+    ``bankroll_usd_provider``) lets Kelly size against the bankroll NET of
+    correlation-weighted committed capital. The INV-K7 per-cycle in-flight
+    reservation accumulator is CLOSURE-held (test-isolation safe), fresh per
+    adapter instance (== per reactor cycle).
     """
+
+    # INV-K7 reservation accumulator: closure-held, fresh per reactor cycle.
+    portfolio_reservation: list[tuple[str, float]] = []
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         no_submit_receipt = build_event_bound_no_submit_receipt(
@@ -299,6 +323,8 @@ def event_bound_live_adapter_from_trade_conn(
             calibration_conn=calibration_conn,
             get_current_level=get_current_level,
             bankroll_usd_provider=bankroll_usd_provider,
+            portfolio_state_provider=portfolio_state_provider,
+            portfolio_reservation=portfolio_reservation,
         )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
@@ -561,8 +587,19 @@ def build_event_bound_no_submit_receipt(
     topology_conn: sqlite3.Connection | None = None,
     calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
+    portfolio_state_provider: "Callable[[], Any] | None" = None,
+    portfolio_reservation: "list[tuple[str, float]] | None" = None,
 ) -> EventSubmissionReceipt:
-    """Produce a typed no-submit EDLI proof without running the cycle runner."""
+    """Produce a typed no-submit EDLI proof without running the cycle runner.
+
+    Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
+    ``bankroll_usd_provider``) supplies the current PortfolioState snapshot so
+    Kelly sizes against the bankroll NET of correlation-weighted committed
+    capital. ``portfolio_reservation`` is the closure-held per-cycle in-flight
+    accumulator (``[(city, usd), ...]``); the builder reads it as
+    ``extra_reserved`` for INV-K7 and APPENDS this event's accepted stake so the
+    next same-cycle event nets it. When either is None the sizing reduces
+    EXACTLY to pre-#107 single-Kelly (no regression for unwired callers/tests)."""
 
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
@@ -862,11 +899,40 @@ def build_event_bound_no_submit_receipt(
         # derivation can raise ValueError (CALIBRATION_AUTHORITY_MISSING) — that
         # routes through the except envelope below to KELLY_PROOF_MISSING
         # fail-closed, never silent.
-        sizing_context = SizingContext.from_candidate_proof(
-            q_posterior=proof.q_posterior,
-            q_lcb_5pct=proof.q_lcb_5pct,
-            lead_days=_snapshot_lead_days(snapshot=row, family=family, payload=payload),
-        )
+        _lead_days = _snapshot_lead_days(snapshot=row, family=family, payload=payload)
+        # Task #107 (portfolio/multi Kelly): when a PortfolioState provider is
+        # wired, size against the bankroll NET of correlation-weighted committed
+        # capital (open + pending + same-cycle in-flight reservation). The
+        # reservation accumulator (closure-held in the adapter factory) carries
+        # this cycle's already-emitted-but-unfilled stakes (INV-K7). When no
+        # provider is wired (back-compat / tests), fall back to the #103 3-arg
+        # context → sizes against the raw bankroll, EXACTLY as before #107.
+        if portfolio_state_provider is not None:
+            from src.state.portfolio import correlated_committed_usd
+
+            _portfolio_state = portfolio_state_provider()
+            _corr_committed_usd = correlated_committed_usd(
+                _portfolio_state,
+                new_city=family.city,
+                extra_reserved=(
+                    list(portfolio_reservation)
+                    if portfolio_reservation is not None
+                    else None
+                ),
+            )
+            sizing_context = SizingContext.from_candidate_proof_with_portfolio(
+                q_posterior=proof.q_posterior,
+                q_lcb_5pct=proof.q_lcb_5pct,
+                lead_days=_lead_days,
+                bankroll_usd=bankroll_usd,
+                corr_committed_usd=_corr_committed_usd,
+            )
+        else:
+            sizing_context = SizingContext.from_candidate_proof(
+                q_posterior=proof.q_posterior,
+                q_lcb_5pct=proof.q_lcb_5pct,
+                lead_days=_lead_days,
+            )
         kelly = evaluate_kelly(
             kelly_decision_id=f"edli_kelly:{event.event_id}:{selected_token_id}",
             p_posterior=proof.q_posterior,
@@ -939,6 +1005,16 @@ def build_event_bound_no_submit_receipt(
     )
     if not risk.passed:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="RISK_GUARD_BLOCKED")
+    # Task #107 INV-K7 (same-cycle in-flight reservation): this bet has now
+    # passed Kelly + RiskGuard and is committed to emission as an accepted final
+    # intent. Reserve its stake in the closure-held per-cycle accumulator so the
+    # NEXT event in this reactor cycle nets it — a just-emitted EDLI entry is
+    # PENDING_TRACKED without fill authority, so its effective_cost_basis_usd is
+    # 0.0 and it is invisible to the portfolio snapshot until reconciled. Without
+    # this, two same-cycle bets would both size against the full (un-netted)
+    # budget and breach it intra-cycle.
+    if portfolio_reservation is not None:
+        portfolio_reservation.append((family.city, float(kelly.size_usd)))
     intent = EventBoundFinalIntent(
         final_intent_id=f"edli_intent:{event.event_id}:{selected_token_id}",
         event_id=event.event_id,

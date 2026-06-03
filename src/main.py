@@ -3635,6 +3635,25 @@ def _edli_event_reactor_cycle() -> None:
                     _alloc_refresh.get("fail_closed"),
                     _alloc_refresh.get("entry", {}).get("reason"),
                 )
+        # Task #107 (portfolio/multi Kelly): source the PortfolioState ONCE per
+        # reactor cycle (DB-only, microseconds) so per-event Kelly sizes against
+        # the bankroll NET of correlation-weighted committed capital. The
+        # provider closure hands the SAME cached snapshot to every event this
+        # cycle (cycle-level read, not per-decision — mirrors the bankroll warm).
+        # FAIL-SOFT: if load_portfolio raises, the provider stays None and Kelly
+        # sizing falls back to pre-#107 single-Kelly (no crash, no over-size vs
+        # the old behaviour). The in-flight reservation accumulator (INV-K7) is
+        # closure-held inside the adapter factory, fresh per cycle.
+        _portfolio_state_provider = None
+        try:
+            _portfolio_snapshot = load_portfolio()
+            _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
+        except Exception as _portfolio_exc:  # noqa: BLE001 — fail-soft to single-Kelly
+            logger.warning(
+                "EDLI reactor: portfolio snapshot load failed (non-fatal); Kelly "
+                "sizing falls back to single-asset (full-bankroll) this cycle: %r",
+                _portfolio_exc,
+            )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -3642,6 +3661,7 @@ def _edli_event_reactor_cycle() -> None:
                 topology_conn=forecasts_conn,
                 calibration_conn=conn,
                 get_current_level=get_current_level,
+                portfolio_state_provider=_portfolio_state_provider,
                 real_order_submit_enabled=real_order_submit_enabled if reactor_mode == "live" else False,
                 live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
                 taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
@@ -3675,6 +3695,7 @@ def _edli_event_reactor_cycle() -> None:
                 topology_conn=forecasts_conn,
                 calibration_conn=conn,
                 get_current_level=get_current_level,
+                portfolio_state_provider=_portfolio_state_provider,
             )
         )
 

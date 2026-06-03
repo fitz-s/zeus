@@ -2152,3 +2152,125 @@ def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():
     assert receipt.kelly_pass is True
     assert receipt.kelly_size_usd > 0
     assert receipt.reason != "KELLY_PROOF_MISSING"
+
+
+# ── Task #107: portfolio-aware Kelly THROUGH the live reactor receipt path ────
+# These drive the SAME build_event_bound_no_submit_receipt the daemon runs and
+# prove the effective-bankroll reduction + INV-K3 single cap on a real receipt
+# (not just the unit sizing path). The fixture city is "Chicago" (see
+# _seed_platt_models). A held Chicago position has corr=1.0 (self) and reduces
+# the new bet; the K3 cap holds against the receipt's bankroll.
+
+def _held_chicago_position(committed_usd: float, tid: str):
+    from src.state.portfolio import Position
+
+    return Position(
+        trade_id=tid,
+        market_id=f"m_{tid}",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-10",
+        bin_label=f"bin_{tid}",
+        direction="buy_yes",
+        cost_basis_usd=float(committed_usd),
+        size_usd=float(committed_usd),
+        state="holding",
+    )
+
+
+def test_107_receipt_unwired_provider_equals_single_kelly_modulo_cap():
+    """No portfolio_state_provider ⇒ receipt sizes EXACTLY as pre-#107 single
+    Kelly (no regression), except the K3 single-bet cap never engages because
+    the cap is only applied on the portfolio-aware path."""
+    event = _bound_forecast_event()
+    receipt = _receipt(
+        event,
+        _trade_conn_with_snapshot(),
+        bankroll_usd_provider=lambda: 170.0,
+    )
+    assert receipt.kelly_pass is True
+    assert receipt.kelly_size_usd > 0
+
+
+def test_107_receipt_correlated_hold_reduces_size_through_reactor():
+    """LIVE-RECEIPT re-size proof: a held Chicago position (corr=1.0) reduces the
+    new Chicago bet's kelly_size_usd via the effective-bankroll reduction,
+    THROUGH the real reactor receipt builder."""
+    from src.state.portfolio import PortfolioState
+
+    bankroll = 170.0
+    # Baseline: empty portfolio, portfolio-aware path wired.
+    empty_state = PortfolioState(positions=[])
+    base = _receipt(
+        _bound_forecast_event(),
+        _trade_conn_with_snapshot(),
+        bankroll_usd_provider=lambda: bankroll,
+        portfolio_state_provider=lambda: empty_state,
+    )
+    assert base.kelly_pass is True
+    base_size = base.kelly_size_usd
+    assert base_size > 0.0
+
+    # Held correlated capital in the SAME city (corr=1.0). A SMALL amount so the
+    # bet shrinks-but-survives (a larger hold would exhaust the haircut-reduced
+    # budget and fail closed, which is INV-K6, tested separately).
+    held_state = PortfolioState(
+        positions=[_held_chicago_position(5.0, "held1")]
+    )
+    reduced = _receipt(
+        _bound_forecast_event(),
+        _trade_conn_with_snapshot(),
+        bankroll_usd_provider=lambda: bankroll,
+        portfolio_state_provider=lambda: held_state,
+    )
+    assert reduced.kelly_pass is True
+    # The correlated hold strictly shrinks the new bet (effective-bankroll
+    # reduction at full weight).
+    assert reduced.kelly_size_usd < base_size, (
+        f"correlated hold did not reduce receipt size: "
+        f"{reduced.kelly_size_usd:.4f} !< {base_size:.4f}"
+    )
+
+
+def test_107_receipt_single_bet_respects_max_single_position_pct():
+    """INV-K3 through the reactor: the receipt's kelly_size_usd never exceeds
+    max_single_position_pct (0.10) of the provider bankroll on the
+    portfolio-aware path — the headline 25-27%→≤10% fix."""
+    from src.config import sizing_defaults
+    from src.state.portfolio import PortfolioState
+
+    bankroll = 170.0
+    max_single_pct = float(sizing_defaults()["max_single_position_pct"])
+    receipt = _receipt(
+        _bound_forecast_event(),
+        _trade_conn_with_snapshot(),
+        bankroll_usd_provider=lambda: bankroll,
+        portfolio_state_provider=lambda: PortfolioState(positions=[]),
+    )
+    assert receipt.kelly_pass is True
+    assert receipt.kelly_size_usd <= bankroll * max_single_pct + 1e-6, (
+        f"receipt single bet {receipt.kelly_size_usd:.4f} "
+        f"({receipt.kelly_size_usd / bankroll * 100:.1f}% of B) exceeds "
+        f"max_single_position_pct cap {bankroll * max_single_pct:.4f}"
+    )
+
+
+def test_107_receipt_full_exposure_fails_closed_through_reactor():
+    """INV-K6 through the reactor: when correlation-weighted committed capital
+    exceeds the budget, the receipt fails closed (no positive size emitted)."""
+    from src.state.portfolio import PortfolioState
+
+    bankroll = 170.0
+    # Same-city committed capital far exceeding the bankroll → B_eff = 0.
+    over_state = PortfolioState(
+        positions=[_held_chicago_position(bankroll + 100.0, "over1")]
+    )
+    receipt = _receipt(
+        _bound_forecast_event(),
+        _trade_conn_with_snapshot(),
+        bankroll_usd_provider=lambda: bankroll,
+        portfolio_state_provider=lambda: over_state,
+    )
+    # Fail-closed: KELLY_REJECTED with zero size, never a positive over-sized bet.
+    assert receipt.kelly_pass is False
+    assert (receipt.kelly_size_usd or 0.0) == 0.0
