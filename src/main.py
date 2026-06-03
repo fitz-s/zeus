@@ -5398,8 +5398,15 @@ def main():
     # assert_calibration_pin_shape_is_dict: fatal if model_keys is a list
     #   (silently coerced to {} in manager.py, making all pins dead config).
     # assert_frozen_as_of_not_stale: WARN>10d, FATAL>21d (override: ZEUS_FREEZE_GUARD_DISABLE=1).
-    assert_calibration_pin_shape_is_dict(settings)
-    assert_frozen_as_of_not_stale(settings, now=datetime.now(tz=timezone.utc))
+    # NB: both guards take the raw config dict (cfg.get(...)). `settings` is a
+    # strict Settings object with no .get(); pass settings._data — the same
+    # raw-dict accessor _settings_section() uses above. Passing the object
+    # itself raised AttributeError('Settings' has no attribute 'get') at boot,
+    # masking the staleness guard and crash-looping the daemon (W0 boot fix
+    # 2026-06-03). The guards' dict contract + unit tests are unchanged.
+    _pin_guard_cfg = settings._data if hasattr(settings, "_data") else settings
+    assert_calibration_pin_shape_is_dict(_pin_guard_cfg)
+    assert_frozen_as_of_not_stale(_pin_guard_cfg, now=datetime.now(tz=timezone.utc))
     logger.info("calibration pin shape + staleness boot-guards: OK")
 
     # N2 — S2 deployment gate (PR-S1, Bug #3).
