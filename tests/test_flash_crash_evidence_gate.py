@@ -1,12 +1,11 @@
 # Created: 2026-06-02
-# Last reused/audited: 2026-06-03 (Wave 3 consolidation — exit_triggers twin deleted)
+# Last reused/audited: 2026-06-02
 # Authority basis: BUG#127 (守護 SEV1, GOAL#36 "a short price change is NOT edge reversal");
-#   src/state/portfolio.py flash_crash_should_fire + Position.evaluate_exit (single live site)
+#   src/execution/exit_triggers.py FLASH_CRASH_PANIC, src/state/portfolio.py Position.evaluate_exit
 # Purpose: Lock the evidence gate on FLASH_CRASH_PANIC so a bare single-cycle quote wiggle
 #   (adverse market_velocity_1h with UNCHANGED belief) can no longer force an exit, while a
-#   belief-confirmed move OR a persistent deep catastrophe still exits. After unblock-W3
-#   deleted the dead exit_triggers.py twin, the live gate lives solely in portfolio.py
-#   (flash_crash_should_fire, shared by Position.evaluate_exit).
+#   belief-confirmed move OR a persistent deep catastrophe still exits. Both trigger sites
+#   (exit_triggers.py and portfolio.py) must agree — they share flash_crash_should_fire().
 # Reuse: Run when FLASH_CRASH gating, exit_triggers ordering, or the flash_crash_* config changes.
 """BUG#127 antibody: FLASH_CRASH_PANIC must be evidence-gated, not a bare price-delta trigger."""
 from __future__ import annotations
@@ -150,13 +149,30 @@ def test_velocity_above_arming_threshold_never_fires():
     ) is False
 
 
-# --- 2. Site A REMOVED (Wave 3, 2026-06-03) ------------------------------------------
-# The dead twin src/execution/exit_triggers.py (evaluate_exit_triggers) was deleted in
-# unblock-W3 (one exit path: only Position.evaluate_exit remains live; zero src callers).
-# BUG#127's substantive belief gate lives in portfolio.py::flash_crash_should_fire (tested
-# in §1) and Position.evaluate_exit (tested in §3) — both preserved. The former Site-A
-# assertions had no surviving subject, so they are dropped rather than repointed to a
-# duplicate of Site B. See PR-A consolidation report (W3 conflict resolution).
+# --- 2. Site A: exit_triggers.evaluate_exit_triggers ----------------------------------
+
+
+def test_exit_triggers_bare_wiggle_no_exit():
+    from src.execution.exit_triggers import evaluate_exit_triggers
+
+    pos = _held_position()
+    # Sharp 1-cycle adverse move, belief unchanged, full probability authority.
+    ctx = _edge_context(market_velocity_1h=-0.20, divergence_score=0.0)
+    signal = evaluate_exit_triggers(pos, ctx, hours_to_settlement=12.0, market_vig=1.0)
+    assert signal is None or signal.trigger != "FLASH_CRASH_PANIC"
+
+
+def test_exit_triggers_belief_confirmed_crash_exits():
+    from src.execution.exit_triggers import evaluate_exit_triggers
+
+    pos = _held_position()
+    ctx = _edge_context(
+        market_velocity_1h=-0.20,
+        divergence_score=divergence_soft_threshold() + 0.01,
+    )
+    signal = evaluate_exit_triggers(pos, ctx, hours_to_settlement=12.0, market_vig=1.0)
+    assert signal is not None
+    assert signal.trigger in {"FLASH_CRASH_PANIC", "MODEL_DIVERGENCE_PANIC"}
 
 
 # --- 3. Site B: Position.evaluate_exit -----------------------------------------------
@@ -181,19 +197,21 @@ def test_portfolio_evaluate_exit_belief_confirmed_crash_exits():
     assert decision.trigger in {"FLASH_CRASH_PANIC", "MODEL_DIVERGENCE_PANIC"}
 
 
-# --- 4. Single-site coherence (Wave 3, 2026-06-03) -----------------------------------
-# Previously a two-site agreement check (exit_triggers.py vs portfolio.py). After W3
-# deleted the dead exit_triggers twin, only the live Position.evaluate_exit site remains;
-# the invariant collapses to: the single live exit site must not flash-crash on a bare
-# 1-cycle wiggle (belief unchanged).
+# --- 4. Cross-site coherence ----------------------------------------------------------
 
 
-def test_live_site_does_not_flash_crash_on_bare_wiggle():
-    """Relationship invariant: the single live exit site must not exit on a bare wiggle."""
+def test_both_sites_agree_on_bare_wiggle():
+    """Relationship invariant: neither site may exit on a bare 1-cycle wiggle."""
+    from src.execution.exit_triggers import evaluate_exit_triggers
+
+    pos_a = _held_position()
     pos_b = _held_position()
+    edge_ctx = _edge_context(market_velocity_1h=-0.25, divergence_score=0.0)
     exit_ctx = _exit_context(market_velocity_1h=-0.25, divergence_score=0.0)
 
+    sig = evaluate_exit_triggers(pos_a, edge_ctx, hours_to_settlement=12.0, market_vig=1.0)
     dec = pos_b.evaluate_exit(exit_ctx)
 
+    site_a_flash = sig is not None and sig.trigger == "FLASH_CRASH_PANIC"
     site_b_flash = "FLASH_CRASH_PANIC" in (dec.trigger or "")
-    assert site_b_flash is False
+    assert site_a_flash == site_b_flash == False

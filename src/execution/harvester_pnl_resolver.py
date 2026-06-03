@@ -1,21 +1,19 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-16; last_reused=2026-05-16
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5; docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
-# W2 (2026-06-03): repointed from forecasts.settlements → forecasts.settlement_outcomes.
 """Trading-side P&L resolver (Phase 1.5 harvester split).
 
-Reads forecasts.settlement_outcomes via get_forecasts_connection() (read-only).
+Reads forecasts.settlements via get_forecasts_connection() (read-only).
 Writes trade.decision_log via store_settlement_records() and settles positions
 via _settle_positions() — both are trading-side operations.
 
 Design invariants:
 - Does NOT write to settlements, settlement_outcomes, market_events, or any forecast table.
-- If forecasts.settlement_outcomes has no new rows, returns awaiting_truth_writer status.
+- If forecasts.settlements has no new rows, returns awaiting_truth_writer status.
 - Feature-flagged: ZEUS_HARVESTER_LIVE_ENABLED must equal "1" or function is a no-op.
 - May import from src.execution.harvester (trading side, no circular reference).
 - Does NOT import from src.ingest_main or scripts.ingest.*.
 
 K1 (2026-05-11): settlements moved from zeus-world.db to zeus-forecasts.db.
-W2 (2026-06-03): reader repointed from legacy settlements → canonical settlement_outcomes.
 Callers pass get_forecasts_connection() as the second argument.
 """
 
@@ -69,15 +67,13 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             "errors": 0,
         }
 
-    # Read settled rows from forecasts.settlement_outcomes (VERIFIED authority only).
-    # W2 (2026-06-03): repointed from legacy settlements table to canonical settlement_outcomes.
-    # Only the table name changed; the projected columns are unchanged.
+    # Read settled rows from forecasts.settlements (VERIFIED authority only).
     try:
         rows = forecasts_conn.execute(
             """
             SELECT city, target_date, market_slug, winning_bin, temperature_metric,
                    authority, settlement_source, settlement_value
-            FROM settlement_outcomes
+            FROM settlements
             WHERE authority = 'VERIFIED'
               AND COALESCE(temperature_metric, 'high') IN ('high', 'low')
             ORDER BY settled_at DESC
@@ -85,9 +81,9 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             """
         ).fetchall()
     except Exception as exc:
-        logger.warning("harvester_pnl_resolver: settlement_outcomes read failed: %s", exc)
+        logger.warning("harvester_pnl_resolver: settlements read failed: %s", exc)
         return {
-            "status": "settlement_outcomes_read_error",
+            "status": "settlements_read_error",
             "error": str(exc),
             "positions_settled": 0,
             "decision_log_rows_written": 0,
@@ -96,7 +92,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
 
     if not rows:
         logger.debug(
-            "harvester_pnl_resolver: no VERIFIED rows in forecasts.settlement_outcomes; "
+            "harvester_pnl_resolver: no VERIFIED settlements in forecasts.settlements; "
             "truth writer may not have run yet"
         )
         return {
@@ -150,7 +146,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
                 settlement_records=settlement_records,
                 strategy_tracker=tracker,
                 settlement_authority=authority,
-                settlement_truth_source="forecasts.settlement_outcomes",
+                settlement_truth_source="forecasts.settlements",
                 settlement_market_slug=str(market_slug or ""),
                 settlement_temperature_metric=str(temperature_metric or ""),
                 settlement_source=str(settlement_source or ""),

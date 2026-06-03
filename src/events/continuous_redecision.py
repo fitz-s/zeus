@@ -2,8 +2,7 @@
 # Last reused or audited: 2026-05-31
 # Authority basis: PLAN_CONTINUOUS_REDECISION_MAX_ALPHA_2026-05-31.md (v2, opus-critic-resolved) +
 #   GOAL #36 expanded (continuous entry+exit, evidence-gated). Implements P1 (belief cache) + P2
-#   (cheap screen + enqueue). screen_exit/screen_exit_cancel deleted Wave 3 (zero live callers —
-#   exit path is Position.evaluate_exit in src/state/portfolio.py).
+#   (cheap screen + enqueue) + exit screen (SD6/SD7) for continuous re-decision.
 #
 # DAEMON-SAFE BACKING (critical): assert_db_matches_registry (table_registry.py:285) is STRICT
 # set-equality — an extra on-disk table not in the ownership registry is a FATAL boot crash. So this
@@ -62,6 +61,16 @@ class EnqueuedRedecision:
 
 
 @dataclass(frozen=True)
+class ExitDecision:
+    family_id: str
+    bin_label: str
+    side: str
+    entry_posterior: float
+    current_posterior: float
+    reason: str = "BELIEF_EDGE_REVERSAL"
+
+
+@dataclass(frozen=True)
 class RepriceDecision:
     """§4.5 (Dimension 3) cancel/re-place decision for a RESTING order. ``action`` is one of
     {CANCEL_REPLACE, CANCEL_STALE, CANCEL_EXIT}; ``reason`` is the evidence class. SHADOW-safe — the
@@ -76,6 +85,23 @@ class RepriceDecision:
 
 def _parse(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
+
+
+def _ci_separated(
+    a: tuple[float, float] | None, b: tuple[float, float] | None
+) -> bool | None:
+    """True iff two confidence intervals are DISJOINT (no overlap) — the SD-7 CI-separation test.
+
+    Returns None when either CI is unavailable (the caller falls back to the flat threshold). The CI
+    bounds are the system's existing robust LCB/percentile machinery (q_5pct-style bounds from the
+    decision kernel / trade_score) — NOT a new statistic; the caller supplies them.
+    """
+    if a is None or b is None:
+        return None
+    lo_a, hi_a = float(min(a)), float(max(a))
+    lo_b, hi_b = float(min(b)), float(max(b))
+    # Disjoint iff one interval lies entirely below the other (strict, with EPS guard).
+    return (hi_a < lo_b - _EPS) or (hi_b < lo_a - _EPS)
 
 
 def _belief_decision_id(family_id: str, snapshot_id: str, calibrator_model_hash: str) -> str:
@@ -264,6 +290,76 @@ def enqueue_live_redecisions(
     return out
 
 
+def screen_exit(
+    conn: sqlite3.Connection,
+    *,
+    family_id: str,
+    bin_label: str,
+    side: str,
+    entry_posterior: float,
+    reversal_belief_delta: float = 0.15,
+    entry_ci: tuple[float, float] | None = None,
+    current_ci: tuple[float, float] | None = None,
+    belief_available: bool = True,
+) -> ExitDecision | None:
+    """Evidence-gated exit (SD6/SD7), the 6a discriminator. Exit a held position ONLY when the BELIEF
+    moved against the held side — NEVER on a bare price move (posterior changes only on forecast/obs
+    evidence). This function does not read price; that property is load-bearing.
+
+    Hardening (design §4.6 / SD-7):
+      - **CI-separation:** when both ``entry_ci`` and ``current_ci`` are supplied (the system's robust
+        LCB/q_5pct percentile machinery from the decision kernel — NOT a new statistic), exit fires
+        ONLY when the current belief's CI EXCLUDES the entry belief's CI (separated evidence). A large
+        point move whose CI still overlaps entry is a noisy snapshot → HOLD. When CI inputs are
+        unavailable, fall back to the flat ``reversal_belief_delta`` floor (pre-hardening behavior).
+      - **EVIDENCE_UNAVAILABLE third state:** when ``belief_available`` is False (degraded day0
+        absorbing-mask / obs math — belief can't be computed, distinct from belief-reversed), return a
+        third state (reason=``EVIDENCE_UNAVAILABLE``) → flag for the 守护 heartbeat. Do NOT exit on
+        price, do NOT blindly hold.
+
+    Returns None (hold) when no belief, no such bin, or no material/separated reversal.
+    """
+    # SD-7 / plan v2.B: degraded day0/obs math → belief UNAVAILABLE (first-class), not reversed.
+    if not belief_available:
+        return ExitDecision(
+            family_id=family_id, bin_label=bin_label, side=side,
+            entry_posterior=float(entry_posterior), current_posterior=float("nan"),
+            reason="EVIDENCE_UNAVAILABLE",
+        )
+    belief = latest_cached_belief(conn, family_id=family_id)
+    if belief is None:
+        return None
+    try:
+        idx = belief.bin_labels.index(bin_label)
+    except ValueError:
+        return None
+    if idx >= len(belief.p_posterior_vec):
+        return None
+    yes_post = float(belief.p_posterior_vec[idx])
+    current = yes_post if side == "buy_yes" else 1.0 - yes_post
+
+    separated = _ci_separated(entry_ci, current_ci)
+    if separated is not None:
+        # CI inputs present → STRICTER CI-separation gate (SD-7). Exit only when the current CI is
+        # disjoint from entry AND lies BELOW it (belief moved against the held side, not merely apart).
+        below = current < entry_posterior - _EPS
+        if separated and below:
+            return ExitDecision(
+                family_id=family_id, bin_label=bin_label, side=side,
+                entry_posterior=float(entry_posterior), current_posterior=current,
+                reason="CI_SEPARATED_REVERSAL",
+            )
+        return None
+
+    # Fallback: flat reversal_belief_delta floor (CI machinery unavailable).
+    if current < entry_posterior - reversal_belief_delta - _EPS:
+        return ExitDecision(
+            family_id=family_id, bin_label=bin_label, side=side,
+            entry_posterior=float(entry_posterior), current_posterior=current,
+        )
+    return None
+
+
 def screen_reprice(
     conn: sqlite3.Connection,
     *,
@@ -331,6 +427,47 @@ def screen_stale_quote_cancel(
             action="CANCEL_STALE", reason="QUOTE_STALE", detail=float(quote_age_ms),
         )
     return None
+
+
+def screen_exit_cancel(
+    conn: sqlite3.Connection,
+    *,
+    family_id: str,
+    bin_label: str,
+    side: str,
+    entry_posterior: float,
+    reversal_belief_delta: float = 0.15,
+    entry_ci: tuple[float, float] | None = None,
+    current_ci: tuple[float, float] | None = None,
+) -> RepriceDecision | None:
+    """§4.6 6b — symmetric anti-twitch for EXITS. A pending exit was placed on a CI-separated reversal.
+    Before it fills, if the belief RE-reverses back (the current CI RE-OVERLAPS the entry CI, or the
+    flat-floor reversal no longer holds), the reversal was noise → CANCEL the pending exit. If the
+    reversal is still sustained (CI still separated / still past the floor), return None (let it fill).
+    """
+    belief = latest_cached_belief(conn, family_id=family_id)
+    if belief is None:
+        return None
+    try:
+        idx = belief.bin_labels.index(bin_label)
+    except ValueError:
+        return None
+    if idx >= len(belief.p_posterior_vec):
+        return None
+    yes_post = float(belief.p_posterior_vec[idx])
+    current = yes_post if side == "buy_yes" else 1.0 - yes_post
+
+    separated = _ci_separated(entry_ci, current_ci)
+    if separated is not None:
+        still_reversed = separated and current < entry_posterior - _EPS
+    else:
+        still_reversed = current < entry_posterior - reversal_belief_delta - _EPS
+    if still_reversed:
+        return None  # reversal sustained → let the pending exit fill
+    return RepriceDecision(
+        family_id=family_id, bin_label=bin_label, side=side,
+        action="CANCEL_EXIT", reason="EXIT_RE_REVERSAL_NOISE", detail=current,
+    )
 
 
 _OPPOSITE_SIDE: dict[str, str] = {"buy_yes": "buy_no", "buy_no": "buy_yes"}

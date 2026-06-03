@@ -96,10 +96,7 @@ tables:
     pk_col: null
     notes: >
       B3cont 2026-05-28: bare world-class settlements shell dropped from forecasts DB.
-      Canonical table is settlement_outcomes. DELETED_PENDING: drop after 2026-08-09.
-      W2 (2026-06-03): P&L resolver repointed to settlement_outcomes. No live writes
-      remain; this table is a read-archive only. OK to DROP once settlement_outcomes
-      has been verified as the sole truth source across all readers.
+      Canonical table is settlement_outcomes. Drop after 2026-08-09.
 
   - name: settlement_outcomes
     db: forecasts
@@ -701,16 +698,10 @@ tables:
 
   - name: model_bias
     db: world
-    schema_class: legacy_archived
+    schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
-    notes: >
-      W2 (2026-06-03): reclassified legacy_archived. Trained on deterministic
-      product; superseded by model_bias_ens (ENS posterior). No live writes
-      expected post-EMOS promotion path. Distinct from model_bias_ens.
-      DELETED_PENDING: candidate for drop once model_bias_ens is confirmed as
-      sole bias source.
 
   - name: model_bias_ens
     db: world
@@ -727,8 +718,6 @@ tables:
       authority='STAGING' rows written by fit_full_transport_error_models.py;
       promoted to 'VERIFIED' by scripts/promote_model_bias_ens.py (operator).
       Distinct from legacy model_bias (trained on deterministic product).
-      INTERIM (W2 2026-06-03): feeds bias-decay Kelly haircut only; not a
-      q-calibrator. Will be superseded when EMOS-σ promotion (#110) completes.
 
   # ---------------------------------------------------------------------------
   # observation_instants — CONSOLIDATED (2026-05-29)
@@ -1182,11 +1171,7 @@ tables:
     schema_version_owner: SCHEMA_VERSION
     created_by: init_schema
     pk_col: null
-    notes: >
-      Pre-v2 Platt calibration models (legacy). v2 is platt_models_v2.
-      INTERIM SURVIVOR (W2 2026-06-03): retained until EMOS-σ CI promotion
-      (#110) completes and replaces the Platt calibration path. Do not drop
-      before #110 is verified live.
+    notes: Pre-v2 Platt calibration models (legacy). v2 is platt_models_v2.
 
   - name: platt_oos_decisions
     db: forecasts

@@ -15,24 +15,8 @@ from src.events.opportunity_event import (
     OpportunityEvent,
     make_opportunity_event,
 )
-from src.strategy.market_phase import market_phase_admits
 
 UTC = timezone.utc
-
-
-def _intake_phase_filter_enabled() -> bool:
-    """Read edli_v1.edli_intake_phase_filter_enabled (default OFF in code).
-
-    WAVE-1 W1-T1. FAIL-OPEN: any config-access error → False (filter OFF) so a
-    settings glitch never silently suppresses every FSR. The reactor's
-    EVENT_BOUND_MARKET_PHASE_CLOSED backstop remains the authority regardless.
-    """
-    try:
-        from src.config import settings
-
-        return bool(settings["edli_v1"].get("edli_intake_phase_filter_enabled", False))
-    except Exception:  # noqa: BLE001 — config glitch must never zero the FSR stream
-        return False
 
 LiveEligibilityReader = Callable[[dict[str, Any], dict[str, Any], dict[str, Any], datetime], bool]
 
@@ -356,21 +340,6 @@ class ForecastSnapshotReadyTrigger:
                 limit,
             ),
         )
-        # WAVE-1 W1-T1 intake phase filter (gated by
-        # edli_v1.edli_intake_phase_filter_enabled, default OFF). When ON, a
-        # forecast_only family whose target local day has begun or whose market
-        # has closed (NOT MarketPhase.PRE_SETTLEMENT_DAY) is skipped HERE so it
-        # never consumes the reactor's bounded decision-proof budget — 76.3% of
-        # candidates die at EVENT_BOUND_MARKET_PHASE_CLOSED in the reactor today.
-        # market_phase_admits is the SAME predicate the reactor applies as a
-        # fail-closed backstop (they cannot diverge). The forecast-DB rows carry
-        # no market start/end timing, so the empty market_row falls back to the
-        # F1 12:00-UTC anchor — identical to the reactor's selected_market_row
-        # path. FAIL-OPEN on the flag being absent/OFF; the reactor backstop
-        # remains the authority either way.
-        _intake_phase_filter_on = bool(
-            _intake_phase_filter_enabled()
-        )
         pending_skip = already_pending_keys or set()
         results: list[EventWriteResult] = []
         for row in reversed(rows):
@@ -384,19 +353,6 @@ class ForecastSnapshotReadyTrigger:
                 source_run_id = str(source_run.get("source_run_id") or coverage.get("source_run_id") or "")
                 entity_key = "|".join((city, target_date, metric, source_run_id))
                 if entity_key in pending_skip:
-                    continue
-            if _intake_phase_filter_on:
-                city = str(snapshot.get("city") or coverage.get("city") or "")
-                target_date = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
-                metric = str(snapshot.get("temperature_metric") or coverage.get("temperature_metric") or "")
-                if not market_phase_admits(
-                    city=city,
-                    target_date=target_date,
-                    metric=metric,
-                    decision_time=decision_time,
-                    market_row={},
-                ):
-                    # Phase-closed family: emit ZERO FSR for it this cycle.
                     continue
             results.append(
                 self.emit_from_rows(

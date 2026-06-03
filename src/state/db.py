@@ -4955,7 +4955,6 @@ _SETTLEMENT_V2_COLUMNS = (
     "authority",
     "provenance_json",
     "recorded_at",
-    "settlement_unit",
 )
 _MARKET_EVENT_OUTCOME_VALUES = frozenset({"YES", "NO"})
 _MARKET_EVENT_OUTCOME_UPDATE_SQL = """
@@ -5803,7 +5802,6 @@ def log_settlement(
     authority: str,
     provenance: dict | None = None,
     recorded_at: str | None = None,
-    settlement_unit: str | None = None,
 ) -> dict:
     """Mirror harvester settlement truth into settlement_outcomes.
 
@@ -5872,9 +5870,9 @@ def log_settlement(
             INSERT INTO settlement_outcomes (
                 city, target_date, temperature_metric, market_slug, winning_bin,
                 settlement_value, settlement_source, settled_at, authority,
-                provenance_json, recorded_at, settlement_unit
+                provenance_json, recorded_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(city, target_date, temperature_metric) DO UPDATE SET
                 market_slug=excluded.market_slug,
                 winning_bin=excluded.winning_bin,
@@ -5883,8 +5881,7 @@ def log_settlement(
                 settled_at=excluded.settled_at,
                 authority=excluded.authority,
                 provenance_json=excluded.provenance_json,
-                recorded_at=excluded.recorded_at,
-                settlement_unit=excluded.settlement_unit
+                recorded_at=excluded.recorded_at
             """,
             (
                 clean_city,
@@ -5898,7 +5895,6 @@ def log_settlement(
                 clean_authority,
                 provenance_json,
                 recorded_at_value,
-                settlement_unit,
             ),
         )
     except sqlite3.OperationalError as exc:

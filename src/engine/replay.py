@@ -1805,7 +1805,9 @@ def _replay_one_settlement(
                 base=settings["sizing"]["kelly_multiplier"],
                 ci_width=ci_width,
                 lead_days=lead_days,
+                rolling_win_rate_20=0.50,
                 portfolio_heat=0.0,
+                drawdown_pct=0.0,
                 # Wave 6 / K1 (PR #348): per-edge unified-budget gate (replay
                 # parity with the live evaluator ci_width seam). No-op at
                 # flag-OFF.

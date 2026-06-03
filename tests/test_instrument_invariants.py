@@ -250,12 +250,15 @@ def test_monitor_mc_count_matches_entry():
 
 
 def test_exit_uses_ci_not_raw_edge():
-    """Exit compares conservative_forward_edge (ci_lower) against threshold via Position.evaluate_exit.
+    """Exit should compare ci_lower of forward_edge against threshold,
+    not the raw forward_edge point estimate.
 
-    Raw point estimate (-0.08) is not below threshold, but conservative lower bound is.
-    Wave 3 (2026-06-02): repointed from deleted evaluate_exit_triggers to Position.evaluate_exit.
+    Entry uses bootstrap CI to quantify edge uncertainty.
+    Exit should use the same epistemic rigor.
     """
-    from src.state.portfolio import Position, ExitContext
+    from src.execution.exit_triggers import evaluate_exit_triggers
+    from src.contracts import EdgeContext, EntryMethod
+    from src.state.portfolio import Position
 
     pos = Position(
         trade_id="ci-exit-1",
@@ -270,28 +273,29 @@ def test_exit_uses_ci_not_raw_edge():
         p_posterior=0.60,
         edge=0.20,
         entry_ci_width=0.10,
-        cost_basis_usd=10.0, shares=25.0, shares_filled=25.0,
-        filled_cost_basis_usd=10.0,
     )
-    exit_ctx = ExitContext(
-        fresh_prob=0.32,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.40,
-        current_market_price_is_fresh=True,
-        best_bid=0.35,  # > fresh_prob(0.32) so EV gate allows exit
-        hours_to_settlement=24.0,
-        position_state="active",
-        market_velocity_1h=0.0,
-        divergence_score=0.0,
+    ctx = EdgeContext(
+        p_raw=np.array([0.45]),
+        p_cal=np.array([0.45]),
+        p_market=np.array([0.40]),
+        p_posterior=0.32,
+        forward_edge=-0.08,
+        alpha=0.55,
+        confidence_band_upper=-0.03,
+        confidence_band_lower=-0.13,
+        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+        decision_snapshot_id="snap-ci",
+        n_edges_found=1,
+        n_edges_after_fdr=1,
     )
-    # First cycle: should not exit (1 < consecutive_confirmations=2)
-    d1 = pos.evaluate_exit(exit_ctx)
-    assert d1.should_exit is False
 
-    # Second consecutive cycle: should exit (neg_edge_count now = 2)
-    d2 = pos.evaluate_exit(exit_ctx)
-    assert d2.should_exit is True
-    assert d2.trigger == "EDGE_REVERSAL"
+    # Raw point estimate (-0.08) is not below the current buy-yes threshold (-0.10),
+    # but the conservative lower bound (-0.13) is. CI-aware exits should therefore trigger
+    # after the usual 2-cycle confirmation.
+    assert evaluate_exit_triggers(pos, ctx) is None
+    signal = evaluate_exit_triggers(pos, ctx)
+    assert signal is not None
+    assert signal.trigger == "EDGE_REVERSAL"
 
 
 # ---- Data Confidence ----

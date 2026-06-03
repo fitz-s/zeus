@@ -172,16 +172,15 @@ class TestDynamicKellyMultFailClose:
             dynamic_kelly_mult(base=float("nan"))
 
     def test_zero_multiplier_raises(self):
-        """When all gates trigger and m reaches 0, must raise.
-        Wave 3 (2026-06-02): drawdown_pct/max_drawdown removed (dead params). The collapse
-        path is still tested via strategy_key='shoulder_sell' (0.0 multiplier from registry).
-        """
+        """When all gates trigger and m reaches 0, must raise."""
         from src.strategy.kelly import dynamic_kelly_mult
 
+        # max_drawdown=0.20, drawdown_pct=0.20 → 1 - 0.20/0.20 = 0.0 → m = 0
         with pytest.raises(ValueError, match="collapsed to"):
             dynamic_kelly_mult(
                 base=0.25,
-                strategy_key="shoulder_sell",  # registry returns 0.0 → m = 0 → raises
+                drawdown_pct=0.20,
+                max_drawdown=0.20,
             )
 
     def test_normal_multiplier_passes(self):

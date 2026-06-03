@@ -191,84 +191,6 @@ def _require_edli_flags(edli_cfg: dict, mode: str, flags: tuple[str, ...]) -> No
         raise RuntimeError(f"{mode.upper()}_REQUIRES_{'_AND_'.join(missing).upper()}")
 
 
-# ---------------------------------------------------------------------------
-# W0-T2 boot-guards: calibration pin shape + staleness
-# ---------------------------------------------------------------------------
-
-def assert_calibration_pin_shape_is_dict(cfg: dict) -> None:
-    """Fail-closed guard: calibration.pin.model_keys must be a dict or absent.
-
-    Raises RuntimeError("MODEL_KEYS_MUST_BE_DICT: ...") when model_keys is
-    present but not a dict (e.g. a JSON list from misconfigured settings).
-    A list is silently skipped by manager.py:get_calibration_pin_config —
-    all 137 pins would be dead config.  This guard makes the misconfiguration
-    visible at boot instead of silent at runtime.
-    """
-    model_keys = (
-        (cfg.get("calibration") or {})
-        .get("pin", {})
-        .get("model_keys")
-    )
-    if model_keys is not None and not isinstance(model_keys, dict):
-        raise RuntimeError(
-            f"MODEL_KEYS_MUST_BE_DICT: calibration.pin.model_keys is a "
-            f"{type(model_keys).__name__}, must be dict"
-        )
-
-
-def assert_frozen_as_of_not_stale(
-    cfg: dict,
-    *,
-    now: "datetime | None" = None,
-) -> None:
-    """WARN if calibration pin is older than 10 days; FATAL if older than 21 days.
-
-    Honors env escape ZEUS_FREEZE_GUARD_DISABLE=1 (skips the FATAL).
-    Pass `now` explicitly so tests can pin the reference time without
-    calling datetime.now() at import.
-
-    WARN threshold: 10 days.
-    FATAL threshold: 21 days (unless ZEUS_FREEZE_GUARD_DISABLE=1).
-    """
-    from datetime import datetime, timezone  # safe re-import: stdlib already loaded
-    frozen_str: str | None = (
-        (cfg.get("calibration") or {})
-        .get("pin", {})
-        .get("frozen_as_of")
-    )
-    if not frozen_str:
-        return
-    if now is None:
-        now = datetime.now(tz=timezone.utc)
-    try:
-        frozen_dt = datetime.fromisoformat(frozen_str.replace("Z", "+00:00"))
-    except ValueError:
-        logger.warning(
-            "assert_frozen_as_of_not_stale: cannot parse frozen_as_of=%r; skipping staleness check",
-            frozen_str,
-        )
-        return
-    age_days = (now - frozen_dt).total_seconds() / 86400.0
-    if age_days > 21:
-        if os.environ.get("ZEUS_FREEZE_GUARD_DISABLE", "0") == "1":
-            logger.warning(
-                "FROZEN_AS_OF_STALE: calibration pin is %.0f days old (>21d threshold); "
-                "FATAL suppressed by ZEUS_FREEZE_GUARD_DISABLE=1",
-                age_days,
-            )
-        else:
-            raise RuntimeError(
-                f"FROZEN_AS_OF_STALE: calibration.pin.frozen_as_of is {age_days:.0f} days old "
-                f"(>{21}d threshold). Update the pin or set ZEUS_FREEZE_GUARD_DISABLE=1 to skip."
-            )
-    elif age_days > 10:
-        logger.warning(
-            "FROZEN_AS_OF_STALE: calibration pin is %.0f days old (>10d warn threshold). "
-            "Consider refreshing calibration.pin.frozen_as_of.",
-            age_days,
-        )
-
-
 def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
     if not bool(edli_cfg.get("edli_live_scaleout_enabled", False)):
         raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED")
@@ -5364,15 +5286,6 @@ def main():
         finally:
             _trade_conn_reg.close()
     conn.close()
-
-    # W0-T2: calibration pin shape + staleness guards (2026-06-03).
-    # Run before strategy gate so a misconfigured pin fails loudly at boot.
-    # assert_calibration_pin_shape_is_dict: fatal if model_keys is a list
-    #   (silently coerced to {} in manager.py, making all pins dead config).
-    # assert_frozen_as_of_not_stale: WARN>10d, FATAL>21d (override: ZEUS_FREEZE_GUARD_DISABLE=1).
-    assert_calibration_pin_shape_is_dict(settings)
-    assert_frozen_as_of_not_stale(settings, now=datetime.now(tz=timezone.utc))
-    logger.info("calibration pin shape + staleness boot-guards: OK")
 
     # N2 — S2 deployment gate (PR-S1, Bug #3).
     # If S1 is deployed but S2 has not been deployed within 4h, refuse boot.

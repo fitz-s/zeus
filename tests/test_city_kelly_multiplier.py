@@ -195,18 +195,15 @@ def test_dynamic_kelly_mult_strategy_zero_zeroes_out_with_city():
     assert out == 0.0
 
 
-def test_dynamic_kelly_mult_heat_ci_lead_compose_correctly():
-    """CI gate × lead haircut × heat × city all multiplicative — sanity over composition.
-    Wave 3 (2026-06-02): drawdown_pct removed (dead param). Using portfolio_heat instead.
-    lead_days=4 triggers lead_days>=3 haircut ×0.8 (not ×1.0).
-    """
+def test_dynamic_kelly_mult_drawdown_ci_lead_compose_correctly():
+    """CI gate × drawdown × city all multiplicative — sanity over composition."""
     base = 0.25
     out = dynamic_kelly_mult(
         base=base,
         ci_width=0.12,           # ×0.7
-        lead_days=4,             # lead_days >= 3 → ×0.8
-        portfolio_heat=0.45,     # ×(1 - 0.45) = ×0.55
+        lead_days=4,             # ×0.8
+        drawdown_pct=0.10,       # ×(1 - 0.10/0.20) = ×0.5
         city="Denver",           # ×0.7
     )
-    expected = base * 0.7 * 0.8 * 0.55 * 0.7
+    expected = base * 0.7 * 0.8 * 0.5 * 0.7
     assert out == pytest.approx(expected)

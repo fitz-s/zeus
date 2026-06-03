@@ -434,7 +434,10 @@ def dynamic_kelly_mult(
     base: float = 0.25,
     ci_width: float = 0.0,
     lead_days: float = 0.0,
+    rolling_win_rate_20: float = 0.50,
     portfolio_heat: float = 0.0,
+    drawdown_pct: float = 0.0,
+    max_drawdown: float = 0.20,
     strategy_key: str | None = None,
     city: str | None = None,
     *,
@@ -444,10 +447,6 @@ def dynamic_kelly_mult(
 
     Reduces base multiplier based on uncertainty and risk state.
     All adjustments are multiplicative (cumulative).
-
-    Removed params (Wave 3, 2026-06-02): rolling_win_rate_20, drawdown_pct, max_drawdown —
-    all three were structurally 0.0 / default-only at live call sites (never computed live).
-    Baseline for portfolio-Kelly (issue #107) is deferred; see #107 for future design.
 
     The optional ``city`` parameter applies a per-city asymmetric-loss
     multiplier (default 1.0× for cities without an override). This is the
@@ -490,9 +489,19 @@ def dynamic_kelly_mult(
     elif lead_days >= 3:
         m *= 0.8
 
+    # Recent performance: losing streak → reduce exposure
+    if rolling_win_rate_20 < 0.40:
+        m *= 0.5
+    elif rolling_win_rate_20 < 0.45:
+        m *= 0.7
+
     # Portfolio concentration: high heat → reduce marginal sizing
     if portfolio_heat > 0.40:
         m *= max(0.1, 1.0 - portfolio_heat)
+
+    # Drawdown: proportional reduction
+    if drawdown_pct > 0 and max_drawdown > 0:
+        m *= max(0.0, 1.0 - drawdown_pct / max_drawdown)
 
     # INV-05 / §P9.7: cascade floor — risk inputs must never collapse to zero or NaN.
     # Note: This check applies to the upstream Kelly computation before per-strategy
@@ -502,7 +511,8 @@ def dynamic_kelly_mult(
     if not (m == m):  # NaN check: NaN != NaN
         raise ValueError(
             f"dynamic_kelly_mult produced NaN (base={base}, ci_width={ci_width}, "
-            f"lead_days={lead_days}, portfolio_heat={portfolio_heat})"
+            f"lead_days={lead_days}, rolling_win_rate_20={rolling_win_rate_20}, "
+            f"portfolio_heat={portfolio_heat}, drawdown_pct={drawdown_pct})"
         )
     if m <= 0.0:
         raise ValueError(

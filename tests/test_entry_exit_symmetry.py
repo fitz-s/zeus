@@ -1,8 +1,6 @@
 # Created: 2026-04-07
-# Last reused/audited: 2026-06-02
+# Last reused/audited: 2026-05-08
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md; docs/operations/task_2026-05-08_object_invariance_wave31/PLAN.md
-# Wave 3 (2026-06-02): evaluate_exit_triggers deleted (dead twin). Single usage repointed
-#   to Position.evaluate_exit.
 """Tests for entry-exit epistemic symmetry. §P9.7, D4.
 
 Entry: bootstrap n=200+ with BH-FDR α=0.10.
@@ -16,6 +14,7 @@ import numpy as np
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.contracts.edge_context import EdgeContext
 from src.contracts.semantic_types import EntryMethod
+from src.execution.exit_triggers import evaluate_exit_triggers
 
 
 # ---------------------------------------------------------------------------
@@ -72,33 +71,26 @@ def _exit_evidence(sample_size=20, fdr_corrected=True, consecutive=2):
 class TestCurrentExitUsesConsecutiveCycles:
 
     def test_exit_requires_consecutive_confirmations(self):
-        """Single negative cycle does NOT trigger exit via Position.evaluate_exit (live path)."""
-        from src.state.portfolio import Position, ExitContext
-        position = Position(
-            trade_id="TEST-001", market_id="m-sym", city="Dallas", cluster="Dallas",
-            target_date="2026-04-01", bin_label="70-75", direction="buy_no",
-            size_usd=10.0, entry_price=0.50, p_posterior=0.50, edge=0.0,
-            entry_ci_width=0.10,
-            # cost_basis must be >= $1 to avoid micro-position hold path
-            cost_basis_usd=10.0, shares=20.0, shares_filled=20.0,
-            filled_cost_basis_usd=10.0,
+        """Single negative cycle does NOT trigger exit."""
+        position = MagicMock()
+        position.trade_id = "TEST-001"
+        position.direction = "buy_no"
+        position.neg_edge_count = 1
+        position.size_usd = 10.0
+        position.effective_cost_basis_usd = 10.0
+        position.entry_ci_width = 0.10
+
+        ctx = _make_edge_context(
+            forward_edge=-0.05,
+            confidence_band_upper=0.50,
+            confidence_band_lower=0.40,
+            p_posterior=0.45,
         )
-        # First negative cycle only — should not exit
-        exit_ctx = ExitContext(
-            fresh_prob=0.45,
-            fresh_prob_is_fresh=True,
-            current_market_price=0.50,
-            current_market_price_is_fresh=True,
-            best_bid=0.45,
-            hours_to_settlement=24.0,
-            position_state="active",
-            market_velocity_1h=0.0,
-            divergence_score=0.0,
-        )
-        decision = position.evaluate_exit(exit_ctx)
-        assert not decision.should_exit or decision.trigger != "BUY_NO_EDGE_EXIT", (
-            "Single negative cycle triggered BUY_NO_EDGE_EXIT — requires consecutive."
-        )
+        signal = evaluate_exit_triggers(position, ctx)
+        if signal is not None:
+            assert signal.trigger != "EDGE_REVERSAL", (
+                "Single negative cycle triggered EDGE_REVERSAL — requires consecutive."
+            )
 
     def test_exit_uses_ci_width_in_evidence_edge(self):
         """conservative_forward_edge applies CI penalty."""
