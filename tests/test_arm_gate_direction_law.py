@@ -190,6 +190,34 @@ class TestKnownHistoricalLosses:
 
 
 # ---------------------------------------------------------------------------
+# None-bin safety (both lo and hi are None = parse failure)
+# ---------------------------------------------------------------------------
+
+class TestNoneBin:
+    """Both traded_bin_lo and traded_bin_hi None = bin parse failure.
+
+    A missing bin can't be won or lost — is_win returns False for both directions
+    without raising, so callers that forget to guard don't silently count wins.
+    The _compute_rows function already skips None-None rows before calling is_win,
+    so this is a defensive contract test for the importable helper.
+    """
+
+    def test_both_none_buy_yes_returns_false(self):
+        """buy_yes with both bounds None → False (not a win, not a crash)."""
+        assert is_win("buy_yes", None, None, 28.0) is False
+
+    def test_both_none_buy_no_returns_false(self):
+        """buy_no with both bounds None → False (not a win, not a crash)."""
+        assert is_win("buy_no", None, None, 28.0) is False
+
+    def test_both_none_does_not_count_as_win_regardless_of_settlement(self):
+        """A missing bin never produces a win for any settlement value."""
+        for settlement in [0.0, 28.0, 100.0, -10.0]:
+            assert is_win("buy_yes", None, None, settlement) is False
+            assert is_win("buy_no", None, None, settlement) is False
+
+
+# ---------------------------------------------------------------------------
 # Invalid direction raises ValueError
 # ---------------------------------------------------------------------------
 

@@ -127,7 +127,21 @@ def is_win(direction: str, traded_bin_lo: Optional[float], traded_bin_hi: Option
 
     Returns:
         True if the position wins, False if it loses.
+
+    Raises:
+        ValueError: if direction is not 'buy_yes' or 'buy_no'.
+
+    None handling:
+        traded_bin_lo=None, traded_bin_hi set  → left-shoulder bin ("X or below")
+        traded_bin_lo set, traded_bin_hi=None  → right-shoulder bin ("X or higher")
+        Both None                               → bin parse failed; returns False (cannot
+            determine win/loss, must not count as win). Callers should skip such rows
+            before calling is_win() to avoid silently dropping valid data.
     """
+    # Both None means the bin label failed to parse — cannot evaluate win/loss.
+    if traded_bin_lo is None and traded_bin_hi is None:
+        return False
+
     # Determine whether settlement lands in the traded bin
     if traded_bin_lo is None:
         # Left-shoulder: "X or below" — settlement_value <= hi
@@ -183,8 +197,8 @@ def _load_deduped_receipts(world_db: str) -> list[dict]:
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     cur.execute("""
-        SELECT receipt_id, direction, c_fee_adjusted, mainstream_agreement_pass,
-               decision_time, receipt_json
+        SELECT receipt_id, token_id, direction, c_fee_adjusted,
+               mainstream_agreement_pass, decision_time, receipt_json
         FROM edli_no_submit_receipts
         ORDER BY decision_time DESC
     """)
@@ -346,9 +360,22 @@ def _stats(rows: list[dict], label: str) -> dict:
     }
 
 
-def _arm_verdict(stats: dict, min_n_pooled: int = 20, min_sigma: float = 2.0,
-                 min_win_rate: float = 0.51) -> tuple[bool, str]:
-    """Return (arm_eligible, reason) for a gate-PASS cohort stats dict."""
+def _arm_verdict(stats: dict, rows: list[dict], min_n_pooled: int = 20,
+                 min_sigma: float = 2.0, min_win_rate: float = 0.51,
+                 min_n_per_city: int = 5) -> tuple[bool, str]:
+    """Return (arm_eligible, reason) for a gate-PASS cohort.
+
+    Enforces ALL documented ARM criteria (must match script header / PR claim):
+        1. Pooled n >= min_n_pooled  (default 20)
+        2. win_rate > min_win_rate   (default 51%)
+        3. ev_sigma >= min_sigma     (default 2.0)
+        4. Every city in the cohort has n >= min_n_per_city (default 5)
+           A city with n < 5 is NOT eligible; pooled criteria alone are insufficient.
+
+    Tightening note: the previous version only checked 1-3. Criterion 4 is added here
+    to match the documented arm criteria exactly (per script header line 11-12).
+    This is an ARM-DECISION tool — a too-lenient verdict is dangerous.
+    """
     if stats["n"] == 0:
         return False, "INSUFFICIENT: gate-PASS cohort empty (no overlap with VERIFIED settlements)"
     if stats["n"] < min_n_pooled:
@@ -357,7 +384,24 @@ def _arm_verdict(stats: dict, min_n_pooled: int = 20, min_sigma: float = 2.0,
         return False, f"DENIED: win_rate={stats['win_rate']:.3f} not > {min_win_rate}"
     if stats["ev_sigma"] is None or stats["ev_sigma"] < min_sigma:
         return False, f"DENIED: ev_sigma={stats['ev_sigma']:.2f} < {min_sigma:.1f} (insufficient confidence)"
-    return True, f"ELIGIBLE: win_rate={stats['win_rate']:.3f} > {min_win_rate}, ev_sigma={stats['ev_sigma']:.2f} >= {min_sigma}"
+
+    # Per-city n >= min_n_per_city check (criterion 4 — must all pass)
+    by_city: dict[str, int] = defaultdict(int)
+    for r in rows:
+        by_city[r["city"]] += 1
+    thin_cities = sorted(c for c, n in by_city.items() if n < min_n_per_city)
+    if thin_cities:
+        thin_detail = ", ".join(f"{c}(n={by_city[c]})" for c in thin_cities)
+        return False, (
+            f"DENIED: per-city n<{min_n_per_city} for {len(thin_cities)} city/cities: "
+            f"{thin_detail}. ALL cities must have n>={min_n_per_city} to be ARM-ELIGIBLE."
+        )
+
+    return True, (
+        f"ELIGIBLE: win_rate={stats['win_rate']:.3f} > {min_win_rate}, "
+        f"ev_sigma={stats['ev_sigma']:.2f} >= {min_sigma}, "
+        f"all {len(by_city)} cities n>={min_n_per_city}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -459,9 +503,9 @@ def main() -> None:
     _print_per_city_table(gate_rows, "GATE-PASS")
 
     # --- ARM verdict ---
-    arm_eligible, arm_reason = _arm_verdict(gate_stats)
+    arm_eligible, arm_reason = _arm_verdict(gate_stats, gate_rows)
     print("\n" + "=" * 78)
-    print("ARM VERDICT (gate-PASS cohort, thresholds: win_rate>51%, sigma>=2.0, n>=20)")
+    print("ARM VERDICT (gate-PASS cohort, thresholds: win_rate>51%, sigma>=2.0, n>=20, per-city n>=5)")
     print("=" * 78)
     verdict = "ARM: ELIGIBLE" if arm_eligible else "ARM: DENIED/INSUFFICIENT"
     print(f"  {verdict}")
