@@ -4505,6 +4505,7 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
     from src.events.edli_position_bridge import (
         _edli_events_table,
         edli_bridge_position_id,
+        edli_bridge_position_id_legacy,
         materialize_position_current_from_edli_fill,
     )
 
@@ -4546,12 +4547,18 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
     for row in candidate_rows:
         aggregate_id = str(_row_get(row, "aggregate_id"))
         position_id = edli_bridge_position_id(aggregate_id)
+        # Dual-probe: check BOTH the wide (new, 68-char) ID and the legacy
+        # narrow (old, 11-char) ID.  The 101 rows written before FIX #96
+        # carry the old short ID; probing only the wide ID would miss them
+        # and re-bridge the same aggregate into a second position_current row
+        # (duplicate position identity = live-money hazard).
+        legacy_position_id = edli_bridge_position_id_legacy(aggregate_id)
         existing = conn.execute(
-            "SELECT 1 FROM position_current WHERE position_id = ? LIMIT 1",
-            (position_id,),
+            "SELECT 1 FROM position_current WHERE position_id IN (?, ?) LIMIT 1",
+            (position_id, legacy_position_id),
         ).fetchone()
         if existing is not None:
-            # Already bridged — idempotent skip (no redundant canonical write).
+            # Already bridged (wide or legacy id) — idempotent skip.
             continue
         if orphaned_seen >= max(0, limit):
             break

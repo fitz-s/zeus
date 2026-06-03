@@ -1383,6 +1383,12 @@ files:
     - src/engine/cycle_runtime.py
     - src/engine/evaluator.py
     - src/engine/monitor_refresh.py
+  src/events/edli_position_bridge.py:
+    zone: K2_runtime
+    authority_role: edli_position_id_generation
+    why: Deterministic canonical position_id from SHA-256 of aggregate_id (68 chars). Widened from 11-char truncation (28 bits) to full digest (256 bits) in FIX #96 to eliminate birthday collision at ~10k fills.
+    downstream:
+    - src/state/projection.py
   src/execution/AGENTS.md:
     zone: docs
     authority_role: registry

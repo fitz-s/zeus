@@ -27,6 +27,7 @@ from src.contracts.semantic_types import ExitState
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.state.ledger import (
     CANONICAL_POSITION_EVENT_COLUMNS,
+    _ensure_position_current_authority_columns,
     apply_architecture_kernel_schema,
     append_many_and_project,
 )
@@ -3810,6 +3811,12 @@ _TRADE_CLASS_TABLES: frozenset[str] = frozenset({
     "decision_integrity_quarantine",
     "execution_fact",
     "executable_market_snapshots",
+    # Repoint 2 (fix/prearm-fill-exit-readiness 2026-06-03): outcome_fact
+    # corrected to trade_class. The live writer (harvester.py log_settlement_event)
+    # has always written to zeus_trades.db via trade_conn (18 live rows confirmed,
+    # 0 on zeus-world.db). DDL added to _TRADE_CLASS_DDL below so init_schema_trade_only
+    # creates it on fresh DBs. architecture/db_table_ownership.yaml updated to match.
+    "outcome_fact",
     "position_current",
     "position_events",
     "position_lots",
@@ -4306,6 +4313,33 @@ CREATE TABLE IF NOT EXISTS settlement_day_observation_authority (
 );
 CREATE INDEX IF NOT EXISTS idx_settlement_day_obs_authority_city_target
     ON settlement_day_observation_authority(city, target_date, decision_time_utc);
+
+-- outcome_fact (Repoint 2, fix/prearm-fill-exit-readiness 2026-06-03)
+-- Canonical writer: harvester.py log_settlement_event → log_outcome_fact,
+-- which receives trade_conn (zeus_trades.db). Copied from
+-- architecture/2026_04_02_architecture_kernel.sql; schema_class corrected to
+-- trade_class in architecture/db_table_ownership.yaml to match the live writer.
+-- 18 rows confirmed on zeus_trades.db (0 on zeus-world.db) per probe-ownership.md.
+CREATE TABLE IF NOT EXISTS outcome_fact (
+    position_id TEXT PRIMARY KEY,
+    strategy_key TEXT CHECK (strategy_key IN (
+        'settlement_capture',
+        'shoulder_sell',
+        'center_buy',
+        'opening_inertia'
+    )),
+    entered_at TEXT,
+    exited_at TEXT,
+    settled_at TEXT,
+    exit_reason TEXT,
+    admin_exit_reason TEXT,
+    decision_snapshot_id TEXT,
+    pnl REAL,
+    outcome INTEGER CHECK (outcome IN (0, 1)),
+    hold_duration_hours REAL,
+    monitor_count INTEGER,
+    chain_corrections_count INTEGER
+);
 """
 
 
@@ -4353,6 +4387,18 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
 
     # Create the trade runtime tables (IF NOT EXISTS — idempotent).
     conn.executescript(_TRADE_CLASS_DDL)
+    # Repoint 1 (fix/prearm-fill-exit-readiness, 2026-06-03): position_current
+    # is trade_class (zeus_trades.db). _ensure_position_current_authority_columns
+    # runs ALTER TABLE ADD COLUMN for every additive column (fill_authority,
+    # chain_shares, chain_avg_price, chain_cost_basis_usd, chain_seen_at,
+    # chain_absence_at, realized_pnl_usd, exit_price, settlement_price,
+    # settled_at, exit_reason). On a FRESH DB the CREATE TABLE IF NOT EXISTS
+    # above already includes all columns, so the function is a no-op. On a
+    # LEGACY DB where position_current pre-dates any of these column additions
+    # (e.g. zeus_trades.db with 101 live rows that pre-dated the W2 P&L commit),
+    # this call migrates the live table instead of silently landing columns only
+    # on the world-class ghost shell. Idempotent: skips columns that already exist.
+    _ensure_position_current_authority_columns(conn)
     _migrate_trade_strategy_key_checks(conn)
     # Executable market substrate is live execution evidence. The market
     # discovery scheduler passes this same trade connection to snapshot_repo and
