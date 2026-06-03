@@ -908,7 +908,7 @@ def build_event_bound_no_submit_receipt(
         # provider is wired (back-compat / tests), fall back to the #103 3-arg
         # context → sizes against the raw bankroll, EXACTLY as before #107.
         if portfolio_state_provider is not None:
-            from src.state.portfolio import correlated_committed_usd
+            from src.state.portfolio import correlated_committed_usd, total_exposure_usd
 
             _portfolio_state = portfolio_state_provider()
             _corr_committed_usd = correlated_committed_usd(
@@ -920,12 +920,21 @@ def build_event_bound_no_submit_receipt(
                     else None
                 ),
             )
+            # INV-K1b absolute raw-dollar floor (verifier fix): total cash
+            # deployed across all open positions (no corr weighting) + same-cycle
+            # reservation usd. This bounds Σ raw stakes ≤ max_portfolio_heat_pct·B
+            # regardless of city correlation.
+            _raw_committed_usd = total_exposure_usd(_portfolio_state) + sum(
+                float(usd)
+                for _, usd in (portfolio_reservation or [])
+            )
             sizing_context = SizingContext.from_candidate_proof_with_portfolio(
                 q_posterior=proof.q_posterior,
                 q_lcb_5pct=proof.q_lcb_5pct,
                 lead_days=_lead_days,
                 bankroll_usd=bankroll_usd,
                 corr_committed_usd=_corr_committed_usd,
+                raw_committed_usd=_raw_committed_usd,
             )
         else:
             sizing_context = SizingContext.from_candidate_proof(

@@ -39,11 +39,12 @@ import pytest
 
 from src.contracts.execution_price import ExecutionPrice
 from src.events.money_path_adapters import evaluate_kelly
-from src.sizing.sizing_context import SizingContext, effective_bankroll
+from src.sizing.sizing_context import SizingContext, effective_bankroll, effective_bankroll_raw
 from src.state.portfolio import (
     PortfolioState,
     Position,
     correlated_committed_usd,
+    total_exposure_usd,
 )
 
 # ── Config truth (read from settings, not hardcoded) ─────────────────────────
@@ -132,6 +133,7 @@ def _size(
 
     Mirrors the live reactor sizing build:
       corr_committed = correlated_committed_usd(state, new_city, extra_reserved)
+      raw_committed  = total_exposure_usd(state) + Σ reservation_usd
       ctx = SizingContext.from_candidate_proof_with_portfolio(...)
       kelly = evaluate_kelly(..., sizing_context=ctx)  # sizes vs effective bankroll
     """
@@ -139,12 +141,17 @@ def _size(
     corr_committed = correlated_committed_usd(
         state, new_city=new_city, extra_reserved=extra_reserved
     )
+    # INV-K1b: absolute raw deployed (no correlation discount) + same-cycle reservation.
+    raw_committed = total_exposure_usd(state) + sum(
+        float(usd) for _, usd in (extra_reserved or [])
+    )
     ctx = SizingContext.from_candidate_proof_with_portfolio(
         q_posterior=p_posterior,
         q_lcb_5pct=p_posterior - 0.01,  # tight CI so the CI haircut isn't what drives the test
         lead_days=1.0,
         bankroll_usd=bankroll,
         corr_committed_usd=corr_committed,
+        raw_committed_usd=raw_committed,
     )
     proof = evaluate_kelly(
         kelly_decision_id="k_test",
@@ -202,11 +209,80 @@ def test_K1_simultaneous_stakes_respect_budget():
     )
 
 
+def test_K1b_distant_city_absolute_raw_floor():
+    """INV-K1b (verifier defect): 15 geographically distant cities at the 0.10
+    correlation floor must collectively sum to ≤ B·max_portfolio_heat_pct (the
+    absolute cash ceiling), AND ≤ B (never exceed the bankroll).
+
+    This is the HEADLINE VERIFIER DEFECT: before the fix each of 15 sequential
+    distant-city bets saw only 0.10 fraction of prior committed as ``corr_committed``
+    → the corr-weighted effective bankroll barely shrank → each bet sized near the
+    K3 single-bet cap ($17) → Σ = $253 against B=$170.
+
+    This test was RED under the original impl (no raw-dollar floor) and GREEN after
+    the ``effective_bankroll_raw`` fix. It exercises the SECOND structural belt:
+    absolute raw-committed constraint (INV-K1b).
+
+    Uses ``_size`` (which mirrors the live reactor by passing both
+    ``corr_committed_usd`` AND ``raw_committed_usd``) with sequentially growing held
+    books of distant-city positions.
+    """
+    # 15 distinct far-apart cities: use Singapore as new_city (gets 0.10 corr floor
+    # vs all others) and build up the held book sequentially.
+    NEW_CITY = "Singapore"
+    # Any city geographically far from Singapore to guarantee 0.10 corr floor.
+    # The correlation module gives floor=0.10 for haversine distance > threshold.
+    far_cities = [
+        "New York City", "Chicago", "Los Angeles", "Miami", "London",
+        "Paris", "Berlin", "Warsaw", "Moscow", "Toronto",
+        "Seattle", "Boston", "Atlanta", "Denver", "Houston",
+    ]
+    assert len(far_cities) == 15
+
+    held: list[Position] = []
+    sizes: list[float] = []
+    reserved: list[tuple[str, float]] = []
+    for i, city in enumerate(far_cities):
+        s = _size(
+            new_city=NEW_CITY,
+            held=list(held),
+            extra_reserved=list(reserved),
+            p_posterior=0.92,
+            bankroll=BANKROLL,
+        )
+        sizes.append(s)
+        # Each prior bet is a "held" position (fully committed) for the next.
+        held.append(_held_position(city=city, committed_usd=s, tid=f"far_{i}"))
+        reserved.append((city, s))
+
+    total_raw = sum(sizes)
+    max_heat_cap = BANKROLL * 0.5  # max_portfolio_heat_pct=0.5 from config
+    assert total_raw <= max_heat_cap + 1e-6, (
+        f"absolute cash ceiling breached: Σ raw stakes={total_raw:.4f} "
+        f"> max_heat_cap={max_heat_cap:.4f} (B·0.5). "
+        f"Individual sizes: {[f'{s:.2f}' for s in sizes]}"
+    )
+    assert total_raw <= BANKROLL + 1e-6, (
+        f"total exceeds full bankroll: Σ={total_raw:.4f} > B={BANKROLL:.4f}"
+    )
+
+
 # ── INV-K2: MECE — same-family bins sized with corr=1.0 (strictly smaller) ───
 
 def test_K2_same_family_bins_sized_non_independent():
     """A 2nd bin in the SAME (city,date) family is sized with corr=1.0 to the
-    first → strictly smaller than if it had been sized independently."""
+    first → strictly smaller than if it had been sized independently.
+
+    CONDITIONALITY NOTE: the ``s2 < s2_indep`` strict-smaller assertion holds
+    ONLY when the committed capital is sufficient to move s2 out of the K3
+    single-bet cap floor. If both bets are already capped at max_single_position_pct·B
+    (and the MECE reduction would move s2 below that cap), s2 still equals the cap
+    and the assertion would fail as ``s2 == s2_indep``. The economic MECE guarantee
+    IS intact (corr=1.0 is verified via ``corr_committed == 20.0`` below); the
+    strict-smaller signal just requires a committed amount large enough to visibly
+    move s2 below the cap. This test uses committed_usd=20.0 which does produce
+    a visible s2=$15.75 < cap=$17.00 (K3 clamp ≠ K2 territory here).
+    """
     first = _held_position(city=NEAR_CITY, committed_usd=20.0, tid="binA")
     s2 = _size(new_city=NEAR_CITY, held=[first])  # binB after binA committed
     s2_indep = _size(new_city=NEAR_CITY, held=[])  # binB sized alone

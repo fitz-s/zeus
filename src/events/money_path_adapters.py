@@ -127,7 +127,7 @@ def evaluate_kelly(
     """
 
     from src.config import sizing_defaults
-    from src.sizing.sizing_context import effective_bankroll
+    from src.sizing.sizing_context import effective_bankroll, effective_bankroll_raw
     from src.strategy.kelly import dynamic_kelly_mult, kelly_size
 
     if sizing_context is None and kelly_multiplier is None:
@@ -159,22 +159,39 @@ def evaluate_kelly(
         effective_multiplier = float(kelly_multiplier)
 
     # Task #107 placement A (the budget ENFORCER): size against the bankroll NET
-    # of correlation-weighted already-committed capital. The budget lives in the
-    # bankroll argument; kelly.py's formula stays untouched. ``effective_bankroll``
-    # divides the committed-capital reduction back by ``effective_multiplier`` so
-    # kelly.py's own ``·effective_multiplier`` reproduces the design's
-    # ``s = f*·f_cap·B_eff``; the simultaneous stakes then sum to ≤
-    # ``effective_multiplier·B`` (INV-K1). A context with no portfolio fields
-    # (the #103 3-arg ``from_candidate_proof``, ``has_portfolio_context`` False)
-    # sizes against the raw bankroll exactly as before #107 — INV-K8 holds with
-    # EQUALITY for the unwired case.
+    # of committed capital. Two limits applied — the binding one (min) is used:
+    #
+    # (corr limit) effective_bankroll: corr-weighted reduction, ensures corr-
+    #   weighted simultaneous stakes ≤ f_cap·B (INV-K1 corr path).
+    #
+    # (raw limit) effective_bankroll_raw: ABSOLUTE raw-dollar floor — total cash
+    #   deployed across ALL positions regardless of correlation. Fixes the
+    #   verifier defect: 15 distant cities at corr=0.10 floor could deploy $254
+    #   against a $170 bankroll because the corr weighting barely reduces the
+    #   effective bankroll for independent bets. Raw constraint: Σ raw deployed
+    #   ≤ max_portfolio_heat_pct·B (0.5·B = $85 at $170). INV-K1b.
+    #
+    # A context with no portfolio fields (the #103 3-arg ``from_candidate_proof``,
+    # ``has_portfolio_context`` False) sizes against the raw bankroll exactly as
+    # before #107 — INV-K8 holds with EQUALITY for the unwired case.
     sizing_bankroll = float(bankroll_usd)
     if sizing_context is not None and sizing_context.has_portfolio_context:
-        sizing_bankroll = effective_bankroll(
-            float(sizing_context.bankroll_usd),
+        _sdc = sizing_defaults()
+        _b = float(sizing_context.bankroll_usd)
+        # Corr-weighted limit (existing).
+        _eff_corr = effective_bankroll(
+            _b,
             float(sizing_context.corr_committed_usd),
             f_cap=float(effective_multiplier),
         )
+        # Absolute raw-dollar limit (verifier fix).
+        _eff_raw = effective_bankroll_raw(
+            _b,
+            float(sizing_context.raw_committed_usd),
+            float(_sdc["max_portfolio_heat_pct"]),
+            f_cap=float(effective_multiplier),
+        )
+        sizing_bankroll = min(_eff_corr, _eff_raw)
 
     size_usd = kelly_size(
         float(p_posterior),
