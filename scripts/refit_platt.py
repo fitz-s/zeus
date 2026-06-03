@@ -652,26 +652,30 @@ def _resolve_isolated_calibration_write_db_path(
     script_name: str,
 ) -> Path:
     """Resolve and validate the write-mode DB target for calibration bulk jobs."""
-    from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
+    # K1-split: calibration_pairs (read source) and the canonical platt_models
+    # both live in zeus-forecasts.db, not zeus-world.db. The canonical-DB-refusal
+    # guard must compare against the forecasts DB so an isolated staging --db is
+    # required and the shared canonical store is never overwritten in place.
+    from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415
 
     if db_path is None:
         raise RuntimeError(
             f"{script_name} write mode requires --db pointing at an isolated "
             "staging calibration DB; refusing to default to the canonical "
-            "shared world DB."
+            "shared forecasts DB."
         )
     resolved = Path(db_path).expanduser().resolve()
-    shared_world = Path(ZEUS_WORLD_DB_PATH).expanduser().resolve()
+    shared_canonical = Path(ZEUS_FORECASTS_DB_PATH).expanduser().resolve()
     same_physical_file = False
-    if resolved.exists() and shared_world.exists():
+    if resolved.exists() and shared_canonical.exists():
         try:
-            same_physical_file = resolved.samefile(shared_world)
+            same_physical_file = resolved.samefile(shared_canonical)
         except OSError:
             same_physical_file = False
-    if resolved == shared_world or same_physical_file:
+    if resolved == shared_canonical or same_physical_file:
         raise RuntimeError(
-            f"{script_name} write mode refuses the canonical shared world DB "
-            f"({shared_world}); use an isolated staging calibration DB and a "
+            f"{script_name} write mode refuses the canonical shared forecasts DB "
+            f"({shared_canonical}); use an isolated staging calibration DB and a "
             "separate operator-approved promotion path."
         )
     return resolved
@@ -1278,8 +1282,11 @@ def main() -> int:
             uri_path = Path(args.db_path).resolve().as_uri().replace("file://", "file:")
             conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
         else:
-            from src.state.db import ZEUS_WORLD_DB_PATH  # noqa: PLC0415
-            uri_path = Path(ZEUS_WORLD_DB_PATH).resolve().as_uri().replace("file://", "file:")
+            # K1-split: calibration_pairs is owned by zeus-forecasts.db, not
+            # zeus-world.db. The read-only preview must open the forecasts DB or
+            # the bucket queries fail with "no such table: calibration_pairs".
+            from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415
+            uri_path = Path(ZEUS_FORECASTS_DB_PATH).resolve().as_uri().replace("file://", "file:")
             conn = sqlite3.connect(f"{uri_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 600000")

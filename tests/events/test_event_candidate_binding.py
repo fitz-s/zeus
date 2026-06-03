@@ -114,6 +114,7 @@ def _candidate(
     yes_token_id: str | None = "yes-1",
     no_token_id: str | None = "no-1",
     label: str = "70-71°F",
+    bin: Bin | None = None,
 ) -> MarketTopologyCandidate:
     return MarketTopologyCandidate(
         city=city,
@@ -122,7 +123,7 @@ def _candidate(
         condition_id=condition_id,
         yes_token_id=yes_token_id,
         no_token_id=no_token_id,
-        bin=Bin(low=70, high=71, unit="F", label=label),
+        bin=bin if bin is not None else Bin(low=70, high=71, unit="F", label=label),
         market_slug="chicago-high-2026-05-25",
     )
 
@@ -215,9 +216,29 @@ def test_wrong_metric_market_rejected():
 
 def test_family_binding_hash_deterministic():
     event = _forecast_event()
+    # COMPLETE-support family: two closed interior bins (70-71, 72-73) bracketed
+    # by '...or below' (low=None) and '...or above' (high=None) shoulders so the
+    # family forms a full -inf..+inf integer partition and passes the
+    # FDR_FAMILY_TOPOLOGY_INCOMPLETE guard at bind time (mirrors the M2 pattern
+    # in test_family_topology_completeness.py). A bare closed bin with no
+    # shoulders is (correctly) rejected by that guard.
     candidates = [
-        _candidate(condition_id="condition-2", yes_token_id="yes-2", no_token_id="no-2", label="72-73°F"),
-        _candidate(condition_id="condition-1", yes_token_id="yes-1", no_token_id="no-1", label="70-71°F"),
+        _candidate(
+            condition_id="condition-2", yes_token_id="yes-2", no_token_id="no-2",
+            bin=Bin(low=72, high=73, unit="F", label="72-73°F"),
+        ),
+        _candidate(
+            condition_id="condition-1", yes_token_id="yes-1", no_token_id="no-1",
+            bin=Bin(low=70, high=71, unit="F", label="70-71°F"),
+        ),
+        _candidate(
+            condition_id="condition-low", yes_token_id="yes-low", no_token_id="no-low",
+            bin=Bin(low=None, high=69, unit="F", label="69°F or below"),
+        ),
+        _candidate(
+            condition_id="condition-high", yes_token_id="yes-high", no_token_id="no-high",
+            bin=Bin(low=74, high=None, unit="F", label="74°F or above"),
+        ),
     ]
 
     first = bind_event_to_candidate_family(event, candidates, decision_time=DECISION_TIME)
@@ -225,4 +246,4 @@ def test_family_binding_hash_deterministic():
 
     assert first.binding_hash == second.binding_hash
     assert first.family_id == second.family_id
-    assert first.condition_ids == ("condition-1", "condition-2")
+    assert first.condition_ids == ("condition-1", "condition-2", "condition-high", "condition-low")

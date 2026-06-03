@@ -81,7 +81,7 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 )
 
 
-# Per-file baseline as of 2026-05-26 (292 sites across 60 files).
+# Per-file baseline as of 2026-06-03 (296 sites across 60 files).
 # Update both this dict AND the `total` field below when a site is added or
 # removed. The test wrapper enforces both directions.
 #
@@ -100,19 +100,29 @@ _DYNAMIC_SQL_PATTERN = re.compile(
 # no untrusted source. Per scanner contract (internal whitelist → bump),
 # this is an explicit registration matching the calibration/store.py rule.
 _BASELINE_PER_FILE: dict[str, int] = {
+    # 2026-06-03: event_opportunity_report has 3 sites. All interpolate
+    # column identifiers validated against internal whitelists
+    # (e.g. {"available_at","received_at"}) or closed internal predicates.
+    "src/analysis/event_opportunity_report.py": 3,
     "src/backtest/economics.py": 1,
     "src/calibration/effective_sample_size.py": 2,
     # 2026-05-26 PR #332 promotion-gate pass: ens_bias_repo grew from 2 → 4.
     # Both additional sites build WHERE fragments from closed internal
     # contributor-policy branches; values remain bound parameters.
-    "src/calibration/ens_bias_repo.py": 4,
+    # 2026-06-03: grew 4 → 6 via schema migration helpers over hardcoded
+    # column/DDL tuples (no user-controlled identifier).
+    "src/calibration/ens_bias_repo.py": 6,
+    # 2026-06-03: platt_oos_resolver adds 1 site with an internal clause
+    # fragment (bucket_clause is either "" or "AND bucket_key = ?").
+    "src/calibration/platt_oos_resolver.py": 1,
     # 2026-05-24 (PR #337 full_transport_v1 refit): store.py grew from 15 → 19.
     # Four new f-string SQL sites added in add_calibration_pair_v2 (2 branches, each
     # conditionally inserts error_model_family column from an internal whitelist
     # {'none', 'full_transport_v1'}) and save_platt_model / deactivate_model_v2
     # (same pattern). The _emf_col/_emf_ph/_emf_val construction is purely internal;
     # no user-controlled identifier is interpolated. Per scanner contract → bump.
-    "src/calibration/store.py": 19,
+    # 2026-06-03: store.py shrunk 19 → 17 (tighten baseline).
+    "src/calibration/store.py": 17,
     # src/contracts/world_schema_validator.py: RETIRED P2 (2026-05-14) — file deleted
     "src/data/daily_obs_append.py": 4,
     # 2026-05-24 (post-PR #337 merge-base): ecmwf_open_data_ingest gained 1 site —
@@ -136,6 +146,10 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # 2026-05-21 PR #267: evaluator adds one additional v2 table-name site
     # while the family-fallback sizing helper keeps the new risk logic explicit.
     "src/engine/evaluator.py": 8,
+    # 2026-06-03: event_reactor_adapter is a new file with 9 sites. All
+    # interpolations are schema/table refs from closed internal callers or
+    # placeholder-strings sized from internal tuples (no user input).
+    "src/engine/event_reactor_adapter.py": 9,
     "src/engine/replay.py": 14,
     # 6 f-string SQL sites: all interpolate module-level table-name constants
     # (sv2_table, cp_v2_table, etc.) from ReplayContext — no user-controlled
@@ -176,24 +190,31 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # 2026-05-26 PR #332 promotion gate: db.py grew from 49 → 50 via an
     # existing decision_events rebuild f-string whose interpolations are
     # SCHEMA_VERSION and hardcoded schema SQL only; no user-controlled input.
-    "src/state/db.py": 50,
+    # 2026-06-03: db.py shrunk 50 → 47 (tighten baseline).
+    "src/state/db.py": 47,
     # 2026-05-24 (post-PR #337 merge-base): decision_integrity_quarantine.py is
     # a new file with 6 f-string SQL sites. All sites interpolate {q_ref} which
     # is a module-local qualified table-name built from ATTACH alias + literal
     # table name (no user input). Pattern mirrors no_trade_events.py PRAGMA sites.
     "src/state/decision_integrity_quarantine.py": 6,
     "src/state/decision_chain.py": 1,  # internal table-name constant; added P1
-    "src/state/ledger.py": 8,
+    # 2026-06-03: ledger.py grew 8 → 15 via additional SAVEPOINT + legacy-schema
+    # reconciliation DDL over hardcoded tuples (no user-controlled identifier).
+    "src/state/ledger.py": 15,
     "src/state/projection.py": 2,
     # 2026-05-18 PR #140 review: F109 consolidator has 9 SAVEPOINT sites.
     # Names are generated from secrets.token_hex() within the module; phase
     # filters were refactored to bound placeholders before registration.
     "src/state/position_duplicate_consolidator.py": 9,
-    # 2026-05-26 PR #332 promotion-gate pass: phase6 evidence schema has 2
-    # sites that interpolate module-local schema-version constants into
-    # migration INSERT/SELECT SQL; all identifiers are hardcoded.
-    "src/state/schema/phase6_evidence_schema.py": 2,
+    # 2026-06-03: phase6_evidence_schema.py no longer has dynamic SQL; removed
+    # from baseline so the gate tightens.
     "src/state/schema/v2_schema.py": 2,  # +1 PRAGMA busy_timeout in P1
+    # 2026-06-03: edli_no_submit_receipts_schema adds 1 site (ALTER TABLE
+    # column/DDL from closed internal constants).
+    "src/state/schema/edli_no_submit_receipts_schema.py": 1,
+    # 2026-06-03: no_trade_regret_events_schema adds 1 site (ALTER TABLE
+    # column/DDL from closed internal constants).
+    "src/state/schema/no_trade_regret_events_schema.py": 1,
     # 2 PRAGMA table_info() interpolations (with optional attached-DB name).
     # Both `table` and `attached` are internal identifiers passed by callers
     # in src/calibration/store.py — no user input. Sites were extracted out
@@ -235,6 +256,13 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # _TERMINAL_PHASES (fixed-length tuple of internal constants — no user input).
     # Added PR-S3 (2026-05-17), registered here per bot review PR #143 (2026-05-18).
     "src/state/portfolio.py": 1,
+    # 2026-06-03: edli_position_bridge adds 1 site interpolating the schema-
+    # qualified EDLI events table from _edli_events_table() (internal whitelist:
+    # {"world.edli_live_order_events","edli_live_order_events"}).
+    "src/events/edli_position_bridge.py": 1,
+    # 2026-06-03: market_channel_ingestor adds 3 sites (PRAGMA table_info over
+    # closed internal table names).
+    "src/events/triggers/market_channel_ingestor.py": 3,
     # 2 f-string SQL sites: SELECT from {table_ref} where table_ref is drawn from
     # the closed internal whitelist ("forecasts.observations", "observations").
     # No user-controlled input. Audited safe 2026-05-21 (PR #248 bot review).

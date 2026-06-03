@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from src.contracts.execution_price import ExecutionPrice
 from src.riskguard.risk_level import RiskLevel
+
+if TYPE_CHECKING:
+    from src.sizing.sizing_context import SizingContext
 
 
 @dataclass(frozen=True)
@@ -86,18 +90,67 @@ def evaluate_kelly(
     p_posterior: float,
     execution_price: ExecutionPrice,
     bankroll_usd: float,
-    kelly_multiplier: float,
+    sizing_context: "SizingContext | None" = None,
+    kelly_multiplier: float | None = None,
 ) -> KellyProof:
-    """Run Zeus' typed Kelly sizing with the supplied executable price."""
+    """Run Zeus' typed Kelly sizing with the supplied executable price.
 
-    from src.strategy.kelly import kelly_size
+    S3 (variance-required Kelly, task #103/#111): the Kelly multiplier is
+    no longer a flat scalar handed in by the caller. Callers pass a typed
+    ``SizingContext`` carrying ``ci_width`` and ``lead_days``, and this
+    adapter derives the multiplier via ``dynamic_kelly_mult`` so that size
+    is NON-INCREASING in CI width (strictly smaller across a haircut
+    threshold). ``dynamic_kelly_mult``'s ci_width haircut is STEPWISE
+    (>0.10 → ×0.7, >0.15 → ×0.5), so two widths both under 0.10 size
+    identically while widths straddling a threshold size strictly smaller.
+    This makes the pre-S3 defect — variance silently dropped on the way to
+    Kelly so two candidates identical except CI width sized identically —
+    unconstructable at this boundary.
+
+    The legacy ``kelly_multiplier`` flat-scalar parameter remains accepted
+    for back-compat with callers not yet migrated (and is the explicit
+    base for ``dynamic_kelly_mult`` when a context IS supplied). At least
+    one of ``sizing_context`` / ``kelly_multiplier`` must be provided; the
+    two are NOT mutually exclusive. The supported combinations are:
+
+      * ``sizing_context`` only            → variance-required (preferred);
+        base defaults to 0.25 and is haircut by ``dynamic_kelly_mult``.
+      * ``sizing_context`` + ``kelly_multiplier`` → ``kelly_multiplier`` is
+        the explicit base fed to ``dynamic_kelly_mult`` (still haircut by
+        CI width / lead).
+      * ``kelly_multiplier`` only          → legacy flat scalar, used as-is.
+      * neither                            → ``ValueError`` (fail-closed).
+
+    ``KellyProof.passed = size_usd > 0`` — when the variance haircut (or a
+    zero edge) collapses the size to 0.0, ``passed`` correctly flips
+    True -> False.
+    """
+
+    from src.strategy.kelly import dynamic_kelly_mult, kelly_size
+
+    if sizing_context is None and kelly_multiplier is None:
+        raise ValueError(
+            "evaluate_kelly requires either a SizingContext (variance-required, "
+            "preferred) or a flat kelly_multiplier (legacy)"
+        )
 
     execution_price.assert_kelly_safe()
+
+    if sizing_context is not None:
+        base = 0.25 if kelly_multiplier is None else float(kelly_multiplier)
+        effective_multiplier = dynamic_kelly_mult(
+            base=base,
+            ci_width=float(sizing_context.ci_width),
+            lead_days=float(sizing_context.lead_days),
+        )
+    else:
+        effective_multiplier = float(kelly_multiplier)
+
     size_usd = kelly_size(
         float(p_posterior),
         execution_price,
         float(bankroll_usd),
-        kelly_mult=float(kelly_multiplier),
+        kelly_mult=effective_multiplier,
     )
     return KellyProof(
         kelly_decision_id=kelly_decision_id,

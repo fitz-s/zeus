@@ -57,7 +57,13 @@ CREATE TABLE position_current (
     chain_avg_price REAL,
     chain_cost_basis_usd REAL,
     chain_seen_at TEXT,
-    chain_absence_at TEXT
+    chain_absence_at TEXT,
+    -- BUG #128 (SEV1, 2026-06-02): durable realized-P&L columns.
+    realized_pnl_usd REAL,
+    exit_price REAL,
+    settlement_price REAL,
+    settled_at TEXT,
+    exit_reason TEXT
 )
 """
 

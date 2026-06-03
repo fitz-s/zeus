@@ -1,0 +1,89 @@
+============================================================================
+CALIBRATION BAKE-OFF SUMMARY
+OOS: target_date >= 2025-01-01  |  n_city_method_cells=183
+============================================================================
+
+METHOD AGGREGATE (all cities pooled, lower logloss = better)
+Method        CitiesWon  MeanLogLoss   MeanCRPS   Cov90   N_obs
+----------------------------------------------------------------------------
+EMOS                 49      2.16521     1.1249   0.888    4772
+GRID_REP              5      3.89955     1.2792   0.671    3798
+RAW                   3      5.02072     1.2003   0.864    5103
+BIAS                  1      5.87517     1.7444   0.537     836
+GRID_BIAS             1      9.64136     2.5726   0.340     691
+
+PER-(CITY, METRIC) WINNER TABLE
+City                   Metric Winner        WinLL    RawLL     N RunnerUp   Flag
+------------------------------------------------------------------------------------------
+Amsterdam              high   EMOS         1.6574   7.2047    51 GRID_REP   
+Ankara                 high   EMOS         1.7922   4.5691   121 GRID_REP   
+Atlanta                high   EMOS         1.7169   3.8238   131 GRID_REP   
+Austin                 high   EMOS         2.0299   6.9561    56 RAW        
+Beijing                high   EMOS         3.2966   7.4355    59 RAW        
+Buenos Aires           high   EMOS         1.9603   4.1182   159 GRID_REP   
+Busan                  high   EMOS         4.3905   9.0922    50 GRID_REP   
+Cape Town              high   GRID_REP     1.4742   8.9527    41 EMOS       
+Chengdu                high   GRID_REP     4.7860   7.5006    59 RAW        
+Chicago                high   EMOS         2.2839   4.6849    99 RAW        
+Chongqing              high   EMOS         2.9703   7.5881    58 GRID_REP   
+Dallas                 high   EMOS         1.9777   4.1307   126 GRID_REP   
+Denver                 high   EMOS         2.0286   6.7185    59 GRID_REP   
+Guangzhou              high   EMOS         4.3683  11.2354    38 GRID_REP   
+Helsinki               high   EMOS         1.6287   8.0934    50 RAW        
+Hong Kong              high   RAW          3.0557   3.0557    42 N/A        
+Hong Kong              low    RAW          1.2294   1.2294     5 N/A        LOW_CONF
+Houston                high   EMOS         2.0517   7.5657    57 GRID_REP   
+Istanbul               high   EMOS         2.3421   7.4186    49 GRID_REP   
+Jakarta                high   EMOS         5.6096   8.6466    46 GRID_REP   
+Jeddah                 high   EMOS         7.6950   8.8134    45 RAW        
+Karachi                high   EMOS         2.3587  10.7418    38 GRID_REP   
+Kuala Lumpur           high   EMOS         2.0928   7.7565    48 GRID_REP   
+Lagos                  high   EMOS         2.9954   6.4576    35 GRID_REP   
+London                 high   EMOS         1.4745   2.2179   380 RAW        
+London                 low    EMOS         1.6714   6.1554    14 RAW        LOW_CONF
+Los Angeles            high   EMOS         2.7136   7.2088    60 GRID_REP   
+Lucknow                high   EMOS         2.3855   6.1704    77 GRID_REP   
+Madrid                 high   EMOS         2.2252   6.6645    65 RAW        
+Manila                 high   GRID_REP     3.9374  11.2488    38 EMOS       
+Mexico City            high   EMOS         1.9103   7.4852    51 RAW        
+Miami                  high   EMOS         1.9494   4.2448    93 RAW        
+Miami                  low    EMOS         3.4497   3.7495    14 RAW        LOW_CONF
+Milan                  high   EMOS         1.7840   6.4680    63 RAW        
+Moscow                 high   EMOS         2.1237   6.7926    47 GRID_REP   
+Munich                 high   EMOS         1.6575   5.9576    79 RAW        
+NYC                    high   EMOS         2.0161   2.6783   431 RAW        
+NYC                    low    EMOS         3.6921   9.4633    13 GRID_REP   LOW_CONF
+Panama City            high   GRID_REP     1.3916   8.0104    50 EMOS       
+Paris                  high   EMOS         1.5751   3.1485   483 GRID_REP   
+Paris                  low    EMOS         1.4324   1.8793   294 GRID_REP   
+Qingdao                high   RAW         15.7446  15.7446    22 N/A        
+San Francisco          high   EMOS         1.9160   6.6188    55 GRID_REP   
+Sao Paulo              high   GRID_BIAS    1.4293   5.1167    11 BIAS       LOW_CONF
+Seattle                high   EMOS         1.9072   4.3697    80 BIAS       
+Seoul                  high   EMOS         2.4430   4.0537   149 RAW        
+Seoul                  low    EMOS         5.8722   8.3285    13 RAW        LOW_CONF
+Shanghai               high   EMOS         2.4444   7.4402    69 GRID_REP   
+Shanghai               low    EMOS         4.6082   6.4603     9 RAW        LOW_CONF
+Shenzhen               high   EMOS         2.8661   8.3820    42 GRID_REP   
+Singapore              high   EMOS         2.5851   6.9623    70 BIAS       
+Taipei                 high   EMOS         4.6094  10.4343    51 BIAS       
+Tel Aviv               high   GRID_REP     2.5594   5.2595    68 EMOS       
+Tokyo                  high   EMOS         2.4198   5.4750    73 GRID_REP   
+Tokyo                  low    EMOS         2.5880  12.7145     9 GRID_REP   LOW_CONF
+Toronto                high   EMOS         3.0345   4.6628    82 RAW        
+Warsaw                 high   BIAS         1.6737   6.9968    65 EMOS       
+Wellington             high   EMOS         1.6540   4.4106   120 GRID_BIAS  
+Wuhan                  high   EMOS         2.6446   7.9600    59 GRID_BIAS  
+
+CAVEATS:
+  - RAW p_raw from calibration_pairs (MC, no correction).
+  - EMOS/GRID_REP/BIAS/GRID_BIAS from analytic Gaussian-mixture recomputed from members_json (instrument sigma floored at 0.5 native-unit, WMO half-step preimage).
+  - CRPS/cov90 for RAW uses full calibration_pairs bin vector; for others uses canonical bin grid.
+  - LOW_CONFIDENCE when n_settled < 20.
+  - EMOS skipped where cell served='raw' or missing.
+  - GRID_REP skipped where activated=False or city absent.
+  - BIAS skipped where no VERIFIED row for (city, season, metric).
+  - Grid-rep offset is lead-invariant (single value per city, no per-season).
+  - Dedup: MIN(lead_days) per (city, target_date, metric), training_allowed=1, outcome=1.
+  - OOS: target_date >= 2025-01-01.
+  - No look-ahead: EMOS params from emos_calibration.json (fit<=2024), grid-rep from grid_representativeness_offset.json (trailing 120-day window pre-bakeoff), bias from model_bias_ens VERIFIED rows..

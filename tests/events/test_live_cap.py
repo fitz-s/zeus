@@ -218,6 +218,122 @@ def test_timeout_unknown_does_not_release_cap_without_reconcile():
         ledger.release(reservation.usage_id, "timeout_unknown")
 
 
+def test_live_cap_rate_limiter_decoupled_from_notional_blocks_n_plus_one():
+    # BUG #99 antibody: prove an order-emission RATE limit bounds frequency
+    # INDEPENDENT of the notional cap. With a deliberately LOOSE notional cap
+    # AND a large coupled day-slot pool (max_orders_per_day=1000 — the knob that
+    # was raised in lockstep with the $5->$185 notional bump), a SEPARATE
+    # per-window rate limit (max_orders_per_window) must still block the N+1th
+    # order. If the rate limit were coupled to notional/day-count, this would not
+    # fail. The default window cap is a conservative canary value (1).
+    ledger = LiveCapLedger(_conn())
+
+    first = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=185.0,
+        max_notional_usd=185.0,
+        max_orders_per_day=1000,
+        max_orders_per_window=1,
+    )
+    assert first.reservation_status == "RESERVED"
+
+    with pytest.raises(LiveCapError, match="rate"):
+        ledger.reserve(
+            event_id="event-2",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=1.0,
+            max_notional_usd=185.0,
+            max_orders_per_day=1000,
+            max_orders_per_window=1,
+        )
+
+
+def test_live_cap_rate_limiter_default_is_conservative_canary():
+    # The decoupled rate limit must default to a SAFE conservative value when the
+    # caller omits it (fail-closed): a single order per window. A second event in
+    # the same window is blocked even though the day-slot pool has 999 free slots.
+    ledger = LiveCapLedger(_conn())
+
+    ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=185.0,
+        max_notional_usd=185.0,
+        max_orders_per_day=1000,
+    )
+
+    with pytest.raises(LiveCapError, match="rate"):
+        ledger.reserve(
+            event_id="event-2",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=1.0,
+            max_notional_usd=185.0,
+            max_orders_per_day=1000,
+        )
+
+
+def test_live_cap_rate_limiter_allows_up_to_window_budget():
+    # A window budget > 1 admits exactly that many orders, then blocks. Proves the
+    # rate limit is a real independent counter, not a constant.
+    ledger = LiveCapLedger(_conn())
+
+    for n in range(3):
+        ledger.reserve(
+            event_id=f"event-{n}",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=10.0,
+            max_notional_usd=185.0,
+            max_orders_per_day=1000,
+            max_orders_per_window=3,
+        )
+
+    with pytest.raises(LiveCapError, match="rate"):
+        ledger.reserve(
+            event_id="event-overflow",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=10.0,
+            max_notional_usd=185.0,
+            max_orders_per_day=1000,
+            max_orders_per_window=3,
+        )
+
+
+def test_live_cap_rate_limiter_released_reservation_frees_window_slot(tmp_path):
+    # Releasing a pre-command-failed reservation must return its window-slot so a
+    # subsequent order can take it (mirrors day-slot release semantics).
+    conn = _file_conn(tmp_path / "cap.db")
+    ledger = LiveCapLedger(conn)
+
+    first = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=10.0,
+        max_notional_usd=185.0,
+        max_orders_per_day=1000,
+        max_orders_per_window=1,
+    )
+    ledger.release(first.usage_id, "final_intent_failed")
+
+    second = ledger.reserve(
+        event_id="event-2",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=10.0,
+        max_notional_usd=185.0,
+        max_orders_per_day=1000,
+        max_orders_per_window=1,
+    )
+    assert second.reservation_status == "RESERVED"
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

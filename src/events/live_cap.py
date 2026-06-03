@@ -10,6 +10,14 @@ from datetime import datetime, timezone
 from src.decision_kernel.canonicalization import stable_hash
 from src.state.schema.edli_live_cap_usage_schema import ensure_table
 
+# BUG #99 antibody: conservative canary default for the order-emission RATE
+# limit. This is INDEPENDENT of the notional cap and of max_orders_per_day. When
+# a caller omits max_orders_per_window we fail closed to a single order per
+# window so that raising the notional cap can never silently uncap order
+# frequency. The operator sets the live value via config (the daemon passes it
+# through); the default here only governs absence.
+DEFAULT_MAX_ORDERS_PER_WINDOW = 1
+
 
 @dataclass(frozen=True)
 class LiveCapReservation:
@@ -59,6 +67,7 @@ class LiveCapLedger:
         requested_notional_usd: float,
         max_notional_usd: float,
         max_orders_per_day: int,
+        max_orders_per_window: int = DEFAULT_MAX_ORDERS_PER_WINDOW,
         final_intent_id: str | None = None,
         execution_command_id: str | None = None,
     ) -> LiveCapReservation:
@@ -68,6 +77,8 @@ class LiveCapLedger:
             raise LiveCapError("requested_notional_usd exceeds max_notional_usd")
         if max_orders_per_day <= 0:
             raise LiveCapError("max_orders_per_day must be positive")
+        if max_orders_per_window <= 0:
+            raise LiveCapError("max_orders_per_window must be positive")
         usage_id = self._usage_id(event_id, cap_scope)
         created_at = _dt(datetime.now(timezone.utc))
         decision_text = _dt(decision_time)
@@ -99,6 +110,24 @@ class LiveCapLedger:
             max_orders_per_day=max_orders_per_day,
             created_at=created_at,
         )
+        # BUG #99 antibody: reserve an independent rate-window slot. This is a
+        # SECOND control, distinct from the day-slot pool above. Even when the
+        # day-slot pool is large (because the notional cap was raised), the
+        # window cap bounds how many orders may be emitted per window. On failure
+        # we must release BOTH slots to stay fail-closed.
+        try:
+            self._reserve_window_slot(
+                usage_id=usage_id,
+                event_id=event_id,
+                cap_scope=cap_scope,
+                window_key=cap_date,
+                max_orders_per_window=max_orders_per_window,
+                created_at=created_at,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
+            raise
         try:
             self.conn.execute(
                 """
@@ -126,6 +155,8 @@ class LiveCapLedger:
         except Exception:
             with contextlib.suppress(Exception):
                 self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
+            with contextlib.suppress(Exception):
+                self.conn.execute("DELETE FROM edli_live_cap_rate_window WHERE usage_id = ?", (usage_id,))
             raise
         return self.get(usage_id)
 
@@ -148,6 +179,7 @@ class LiveCapLedger:
             (usage_id,),
         )
         self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
+        self.conn.execute("DELETE FROM edli_live_cap_rate_window WHERE usage_id = ?", (usage_id,))
 
     def consume(self, usage_id: str, *, final_intent_id: str, execution_command_id: str) -> None:
         if not final_intent_id or not execution_command_id:
@@ -222,6 +254,45 @@ class LiveCapLedger:
             except sqlite3.IntegrityError:
                 continue
         raise LiveCapError("live cap max_orders_per_day exhausted")
+
+    def _reserve_window_slot(
+        self,
+        *,
+        usage_id: str,
+        event_id: str,
+        cap_scope: str,
+        window_key: str,
+        max_orders_per_window: int,
+        created_at: str,
+    ) -> int:
+        existing = self.conn.execute(
+            """
+            SELECT slot, usage_id
+            FROM edli_live_cap_rate_window
+            WHERE event_id = ? AND cap_scope = ? AND window_key = ?
+            """,
+            (event_id, cap_scope, window_key),
+        ).fetchone()
+        if existing is not None:
+            slot = int(existing["slot"] if isinstance(existing, sqlite3.Row) else existing[0])
+            existing_usage_id = str(existing["usage_id"] if isinstance(existing, sqlite3.Row) else existing[1])
+            if existing_usage_id != usage_id:
+                raise LiveCapError("live cap rate window slot drift for event/cap_scope")
+            return slot
+        for slot in range(1, int(max_orders_per_window) + 1):
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO edli_live_cap_rate_window (
+                        cap_scope, window_key, slot, usage_id, event_id, created_at, schema_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (cap_scope, window_key, slot, usage_id, event_id, created_at),
+                )
+                return slot
+            except sqlite3.IntegrityError:
+                continue
+        raise LiveCapError("live cap order-emission rate limit exhausted (max_orders_per_window)")
 
 
 def _reservation_from_row(row) -> LiveCapReservation:

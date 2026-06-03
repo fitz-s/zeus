@@ -199,6 +199,15 @@ def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None
         ("chain_cost_basis_usd", "REAL"),
         ("chain_seen_at", "TEXT"),
         ("chain_absence_at", "TEXT"),
+        # BUG #128 (SEV1, 2026-06-02): durable realized-P&L projection. Pre-fix
+        # realized P&L lived ONLY in-memory + positions.json; a filled+settled
+        # order left no queryable position_current record. Additive nullable
+        # columns populated by build_position_current_projection on close.
+        ("realized_pnl_usd", "REAL"),
+        ("exit_price", "REAL"),
+        ("settlement_price", "REAL"),
+        ("settled_at", "TEXT"),
+        ("exit_reason", "TEXT"),
     )
     with conn:
         for col_name, col_type in additions:

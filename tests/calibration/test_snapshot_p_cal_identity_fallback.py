@@ -338,3 +338,93 @@ class TestFittedPlattStillUsed:
             "When a fitted Platt row exists, p_cal must NOT equal p_raw. "
             "This confirms the identity fallback only fires when cal is None."
         )
+
+
+# ---------------------------------------------------------------------------
+# (d) codex P1 (2026-06-02): grid-corrected p_raw must BYPASS stale Platt fits.
+#     The _maybe_apply_grid_representativeness_correction hook sets
+#     payload['_edli_grid_corrected']=True when it shifts the member array. The
+#     existing Platt fits were trained on the UNSHIFTED p_raw domain, so feeding
+#     a grid-shifted p_raw through them mis-calibrates live EDLI probabilities.
+#     _snapshot_p_cal must short-circuit to identity Platt when this flag is set,
+#     mirroring the _edli_bias_corrected lockstep. Pre-fix the flag was set but
+#     never consumed in _snapshot_p_cal.
+# ---------------------------------------------------------------------------
+
+class TestGridCorrectedBypassesStalePlatt:
+
+    def test_grid_corrected_flag_forces_identity_even_with_fitted_platt(self, tmp_path, monkeypatch):
+        """RED→GREEN (Bug 4): with a FITTED Platt present for the bucket, a
+        payload carrying _edli_grid_corrected=True must still return identity
+        p_cal (== normalized p_raw), NOT the Platt-transformed vector.
+
+        Pre-fix: _snapshot_p_cal only checked _edli_bias_corrected, so the grid
+        flag was ignored and the shifted p_raw flowed through the stale Platt.
+        """
+        conn = _make_cal_conn(tmp_path)
+
+        # Disable frozen_as_of pin so the freshly-inserted test row is found
+        import src.calibration.manager as cal_manager
+        monkeypatch.setattr(cal_manager, "_PIN_CONFIG_CACHE", {"frozen_as_of": None, "model_keys": {}})
+
+        from src.calibration.manager import season_from_date
+        from src.config import cities_by_name
+
+        tokyo = cities_by_name.get("Tokyo")
+        assert tokyo is not None
+        target_date = "2026-06-05"
+        season = season_from_date(target_date, lat=tokyo.lat)
+        _insert_platt_row(conn, "Tokyo", season)
+
+        bins = _make_bins(9)
+        p_raw = np.array([0.3, 0.25, 0.15, 0.1, 0.07, 0.05, 0.04, 0.02, 0.02])
+        p_raw = p_raw / p_raw.sum()
+        family = _make_family("Tokyo", target_date, "high", bins)
+        snapshot = _make_snapshot("Tokyo", target_date)
+
+        # Sanity: WITHOUT the grid flag, the fitted Platt transforms p_raw (p_cal != p_raw)
+        payload_no_flag = _make_payload("high")
+        p_cal_platt = _snapshot_p_cal(
+            conn, snapshot=snapshot, family=family, bins=bins, p_raw=p_raw,
+            payload=payload_no_flag,
+            decision_time=datetime(2026, 6, 5, 6, 0, tzinfo=timezone.utc),
+        )
+        assert not np.allclose(p_cal_platt, p_raw, atol=1e-6), (
+            "precondition: a fitted Platt must transform p_raw when no correction flag is set"
+        )
+
+        # WITH _edli_grid_corrected=True: must short-circuit to identity (== normalized p_raw)
+        payload_grid = _make_payload("high")
+        payload_grid["_edli_grid_corrected"] = True
+        p_cal_grid = _snapshot_p_cal(
+            conn, snapshot=snapshot, family=family, bins=bins, p_raw=p_raw,
+            payload=payload_grid,
+            decision_time=datetime(2026, 6, 5, 6, 0, tzinfo=timezone.utc),
+        )
+        conn.close()
+
+        np.testing.assert_allclose(
+            p_cal_grid, p_raw, rtol=1e-10, atol=1e-12,
+            err_msg="_edli_grid_corrected=True must force identity Platt "
+                    "(p_cal == normalized p_raw), bypassing the stale Platt fit.",
+        )
+
+    def test_grid_corrected_invalid_p_raw_still_raises(self, tmp_path):
+        """Antibody: the grid-corrected identity seam still fails closed on an
+        invalid (all-zero) p_raw — it must not silently return zeros.
+        """
+        conn = _make_cal_conn(tmp_path)
+        bins = _make_bins(9)
+        p_raw_invalid = np.zeros(9, dtype=float)
+        family = _make_family("Tokyo", "2026-06-05", "high", bins)
+        snapshot = _make_snapshot("Tokyo", "2026-06-05")
+        payload = _make_payload("high")
+        payload["_edli_grid_corrected"] = True
+
+        with pytest.raises(ValueError, match="CALIBRATION_AUTHORITY_MISSING"):
+            _snapshot_p_cal(
+                conn, snapshot=snapshot, family=family, bins=bins, p_raw=p_raw_invalid,
+                payload=payload,
+                decision_time=datetime(2026, 6, 5, 6, 0, tzinfo=timezone.utc),
+            )
+        conn.close()

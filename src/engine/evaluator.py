@@ -5259,9 +5259,13 @@ def evaluate_candidate(
     _fdr_family_size = len(full_family_hypotheses)
     entry_validations.append("bootstrap_ci")
 
-    # FDR filter — full-family is the live standard.
-    # Legacy fdr_filter() is preserved for audit/comparison recording only.
-    legacy_filtered = fdr_filter(edges)
+    # FDR filter — full-family is the live standard (scan_full_hypothesis_family
+    # + apply_familywise_fdr below). S6-FDR (2026-06-01): the prior audit-only
+    # `legacy_filtered = fdr_filter(edges)` call was DELETED. It ran legacy BH
+    # over the find_edges() survivor SUBSET (an inflated-denominator path) and
+    # its result was never consumed — dead audit weight. Attesting
+    # family_complete=True over that subset would be a structural lie under the
+    # Q4 contract; the full-family path here is the only trustworthy selector.
     if _fdr_fallback:
         filtered = []
     elif full_family_hypotheses:

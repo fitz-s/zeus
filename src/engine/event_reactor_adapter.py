@@ -55,6 +55,7 @@ from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_ke
 from src.events.opportunity_event import OpportunityEvent
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.riskguard.risk_level import RiskLevel
+from src.sizing.sizing_context import SizingContext
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -819,11 +820,24 @@ def build_event_bound_no_submit_receipt(
             _bias_decay_native,
             _bias_decay_reason,
         ) = _maybe_bias_decay_kelly_haircut(kelly_multiplier, family=family)
+        # S3 (variance-required Kelly, task #103/#111): carry the candidate's
+        # posterior CI width and forecast lead into Kelly so a wider-CI edge
+        # sizes STRICTLY smaller. The config/bias-decay multiplier above is the
+        # BASE; SizingContext adds the CI/lead variance haircut on top. lead_days
+        # derivation can raise ValueError (CALIBRATION_AUTHORITY_MISSING) — that
+        # routes through the except envelope below to KELLY_PROOF_MISSING
+        # fail-closed, never silent.
+        sizing_context = SizingContext.from_candidate_proof(
+            q_posterior=proof.q_posterior,
+            q_lcb_5pct=proof.q_lcb_5pct,
+            lead_days=_snapshot_lead_days(snapshot=row, family=family, payload=payload),
+        )
         kelly = evaluate_kelly(
             kelly_decision_id=f"edli_kelly:{event.event_id}:{selected_token_id}",
             p_posterior=proof.q_posterior,
             execution_price=execution_price,
             bankroll_usd=bankroll_usd,
+            sizing_context=sizing_context,
             kelly_multiplier=kelly_multiplier,
         )
     except (TypeError, ValueError) as exc:
@@ -1293,11 +1307,22 @@ def _build_live_execution_command_certificates(
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
-            # Bug A fix (2026-06-01): source tick_size from the DB snapshot (Decimal)
-            # rather than the cert payload float.  The cert payload may carry "0.01"
-            # (the default) while the DB snapshot has "0.001" for binary Polymarket
-            # markets, causing executor parity rejection (intent.tick_size ≠ snapshot.min_tick_size).
-            tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01),
+            # BUG #92 structural fix (2026-06-02): the intent's tick_size MUST be the
+            # min_tick_size of the SAME snapshot the executor re-hydrates at submit
+            # time (intent.snapshot_id == proof.executable_snapshot_id ==
+            # executable_snapshot.payload['identity']).  Both branches below are bound
+            # to that one snapshot:
+            #   - TAKER: `_snap_for_depth` = get_snapshot(proof.executable_snapshot_id).
+            #   - else : executable_snapshot.payload['min_tick_size'], populated at
+            #            reactor:2448 from `_hydrated_snapshot =
+            #            get_snapshot(proof.executable_snapshot_id)`.
+            # The pre-fix `_float_or_default(..., 0.01)` silent default was an UNBOUND
+            # tick source: when the canonical tick disagreed with a hardcoded 0.01 the
+            # intent diverged from the executor's snapshot (live 2026-06-01: intent
+            # tick=0.001 vs bound snapshot tick=0.01 → 28 EXECUTOR_PRE_VENUE_REJECTED).
+            # Fail closed instead of defaulting — a missing canonical tick is a
+            # provenance fault, not a 0.01 market.
+            tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _required_bound_tick_size(_snap_for_depth, executable_snapshot.payload),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
             best_bid=best_bid,
             best_ask=best_ask,
@@ -1418,6 +1443,7 @@ def _build_live_execution_command_certificates(
             requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
             max_notional_usd=float(tiny_live_max_notional_usd),
             max_orders_per_day=int(settings["edli_v1"].get("tiny_live_max_orders_per_day", 1)),
+            max_orders_per_window=int(settings["edli_v1"].get("tiny_live_max_orders_per_window", 1)),
             final_intent_id=str(final_intent.payload["final_intent_id"]),
             execution_command_id=execution_command_id,
         )
@@ -3133,6 +3159,24 @@ def _canonical_probability_and_fdr_proof(
                 p_values[(condition_id, direction)] = 1.0
                 lcb_by_direction[(condition_id, direction)] = q_point
                 prefilter[(condition_id, direction)] = False
+
+    # EMOS-CI LIVE OVERRIDE (Option B, 2026-06-02, /tmp/design_emos_ci.md §6).
+    # Replace the MC q_5pct (lcb_by_direction) with the coverage-honest EMOS analytic CI
+    # for LICENSED HIGH-metric cities only. DEFAULT OFF — no live decision change unless
+    # the operator flips edli_v1.edli_emos_ci_live_enabled AND adds the city to
+    # state/emos_ci_license.json. Touches ONLY the q_5pct term the robust trade-score
+    # consumes; hyp.p_value / prefilter (the FDR edge-space gate) stay on the proven MC
+    # engine (lowest blast radius). FAIL-CLOSED: any missing EMOS / exception keeps the
+    # MC lcb (never crash, never substitute a wrong value).
+    _maybe_override_lcb_with_emos_ci(
+        family=family,
+        snapshot=snapshot,
+        analysis=analysis,
+        native_costs=native_costs,
+        payload=_payload(event),
+        lcb_by_direction=lcb_by_direction,
+    )
+
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
 
     prior = tuple(max(q_by_condition[str(candidate.condition_id or "")], 1e-9) for candidate in family.candidates)
@@ -3167,6 +3211,30 @@ def _canonical_probability_and_fdr_proof(
     # audit) — so skipping the write is safe and is the unlock for the first receipt.
     # Re-enable under plan A2 by writing the belief through the reactor's EXISTING
     # connection (same transaction), never a fresh get_world_connection().
+
+    # EMOS shadow ledger (PIECE 2, 2026-06-02): parallel EMOS-calibrated probabilities.
+    # Flag-gated (edli_v1.edli_emos_shadow_ledger_enabled, default OFF).
+    # FAIL-OPEN/SILENT: any error must not affect the live q_by_condition decision.
+    try:
+        if bool(settings["edli_v1"].get("edli_emos_shadow_ledger_enabled", False)):
+            _write_emos_shadow_ledger(
+                event=event,
+                family=family,
+                snapshot=snapshot,
+                analysis=analysis,
+                q_by_condition=q_by_condition,
+                decision_time=decision_time,
+                lcb_by_direction=lcb_by_direction,
+                native_costs=native_costs,
+            )
+    except Exception as _emos_exc:
+        try:
+            logging.getLogger("zeus.emos_ledger").warning(
+                "EMOS shadow ledger write failed (non-fatal): %s", _emos_exc
+            )
+        except Exception:
+            pass
+
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 
@@ -3315,6 +3383,13 @@ def _market_analysis_from_event_snapshot(
     )
     if _bias_corrected:
         payload["_edli_bias_corrected"] = True
+    # Grid→point representativeness correction (lead-invariant, OOS-validated).
+    # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
+    # Applied on the (potentially bias-corrected) member array so both corrections compose.
+    members, _grid_corrected = _maybe_apply_grid_representativeness_correction(
+        members, snapshot=snapshot, family=family, city=city, payload=payload
+    )
+    # payload['_edli_grid_corrected'] set inside the hook when applied.
     p_raw = _snapshot_p_raw(
         snapshot, family=family, bins=bins, members=members, payload=payload,
         members_already_corrected=True,
@@ -3567,6 +3642,467 @@ def _maybe_apply_edli_bias_correction(
         return members, False
 
 
+def _maybe_apply_grid_representativeness_correction(
+    members: np.ndarray,
+    *,
+    snapshot: dict[str, Any],
+    family,
+    city,
+    payload: dict[str, object],
+) -> tuple[np.ndarray, bool]:
+    """Per-(city,season) grid→point representativeness offset for the LIVE EDLI p_raw path.
+
+    Subtracts the OOS-validated, shrunk per-(city,season) offset from member maxes BEFORE
+    p_raw is computed. The offset sign convention is ``offset_c = mean(ENS_member_mean −
+    obs_daily_max)`` so subtracting it warms cold-biased members toward the settlement
+    station point (offset_c is negative for cold cities → subtracting warms).
+
+    Flag-gated by ``edli_v1.edli_grid_representativeness_correction_enabled`` (default OFF).
+    FAIL-CLOSED: any missing flag/table/entry/activated=False/error → return raw members
+    with applied=False, so live behavior is byte-identical to today when the flag is absent.
+
+    When applied, sets payload['_edli_grid_corrected']=True so the calibration step uses
+    identity Platt for the corrected p_raw domain (mirrors _edli_bias_corrected semantics).
+
+    Unit convention: offset_c is in °C. For F-settled cities (settlement_unit='F'), the
+    member array is in °F, so offset_native = offset_c × 1.8.
+    """
+    try:
+        if not bool(settings["edli_v1"].get("edli_grid_representativeness_correction_enabled", False)):
+            return members, False
+        from src.calibration.grid_representativeness import get_offset
+        from src.calibration.manager import season_from_date
+
+        season = season_from_date(str(family.target_date), lat=city.lat)
+        # METRIC GATE (codex P1, 2026-06-02): the grid offset table is fit for
+        # metric='high' ONLY (grid_representativeness.py / fit_grid_representativeness_offset.py).
+        # A LOW family must NOT receive a HIGH-derived offset — that would mix the
+        # high/low tracks and shift LOW-market p_raw by the wrong physical quantity.
+        # Pass family.metric and fail closed (get_offset returns None) for any
+        # non-high metric until separate LOW offsets are fit.
+        entry = get_offset(city.name, season, metric=str(getattr(family, "metric", "high")))
+        if entry is None:
+            return members, False
+        offset_c = float(entry["offset_c"])
+        _unit = getattr(city, "settlement_unit", "C")
+        offset_native = offset_c * 1.8 if _unit == "F" else offset_c
+        corrected = np.asarray(members, dtype=float) - offset_native
+        payload["_edli_grid_corrected"] = True
+        import logging
+        logging.getLogger("zeus.grid_repr").info(
+            "EDLI grid-repr correction applied city=%s season=%s unit=%s offset_c=%.3f offset_native=%.3f",
+            city.name, season, _unit, offset_c, offset_native,
+        )
+        return corrected, True
+    except Exception as exc:
+        try:
+            import logging
+            logging.getLogger("zeus.grid_repr").warning(
+                "EDLI grid-repr correction skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return members, False
+
+
+def _write_emos_shadow_ledger(
+    *,
+    event: "OpportunityEvent",
+    family,
+    snapshot: dict[str, Any],
+    analysis: Any,
+    q_by_condition: dict[str, float],
+    decision_time: datetime,
+    lcb_by_direction: dict | None = None,
+    native_costs: dict | None = None,
+) -> None:
+    """Write per-bin EMOS shadow ledger rows (PIECE 2 + CI extension 2026-06-02).
+
+    Called from _canonical_probability_and_fdr_proof ONLY when
+    edli_v1.edli_emos_shadow_ledger_enabled is True.  FAIL-OPEN: caller
+    wraps in try/except so any raise here is silently absorbed.
+
+    lcb_by_direction: the live q_5pct in probability space, built at adapter:3107.
+        Keys: (condition_id, "buy_yes") / (condition_id, "buy_no").
+        Defaults to None → cost/lcb/score fields recorded as null.
+    native_costs: the executable-ask cost dict from _canonical_probability_and_fdr_proof.
+        native_costs[(cond, dir)][1] is the ExecutionPrice; .value = the live ask.
+        Defaults to None → same fallback.
+    """
+    import logging as _logging
+    from datetime import timezone as _tz
+    from src.calibration.emos import emos_predictive, bin_probability_settlement as bin_probability, season_for
+    from src.calibration.emos_ledger import append_ledger
+    from src.calibration.emos_ci_shadow import compute_robust_edge
+    from src.contracts.season import season_from_date
+
+    city_obj = runtime_cities_by_name().get(family.city)
+    lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+    season = season_from_date(str(family.target_date), lat=lat)
+    lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=_payload(event))
+
+    # members_c: read raw members from snapshot["members_json"] — the EXACT source used
+    # in fit_emos_calibration.py (scripts/fit_emos_calibration.py:68-70).  This matches the
+    # EMOS fit (raw 51 members, no bias/grid offset), so forward emos_q is consistent with
+    # the backward coverage license.  The bug: getattr(analysis,"member_maxes",...) returned
+    # an EMPTY array because the attribute is analysis._member_maxes (private, and
+    # uncertainty-adjusted — different from raw fit source anyway).
+    # Option (a) preferred: snapshot already available here; _snapshot_members() is the
+    # same parse path the adapter uses for p_raw computation.
+    try:
+        members_native = _snapshot_members(snapshot).astype(float)
+    except Exception:
+        members_native = np.array([], dtype=float)
+    unit = getattr(analysis, "_unit", "C")
+    if unit == "F":
+        members_c = (members_native - 32.0) * 5.0 / 9.0
+    else:
+        members_c = members_native
+
+    raw_mu_c = float(np.mean(members_c)) if members_c.size > 0 else float("nan")
+    raw_sigma_c = float(np.std(members_c, ddof=1)) if members_c.size > 1 else float("nan")
+
+    # EMOS calibration table is HIGH-metric only (fit_emos_calibration.py:68 WHERE
+    # temperature_metric='high').  Applying HIGH params to LOW members produces garbage
+    # emos_q.  Gate the entire EMOS computation on metric == "high".
+    family_metric = str(getattr(family, "metric", "") or "").lower()
+    is_high_metric = (family_metric == "high")
+
+    emos_mu_c: float | None = None
+    emos_sigma_c: float | None = None
+    served_status = "missing"
+    if is_high_metric:
+        emos_result = emos_predictive(family.city, season, lead_days, members_c)
+        if emos_result is not None:
+            emos_mu_c, emos_sigma_c = emos_result
+            served_status = "emos"
+        else:
+            # Distinguish raw vs missing by checking table directly
+            from src.calibration.emos import load_emos_table
+            tbl = load_emos_table()
+            cell = tbl.get("cells", {}).get(f"{family.city}|{season}")
+            if cell is not None:
+                served_status = str(cell.get("served", "missing"))
+            else:
+                served_status = "missing"
+    else:
+        # LOW or unknown metric: EMOS not applicable; served_status remains "missing"
+        # raw fields (raw_mu_c, raw_sigma_c) still recorded for completeness.
+        served_status = "not_high_metric"
+
+    # p_raw is the raw ensemble vector (before Platt); p_cal is after Platt.
+    # raw_q (stored below) records p_cal[index] — the Platt-calibrated probability.
+    # q_live = q_by_condition[cond] = the post-evaluate_live_bins q (the live trade score q).
+    # The robust score MUST use q_live, not raw_q (q-domain parity, spec §2b/#91/#105).
+    p_posterior_vec = np.asarray(getattr(analysis, "p_cal", np.array([])), dtype=float)
+
+    ts = decision_time.astimezone(_tz.utc).isoformat()
+
+    for index, candidate in enumerate(family.candidates):
+        condition_id = str(candidate.condition_id or "")
+        raw_q = float(p_posterior_vec[index]) if index < len(p_posterior_vec) else float("nan")
+        b = candidate.bin
+        bin_low = b.low
+        bin_high = b.high
+        bin_unit = getattr(b, "unit", unit)
+
+        # q_live: the live q after evaluate_live_bins (the value the trade score uses).
+        q_live: float | None = q_by_condition.get(condition_id)
+
+        # EMOS q and q_lcb — computed in the bin's native unit (unit-correct per spec §5).
+        emos_q: float | None = None
+        emos_q_lcb: float | None = None
+        mu_native: float | None = None
+        sigma_native: float | None = None
+        if emos_mu_c is not None and emos_sigma_c is not None:
+            try:
+                if bin_unit == "F":
+                    mu_native = emos_mu_c * 9.0 / 5.0 + 32.0
+                    sigma_native = emos_sigma_c * 9.0 / 5.0
+                else:
+                    mu_native = emos_mu_c
+                    sigma_native = emos_sigma_c
+                emos_q = bin_probability(mu_native, sigma_native, bin_low, bin_high)
+                # k_cov=1.0 in shadow: emos_q_lcb = min(emos_q, q(mu, 1.0*sigma)) = emos_q
+                # (harness re-derives k_cov post-hoc from realized coverage)
+                emos_q_lcb = emos_q  # k_cov=1.0 → min(emos_q, emos_q) = emos_q
+            except Exception:
+                emos_q = None
+                emos_q_lcb = None
+
+        # LCB values from lcb_by_direction (live MC q_5pct in probability space).
+        raw_q_lcb_buy_yes: float | None = None
+        raw_q_lcb_buy_no: float | None = None
+        if lcb_by_direction is not None:
+            _lcb_yes = lcb_by_direction.get((condition_id, "buy_yes"))
+            _lcb_no = lcb_by_direction.get((condition_id, "buy_no"))
+            raw_q_lcb_buy_yes = float(_lcb_yes) if _lcb_yes is not None else None
+            raw_q_lcb_buy_no = float(_lcb_no) if _lcb_no is not None else None
+
+        # Costs from native_costs (the executable ask the trade score uses).
+        # native_costs[(cond, dir)] is a 5-tuple; index [1] is ExecutionPrice | None.
+        cost_buy_yes: float | None = None
+        cost_buy_no: float | None = None
+        if native_costs is not None:
+            _ep_yes = (native_costs.get((condition_id, "buy_yes")) or (None, None))[1]
+            _ep_no = (native_costs.get((condition_id, "buy_no")) or (None, None))[1]
+            cost_buy_yes = float(_ep_yes.value) if _ep_yes is not None else None
+            cost_buy_no = float(_ep_no.value) if _ep_no is not None else None
+
+        # Robust edge scores (replicate trade_score.py:48-52 using q_live, NOT raw_q).
+        # buy_yes: q_posterior = q_live, q_5pct = raw_q_lcb_buy_yes, cost = cost_buy_yes
+        # buy_no:  q_posterior = 1 - q_live, q_5pct = raw_q_lcb_buy_no, cost = cost_buy_no
+        #          (INV/#106: buy_no lcb is independent, NOT negation of buy_yes lcb)
+        _PENALTY = 0.01  # mirror adapter:4525-4526
+
+        robust_score_raw_buy_yes: float | None = None
+        robust_score_raw_buy_no: float | None = None
+        if q_live is not None and raw_q_lcb_buy_yes is not None and cost_buy_yes is not None:
+            robust_score_raw_buy_yes = compute_robust_edge(
+                q_posterior=q_live,
+                q_5pct=raw_q_lcb_buy_yes,
+                cost=cost_buy_yes,
+                penalty=_PENALTY,
+            )
+        if q_live is not None and raw_q_lcb_buy_no is not None and cost_buy_no is not None:
+            robust_score_raw_buy_no = compute_robust_edge(
+                q_posterior=1.0 - q_live,
+                q_5pct=raw_q_lcb_buy_no,
+                cost=cost_buy_no,
+                penalty=_PENALTY,
+            )
+
+        robust_score_emos_buy_yes: float | None = None
+        robust_score_emos_buy_no: float | None = None
+        if emos_q is not None and emos_q_lcb is not None and cost_buy_yes is not None:
+            # k_cov=1 → both emos_q_lcb and emos_q equal, so min(...) = emos_q
+            robust_score_emos_buy_yes = compute_robust_edge(
+                q_posterior=emos_q,
+                q_5pct=emos_q_lcb,
+                cost=cost_buy_yes,
+                penalty=_PENALTY,
+            )
+        if emos_q is not None and emos_q_lcb is not None and cost_buy_no is not None:
+            # buy_no emos q is the complement: 1 - emos_q (binary complement of YES bin mass)
+            emos_q_no = 1.0 - emos_q
+            emos_q_lcb_no = 1.0 - emos_q  # k_cov=1: lcb = emos_q complement
+            robust_score_emos_buy_no = compute_robust_edge(
+                q_posterior=emos_q_no,
+                q_5pct=emos_q_lcb_no,
+                cost=cost_buy_no,
+                penalty=_PENALTY,
+            )
+
+        # Clearing booleans
+        would_clear_emos_buy_yes = (
+            bool(robust_score_emos_buy_yes > 0) if robust_score_emos_buy_yes is not None else None
+        )
+        would_clear_emos_buy_no = (
+            bool(robust_score_emos_buy_no > 0) if robust_score_emos_buy_no is not None else None
+        )
+        cleared_raw_buy_yes = (
+            bool(robust_score_raw_buy_yes > 0) if robust_score_raw_buy_yes is not None else None
+        )
+        cleared_raw_buy_no = (
+            bool(robust_score_raw_buy_no > 0) if robust_score_raw_buy_no is not None else None
+        )
+
+        # FIX B — write-boundary staleness reject.
+        # Reject rows whose decision_time is far from wall-clock now.
+        # Catches replay/fixture-contamination leaks at the write boundary:
+        # live daemon rows are written within seconds of the event; a row with
+        # decision_time 2+ days old is from a replay or a test fixture that
+        # slipped through the path seam.
+        # FAIL-OPEN: any exception in this check is silently swallowed; the
+        # row is rejected on stale detection but never raises into the hot path.
+        _STALE_BOUNDARY_DAYS = 2
+        try:
+            from datetime import timezone as _tz_b
+            _now_utc = datetime.now(_tz_b.utc)
+            _age_seconds = abs((_now_utc - decision_time.astimezone(_tz_b.utc)).total_seconds())
+            if _age_seconds > _STALE_BOUNDARY_DAYS * 86400:
+                import logging as _lg_b
+                _lg_b.getLogger(__name__).debug(
+                    "emos_ledger: skipping stale row (age=%.0fs > %dd) for %s/%s",
+                    _age_seconds, _STALE_BOUNDARY_DAYS, family.city, str(family.target_date),
+                )
+                continue
+        except Exception:
+            pass  # fail-open: if we can't check age, proceed with write
+
+        row = {
+            "ts": ts,
+            "city": family.city,
+            "target_date": str(family.target_date),
+            "season": season,
+            "lead_days": lead_days,
+            "metric": family_metric,  # "high" / "low" / "" — EMOS only valid for "high"
+            "bin_label": b.label,
+            "bin_low": bin_low,
+            "bin_high": bin_high,
+            "bin_unit": bin_unit,
+            "raw_q": raw_q,           # p_cal[index] (Platt-calibrated, pre-evaluate_live_bins)
+            "q_live": q_live,          # q_by_condition[cond] (post-evaluate_live_bins, trade-score q)
+            "emos_q": emos_q,
+            "emos_q_lcb": emos_q_lcb,  # k_cov=1 shadow: == emos_q; harness re-derives k_cov>1
+            "raw_mu_c": raw_mu_c,
+            "raw_sigma_c": raw_sigma_c,
+            "emos_mu_c": emos_mu_c,
+            "emos_sigma_c": emos_sigma_c,
+            "served": served_status,
+            "candidate_id": f"{family.family_id}:{condition_id}" if getattr(family, "family_id", None) else condition_id,
+            # CI extension fields (spec §2b)
+            "raw_q_lcb_buy_yes": raw_q_lcb_buy_yes,
+            "raw_q_lcb_buy_no": raw_q_lcb_buy_no,
+            "cost_buy_yes": cost_buy_yes,
+            "cost_buy_no": cost_buy_no,
+            "robust_score_raw_buy_yes": robust_score_raw_buy_yes,
+            "robust_score_raw_buy_no": robust_score_raw_buy_no,
+            "robust_score_emos_buy_yes": robust_score_emos_buy_yes,
+            "robust_score_emos_buy_no": robust_score_emos_buy_no,
+            "would_clear_emos_buy_yes": would_clear_emos_buy_yes,
+            "would_clear_emos_buy_no": would_clear_emos_buy_no,
+            "cleared_raw_buy_yes": cleared_raw_buy_yes,
+            "cleared_raw_buy_no": cleared_raw_buy_no,
+            "penalty_used": _PENALTY,
+            "kcov_applied": 1.0,
+        }
+        append_ledger(row)
+
+
+def _maybe_override_lcb_with_emos_ci(
+    *,
+    family,
+    snapshot: dict[str, Any],
+    analysis: Any,
+    native_costs: dict | None,
+    payload: dict[str, object],
+    lcb_by_direction: dict[tuple[str, str], float],
+) -> None:
+    """EMOS-CI LIVE OVERRIDE (Option B, /tmp/design_emos_ci.md §6) — in-place mutate lcb_by_direction.
+
+    For LICENSED HIGH-metric cities only, replace the MC q_5pct
+    (lcb_by_direction[(cond,dir)]) with the coverage-honest EMOS analytic CI:
+
+        emos_q          = bin_probability(mu_native, sigma_native, low, high)
+        q_inflated      = bin_probability(mu_native, k_cov * sigma_native, low, high)
+        buy_yes lcb     = min(emos_q, q_inflated)            # never optimistic (widening σ lowers a peaked bin)
+        buy_no  lcb     = min(1 - emos_q, 1 - q_inflated)    # = 1 - max(emos_q, q_inflated); the INDEPENDENT
+                                                              #   honest NO-mass lower bound (mirrors the shadow
+                                                              #   hook's 1 - emos_q at k_cov=1, never optimistic
+                                                              #   for NO at k_cov>1). NOT 1 - yes_lcb (#106).
+
+    Native unit: °F cities convert (mu_c, sigma_c) to °F exactly as
+    _write_emos_shadow_ledger does (mirror EXACTLY). k_cov comes from the per-city
+    license cell (clamped >= 1.0; sigma is never tightened).
+
+    Gating (all must hold or the override is a no-op, MC lcb stands):
+      - settings["edli_v1"].edli_emos_ci_live_enabled is True (default False)
+      - family.metric == "high"
+      - family.city in the EMOS-CI license (state/emos_ci_license.json)
+      - emos_predictive(city, season, lead_days, members_c) is not None (served == emos)
+
+    FAIL-CLOSED: any missing EMOS / per-bin error / any exception leaves the MC lcb
+    for that key untouched. The function NEVER raises into the hot path and NEVER
+    substitutes a wrong value (a per-bin failure keeps that bin's MC lcb).
+
+    Touches ONLY lcb_by_direction. q_by_condition, p_values, prefilter, and
+    hyp.p_value are unchanged (the FDR edge-space gate stays on the MC engine).
+    """
+    import logging as _logging
+
+    try:
+        if not bool(settings["edli_v1"].get("edli_emos_ci_live_enabled", False)):
+            return
+    except Exception:
+        return
+
+    # Metric gate: EMOS calibration is HIGH-metric only (HIGH params on LOW members = garbage).
+    family_metric = str(getattr(family, "metric", "") or "").lower()
+    if family_metric != "high":
+        return
+
+    # Per-city license gate (operator-armed). Absent city → no-op (fail-closed).
+    try:
+        from src.calibration.emos_ci_license import emos_ci_k_cov
+        k_cov = emos_ci_k_cov(family.city)
+    except Exception:
+        return
+    if k_cov is None:
+        return
+
+    log = _logging.getLogger("zeus.emos_ci_live")
+    try:
+        from src.calibration.emos import emos_predictive, bin_probability_settlement as bin_probability
+        from src.contracts.season import season_from_date
+
+        # Season + lead_days + members_c — EXACT mirror of _write_emos_shadow_ledger
+        # (raw 51 members from snapshot["members_json"], °F→°C convert, season hemisphere-aware).
+        city_obj = runtime_cities_by_name().get(family.city)
+        lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+        season = season_from_date(str(family.target_date), lat=lat)
+        lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
+        try:
+            members_native = _snapshot_members(snapshot).astype(float)
+        except Exception:
+            members_native = np.array([], dtype=float)
+        unit = getattr(analysis, "_unit", "C")
+        if unit == "F":
+            members_c = (members_native - 32.0) * 5.0 / 9.0
+        else:
+            members_c = members_native
+
+        emos_result = emos_predictive(family.city, season, lead_days, members_c)
+        if emos_result is None:
+            # served != emos (raw/missing cell) or insufficient members → fail-closed, MC stands.
+            return
+        emos_mu_c, emos_sigma_c = emos_result
+    except Exception as exc:
+        log.warning("EMOS-CI live override setup failed (non-fatal, MC lcb kept): %s", exc)
+        return
+
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        b = candidate.bin
+        bin_unit = getattr(b, "unit", unit)
+        try:
+            # Native-unit conversion — EXACT mirror of _write_emos_shadow_ledger (3783-3788).
+            if bin_unit == "F":
+                mu_native = emos_mu_c * 9.0 / 5.0 + 32.0
+                sigma_native = emos_sigma_c * 9.0 / 5.0
+            else:
+                mu_native = emos_mu_c
+                sigma_native = emos_sigma_c
+            emos_q = bin_probability(mu_native, sigma_native, b.low, b.high)
+            q_inflated = bin_probability(mu_native, k_cov * sigma_native, b.low, b.high)
+            # buy_yes: never-optimistic lower bound on the YES (in-bin) mass.
+            emos_q_lcb_yes = min(emos_q, q_inflated)
+            # buy_no: independent honest lower bound on the NO (complement) mass.
+            # = 1 - max(emos_q, q_inflated); equals the shadow hook's (1 - emos_q) at k_cov=1.
+            emos_q_lcb_no = min(1.0 - emos_q, 1.0 - q_inflated)
+        except Exception as exc:
+            log.warning(
+                "EMOS-CI live override skipped bin %s/%s (non-fatal, MC lcb kept): %s",
+                family.city, getattr(b, "label", "?"), exc,
+            )
+            continue
+
+        for direction, emos_lcb in (("buy_yes", emos_q_lcb_yes), ("buy_no", emos_q_lcb_no)):
+            key = (condition_id, direction)
+            if key not in lcb_by_direction:
+                # No MC entry for this direction (non-executable side) → nothing to override.
+                continue
+            mc_lcb = lcb_by_direction[key]
+            lcb_by_direction[key] = float(emos_lcb)
+            try:
+                log.info(
+                    "EMOS-CI override city=%s cond=%s dir=%s k_cov=%.3f mc_lcb=%.6f->emos_lcb=%.6f",
+                    family.city, condition_id, direction, k_cov, float(mc_lcb), float(emos_lcb),
+                )
+            except Exception:
+                pass
+
+
 def _snapshot_p_raw(
     snapshot: dict[str, Any],
     *,
@@ -3617,15 +4153,20 @@ def _snapshot_p_cal(
     if city is None:
         raise ValueError(f"CALIBRATION_AUTHORITY_MISSING:city config missing for {family.city}")
 
-    # A4 lockstep: when the member maxes were bias-corrected pre-p_raw, the existing
-    # Platt models were fit on UNCORRECTED p_raw and would mis-calibrate the shifted
-    # domain. Use identity Platt (p_cal = normalized p_raw) for the corrected domain
-    # until a Platt is refit on the corrected p_raw_domain. Enforces train/serve match.
-    if bool(payload.get("_edli_bias_corrected")):
+    # A4 lockstep: when the member maxes were bias-corrected OR grid-representativeness
+    # corrected pre-p_raw, the existing Platt models were fit on the UNCORRECTED
+    # (unshifted) p_raw domain and would mis-calibrate the shifted domain. Use identity
+    # Platt (p_cal = normalized p_raw) for the corrected domain until a Platt is refit on
+    # the corrected p_raw_domain. Enforces train/serve match.
+    #   - _edli_bias_corrected: city-specific bias shift (_maybe_apply_edli_bias_correction)
+    #   - _edli_grid_corrected: grid→point representativeness shift
+    #     (codex P1, 2026-06-02): this flag was set but NEVER consumed here, so a
+    #     grid-shifted p_raw was still fed through Platt fits on the unshifted domain.
+    if bool(payload.get("_edli_bias_corrected")) or bool(payload.get("_edli_grid_corrected")):
         arr = np.asarray(p_raw, dtype=float)
         total = float(arr.sum())
         if not _valid_probability_vector(arr, len(bins)) or total <= 0.0:
-            raise ValueError("CALIBRATION_AUTHORITY_MISSING:bias-corrected p_raw invalid")
+            raise ValueError("CALIBRATION_AUTHORITY_MISSING:corrected p_raw invalid")
         return arr / total
 
     source_id = _nonnull(snapshot.get("source_id") or payload.get("source_id"))
@@ -4402,6 +4943,38 @@ def _optional_float(value: object) -> float | None:
 def _float_or_default(value: object, default: float) -> float:
     parsed = _optional_float(value)
     return default if parsed is None else parsed
+
+
+def _required_bound_tick_size(snap_for_depth, executable_snapshot_payload) -> str:
+    """Resolve the intent tick_size bound to the executor's hydration target.
+
+    BUG #92 antibody: the tick MUST be the min_tick_size of the snapshot the
+    executor re-hydrates (proof.executable_snapshot_id).  Both candidate sources
+    below are bound to that single snapshot:
+
+      1. ``snap_for_depth`` is ``get_snapshot(proof.executable_snapshot_id)``
+         (TAKER + trade_conn path); its ``min_tick_size`` is the canonical Decimal.
+      2. ``executable_snapshot_payload['min_tick_size']`` is populated at the
+         evidence-build site from ``_hydrated_snapshot =
+         get_snapshot(proof.executable_snapshot_id)`` — the same id.
+
+    There is NO hardcoded default: a tick that is not the bound snapshot's tick
+    is exactly the two-snapshot divergence that produced the live pre-arm wall.
+    If neither source yields a tick, fail closed (provenance fault) rather than
+    silently substituting a fixed 0.01 that the executor's snapshot will reject.
+    """
+    if snap_for_depth is not None and getattr(snap_for_depth, "min_tick_size", None) is not None:
+        return str(snap_for_depth.min_tick_size)
+    payload_tick = executable_snapshot_payload.get("min_tick_size")
+    if payload_tick is None or str(payload_tick).strip() == "":
+        raise ValueError(
+            "BUG#92_TICK_UNBOUND: executable_snapshot evidence carries no "
+            "min_tick_size and no depth snapshot was hydrated; cannot bind "
+            "intent tick_size to the executor's snapshot without a silent "
+            "default — fail closed."
+        )
+    # Already a canonical Decimal string from the evidence builder; normalise.
+    return str(Decimal(str(payload_tick)))
 
 
 def _optional_bool(value: object) -> bool | None:

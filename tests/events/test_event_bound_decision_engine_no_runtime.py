@@ -49,15 +49,52 @@ def _forecast_event():
     )
 
 
-def _candidate():
+def _candidate(
+    *,
+    bin: Bin,
+    condition_id: str,
+    yes_token_id: str,
+    no_token_id: str,
+):
     return MarketTopologyCandidate(
         city="Chicago",
         target_date="2026-05-25",
         metric="high",
-        condition_id="condition-1",
-        yes_token_id="yes-1",
-        no_token_id="no-1",
-        bin=Bin(low=70, high=71, unit="F", label="70-71°F"),
+        condition_id=condition_id,
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
+        bin=bin,
+    )
+
+
+def _complete_support_family():
+    """A COMPLETE-support candidate family (full -inf..+inf integer partition).
+
+    Mirrors the M2 pattern in test_family_topology_completeness.py: an interior
+    closed bin bracketed by '...or below' (low=None) and '...or above'
+    (high=None) shoulders, so the family forms a complete partition and passes
+    the FDR_FAMILY_TOPOLOGY_INCOMPLETE guard at bind time. A single closed bin
+    with no shoulders is (correctly) rejected by that guard.
+    """
+    return (
+        _candidate(
+            bin=Bin(low=None, high=69, unit="F", label="69°F or below"),
+            condition_id="condition-low",
+            yes_token_id="yes-low",
+            no_token_id="no-low",
+        ),
+        _candidate(
+            bin=Bin(low=70, high=71, unit="F", label="70-71°F"),
+            condition_id="condition-1",
+            yes_token_id="yes-1",
+            no_token_id="no-1",
+        ),
+        _candidate(
+            bin=Bin(low=72, high=None, unit="F", label="72°F or above"),
+            condition_id="condition-high",
+            yes_token_id="yes-high",
+            no_token_id="no-high",
+        ),
     )
 
 
@@ -65,7 +102,7 @@ def test_decision_engine_builds_event_bound_candidate_family_only():
     result = EventBoundDecisionEngine().evaluate(
         EventBoundDecisionRequest(
             event=_forecast_event(),
-            market_topology=(_candidate(),),
+            market_topology=_complete_support_family(),
             decision_time="2026-05-24T12:00:00+00:00",
             market_topology_source="fixture_topology",
         )
@@ -117,7 +154,7 @@ def test_decision_engine_rejects_unbound_event_without_runtime_fallback():
     result = EventBoundDecisionEngine().evaluate(
         EventBoundDecisionRequest(
             event=bad_event,
-            market_topology=(_candidate(),),
+            market_topology=_complete_support_family(),
             decision_time="2026-05-24T12:00:00+00:00",
         )
     )
