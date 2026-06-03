@@ -269,6 +269,181 @@ def assert_frozen_as_of_not_stale(
         )
 
 
+# ---------------------------------------------------------------------------
+# W0-T3: _run_boot_guards / _validate_boot — safe pre-restart smoke
+# (2026-06-03)
+# ---------------------------------------------------------------------------
+
+def _run_boot_guards(raw_cfg: dict) -> list:
+    """Run every pre-loop boot guard against *raw_cfg* (plain dict from Settings._data).
+
+    Returns a list of (name: str, passed: bool, detail: str) tuples — one per
+    guard.  Never raises; all exceptions are caught and surfaced in `detail`.
+
+    Guards included (same set the real boot path runs, in the same order):
+      1. assert_calibration_pin_shape_is_dict  — model_keys must be dict/absent
+      2. assert_frozen_as_of_not_stale         — WARN>10d, FATAL>21d
+
+    Read-only: no DB writes, no network calls, no exclusive locks acquired.
+    """
+    from datetime import datetime, timezone
+
+    results: list = []
+
+    # Guard 1: calibration pin shape
+    try:
+        assert_calibration_pin_shape_is_dict(raw_cfg)
+        results.append(("calibration_pin_shape", True, "model_keys absent or dict — OK"))
+    except RuntimeError as exc:
+        results.append(("calibration_pin_shape", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("calibration_pin_shape", False, f"unexpected: {exc}"))
+
+    # Guard 2: frozen_as_of staleness
+    try:
+        assert_frozen_as_of_not_stale(raw_cfg, now=datetime.now(tz=timezone.utc))
+        results.append(("frozen_as_of_staleness", True, "frozen_as_of absent or within 21d — OK"))
+    except RuntimeError as exc:
+        results.append(("frozen_as_of_staleness", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("frozen_as_of_staleness", False, f"unexpected: {exc}"))
+
+    return results
+
+
+def _run_schema_guards() -> list:
+    """Read-only DB schema guards for --validate-boot.
+
+    Opens each canonical DB in read-only URI mode (no lock acquired, safe to
+    run alongside a live daemon).  Returns a list of (name, passed, detail).
+
+    Checks:
+      world_db_schema    — PRAGMA user_version + assert_schema_current
+      forecasts_db_schema — PRAGMA user_version + assert_schema_current_forecasts
+      world_registry     — assert_db_matches_registry(WORLD)
+      forecasts_registry — assert_db_matches_registry(FORECASTS)
+    """
+    import sqlite3 as _sqlite3
+
+    from src.state.db import (
+        ZEUS_WORLD_DB_PATH,
+        ZEUS_FORECASTS_DB_PATH,
+        assert_schema_current,
+        assert_schema_current_forecasts,
+    )
+    from src.state.table_registry import DBIdentity, assert_db_matches_registry
+
+    results: list = []
+
+    def _ro_conn(path):
+        return _sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True, timeout=5.0)
+
+    # World DB schema
+    try:
+        if not ZEUS_WORLD_DB_PATH.exists():
+            raise FileNotFoundError(f"{ZEUS_WORLD_DB_PATH} does not exist")
+        conn = _ro_conn(ZEUS_WORLD_DB_PATH)
+        try:
+            conn.execute("PRAGMA query_only = ON")
+            assert_schema_current(conn)
+            row = conn.execute("PRAGMA user_version").fetchone()
+            results.append(("world_db_schema", True, f"user_version={row[0] if row else '?'} — OK"))
+        finally:
+            conn.close()
+    except Exception as exc:
+        results.append(("world_db_schema", False, str(exc)))
+
+    # Forecasts DB schema
+    try:
+        if not ZEUS_FORECASTS_DB_PATH.exists():
+            raise FileNotFoundError(f"{ZEUS_FORECASTS_DB_PATH} does not exist")
+        conn = _ro_conn(ZEUS_FORECASTS_DB_PATH)
+        try:
+            conn.execute("PRAGMA query_only = ON")
+            assert_schema_current_forecasts(conn)
+            row = conn.execute("PRAGMA user_version").fetchone()
+            results.append(("forecasts_db_schema", True, f"user_version={row[0] if row else '?'} — OK"))
+        finally:
+            conn.close()
+    except Exception as exc:
+        results.append(("forecasts_db_schema", False, str(exc)))
+
+    # World registry
+    try:
+        if not ZEUS_WORLD_DB_PATH.exists():
+            raise FileNotFoundError(f"{ZEUS_WORLD_DB_PATH} does not exist")
+        conn = _ro_conn(ZEUS_WORLD_DB_PATH)
+        try:
+            assert_db_matches_registry(conn, DBIdentity.WORLD)
+            results.append(("world_registry", True, "world table-set matches registry — OK"))
+        finally:
+            conn.close()
+    except Exception as exc:
+        results.append(("world_registry", False, str(exc)))
+
+    # Forecasts registry
+    try:
+        if not ZEUS_FORECASTS_DB_PATH.exists():
+            raise FileNotFoundError(f"{ZEUS_FORECASTS_DB_PATH} does not exist")
+        conn = _ro_conn(ZEUS_FORECASTS_DB_PATH)
+        try:
+            assert_db_matches_registry(conn, DBIdentity.FORECASTS)
+            results.append(("forecasts_registry", True, "forecasts table-set matches registry — OK"))
+        finally:
+            conn.close()
+    except Exception as exc:
+        results.append(("forecasts_registry", False, str(exc)))
+
+    return results
+
+
+def _validate_boot(settings_path=None) -> int:
+    """Run all read-only boot guards and print PASS/FAIL for each.
+
+    Safe to invoke while the live daemon is running: opens no exclusive
+    locks, acquires no ports, starts no threads, makes no network calls,
+    performs no DB writes.
+
+    Args:
+        settings_path: Optional[str | Path] — override the settings.json path.
+            Useful for testing with a temporary config file.
+
+    Returns:
+        0 if all checks pass, 1 if any fail.
+    """
+    from pathlib import Path as _Path
+
+    from src.config import Settings as _Settings
+
+    # Load settings — use override path when supplied (test / operator use)
+    try:
+        path = _Path(settings_path) if settings_path else None
+        _s = _Settings(path=path)
+        raw_cfg = _s._data if hasattr(_s, "_data") else _s
+        print("PASS settings_load")
+    except Exception as exc:
+        print(f"FAIL settings_load: {exc}")
+        return 1
+
+    all_results = []
+
+    # Boot guards (calibration pin shape + staleness)
+    all_results.extend(_run_boot_guards(raw_cfg))
+
+    # Read-only schema / registry guards
+    all_results.extend(_run_schema_guards())
+
+    # Report
+    any_fail = False
+    for name, passed, detail in all_results:
+        tag = "PASS" if passed else "FAIL"
+        print(f"{tag} {name}: {detail}")
+        if not passed:
+            any_fail = True
+
+    return 1 if any_fail else 0
+
+
 def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
     if not bool(edli_cfg.get("edli_live_scaleout_enabled", False)):
         raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED")
@@ -5275,6 +5450,26 @@ def main():
         BlockingScheduler = _BlockingScheduler
     mode = get_mode()
     once = "--once" in sys.argv
+
+    # --validate-boot: read-only pre-restart smoke (W0-T3, 2026-06-03).
+    # Runs EVERY boot guard (calibration pin shape, staleness, schema, registry)
+    # without acquiring ANY exclusive resource — no venue heartbeat thread, no
+    # world_write_lock, no APScheduler, no network calls, no DB writes.
+    # Safe to run while the live daemon is active. Exits before the daemon loop.
+    #
+    # Usage:
+    #   python -m src.main --validate-boot [--settings-path /path/to/settings.json]
+    #
+    # Exit codes: 0 = all guards pass, 1 = one or more fail.
+    if "--validate-boot" in sys.argv:
+        _sp_idx = sys.argv.index("--settings-path") if "--settings-path" in sys.argv else None
+        _sp = sys.argv[_sp_idx + 1] if _sp_idx is not None else None
+        # Use plain print (not logger) — logging not yet configured.
+        print("zeus --validate-boot: running read-only boot guards")
+        exit_code = _validate_boot(settings_path=_sp)
+        print(f"zeus --validate-boot: {'ALL PASS' if exit_code == 0 else 'SOME FAIL'} (exit {exit_code})")
+        sys.exit(exit_code)
+
     # F85: route INFO (below-WARNING) to stdout (.log) and WARNING+ to stderr (.err).
     # Plists correctly bifurcate StandardOutPath/.err; basicConfig default
     # StreamHandler(sys.stderr) was routing all output to .err only.
@@ -5393,20 +5588,18 @@ def main():
             _trade_conn_reg.close()
     conn.close()
 
-    # W0-T2: calibration pin shape + staleness guards (2026-06-03).
-    # Run before strategy gate so a misconfigured pin fails loudly at boot.
-    # assert_calibration_pin_shape_is_dict: fatal if model_keys is a list
-    #   (silently coerced to {} in manager.py, making all pins dead config).
-    # assert_frozen_as_of_not_stale: WARN>10d, FATAL>21d (override: ZEUS_FREEZE_GUARD_DISABLE=1).
-    # NB: both guards take the raw config dict (cfg.get(...)). `settings` is a
-    # strict Settings object with no .get(); pass settings._data — the same
-    # raw-dict accessor _settings_section() uses above. Passing the object
-    # itself raised AttributeError('Settings' has no attribute 'get') at boot,
-    # masking the staleness guard and crash-looping the daemon (W0 boot fix
-    # 2026-06-03). The guards' dict contract + unit tests are unchanged.
+    # W0-T2/T3: calibration pin shape + staleness guards (2026-06-03).
+    # _run_boot_guards is the DRY helper shared with --validate-boot so the
+    # pre-restart smoke and the real boot path run the SAME guards (no drift).
+    # NB: guards take raw config dict (cfg.get(...)). settings is a strict
+    # Settings object with no .get(); pass settings._data (the raw-dict accessor
+    # _settings_section() also uses). Passing the object itself raised
+    # AttributeError at boot, crash-looping the daemon (W0 fix 2026-06-03).
     _pin_guard_cfg = settings._data if hasattr(settings, "_data") else settings
-    assert_calibration_pin_shape_is_dict(_pin_guard_cfg)
-    assert_frozen_as_of_not_stale(_pin_guard_cfg, now=datetime.now(tz=timezone.utc))
+    for _gname, _gpassed, _gdetail in _run_boot_guards(_pin_guard_cfg):
+        if not _gpassed:
+            raise RuntimeError(f"BOOT_GUARD_FAILED:{_gname}: {_gdetail}")
+        logger.info("boot-guard %s: %s", _gname, _gdetail)
     logger.info("calibration pin shape + staleness boot-guards: OK")
 
     # N2 — S2 deployment gate (PR-S1, Bug #3).
