@@ -314,8 +314,10 @@ def _run_boot_guards(raw_cfg: dict) -> list:
 def _run_schema_guards() -> list:
     """Read-only DB schema guards for --validate-boot.
 
-    Opens each canonical DB in read-only URI mode (no lock acquired, safe to
-    run alongside a live daemon).  Returns a list of (name, passed, detail).
+    Opens each canonical DB in read-only URI mode (shared read lock, no
+    write/exclusive lock).  Safe alongside the live daemon because SQLite WAL
+    permits concurrent readers without blocking writers.  Returns a list of
+    (name, passed, detail).
 
     Checks:
       world_db_schema    — PRAGMA user_version + assert_schema_current
@@ -5463,6 +5465,9 @@ def main():
     # Exit codes: 0 = all guards pass, 1 = one or more fail.
     if "--validate-boot" in sys.argv:
         _sp_idx = sys.argv.index("--settings-path") if "--settings-path" in sys.argv else None
+        if _sp_idx is not None and _sp_idx + 1 >= len(sys.argv):
+            print("ERROR: --settings-path requires a following value", file=sys.stderr)
+            sys.exit(1)
         _sp = sys.argv[_sp_idx + 1] if _sp_idx is not None else None
         # Use plain print (not logger) — logging not yet configured.
         print("zeus --validate-boot: running read-only boot guards")

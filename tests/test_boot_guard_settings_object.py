@@ -213,13 +213,18 @@ _REPO = _Path(__file__).parent.parent  # /tmp/zeus-w0
 
 
 def _settings_with_pin(model_keys=None, tmp_path=None):
-    """Write a minimal settings.json with optional calibration.pin.model_keys."""
+    """Write a minimal settings.json with optional calibration.pin.model_keys.
+
+    frozen_as_of is intentionally omitted so pin-shape-focused tests get clean
+    signal: staleness guard is a no-op (absent frozen_as_of -> pass), so any
+    FAIL is attributable to model_keys shape alone.  Tests that explicitly
+    exercise staleness should set frozen_as_of directly on the dict.
+    """
     data = json.loads(json.dumps(_BASE_SETTINGS))
     if model_keys is not None:
-        data["calibration"] = {"pin": {"model_keys": model_keys,
-                                        "frozen_as_of": "2026-01-01T00:00:00Z"}}
+        data["calibration"] = {"pin": {"model_keys": model_keys}}
     else:
-        data["calibration"] = {"pin": {"frozen_as_of": "2026-01-01T00:00:00Z"}}
+        data["calibration"] = {"pin": {}}
     p = tmp_path / "settings.json"
     p.write_text(json.dumps(data))
     return str(p)
@@ -279,7 +284,6 @@ def test_validate_boot_list_model_keys_guard_fails(tmp_path):
 # Verifies the CLI path exits without starting the daemon.
 # ---------------------------------------------------------------------------
 
-@pytest.mark.slow
 def test_validate_boot_subprocess_exits_without_daemon(tmp_path):
     """--validate-boot subprocess exits cleanly — no daemon loop, no lock.
 
@@ -311,4 +315,34 @@ def test_validate_boot_subprocess_exits_without_daemon(tmp_path):
     # Specifically must NOT print daemon startup markers
     assert "Zeus starting in" not in proc.stdout, (
         "Daemon loop started — --validate-boot did not short-circuit"
+    )
+
+
+def test_validate_boot_missing_settings_path_value_exits_1():
+    """--settings-path at end of argv (no following value) must exit 1, not crash.
+
+    This guards the positional index parse: `--settings-path` with no following
+    value previously caused IndexError (off-end of sys.argv).  The fix prints a
+    clear error message to stderr and exits 1 (fail-closed).
+    """
+    proc = subprocess.run(
+        [str(_PYTHON), "-m", "src.main", "--validate-boot", "--settings-path"],
+        capture_output=True,
+        text=True,
+        cwd=str(_REPO),
+        timeout=15,
+        env={
+            **__import__("os").environ,
+            "ZEUS_MODE": "live",
+        },
+    )
+    assert proc.returncode == 1, (
+        f"Expected exit 1 for missing --settings-path value; got {proc.returncode}; "
+        f"stderr={proc.stderr!r}"
+    )
+    assert "ERROR" in proc.stderr, (
+        f"Expected ERROR message in stderr; got: {proc.stderr!r}"
+    )
+    assert "IndexError" not in proc.stderr, (
+        f"Must not crash with IndexError; stderr={proc.stderr!r}"
     )
