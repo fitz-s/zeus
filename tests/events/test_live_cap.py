@@ -1,6 +1,8 @@
 # Created: 2026-05-25
-# Last reused or audited: 2026-05-27
-# Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
+# Last reused or audited: 2026-06-03
+# Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment;
+#   2026-06-03 operator directive: remove artificial notional + per-day caps via explicit unbounded
+#   sentinel, fail-SAFE to capped on missing/malformed config.
 from __future__ import annotations
 
 import sqlite3
@@ -8,7 +10,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.events.live_cap import LiveCapError, LiveCapLedger
+from src.events.live_cap import (
+    LiveCapError,
+    LiveCapLedger,
+    cap_explicitly_disabled,
+)
 
 
 NOW = datetime(2026, 5, 25, 12, tzinfo=timezone.utc)
@@ -332,6 +338,186 @@ def test_live_cap_rate_limiter_released_reservation_frees_window_slot(tmp_path):
         max_orders_per_window=1,
     )
     assert second.reservation_status == "RESERVED"
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-03 operator directive: remove the artificial $5 notional + 1/day caps
+# via an EXPLICIT unbounded sentinel, while preserving the fail-SAFE invariant:
+# unbounded must be DELIBERATE. A missing or malformed cap config must STILL
+# fail closed to the tight cap, never silently uncap on a config typo. The
+# flood-guard rate-limit and the collateral check are NOT touched.
+# ---------------------------------------------------------------------------
+
+
+def test_cap_explicitly_disabled_only_on_literal_false():
+    # The disable sentinel is the literal JSON boolean false (Python False) and
+    # NOTHING else. Every other value — missing, typo string, number, truthy —
+    # is NOT a disable signal, so the cap stays enabled (fail-closed).
+    assert cap_explicitly_disabled(False) is True
+
+    # Fail-safe: none of these is the explicit sentinel -> cap stays ON.
+    for not_a_sentinel in (None, "false", "False", "no", "0", 0, "", "true", True, 1, 1.0, {}, []):
+        assert cap_explicitly_disabled(not_a_sentinel) is False, not_a_sentinel
+
+
+def test_notional_cap_disabled_passes_kelly_size_through():
+    # (a) RED-first: with the notional cap EXPLICITLY disabled, a Kelly-sized
+    # request well above the old $5 ceiling reserves the full amount with no
+    # LiveCapError. max_notional_usd is irrelevant when disabled.
+    ledger = LiveCapLedger(_conn())
+
+    reservation = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=43.0,
+        max_notional_usd=5.0,
+        max_orders_per_day=1,
+        notional_cap_enabled=False,
+    )
+
+    assert reservation.reservation_status == "RESERVED"
+    assert reservation.reserved_notional_usd == 43.0
+
+
+def test_notional_cap_enabled_backward_compatible_still_blocks():
+    # (b) Backward compat: with the cap ENABLED (the default / old behaviour),
+    # a request above the ceiling still raises exactly as before.
+    ledger = LiveCapLedger(_conn())
+
+    with pytest.raises(LiveCapError, match="exceeds"):
+        ledger.reserve(
+            event_id="event-1",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=43.0,
+            max_notional_usd=5.0,
+            max_orders_per_day=1,
+            notional_cap_enabled=True,
+        )
+
+
+def test_notional_cap_default_is_enabled_fail_closed():
+    # FAIL-SAFE: the default of notional_cap_enabled is True. A caller that
+    # forgets to pass the flag (e.g. malformed config dropped the key) gets the
+    # tight cap, NOT unbounded.
+    ledger = LiveCapLedger(_conn())
+
+    with pytest.raises(LiveCapError, match="exceeds"):
+        ledger.reserve(
+            event_id="event-1",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=43.0,
+            max_notional_usd=5.0,
+            max_orders_per_day=1,
+        )
+
+
+def test_daily_order_cap_disabled_admits_many_orders_same_day():
+    # (a-day) With the per-day cap EXPLICITLY disabled, more than
+    # max_orders_per_day orders are admitted in the same day.
+    ledger = LiveCapLedger(_conn())
+
+    for n in range(5):
+        ledger.reserve(
+            event_id=f"event-{n}",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=10.0,
+            max_notional_usd=5.0,
+            max_orders_per_day=1,
+            notional_cap_enabled=False,
+            daily_order_cap_enabled=False,
+            # window budget large so this test isolates the DAY cap, not the
+            # flood-guard window cap (proven separately below).
+            max_orders_per_window=1000,
+        )
+
+    # All five reserved; the day-slot pool did not cap.
+    assert (
+        ledger.conn.execute(
+            "SELECT COUNT(*) FROM edli_live_cap_usage WHERE reservation_status = 'RESERVED'"
+        ).fetchone()[0]
+        == 5
+    )
+
+
+def test_daily_order_cap_default_is_enabled_fail_closed():
+    # FAIL-SAFE: the per-day cap defaults to ENABLED. Omitting the flag keeps the
+    # tight 1/day ceiling (the old behaviour) — a config typo cannot uncap.
+    ledger = LiveCapLedger(_conn())
+
+    ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=1.0,
+        max_notional_usd=5.0,
+        max_orders_per_day=1,
+    )
+
+    with pytest.raises(LiveCapError, match="max_orders_per_day"):
+        ledger.reserve(
+            event_id="event-2",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=1.0,
+            max_notional_usd=5.0,
+            max_orders_per_day=1,
+        )
+
+
+def test_flood_guard_window_still_bounds_runaway_when_notional_cap_disabled():
+    # (d) THE non-cap safety must survive: with BOTH artificial caps disabled,
+    # the flood-guard per-window rate limit STILL bounds a runaway loop. Prove a
+    # tight window budget blocks the N+1th order even though notional + per-day
+    # are uncapped.
+    ledger = LiveCapLedger(_conn())
+
+    first = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=500.0,
+        max_notional_usd=5.0,
+        max_orders_per_day=1,
+        notional_cap_enabled=False,
+        daily_order_cap_enabled=False,
+        max_orders_per_window=1,
+    )
+    assert first.reservation_status == "RESERVED"
+
+    with pytest.raises(LiveCapError, match="rate"):
+        ledger.reserve(
+            event_id="event-2",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=500.0,
+            max_notional_usd=5.0,
+            max_orders_per_day=1,
+            notional_cap_enabled=False,
+            daily_order_cap_enabled=False,
+            max_orders_per_window=1,
+        )
+
+
+def test_disabled_caps_still_reject_nonpositive_notional():
+    # Disabling the ceiling does NOT disable the basic sanity floor: a
+    # non-positive notional is still rejected (a real order can never be <= 0).
+    ledger = LiveCapLedger(_conn())
+
+    with pytest.raises(LiveCapError, match="positive"):
+        ledger.reserve(
+            event_id="event-1",
+            decision_time=NOW,
+            cap_scope="tiny_live_canary",
+            requested_notional_usd=0.0,
+            max_notional_usd=5.0,
+            max_orders_per_day=1,
+            notional_cap_enabled=False,
+            daily_order_cap_enabled=False,
+        )
 
 
 def _conn() -> sqlite3.Connection:

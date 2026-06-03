@@ -19,6 +19,27 @@ from src.state.schema.edli_live_cap_usage_schema import ensure_table
 DEFAULT_MAX_ORDERS_PER_WINDOW = 1
 
 
+def cap_explicitly_disabled(value: object) -> bool:
+    """Return True ONLY when ``value`` is the explicit-disable sentinel.
+
+    2026-06-03 operator directive: the artificial notional + per-day caps may be
+    removed, but unbounded must be DELIBERATE. The disable signal is the literal
+    JSON boolean ``false`` (Python ``False``) and NOTHING else.
+
+    FAIL-SAFE INVARIANT: a missing key (``None``), a malformed string
+    (``"false"``, ``"0"``, ``"no"``), a number, an empty container, or any
+    truthy value is NOT the sentinel and therefore does NOT disable the cap. The
+    caller treats a non-disable result as "cap stays enabled" (fail closed). A
+    config typo can never silently uncap — it can only leave the cap ON.
+
+    Note we deliberately do NOT coerce strings here (unlike a permissive
+    ``_coerce_bool``): a config that wrote the string ``"false"`` instead of the
+    JSON literal ``false`` is treated as malformed and the cap stays enabled.
+    Disabling a live risk-sizing limit must be unambiguous.
+    """
+    return value is False
+
+
 @dataclass(frozen=True)
 class LiveCapReservation:
     usage_id: str
@@ -68,13 +89,30 @@ class LiveCapLedger:
         max_notional_usd: float,
         max_orders_per_day: int,
         max_orders_per_window: int = DEFAULT_MAX_ORDERS_PER_WINDOW,
+        notional_cap_enabled: bool = True,
+        daily_order_cap_enabled: bool = True,
         final_intent_id: str | None = None,
         execution_command_id: str | None = None,
     ) -> LiveCapReservation:
+        # 2026-06-03 operator directive: the artificial notional + per-day caps
+        # may be EXPLICITLY disabled so fractional-Kelly sizing is the sole
+        # notional constraint (alongside collateral + the flood-guard rate
+        # window, both of which remain active). FAIL-SAFE: these flags default
+        # to True; a caller that omits them (e.g. a malformed config that lost
+        # the disable sentinel) gets the tight cap, never unbounded.
         if requested_notional_usd <= 0:
             raise LiveCapError("requested_notional_usd must be positive")
-        if requested_notional_usd > max_notional_usd:
+        if notional_cap_enabled and requested_notional_usd > max_notional_usd:
             raise LiveCapError("requested_notional_usd exceeds max_notional_usd")
+        # When the notional cap is disabled the persisted row must stay
+        # self-consistent (reserved <= max, schema CHECK max >= 0): record the
+        # actual requested notional as the row's max so it documents the
+        # uncapped size rather than a stale ceiling.
+        recorded_max_notional_usd = (
+            float(max_notional_usd)
+            if notional_cap_enabled
+            else float(requested_notional_usd)
+        )
         if max_orders_per_day <= 0:
             raise LiveCapError("max_orders_per_day must be positive")
         if max_orders_per_window <= 0:
@@ -93,7 +131,7 @@ class LiveCapLedger:
         if existing is not None:
             reservation = _reservation_from_row(existing)
             if (
-                reservation.max_notional_usd != float(max_notional_usd)
+                reservation.max_notional_usd != recorded_max_notional_usd
                 or reservation.max_orders_per_day != int(max_orders_per_day)
                 or reservation.reserved_notional_usd != float(requested_notional_usd)
                 or (final_intent_id is not None and reservation.final_intent_id != final_intent_id)
@@ -102,14 +140,29 @@ class LiveCapLedger:
                 raise LiveCapError("live cap reservation drift for event/cap_scope")
             return reservation
         cap_date = decision_text[:10]
-        slot = self._reserve_day_slot(
-            usage_id=usage_id,
-            event_id=event_id,
-            cap_scope=cap_scope,
-            cap_date=cap_date,
-            max_orders_per_day=max_orders_per_day,
-            created_at=created_at,
-        )
+        # Per-day cap: when EXPLICITLY disabled the day-slot pool is bypassed so
+        # an unbounded number of orders may be placed per day (Kelly + collateral
+        # + flood-guard remain the only constraints). The day-slot table's unique
+        # (event_id, cap_scope) index still provides per-event idempotency — that
+        # is not a cap, so it is preserved. When enabled (the default) the bounded
+        # slot pool caps per-day exactly as before.
+        if daily_order_cap_enabled:
+            slot = self._reserve_day_slot(
+                usage_id=usage_id,
+                event_id=event_id,
+                cap_scope=cap_scope,
+                cap_date=cap_date,
+                max_orders_per_day=max_orders_per_day,
+                created_at=created_at,
+            )
+        else:
+            slot = self._reserve_uncapped_day_slot(
+                usage_id=usage_id,
+                event_id=event_id,
+                cap_scope=cap_scope,
+                cap_date=cap_date,
+                created_at=created_at,
+            )
         # BUG #99 antibody: reserve an independent rate-window slot. This is a
         # SECOND control, distinct from the day-slot pool above. Even when the
         # day-slot pool is large (because the notional cap was raised), the
@@ -143,7 +196,7 @@ class LiveCapLedger:
                     event_id,
                     decision_text,
                     cap_scope,
-                    float(max_notional_usd),
+                    recorded_max_notional_usd,
                     int(max_orders_per_day),
                     float(requested_notional_usd),
                     int(slot),
@@ -254,6 +307,58 @@ class LiveCapLedger:
             except sqlite3.IntegrityError:
                 continue
         raise LiveCapError("live cap max_orders_per_day exhausted")
+
+    def _reserve_uncapped_day_slot(
+        self,
+        *,
+        usage_id: str,
+        event_id: str,
+        cap_scope: str,
+        cap_date: str,
+        created_at: str,
+    ) -> int:
+        """Reserve a day slot with NO per-day ceiling (2026-06-03 directive).
+
+        Used only when the per-day cap is EXPLICITLY disabled. Unlike
+        ``_reserve_day_slot`` there is no ``max_orders_per_day`` bound: a fresh
+        slot is allocated by walking past collisions until a free integer is
+        found, so the pool grows without limit. The unique (event_id, cap_scope)
+        index is still honoured for per-event idempotency (NOT a cap), and the
+        flood-guard rate window (reserved separately by the caller) remains the
+        active order-frequency bound.
+        """
+        existing = self.conn.execute(
+            """
+            SELECT slot, usage_id
+            FROM edli_live_cap_day_slots
+            WHERE event_id = ? AND cap_scope = ?
+            """,
+            (event_id, cap_scope),
+        ).fetchone()
+        if existing is not None:
+            slot = int(existing["slot"] if isinstance(existing, sqlite3.Row) else existing[0])
+            existing_usage_id = str(existing["usage_id"] if isinstance(existing, sqlite3.Row) else existing[1])
+            if existing_usage_id != usage_id:
+                raise LiveCapError("live cap day slot drift for event/cap_scope")
+            return slot
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(slot), 0) FROM edli_live_cap_day_slots WHERE cap_scope = ? AND cap_date = ?",
+            (cap_scope, cap_date),
+        ).fetchone()
+        slot = int(row[0]) + 1
+        while True:
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO edli_live_cap_day_slots (
+                        cap_scope, cap_date, slot, usage_id, event_id, created_at, schema_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (cap_scope, cap_date, slot, usage_id, event_id, created_at),
+                )
+                return slot
+            except sqlite3.IntegrityError:
+                slot += 1
 
     def _reserve_window_slot(
         self,
