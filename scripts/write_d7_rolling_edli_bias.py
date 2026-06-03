@@ -6,6 +6,22 @@
 #   bias_d7 MAE 1.882 < static 2.098 < grid_rep 2.193 < emos 2.881 < raw 3.036 (settlement
 #   degrees). D-7 is the validated winner; MIN_N=3 (raw fallback below).
 #
+#   2026-06-03 REFINEMENT (A)+(B) — stop manufacturing spurious corrections on
+#   noisy/transition cities while preserving real, stable biases:
+#     (A) LEAD-CONSISTENT, MULTI-SNAPSHOT daily residual (train==serve). The per-day
+#         residual is the MEAN of the trade-lead-band (3-5d == LEAD_BAND_LO..HI hours)
+#         snapshots' member-means, NOT a single arbitrary latest snapshot. This removes
+#         the single-snapshot draw noise AND matches the lead the live q is computed at
+#         (config discovery.preferred_lead_days=[3,4,5]). If a day has no in-band snapshot,
+#         fall back to the nearest-available lead and record the fallback count.
+#     (B) SIGNIFICANCE-SHRINKAGE toward zero. Per city with daily residuals r_1..r_n,
+#         b=mean, s=stdev, SE=s/sqrt(n), t=b/SE; b_shrunk = b * t^2/(t^2 + SHRINK_C).
+#         Noisy/insignificant biases (|t| small) collapse toward 0; strong stable biases
+#         (|t| large) are kept nearly intact. Zero-variance => infinite t => full bias.
+#     effective_bias_c (what the live reader consumes) = b_shrunk; raw_bias_c is retained
+#     for the dry-run table only. Seoul (cold EPISODE that ended) -> ~0; Tokyo/Taipei
+#     (lead-invariant real cold bias) -> preserved.
+#
 #   SAME write shape/keying as write_promoted_edli_bias.py so the LIVE reader
 #   (event_reactor_adapter._maybe_apply_edli_bias_correction -> read_bias_model) is
 #   unchanged: model_bias_ens VERIFIED, family='edli_per_city_v1', keyed (city, season,
@@ -58,6 +74,41 @@ DEFAULT_WINDOW_DAYS = 7
 MIN_N = 3
 LEAD_BUCKET = "LEGACY_POOLED"  # matches static producer rows (reader does not bucket-filter)
 
+# (A) Trade-lead band, in lead_hours. The live q decides at preferred_lead_days=[3,4,5]
+# (config discovery), i.e. 72h..120h. Widen by +-12h so 3d/4d/5d cycles (and the
+# adjacent 6d slot) all qualify while the 0-2d nowcast region (which leads peak-day
+# observed-so-far noise / DST extraction quirks) is excluded. Computing the residual at
+# the lead the q is computed at makes train==serve.
+LEAD_BAND_LO = 60.0
+LEAD_BAND_HI = 144.0
+
+# (B) Significance-shrinkage constant for the smooth t-gate
+#   b_shrunk = b * t^2 / (t^2 + SHRINK_C),   t = b / (s/sqrt(n)).
+# c=2 => the half-shrink point is at t^2=2, i.e. |t|~1.41: a bias not even ~2sigma
+# significant is shrunk by >50% toward 0, while |t|>~2.83 (~3sigma) retains >80% and
+# |t|>~7 (Tokyo/SF) is essentially untouched. This is a smooth analogue of a "require
+# ~2sigma" gate that, unlike a hard cutoff, never flips a near-threshold city on/off.
+# Calibrated against the settled-truth proof cases (Seoul |t|~1 collapses to ~0; Tokyo
+# |t|~7.5 and Taipei |t|~2.5 preserved; zero-variance => full; zero-mean-high-var => 0).
+SHRINK_C = 2.0
+
+
+def _significance_shrink(b: float, s: float, n: int, c: float = SHRINK_C) -> float:
+    """Shrink ``b`` toward 0 by the smooth t-gate b * t^2/(t^2+c).
+
+    t = b / SE, SE = s/sqrt(n). Zero variance (s==0) with a nonzero mean is treated as
+    infinitely significant (t -> inf) => full bias returned. A zero mean returns 0
+    regardless of variance. Insignificant (|t| small) biases collapse toward 0.
+    """
+    if n <= 0 or b == 0.0:
+        return 0.0
+    se = (s / (n ** 0.5)) if n > 0 else 0.0
+    if se < 1e-12:
+        # zero (or numerically-zero) spread with nonzero mean -> fully significant.
+        return float(b)
+    t2 = (b / se) ** 2
+    return float(b) * (t2 / (t2 + c))
+
 
 def _unit_family(unit: str | None) -> str:
     """Return 'F' or 'C' family for a unit string, or raise on unknown."""
@@ -69,43 +120,77 @@ def _unit_family(unit: str | None) -> str:
     raise ValueError(f"unknown temperature unit: {unit!r}")
 
 
-def _latest_causal_snapshot_mean_c(
+def _snapshot_member_mean_c(mj: str, mu: str) -> float | None:
+    """Mean (degC) of one snapshot's non-null members, or None if unparseable/empty."""
+    try:
+        parsed = json.loads(mj)
+        vals = [
+            float(x)
+            for x in (parsed.values() if isinstance(parsed, dict) else parsed)
+            if x is not None
+        ]
+        if not vals:
+            return None
+        return _to_c(statistics.fmean(vals), mu)
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _inband_daily_residual_mean_c(
     conn, *, city: str, target_date: str, data_version: str, metric: str,
     settlement_unit: str,
-) -> float | None:
-    """Mean (degC) of the latest-available causal snapshot's non-null members for
-    (city, target_date). Requires members_unit present and same family as the
-    settlement unit (no cross-unit residual). Returns None if no usable snapshot.
+    lead_lo: float = LEAD_BAND_LO, lead_hi: float = LEAD_BAND_HI,
+) -> tuple[float, bool] | None:
+    """(A) Stable per-day forecast mean (degC) at the TRADE LEAD for (city, target_date).
+
+    Take every VERIFIED snapshot whose ``lead_hours`` is in [lead_lo, lead_hi] and whose
+    members_unit shares the settlement unit family (no cross-unit residual), parse its
+    member-mean to degC, and return the MEAN of those per-snapshot means — NOT a single
+    arbitrary latest snapshot. Averaging the in-band snapshots removes the single-draw
+    noise and matches the lead the live q is computed at (train==serve).
+
+    If NO snapshot is in-band for this day, fall back to the single nearest-lead
+    snapshot (closest |lead_hours - band center|). Returns ``(mean_c, fellback)`` or
+    None if no usable (same-unit-family, parseable) snapshot exists at all.
     """
     rows = conn.execute(
         """
-        SELECT members_json AS mj, members_unit AS mu, available_at AS av
+        SELECT members_json AS mj, members_unit AS mu, lead_hours AS lh,
+               available_at AS av
         FROM ensemble_snapshots
         WHERE city = ? AND target_date = ? AND dataset_id = ?
           AND temperature_metric = ? AND authority = 'VERIFIED'
           AND members_json IS NOT NULL AND members_unit IS NOT NULL
-        ORDER BY available_at DESC
         """,
         (city, target_date, data_version, metric),
     ).fetchall()
-    for r in rows:
-        mu = r["mu"]
-        try:
-            # members and settlement must share the same unit family (no Kelvin leak /
-            # cross-unit residual). Mismatch -> skip this snapshot (fail-closed).
-            if _unit_family(mu) != _unit_family(settlement_unit):
-                continue
-            parsed = json.loads(r["mj"])
-            vals = [
-                float(x)
-                for x in (parsed.values() if isinstance(parsed, dict) else parsed)
-                if x is not None
-            ]
-            if not vals:
-                continue
-            return _to_c(statistics.fmean(vals), mu)
-        except (ValueError, TypeError, json.JSONDecodeError):
-            continue
+
+    # Only same-unit-family rows are usable (fail-closed on Kelvin leak / cross-unit).
+    usable = [r for r in rows if _unit_family(r["mu"]) == _unit_family(settlement_unit)]
+    if not usable:
+        return None
+
+    inband = [r for r in usable if r["lh"] is not None and lead_lo <= r["lh"] <= lead_hi]
+    if inband:
+        means = [m for m in (_snapshot_member_mean_c(r["mj"], r["mu"]) for r in inband)
+                 if m is not None]
+        if means:
+            return statistics.fmean(means), False
+        # in-band rows all unparseable -> drop through to nearest-lead fallback
+
+    # Nearest-lead fallback: pick the single usable snapshot closest to the band center.
+    center = (lead_lo + lead_hi) / 2.0
+    cand = [r for r in usable if r["lh"] is not None]
+    if not cand:
+        # no lead_hours at all: fall back to latest-available (legacy behaviour)
+        cand = sorted(usable, key=lambda r: str(r["av"] or ""), reverse=True)
+        m = next((mm for mm in (_snapshot_member_mean_c(r["mj"], r["mu"]) for r in cand)
+                  if mm is not None), None)
+        return (m, True) if m is not None else None
+    for r in sorted(cand, key=lambda rr: abs(rr["lh"] - center)):
+        m = _snapshot_member_mean_c(r["mj"], r["mu"])
+        if m is not None:
+            return m, True
     return None
 
 
@@ -154,34 +239,55 @@ def compute_city_bias(
 
     residuals: list[float] = []
     used_dates: list[str] = []
+    n_fallback_days = 0
     for td in window_dates:
         rec = by_date[td]
         sv, su = rec["sv"], rec["su"]
         if sv is None or su is None:
             continue
         try:
-            fc_mean_c = _latest_causal_snapshot_mean_c(
+            inband = _inband_daily_residual_mean_c(
                 conn, city=city, target_date=td, data_version=data_version,
                 metric=metric, settlement_unit=su,
             )
-            if fc_mean_c is None:
+            if inband is None:
                 continue
+            fc_mean_c, fellback = inband
             settle_c = _to_c(float(sv), su)
         except (ValueError, TypeError):
             continue
         residuals.append(fc_mean_c - settle_c)
         used_dates.append(td)
+        if fellback:
+            n_fallback_days += 1
 
     if len(residuals) < min_n:
         return None
 
-    eff = statistics.fmean(residuals)
+    # (B) raw mean, then significance-shrinkage toward 0. effective_bias_c (what the
+    # live reader consumes) is the SHRUNK value; raw is kept for the dry-run table.
+    raw = statistics.fmean(residuals)
     sd = statistics.stdev(residuals) if len(residuals) > 1 else 0.0
+    shrunk = _significance_shrink(raw, sd, len(residuals))
+    se = (sd / (len(residuals) ** 0.5)) if residuals else 0.0
+    t_stat = (raw / se) if se > 1e-12 else (float("inf") if raw != 0.0 else 0.0)
     used_sorted = sorted(used_dates)
     return {
-        "effective_bias_c": float(eff),
+        "effective_bias_c": float(shrunk),
+        "raw_bias_c": float(raw),
         "sd_c": float(sd),
+        # Representativeness sigma: the std of the trailing-window daily residuals, in the
+        # SAME unit/convention as effective_bias_c (degC). Persisted to model_bias_ens
+        # residual_sd_c so a downstream variance term can inflate q_lcb to honestly
+        # reflect per-city representativeness uncertainty. This is the per-DAY residual
+        # SPREAD (not the SE of the mean and not the shrunk bias) — it stays large for a
+        # noisy city even when the bias MEAN was shrunk to ~0, which is exactly the
+        # honesty signal q_lcb needs (the operator removed the canary cap).
+        "residual_std_c": float(sd),
+        "t_stat": float(t_stat) if t_stat != float("inf") else float("inf"),
         "n_window": len(residuals),
+        "n_fallback_days": n_fallback_days,
+        "lead_band": (LEAD_BAND_LO, LEAD_BAND_HI),
         "window_dates": used_sorted,
         "window_start": used_sorted[0],
         "window_end": used_sorted[-1],
@@ -210,7 +316,11 @@ def write_city_bias(
     if lat == 90.0:
         lat = float(getattr(city, "lat", 90.0))
     eff = float(bias["effective_bias_c"])
-    sd = float(bias["sd_c"])
+    # Representativeness sigma (degC) = std of the trailing-window daily residuals.
+    # ``residual_std_c`` is the canonical key; fall back to legacy ``sd_c`` for callers
+    # that predate the field. Written to model_bias_ens.residual_sd_c for the downstream
+    # q_lcb representativeness-inflation reader.
+    sd = float(bias.get("residual_std_c", bias["sd_c"]))
     n = int(bias["n_window"])
     cov_end_month = int(str(bias["window_end"])[5:7])
     if months is None:
@@ -253,6 +363,18 @@ def write_city_bias(
                     "window_start": bias["window_start"],
                     "window_end": bias["window_end"],
                     "recorded_at": now_iso,
+                    # (A)+(B) provenance: raw vs shrunk, the trade-lead band, the
+                    # significance the shrink consumed, and any nearest-lead fallbacks.
+                    "raw_bias_c": float(bias.get("raw_bias_c", eff)),
+                    "shrunk_bias_c": eff,
+                    "shrink_c": SHRINK_C,
+                    "t_stat": (None if bias.get("t_stat") in (None, float("inf"))
+                               else round(float(bias["t_stat"]), 4)),
+                    # Representativeness sigma (= residual_sd_c column) — std of the
+                    # trailing-window daily residuals, degC. Downstream q_lcb inflater.
+                    "residual_std_c": sd,
+                    "lead_band_hours": [LEAD_BAND_LO, LEAD_BAND_HI],
+                    "n_fallback_days": int(bias.get("n_fallback_days", 0)),
                 }
             ),
             training_cutoff=now_iso,
@@ -309,13 +431,18 @@ def main() -> int:
         f"D-7 rolling EDLI bias | metric={args.metric} dv={data_version} "
         f"now={now_iso} window={args.window_days}d min_n={args.min_n} commit={args.commit}\n"
     )
-    header = f"{'city':16s} {'n':>3s} {'window':23s} {'d7_bias_c':>10s} {'old_static':>11s} {'delta':>8s}"
+    print(f"(A) lead band {LEAD_BAND_LO:.0f}-{LEAD_BAND_HI:.0f}h (trade lead 3-5d); "
+          f"(B) shrink b*t^2/(t^2+{SHRINK_C:g}) toward 0\n")
+    header = (f"{'city':16s} {'n':>3s} {'fb':>3s} {'raw_b':>7s} {'t':>6s} "
+              f"{'shrunk_b':>8s} {'old_static':>11s} {'delta':>8s}")
     print(header)
     print("-" * len(header))
 
     written_total = 0
     thin_cities: list[str] = []
     moved_1c: list[tuple[str, float]] = []
+    collapsed: list[tuple[str, float, float]] = []  # noise shrunk to ~0
+    no_inband: list[str] = []  # any nearest-lead fallback used
     for name in sorted(cities_by_name):
         city = cities_by_name[name]
         bias = compute_city_bias(
@@ -325,15 +452,23 @@ def main() -> int:
         old = _old_static_bias(world, city.name, args.metric, data_version)
         if bias is None:
             thin_cities.append(city.name)
-            print(f"{city.name:16s} {'--':>3s} {'(thin-n raw fallback)':23s} "
-                  f"{'--':>10s} {('%+.2f' % old) if old is not None else '--':>11s} {'--':>8s}")
+            print(f"{city.name:16s} {'--':>3s} {'--':>3s} {'--':>7s} {'--':>6s} "
+                  f"{'--':>8s} {('%+.2f' % old) if old is not None else '--':>11s} {'--':>8s}")
             continue
-        eff = bias["effective_bias_c"]
-        win = f"{bias['window_start']}..{bias['window_end']}"
+        eff = bias["effective_bias_c"]       # shrunk (what the reader consumes)
+        raw_b = bias.get("raw_bias_c", eff)
+        t_stat = bias.get("t_stat", 0.0)
+        n_fb = int(bias.get("n_fallback_days", 0))
+        if n_fb:
+            no_inband.append(f"{city.name}({n_fb}/{bias['n_window']})")
         delta = (eff - old) if old is not None else None
         if delta is not None and abs(delta) > 1.0:
             moved_1c.append((city.name, delta))
-        print(f"{city.name:16s} {bias['n_window']:>3d} {win:23s} {eff:>+10.2f} "
+        if abs(raw_b) >= 1.0 and abs(eff) <= 1.0:
+            collapsed.append((city.name, raw_b, eff))
+        t_str = "inf" if t_stat == float("inf") else f"{t_stat:+.2f}"
+        print(f"{city.name:16s} {bias['n_window']:>3d} {n_fb:>3d} {raw_b:>+7.2f} "
+              f"{t_str:>6s} {eff:>+8.2f} "
               f"{('%+.2f' % old) if old is not None else '--':>11s} "
               f"{('%+.2f' % delta) if delta is not None else '--':>8s}")
         if args.commit:
@@ -346,6 +481,11 @@ def main() -> int:
     print()
     if thin_cities:
         print(f"THIN-N (raw fallback, no row): {', '.join(thin_cities)}")
+    if collapsed:
+        print("COLLAPSED to ~0 (noise shrunk): "
+              + ", ".join(f"{c}({rb:+.2f}->{e:+.2f})" for c, rb, e in collapsed))
+    if no_inband:
+        print("NEAREST-LEAD FALLBACK (no 3-5d snapshot some days): " + ", ".join(no_inband))
     if moved_1c:
         print("MOVED >1C vs old static: " + ", ".join(f"{c}({d:+.2f})" for c, d in moved_1c))
 

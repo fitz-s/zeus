@@ -241,3 +241,241 @@ def test_written_row_readable_by_live_reader_key(fc_conn, world_conn):
     )
     assert row is not None, "live reader cannot see the producer's row (key mismatch)"
     assert row["effective_bias_c"] == pytest.approx(26.0 - 28.0, abs=1e-6)
+
+
+# ===========================================================================
+# (A) lead-consistent multi-snapshot daily residual  +  (B) significance shrink
+# ---------------------------------------------------------------------------
+# These pin the two corrections that stop the producer manufacturing spurious
+# corrections on noisy/transition cities while preserving the real ones:
+#   (A) the daily residual is the MEAN of the in-band (trade-lead 3-5d, 60-144h)
+#       snapshots' member-means — not one arbitrary latest snapshot. Removes the
+#       single-snapshot draw noise AND matches the lead the q is computed at.
+#   (B) per-city b is shrunk toward 0 by a smooth t-gate
+#       b_shrunk = b * t^2/(t^2 + c), c=2 (half-shrink at |t|~1.41 ~ "needs ~2sigma").
+# ===========================================================================
+
+# Trade-lead band the live q uses (config discovery.preferred_lead_days=[3,4,5]).
+LEAD_3D, LEAD_4D, LEAD_5D, LEAD_6D = 72.0, 96.0, 120.0, 144.0
+NOW_PROOF = "2026-06-10T00:00:00+00:00"
+
+
+def _proof_window_dates():
+    """7 distinct settled days, each settled strictly before NOW_PROOF."""
+    return [
+        ("2026-06-02", "2026-06-03T18:00:00+00:00"),
+        ("2026-06-01", "2026-06-02T18:00:00+00:00"),
+        ("2026-05-31", "2026-06-01T18:00:00+00:00"),
+        ("2026-05-29", "2026-05-30T18:00:00+00:00"),
+        ("2026-05-27", "2026-05-28T18:00:00+00:00"),
+        ("2026-05-25", "2026-05-26T18:00:00+00:00"),
+        ("2026-05-24", "2026-05-25T18:00:00+00:00"),
+    ]
+
+
+def _seed_city_from_daily_residuals(conn, city, daily_residuals, *, unit="C",
+                                    settle_value=20.0):
+    """Seed a city so that each settled day's IN-BAND (3-5d) snapshot mean equals
+    ``settle_value + residual``. For every day we write THREE in-band snapshots
+    (72h/96h/120h) whose member-means straddle the intended day-mean, plus a noisy
+    OUT-OF-BAND nowcast (24h) snapshot that must be IGNORED. This proves the
+    multi-snapshot-in-band averaging (A): if the producer picked the single latest
+    (nowcast) snapshot it would read the out-of-band noise instead.
+    """
+    days = _proof_window_dates()
+    assert len(daily_residuals) <= len(days)
+    for (d, sat), resid in zip(days, daily_residuals):
+        day_mean = settle_value + resid  # forecast mean we want at trade lead
+        # three in-band snapshots whose means average to exactly day_mean
+        _snap(conn, city, d, [day_mean - 1.0, day_mean, day_mean + 1.0], unit=unit,
+              lead=LEAD_3D, avail=f"{d}T00:00:00Z")
+        _snap(conn, city, d, [day_mean - 0.5, day_mean, day_mean + 0.5], unit=unit,
+              lead=LEAD_4D, avail=f"{d}T01:00:00Z")
+        _snap(conn, city, d, [day_mean - 2.0, day_mean, day_mean + 2.0], unit=unit,
+              lead=LEAD_5D, avail=f"{d}T02:00:00Z")
+        # OUT-OF-BAND nowcast with a wildly different mean (latest available_at) —
+        # the producer must NOT use this; (A) selects the trade-lead band.
+        _snap(conn, city, d, [day_mean + 50.0], unit=unit, lead=24.0,
+              avail=f"{d}T23:00:00Z")
+        _settle(conn, city, d, settle_value, unit=unit, settled_at=sat)
+
+
+def _b_shrunk(out):
+    return out["effective_bias_c"]
+
+
+def test_A_inband_multisnapshot_ignores_nowcast_noise(fc_conn):
+    """(A) The daily residual uses the MEAN of the 3-5d in-band snapshots, not the
+    latest (nowcast) snapshot. Seed each day's in-band mean to settle exactly (resid 0)
+    while the nowcast is +50 off — the bias must be ~0, proving the out-of-band noisy
+    draw is excluded and the in-band snapshots are averaged.
+    """
+    _seed_city_from_daily_residuals(fc_conn, "BandProbe", [0.0] * 5, settle_value=20.0)
+    out = d7.compute_city_bias(fc_conn, city="BandProbe", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    assert out["n_window"] == 5
+    assert out["raw_bias_c"] == pytest.approx(0.0, abs=1e-6), \
+        "nowcast (+50) leaked — in-band selection/averaging broken"
+    assert _b_shrunk(out) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_A_nearest_lead_fallback_when_no_inband(fc_conn):
+    """(A) If a day has NO snapshot in the 3-5d band, fall back to the nearest-lead
+    snapshot and record that a fallback happened. Here every day has only a 24h
+    (nowcast) snapshot; residual must still be computed from it (nearest lead).
+    """
+    days = _proof_window_dates()
+    for d, sat in days[:4]:
+        _snap(fc_conn, "FallbackCity", d, [18.0, 20.0, 22.0], unit="C", lead=24.0,
+              avail=f"{d}T00:00:00Z")  # mean 20, only lead = 24h (out of band)
+        _settle(fc_conn, "FallbackCity", d, 22.0, unit="C", settled_at=sat)
+    out = d7.compute_city_bias(fc_conn, city="FallbackCity", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    assert out["n_window"] == 4
+    # residual = 20 - 22 = -2 per day (degC), from the nearest-lead fallback
+    assert out["raw_bias_c"] == pytest.approx(-2.0, abs=1e-6)
+    assert out["n_fallback_days"] == 4, "fallback-day count not recorded"
+
+
+def test_B_shrink_seoul_noise_collapses_toward_zero(fc_conn):
+    """Seoul PROOF: real in-band residuals are ~0 with one dead cold episode; raw b
+    is weakly significant (|t|~1) so shrinkage collapses it toward 0. Must be <= ~1.0C
+    in magnitude (would have been -4.11 under the old single-snapshot flat mean).
+    """
+    seoul = [-0.726, 1.774, -1.002, 0.390, 1.144, 0.080, 1.058]  # measured in-band
+    _seed_city_from_daily_residuals(fc_conn, "Seoul", seoul, settle_value=25.0)
+    out = d7.compute_city_bias(fc_conn, city="Seoul", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    assert abs(_b_shrunk(out)) <= 1.0, \
+        f"Seoul not collapsed: b_shrunk={_b_shrunk(out):+.3f} (raw {out['raw_bias_c']:+.3f})"
+
+
+def test_B_shrink_tokyo_real_bias_preserved(fc_conn):
+    """Tokyo PROOF: tight, highly-significant real cold bias (|t|~7.5) must be PRESERVED
+    at <= -4.0C after shrinkage (shrinkage barely touches strong stable biases).
+    """
+    tokyo = [-4.341, -7.710, -4.638, -6.156, -6.010, -3.938, -2.328]
+    _seed_city_from_daily_residuals(fc_conn, "Tokyo", tokyo, settle_value=25.0)
+    out = d7.compute_city_bias(fc_conn, city="Tokyo", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    assert _b_shrunk(out) <= -4.0, \
+        f"Tokyo real bias not preserved: b_shrunk={_b_shrunk(out):+.3f}"
+
+
+def test_B_shrink_taipei_real_bias_preserved(fc_conn):
+    """Taipei PROOF: real ~-2 to -3 bias preserved within ~0.5C (b_shrunk stays a clear
+    cold correction, not collapsed). Raw b ~ -2.34, |t| ~ 2.5.
+    """
+    taipei = [-5.673, 0.663, -0.773, 0.285, -4.299, -3.187, -3.404]
+    _seed_city_from_daily_residuals(fc_conn, "Taipei", taipei, settle_value=28.0)
+    out = d7.compute_city_bias(fc_conn, city="Taipei", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    bs = _b_shrunk(out)
+    # distance from bs to the nearest edge of the real cold band [-3, -2] (0 if inside).
+    lo, hi = -3.0, -2.0
+    nearest_edge_dist = 0.0 if lo <= bs <= hi else min(abs(bs - lo), abs(bs - hi))
+    assert nearest_edge_dist <= 0.5, f"Taipei not preserved: b_shrunk={bs:+.3f}"
+    assert bs <= -1.5, f"Taipei collapsed too far: b_shrunk={bs:+.3f}"
+
+
+def test_B_shrink_zero_variance_full_bias(fc_conn):
+    """SYNTHETIC PROOF: residuals [-5,-5,-5,-5,-5] (zero variance, n=5) -> b_shrunk ~ -5.
+    Zero variance => infinite t => full bias, no shrinkage.
+    """
+    _seed_city_from_daily_residuals(fc_conn, "ZeroVar", [-5.0] * 5, settle_value=20.0)
+    out = d7.compute_city_bias(fc_conn, city="ZeroVar", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    assert _b_shrunk(out) == pytest.approx(-5.0, abs=1e-6), \
+        f"zero-variance bias must be full: b_shrunk={_b_shrunk(out):+.3f}"
+
+
+def test_B_shrink_high_variance_collapses_to_zero(fc_conn):
+    """SYNTHETIC PROOF: residuals [-4,+4,-4,+4,0] (mean ~0, high variance) -> b_shrunk ~ 0.
+    Mean zero with large spread => no significant bias => fully shrunk.
+    """
+    _seed_city_from_daily_residuals(fc_conn, "HighVar", [-4.0, 4.0, -4.0, 4.0, 0.0],
+                                    settle_value=20.0)
+    out = d7.compute_city_bias(fc_conn, city="HighVar", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    assert abs(_b_shrunk(out)) <= 0.5, \
+        f"high-variance zero-mean must collapse: b_shrunk={_b_shrunk(out):+.3f}"
+
+
+# ===========================================================================
+# (representativeness sigma) residual_sd_c persisted alongside the shrunk bias
+# ---------------------------------------------------------------------------
+# A downstream variance term reads model_bias_ens.residual_sd_c to inflate q_lcb so it
+# honestly reflects per-city representativeness uncertainty (the operator removed the
+# canary cap; honest q_lcb is the only protection). The persisted residual_sd_c MUST be
+# the std of the trailing-window daily residuals (degC) — the per-DAY spread, which stays
+# LARGE for a noisy city even after the bias MEAN was shrunk to ~0.
+# ===========================================================================
+
+def test_residual_std_persisted_equals_daily_residual_std(fc_conn, world_conn):
+    """The written model_bias_ens.residual_sd_c equals statistics.stdev of the trailing-
+    window daily residuals (degC), and equals the producer's returned residual_std_c.
+    """
+    import statistics as _stats
+
+    seoul = [-0.726, 1.774, -1.002, 0.390, 1.144, 0.080, 1.058]
+    _seed_city_from_daily_residuals(fc_conn, "Seoul", seoul, settle_value=25.0)
+    out = d7.compute_city_bias(fc_conn, city="Seoul", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    expected_std = _stats.stdev(seoul)  # degC residual std of the 7 daily residuals
+    assert out["residual_std_c"] == pytest.approx(expected_std, abs=1e-6)
+    assert out["sd_c"] == pytest.approx(expected_std, abs=1e-6)
+
+    d7.write_city_bias(world_conn, city="Seoul", metric="high", data_version=OPD,
+                       bias=out, now_iso=NOW_PROOF)
+    world_conn.commit()
+    row = world_conn.execute(
+        "SELECT residual_sd_c, effective_bias_c FROM model_bias_ens "
+        "WHERE city=? AND error_model_family=?", ("Seoul", "edli_per_city_v1"),
+    ).fetchone()
+    assert row is not None
+    assert row["residual_sd_c"] == pytest.approx(expected_std, abs=1e-6)
+    # The KEY relationship: the bias MEAN was shrunk toward 0 (|eff|<=1) but the
+    # representativeness sigma is UNSHRUNK and large (>1C) — q_lcb sees honest spread.
+    assert abs(row["effective_bias_c"]) <= 1.0
+    assert row["residual_sd_c"] > 1.0, \
+        "representativeness sigma collapsed with the bias mean (q_lcb would over-trust)"
+
+
+def test_residual_std_large_when_bias_shrunk_high_variance(fc_conn, world_conn):
+    """High-variance zero-mean city: effective_bias_c ~ 0 but residual_sd_c is LARGE.
+    This is the honesty invariant — shrinking the mean must not shrink the sigma.
+    """
+    import statistics as _stats
+
+    resids = [-4.0, 4.0, -4.0, 4.0, 0.0]
+    _seed_city_from_daily_residuals(fc_conn, "HighVar", resids, settle_value=20.0)
+    out = d7.compute_city_bias(fc_conn, city="HighVar", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    d7.write_city_bias(world_conn, city="HighVar", metric="high", data_version=OPD,
+                       bias=out, now_iso=NOW_PROOF)
+    world_conn.commit()
+    row = world_conn.execute(
+        "SELECT residual_sd_c, effective_bias_c FROM model_bias_ens "
+        "WHERE city=? AND error_model_family=?", ("HighVar", "edli_per_city_v1"),
+    ).fetchone()
+    assert abs(row["effective_bias_c"]) <= 0.5  # mean collapsed
+    assert row["residual_sd_c"] == pytest.approx(_stats.stdev(resids), abs=1e-6)
+    assert row["residual_sd_c"] >= 3.0  # spread preserved (honest q_lcb inflation)
