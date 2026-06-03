@@ -155,9 +155,29 @@ def _receipt_id(receipt: EventSubmissionReceipt) -> str:
     return f"edli_no_submit:{digest}"
 
 
+_MAINSTREAM_GATE_FIELDS = frozenset({
+    "mainstream_agreement_pass",
+    "mainstream_agreement_fail_reason",
+    "mainstream_point",
+    "mainstream_delta",
+    "mainstream_bin_label",
+    "mainstream_source",
+    "mainstream_fetched_at_utc",
+})
+
+
 def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     payload: dict[str, Any] = asdict(receipt)
     payload.pop("decision_proof_bundle", None)
+    # BUG-2 fix (#135): omit mainstream_* fields when the gate was NOT evaluated
+    # (all None) so receipt_hash is byte-identical to pre-gate baseline when the
+    # flag is OFF. Presence of the fields with null values changes the JSON and
+    # therefore the hash — breaking shadow-inertness / triggering EdliReceiptHashDrift
+    # on retry for pre-existing shadow receipts. Mirror the decision_proof_bundle
+    # exclusion pattern: drop the block entirely when not populated.
+    if all(payload.get(k) is None for k in _MAINSTREAM_GATE_FIELDS):
+        for k in _MAINSTREAM_GATE_FIELDS:
+            payload.pop(k, None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

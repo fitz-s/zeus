@@ -1,12 +1,13 @@
-# Created: 2026-06-03
-# Last reused/audited: 2026-06-03
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Purpose: Relationship + function tests for the mainstream-agreement gate (#135).
+#   Antibody against cold/warm-bias false positives reaching arm candidates.
+#   Covers: gate logic, tolerance-aware check-3, adapter-fires, hash stability.
+# Reuse: run with live venv (.venv/bin/python -m pytest tests/test_mainstream_agreement_gate.py).
+#   Before relying on antibody tests, confirm MarketAnalysis.member_maxes property exists
+#   (BUG-1 fix) and _receipt_json strips None mainstream_* fields (BUG-2 fix).
 # Authority basis: Task #135 mainstream-forecast direction-agreement gate
 #   (/tmp/arm-truth.md keystone finding); DIRECTION LAW
-#   (feedback_buy_direction_semantic); operator ARM criterion. These are
-#   RELATIONSHIP tests (cross-module invariant: OUR forecast point flows into
-#   the gate alongside an INDEPENDENT mainstream point and the traded bin's
-#   direction — the property that must hold across that boundary is that a
-#   bias-warped forecast can never produce an arm-eligible candidate).
+#   (feedback_buy_direction_semantic); operator ARM criterion.
 """Relationship + function tests for the mainstream-agreement gate (#135).
 
 The gate is the K-structural antibody that makes the cold/warm-bias
@@ -437,3 +438,170 @@ def test_sf_cold_bias_demoted_by_closeness_not_coord_gap():
     assert verdict.mainstream_close is False  # 4.5°F > 2°F tolerance
     assert verdict.fail_reason == "MAINSTREAM_NOT_CLOSE"
     assert verdict.passed is False
+
+
+# ---------------------------------------------------------------------------
+# ANTIBODY TEST A — BUG-1: gate fires through adapter with real MarketAnalysis.
+# Pre-fix: analysis._member_maxes/._unit/._precision were private → AttributeError
+# swallowed by outer try/except → gate silently disabled (fail-open).
+# Post-fix: public @property accessors on MarketAnalysis → verdicts populated.
+# This test proves the gate ACTUALLY FIRES and does NOT fail-open.
+# ---------------------------------------------------------------------------
+
+
+def test_gate_fires_through_adapter_not_fail_open():
+    """_evaluate_and_store_mainstream_agreement populates verdicts with real MarketAnalysis."""
+    import numpy as np
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from src.strategy.market_analysis import MarketAnalysis
+    from src.types.market import Bin
+    from src.engine.event_reactor_adapter import _evaluate_and_store_mainstream_agreement
+
+    bins = [
+        Bin(low=None, high=14, unit="C", label="14°C or below"),
+        Bin(low=15, high=15, unit="C", label="15°C"),
+        Bin(low=16, high=None, unit="C", label="16°C or higher"),
+    ]
+    members = np.array([15.0, 15.1, 14.9, 15.2, 15.0])
+    p_raw = np.array([0.1, 0.7, 0.2])
+    p_cal = np.array([0.1, 0.7, 0.2])
+
+    analysis = MarketAnalysis(
+        p_raw=p_raw, p_cal=p_cal, p_market=None,
+        alpha=1.0, bins=bins, member_maxes=members,
+        unit="C", precision=1.0,
+    )
+
+    event = SimpleNamespace(event_id="evt-antibody-001")
+    candidate_stub = SimpleNamespace(condition_id="cond-antibody-1", bin=bins[1])
+    family = SimpleNamespace(
+        city="Wellington",
+        target_date="2026-06-04",
+        candidates=[candidate_stub],
+    )
+    payload: dict = {}
+
+    mainstream_result = {
+        "point": 15.8,
+        "unit": "C",
+        "source": "open_meteo_standard_forecast",
+        "authority_tier": "mainstream",
+        "fetched_at_utc": "2026-06-03T10:00:00+00:00",
+        "latitude": -41.325,
+        "longitude": 174.792,
+        "target_date": "2026-06-04",
+    }
+    with patch("src.data.mainstream_forecast_source.fetch_mainstream_point", return_value=mainstream_result):
+        _evaluate_and_store_mainstream_agreement(
+            event=event,
+            family=family,
+            analysis=analysis,
+            payload=payload,
+        )
+
+    # Gate must have fired — verdicts must be present (not silently swallowed).
+    assert "_mainstream_agreement_verdicts" in payload, (
+        "Gate did not fire — payload missing _mainstream_agreement_verdicts. "
+        "AttributeError on analysis.member_maxes/.unit/.precision was swallowed "
+        "by outer try/except (fail-open regression — BUG-1)."
+    )
+    verdicts = payload["_mainstream_agreement_verdicts"]
+    assert len(verdicts) >= 1, "No verdicts stored — gate is fail-open"
+    buy_yes_key = ("cond-antibody-1", "buy_yes")
+    assert buy_yes_key in verdicts, (
+        f"Expected buy_yes verdict for candidate, got keys: {list(verdicts.keys())}"
+    )
+    v = verdicts[buy_yes_key]
+    assert v.get("mainstream_agreement_pass") is True, (
+        f"Wellington 15°C buy_yes with mainstream 15.8°C must PASS. verdict={v}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ANTIBODY TEST B — BUG-2: receipt_hash stable when gate NOT evaluated.
+# Pre-fix: asdict(receipt) serialized null mainstream_* fields → different JSON
+# → EdliReceiptHashDriftError on retry for pre-existing shadow receipts.
+# Post-fix: _receipt_json strips None mainstream_* fields → hash byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def test_receipt_hash_stable_when_gate_not_evaluated():
+    """_receipt_json hash is byte-identical when all mainstream_* fields are None (gate OFF)."""
+    import json
+    import hashlib
+    from src.events.reactor import EventSubmissionReceipt
+    from src.events.no_submit_receipts import _receipt_json
+
+    # Minimal pre-gate receipt (no mainstream_ fields at all).
+    base_receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="evt-hash-test",
+        causal_snapshot_id="snap-hash-test",
+        city="Wellington",
+        target_date="2026-06-04",
+        metric="high",
+        family_id="fam-1",
+    )
+    base_json = _receipt_json(base_receipt)
+    base_hash = hashlib.sha256(base_json.encode("utf-8")).hexdigest()
+
+    # Confirm mainstream fields are ABSENT from the JSON (not serialized as null).
+    parsed = json.loads(base_json)
+    for field in (
+        "mainstream_agreement_pass", "mainstream_agreement_fail_reason",
+        "mainstream_point", "mainstream_delta", "mainstream_bin_label",
+        "mainstream_source", "mainstream_fetched_at_utc",
+    ):
+        assert field not in parsed, (
+            f"Field {field!r} present as null in receipt_json — "
+            "would cause hash drift vs pre-gate baseline (BUG-2 regression)."
+        )
+
+    # Post-gate receipt with all mainstream_* = None (flag OFF / not evaluated).
+    gate_off_receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="evt-hash-test",
+        causal_snapshot_id="snap-hash-test",
+        city="Wellington",
+        target_date="2026-06-04",
+        metric="high",
+        family_id="fam-1",
+        mainstream_agreement_pass=None,
+        mainstream_agreement_fail_reason=None,
+        mainstream_point=None,
+        mainstream_delta=None,
+        mainstream_bin_label=None,
+        mainstream_source=None,
+        mainstream_fetched_at_utc=None,
+    )
+    gate_off_json = _receipt_json(gate_off_receipt)
+    gate_off_hash = hashlib.sha256(gate_off_json.encode("utf-8")).hexdigest()
+
+    assert base_json == gate_off_json, (
+        "receipt_json differs when mainstream_* are None vs absent — "
+        "EdliReceiptHashDrift regression on retry of pre-gate shadow receipt (BUG-2).\n"
+        f"  base:     {base_json[:120]}\n"
+        f"  gate_off: {gate_off_json[:120]}"
+    )
+    assert base_hash == gate_off_hash, "receipt_hash drifts when gate not evaluated (BUG-2)"
+
+    # Sanity: gate-ON receipt has DIFFERENT hash (gate evaluation is detectable).
+    gate_on_receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="evt-hash-test",
+        causal_snapshot_id="snap-hash-test",
+        city="Wellington",
+        target_date="2026-06-04",
+        metric="high",
+        family_id="fam-1",
+        mainstream_agreement_pass=True,
+        mainstream_agreement_fail_reason="PASS",
+        mainstream_point=15.8,
+        mainstream_delta=-0.6,
+        mainstream_bin_label="15°C",
+        mainstream_source="open_meteo_standard_forecast",
+        mainstream_fetched_at_utc="2026-06-03T10:00:00+00:00",
+    )
+    gate_on_json = _receipt_json(gate_on_receipt)
+    assert gate_on_json != base_json, "Gate-ON receipt must have different hash (sanity check)"

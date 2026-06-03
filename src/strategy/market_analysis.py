@@ -335,6 +335,27 @@ class MarketAnalysis:
     def mean_context(self) -> dict:
         return dict(self._mean_context)
 
+    @property
+    def member_maxes(self) -> "np.ndarray":
+        """Public accessor for the (bias-corrected) ensemble member maxima array.
+
+        Gate consumers (#135 mainstream-agreement) MUST use this accessor — the
+        backing attribute is private (_member_maxes) so direct attribute access
+        silently raises AttributeError inside the outer try/except, converting a
+        hard bug into a fail-open gate (the antibody the gate is meant to be).
+        """
+        return self._member_maxes
+
+    @property
+    def unit(self) -> str:
+        """Public accessor for the settlement unit ('C' or 'F')."""
+        return self._unit
+
+    @property
+    def precision(self) -> float:
+        """Public accessor for settlement precision (1.0 = integer, 0.1 = one decimal)."""
+        return self._precision
+
     def forecast_context(self) -> dict:
         return {
             "uncertainty": self.sigma_context(),

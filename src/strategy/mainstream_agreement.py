@@ -94,7 +94,13 @@ class MainstreamAgreementVerdict:
     fail_reason: str
 
     def to_dict(self) -> dict:
-        """Flat dict for the no_submit receipt tag (`mainstream_agreement_*`)."""
+        """Flat dict for the no_submit receipt tag (`mainstream_agreement_*`).
+
+        Key `mainstream_delta` is the canonical receipt/DB field name (matching
+        the EventSubmissionReceipt and edli_no_submit_receipts column names).
+        Key `forecast_delta` is kept for back-compat with existing callers and
+        shadow receipt analysis scripts.
+        """
         return {
             "mainstream_agreement_pass": self.passed,
             "mainstream_agreement_fail_reason": self.fail_reason,
@@ -107,7 +113,8 @@ class MainstreamAgreementVerdict:
             "our_modal_bin_label": self.our_modal_bin_label,
             "mainstream_point": self.mainstream_point,
             "mainstream_bin_label": self.mainstream_bin_label,
-            "forecast_delta": self.forecast_delta,
+            "forecast_delta": self.forecast_delta,   # back-compat alias
+            "mainstream_delta": self.forecast_delta,  # canonical receipt/DB field name
             "tolerance": self.tolerance,
             "traded_bin_label": self.traded_bin_label,
             "direction": self.direction,
