@@ -757,7 +757,9 @@ def _verify_forecast_no_submit_semantic_consistency(
     # belief.forecast_snapshot_id == forecast.snapshot_id; conflating snapshot_id with the elected id
     # here re-introduces the FORECAST_READER_SNAPSHOT_MISMATCH leak.
     _require_equal("source_truth.snapshot_id", source.get("snapshot_id"), "causal.causal_snapshot_id", causal.get("causal_snapshot_id"))
-    _require_equal("source_truth.source_run_id", source.get("source_run_id"), "forecast.source_run_id", forecast.get("source_run_id"))
+    # WAVE-1 W1-T3: dual-chain source_run binding (gated; legacy single-chain
+    # equality preserved when the flag is OFF or derived_from_source_run_id absent).
+    _bind_source_run_chains(source, forecast)
     _require_equal("source_truth.source_id", source.get("source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
     _require_equal("source_truth.payload_hash", source.get("payload_hash"), "causal.payload_hash", causal.get("payload_hash"))
     _require_equal("source_truth.event_source", source.get("event_source"), "causal.source", causal.get("source"))
@@ -1055,6 +1057,38 @@ def _required_parent_payload(parents: dict[str, DecisionCertificate], certificat
 def _require_equal(left_name: str, left: object, right_name: str, right: object) -> None:
     if left != right:
         raise CertificateVerificationError(f"{left_name} != {right_name}: {left!r} != {right!r}")
+
+
+def _bind_source_run_chains(source: dict, forecast: dict) -> None:
+    """Verifier-side mirror of compiler.bind_source_run_chains (WAVE-1 W1-T3).
+
+    Uses the SAME flag reader (compiler._dual_chain_source_run_enabled) so the
+    compiler and verifier cannot disagree on whether the dual-chain relaxation is
+    in effect. Raises CertificateVerificationError (verifier's error type) rather
+    than ValueError. See compiler.bind_source_run_chains for the full rationale.
+    """
+    from src.decision_kernel.compiler import _dual_chain_source_run_enabled
+
+    derived = source.get("derived_from_source_run_id")
+    if _dual_chain_source_run_enabled() and derived not in (None, ""):
+        # Executable chain binds to the reader-elected run.
+        _require_equal(
+            "source_truth.derived_from_source_run_id",
+            derived,
+            "forecast.source_run_id",
+            forecast.get("source_run_id"),
+        )
+        if source.get("source_run_id") in (None, ""):
+            raise CertificateVerificationError(
+                "source_truth.source_run_id missing (causal chain)"
+            )
+        return
+    _require_equal(
+        "source_truth.source_run_id",
+        source.get("source_run_id"),
+        "forecast.source_run_id",
+        forecast.get("source_run_id"),
+    )
 
 
 def _normalize_forecast_status(status: object) -> str | None:

@@ -110,6 +110,11 @@ def get_calibration_pin_config() -> dict:
                     str(k): (None if v is None else str(v))
                     for k, v in raw_fao.items()
                 }
+            # W0-T1 (2026-06-03): model_keys loading.
+            # assert_calibration_pin_shape_is_dict() (boot guard in main.py)
+            # enforces dict-or-absent before daemon start, so only dict values
+            # reach this path at runtime. The guard replaced the old
+            # silent-drop behaviour where a list would be coerced to {}.
             if isinstance(pin_cfg.get("model_keys"), dict):
                 pin["model_keys"] = dict(pin_cfg["model_keys"])
             # PR #82 Copilot review: load eligibility floor into cache so

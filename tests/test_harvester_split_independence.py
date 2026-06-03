@@ -257,10 +257,13 @@ def test_harvester_pnl_resolver_does_not_write_settlement_truth_tables():
 
 
 def test_harvester_pnl_resolver_passes_verified_forecasts_truth_to_position_settlement():
-    """Static relationship: forecasts.settlements VERIFIED authority reaches _settle_positions."""
+    """Static relationship: forecasts.settlement_outcomes VERIFIED authority reaches _settle_positions.
+
+    W2 (2026-06-03): truth source repointed from legacy settlements → settlement_outcomes.
+    """
     source = _PNL_RESOLVER.read_text(encoding="utf-8")
 
     assert "WHERE authority = 'VERIFIED'" in source
-    assert 'settlement_truth_source="forecasts.settlements"' in source
+    assert 'settlement_truth_source="forecasts.settlement_outcomes"' in source
     assert "settlement_authority=authority" in source
     assert "settlement_temperature_metric=str(temperature_metric or \"\")" in source

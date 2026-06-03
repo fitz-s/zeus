@@ -60,7 +60,11 @@ from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
-from src.strategy.market_phase import MarketPhase
+from src.strategy.market_phase import (
+    MarketPhase,
+    FORECAST_ONLY_ADMIT_PHASES as _FORECAST_ONLY_ADMIT_PHASES,
+    market_phase_admits,
+)
 from src.strategy import market_phase_evidence as _market_phase_evidence
 from src.types.market import Bin
 
@@ -492,9 +496,14 @@ def _run_live_order_build_savepoint(
 # in the future). SETTLEMENT_DAY / POST_TRADING / RESOLVED / unknown all reject
 # fail-closed. Same-day edge belongs to the disjoint day0 observation-aware
 # scope, never forecast_only. Authority: src/strategy/market_phase.py.
+#
+# WAVE-1 W1-T1: the admit-set and the predicate are now the SHARED canonical
+# objects from src.strategy.market_phase (FORECAST_ONLY_ADMIT_PHASES /
+# market_phase_admits), imported at module top. The reactor keeps this
+# evidence-building backstop (it needs the typed evidence for the
+# EVENT_BOUND_MARKET_PHASE_CLOSED rejection reason); the admit verdict cannot
+# diverge from the intake filter because both consult the same frozenset.
 # --------------------------------------------------------------------------- #
-
-_FORECAST_ONLY_ADMIT_PHASES: frozenset[MarketPhase] = frozenset({MarketPhase.PRE_SETTLEMENT_DAY})
 
 
 def _edli_forecast_only_phase_evidence(
@@ -2325,6 +2334,13 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "source_reason_code": forecast_payload.get("reader_reason_code"),
                 "derived_from_certificate_type": claims.FORECAST_AUTHORITY,
                 "derived_from_snapshot_id": forecast_payload.get("snapshot_id"),
+                # WAVE-1 W1-T3: the reader-ELECTED executable source_run (may
+                # differ from the causal event run, e.g. 00Z causal → 12Z
+                # elected). Stamped unconditionally so the payload is
+                # self-describing; the cert's dual-chain binding only consults it
+                # when edli_v1.edli_source_run_dual_chain_enabled is ON (default
+                # OFF → legacy single-chain equality, so the merge is inert).
+                "derived_from_source_run_id": forecast_payload.get("source_run_id"),
                 "derived_from_reader_status": forecast_payload.get("reader_status"),
                 "completeness_status": payload.get("completeness_status"),
                 "required_fields_present": payload.get("required_fields_present"),

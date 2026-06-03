@@ -818,6 +818,12 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     monkeypatch.setattr(main, "_startup_wallet_check", lambda: None)
     monkeypatch.setattr(main, "_start_user_channel_ingestor_if_enabled", lambda: None)
     monkeypatch.setattr(main, "_check_s1_without_s2_sla", lambda: None)
+    # W0-T2 boot-guards: tests use live settings.json which has model_keys as a list
+    # (the bad config the guard catches). Patch out here so tests exercise EDLI boot
+    # logic, not calibration-pin shape. The guards have dedicated tests in
+    # test_boot_guard_pin_shape.py.
+    monkeypatch.setattr(main, "assert_calibration_pin_shape_is_dict", lambda _cfg: None)
+    monkeypatch.setattr(main, "assert_frozen_as_of_not_stale", lambda _cfg, **_kw: None)
     monkeypatch.setattr(main, "_assert_cascade_liveness_contract", lambda _scheduler: None)
     monkeypatch.setattr(main, "init_schema_trade_only", lambda _conn: None)
     monkeypatch.setenv("ZEUS_BOOT_REGISTRY_ASSERT_ENABLED", "0")

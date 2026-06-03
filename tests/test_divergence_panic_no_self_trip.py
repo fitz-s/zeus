@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-17; last_reviewed=2026-05-17; last_reused=2026-05-17
+# Lifecycle: created=2026-05-17; last_reviewed=2026-06-02; last_reused=2026-06-02
 # Purpose: Antibody for divergence_score formula sign collapse. Locks
 #   _compute_divergence_score to adverse-only semantics so abs() cannot be
 #   reintroduced at the call site (monitor_refresh.py) without break/restore
@@ -25,14 +25,14 @@ exit_triggers.py that restores the sign collapse will fail this test.
 import math
 
 import pytest
-from unittest.mock import MagicMock
-import numpy as np
 
-from src.contracts.edge_context import EdgeContext
-from src.contracts.semantic_types import EntryMethod
 from src.engine.monitor_refresh import _compute_divergence_score
-from src.execution.exit_triggers import evaluate_exit_triggers
-from src.state.portfolio import divergence_hard_threshold, divergence_soft_threshold
+from src.state.portfolio import (
+    Position, ExitContext,
+    divergence_hard_threshold, divergence_soft_threshold,
+)
+# Wave 3 (2026-06-02): evaluate_exit_triggers deleted (dead twin). Tests repointed to
+#   Position.evaluate_exit. _make_position now returns a real Position, not MagicMock.
 
 
 # ---------------------------------------------------------------------------
@@ -81,46 +81,51 @@ class TestProductionFormulaIsAdverseOnly:
         assert _compute_divergence_score(p_post, p_mkt, available=True) == 0.0
 
 
-# ---------------------------------------------------------------------------
-# Shared builder — mirrors how monitor_refresh.refresh_position builds EdgeContext
-# ---------------------------------------------------------------------------
-
-def _make_edge_context(
-    p_posterior: float,
-    p_market: float,
-    divergence_score: float,
-    forward_edge: float,
-    market_velocity_1h: float = 0.0,
-    ci_lower: float = 0.47,
-    ci_upper: float = 0.78,
-) -> EdgeContext:
-    """Mirror the EdgeContext produced by monitor_refresh.refresh_position."""
-    return EdgeContext(
-        p_raw=np.array([p_posterior]),
-        p_cal=np.array([p_posterior]),
-        p_market=np.array([p_market]),
-        p_posterior=p_posterior,
-        forward_edge=forward_edge,
-        alpha=0.70,
-        confidence_band_lower=ci_lower,
-        confidence_band_upper=ci_upper,
-        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-        decision_snapshot_id="test-snap-london-antibody",
-        n_edges_found=1,
-        n_edges_after_fdr=1,
-        market_velocity_1h=market_velocity_1h,
-        divergence_score=divergence_score,
+def _make_position(direction: str = "buy_yes", cost_basis: float = 2.0) -> Position:
+    return Position(
+        trade_id="test-london-antibody",
+        market_id="m-div-test",
+        city="London",
+        cluster="London",
+        target_date="2026-04-01",
+        bin_label="test-bin",
+        direction=direction,
+        size_usd=cost_basis,
+        entry_price=0.40,
+        p_posterior=0.622,
+        edge=0.34,
+        entry_ci_width=0.307,
+        cost_basis_usd=cost_basis,
+        shares=max(1.0, cost_basis / 0.40),
+        shares_filled=max(1.0, cost_basis / 0.40),
+        filled_cost_basis_usd=cost_basis,
     )
 
 
-def _make_position(direction: str = "buy_yes", cost_basis: float = 2.0) -> MagicMock:
-    pos = MagicMock()
-    pos.trade_id = "test-london-antibody"
-    pos.direction = direction
-    pos.neg_edge_count = 0
-    pos.effective_cost_basis_usd = cost_basis
-    pos.entry_ci_width = 0.307
-    return pos
+def _evaluate_via_live_path(
+    position: Position,
+    *,
+    fresh_prob: float,
+    current_market_price: float,
+    divergence_score: float,
+    market_velocity_1h: float = 0.0,
+    hours_to_settlement: float = 24.0,
+    best_bid: float | None = None,
+):
+    """Thin wrapper: build ExitContext and call the one live path."""
+    ctx = ExitContext(
+        fresh_prob=fresh_prob,
+        fresh_prob_is_fresh=True,
+        current_market_price=current_market_price,
+        current_market_price_is_fresh=True,
+        best_bid=best_bid if best_bid is not None else current_market_price,
+        hours_to_settlement=hours_to_settlement,
+        position_state="active",
+        divergence_score=divergence_score,
+        market_velocity_1h=market_velocity_1h,
+        market_vig=1.01,
+    )
+    return position.evaluate_exit(ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -154,27 +159,20 @@ class TestEntryEdgeDoesNotSelfTrip:
             f"({hard_thresh:.3f}); this is the self-trip condition under old formula"
         )
 
-        edge_ctx = _make_edge_context(
-            p_posterior=p_posterior,
-            p_market=p_market,
-            divergence_score=divergence_score,
-            forward_edge=forward_edge,
-        )
         position = _make_position(direction="buy_yes")
 
-        result = evaluate_exit_triggers(
-            position=position,
-            current_edge_context=edge_ctx,
-            hours_to_settlement=24.0,
-            market_vig=1.01,
-            is_whale_sweep=False,
+        result = _evaluate_via_live_path(
+            position,
+            fresh_prob=p_posterior,
+            current_market_price=p_market,
+            divergence_score=divergence_score,
             best_bid=p_market,
         )
 
-        assert result is None or result.trigger != "MODEL_DIVERGENCE_PANIC", (
+        assert not result.should_exit or result.trigger != "MODEL_DIVERGENCE_PANIC", (
             f"Entry with edge={forward_edge:.3f} must NOT trigger MODEL_DIVERGENCE_PANIC "
             f"on next cycle (divergence_score={divergence_score:.3f}). "
-            f"Got trigger: {result.trigger if result else None}. "
+            f"Got trigger: {result.trigger!r}. "
             "This indicates abs() is still in the divergence formula."
         )
 
@@ -187,26 +185,19 @@ class TestEntryEdgeDoesNotSelfTrip:
         p_market = 0.30
         divergence_score = max(0.0, p_market - p_posterior)
 
-        edge_ctx = _make_edge_context(
-            p_posterior=p_posterior,
-            p_market=p_market,
-            divergence_score=divergence_score,
-            forward_edge=p_posterior - p_market,
-        )
         position = _make_position(direction="buy_yes")
 
-        result = evaluate_exit_triggers(
-            position=position,
-            current_edge_context=edge_ctx,
-            hours_to_settlement=24.0,
-            market_vig=1.01,
-            is_whale_sweep=False,
+        result = _evaluate_via_live_path(
+            position,
+            fresh_prob=p_posterior,
+            current_market_price=p_market,
+            divergence_score=divergence_score,
             best_bid=p_market,
         )
 
-        assert result is None or result.trigger != "MODEL_DIVERGENCE_PANIC", (
+        assert not result.should_exit or result.trigger != "MODEL_DIVERGENCE_PANIC", (
             f"Position at edge=hard_threshold must not self-trip. "
-            f"Got trigger: {result.trigger if result else None}"
+            f"Got trigger: {result.trigger!r}"
         )
 
 
@@ -236,28 +227,21 @@ class TestAdverseOvershotFiresPanic:
             f"threshold ({hard_thresh:.3f}) for panic to be expected"
         )
 
-        edge_ctx = _make_edge_context(
-            p_posterior=p_posterior,
-            p_market=p_market,
-            divergence_score=divergence_score,
-            forward_edge=forward_edge,
-        )
         position = _make_position(direction="buy_yes")
 
-        result = evaluate_exit_triggers(
-            position=position,
-            current_edge_context=edge_ctx,
-            hours_to_settlement=24.0,
-            market_vig=1.01,
-            is_whale_sweep=False,
+        result = _evaluate_via_live_path(
+            position,
+            fresh_prob=p_posterior,
+            current_market_price=p_market,
+            divergence_score=divergence_score,
             best_bid=p_market,
         )
 
-        assert result is not None, (
-            "Expected MODEL_DIVERGENCE_PANIC when market has blown past posterior, got None"
+        assert result.should_exit, (
+            "Expected MODEL_DIVERGENCE_PANIC when market has blown past posterior, got should_exit=False"
         )
         assert result.trigger == "MODEL_DIVERGENCE_PANIC", (
-            f"Expected MODEL_DIVERGENCE_PANIC, got {result.trigger}"
+            f"Expected MODEL_DIVERGENCE_PANIC, got {result.trigger!r}"
         )
 
     def test_market_above_posterior_at_soft_threshold_with_adverse_velocity_fires(self):
@@ -275,29 +259,22 @@ class TestAdverseOvershotFiresPanic:
             f"Precondition: divergence ({divergence_score:.3f}) >= soft threshold ({soft_thresh:.3f})"
         )
 
-        edge_ctx = _make_edge_context(
-            p_posterior=p_posterior,
-            p_market=p_market,
-            divergence_score=divergence_score,
-            forward_edge=forward_edge,
-            market_velocity_1h=-0.08,
-        )
         position = _make_position(direction="buy_yes")
 
-        result = evaluate_exit_triggers(
-            position=position,
-            current_edge_context=edge_ctx,
-            hours_to_settlement=24.0,
-            market_vig=1.01,
-            is_whale_sweep=False,
+        result = _evaluate_via_live_path(
+            position,
+            fresh_prob=p_posterior,
+            current_market_price=p_market,
+            divergence_score=divergence_score,
+            market_velocity_1h=-0.08,
             best_bid=p_market,
         )
 
-        assert result is not None, (
-            "Expected MODEL_DIVERGENCE_PANIC (soft path) with adverse velocity, got None"
+        assert result.should_exit, (
+            "Expected MODEL_DIVERGENCE_PANIC (soft path) with adverse velocity, got should_exit=False"
         )
         assert result.trigger == "MODEL_DIVERGENCE_PANIC", (
-            f"Expected MODEL_DIVERGENCE_PANIC, got {result.trigger}"
+            f"Expected MODEL_DIVERGENCE_PANIC, got {result.trigger!r}"
         )
 
     def test_market_above_posterior_soft_zone_without_velocity_does_not_fire(self):
@@ -309,27 +286,20 @@ class TestAdverseOvershotFiresPanic:
         p_market = 0.84
         divergence_score = max(0.0, p_market - p_posterior)
 
-        edge_ctx = _make_edge_context(
-            p_posterior=p_posterior,
-            p_market=p_market,
-            divergence_score=divergence_score,
-            forward_edge=p_posterior - p_market,
-            market_velocity_1h=0.02,
-        )
         position = _make_position(direction="buy_yes")
 
-        result = evaluate_exit_triggers(
-            position=position,
-            current_edge_context=edge_ctx,
-            hours_to_settlement=24.0,
-            market_vig=1.01,
-            is_whale_sweep=False,
+        result = _evaluate_via_live_path(
+            position,
+            fresh_prob=p_posterior,
+            current_market_price=p_market,
+            divergence_score=divergence_score,
+            market_velocity_1h=0.02,
             best_bid=p_market,
         )
 
-        assert result is None or result.trigger != "MODEL_DIVERGENCE_PANIC", (
+        assert not result.should_exit or result.trigger != "MODEL_DIVERGENCE_PANIC", (
             f"Soft divergence without confirming velocity must not panic. "
-            f"Got trigger: {result.trigger if result else None}"
+            f"Got trigger: {result.trigger!r}"
         )
 
 
@@ -375,24 +345,17 @@ class TestDivergenceScoreIsDistinctFromForwardEdge:
 
         assert divergence_score == 0.0
 
-        edge_ctx = _make_edge_context(
-            p_posterior=p_posterior,
-            p_market=p_market,
-            divergence_score=divergence_score,
-            forward_edge=forward_edge,
-        )
         position = _make_position(direction="buy_yes")
 
-        result = evaluate_exit_triggers(
-            position=position,
-            current_edge_context=edge_ctx,
-            hours_to_settlement=24.0,
-            market_vig=1.01,
-            is_whale_sweep=False,
+        result = _evaluate_via_live_path(
+            position,
+            fresh_prob=p_posterior,
+            current_market_price=p_market,
+            divergence_score=divergence_score,
             best_bid=p_market,
         )
 
-        assert result is None or result.trigger != "MODEL_DIVERGENCE_PANIC", (
+        assert not result.should_exit or result.trigger != "MODEL_DIVERGENCE_PANIC", (
             f"p_market={p_market} (bullish position): unexpected MODEL_DIVERGENCE_PANIC. "
             f"divergence_score={divergence_score:.4f}."
         )

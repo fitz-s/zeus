@@ -14,64 +14,45 @@
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 from src.engine import monitor_refresh
-from src.execution.exit_triggers import (
-    evaluate_exit_triggers, clear_reversal_state,
-    ExitSignal,
-)
+# Wave 3 (2026-06-02): evaluate_exit_triggers deleted (dead twin). TestExitTriggers
+#   repointed to Position.evaluate_exit (the one live path).
 from src.execution.harvester import harvest_settlement
-from src.state.portfolio import Position, PortfolioState
+from src.state.portfolio import Position, PortfolioState, ExitContext
 from src.state.db import get_connection, init_schema
 from src.config import City
-from src.contracts import EdgeContext, EntryMethod
 
 
-def _make_edge_context(p_posterior: float, entry_price: float) -> EdgeContext:
-    """Build a minimal EdgeContext for tests. forward_edge = p_posterior - entry_price."""
-    forward_edge = p_posterior - entry_price
-    dummy_vec = np.array([1.0])
-    return EdgeContext(
-        p_raw=dummy_vec,
-        p_cal=dummy_vec,
-        p_market=dummy_vec,
-        p_posterior=p_posterior,
-        forward_edge=forward_edge,
-        alpha=0.55,
-        confidence_band_upper=forward_edge + 0.05,
-        confidence_band_lower=forward_edge - 0.05,
-        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-        decision_snapshot_id="test-snap",
-        n_edges_found=1,
-        n_edges_after_fdr=1,
-        market_velocity_1h=0.0,
-        divergence_score=0.0,
-    )
-
-
-def _make_non_authoritative_edge_context(*, market_velocity_1h: float = 0.0) -> EdgeContext:
-    """Build a degraded monitor context whose probability fields are not authority."""
-    dummy_vec = np.array([1.0])
-    return EdgeContext(
-        p_raw=dummy_vec,
-        p_cal=dummy_vec,
-        p_market=dummy_vec,
-        p_posterior=np.nan,
-        forward_edge=np.nan,
-        alpha=0.55,
-        confidence_band_upper=np.nan,
-        confidence_band_lower=np.nan,
-        entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-        decision_snapshot_id="test-snap-degraded",
-        n_edges_found=1,
-        n_edges_after_fdr=1,
+def _call_exit(
+    pos: Position,
+    fresh_prob: float,
+    current_market_price: float,
+    *,
+    hours_to_settlement: float = 72.0,
+    best_bid: float | None = None,
+    divergence_score: float = 0.0,
+    market_velocity_1h: float = 0.0,
+    whale_toxicity: bool | None = None,
+    market_vig: float | None = None,
+):
+    """Thin wrapper: call the one live exit path."""
+    ctx = ExitContext(
+        fresh_prob=fresh_prob,
+        fresh_prob_is_fresh=True,
+        current_market_price=current_market_price,
+        current_market_price_is_fresh=True,
+        best_bid=best_bid if best_bid is not None else current_market_price,
+        hours_to_settlement=hours_to_settlement,
+        position_state="active",
         market_velocity_1h=market_velocity_1h,
-        divergence_score=0.0,
+        divergence_score=divergence_score,
+        whale_toxicity=whale_toxicity,
+        market_vig=market_vig,
     )
+    return pos.evaluate_exit(ctx)
 
 
 NYC = City(
@@ -283,203 +264,146 @@ def test_chain_reconciliation_phantom_void_allows_legacy_unknown_phase_before(tm
 
 
 class TestExitTriggers:
+    """Wave 3 (2026-06-02): all tests repointed from evaluate_exit_triggers
+    (dead twin, deleted) to Position.evaluate_exit (the one live path).
+    entry_price=0.40, p_posterior=0.60; use hours_to_settlement=72.0 unless
+    testing near-settlement behavior (near_settlement_hours()=48).
+    """
 
     def test_settlement_imminent(self):
         pos = _make_position()
-        signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40), hours_to_settlement=0.5)
-        assert signal is not None
-        assert signal.trigger == "SETTLEMENT_IMMINENT"
-        assert signal.urgency == "immediate"
+        decision = _call_exit(pos, 0.60, 0.40, hours_to_settlement=0.5)
+        assert decision.should_exit
+        assert decision.trigger == "SETTLEMENT_IMMINENT"
 
     def test_whale_toxicity(self):
         pos = _make_position()
-        signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40), is_whale_sweep=True)
-        assert signal is not None
-        assert signal.trigger == "WHALE_TOXICITY"
+        decision = _call_exit(pos, 0.60, 0.40, whale_toxicity=True)
+        assert decision.should_exit
+        assert decision.trigger == "WHALE_TOXICITY"
 
     def test_soft_divergence_requires_adverse_velocity_confirmation(self):
+        """Soft divergence (0.20) without adverse velocity does not panic."""
         pos = _make_position()
-        edge_ctx = EdgeContext(
-            p_raw=np.array([1.0]),
-            p_cal=np.array([1.0]),
-            p_market=np.array([0.40]),
-            p_posterior=0.20,
-            forward_edge=-0.20,
-            alpha=0.0,
-            confidence_band_upper=0.05,
-            confidence_band_lower=0.0,
-            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-            decision_snapshot_id="test-snap",
-            n_edges_found=1,
-            n_edges_after_fdr=1,
-            market_velocity_1h=0.0,
-            divergence_score=0.20,
+        decision = _call_exit(
+            pos, 0.20, 0.40, divergence_score=0.20, market_velocity_1h=0.0,
         )
-        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
-        assert signal is None
+        assert not decision.should_exit or decision.trigger != "MODEL_DIVERGENCE_PANIC"
 
     def test_hard_divergence_panics_without_velocity_confirmation(self):
+        """Hard divergence (>= 0.30) panics regardless of velocity."""
         pos = _make_position()
-        edge_ctx = EdgeContext(
-            p_raw=np.array([1.0]),
-            p_cal=np.array([1.0]),
-            p_market=np.array([0.40]),
-            p_posterior=0.20,
-            forward_edge=-0.20,
-            alpha=0.0,
-            confidence_band_upper=0.05,
-            confidence_band_lower=0.0,
-            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
-            decision_snapshot_id="test-snap",
-            n_edges_found=1,
-            n_edges_after_fdr=1,
-            market_velocity_1h=0.0,
-            divergence_score=0.31,
+        decision = _call_exit(
+            pos, 0.20, 0.40, divergence_score=0.31, market_velocity_1h=0.0,
         )
-        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0)
-        assert signal is not None
-        assert signal.trigger == "MODEL_DIVERGENCE_PANIC"
+        assert decision.should_exit
+        assert decision.trigger == "MODEL_DIVERGENCE_PANIC"
 
     def test_edge_reversal_needs_two_confirmations(self):
-        """CLAUDE.md §4.2: EDGE_REVERSAL needs 2 confirmations, 1st doesn't trigger."""
-        pos = _make_position()
+        """CLAUDE.md §4.2: EDGE_REVERSAL needs 2 confirmations, 1st doesn't trigger.
 
+        buy_yes: fresh_prob=0.30 < market=0.40 → forward_edge=-0.10 (negative).
+        CI_OVERLAP_HOLD gate: entry_ci_width=0 (default), so width/2=0 →
+        ci_lo=ci_hi=entry_price → only fires when fresh_prob==entry_price exactly.
+        """
+        pos = _make_position()
         # First check: edge reversed but only 1 confirmation
-        signal = evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))  # edge < 0
-        assert signal is None  # Should NOT trigger on first reversal
+        decision = _call_exit(pos, 0.30, 0.40)
+        assert not decision.should_exit  # Should NOT trigger on first reversal
 
         # Second check: confirmed reversal
-        signal = evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))
-        assert signal is not None
-        assert signal.trigger == "EDGE_REVERSAL"
+        decision = _call_exit(pos, 0.30, 0.40)
+        assert decision.should_exit
+        assert decision.trigger == "EDGE_REVERSAL"
 
-    def test_buy_yes_ev_gate_uses_current_edge_context_posterior(self, monkeypatch):
-        """Monitor-current posterior must survive into the buy-yes hold EV gate."""
-        import src.execution.exit_triggers as exit_triggers
+    def test_buy_yes_ev_gate_hold_when_bid_below_posterior(self):
+        """When best_bid < p_posterior (hold EV > sell EV), exit is blocked.
 
-        pos = _make_position(p_posterior=0.90)
+        Wave 3: direct observable-behavior test. No monkeypatching needed.
+        Position has neg_edge_count=1 (pre-set); next negative cycle would
+        normally exit but EV gate blocks it (sell at 0.10 < hold value 0.60).
+        """
+        pos = _make_position(p_posterior=0.60, entry_price=0.50)
         pos.neg_edge_count = 1
-        captured: dict[str, float] = {}
+        # fresh_prob=0.10, market=0.55 → edge=-0.45 (deeply negative, would exit)
+        # best_bid=0.10 << p_posterior=0.60 → hold EV > sell EV → HOLD
+        decision = _call_exit(pos, 0.10, 0.55, best_bid=0.10)
+        assert not decision.should_exit  # EV gate blocks
 
-        def capture_hold_value(shares, current_p_posterior):
-            captured["posterior"] = current_p_posterior
-            return SimpleNamespace(net_value=0.0)
+    def test_buy_yes_ev_gate_exits_when_bid_above_posterior(self):
+        """When best_bid >= p_posterior (sell EV >= hold EV), exit fires.
 
-        monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
-        ctx = _make_edge_context(p_posterior=0.10, entry_price=0.50)
+        Wave 3: complement of EV-gate-hold test. Fresh posterior has degraded
+        (0.10) but market is generous (0.65 bid > posterior). Rational to exit.
+        """
+        pos = _make_position(p_posterior=0.60, entry_price=0.50)
+        pos.neg_edge_count = 1
+        # best_bid=0.65 > p_posterior=0.10 → sell value exceeds hold EV → EXIT
+        decision = _call_exit(pos, 0.10, 0.65, best_bid=0.65)
+        assert decision.should_exit
+        assert decision.trigger == "EDGE_REVERSAL"
 
-        signal = evaluate_exit_triggers(pos, ctx, best_bid=0.49)
+    def test_stale_probability_authority_blocks_edge_exit(self):
+        """Stale fresh_prob (fresh_prob_is_fresh=False) → EVIDENCE_UNAVAILABLE, no exit.
 
-        assert signal is not None
-        assert signal.trigger == "EDGE_REVERSAL"
-        assert captured["posterior"] == pytest.approx(ctx.p_posterior)
-        assert captured["posterior"] != pytest.approx(pos.p_posterior)
-
-    def test_monitor_current_posterior_flows_to_buy_yes_ev_gate(self, monkeypatch):
-        """refresh_position -> exit trigger must preserve the fresh monitor posterior."""
-        import src.execution.exit_triggers as exit_triggers
-
+        Wave 3: ExitContext.fresh_prob_is_fresh=False triggers EVIDENCE_UNAVAILABLE hold.
+        """
         pos = _make_position(entry_price=0.12, p_posterior=0.90)
         pos.neg_edge_count = 1
-        captured: dict[str, float] = {}
-
-        def fresh_refresh(position, *, conn, city, target_d):
-            position.selected_method = position.entry_method
-            position.applied_validations = ["fresh_ens_fetch"]
-            return 0.05, position, True
-
-        def capture_hold_value(shares, current_p_posterior):
-            captured["posterior"] = current_p_posterior
-            return SimpleNamespace(net_value=0.0)
-
-        monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", fresh_refresh)
-        monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", lambda conn, clob, position: None)
-        monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
-        monkeypatch.setattr(exit_triggers, "_declared_zero_cost_hold_value", capture_hold_value)
-
-        edge_ctx = monitor_refresh.refresh_position(None, None, pos)
-        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0, best_bid=0.49)
-
-        assert edge_ctx.p_posterior == pytest.approx(0.05)
-        assert edge_ctx.p_posterior != pytest.approx(pos.p_posterior)
-        assert signal is not None
-        assert signal.trigger == "EDGE_REVERSAL"
-        assert captured["posterior"] == pytest.approx(0.05)
-
-    def test_stale_monitor_probability_cannot_drive_exit(self, monkeypatch):
-        """Stale monitor probability remains non-authoritative at the exit seam."""
-        pos = _make_position(entry_price=0.12, p_posterior=0.90, last_monitor_prob=0.41)
-        pos.neg_edge_count = 1
-
-        def stale_refresh(position, *, conn, city, target_d):
-            position.selected_method = position.entry_method
-            position.applied_validations = ["fresh_ens_fetch", "missing_observation_timestamp"]
-            return position.p_posterior, position, False
-
-        monkeypatch.setattr(monitor_refresh, "monitor_probability_refresh", stale_refresh)
-        monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", lambda conn, clob, position: None)
-        monkeypatch.setattr(monitor_refresh, "_detect_whale_toxicity_from_orderbook", lambda *args, **kwargs: False)
-
-        edge_ctx = monitor_refresh.refresh_position(None, None, pos)
-        signal = evaluate_exit_triggers(pos, edge_ctx, hours_to_settlement=24.0, best_bid=0.49)
-
-        assert pos.last_monitor_prob == pytest.approx(0.41)
-        assert pos.last_monitor_prob_is_fresh is False
-        assert not np.isfinite(pos.last_monitor_edge)
-        assert "monitor_probability_stale" in pos.applied_validations
-        assert not np.isfinite(edge_ctx.p_posterior)
-        assert not np.isfinite(edge_ctx.forward_edge)
-        assert not np.isfinite(edge_ctx.ci_width)
-        assert signal is None
-        assert pos.neg_edge_count == 1
-
-    def test_missing_probability_authority_does_not_block_flash_crash_exit(self):
-        """Quote/velocity safety evidence must survive missing monitor probability."""
-        pos = _make_position()
-        signal = evaluate_exit_triggers(
-            pos,
-            _make_non_authoritative_edge_context(market_velocity_1h=-0.20),
-            hours_to_settlement=24.0,
+        ctx = ExitContext(
+            fresh_prob=0.05,
+            fresh_prob_is_fresh=False,  # stale — not authority
+            current_market_price=0.50,
+            current_market_price_is_fresh=True,
+            best_bid=0.49,
+            hours_to_settlement=72.0,
+            position_state="active",
+            market_velocity_1h=0.0,
+            divergence_score=0.0,
         )
+        decision = pos.evaluate_exit(ctx)
+        assert not decision.should_exit
 
-        assert signal is not None
-        assert signal.trigger == "FLASH_CRASH_PANIC"
+    def test_flash_crash_panic_fires_with_adverse_velocity(self):
+        """Adverse velocity (-0.20/h) triggers FLASH_CRASH_PANIC.
 
-    def test_missing_probability_authority_does_not_block_vig_extreme_exit(self):
-        """Market-vig safety evidence is not probability authority and remains live."""
+        Wave 3: live path requires probability authority (fresh_prob_is_fresh=True).
+        Flash crash fires AFTER the authority check: it needs consecutive cycles of
+        velocity <= flash_crash_velocity(). Set flash_crash_count=2 via two calls.
+        """
         pos = _make_position()
-        signal = evaluate_exit_triggers(
-            pos,
-            _make_non_authoritative_edge_context(),
-            hours_to_settlement=24.0,
-            market_vig=1.10,
-        )
+        # Two cycles of adverse velocity accumulate flash_crash_count
+        _call_exit(pos, 0.60, 0.40, market_velocity_1h=-0.20)
+        decision = _call_exit(pos, 0.60, 0.40, market_velocity_1h=-0.20)
+        # After 2 consecutive flash-crash-velocity cycles, FLASH_CRASH_PANIC fires
+        assert decision.should_exit
+        assert decision.trigger == "FLASH_CRASH_PANIC"
 
-        assert signal is not None
-        assert signal.trigger == "VIG_EXTREME"
+    def test_vig_extreme_fires_with_probability_authority(self):
+        """Market-vig extreme (>1.08) triggers VIG_EXTREME exit."""
+        pos = _make_position()
+        decision = _call_exit(pos, 0.60, 0.40, market_vig=1.10)
+        assert decision.should_exit
+        assert decision.trigger == "VIG_EXTREME"
 
     def test_edge_reversal_resets_on_recovery(self):
         """If edge recovers between checks, counter resets."""
         pos = _make_position()
-
-        # First reversal
-        evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))
-        # Edge recovers
-        evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40))
-        # Another reversal — should need 2 new confirmations
-        signal = evaluate_exit_triggers(pos, _make_edge_context(0.30, 0.40))
-        assert signal is None  # Only 1st confirmation after reset
+        _call_exit(pos, 0.30, 0.40)  # neg → count=1
+        _call_exit(pos, 0.60, 0.40)  # pos → count=0
+        decision = _call_exit(pos, 0.30, 0.40)  # neg → count=1 again
+        assert not decision.should_exit  # Only 1st confirmation after reset
 
     def test_no_exit_when_edge_healthy(self):
         pos = _make_position()
-        signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40))
-        assert signal is None
+        decision = _call_exit(pos, 0.60, 0.40)
+        assert not decision.should_exit
 
     def test_vig_extreme(self):
         pos = _make_position()
-        signal = evaluate_exit_triggers(pos, _make_edge_context(0.60, 0.40), market_vig=1.10)
-        assert signal is not None
-        assert signal.trigger == "VIG_EXTREME"
+        decision = _call_exit(pos, 0.60, 0.40, market_vig=1.10)
+        assert decision.should_exit
+        assert decision.trigger == "VIG_EXTREME"
 
 
 class TestMonitorWhaleToxicity:

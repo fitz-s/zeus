@@ -198,6 +198,7 @@ def write_settlement_with_era_provenance(
             authority=settlement.get("authority", "QUARANTINED"),
             provenance=merged_provenance,
             recorded_at=settlement.get("recorded_at"),
+            settlement_unit=settlement.get("settlement_unit"),
         )
 
     if conn is not None:
