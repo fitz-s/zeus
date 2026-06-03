@@ -900,6 +900,65 @@ class MarketAnalysis:
         self._bootstrap_cache[("yes", bin_idx, n)] = result
         return result
 
+    def _no_certain_yes_floor(self, bin_idx: int) -> float:
+        """Irreducible Gaussian YES-mass of a bin given the representativeness σ.
+
+        "No certain NO" structural antibody (#89, iron rule 5, 2026-06-03). The #129 clamp caps
+        the NO lower bound at the NO POINT q_no = 1 - p_posterior[bin_idx]. For a DEEP-tail bin
+        (member mean many σ away) p_posterior ≈ 0, so q_no_point ≈ 1.0 and the member-resampling
+        bootstrap almost never lands in the bin — q_no_lcb saturates at ~1.0 ("certain NO") even
+        with σ_repr folded into the MC noise. A mean-only bias correction CANNOT make a far bin a
+        certain not-settle when the irreducible residual σ is ~2°C.
+
+        This returns the HONEST Gaussian mass P(settlement ∈ bin | mean = member mean, σ = σ_repr):
+        the irreducible probability the settlement still lands in the bin given only the
+        representativeness uncertainty. The caller subtracts it from the NO ceiling so
+        q_no_lcb ≤ 1 - YES_floor < 1 whenever σ_repr > 0 — making a corrected-domain q_no_lcb of
+        exactly 1.0 UNCONSTRUCTABLE.
+
+        ANTI-P-HACKING: the floor is the GENUINE Gaussian tail mass of the bin, NOT an invented
+        constant. At a realistic deep-NO distance (~2-3°C, the q≈0.93 regime the operator cited)
+        it is material (~0.07). At extreme distance (≥6°C) it is honestly microscopic — the bin
+        really is ~99.9% not-settle, so the ceiling barely moves (and that is correct, not a bug).
+        σ_repr = 0 → floor = 0 → the ceiling reduces to the legacy #129 clamp, byte-identical.
+        The Gaussian is centred on the CORRECTED member mean (same array q is computed from) so
+        train==serve.
+
+        POINT-BIN ROUNDING (correctness, not tuning): a °C point market is labelled "29°C" with
+        low == high == 29, but the SETTLEMENT is the ROUNDED value, so the bin actually captures
+        the rounding interval [v - precision/2, v + precision/2]. Integrating the Gaussian over a
+        zero-width point would give a spurious mass of exactly 0 (a "certain NO" the σ cannot
+        forbid). We therefore expand any closed bin by half the settlement precision on each side
+        so the mass is the honest P(rounded settlement ∈ bin). For a range bin (°F width-2) the
+        boundaries already span the rounding interval, so the same half-precision expansion is
+        the consistent treatment of the inclusive integer endpoints.
+        """
+        sigma = float(self._representativeness_sigma)
+        if sigma <= 0.0 or not np.isfinite(sigma):
+            return 0.0  # no correction / no σ → no ceiling beyond the legacy #129 clamp
+        members = self._member_maxes
+        if len(members) == 0:
+            return 0.0
+        mean = float(np.mean(members))
+        b = self.bins[bin_idx]
+        from statistics import NormalDist
+
+        nd = NormalDist(mean, sigma)
+        lo = None if b.low is None else float(b.low)
+        hi = None if b.high is None else float(b.high)
+        if lo is None and hi is None:
+            return 0.0
+        # Expand closed endpoints by half the settlement precision so the Gaussian integrates
+        # over the rounding interval the settlement actually falls in (point bins low==high would
+        # otherwise yield mass 0). Open ends stay open.
+        half = max(float(getattr(self, "_precision", 1.0)), 0.0) / 2.0
+        upper = 1.0 if hi is None else nd.cdf(hi + half)
+        lower = 0.0 if lo is None else nd.cdf(lo - half)
+        mass = upper - lower
+        if not np.isfinite(mass) or mass <= 0.0:
+            return 0.0
+        return float(min(1.0, mass))
+
     def _bootstrap_bin_no(
         self, bin_idx: int, n: int
     ) -> tuple[float, float, float]:
@@ -990,7 +1049,18 @@ class MarketAnalysis:
         # that exceeds the point is not a lower bound. c_b_point is the FIXED NO market price (the
         # same cost the adapter adds back at restore), so the cancellation is exact.
         c_b_point = float(self.buy_no_market_price(bin_idx))
-        point_edge_ceiling = (1.0 - float(self.p_posterior[bin_idx])) - c_b_point
+        # "NO CERTAIN NO" ceiling (#89, iron rule 5, 2026-06-03). On the bias-corrected domain
+        # (σ_repr > 0) the NO ceiling is tightened from the legacy q_no_point (= 1 - p_posterior)
+        # to 1 - YES_floor, where YES_floor is the irreducible Gaussian mass the settlement still
+        # lands in this bin given σ_repr. This makes a corrected-domain q_no_lcb of exactly 1.0
+        # UNCONSTRUCTABLE: a deep-NO bin where the member-resampling bootstrap saturates (q_no_lcb
+        # → q_no_point ≈ 1.0) is capped at the honest 1 - YES_floor instead. σ_repr = 0 ⇒
+        # YES_floor = 0 ⇒ ceiling == legacy #129 clamp, byte-identical. The ceiling only ever
+        # LOWERS the bound (max with the legacy floor below would be wrong — we take the tighter
+        # of the two so the bound is never RAISED above either).
+        yes_floor = self._no_certain_yes_floor(bin_idx)
+        q_no_ceiling = min(1.0 - float(self.p_posterior[bin_idx]), 1.0 - yes_floor)
+        point_edge_ceiling = q_no_ceiling - c_b_point
         ci_lo = min(ci_lo, point_edge_ceiling)
         ci_hi = max(ci_hi, ci_lo)
 

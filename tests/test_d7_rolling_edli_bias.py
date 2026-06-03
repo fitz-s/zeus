@@ -26,6 +26,7 @@ not just single-function behavior):
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 
 import pytest
@@ -455,6 +456,43 @@ def test_residual_std_persisted_equals_daily_residual_std(fc_conn, world_conn):
     assert abs(row["effective_bias_c"]) <= 1.0
     assert row["residual_sd_c"] > 1.0, \
         "representativeness sigma collapsed with the bias mean (q_lcb would over-trust)"
+
+
+def test_full_predictive_total_residual_persisted_and_wider(fc_conn, world_conn):
+    """#89 honest q_lcb (2026-06-03): the written total_residual_sd_c is the FULL FORWARD
+    PREDICTIVE σ (σ_resid·sqrt(1+1/n)), STRICTLY WIDER than the in-sample residual_sd_c, and
+    heterogeneity_var_c2 = var_resid/n. The live q_lcb inflater reads total_residual_sd_c, so
+    this is the column that must carry the honest (heterogeneity-inflated) uncertainty.
+    """
+    import statistics as _stats
+
+    seoul = [-0.726, 1.774, -1.002, 0.390, 1.144, 0.080, 1.058]
+    _seed_city_from_daily_residuals(fc_conn, "SeoulPred", seoul, settle_value=25.0)
+    out = d7.compute_city_bias(fc_conn, city="SeoulPred", metric="high",
+                               data_version=OPD, now_iso=NOW_PROOF,
+                               window_days=7, min_n=3)
+    assert out is not None
+    n = len(seoul)
+    var_resid = _stats.variance(seoul)
+    expected_het = var_resid / n
+    expected_total = math.sqrt(var_resid + expected_het)
+    assert out["heterogeneity_var_c2"] == pytest.approx(expected_het, abs=1e-9)
+    assert out["total_residual_std_c"] == pytest.approx(expected_total, abs=1e-9)
+    # STRICTLY wider than the in-sample residual std (the whole point — drops the
+    # under-statement that produced the over-confident deep-NO tail).
+    assert out["total_residual_std_c"] > out["residual_std_c"]
+
+    d7.write_city_bias(world_conn, city="SeoulPred", metric="high", data_version=OPD,
+                       bias=out, now_iso=NOW_PROOF)
+    world_conn.commit()
+    row = world_conn.execute(
+        "SELECT residual_sd_c, total_residual_sd_c, heterogeneity_var_c2 "
+        "FROM model_bias_ens WHERE city=? AND error_model_family=?",
+        ("SeoulPred", "edli_per_city_v1"),
+    ).fetchone()
+    assert row["total_residual_sd_c"] == pytest.approx(expected_total, abs=1e-9)
+    assert row["heterogeneity_var_c2"] == pytest.approx(expected_het, abs=1e-9)
+    assert row["total_residual_sd_c"] > row["residual_sd_c"]
 
 
 def test_residual_std_large_when_bias_shrunk_high_variance(fc_conn, world_conn):

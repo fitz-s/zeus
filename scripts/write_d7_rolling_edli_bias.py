@@ -62,6 +62,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.calibration.ens_bias_repo import _to_c, init_ens_bias_schema, write_bias_model
+from src.calibration.ens_error_model import (
+    full_predictive_residual_sd,
+    predictive_heterogeneity_var,
+)
 from src.calibration.manager import season_from_date
 
 # Keep these IDENTICAL to write_promoted_edli_bias.py so the live read key matches.
@@ -271,6 +275,15 @@ def compute_city_bias(
     shrunk = _significance_shrink(raw, sd, len(residuals))
     se = (sd / (len(residuals) ** 0.5)) if residuals else 0.0
     t_stat = (raw / se) if se > 1e-12 else (float("inf") if raw != 0.0 else 0.0)
+    # FULL FORWARD PREDICTIVE σ (#89, 2026-06-03). residual_std_c (= sd) is the IN-SAMPLE daily
+    # residual spread; total_residual_std_c is the predictive σ for a future out-of-window day,
+    # inflating sd by the mean-estimation drift (var_resid/n). The live q_lcb inflater reads
+    # total_residual_sd_c so the deep-NO CI widens HONESTLY. This is the smallest defensible
+    # widening (in-window predictive term); the seasonal fit↔serve drift is NOT manufactured.
+    het_var = float(predictive_heterogeneity_var(residuals))
+    total_sd = float(full_predictive_residual_sd(residuals))
+    if total_sd < sd:  # degenerate guard: never narrower than the in-sample spread
+        total_sd = sd
     used_sorted = sorted(used_dates)
     return {
         "effective_bias_c": float(shrunk),
@@ -284,6 +297,10 @@ def compute_city_bias(
         # noisy city even when the bias MEAN was shrunk to ~0, which is exactly the
         # honesty signal q_lcb needs (the operator removed the canary cap).
         "residual_std_c": float(sd),
+        # Full forward predictive σ (degC) -> model_bias_ens.total_residual_sd_c, the value the
+        # live q_lcb inflater consumes. heterogeneity_var_c2 = var_resid/n (mean-drift term).
+        "total_residual_std_c": float(total_sd),
+        "heterogeneity_var_c2": float(het_var),
         "t_stat": float(t_stat) if t_stat != float("inf") else float("inf"),
         "n_window": len(residuals),
         "n_fallback_days": n_fallback_days,
@@ -321,6 +338,12 @@ def write_city_bias(
     # that predate the field. Written to model_bias_ens.residual_sd_c for the downstream
     # q_lcb representativeness-inflation reader.
     sd = float(bias.get("residual_std_c", bias["sd_c"]))
+    # Full forward predictive σ (#89): the value the live q_lcb inflater consumes. Falls back
+    # to the in-sample sd for legacy callers/bias dicts that predate the field.
+    total_sd = float(bias.get("total_residual_std_c", sd))
+    if total_sd < sd:
+        total_sd = sd
+    het_var = float(bias.get("heterogeneity_var_c2", 0.0))
     n = int(bias["n_window"])
     cov_end_month = int(str(bias["window_end"])[5:7])
     if months is None:
@@ -347,8 +370,9 @@ def write_city_bias(
             bias_c=eff,
             bias_sd_c=sd,
             residual_sd_c=sd,
+            heterogeneity_var_c2=het_var,
             effective_bias_c=eff,
-            total_residual_sd_c=sd,
+            total_residual_sd_c=total_sd,
             correction_strength=1.0,
             error_model_family=FAMILY,
             error_model_key=f"{city_name}|{season}|{mo}|{metric}|{METHOD}",
@@ -373,6 +397,10 @@ def write_city_bias(
                     # Representativeness sigma (= residual_sd_c column) — std of the
                     # trailing-window daily residuals, degC. Downstream q_lcb inflater.
                     "residual_std_c": sd,
+                    # Full forward predictive σ (= total_residual_sd_c column) and the
+                    # mean-drift heterogeneity term it folds in (#89, 2026-06-03).
+                    "total_residual_std_c": total_sd,
+                    "heterogeneity_var_c2": het_var,
                     "lead_band_hours": [LEAD_BAND_LO, LEAD_BAND_HI],
                     "n_fallback_days": int(bias.get("n_fallback_days", 0)),
                 }

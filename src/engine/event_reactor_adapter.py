@@ -4032,11 +4032,19 @@ def _edli_representativeness_sigma_native(
     of the forecast-vs-settlement residual the correction is trained on — so the caller can
     fold it into the MC resampling noise in QUADRATURE and widen q_lcb honestly.
 
-    Primary source: model_bias_ens.residual_sd_c (edli_per_city_v1, VERIFIED, same row keyed
-    identically to _maybe_apply_edli_bias_correction). residual_sd_c is degC; for F-settled
+    Primary source: model_bias_ens.total_residual_sd_c (edli_per_city_v1, VERIFIED, same row
+    keyed identically to _maybe_apply_edli_bias_correction). This is the FULL FORWARD PREDICTIVE
+    σ — the in-sample daily residual std inflated by the mean-estimation drift (σ_resid·sqrt(1+
+    1/n)) — NOT the in-sample-only residual_sd_c. #89 honest-q_lcb fix (2026-06-03): reading the
+    in-sample-only std under-stated the predictive uncertainty and produced the over-confident
+    deep-NO tail (claimed 0.93, realized 0.645). total_residual_sd_c is degC; for F-settled
     cities the member array is degF so the σ is scaled ×1.8 (degC delta → degF delta).
 
-    Fallback: if the row carries no residual_sd_c, compute the per-city residual std from the
+    Legacy/backward-compat: rows written before #89 carry total_residual_sd_c == residual_sd_c
+    (or NULL); the reader falls back to residual_sd_c so pre-fix rows keep today's behaviour
+    exactly (the widening only grows once the producer re-stamps the heterogeneity-inflated total).
+
+    Fallback: if the row carries no usable σ, compute the per-city residual std from the
     trailing-window settled residuals (mean over the last settled days of
     raw_ens_mean − settlement, in settlement unit). Robust either way.
 
@@ -4048,7 +4056,7 @@ def _edli_representativeness_sigma_native(
     _unit = getattr(city, "settlement_unit", "C")
     _scale = 1.8 if _unit == "F" else 1.0
 
-    # ---- Primary: the residual_sd_c stamped on the VERIFIED edli bias row ----
+    # ---- Primary: the FULL PREDICTIVE σ stamped on the VERIFIED edli bias row ----
     try:
         import contextlib
         from src.calibration.manager import season_from_date
@@ -4078,9 +4086,24 @@ def _edli_representativeness_sigma_native(
                 )
             if row is not None:
                 keys = set(row.keys())
+                # #89 honest q_lcb (2026-06-03): prefer the FULL FORWARD PREDICTIVE σ
+                # (total_residual_sd_c = σ_resid·sqrt(1+1/n)), which captures the mean-
+                # estimation drift the in-sample-only residual_sd_c drops. Fall back to
+                # residual_sd_c for legacy rows that predate the heterogeneity stamp, so
+                # pre-fix behaviour is preserved exactly. Both are degC; ×_scale → native.
+                total_c = row["total_residual_sd_c"] if "total_residual_sd_c" in keys else None
                 resid_c = row["residual_sd_c"] if "residual_sd_c" in keys else None
-                if resid_c is not None and float(resid_c) > 0.0 and np.isfinite(float(resid_c)):
-                    return float(resid_c) * _scale
+                chosen = None
+                if total_c is not None and float(total_c) > 0.0 and np.isfinite(float(total_c)):
+                    chosen = float(total_c)
+                elif resid_c is not None and float(resid_c) > 0.0 and np.isfinite(float(resid_c)):
+                    chosen = float(resid_c)
+                # Defensive: total must never be < in-sample residual (a predictive σ that is
+                # narrower than the in-sample scatter is not honest). Floor to residual_sd_c.
+                if chosen is not None:
+                    if resid_c is not None and float(resid_c) > 0.0 and np.isfinite(float(resid_c)):
+                        chosen = max(chosen, float(resid_c))
+                    return chosen * _scale
     except Exception as exc:
         try:
             import logging
