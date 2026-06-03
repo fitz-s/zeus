@@ -117,6 +117,31 @@ class ExitDecision:
     trigger: str = ""
 
 
+_CI_SEP_EPS: float = 1e-9
+
+
+def _ci_intervals_separated(
+    a: Optional[tuple], b: Optional[tuple]
+) -> Optional[bool]:
+    """True iff two confidence intervals are DISJOINT (no overlap) — the SD-7 CI-separation test.
+
+    Mirrors src.events.continuous_redecision._ci_separated (the severed screen_exit logic). The
+    CI bounds are the system's existing robust LCB/percentile (q_5pct-style) machinery, supplied by
+    the caller — NOT a new statistic. Returns None when either CI is unavailable or non-finite, so
+    the caller falls back to the flat reversal floor.
+    """
+    if a is None or b is None:
+        return None
+    try:
+        lo_a, hi_a = float(min(a)), float(max(a))
+        lo_b, hi_b = float(min(b)), float(max(b))
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (lo_a, hi_a, lo_b, hi_b)):
+        return None
+    return (hi_a < lo_b - _CI_SEP_EPS) or (hi_b < lo_a - _CI_SEP_EPS)
+
+
 @dataclass(frozen=True)
 class ExitContext:
     """Unified runtime authority surface for exit evaluation + execution.
@@ -152,6 +177,24 @@ class ExitContext:
     # bankroll: current bankroll used as the denominator for exposure %.
     portfolio_positions: tuple = ()
     bankroll: Optional[float] = None
+
+    # BUG#113 (守護 SD-7): CI-separation exit inputs, threaded from the cycle's ALREADY
+    # computed bootstrap CI machinery (monitor_refresh EdgeContext.confidence_band_*) and the
+    # entry-time held-side belief snapshot — NOT a new statistic and NOT a fresh DB read. The
+    # 2026-05-31 severance deadlocked because the belief read opened a SECOND world connection
+    # inside the reactor SAVEPOINT; threading the bounds through this frozen context means the
+    # live CI-separation gate performs ZERO DB I/O, so that deadlock category is impossible.
+    #   entry_posterior : held-side belief point at entry (Position.p_posterior, frozen).
+    #   entry_ci        : (lo, hi) entry belief CI (entry_posterior ± entry_ci_width/2).
+    #   current_ci      : (lo, hi) CURRENT belief CI (fresh bootstrap from this cycle).
+    #   belief_available: False when current belief math is degraded (day0 absorbing-mask /
+    #                     obs gap) — the EVIDENCE_UNAVAILABLE third state (distinct from
+    #                     belief-reversed). When any of these is None, the gate is inert and
+    #                     the legacy flat 2-confirm path runs unchanged (full back-compat).
+    entry_posterior: Optional[float] = None
+    entry_ci: Optional[tuple] = None
+    current_ci: Optional[tuple] = None
+    belief_available: bool = True
 
     @staticmethod
     def _is_finite(value: Optional[float]) -> bool:
@@ -828,6 +871,27 @@ class Position:
                 applied_validations=list(self.applied_validations),
             )
 
+        # BUG#113 (守護 SD-7) — EVIDENCE_UNAVAILABLE third state. When the current belief math is
+        # degraded (day0 absorbing-mask / obs gap), belief CANNOT be computed — distinct from
+        # belief-reversed. Do NOT exit on a price move and do NOT collapse into a blind hold; return
+        # a first-class hold flagged EVIDENCE_UNAVAILABLE for the 守護 heartbeat. Runs BEFORE the
+        # missing-authority check so a NaN fresh_prob caused by degraded belief is named correctly
+        # (not the generic INCOMPLETE_EXIT_CONTEXT). RED force-exit above still preempts this.
+        if (
+            not exit_context.belief_available
+            and exit_context.entry_posterior is not None
+        ):
+            applied.append("ci_separation_gate")
+            applied.append("evidence_unavailable_third_state")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "EVIDENCE_UNAVAILABLE",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="EVIDENCE_UNAVAILABLE",
+            )
+
         missing = exit_context.missing_authority_fields()
         model_probability_missing_only = (
             exit_context.day0_active
@@ -1049,6 +1113,46 @@ class Position:
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
                 trigger="VIG_EXTREME",
+            )
+
+        # BUG#113 (守護 SD-7) — CI-SEPARATION belief-reversal gate (the 120-min 守護 guarantee:
+        # "exit only when the belief CI has SEPARATED below entry, NEVER on a bare/large price
+        # move whose CI still overlaps entry"). This lifts the severed screen_exit logic onto the
+        # LIVE path. It performs ZERO DB I/O — the CI bounds arrive pre-computed via ExitContext
+        # (current_ci = this cycle's fresh bootstrap CI; entry_ci = entry-time snapshot) — so the
+        # 2026-05-31 "second world connection inside the SAVEPOINT" deadlock is structurally
+        # impossible here. When CI inputs are absent the gate is inert and the legacy flat
+        # 2-confirm path below runs unchanged.
+        separated = _ci_intervals_separated(exit_context.entry_ci, exit_context.current_ci)
+        if separated is not None and exit_context.entry_posterior is not None:
+            applied.append("ci_separation_gate")
+            current_held = float(exit_context.fresh_prob)
+            below = current_held < float(exit_context.entry_posterior) - _CI_SEP_EPS
+            if separated and below:
+                # Disjoint AND moved against the held side → genuine evidence reversal → EXIT.
+                self.neg_edge_count = 0
+                applied.append("ci_separated_reversal")
+                self.applied_validations = _dedupe_validations(applied)
+                return ExitDecision(
+                    True,
+                    f"CI_SEPARATED_REVERSAL (entry={float(exit_context.entry_posterior):.4f}, current={current_held:.4f})",
+                    selected_method=self.selected_method or self.entry_method,
+                    applied_validations=list(self.applied_validations),
+                    trigger="CI_SEPARATED_REVERSAL",
+                )
+            # CI present but NOT a separated-below reversal: the belief CI still overlaps entry
+            # (a noisy snapshot / large point move) → HOLD. Suppress the flat 2-confirm exit; a
+            # bare price move must NOT close the position. Reset the flat counter so a transient
+            # overlapping dip cannot accumulate toward a later flat exit.
+            self.neg_edge_count = 0
+            applied.append("ci_overlap_hold")
+            self.applied_validations = _dedupe_validations(applied)
+            return ExitDecision(
+                False,
+                "CI_OVERLAP_HOLD",
+                selected_method=self.selected_method or self.entry_method,
+                applied_validations=list(self.applied_validations),
+                trigger="CI_OVERLAP_HOLD",
             )
 
         # Direction-specific exit logic

@@ -2887,6 +2887,44 @@ def _build_exit_context(
             and _is_open_crowding_exposure(p)
         )
 
+    # BUG#113 (守護 SD-7): thread the CI-separation inputs into the exit context so the LIVE
+    # Position.evaluate_exit gate can fire WITHOUT any DB read (the 2026-05-31 deadlock was a
+    # belief read opening a 2nd world connection inside the reactor SAVEPOINT — here the bounds
+    # are already in hand). PROVENANCE: edge_ctx.confidence_band_{lower,upper} are EDGE-space CI
+    # (bootstrap of p_posterior − price; src/strategy/market_analysis._bootstrap_bin). Edge =
+    # belief − price with price a per-decision constant, so adding the held-side market price back
+    # shifts the band into BELIEF space — the same space as entry_posterior (pos.p_posterior) and
+    # entry_ci_width (an edge-CI WIDTH, which is shift-invariant ⇒ already a belief-CI width). All
+    # three are therefore consistent belief-space quantities. belief_available is False when the
+    # current bootstrap CI is non-finite (degraded day0/obs math) → EVIDENCE_UNAVAILABLE third
+    # state. Inert (None) unless we have both a finite current CI and the held-side price.
+    # belief_available stays TRUE here: a missing CI is NOT proof of degraded belief math — it is
+    # almost always a missing-authority case that the existing INCOMPLETE_EXIT_CONTEXT path must
+    # own. We populate entry_ci / current_ci ONLY when a finite current belief CI is in hand; when
+    # it is not, the CI-separation gate is simply inert and the legacy authority + flat path run
+    # unchanged. The EVIDENCE_UNAVAILABLE third state is reserved for callers that POSITIVELY know
+    # the belief math degraded (day0 absorbing-mask) and pass belief_available=False explicitly.
+    _entry_posterior = None
+    _entry_ci = None
+    _current_ci = None
+    _cb_lo = getattr(edge_ctx, "confidence_band_lower", None)
+    _cb_hi = getattr(edge_ctx, "confidence_band_upper", None)
+    _held_price = p_market
+    _fresh_post = getattr(edge_ctx, "p_posterior", None)
+    if (
+        pos.p_posterior is not None
+        and _fresh_post is not None and math.isfinite(float(_fresh_post))
+        and _cb_lo is not None and _cb_hi is not None and _held_price is not None
+        and math.isfinite(float(_cb_lo)) and math.isfinite(float(_cb_hi))
+        and math.isfinite(float(_held_price))
+    ):
+        # Both entry and a finite CURRENT belief CI are available → arm the CI-separation gate.
+        _entry_posterior = float(pos.p_posterior)
+        _ci_half = max(0.0, float(getattr(pos, "entry_ci_width", 0.0) or 0.0)) / 2.0
+        _entry_ci = (_entry_posterior - _ci_half, _entry_posterior + _ci_half)
+        # Shift edge-space band → belief space by adding the held-side price back.
+        _current_ci = (float(_cb_lo) + float(_held_price), float(_cb_hi) + float(_held_price))
+
     return ExitContext(
         fresh_prob=float(edge_ctx.p_posterior) if getattr(edge_ctx, "p_posterior", None) is not None else None,
         fresh_prob_is_fresh=bool(getattr(pos, "last_monitor_prob_is_fresh", False)),
@@ -2904,6 +2942,9 @@ def _build_exit_context(
         market_velocity_1h=float(getattr(edge_ctx, "market_velocity_1h", 0.0) or 0.0),
         portfolio_positions=portfolio_positions,
         bankroll=bankroll,
+        entry_posterior=_entry_posterior,
+        entry_ci=_entry_ci,
+        current_ci=_current_ci,
     )
 
 
