@@ -14,6 +14,8 @@ scheduler health must mark market_discovery FAILED — not healthy.
 RED baseline confirmed on pre-fix code (persistence failure was invisible to
 scheduler health); GREEN after P2-2 fix.
 """
+import threading
+
 import pytest
 
 
@@ -49,6 +51,72 @@ class FakeConn:
 
 def _fake_refresh(*_args, **_kwargs):
     return {"attempted": 1, "inserted": 1, "skipped": 0, "failed": 0, "truncated": 0}
+
+
+def test_persistence_result_is_thread_isolated():
+    """Thread isolation: each thread's find_weather_markets() persist result is private.
+
+    Thread A writes status="failed"; thread B writes status="ok" (concurrently or interleaved).
+    Each thread's get_last_market_events_persistence_result() must return ITS OWN result.
+
+    Against the old process-global both threads would see whichever wrote last; against the
+    thread-local fix each thread sees only its own write.
+    """
+    import src.data.market_scanner as ms
+    from src.data.market_scanner import (
+        MarketEventsPersistenceResult,
+        _PERSISTENCE_RESULT_LOCAL,
+        get_last_market_events_persistence_result,
+    )
+
+    barrier = threading.Barrier(2)
+
+    thread_a_result: list = []
+    thread_b_result: list = []
+
+    def thread_a():
+        # Simulate: _parse_and_persist_weather_events wrote a "failed" outcome for this thread.
+        _PERSISTENCE_RESULT_LOCAL.result = MarketEventsPersistenceResult(
+            status="failed",
+            inserted=0,
+            event_count=1,
+            error="db locked",
+        )
+        barrier.wait()  # ensure thread B also writes before either reads
+        thread_a_result.append(get_last_market_events_persistence_result())
+
+    def thread_b():
+        # Simulate: a concurrent find_weather_markets() in the market-channel thread succeeded.
+        _PERSISTENCE_RESULT_LOCAL.result = MarketEventsPersistenceResult(
+            status="ok",
+            inserted=2,
+            event_count=2,
+            error=None,
+        )
+        barrier.wait()
+        thread_b_result.append(get_last_market_events_persistence_result())
+
+    ta = threading.Thread(target=thread_a)
+    tb = threading.Thread(target=thread_b)
+    ta.start()
+    tb.start()
+    ta.join(timeout=5)
+    tb.join(timeout=5)
+
+    assert thread_a_result, "thread A never completed"
+    assert thread_b_result, "thread B never completed"
+
+    a_status = thread_a_result[0].status if thread_a_result[0] is not None else None
+    b_status = thread_b_result[0].status if thread_b_result[0] is not None else None
+
+    assert a_status == "failed", (
+        f"Thread A expected 'failed' but got {a_status!r}. "
+        "If both threads see the same status, the slot is still process-global (not thread-local)."
+    )
+    assert b_status == "ok", (
+        f"Thread B expected 'ok' but got {b_status!r}. "
+        "If both threads see the same status, the slot is still process-global (not thread-local)."
+    )
 
 
 def test_trading_daemon_surfaces_persistence_failure(monkeypatch):

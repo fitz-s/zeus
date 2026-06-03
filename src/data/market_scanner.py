@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 import time
 import hashlib
 import uuid
@@ -217,7 +218,12 @@ _ACTIVE_EVENTS_CACHE: list[dict] | None = None
 _ACTIVE_EVENTS_CACHE_AT: float = 0.0  # monotonic timestamp of last fetch
 _ACTIVE_EVENTS_CACHE_AT_UTC: datetime | None = None  # wall-clock of last successful fetch
 _ACTIVE_EVENTS_LAST_STATUS: ScanAuthority = "NEVER_FETCHED"  # B017 provenance flag
-_LAST_MARKET_EVENTS_PERSISTENCE_RESULT: MarketEventsPersistenceResult | None = None
+_PERSISTENCE_RESULT_LOCAL: threading.local = threading.local()
+# Thread-local slot: each thread's find_weather_markets() → persist writes to its own slot.
+# _market_discovery_cycle (trading daemon) and ingest_market_scan (ingest daemon) each call
+# find_weather_markets() then immediately read the accessor in the SAME thread, so thread-local
+# preserves the same-thread write→read contract while eliminating cross-thread clobber between
+# the discovery scheduler thread and the EDLI market-channel thread (both call find_weather_markets).
 _ACTIVE_EVENTS_TTL: float = 300.0  # 5-minute TTL
 
 # Per-tick CLOB /markets/{cid} archived cross-check cache.
@@ -783,9 +789,12 @@ def _persist_market_events_to_db(
 
 
 def get_last_market_events_persistence_result() -> MarketEventsPersistenceResult | None:
-    """Return the last market_events persistence outcome for scheduler health."""
+    """Return the calling thread's last market_events persistence outcome for scheduler health.
 
-    return _LAST_MARKET_EVENTS_PERSISTENCE_RESULT
+    Thread-local: each thread (discovery scheduler, market-channel refresh) holds its own
+    result so concurrent find_weather_markets() calls cannot clobber each other's observability.
+    """
+    return getattr(_PERSISTENCE_RESULT_LOCAL, "result", None)
 
 
 def _dedupe_condition_ids(values) -> list[str]:
@@ -906,8 +915,7 @@ def _parse_and_persist_weather_events(
             results.append(parsed)
 
     logger.info("Found %d active weather markets", len(results))
-    global _LAST_MARKET_EVENTS_PERSISTENCE_RESULT
-    _LAST_MARKET_EVENTS_PERSISTENCE_RESULT = _persist_market_events_to_db(results)
+    _PERSISTENCE_RESULT_LOCAL.result = _persist_market_events_to_db(results)
     return results
 
 
