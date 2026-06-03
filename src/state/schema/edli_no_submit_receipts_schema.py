@@ -60,6 +60,15 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "risk_decision_id", "TEXT")
     _ensure_column(conn, "projection_hash", "TEXT")
     _backfill_projection_hash(conn)
+    # Mainstream-agreement gate columns (#135, 2026-06-03).
+    # Added via _ensure_column so existing DBs are migrated without data loss.
+    _ensure_column(conn, "mainstream_agreement_pass", "INTEGER")
+    _ensure_column(conn, "mainstream_agreement_fail_reason", "TEXT")
+    _ensure_column(conn, "mainstream_point", "REAL")
+    _ensure_column(conn, "mainstream_delta", "REAL")
+    _ensure_column(conn, "mainstream_bin_label", "TEXT")
+    _ensure_column(conn, "mainstream_source", "TEXT")
+    _ensure_column(conn, "mainstream_fetched_at_utc", "TEXT")
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
 

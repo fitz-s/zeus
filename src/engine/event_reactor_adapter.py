@@ -91,6 +91,9 @@ class _CandidateProof:
     p_cal_vector_hash: str
     p_live_vector_hash: str
     missing_reason: str | None = None
+    # Mainstream-agreement gate verdict (Task #135). None = gate not evaluated
+    # (flag OFF or evaluation failed). When populated, `.passed` controls arm-eligibility.
+    mainstream_agreement: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -965,6 +968,21 @@ def build_event_bound_no_submit_receipt(
             "family_complete": True,
         }
     )
+    # Mainstream-agreement gate fields (#135). Added when the verdict is available on the
+    # selected proof; absent otherwise (gate OFF or evaluation error — receipt stays clean).
+    if proof.mainstream_agreement is not None:
+        _mav = proof.mainstream_agreement
+        raw_receipt.update(
+            {
+                "mainstream_agreement_pass": _mav.get("mainstream_agreement_pass"),
+                "mainstream_agreement_fail_reason": _mav.get("mainstream_agreement_fail_reason"),
+                "mainstream_point": _mav.get("mainstream_point"),
+                "mainstream_delta": _mav.get("forecast_delta"),
+                "mainstream_bin_label": _mav.get("mainstream_bin_label"),
+                "mainstream_source": _mav.get("mainstream_source"),
+                "mainstream_fetched_at_utc": _mav.get("mainstream_fetched_at_utc"),
+            }
+        )
     proof_bundle = _build_no_submit_proof_bundle_from_adapter_evidence(
         event=event,
         payload=payload,
@@ -1053,6 +1071,13 @@ def _event_submission_receipt_from_typed_receipt_payload(
         reason=str(raw_receipt.get("reason") or "event_bound_final_intent_no_submit"),
         proof_accepted=bool(raw_receipt.get("proof_accepted")),
         decision_proof_bundle=decision_proof_bundle,
+        mainstream_agreement_pass=_optional_bool(raw_receipt.get("mainstream_agreement_pass")),
+        mainstream_agreement_fail_reason=raw_receipt.get("mainstream_agreement_fail_reason"),
+        mainstream_point=_optional_float(raw_receipt.get("mainstream_point")),
+        mainstream_delta=_optional_float(raw_receipt.get("mainstream_delta")),
+        mainstream_bin_label=raw_receipt.get("mainstream_bin_label"),
+        mainstream_source=raw_receipt.get("mainstream_source"),
+        mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
     )
 
 
@@ -2964,12 +2989,19 @@ def _generate_candidate_proofs(
                     p_cal_vector_hash=str(probability_evidence["p_cal_vector_hash"]),
                     p_live_vector_hash=str(probability_evidence["p_live_vector_hash"]),
                     missing_reason=missing_reason,
+                    mainstream_agreement=_payload(event).get(
+                        "_mainstream_agreement_verdicts", {}
+                    ).get((condition_id, direction)),
                 )
             )
     return tuple(proofs)
 
 
 def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_CandidateProof, ...]) -> _CandidateProof | None:
+    from src.config import settings
+
+    gate_enabled = bool(settings["edli_v1"].get("mainstream_agreement_gate_enabled", False))
+
     requested_token = _nonnull(payload.get("token_id"))
     requested_condition = _nonnull(payload.get("condition_id"))
     if requested_token:
@@ -2980,9 +3012,25 @@ def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_Candida
                 continue
             return proof
         return None
-    executable = [proof for proof in proofs if proof.execution_price is not None]
+    # When the mainstream-agreement gate is enabled, exclude any proof whose gate verdict
+    # explicitly failed (i.e. the gate ran AND passed=False). Proofs where the verdict is
+    # absent (gate flag off or evaluation error) are treated as eligible — fail-open for
+    # the selector, since the gate-evaluation wrapper already logged the error.
+    def _gate_eligible(proof: _CandidateProof) -> bool:
+        if not gate_enabled:
+            return True
+        v = proof.mainstream_agreement
+        if v is None:
+            return True  # gate not evaluated — admit (fail-open in selector)
+        return bool(v.get("mainstream_agreement_pass", True))
+
+    eligible = [proof for proof in proofs if _gate_eligible(proof)]
+    if not eligible:
+        # All proofs failed the gate — return None so the receipt is a clean no_submit.
+        return None
+    executable = [proof for proof in eligible if proof.execution_price is not None]
     if not executable:
-        return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
+        return max(eligible, key=lambda proof: proof.q_lcb_5pct, default=None)
     return max(executable, key=lambda proof: (proof.trade_score, proof.q_lcb_5pct))
 
 
@@ -3251,6 +3299,28 @@ def _canonical_probability_and_fdr_proof(
         except Exception:
             pass
 
+    # MAINSTREAM AGREEMENT GATE (#135, 2026-06-03): evaluate per-candidate direction-agreement
+    # against an independent mainstream forecast point (Open-Meteo standard /v1/forecast).
+    # Flag-gated (edli_v1.mainstream_agreement_gate_enabled, default OFF).
+    # FAIL-OPEN/SILENT: any evaluation error must not affect the live q_by_condition decision.
+    # Verdicts stored in payload for receipt annotation + arm-ranking filter in
+    # _selected_candidate_proof. Key: (condition_id, direction) → verdict dict.
+    try:
+        if bool(settings["edli_v1"].get("mainstream_agreement_gate_enabled", False)):
+            _evaluate_and_store_mainstream_agreement(
+                event=event,
+                family=family,
+                analysis=analysis,
+                payload=_payload(event),
+            )
+    except Exception as _gate_exc:
+        try:
+            logging.getLogger("zeus.mainstream_gate").warning(
+                "mainstream-agreement gate evaluation failed (non-fatal): %s", _gate_exc
+            )
+        except Exception:
+            pass
+
     return q_by_condition, lcb_by_direction, p_values, prefilter, probability_evidence
 
 
@@ -3466,6 +3536,81 @@ def _market_analysis_from_event_snapshot(
         bootstrap_probability_sampler=sampler,
         bootstrap_signal_type="edli_event_bound_day0" if family.event_type == "DAY0_EXTREME_UPDATED" else "edli_event_bound_forecast",
     )
+
+
+def _evaluate_and_store_mainstream_agreement(
+    *,
+    event: OpportunityEvent,
+    family,
+    analysis,  # MarketAnalysis — carries member_maxes (corrected) + bins + unit + precision
+    payload: dict,
+) -> None:
+    """Evaluate the 4-check mainstream-agreement gate per candidate and store verdicts.
+
+    Verdicts are stored as payload["_mainstream_agreement_verdicts"] dict keyed by
+    (condition_id, direction) → MainstreamAgreementVerdict.to_dict(). The payload is
+    event-scoped so verdicts survive only for this event's receipt build.
+
+    Fail-closed is enforced by the gate module itself (mainstream_point=None → FAIL_CLOSED).
+    This function never raises — if something goes wrong the payload key is absent and
+    the receipt simply omits mainstream_agreement_* fields.
+    """
+    from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
+    from src.data.mainstream_forecast_source import fetch_mainstream_point
+
+    _msc = getattr(_evaluate_and_store_mainstream_agreement, "_cache", None)
+    if _msc is None:
+        _msc = {}
+        _evaluate_and_store_mainstream_agreement._cache = _msc  # type: ignore[attr-defined]
+
+    members = list(float(m) for m in analysis.member_maxes) if analysis.member_maxes is not None else None
+    our_point = float(analysis.member_maxes.mean()) if members else None
+    bins = list(analysis.bins)
+    unit = str(analysis.unit or "C")
+    precision = float(getattr(analysis, "precision", 1.0) or 1.0)
+
+    mainstream_snap = fetch_mainstream_point(
+        family.city,
+        family.target_date,
+        _cache=_msc,
+    )
+    mainstream_pt = float(mainstream_snap["point"]) if mainstream_snap is not None else None
+
+    verdicts: dict[tuple[str, str], dict] = {}
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        for direction in ("buy_yes", "buy_no"):
+            try:
+                verdict = evaluate_mainstream_agreement(
+                    city=family.city,
+                    target_date=family.target_date,
+                    unit=unit,
+                    our_point=our_point if our_point is not None else 0.0,
+                    bins=bins,
+                    traded_bin=candidate.bin,
+                    direction=direction,
+                    members=members,
+                    mainstream_point=mainstream_pt,
+                    precision=precision,
+                )
+                verdicts[(condition_id, direction)] = verdict.to_dict()
+                verdicts[(condition_id, direction)]["mainstream_authority_tier"] = (
+                    mainstream_snap.get("authority_tier") if mainstream_snap else None
+                )
+                verdicts[(condition_id, direction)]["mainstream_source"] = (
+                    mainstream_snap.get("source") if mainstream_snap else None
+                )
+                verdicts[(condition_id, direction)]["mainstream_fetched_at_utc"] = (
+                    mainstream_snap.get("fetched_at_utc") if mainstream_snap else None
+                )
+            except Exception as _v_exc:
+                logging.getLogger("zeus.mainstream_gate").debug(
+                    "verdict evaluation failed for %s %s %s: %s",
+                    family.city, condition_id, direction, _v_exc,
+                )
+
+    if verdicts:
+        payload["_mainstream_agreement_verdicts"] = verdicts
 
 
 def _snapshot_members(snapshot: dict[str, Any]) -> np.ndarray:

@@ -91,6 +91,15 @@ class EventSubmissionReceipt:
     reason: str = ""
     proof_accepted: bool | None = None
     decision_proof_bundle: Any | None = field(default=None, repr=False, compare=False)
+    # Mainstream-agreement gate fields (#135, 2026-06-03).
+    # None = gate not evaluated (flag OFF or evaluation error).
+    mainstream_agreement_pass: bool | None = None
+    mainstream_agreement_fail_reason: str | None = None
+    mainstream_point: float | None = None
+    mainstream_delta: float | None = None
+    mainstream_bin_label: str | None = None
+    mainstream_source: str | None = None
+    mainstream_fetched_at_utc: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
