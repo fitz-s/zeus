@@ -1,4 +1,5 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Lifecycle: created=2026-04-30; last_reviewed=2026-05-16; last_reused=2026-06-02
+# Last reused or audited: 2026-06-02 — commit boundary moved to per-event (lock-storm antibody; data-ingest bootout 2026-05-27)
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5; docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 """Ingest-side settlement truth writer (Phase 1.5 harvester split).
 
@@ -810,6 +811,19 @@ def write_settlement_truth_for_open_markets(
                 temperature_metric=temperature_metric,
                 pm_bin_unit=winning_bin_unit,
             )
+            # Commit per-event: release the forecasts WAL write lock between events.
+            # Holding the lock across the full batch caused a "database is locked"
+            # flood contending with forecast-live daemon during startup catch-up
+            # (data-ingest bootout 2026-05-27, lock-storm antibody #81-class).
+            try:
+                forecasts_conn.commit()
+            except Exception as commit_exc:
+                logger.error(
+                    "harvester_truth_writer: per-event commit failed for %s %s: %s",
+                    city.name, target_date, commit_exc,
+                )
+                errors += 1
+                continue
             settlements_written += 1
 
         except Exception as exc:
@@ -820,10 +834,11 @@ def write_settlement_truth_for_open_markets(
             errors += 1
 
     if not dry_run:
+        # Final flush/no-op safety: harmless if nothing pending.
         try:
             forecasts_conn.commit()
         except Exception as exc:
-            logger.error("harvester_truth_writer: commit failed: %s", exc)
+            logger.error("harvester_truth_writer: final commit flush failed: %s", exc)
             errors += 1
 
     return {
