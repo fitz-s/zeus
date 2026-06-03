@@ -4432,15 +4432,26 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
 
     table = _edli_events_table(conn)
     try:
-        candidate_rows = conn.execute(
-            f"""
+        if table == "world.edli_live_order_events":
+            sql = """
             SELECT DISTINCT aggregate_id
-            FROM {table}
+            FROM world.edli_live_order_events
             WHERE event_type = 'UserTradeObserved'
               AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
             ORDER BY aggregate_id ASC
             """
-        ).fetchall()
+        elif table == "edli_live_order_events":
+            sql = """
+            SELECT DISTINCT aggregate_id
+            FROM edli_live_order_events
+            WHERE event_type = 'UserTradeObserved'
+              AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+            ORDER BY aggregate_id ASC
+            """
+        else:
+            raise ValueError(f"unexpected EDLI events table: {table!r}")
+
+        candidate_rows = conn.execute(sql).fetchall()
     except Exception as exc:  # noqa: BLE001
         # Missing table / attach (e.g. a degraded boot) must not crash the
         # caller — the EDLI events persist and the next cycle retries.
@@ -4453,11 +4464,8 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
         return 0
 
     bridged = 0
-    scanned = 0
+    orphaned_seen = 0
     for row in candidate_rows:
-        if scanned >= max(0, limit):
-            break
-        scanned += 1
         aggregate_id = str(_row_get(row, "aggregate_id"))
         position_id = edli_bridge_position_id(aggregate_id)
         existing = conn.execute(
@@ -4467,6 +4475,9 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
         if existing is not None:
             # Already bridged — idempotent skip (no redundant canonical write).
             continue
+        if orphaned_seen >= max(0, limit):
+            break
+        orphaned_seen += 1
         try:
             result = materialize_position_current_from_edli_fill(
                 conn, aggregate_id, now=now
