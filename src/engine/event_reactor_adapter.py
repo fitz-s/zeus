@@ -3729,7 +3729,7 @@ def _market_analysis_from_event_snapshot(
             _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
                             else "JJA" if _emos_m in (6, 7, 8) else "SON")
             _emos_q = _build_emos_q(
-                city=city.name, season=_emos_season,
+                city=city.name, season=_emos_season, metric=family.metric,
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
             )
@@ -3942,6 +3942,7 @@ def _evaluate_and_store_mainstream_agreement(
     mainstream_snap = fetch_mainstream_point(
         family.city,
         family.target_date,
+        metric=family.metric,  # METRIC-MATCHED (#metric-crossing fix): LOW->daily min, HIGH->daily max.
         _cache=_msc,
     )
     mainstream_pt = float(mainstream_snap["point"]) if mainstream_snap is not None else None
