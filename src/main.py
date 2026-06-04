@@ -2701,7 +2701,12 @@ def _refresh_pending_family_snapshots(
     # ORDER BY priority DESC, available_at ASC), so the highest-priority families are
     # captured first; the remainder are picked up on subsequent cycles. The reactor's
     # own proof_limit still bounds decisions; this bounds the venue-I/O per cycle.
-    _FAMILY_REFRESH_CAP = 8
+    # Universe-collapse fix (2026-06-04): the fairness round-robin emits a rotating window of
+    # ~`forecast_snapshot_emit_limit` (50) families/cycle; this cap must keep pace or the
+    # emitted A-L families never get their just-in-time snapshot refresh -> stay incomplete ->
+    # no candidate (the cap was 8 while the universe is ~108 (city,metric) families -> a
+    # second starvation downstream of the emit one). Match it to the emit limit.
+    _FAMILY_REFRESH_CAP = 50
     if len(families) > _FAMILY_REFRESH_CAP:
         families = families[:_FAMILY_REFRESH_CAP]
 
@@ -3938,11 +3943,29 @@ def _edli_event_reactor_cycle() -> None:
                 # candidates already queued from prior cycles. Catch ONLY the transient lock
                 # (narrow, by message) and continue; real schema/logic faults still propagate.
                 try:
+                    # COVERAGE-FAIRNESS (universe-collapse fix 2026-06-04): the emit is
+                    # ORDER BY ... snapshot_id DESC LIMIT N. Under one batch write all families
+                    # share computed_at, so snapshot_id-DESC deterministically emits only the
+                    # alphabetic TAIL (M-W) every cycle and starves A-L forever. The fairness
+                    # round-robin rotates the window by cycle_index, parsed from a monotonic
+                    # `cycle-N` source — so it must be FED that source here (the plain emit
+                    # previously passed none -> cycle_index frozen at 0 -> A-L permanently dark).
+                    # Bounded by `limit` per cycle; covers all 108 (city,metric) families in
+                    # ceil(108/limit) cycles. Gated by edli_v1.coverage_fairness_emit_enabled.
+                    # source ONLY when fairness is ON: a per-cycle `cycle-N` source advances the
+                    # round-robin window AND makes the emit re-emit each cycle. Flag-OFF -> None ->
+                    # the original one-shot catch-up (byte-identical to pre-fix behavior).
+                    _fair_source = (
+                        _edli_next_redecision_source()
+                        if bool(edli_cfg.get("coverage_fairness_emit_enabled", False))
+                        else None
+                    )
                     _edli_emit_forecast_snapshot_events(
                         conn,
                         decision_time=now,
                         received_at=received_at,
                         limit=forecast_emit_limit,
+                        source=_fair_source,
                     )
                 except sqlite3.OperationalError as _emit_lock_exc:
                     if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
