@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -33,6 +34,116 @@ def _intake_phase_filter_enabled() -> bool:
         return bool(settings["edli_v1"].get("edli_intake_phase_filter_enabled", False))
     except Exception:  # noqa: BLE001 — config glitch must never zero the FSR stream
         return False
+
+
+def _coverage_fairness_emit_enabled() -> bool:
+    """Read edli_v1.coverage_fairness_emit_enabled (default OFF — shadow-safe).
+
+    Phase-2 B4. FAIL-OPEN on any config error → False (legacy ORDER BY).
+    When OFF, scan_committed_snapshots uses the legacy
+    ``ORDER BY LIVE_ELIGIBLE, computed_at DESC, snapshot_id DESC LIMIT ?``
+    exactly as before this commit — byte-identical behaviour.
+    When ON, selection is keyed by a CoverageFairnessRequest that deduplicates
+    to ≤1 row per (city, target_date, metric) per cycle and round-robins so no
+    city is starved beyond ceil(N/LIMIT) cycles.
+    """
+    try:
+        from src.config import settings
+
+        return bool(settings["edli_v1"].get("coverage_fairness_emit_enabled", False))
+    except Exception:  # noqa: BLE001 — config glitch must never dark all cities
+        return False
+
+
+@dataclass(frozen=True)
+class CoverageFairnessRequest:
+    """Contract object that owns per-cycle city-fair emit selection.
+
+    The contract encapsulates the city-dedup round-robin logic so that the
+    SQL query ORDER BY and the Python selection layer cannot diverge: any
+    caller that wants fair coverage must pass a CoverageFairnessRequest;
+    callers that need legacy ORDER BY must NOT construct one.  This makes
+    snapshot_id-ordering bias unconstructable at the call boundary when
+    fairness is required — you cannot accidentally get unfair selection
+    without explicitly constructing the legacy path.
+
+    Algorithm:
+      1. From the full candidate list (already filtered by the SQL WHERE
+         clause, no LIMIT applied), deduplicate to the BEST row per
+         (city, target_date, metric): best = LIVE_ELIGIBLE > BLOCKED, then
+         lowest snapshot_id (stable tie-break).
+      2. Assign each unique key to a round-robin slot based on insertion
+         order (deterministic: the SQL result order feeds this, but since we
+         deduplicate first, snapshot_id bias in the SQL no longer starves
+         cities — each city gets exactly one slot).
+      3. Return the ``limit`` keys whose slot index falls in
+         [cycle_index * limit, (cycle_index + 1) * limit).
+
+    ``cycle_index`` is derived from the ``source`` string passed to
+    ``scan_committed_snapshots``: when ``source`` matches ``cycle-N``, N is
+    used; otherwise 0 (first-cycle behaviour, same as legacy).
+    """
+
+    limit: int
+    cycle_index: int = 0
+
+    def select_rows(
+        self, candidate_rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return up to ``limit`` rows for this cycle, one per city-family key.
+
+        A city-family key is (city, target_date, metric).  Among multiple rows
+        for the same key, the LIVE_ELIGIBLE row wins; ties broken by snapshot_id
+        ascending (lowest = most stable / oldest).
+        """
+        # Step 1: dedup to best row per city-family key.
+        best: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in candidate_rows:
+            city = str(row.get("snapshot_city") or row.get("city") or "")
+            target_date = str(row.get("snapshot_target_date") or row.get("target_local_date") or "")
+            metric = str(row.get("snapshot_temperature_metric") or row.get("temperature_metric") or "")
+            key = (city, target_date, metric)
+            existing = best.get(key)
+            if existing is None:
+                best[key] = row
+                continue
+            # LIVE_ELIGIBLE beats any other readiness.
+            new_ready = str(row.get("readiness_status") or "")
+            old_ready = str(existing.get("readiness_status") or "")
+            if new_ready == "LIVE_ELIGIBLE" and old_ready != "LIVE_ELIGIBLE":
+                best[key] = row
+                continue
+            if old_ready == "LIVE_ELIGIBLE" and new_ready != "LIVE_ELIGIBLE":
+                continue
+            # Both same readiness: lower snapshot_id wins (stable tie-break).
+            try:
+                new_sid = int(row.get("snapshot_id") or 0)
+                old_sid = int(existing.get("snapshot_id") or 0)
+            except (ValueError, TypeError):
+                new_sid = old_sid = 0
+            if new_sid < old_sid:
+                best[key] = row
+
+        # Step 2: stable ordering of unique keys (insertion order of first seen).
+        # The SQL result feeds this; LIVE_ELIGIBLE rows naturally surface first
+        # (the existing ORDER BY still runs — we just don't cap it at LIMIT).
+        ordered_keys: list[tuple[str, str, str]] = []
+        seen_keys: set[tuple[str, str, str]] = set()
+        for row in candidate_rows:
+            city = str(row.get("snapshot_city") or row.get("city") or "")
+            target_date = str(row.get("snapshot_target_date") or row.get("target_local_date") or "")
+            metric = str(row.get("snapshot_temperature_metric") or row.get("temperature_metric") or "")
+            key = (city, target_date, metric)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                ordered_keys.append(key)
+
+        # Step 3: round-robin window.
+        start = self.cycle_index * self.limit
+        end = start + self.limit
+        window_keys = ordered_keys[start:end]
+
+        return [best[k] for k in window_keys if k in best]
 
 LiveEligibilityReader = Callable[[dict[str, Any], dict[str, Any], dict[str, Any], datetime], bool]
 
@@ -308,9 +419,22 @@ class ForecastSnapshotReadyTrigger:
                 " AND m.target_date = c.target_local_date"
                 " AND m.temperature_metric = c.temperature_metric))"
             )
-        rows = _dict_rows(
-            forecasts_conn,
-            f"""
+        # B4 coverage-fairness contract (Phase-2, shadow-gated).
+        # When flag ON: fetch ALL candidates (no SQL LIMIT) then apply
+        # CoverageFairnessRequest.select_rows() which deduplicates to ≤1 row per
+        # (city, target_date, metric) per cycle and round-robins so no city is
+        # starved beyond ceil(N/LIMIT) cycles.
+        # When flag OFF: use the legacy LIMIT ? in SQL — byte-identical behaviour.
+        _fairness_on = _coverage_fairness_emit_enabled()
+        _cycle_index = 0
+        if _fairness_on and source is not None:
+            # Derive cycle index from source string "cycle-N" (continuous re-decision).
+            try:
+                _cycle_index = int(source.split("-")[-1])
+            except (ValueError, IndexError):
+                _cycle_index = 0
+
+        _select_sql_base = f"""
             SELECT
                 c.*,
                 sr.source_cycle_time AS sr_source_cycle_time,
@@ -347,15 +471,34 @@ class ForecastSnapshotReadyTrigger:
             ORDER BY
                 CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
                 c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
-            LIMIT ?
-            """,
-            (
-                decision_time.astimezone(UTC).isoformat(),
-                decision_time.astimezone(UTC).isoformat(),
-                decision_time.astimezone(UTC).isoformat(),
-                limit,
-            ),
-        )
+        """
+        _decision_iso = decision_time.astimezone(UTC).isoformat()
+        if _fairness_on:
+            # Fetch all candidates (no LIMIT); fairness contract applies LIMIT per cycle.
+            rows = _dict_rows(
+                forecasts_conn,
+                _select_sql_base,
+                (
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                ),
+            )
+            rows = CoverageFairnessRequest(
+                limit=limit, cycle_index=_cycle_index
+            ).select_rows(rows)
+        else:
+            # Legacy path: SQL LIMIT keeps behaviour byte-identical to pre-B4.
+            rows = _dict_rows(
+                forecasts_conn,
+                _select_sql_base + "\n            LIMIT ?",
+                (
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                    limit,
+                ),
+            )
         # WAVE-1 W1-T1 intake phase filter (gated by
         # edli_v1.edli_intake_phase_filter_enabled, default OFF). When ON, a
         # forecast_only family whose target local day has begun or whose market

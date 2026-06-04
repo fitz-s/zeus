@@ -34,6 +34,7 @@ from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_
 from src.strategy.fdr_filter import fdr_filter
 import src.strategy.market_analysis as market_analysis_module
 from src.strategy.market_analysis import MarketAnalysis
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.strategy.risk_limits import RiskLimits
 from src.strategy.selection_family import apply_familywise_fdr, benjamini_hochberg_mask, make_edge_family_id
 from src.types import Bin, BinEdge
@@ -557,7 +558,7 @@ class TestSelectionFamilySubstrate:
             Bin(low=68, high=69, unit="F", label="68-69°F"),
             Bin(low=70, high=None, unit="F", label="70°F or higher"),
         ]
-        analysis = MarketAnalysis(
+        analysis = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.20, 0.50, 0.30]),
             p_cal=np.array([0.20, 0.50, 0.30]),
             p_market=np.array([0.90, 0.05, 0.05]),
@@ -587,7 +588,7 @@ class TestSelectionFamilySubstrate:
             Bin(low=68, high=69, unit="F", label="68-69°F"),
             Bin(low=70, high=None, unit="F", label="70°F or higher"),
         ]
-        analysis = MarketAnalysis(
+        analysis = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.20, 0.50, 0.30]),
             p_cal=np.array([0.20, 0.50, 0.30]),
             p_market=np.array([0.90, 0.05, 0.05]),
@@ -623,7 +624,7 @@ class TestSelectionFamilySubstrate:
             Bin(low=68, high=69, unit="F", label="68-69°F"),
             Bin(low=70, high=None, unit="F", label="70°F or higher"),
         ]
-        analysis = MarketAnalysis(
+        analysis = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.20, 0.50, 0.30]),
             p_cal=np.array([0.20, 0.50, 0.30]),
             p_market=np.array([0.90, 0.05, 0.05]),

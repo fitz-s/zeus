@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from src.strategy.market_analysis import MarketAnalysis
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 from src.calibration.platt import ExtendedPlattCalibrator, RAW_PROBABILITY_SPACE
 from src.types import Bin
@@ -80,7 +81,7 @@ def _eleven_bin_high_qno_analysis(cal: ExtendedPlattCalibrator) -> tuple[MarketA
     p_market[int(np.argmax(p_raw))] = 0.90
     p_market_no = np.full(nb, 0.95)
 
-    ma = MarketAnalysis(
+    ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
         p_raw=p_raw / p_raw.sum(),
         p_cal=p_cal,
         p_market=p_market,

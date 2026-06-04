@@ -28,6 +28,7 @@ import pytest
 
 from src.types.market import BinEdge, Bin
 from src.contracts.execution_price import ExecutionPrice
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 
 # Allowed price_type values at the BinEdge.entry_price level
 # (post-Wave-2; Wave 3 may add "depth_walked").
@@ -111,7 +112,7 @@ def test_r2_production_find_edges_stamps_vwmp_provenance() -> None:
     member_maxes = np.array([25.5, 25.5, 26.0, 26.5, 26.8])
     executable_mask = np.array([True, True])
 
-    analysis = MarketAnalysis(
+    analysis = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
         p_raw=p_raw,
         p_cal=p_cal,
         p_market=p_market,

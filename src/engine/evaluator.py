@@ -175,6 +175,7 @@ from src.data.forecast_source_registry import (
     calibration_source_id_for_lookup,
 )
 from src.strategy.market_analysis import MarketAnalysis
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.strategy.market_fusion import (
     AuthorityViolation,
     MODEL_ONLY_POSTERIOR_MODE,
@@ -5201,6 +5202,10 @@ def evaluate_candidate(
         bootstrap_signal_type=(
             "day0_observation_fused" if is_day0_mode else "generic_ensemble"
         ),
+        # K1: legacy evaluator path (not the EDLI event-bound live-q seam). The K1
+        # sharpness gate targets the EDLI live path; here it is exempt so behaviour is
+        # byte-identical. Day0 mode is exempt by definition (obs replaces forecast).
+        forecast_sharpness=ForecastSharpnessEvidence.exempt(unit=city.settlement_unit),
     )
     if hasattr(analysis, "forecast_context"):
         forecast_context = analysis.forecast_context()

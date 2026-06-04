@@ -16,6 +16,7 @@ import pytest
 
 from src.calibration.platt import ExtendedPlattCalibrator
 from src.strategy.market_analysis import MarketAnalysis, compute_transfer_logit_sigma
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.types import Bin
 
 
@@ -74,6 +75,7 @@ def _make_ma(transfer_logit_sigma=None, *, rng_seed=42, calibrator=None) -> Mark
         member_maxes=members,
         unit="F",
         rng_seed=rng_seed,
+        forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"),
     )
     if calibrator is not None:
         kwargs["calibrator"] = calibrator
@@ -182,7 +184,7 @@ def test_transfer_sigma_preserves_p_value_sign_at_zero_edge():
     epsilon = 0.15  # generous tolerance — bootstrap variance at exact zero
 
     for sigma in (0.0, 0.1, 0.3):
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p,
             p_cal=p,
             p_market=p_market,

@@ -3120,10 +3120,21 @@ def _generate_candidate_proofs(
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
-        yes_lcb = q_lcb_by_direction.get((condition_id, "buy_yes"))
-        no_lcb = q_lcb_by_direction.get((condition_id, "buy_no"))
-        if yes_q is None or yes_lcb is None or no_lcb is None:
+        yes_lcb_entry = q_lcb_by_direction.get((condition_id, "buy_yes"))
+        no_lcb_entry = q_lcb_by_direction.get((condition_id, "buy_no"))
+        if yes_q is None or yes_lcb_entry is None or no_lcb_entry is None:
             raise ValueError(f"missing q_live for condition {condition_id}")
+        # K3: q_lcb carrier entries are QlcbProvenance (or bare float on the day0
+        # generated path); _qlcb_raw_float reads the RAW (pre-clamp) value so the
+        # selection-ranking key (trade_score, q_lcb_5pct) stays byte-identical to
+        # legacy when deep-OTM bins carry a legitimately negative bootstrap q_lcb.
+        # Clamped vs raw only differs when clamped=True; for in-range bins they are
+        # identical. Using raw here restores legacy loser-selection ordering on
+        # no-submit receipts (the measurement/telemetry substrate). _qlcb_float
+        # (the clamped door) is still used everywhere a value must be in [0,1].
+        from src.calibration.qlcb_provenance import _qlcb_raw_float
+        yes_lcb = _qlcb_raw_float(yes_lcb_entry)
+        no_lcb = _qlcb_raw_float(no_lcb_entry)
         row = rows_by_condition.get(condition_id)
         for token_id, direction, q_value, q_lcb in (
             (str(candidate.yes_token_id or ""), "buy_yes", yes_q, yes_lcb),
@@ -3357,7 +3368,13 @@ def _canonical_probability_and_fdr_proof(
         for hypothesis in hypotheses
     }
     q_by_condition: dict[str, float] = {}
-    lcb_by_direction: dict[tuple[str, str], float] = {}
+    # K3 (Phase-2): the live q_lcb carrier is the typed QlcbByDirection — a bare
+    # float is unconstructable at this boundary (it raises TypeError at __setitem__).
+    # Every entry travels WITH its calibration provenance (FORECAST_BOOTSTRAP here,
+    # EMOS_ANALYTIC on the licensed override, SETTLEMENT_ISOTONIC on the coverage
+    # shrink). Consumers read the float back via _qlcb_float(...).q_lcb.
+    from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
+    lcb_by_direction: QlcbByDirection = QlcbByDirection()
     p_values: dict[tuple[str, str], float] = {}
     prefilter: dict[tuple[str, str], bool] = {}
     # Live FDR truth comes from the family hypothesis scan above (the same
@@ -3388,7 +3405,12 @@ def _canonical_probability_and_fdr_proof(
             hyp = hypothesis_by_label_direction.get((range_label, direction))
             if hyp is not None and hyp.p_value is not None and hyp.ci_lower is not None:
                 p_values[(condition_id, direction)] = float(hyp.p_value)
-                lcb_by_direction[(condition_id, direction)] = float(hyp.ci_lower) + cost_by_direction[direction]
+                _set_qlcb_provenance(
+                    lcb_by_direction,
+                    (condition_id, direction),
+                    float(hyp.ci_lower) + cost_by_direction[direction],
+                    source="FORECAST_BOOTSTRAP",
+                )
                 prefilter[(condition_id, direction)] = bool(hyp.passed_prefilter)
             else:
                 # scan_full_hypothesis_family omits a direction when that side has no executable
@@ -3398,7 +3420,12 @@ def _canonical_probability_and_fdr_proof(
                 # (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed raise.
                 q_point = yes_posterior if direction == "buy_yes" else (1.0 - yes_posterior)
                 p_values[(condition_id, direction)] = 1.0
-                lcb_by_direction[(condition_id, direction)] = q_point
+                _set_qlcb_provenance(
+                    lcb_by_direction,
+                    (condition_id, direction),
+                    q_point,
+                    source="FORECAST_BOOTSTRAP",
+                )
                 prefilter[(condition_id, direction)] = False
 
     # EMOS-CI LIVE OVERRIDE (Option B, 2026-06-02, /tmp/design_emos_ci.md §6).
@@ -3415,6 +3442,19 @@ def _canonical_probability_and_fdr_proof(
         analysis=analysis,
         native_costs=native_costs,
         payload=_payload(event),
+        lcb_by_direction=lcb_by_direction,
+    )
+
+    # K3 (Phase-2) SETTLEMENT-BACKWARD COVERAGE — license each q_lcb against the
+    # REALIZED settlement win-rate in its band, shrinking an UNLICENSED band to the
+    # realized rate minus 1pp (source SETTLEMENT_ISOTONIC). SHADOW FLAG, DEFAULT OFF
+    # (edli_v1.q_lcb_settlement_coverage_gate_enabled): with the flag OFF this is a
+    # pure no-op and the q_lcb is byte-identical to the EMOS/MC value above. The
+    # coverage table is built ONLY through the spine grade_receipt. FAIL-OPEN: any
+    # error keeps the upstream lcb (never crash, never widen optimistically).
+    _maybe_apply_settlement_coverage_to_lcb(
+        family=family,
+        forecast_conn=conn,
         lcb_by_direction=lcb_by_direction,
     )
 
@@ -3708,13 +3748,25 @@ def _market_analysis_from_event_snapshot(
         buy_no_available.append(no_price is not None)
         executable_mask.append(yes_price is not None or no_price is not None)
     sampler = None
-    if family.event_type == "DAY0_EXTREME_UPDATED":
+    is_day0 = family.event_type == "DAY0_EXTREME_UPDATED"
+    if is_day0:
         static_p_cal = np.asarray(p_cal, dtype=float)
 
         def _static_sampler(_analysis, _n_members):
             return static_p_cal
 
         sampler = _static_sampler
+    # K1 — ForecastSharpnessEvidence (Phase-2, REQUIRED ctor param). Day0/imminent
+    # paths are exempt (the realized observation replaces the forecast, so forecast
+    # sharpness is moot). Otherwise load the settlement MAE for (city, unit, lead)
+    # from forecast_skill. The BEHAVIOR (edge suppression) is flag-gated OFF
+    # (edli_v1.forecast_sharpness_gate_enabled) so this evidence is inert on live emit
+    # today; only the TYPE is load-bearing now. Any load failure -> fail-closed
+    # `missing` evidence (also inert while the flag is OFF).
+    forecast_sharpness = _edli_forecast_sharpness_evidence(
+        snapshot=snapshot, family=family, payload=payload, unit=unit, bins=bins,
+        day0_exempt=is_day0,
+    )
     return MarketAnalysis(
         p_raw=np.asarray(p_raw, dtype=float),
         p_cal=np.asarray(p_cal, dtype=float),
@@ -3735,9 +3787,56 @@ def _market_analysis_from_event_snapshot(
         market_complete=True,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
-        bootstrap_signal_type="edli_event_bound_day0" if family.event_type == "DAY0_EXTREME_UPDATED" else "edli_event_bound_forecast",
+        bootstrap_signal_type="edli_event_bound_day0" if is_day0 else "edli_event_bound_forecast",
         representativeness_sigma=representativeness_sigma,  # iron rule 6: honest q_lcb widening on corrected domain
+        forecast_sharpness=forecast_sharpness,  # K1: required sharpness contract
     )
+
+
+def _bin_width_native(bins) -> float:
+    """Return the integer settlement bin width in the native unit (1 °C / 2 °F).
+
+    Reads the first finite-width (non-shoulder) bin so the K1 sharpness threshold
+    is keyed to the actual market grid, not an assumed value.
+    """
+    for b in bins:
+        w = getattr(b, "width", None)
+        if w:
+            return float(w)
+    # No finite-width bin in the family (all shoulders) — fall back to unit default.
+    unit = getattr(bins[0], "unit", "F") if bins else "F"
+    return 2.0 if unit == "F" else 1.0
+
+
+def _edli_forecast_sharpness_evidence(
+    *, snapshot, family, payload, unit, bins, day0_exempt: bool
+):
+    """Build the K1 ForecastSharpnessEvidence for the event-bound q path.
+
+    Day0 -> exempt. Otherwise aggregate settlement MAE from forecast_skill keyed by
+    (city, unit, int(min(lead_days, 7))). Fail-closed `missing` on any error — inert
+    while the gate flag is OFF, conservative when ON.
+    """
+    from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
+
+    if day0_exempt:
+        return ForecastSharpnessEvidence.exempt(unit=unit)
+    bin_width = _bin_width_native(bins)
+    try:
+        lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
+    except Exception:
+        return ForecastSharpnessEvidence.missing(unit=unit, bin_width=bin_width, lead_days=7)
+    try:
+        from src.state.db import get_world_connection_read_only
+
+        conn = get_world_connection_read_only()
+        return ForecastSharpnessEvidence.load_for(
+            conn, city=family.city, unit=unit, lead_days=lead_days, bin_width=bin_width
+        )
+    except Exception:
+        return ForecastSharpnessEvidence.missing(
+            unit=unit, bin_width=bin_width, lead_days=int(min(max(lead_days, 0.0), 7.0))
+        )
 
 
 def _evaluate_and_store_mainstream_agreement(
@@ -3874,6 +3973,32 @@ def _maybe_bias_decay_kelly_haircut(
         city = runtime_cities_by_name().get(family.city)
         if city is None:
             return kelly_multiplier, False, None, "no_city"
+        # Phase-2 K2+N1+#122 (task #167): corrected XOR haircut. When v2 is ON, consult the
+        # single typed BiasTreatment. If this (city,bucket) is on the CORRECT path the bias
+        # was already consumed by the p_raw shift — the haircut MUST NOT also fire on the
+        # same row (the N1 double penalty). The XOR invariant lives in BiasTreatment.
+        # kelly_factor(): a CORRECT treatment returns factor 1.0 (residual-after-correction
+        # is 0). Flag OFF -> this block is skipped -> legacy haircut byte-identical.
+        if bool(ev.get("bias_treatment_v2_enabled", False)):
+            _treatment = _edli_bias_treatment_for_bucket(family=family, city=city)
+            if _treatment is not None:
+                _unit = getattr(city, "settlement_unit", "C")
+                _thr = float(ev.get("bias_decay_threshold_f", 3.0)) if _unit == "F" else float(
+                    ev.get("bias_decay_threshold_c", 2.0)
+                )
+                _factor = float(ev.get("bias_decay_kelly_factor", 0.5))
+                _kf = _treatment.kelly_factor(threshold_native=_thr, haircut_factor=_factor)
+                if _kf < 1.0:
+                    logging.getLogger("zeus.edli_bias").info(
+                        "bias-decay haircut (v2 BiasTreatment) APPLIED city=%s residual=%.2f "
+                        "thr=%.2f factor=%.2f", family.city, _treatment.residual_native, _thr, _kf,
+                    )
+                    return kelly_multiplier * _kf, True, _treatment.residual_native, "bias_exceeds_v2"
+                # CORRECT path or within-threshold: NO haircut (XOR honoured).
+                return kelly_multiplier, False, _treatment.residual_native, "treated_v2_no_haircut"
+            # treatment is None: either no VERIFIED row, or correction flag OFF with no row.
+            # Fall through to the legacy fail-safe (data-absent -> conservative haircut),
+            # preserving the operator's data-insufficient-phase intent for uncovered buckets.
         unit = getattr(city, "settlement_unit", "C")
         metric = family.metric
         ldv = (
@@ -3970,6 +4095,123 @@ def _assert_single_temperature_mean_correction(
         )
 
 
+def _edli_bias_treatment_for_bucket(
+    *,
+    family,
+    city,
+    snapshot: dict[str, Any] | None = None,
+):
+    """Build the single typed ``BiasTreatment`` decision for a (city,bucket).
+
+    Phase-2 K2+N1+#122 (task #167). This is the ONE place the per-(city,bucket) bias is
+    turned into a decision; both the p_raw correction and the Kelly haircut consult it so a
+    bias is corrected XOR haircut, never both (kills the N1 double penalty). The fail-closed
+    BiasTreatment factory refuses NULL/non-VERIFIED authority (#122) and a training_cutoff
+    outside the target season (stale-fit gate). Returns ``None`` when:
+      * ``edli_v1.bias_treatment_v2_enabled`` is OFF (legacy paths own the decision), OR
+      * no VERIFIED row / weight_live<=0 / effective_bias missing, OR
+      * the row fails the provenance or staleness gate (fail-closed).
+
+    The returned mode is CORRECT whenever the correction would be live for this bucket
+    (``edli_v1.edli_bias_correction_enabled`` ON), else HAIRCUT — so the two consumers are
+    mutually exclusive by construction. Native unit: degC for C-cities, degF (x1.8) for
+    F-settled cities (matches the legacy member-array unit).
+    """
+    try:
+        ev = settings["edli_v1"]
+        if not bool(ev.get("bias_treatment_v2_enabled", False)):
+            return None
+        import contextlib
+        from src.calibration.manager import season_from_date
+        from src.calibration.ens_bias_repo import read_bias_model
+        from src.state.db import get_world_connection
+        from src.contracts.bias_treatment import (
+            BiasProvenanceError,
+            BiasStaleError,
+            BiasTreatment,
+            BiasTreatmentMode,
+        )
+
+        metric = family.metric
+        ldv = (
+            "ecmwf_opendata_mx2t3_local_calendar_day_max"
+            if metric == "high"
+            else "ecmwf_opendata_mn2t3_local_calendar_day_min"
+        )
+        season = season_from_date(str(family.target_date), lat=city.lat)
+        month = int(str(family.target_date)[5:7])
+        with contextlib.closing(get_world_connection()) as conn:
+            try:
+                conn.row_factory = sqlite3.Row
+            except Exception:
+                pass
+            row = read_bias_model(
+                conn,
+                city=city.name,
+                season=season,
+                metric=metric,
+                live_data_version=ldv,
+                month=month,
+                target_month=month,
+                authority="VERIFIED",
+                error_model_family=_EDLI_BIAS_FAMILY,
+            )
+        if row is None:
+            return None
+        keys = set(row.keys())
+        eff = row["effective_bias_c"] if "effective_bias_c" in keys else None
+        wl = row["weight_live"] if "weight_live" in keys else 0.0
+        if eff is None or float(wl or 0.0) <= 0.0:
+            return None
+
+        unit = getattr(city, "settlement_unit", "C")
+        scale = 1.8 if unit == "F" else 1.0
+        eff_native = float(eff) * scale
+        resid_c = row["residual_sd_c"] if "residual_sd_c" in keys else None
+        resid_native = abs(float(resid_c)) * scale if resid_c is not None else 0.0
+        n_live = int(row["n_live"]) if ("n_live" in keys and row["n_live"] is not None) else 0
+        cs = row["correction_strength"] if "correction_strength" in keys else None
+        cs = float(cs) if cs is not None else 1.0
+        authority = row["authority"] if "authority" in keys else None
+        training_cutoff = row["training_cutoff"] if "training_cutoff" in keys else None
+
+        thr = float(ev.get("bias_decay_threshold_f", 3.0)) if unit == "F" else float(
+            ev.get("bias_decay_threshold_c", 2.0)
+        )
+        correction_on = bool(ev.get("edli_bias_correction_enabled", False))
+        mode = BiasTreatmentMode.CORRECT if correction_on else BiasTreatmentMode.HAIRCUT
+        try:
+            return BiasTreatment.from_row(
+                effective_bias_native=eff_native,
+                residual_sd_native=resid_native,
+                n_live=n_live,
+                correction_strength=cs,
+                authority=authority,
+                training_cutoff=training_cutoff,
+                target_date=str(family.target_date),
+                lat=float(city.lat),
+                threshold_native=thr,
+                mode=mode,
+            )
+        except (BiasProvenanceError, BiasStaleError) as exc:
+            # Fail closed: a NULL-authority or stale row never enters live q.
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "BiasTreatment refused (fail-closed) city=%s metric=%s: %s",
+                getattr(city, "name", family.city), metric, exc,
+            )
+            return None
+    except Exception as exc:  # never break the live decision path
+        try:
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "BiasTreatment build skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
 def _maybe_apply_edli_bias_correction(
     members: np.ndarray,
     *,
@@ -3996,6 +4238,26 @@ def _maybe_apply_edli_bias_correction(
     try:
         if not bool(settings["edli_v1"].get("edli_bias_correction_enabled", False)):
             return members, False
+        # Phase-2 K2+N1+#122 (task #167): when bias_treatment_v2_enabled is ON, the typed
+        # BiasTreatment gate is the single fail-closed decision. A NULL-authority (#122) or
+        # stale-cutoff row yields treatment=None -> NO correction (raw members), so an
+        # unverified/out-of-season bias never enters live q. The shift it applies is
+        # IDENTICAL to the legacy subtraction (eff_native = eff * (1.8 if F else 1)); only
+        # the fail-closed GATE is added. Flag OFF -> this block is skipped -> byte-identical.
+        if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
+            _treatment = _edli_bias_treatment_for_bucket(
+                family=family, city=city, snapshot=snapshot
+            )
+            if _treatment is None or not _treatment.is_correcting:
+                return members, False
+            corrected = np.asarray(members, dtype=float) - float(_treatment.shift_native)
+            import logging
+            logging.getLogger("zeus.edli_bias").info(
+                "EDLI bias correction (v2 BiasTreatment) city=%s metric=%s shift_native=%.3f "
+                "n_live=%d authority=%s", city.name, family.metric,
+                float(_treatment.shift_native), int(_treatment.n_live), _treatment.authority,
+            )
+            return corrected, True
         import contextlib
         from src.calibration.manager import season_from_date
         from src.calibration.ens_bias_repo import read_bias_model
@@ -4138,7 +4400,46 @@ def _edli_representativeness_sigma_native(
                 if chosen is not None:
                     if resid_c is not None and float(resid_c) > 0.0 and np.isfinite(float(resid_c)):
                         chosen = max(chosen, float(resid_c))
-                    return chosen * _scale
+                    sigma_native = chosen * _scale
+                    # Phase-2 K2 D4 (task #167): when bias_treatment_v2_enabled is ON and the
+                    # fit is low-n (n_live<20), fold the bias-MEAN standard error
+                    # (shift_se = residual_sd/sqrt(n)) into the representativeness σ IN
+                    # QUADRATURE so a low-n correction WIDENS q_lcb rather than applying a
+                    # hard point shift (iron rule 6).
+                    #
+                    # K2 D4 DOUBLE-COUNT FIX (2026-06-03, adversarial-verify finding #2):
+                    # the quadrature BASE must be the IN-SAMPLE residual_sd_c (= σ_resid),
+                    # NOT total_residual_sd_c. total_residual_sd_c = σ_resid·sqrt(1 + 1/n)
+                    # ALREADY contains the 1/n mean-estimation-drift term, so folding
+                    # shift_se² = σ_resid²/n onto total² gave σ_resid²·(1 + 2/n) — the 1/n is
+                    # counted TWICE (~6% over-wide q_lcb at n=7). Basing the fold on
+                    # residual_sd_c reconstructs exactly the intended predictive σ:
+                    #   sqrt(σ_resid² + σ_resid²/n) = σ_resid·sqrt(1 + 1/n) = total_residual_sd_c.
+                    # The fold therefore widens to the honest predictive σ once, never twice.
+                    # Flag OFF -> sigma_native returned unchanged (byte-identical legacy).
+                    try:
+                        if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
+                            import math as _math
+                            _n = (
+                                int(row["n_live"])
+                                if ("n_live" in keys and row["n_live"] is not None)
+                                else 0
+                            )
+                            if 0 < _n < 20 and resid_c is not None and float(resid_c) > 0.0:
+                                # IN-SAMPLE σ is the quadrature base (no 1/n term in it).
+                                in_sample_native = float(resid_c) * _scale
+                                shift_se_native = (float(resid_c) / _math.sqrt(_n)) * _scale
+                                folded = float(
+                                    _math.sqrt(in_sample_native ** 2 + shift_se_native ** 2)
+                                )
+                                # Defensive: never let the D4 fold TIGHTEN below the σ already
+                                # chosen (total_residual_sd_c floor). With honest producer
+                                # stamps folded == sigma_native; the max only guards a row
+                                # whose total < σ_resid·sqrt(1+1/n) (stale/legacy stamp).
+                                sigma_native = max(sigma_native, folded)
+                    except Exception:
+                        pass
+                    return sigma_native
     except Exception as exc:
         try:
             import logging
@@ -4426,10 +4727,11 @@ def _write_emos_shadow_ledger(
         raw_q_lcb_buy_yes: float | None = None
         raw_q_lcb_buy_no: float | None = None
         if lcb_by_direction is not None:
+            from src.calibration.qlcb_provenance import _qlcb_float
             _lcb_yes = lcb_by_direction.get((condition_id, "buy_yes"))
             _lcb_no = lcb_by_direction.get((condition_id, "buy_no"))
-            raw_q_lcb_buy_yes = float(_lcb_yes) if _lcb_yes is not None else None
-            raw_q_lcb_buy_no = float(_lcb_no) if _lcb_no is not None else None
+            raw_q_lcb_buy_yes = _qlcb_float(_lcb_yes) if _lcb_yes is not None else None
+            raw_q_lcb_buy_no = _qlcb_float(_lcb_no) if _lcb_no is not None else None
 
         # Costs from native_costs (the executable ask the trade score uses).
         # native_costs[(cond, dir)] is a 5-tuple; index [1] is ExecutionPrice | None.
@@ -4684,8 +4986,14 @@ def _maybe_override_lcb_with_emos_ci(
             if key not in lcb_by_direction:
                 # No MC entry for this direction (non-executable side) → nothing to override.
                 continue
-            mc_lcb = lcb_by_direction[key]
-            lcb_by_direction[key] = float(emos_lcb)
+            from src.calibration.qlcb_provenance import _qlcb_float, _set_qlcb_provenance
+            mc_lcb = _qlcb_float(lcb_by_direction[key])
+            # K3: the EMOS analytic CI is its own calibration source. On the live
+            # typed carrier this writes a QlcbProvenance(source=EMOS_ANALYTIC); on a
+            # plain test dict it writes a bare float (legacy EMOS tests unchanged).
+            _set_qlcb_provenance(
+                lcb_by_direction, key, float(emos_lcb), source="EMOS_ANALYTIC"
+            )
             try:
                 log.info(
                     "EMOS-CI override city=%s cond=%s dir=%s k_cov=%.3f mc_lcb=%.6f->emos_lcb=%.6f",
@@ -4693,6 +5001,148 @@ def _maybe_override_lcb_with_emos_ci(
                 )
             except Exception:
                 pass
+
+
+def _settlement_coverage_observations(
+    *,
+    forecast_conn: sqlite3.Connection,
+    city: str,
+    metric: str,
+    bin: Bin,
+    direction: str,
+    claimed_q_lcb: float,
+):
+    """Build the (claimed_q_lcb, won) coverage stream for ONE (bin, direction).
+
+    Backward coverage: for every SETTLED outcome of this (city, metric), grade
+    "had I traded THIS bin in THIS direction, would the settled value have won?"
+    via the spine grade_receipt — the Direction Law + BinKind + unit antibodies are
+    inherited, not re-rolled. Returns a list[CoverageObservation]. FAIL-OPEN: any
+    error / unit mismatch yields an empty stream (→ INSUFFICIENT_DATA → no shrink).
+    """
+    from types import SimpleNamespace
+
+    from src.calibration.settlement_backward_coverage import CoverageObservation
+    from src.contracts.graded_receipt import grade_receipt
+    from src.types.temperature import UnitMismatchError
+
+    obs: list = []
+    try:
+        rows = forecast_conn.execute(
+            "SELECT settlement_value, settlement_unit FROM settlement_outcomes "
+            "WHERE city = ? AND temperature_metric = ? "
+            "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL",
+            (str(city), str(metric).lower()),
+        ).fetchall()
+    except Exception:
+        return obs
+    for row in rows:
+        try:
+            settled_value = float(row[0])
+            settled_unit = str(row[1])
+        except (TypeError, ValueError):
+            continue
+        # settlement_outcomes.settlement_value is WMO-rounded at write time, so no
+        # semantics object is needed (grade_receipt grades the stored value as-is).
+        settlement = SimpleNamespace(
+            settlement_value=settled_value, settlement_unit=settled_unit
+        )
+        try:
+            graded = grade_receipt(bin, direction, settlement)
+        except UnitMismatchError:
+            # Cross-unit settlement for this bin — not a valid backward observation.
+            continue
+        except Exception:
+            continue
+        obs.append(CoverageObservation(q_lcb=float(claimed_q_lcb), won=bool(graded.won)))
+    return obs
+
+
+def _maybe_apply_settlement_coverage_to_lcb(
+    *,
+    family,
+    forecast_conn: sqlite3.Connection,
+    lcb_by_direction,
+) -> None:
+    """K3 (Phase-2): shrink an UNLICENSED q_lcb to its realized settlement rate.
+
+    SHADOW FLAG (edli_v1.q_lcb_settlement_coverage_gate_enabled, default FALSE):
+    flag OFF → IMMEDIATE no-op, the q_lcb is byte-identical to the EMOS/MC value.
+    Flag ON → for each (cond, direction) build the backward-coverage stream through
+    grade_receipt, run settlement_backward_coverage_check, and apply the shrink via
+    apply_settlement_coverage (only UNLICENSED moves the number; the shrink only ever
+    LOWERS the LCB). The new entry's calibration_source becomes SETTLEMENT_ISOTONIC.
+
+    FAIL-OPEN: any error keeps the upstream lcb (never crash the hot path, never
+    widen optimistically). Touches ONLY lcb_by_direction; q/p_values/prefilter stay.
+    """
+    import logging as _logging
+
+    try:
+        if not bool(settings["edli_v1"].get("q_lcb_settlement_coverage_gate_enabled", False)):
+            return
+    except Exception:
+        return
+
+    log = _logging.getLogger("zeus.qlcb_settlement_coverage")
+    try:
+        from src.calibration.qlcb_provenance import _qlcb_float, _set_qlcb_provenance
+        from src.calibration.settlement_backward_coverage import (
+            apply_settlement_coverage,
+            settlement_backward_coverage_check,
+        )
+        from src.contracts.season import season_from_date
+
+        metric = str(getattr(family, "metric", "") or "").lower()
+        city_obj = runtime_cities_by_name().get(family.city)
+        lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+        season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
+    except Exception as exc:
+        log.warning("K3 coverage setup failed (non-fatal, lcb kept): %s", exc)
+        return
+
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        bin_obj = getattr(candidate, "bin", None)
+        if bin_obj is None:
+            continue
+        for direction in ("buy_yes", "buy_no"):
+            key = (condition_id, direction)
+            if key not in lcb_by_direction:
+                continue
+            try:
+                claimed = _qlcb_float(lcb_by_direction[key])
+                obs = _settlement_coverage_observations(
+                    forecast_conn=forecast_conn,
+                    city=family.city,
+                    metric=metric,
+                    bin=bin_obj,
+                    direction=direction,
+                    claimed_q_lcb=claimed,
+                )
+                verdict = settlement_backward_coverage_check(
+                    city=family.city, metric=metric, season=season,
+                    q_lcb=claimed, observations=obs, min_n=30,
+                )
+                new_q = apply_settlement_coverage(q_lcb=claimed, verdict=verdict, enabled=True)
+                if new_q != claimed:
+                    _set_qlcb_provenance(
+                        lcb_by_direction, key, new_q,
+                        source="SETTLEMENT_ISOTONIC",
+                        n_settlement_observations=verdict.n_settlement_observations,
+                        coverage_ratio=verdict.coverage_ratio,
+                    )
+                    log.info(
+                        "K3 coverage shrink city=%s cond=%s dir=%s %.6f->%.6f (status=%s n=%d)",
+                        family.city, condition_id, direction, claimed, new_q,
+                        verdict.status, verdict.n_settlement_observations,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "K3 coverage skipped bin %s/%s (non-fatal, lcb kept): %s",
+                    family.city, getattr(bin_obj, "label", "?"), exc,
+                )
+                continue
 
 
 def _snapshot_p_raw(
@@ -4979,8 +5429,15 @@ def _apply_day0_mask_to_generated_probabilities(
             orderbook_event=False,
         )
     )
+    # K3: keep the typed carrier end-to-end so the masked output a day0 family hands
+    # to the candidate consumer (at 3092) is also a provenance-carrying QlcbByDirection.
+    from src.calibration.qlcb_provenance import (
+        QlcbByDirection,
+        _qlcb_float,
+        _set_qlcb_provenance,
+    )
     masked_q_by_condition: dict[str, float] = {}
-    masked_lcb_by_direction: dict[tuple[str, str], float] = {}
+    masked_lcb_by_direction: QlcbByDirection = QlcbByDirection()
     for index, candidate in enumerate(family.candidates):
         condition_id = str(candidate.condition_id or "")
         q_value = float(live_state.probabilities[str(index)])
@@ -4991,10 +5448,22 @@ def _apply_day0_mask_to_generated_probabilities(
         # and killing the ENTIRE family (zero candidates) instead of skipping just the
         # non-executable direction. .get(...,0.0) → that direction gets no fill confidence
         # (min(0.0,·)=0.0 → not acceptable) while bins WITH quotes still proceed.
-        yes_lcb = lcb_by_condition.get((condition_id, "buy_yes"), 0.0)
-        no_lcb = lcb_by_condition.get((condition_id, "buy_no"), 0.0)
-        masked_lcb_by_direction[(condition_id, "buy_yes")] = 0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value)
-        masked_lcb_by_direction[(condition_id, "buy_no")] = min(no_lcb, 1.0 - q_value)
+        yes_lcb = _qlcb_float(lcb_by_condition.get((condition_id, "buy_yes"), 0.0))
+        no_lcb = _qlcb_float(lcb_by_condition.get((condition_id, "buy_no"), 0.0))
+        # The masked LCB inherits the upstream calibration source; the day0 mask is a
+        # downstream transform of the forecast-bootstrap LCB, not a new calibration.
+        _set_qlcb_provenance(
+            masked_lcb_by_direction,
+            (condition_id, "buy_yes"),
+            0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value),
+            source="FORECAST_BOOTSTRAP",
+        )
+        _set_qlcb_provenance(
+            masked_lcb_by_direction,
+            (condition_id, "buy_no"),
+            min(no_lcb, 1.0 - q_value),
+            source="FORECAST_BOOTSTRAP",
+        )
     return masked_q_by_condition, masked_lcb_by_direction
 
 

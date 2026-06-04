@@ -2002,6 +2002,65 @@ _user_channel_ingestor = None
 _user_channel_thread = None
 _edli_market_channel_thread = None
 
+# B4 (Phase-2): monotonic redecision cycle index. The continuous-redecision emit passes
+# a per-cycle distinct `source` to scan_committed_snapshots for TWO reasons: (1) the
+# B4 round-robin derives its window index from int(source.split('-')[-1]) — it needs a
+# parseable "cycle-N" suffix; and (2) the source must be distinct per cycle so the
+# re-emitted FSR-equivalent does not dedup to the consumed FSR.
+#
+# CROSS-RESTART UNIQUENESS (MAJOR-2 adversarial finding + HARDEN-1): the idempotency
+# key is stable_idempotency_key(event_type, entity_key, source, available_at, digest).
+# available_at is SNAPSHOT-STABLE (it does not advance per cycle), so `source` is
+# the only varying component. A bare counter that resets to 0 on restart means the
+# post-restart cycle-0 emit produces the SAME idempotency key as the pre-restart
+# cycle-0 emit for the same snapshot family → dedup → family not re-decided for the
+# early post-restart cycles.
+#
+# Fix (HARDEN-1): the boot token is `f"{int(time.time())}{os.getpid()}"` — a single
+# decimal string with NO internal hyphens so source.split('-') stays ['cycle', TOKEN, N]
+# and int(source.split('-')[-1]) still yields N. The PID changes on EVERY restart
+# (even a crash-loop restart within the same wall-clock second), so the token is
+# guaranteed restart-unique regardless of timing. int(time.time()) is included for
+# human readability; PID alone would also suffice for correctness.
+#
+# Format: `cycle-{EPOCH}{PID}-{N}` where EPOCH and PID are concatenated (no separator)
+# so the only hyphens in the string are the two that delimit the three components.
+import time as _time
+
+_edli_redecision_boot_token: str = f"{int(_time.time())}{os.getpid()}"
+_edli_redecision_cycle_index: int = 0
+
+
+def _edli_next_redecision_source() -> str:
+    """Return the next continuous-redecision emit source as ``cycle-{TOKEN}-{N}``.
+
+    TOKEN = f"{int(time.time())}{os.getpid()}" captured once at module init — no
+    internal hyphens, so split('-')[-1] == str(N) always. PID changes on every
+    restart (including crash-loop restarts within the same wall-clock second), so
+    the token is restart-unique unconditionally. N advances monotonically within a
+    process, ensuring within-process sources are also distinct.
+    """
+    global _edli_redecision_cycle_index
+    n = _edli_redecision_cycle_index
+    _edli_redecision_cycle_index = n + 1
+    return f"cycle-{_edli_redecision_boot_token}-{n}"
+
+
+def _reset_edli_redecision_cycle_index() -> None:
+    """Test hook: reset the monotonic redecision cycle counter to 0."""
+    global _edli_redecision_cycle_index
+    _edli_redecision_cycle_index = 0
+
+
+def _set_edli_redecision_boot_token(token: str) -> None:
+    """Test hook: set the boot token to a fixed value for deterministic testing.
+
+    The token must contain NO hyphens (see format contract above).
+    """
+    global _edli_redecision_boot_token
+    assert "-" not in token, f"boot token must not contain hyphens, got {token!r}"
+    _edli_redecision_boot_token = token
+
 
 USER_CHANNEL_REQUIRED_ENV_VARS = (
     "ZEUS_USER_CHANNEL_WS_ENABLED",
@@ -3819,7 +3878,12 @@ def _edli_event_reactor_cycle() -> None:
             if bool(edli_cfg.get("redecision_continuous_enabled", False)):
                 try:
                     _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
-                    _rd_source = f"edli_redecision:{now.isoformat()}"
+                    # B4 (Phase-2): a monotonic `cycle-N` source so the coverage-fairness
+                    # round-robin (int(source.split('-')[-1])) advances its window each cycle
+                    # and reaches all cities within ceil(N/limit) cycles. Still distinct per
+                    # cycle (re-emit idempotency). The prior ISO-timestamp source raised
+                    # ValueError in the parse -> cycle_index frozen at 0 -> cities 21..N dark.
+                    _rd_source = _edli_next_redecision_source()
                     _rd_pending = _edli_pending_entity_keys(conn)
                     _rd_n = _edli_emit_forecast_snapshot_events(
                         conn,

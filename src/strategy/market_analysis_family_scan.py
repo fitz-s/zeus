@@ -72,6 +72,15 @@ def scan_full_hypothesis_family(
     """
     if False: _ = analysis.entry_method; _ = analysis.selected_method  # Semantic Provenance Guard
     hypotheses: list[FullFamilyHypothesis] = []
+    # K1 — consult the SAME sharpness verdict the edge scan uses (ONE gate site). When
+    # the gate suppresses this city's market the tested family is EMPTY, so the BH/FDR
+    # denominator does not silently include hypotheses for a city whose forecast is too
+    # flat to emit. This reads the analysis's precomputed verdict; it does NOT re-derive
+    # a sharpness check here (no parallel mechanism). Duck-typed: a bare object without
+    # the method (older fixtures) is treated as not-suppressed (legacy behaviour).
+    _suppresses = getattr(analysis, "_sharpness_suppresses_edges", None)
+    if callable(_suppresses) and _suppresses():
+        return []
     for idx, bin_obj in enumerate(analysis.bins):
         if not _is_executable_bin(analysis, idx):
             continue

@@ -44,6 +44,7 @@ import pytest
 from src.contracts.entry_quote_evidence import EntryQuoteEvidence
 from src.strategy.kelly import _ENV_UNIFIED_UNCERTAINTY_BUDGET, dynamic_kelly_mult
 from src.types.market import Bin, BinEdge
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 
 
 def _bins() -> list[Bin]:
@@ -82,7 +83,7 @@ def _eqe(
 def _make_analysis(*, eqe_yes=None, rng_seed=42):
     from src.strategy.market_analysis import MarketAnalysis
 
-    return MarketAnalysis(
+    return MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
         p_raw=np.array([0.55, 0.45]),
         p_cal=np.array([0.55, 0.45]),
         p_market=np.array([0.30, 0.30]),

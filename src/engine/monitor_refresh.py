@@ -1791,6 +1791,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     elif bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
         try:
             from src.strategy.market_analysis import MarketAnalysis
+            from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
             held_idx = bootstrap_ctx["held_idx"]
             bins = bootstrap_ctx["bins"]
             if len(bootstrap_ctx["member_extrema"]) == 0:
@@ -1824,6 +1825,10 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 lead_days=bootstrap_ctx["lead_days"],
                 unit=bootstrap_ctx["unit"],
                 posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+                # K1: this path recomputes CI for a HELD position via _bootstrap_bin
+                # (never find_edges), so the sharpness gate is moot — exempt evidence
+                # keeps the required ctor contract satisfied without affecting CI.
+                forecast_sharpness=ForecastSharpnessEvidence.exempt(unit=bootstrap_ctx["unit"]),
             )
             # Call _bootstrap_bin directly (not find_edges) so CI is computed
             # regardless of edge sign — monitor needs CI even when edge is negative.

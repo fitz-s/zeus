@@ -37,6 +37,7 @@ import numpy as np
 import pytest
 
 from src.strategy.market_analysis import MarketAnalysis
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.types.market import Bin
 
 
@@ -57,7 +58,7 @@ def _city(*, edge: float, sigma: float, members: np.ndarray, rng_seed: int = 42,
         Bin(low=edge, high=None, unit="C", label=f"{edge + 1.0:.0f}C or above"),
     ]
     p_near = 1.0 - p_far
-    return MarketAnalysis(
+    return MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
         p_raw=np.array([p_near, p_far]),
         p_cal=np.array([p_near, p_far]),
         p_market=np.array([0.50, 0.02]),
@@ -143,6 +144,7 @@ class TestNoCertainNoCeiling:
             member_maxes=_TIGHT_MEMBERS,
             executable_mask=np.array([True, True]),
             rng_seed=42,
+            forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"),
         )
         a_legacy = MarketAnalysis(**common)
         a_zero = MarketAnalysis(**common, representativeness_sigma=0.0)
