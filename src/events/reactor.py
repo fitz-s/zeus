@@ -107,6 +107,13 @@ class EventSubmissionReceipt:
     # the Phase-2 gate will handle NULL explicitly).  Read-only observation column;
     # no selection or gate behavior here.
     alpha_gap: float | None = None
+    # #120 (2026-06-04): which calibrator produced q_live for this receipt.
+    # "emos" = EMOS sole-calibrator served this (city,season,metric) cell;
+    # "bias_platt"/"platt" = the maze fallback (bias-corrected / plain Platt).
+    # None = not tagged (gate path / error receipts). Persisted in receipt_json
+    # ONLY when set (omit-when-None for hash stability) so 06-05+ settlement can
+    # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
+    q_source: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:

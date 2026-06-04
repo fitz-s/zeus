@@ -97,6 +97,13 @@ class _CandidateProof:
     # NOT gate production selection (see _selected_candidate_proof). `.passed` is
     # an arm-decision reference signal, never a selection filter.
     mainstream_agreement: dict | None = None
+    # #120 (2026-06-04): the calibrator that produced q_posterior for this
+    # candidate's family ("emos" | "bias_platt" | "platt"). Read from
+    # payload["_edli_q_source"] (set by the ONE-CALIBRATOR SEAM, era.py:3735-3818)
+    # at proof construction — instance-safe (same payload threaded by the #149
+    # fix). Carried to the receipt so 06-05+ settlement can attribute EMOS-cells
+    # vs maze-cells per city (the PROMOTE evidence).
+    q_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1084,6 +1091,7 @@ def build_event_bound_no_submit_receipt(
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
             "q_live": proof.q_posterior,
             "q_lcb_5pct": proof.q_lcb_5pct,
+            "q_source": proof.q_source,  # #120 calibrator provenance
             "c_fee_adjusted": execution_price.value,
             "c_cost_95pct": proof.c_cost_95pct,
             "p_fill_lcb": proof.p_fill_lcb,
@@ -1208,6 +1216,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_bin_label=raw_receipt.get("mainstream_bin_label"),
         mainstream_source=raw_receipt.get("mainstream_source"),
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
+        q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
     )
 
 
@@ -3208,6 +3217,10 @@ def _generate_candidate_proofs(
                     mainstream_agreement=payload.get(
                         "_mainstream_agreement_verdicts", {}
                     ).get((condition_id, direction)),
+                    # #120: calibrator provenance — per-family, set by the
+                    # ONE-CALIBRATOR SEAM (era.py:3772 emos / 3774 maze). Same
+                    # payload instance (#149 fix), so this is the actual q_source.
+                    q_source=payload.get("_edli_q_source"),
                 )
             )
     return tuple(proofs)
@@ -3777,6 +3790,9 @@ def _market_analysis_from_event_snapshot(
         )
         if _bias_corrected:
             payload["_edli_bias_corrected"] = True
+        # #120: maze-fallback calibrator provenance (EMOS did not serve this cell).
+        # "bias_platt" = bias-corrected members fed to Platt; "platt" = plain.
+        payload["_edli_q_source"] = "bias_platt" if _bias_corrected else "platt"
         # Grid→point representativeness correction (lead-invariant, OOS-validated).
         # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
         # Applied on the (potentially bias-corrected) member array so both corrections compose.
