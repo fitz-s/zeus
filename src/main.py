@@ -4313,6 +4313,81 @@ def _edli_market_substrate_warm_cycle() -> None:
             pass
 
 
+@_scheduler_job("edli_mainstream_warm")
+def _edli_mainstream_warm_cycle() -> None:
+    """Dedicated EDLI mainstream-forecast point warmer, DECOUPLED from the reactor.
+
+    E2 (STEP 8 efficiency, consolidated timeliness fix). The mainstream
+    direction-agreement reference reads an Open-Meteo HTTP point whose client
+    applies a Retry-After ``time.sleep`` on 429s. The reactor proof path runs
+    UNDER the world_write_mutex, so a synchronous fetch there serialized every
+    world write behind a slow/blocked network call. This job fetches the point
+    on its OWN cadence and stores it in the process-global warm cache
+    (``mainstream_forecast_source._WARM_CACHE``); the reactor proof path reads
+    that cache ONLY (``read_mainstream_point_cached``) and fail-closes to None on
+    a miss — byte-identical to a stale/absent fetch today.
+
+    Mirrors ``_edli_market_substrate_warm_cycle`` (#45): same warm-cache pattern,
+    same fail-soft contract. Scoped to the SAME pending families the reactor will
+    decide (city/target_date/metric of pending opportunity_events), so the cache
+    is populated for exactly the candidates that need it.
+
+    NOTE: ``mainstream_agreement_reference_enabled`` is currently OFF in config
+    (operator unblock). This warmer is safe to run regardless — when the flag is
+    OFF the reactor never reads the cache, and when it is re-enabled the cache is
+    already warm. Not a DB writer (no table owned); the @_scheduler_job decorator
+    is the only wiring needed (B047). Fail-soft: a transient Open-Meteo failure
+    logs but never crashes this job (consumers fail-closed in the interim).
+    """
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    from src.data.mainstream_forecast_source import warm_mainstream_point
+    from src.state.db import get_world_connection
+
+    conn = get_world_connection()
+    try:
+        pending_rows = conn.execute(
+            """
+            SELECT DISTINCT
+                json_extract(e.payload_json, '$.city')        AS city,
+                json_extract(e.payload_json, '$.target_date') AS target_date,
+                json_extract(e.payload_json, '$.metric')      AS metric
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p ON p.event_id = e.event_id
+            WHERE p.consumer_name = 'edli_reactor_v1'
+              AND p.processing_status = 'pending'
+              AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+            """
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
+        logger.error("EDLI mainstream warm: pending-event query failed (non-fatal): %r", exc)
+        return
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    warmed = 0
+    for row in pending_rows:
+        city = str(row[0] or "").strip()
+        target_date = str(row[1] or "").strip()
+        metric = str(row[2] or "").strip().lower()
+        if not (city and target_date and metric in ("high", "low")):
+            continue
+        try:
+            if warm_mainstream_point(city, target_date, metric=metric) is not None:
+                warmed += 1
+        except Exception as exc:  # noqa: BLE001 — fail-soft per-family; never crash the job
+            logger.warning(
+                "EDLI mainstream warm: fetch failed for %s/%s/%s (non-fatal): %r",
+                city, target_date, metric, exc,
+            )
+    logger.info("EDLI mainstream warm: warmed=%d of %d pending families", warmed, len(pending_rows))
+
+
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
     try:
         value = int(config.get(key, default))

@@ -3962,12 +3962,7 @@ def _evaluate_and_store_mainstream_agreement(
     the receipt simply omits mainstream_agreement_* fields.
     """
     from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
-    from src.data.mainstream_forecast_source import fetch_mainstream_point
-
-    _msc = getattr(_evaluate_and_store_mainstream_agreement, "_cache", None)
-    if _msc is None:
-        _msc = {}
-        _evaluate_and_store_mainstream_agreement._cache = _msc  # type: ignore[attr-defined]
+    from src.data.mainstream_forecast_source import read_mainstream_point_cached
 
     members = list(float(m) for m in analysis.member_maxes) if analysis.member_maxes is not None else None
     our_point = float(analysis.member_maxes.mean()) if members else None
@@ -3985,11 +3980,14 @@ def _evaluate_and_store_mainstream_agreement(
     unit = str(analysis.unit or "C")
     precision = float(getattr(analysis, "precision", 1.0) or 1.0)
 
-    mainstream_snap = fetch_mainstream_point(
+    # STEP 7 (E2): cache-ONLY read — never fetch on the mutex-held decision path.
+    # A miss yields mainstream_snap=None → mainstream_point=None → the gate's
+    # existing FAIL_CLOSED path (the warm job _edli_mainstream_warm_cycle keeps
+    # this cache populated off the decision path).
+    mainstream_snap = read_mainstream_point_cached(
         family.city,
         family.target_date,
         metric=family.metric,  # METRIC-MATCHED (#metric-crossing fix): LOW->daily min, HIGH->daily max.
-        _cache=_msc,
     )
     mainstream_pt = float(mainstream_snap["point"]) if mainstream_snap is not None else None
 

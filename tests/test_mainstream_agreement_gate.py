@@ -501,7 +501,14 @@ def test_gate_fires_through_adapter_not_fail_open():
         "longitude": 174.792,
         "target_date": "2026-06-04",
     }
-    with patch("src.data.mainstream_forecast_source.fetch_mainstream_point", return_value=mainstream_result):
+    # STEP 7 (E2): the proof path now reads the WARM CACHE only
+    # (read_mainstream_point_cached), never fetch_mainstream_point — the fetch is
+    # done off the mutex path by _edli_mainstream_warm_cycle. Patch the cache-read
+    # the proof path actually calls.
+    with patch(
+        "src.data.mainstream_forecast_source.read_mainstream_point_cached",
+        return_value=mainstream_result,
+    ):
         _evaluate_and_store_mainstream_agreement(
             event=event,
             family=family,

@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,6 +47,23 @@ logger = logging.getLogger(__name__)
 
 _FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 _MAX_AGE_HOURS_DEFAULT = 6.0
+
+# ----------------------------------------------------------------------------- #
+# Process-global warm cache (STEP 7 / E2 of the consolidated timeliness fix).
+#
+# The mainstream point is an Open-Meteo HTTP fetch whose client applies
+# Retry-After ``time.sleep`` on 429s. The reactor's proof path runs UNDER the
+# world_write_mutex, so a synchronous fetch there serialized every world write
+# behind a slow/blocked network call. We split the concern:
+#   - ``warm_mainstream_point`` performs the fetch and stores into this global
+#     cache; it is driven by a dedicated scheduler job OFF the mutex path.
+#   - ``read_mainstream_point_cached`` reads this cache ONLY and returns None on
+#     miss (fail-closed-to-None) — it NEVER touches the network. The proof path
+#     calls this, so the mutex-held decision path can never block on a fetch.
+# Thread-safe: the warm job and the reactor run on different scheduler threads.
+# ----------------------------------------------------------------------------- #
+_WARM_CACHE_LOCK = threading.Lock()
+_WARM_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
 
 # City config is loaded once at module import (read-only).
 _CITY_CONFIG: dict[str, dict[str, Any]] = {}
@@ -202,6 +220,59 @@ def fetch_mainstream_point(
     if _cache is not None:
         _cache[cache_key] = result
 
+    return result
+
+
+def read_mainstream_point_cached(
+    city: str,
+    target_date: str,
+    *,
+    metric: str,
+    max_age_hours: float = _MAX_AGE_HOURS_DEFAULT,
+) -> dict[str, Any] | None:
+    """Cache-ONLY read of the warm mainstream point (STEP 7 / E2).
+
+    NEVER performs a network fetch. Returns the warm-cached snapshot for
+    (city, target_date, metric) iff present AND fresh (< ``max_age_hours``);
+    otherwise returns None (fail-closed-to-None). The reactor proof path calls
+    this so the mutex-held decision path can never block on an Open-Meteo fetch.
+    A miss leaves the existing ``mainstream_point=None → FAIL_CLOSED`` behavior
+    intact — exactly as a stale/absent fetch would today.
+    """
+    metric_norm = str(metric).lower()
+    if metric_norm not in ("high", "low"):
+        raise ValueError(
+            f"read_mainstream_point_cached: metric must be 'high' or 'low', got {metric!r}"
+        )
+    cache_key = (city.lower(), target_date, metric_norm)
+    with _WARM_CACHE_LOCK:
+        cached = _WARM_CACHE.get(cache_key)
+        if cached is None:
+            return None
+        if not _is_fresh(cached.get("fetched_at_utc"), max_age_hours):
+            # Stale: drop it and fail-closed. The warm job re-populates next tick.
+            _WARM_CACHE.pop(cache_key, None)
+            return None
+        return dict(cached)
+
+
+def warm_mainstream_point(
+    city: str,
+    target_date: str,
+    *,
+    metric: str,
+) -> dict[str, Any] | None:
+    """Fetch the mainstream point and store it in the process-global warm cache
+    (STEP 7 / E2). Driven by the dedicated ``_edli_mainstream_warm_cycle``
+    scheduler job, OFF the world_write_mutex decision path. Returns the fetched
+    snapshot (or None on fail-closed); the side effect is the cache write that
+    ``read_mainstream_point_cached`` later serves to the reactor.
+    """
+    result = fetch_mainstream_point(city, target_date, metric=metric)
+    if result is not None:
+        cache_key = (city.lower(), target_date, str(metric).lower())
+        with _WARM_CACHE_LOCK:
+            _WARM_CACHE[cache_key] = result
     return result
 
 
