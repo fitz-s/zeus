@@ -11,6 +11,7 @@ from typing import Any
 
 from src.decision_kernel.canonicalization import stable_hash
 from src.events.reactor import EventSubmissionReceipt
+from src.types.market_price import MarketPrice, compute_alpha_gap_from_market_price
 
 SCHEMA_VERSION = 1
 
@@ -83,7 +84,8 @@ class EdliNoSubmitReceiptLedger:
                 projection_hash, receipt_json, receipt_hash, created_at, schema_version,
                 mainstream_agreement_pass, mainstream_agreement_fail_reason,
                 mainstream_point, mainstream_delta, mainstream_bin_label,
-                mainstream_source, mainstream_fetched_at_utc
+                mainstream_source, mainstream_fetched_at_utc,
+                alpha_gap
             ) VALUES (
                 :receipt_id, :event_id, :causal_snapshot_id, :decision_time,
                 :family_id, :candidate_id, :condition_id, :token_id, :direction,
@@ -94,7 +96,8 @@ class EdliNoSubmitReceiptLedger:
                 :projection_hash, :receipt_json, :receipt_hash, :created_at, :schema_version,
                 :mainstream_agreement_pass, :mainstream_agreement_fail_reason,
                 :mainstream_point, :mainstream_delta, :mainstream_bin_label,
-                :mainstream_source, :mainstream_fetched_at_utc
+                :mainstream_source, :mainstream_fetched_at_utc,
+                :alpha_gap
             )
             """,
             {
@@ -138,6 +141,23 @@ class EdliNoSubmitReceiptLedger:
                 "mainstream_bin_label": receipt.mainstream_bin_label,
                 "mainstream_source": receipt.mainstream_source,
                 "mainstream_fetched_at_utc": receipt.mainstream_fetched_at_utc,
+                # B2 (PR-4, 2026-06-03): edge-axis column.
+                # NULL when c_fee_adjusted is NULL (no executable quote — fail-closed).
+                # Routed through compute_alpha_gap_from_market_price so that passing
+                # c_cost_95pct (C95Price) where c_fee_adjusted (MarketPrice) is expected
+                # raises TypeError at this write boundary — the confusion is unconstructable.
+                "alpha_gap": (
+                    receipt.alpha_gap
+                    if receipt.alpha_gap is not None
+                    else (
+                        compute_alpha_gap_from_market_price(
+                            receipt.q_live,
+                            MarketPrice(receipt.c_fee_adjusted),
+                        )
+                        if receipt.q_live is not None and receipt.c_fee_adjusted is not None
+                        else None
+                    )
+                ),
             },
         )
         return receipt_id
@@ -178,6 +198,24 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     if all(payload.get(k) is None for k in _MAINSTREAM_GATE_FIELDS):
         for k in _MAINSTREAM_GATE_FIELDS:
             payload.pop(k, None)
+    # B2 (PR-4, 2026-06-03): alpha_gap — omit when None for hash stability.
+    # Receipts without an executable quote (c_fee_adjusted=NULL) had no alpha_gap
+    # before B2; including "alpha_gap: null" would change their hash and trigger
+    # EdliReceiptHashDrift on all pre-B2 shadow receipts.  When the gap IS
+    # computed (both q_live and c_fee_adjusted present), include it so backfill
+    # and audit tooling can recover the value from the blob.
+    alpha_gap_val = payload.get("alpha_gap")
+    if alpha_gap_val is None:
+        # Compute from q_live/c_fee_adjusted in case the dataclass field was not
+        # pre-populated (e.g., receipts constructed before B2 field was added).
+        q_live_val = payload.get("q_live")
+        c_fee_val = payload.get("c_fee_adjusted")
+        if q_live_val is not None and c_fee_val is not None:
+            alpha_gap_val = float(q_live_val) - float(c_fee_val)
+    if alpha_gap_val is not None:
+        payload["alpha_gap"] = alpha_gap_val
+    else:
+        payload.pop("alpha_gap", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

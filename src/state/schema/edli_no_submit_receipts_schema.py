@@ -69,6 +69,11 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     _ensure_column(conn, "mainstream_bin_label", "TEXT")
     _ensure_column(conn, "mainstream_source", "TEXT")
     _ensure_column(conn, "mainstream_fetched_at_utc", "TEXT")
+    # B2 (PR-4, 2026-06-03): edge-axis measurement column.
+    # alpha_gap = q_live - c_fee_adjusted.  NULL when c_fee_adjusted is NULL.
+    # Added via _ensure_column so existing live DBs are migrated on next boot.
+    _ensure_column(conn, "alpha_gap", "REAL")
+    _backfill_alpha_gap(conn)
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
 
@@ -77,6 +82,44 @@ def _ensure_column(conn: sqlite3.Connection, column_name: str, column_sql: str) 
     columns = {row[1] for row in conn.execute("PRAGMA table_info(edli_no_submit_receipts)").fetchall()}
     if column_name not in columns:
         conn.execute(f"ALTER TABLE edli_no_submit_receipts ADD COLUMN {column_name} {column_sql}")
+
+
+def _backfill_alpha_gap(conn: sqlite3.Connection) -> None:
+    """Backfill alpha_gap for existing rows from receipt_json.
+
+    For rows where alpha_gap IS NULL: recover q_live and c_fee_adjusted from the
+    stored receipt_json blob and compute alpha_gap = q_live - c_fee_adjusted.
+    Rows where c_fee_adjusted is missing in JSON are left NULL (fail-closed).
+
+    This ensures the column is populated for the ~60k existing shadow receipts on
+    the live DB without requiring a full receipt re-process.
+    """
+    rows = conn.execute(
+        """
+        SELECT receipt_id, receipt_json
+        FROM edli_no_submit_receipts
+        WHERE alpha_gap IS NULL
+        """
+    ).fetchall()
+    for row in rows:
+        receipt_id = row["receipt_id"] if isinstance(row, sqlite3.Row) else row[0]
+        receipt_json_str = row["receipt_json"] if isinstance(row, sqlite3.Row) else row[1]
+        try:
+            payload = json.loads(receipt_json_str)
+        except (ValueError, TypeError):
+            continue
+        q_live = payload.get("q_live")
+        c_fee_adjusted = payload.get("c_fee_adjusted")
+        if q_live is None or c_fee_adjusted is None:
+            continue  # leave NULL — fail-closed, no executable price
+        try:
+            alpha_gap = float(q_live) - float(c_fee_adjusted)
+        except (ValueError, TypeError):
+            continue
+        conn.execute(
+            "UPDATE edli_no_submit_receipts SET alpha_gap = ? WHERE receipt_id = ?",
+            (alpha_gap, receipt_id),
+        )
 
 
 def _backfill_projection_hash(conn: sqlite3.Connection) -> None:
