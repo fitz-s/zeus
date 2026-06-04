@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-20
-# Authority basis: slug-pattern discovery (2026-05-19 alpha window) — tag-based gamma queries
-#   do not surface newly-opened weather markets until tag is applied; direct slug lookup works immediately.
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-20
+# Last reused or audited: 2026-06-03
+# Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03 — SLUG_DISCOVERY_CITIES
+#   now derived from configured universe; antibody test_discovery_covers_configured_universe added.
+# Lifecycle: created=2026-05-19; last_reviewed=2026-06-03; last_reused=2026-06-03
 # Purpose: Antibody tests for _fetch_events_by_slug_pattern — slug fallback discovery path in market_scanner.
 # Reuse: Run when modifying SLUG_DISCOVERY_CITIES, SLUG_DISCOVERY_PREFIXES, _fetch_events_by_slug_pattern,
 #   or _fetch_events_by_tags integration. Verify CLOB cross-check still applies on slug path.
@@ -359,3 +359,33 @@ def test_slug_discovery_prefixes_cover_high_low():
     prefixes_str = " ".join(SLUG_DISCOVERY_PREFIXES)
     assert "highest-temperature" in prefixes_str, "SLUG_DISCOVERY_PREFIXES must cover highest-temp"
     assert "lowest-temperature" in prefixes_str, "SLUG_DISCOVERY_PREFIXES must cover lowest-temp"
+
+
+# ---------------------------------------------------------------------------
+# Antibody: configured trading universe ⊆ discoverable set
+# ---------------------------------------------------------------------------
+
+def test_discovery_covers_configured_universe():
+    """Antibody: every configured city slug_name must appear in SLUG_DISCOVERY_CITIES.
+
+    A configured city absent from discovery silently goes dark when its tag-based
+    gamma discovery lags (Lagos, Jakarta precedent). This test makes that category
+    structurally impossible: failure here means a city was added to cities.json
+    without being added to the discovery set.
+
+    Sed-revert: remove any slug_name from SLUG_DISCOVERY_CITIES → RED.
+    Sed-add: add a new city to cities.json without updating discovery → RED.
+    """
+    import src.config as _cfg
+
+    configured_slugs: set[str] = set()
+    for city in _cfg.cities:
+        configured_slugs.update(city.slug_names)
+
+    discovery_set = set(SLUG_DISCOVERY_CITIES)
+    missing = configured_slugs - discovery_set
+    assert not missing, (
+        f"{len(missing)} configured city slug(s) are NOT in SLUG_DISCOVERY_CITIES — "
+        f"these cities can only trade on pre-existing market rows and go dark when "
+        f"their market closes (Lagos/Jakarta precedent). Missing: {sorted(missing)}"
+    )

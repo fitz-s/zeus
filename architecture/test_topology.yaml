@@ -2611,6 +2611,7 @@ test_metadata:
       - SLUG-PATTERN-DEDUP-AGAINST-TAG-RESULTS
       - SLUG-PATH-CLOB-ARCHIVED-CROSS-CHECK
       - SLUG-SEEN-IDS-SHARED-WITH-TAG-PATH
+      - SLUG-DISCOVERY-COVERS-CONFIGURED-UNIVERSE
     source_under_test:
       - src/data/market_scanner.py
     law_dependencies:
@@ -2624,8 +2625,10 @@ test_metadata:
       (T3), CLOB archived cross-check on slug path (T4), shared seen_ids set
       prevents duplicates (T5). Bare slug returns negRisk parent with all bins
       in markets:[...] — one request per (city, date).
+      2026-06-03: SLUG-DISCOVERY-COVERS-CONFIGURED-UNIVERSE antibody added;
+      SLUG_DISCOVERY_CITIES now derived from runtime_config.cities (14→63 slugs).
     created: 2026-05-19
-    last_reused_or_audited: 2026-05-19
+    last_reused_or_audited: 2026-06-03
 
   tests/test_settlement_commands_hexbytes_serializer.py:
     modules: [execution, state, venue]

@@ -1,3 +1,5 @@
+# Last reused or audited: 2026-06-03
+# Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03
 """Gamma API market scanner: discover active weather markets.
 
 Queries Polymarket's Gamma API for temperature events.
@@ -213,13 +215,15 @@ TAG_SLUGS = ["weather", "temperature", "daily-temperature"]
 # Tag-based gamma queries do NOT surface newly-opened weather markets until
 # Polymarket adds the tag — typically a lag of minutes to hours.
 # Direct slug lookup via GET /events?slug=<full-slug> returns live markets
-# immediately after opening. This city list covers the verified-tradeable
-# set confirmed on 2026-05-19; expand as new cities launch.
-SLUG_DISCOVERY_CITIES = [
-    "amsterdam", "denver", "shanghai", "kuala-lumpur", "panama-city",
-    "mexico-city", "jeddah", "london", "new-york-city", "paris", "tokyo",
-    "seoul", "miami", "chicago",
-]
+# immediately after opening.
+#
+# Derived at import time from the canonical city config so it can never drift
+# out of sync with the configured trading universe. All slug_names from
+# config/cities.json are discoverable; the test_discovery_covers_configured_universe
+# antibody in tests/test_scanner_slug_pattern.py enforces set(configured) ⊆ set(discoverable).
+SLUG_DISCOVERY_CITIES: list[str] = sorted(
+    {slug for city in runtime_config.cities for slug in city.slug_names}
+)
 # Slug prefixes to enumerate per (city, date).
 SLUG_DISCOVERY_PREFIXES = [
     "highest-temperature-in-{city}-on-{date}",
