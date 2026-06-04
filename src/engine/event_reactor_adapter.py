@@ -3761,23 +3761,41 @@ def _market_analysis_from_event_snapshot(
         # M1 (critic 2026-06-04): the EMOS branch must degrade to the honest path on ANY failure,
         # mirroring the flag-OFF try/except around _snapshot_lead_days — otherwise a lead-missing
         # snapshot fail-closes the whole family (coverage regression) when the flag is ON.
+        # NH month-season, MATCHING emos_calibration.json keying (fit_emos_calibration.season()).
+        # MUST NOT be hemisphere-aware: the fit groups e.g. Sao Paulo|June under "JJA" (NH label);
+        # a lat-flipped season would serve the OPPOSITE-season cell (critic C1). Month-only keys
+        # the cell fit on the SAME calendar months as the target. Computed BEFORE the try so it is
+        # always available for the failure log (city|season|metric cell identity).
+        _emos_m = (family.target_date.month if hasattr(family.target_date, "month")
+                   else int(str(family.target_date)[5:7]))
+        _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
+                        else "JJA" if _emos_m in (6, 7, 8) else "SON")
         try:
             from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
-            # NH month-season, MATCHING emos_calibration.json keying (fit_emos_calibration.season()).
-            # MUST NOT be hemisphere-aware: the fit groups e.g. Sao Paulo|June under "JJA" (NH label);
-            # a lat-flipped season would serve the OPPOSITE-season cell (critic C1). Month-only keys
-            # the cell fit on the SAME calendar months as the target.
-            _emos_m = (family.target_date.month if hasattr(family.target_date, "month")
-                       else int(str(family.target_date)[5:7]))
-            _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
-                            else "JJA" if _emos_m in (6, 7, 8) else "SON")
             _emos_q = _build_emos_q(
                 city=city.name, season=_emos_season, metric=family.metric,
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
             )
-        except Exception:
-            _emos_q = None  # honest path; EMOS is best-effort, never fail-closes a family
+        except Exception as _emos_exc:
+            # DE-SILENCED ANTIBODY (#149 / live-diagnosis 2026-06-04): a bare
+            # `except Exception: _emos_q = None` swallowed EVERY EMOS failure with NO log, so a
+            # flag-ON-but-always-failing calibrator was INDISTINGUISHABLE from flag-OFF (q_source
+            # absent; legacy ran invisibly — the exact fail-open-inert class). EMOS stays
+            # best-effort (degrades to the honest legacy path, never fail-closes a family), BUT
+            # the degrade is now LOUD: a distinct EMOS_SERVE_FAILED line carrying the exception
+            # type+message and the served cell identity (city|season|metric|unit) so monitoring
+            # catches a served cell that has silently stopped serving. A silent fall-back on a
+            # served cell is forbidden; this makes that category UNCONSTRUCTABLE in CI
+            # (tests/engine/test_emos_seam_serve_loud.py). `_emos_q` left None -> legacy path.
+            _emos_q = None
+            payload["_edli_emos_serve_failed"] = True
+            import logging  # module uses lazy per-fn logging imports
+            logging.getLogger("zeus.emos_serve").warning(
+                "EMOS_SERVE_FAILED cell=%s|%s|%s unit=%s exc=%s: %s",
+                getattr(city, "name", family.city), _emos_season, family.metric, unit,
+                type(_emos_exc).__name__, _emos_exc,
+            )
     if _emos_q is not None:
         _q_vec, _emos_mu_native, _emos_sigma_native = _emos_q
         p_raw = np.asarray(_q_vec, dtype=float)
