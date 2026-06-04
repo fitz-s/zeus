@@ -269,6 +269,142 @@ class EventStore:
             )
         return len(expired_ids)
 
+    # Channel event types that carry a per-token price-update stream and are
+    # subject to the superseded-keep-latest sweep. NEW_MARKET_DISCOVERED is
+    # included because a re-discovered market replaces prior discovery events
+    # for the same token just as price ticks do.
+    _CHANNEL_EVENT_TYPES: tuple[str, ...] = (
+        "BEST_BID_ASK_CHANGED",
+        "BOOK_SNAPSHOT",
+        "NEW_MARKET_DISCOVERED",
+    )
+
+    def archive_superseded_channel_events(
+        self, *, batch_limit: int = 100_000
+    ) -> int:
+        """Sweep superseded per-token channel events to terminal ``'expired'`` status.
+
+        OPERATOR DIRECTIVE 2026-06-04 (companion to ``archive_expired_candidates``):
+        ``BEST_BID_ASK_CHANGED`` / ``BOOK_SNAPSHOT`` / ``NEW_MARKET_DISCOVERED`` events
+        are a price-update stream for each market token. For any given ``(event_type,
+        token_id)`` group, only the event with the LATEST ``available_at`` carries live
+        state; every older event in the group is superseded and useless to re-scan —
+        but ~1.7M such pending rows were piling up because nothing ever pruned them.
+
+        INVARIANT (superseded-keep-latest): for each ``(event_type, token_id)`` group
+        in the active working set (``pending`` / ``processing`` only), mark all rows
+        EXCEPT the one with ``MAX(available_at)`` as ``'expired'``. This is strictly
+        correct: the latest tick for a token is the only one the reactor could act on;
+        all older ticks are definitionally superseded regardless of elapsed time.
+
+        WHY NOT A TIME THRESHOLD: a pure age cutoff (e.g. "older than 2h") could
+        wrongly archive a fresh event for a slow-updating token.  The superseded test
+        is definitional and requires no arbitrary threshold: if there is a newer event
+        for the SAME key, the older one cannot contribute new information.
+
+        TOKEN KEY: ``token_id`` from ``payload_json`` (confirmed present in every live
+        ``BEST_BID_ASK_CHANGED`` and ``BOOK_SNAPSHOT`` row sampled 2026-06-04; see
+        ``MarketBookEventPayload.token_id``). Events whose ``token_id`` is NULL or
+        missing are KEPT ACTIVE (fail-closed — never archive an unverifiable row).
+
+        The group key is ``(event_type, token_id)`` — not just ``token_id`` — so a
+        ``BEST_BID_ASK_CHANGED`` and a ``BOOK_SNAPSHOT`` for the same token are
+        treated as independent streams (they carry different information; the latest
+        BA-changed event and the latest book snapshot are both kept).
+
+        APPEND-ONLY PROVENANCE: only ``opportunity_event_processing.processing_status``
+        is mutated; the immutable ``opportunity_events`` row is never deleted.
+
+        BATCH-BOUNDED: ``batch_limit`` caps the rows examined per call so a 1.7M
+        one-time backlog drains across cycles instead of in one giant transaction that
+        could lock the world WAL for seconds. The groups are evaluated in ascending
+        ``available_at`` order so older superseded events are swept first.
+
+        IDEMPOTENT: re-running at the same state archives nothing new (already-expired
+        rows are excluded from the ``pending``/``processing`` filter).
+
+        Returns the number of processing rows transitioned to ``'expired'``.
+        """
+
+        self._require_world_event_tables()
+        type_placeholders = ",".join("?" * len(self._CHANNEL_EVENT_TYPES))
+
+        # Step 1: for each (event_type, token_id) group, find the keeper event_id —
+        # the one whose available_at equals MAX(available_at) for that group.
+        # Pattern: find MAX(available_at) per group in a subquery, then JOIN back to
+        # get the event_id of the row that matches. This is unambiguous in SQLite
+        # (no "bare column in GROUP BY" gotcha). Rows with a NULL token_id are fully
+        # excluded (fail-closed on unverifiable key — they never enter the to-archive
+        # list and are handled separately by the NULL-check below).
+        keeper_rows = self.conn.execute(
+            f"""
+            SELECT e.event_id
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p
+              ON p.event_id = e.event_id
+             AND p.consumer_name = ?
+            JOIN (
+                SELECT e2.event_type,
+                       json_extract(e2.payload_json, '$.token_id') AS token_id,
+                       MAX(e2.available_at) AS max_available_at
+                FROM opportunity_events e2
+                JOIN opportunity_event_processing p2
+                  ON p2.event_id = e2.event_id
+                 AND p2.consumer_name = ?
+                WHERE e2.event_type IN ({type_placeholders})
+                  AND p2.processing_status IN ('pending', 'processing')
+                  AND json_extract(e2.payload_json, '$.token_id') IS NOT NULL
+                GROUP BY e2.event_type, json_extract(e2.payload_json, '$.token_id')
+            ) grp
+              ON e.event_type = grp.event_type
+             AND json_extract(e.payload_json, '$.token_id') = grp.token_id
+             AND e.available_at = grp.max_available_at
+             AND p.processing_status IN ('pending', 'processing')
+            """,
+            (self.consumer_name, self.consumer_name, *self._CHANNEL_EVENT_TYPES),
+        ).fetchall()
+        keeper_ids: set[str] = {row[0] for row in keeper_rows}
+
+        if not keeper_ids:
+            return 0
+
+        # Step 2: fetch all pending/processing channel-event rows with a parseable
+        # token_id (batch-limited). The keepers are excluded in Python after fetch
+        # (avoids a large NOT-IN SQL clause that could be slow on SQLite with 1.7M rows).
+        candidate_rows = self.conn.execute(
+            f"""
+            SELECT e.event_id
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p
+              ON p.event_id = e.event_id
+             AND p.consumer_name = ?
+            WHERE e.event_type IN ({type_placeholders})
+              AND p.processing_status IN ('pending', 'processing')
+              AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
+            ORDER BY e.available_at ASC
+            LIMIT ?
+            """,
+            (self.consumer_name, *self._CHANNEL_EVENT_TYPES, batch_limit),
+        ).fetchall()
+
+        superseded_ids = [row[0] for row in candidate_rows if row[0] not in keeper_ids]
+
+        now = _utc_now()
+        for event_id in superseded_ids:
+            self.conn.execute(
+                """
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, event_id),
+            )
+        return len(superseded_ids)
+
     @staticmethod
     def _strictly_past_in_tz(
         city: str | None, target_date: str | None, decision_time_utc: datetime

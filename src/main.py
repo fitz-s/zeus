@@ -14,10 +14,10 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-06-03
+# Last reused/audited: 2026-06-04
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
-#                  + 2026-06-03 arm direction-gate footgun antibody / pre-arm verification (_assert_edli_arm_requires_direction_gate)
+#                  + 2026-06-04 mainstream made display-only/unconstructable-as-decision (arm direction-gate boot guard + submit enforce branch DELETED)
 
 import functools
 import json
@@ -552,37 +552,12 @@ def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
         raise RuntimeError(verified.reason)
 
 
-def _assert_edli_arm_requires_direction_gate(edli_cfg: dict) -> None:
-    """ANTIBODY: arming WITHOUT the direction-agreement gate is a BOOT FAILURE.
-
-    The direction-agreement gate (event_reactor_adapter.py) is what separates
-    direction-CORRECT candidates from WRONG-SIDE buy_no candidates that already
-    pass proof+kelly+fdr+trade_score. That gate only EXCLUDES a candidate at
-    submit time when BOTH:
-      - ``real_order_submit_enabled`` (the ARM key), AND
-      - ``edli_v1.mainstream_agreement_enforce_on_submit`` are true.
-
-    ARM is therefore a TWO-KEY operation. If an operator arms by flipping ONLY
-    ``real_order_submit_enabled=true`` while ``mainstream_agreement_enforce_on_submit``
-    is still false, the direction gate is SKIPPED and gate-FAIL wrong-side
-    candidates become live-submittable. The second key being off is catastrophic
-    and silent. This guard makes "armed without the direction gate" UNCONSTRUCTABLE
-    at boot.
-
-    Invoked only on armed modes (edli_live_canary / edli_live — both require
-    ``real_order_submit_enabled``). In edli_shadow_no_submit the armed-mode branch
-    is never entered, so this guard never fires (shadow boot is byte-identical).
-
-    Asserts BOTH, fail-closed (a MISSING flag is treated as NOT-satisfied; only the
-    explicit literal True satisfies):
-      - ``mainstream_agreement_enforce_on_submit`` is True (enforcement is live), AND
-      - ``mainstream_agreement_reference_enabled`` is True (the verdict the
-        enforcement reads is actually produced).
-    """
-    enforce = edli_cfg.get("mainstream_agreement_enforce_on_submit", False)
-    reference = edli_cfg.get("mainstream_agreement_reference_enabled", False)
-    if enforce is not True or reference is not True:
-        raise RuntimeError("EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT")
+# OPERATOR LAW (2026-06-04, Rule-4 antibody): the former
+# ``_assert_edli_arm_requires_direction_gate`` two-key arm boot guard is DELETED.
+# It coupled arming to the mainstream-enforcement flag — but mainstream is now
+# OBSERVATIONAL / DISPLAY-ONLY and is NEVER a decision/arm input. The submit-time
+# enforce branch it guarded was also deleted (event_reactor_adapter submit closure),
+# so there is no "direction gate" left to require. Mainstream cannot block boot/arm.
 
 
 def evaluate_edli_stage_readiness(
@@ -1007,13 +982,9 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
         # Ordered AFTER the (edli_live-only) promotion-artifact gate so the
         # promotion gate's specific reason still surfaces first for edli_live.
         _assert_edli_arm_gate_artifact(edli_cfg)
-        # ANTIBODY (arm direction-gate footgun): ARM is a two-key operation.
-        # Flipping ONLY real_order_submit_enabled (without
-        # mainstream_agreement_enforce_on_submit) skips the direction-agreement
-        # gate -> wrong-side buy_no candidates become live-submittable. Make that
-        # state a boot failure. Fires for BOTH armed modes; inert in shadow (this
-        # branch is not entered when real_order_submit_enabled is false).
-        _assert_edli_arm_requires_direction_gate(edli_cfg)
+        # OPERATOR LAW (2026-06-04): the former two-key arm direction-gate guard is
+        # DELETED — mainstream is observational/display-only and is NEVER a decision/arm
+        # input, so there is no mainstream-enforcement key to require at arm time.
     return mode
 
 
@@ -4102,6 +4073,31 @@ def _edli_event_reactor_cycle() -> None:
                 _sweep_exc,
             )
 
+        # CHANNEL EVENT SWEEP (operator directive 2026-06-04 companion): prune
+        # superseded BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT / NEW_MARKET_DISCOVERED
+        # pending rows. For each (event_type, token_id) group only the LATEST
+        # available_at survives; all older ones are superseded state and marked
+        # 'expired'. The 1.7M pending channel-event backlog (1743 distinct tokens
+        # × ~990 ticks each) is the main fetch_pending JOIN cost; this sweep
+        # reduces it to ~1 row per token. batch_limit bounds the per-cycle work so
+        # the backlog drains across cycles rather than in one giant transaction.
+        # Fail-soft: a sweep error must never crash a decision cycle.
+        try:
+            _ch_archived = store.archive_superseded_channel_events()
+            if _ch_archived:
+                logger.info(
+                    "EDLI reactor: archived %d superseded channel events "
+                    "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) → "
+                    "'expired'; pending channel-event scan reduced",
+                    _ch_archived,
+                )
+        except Exception as _ch_sweep_exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "EDLI reactor: archive_superseded_channel_events sweep failed "
+                "(non-fatal): %r",
+                _ch_sweep_exc,
+            )
+
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
@@ -6275,6 +6271,26 @@ def main():
             seconds=90,
             id="edli_market_substrate_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 25.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # MAINSTREAM WARM (E2 / operator directive 2026-06-04 #2): dedicated off-mutex
+        # warmer for the mainstream-forecast point cache (read_mainstream_point_cached),
+        # mirroring _edli_market_substrate_warm_cycle. The reactor proof path now ALWAYS
+        # annotates the mainstream/bias agreement value on every candidate (decoupled from
+        # mainstream_agreement_reference_enabled), reading the WARM CACHE only — so this job
+        # MUST run for the cache to populate, else every receipt carries
+        # mainstream_*=None (unknown). Gated only by edli_v1.enabled (inside the job), NOT
+        # by the reference flag — warming the cache is just a read, off-mutex, safe. The
+        # fetch applies Retry-After backoff on 429s; on its own cadence it never serializes
+        # a world write. Data-only (no orders); fail-soft. Display-only: the value it warms
+        # is NEVER a decision input (the enforce/arm coupling is deleted).
+        scheduler.add_job(
+            _edli_mainstream_warm_cycle,
+            "interval",
+            seconds=90,
+            id="edli_mainstream_warm",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 28.0),
             max_instances=1,
             coalesce=True,
         )
