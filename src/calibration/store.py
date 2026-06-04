@@ -437,6 +437,7 @@ def get_decision_group_count(
     authority_filter: str = "VERIFIED",
     *,
     metric: Literal["high", "low"] | None = None,
+    bin_source_filter: str | None = None,
 ) -> int:
     """Count independent decision groups in a calibration bucket.
 
@@ -444,24 +445,47 @@ def get_decision_group_count(
     (see `get_pairs_for_bucket` docstring). `metric="low"` raises
     immediately because legacy `calibration_pairs` has no
     `temperature_metric` column.
+
+    `bin_source_filter` mirrors the same parameter on `get_pairs_for_bucket`.
+    When provided, only rows with the matching bin_source value are counted,
+    so the count and fit populations are guaranteed identical (FIX-1
+    canonical bin_source / wiring verdict 2026-06-03: both callers must
+    query ONE population via CANONICAL_CALIBRATION_PAIR_BIN_SOURCE so a
+    future bin_source bump cannot reopen the count/fit mismatch).
     """
+    # Created: 2026-06-03
+    # Last reused or audited: 2026-06-03
+    # Authority basis: FIX-1 canonical bin_source / wiring verdict 2026-06-03
     if metric == "low":
         raise NotImplementedError(
             "get_decision_group_count reads legacy `calibration_pairs`, "
             "which is HIGH-only. For LOW counts use the calibration_pairs API."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
+    bin_clause = "AND bin_source = ?" if bin_source_filter is not None else ""
     if authority_filter == "any" or not _has_authority_column(conn):
+        params: tuple = (
+            (cluster, season, bin_source_filter)
+            if bin_source_filter is not None
+            else (cluster, season)
+        )
         row = conn.execute(f"""
             SELECT COUNT(DISTINCT decision_group_id) FROM {table}
             WHERE cluster = ? AND season = ? AND decision_group_id IS NOT NULL
-        """, (cluster, season)).fetchone()
+            {bin_clause}
+        """, params).fetchone()
     else:
+        params = (
+            (cluster, season, authority_filter, bin_source_filter)
+            if bin_source_filter is not None
+            else (cluster, season, authority_filter)
+        )
         row = conn.execute(f"""
             SELECT COUNT(DISTINCT decision_group_id) FROM {table}
             WHERE cluster = ? AND season = ? AND authority = ?
               AND decision_group_id IS NOT NULL
-        """, (cluster, season, authority_filter)).fetchone()
+            {bin_clause}
+        """, params).fetchone()
     return int(row[0] or 0)
 
 

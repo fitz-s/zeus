@@ -34,6 +34,7 @@ test_trust_policy:
     tests/test_market_events_persistence_observability.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P2-2: market_events persistence failure surfaces to scheduler health (relationship test)"}
     tests/test_calibration_manager_w0.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_calibration_coverage_guard.py: {created: "2026-06-03", last_used: "2026-06-03", note: "#90: loud bias+Platt calibration-coverage antibody — warn(shadow)/fail-closed(armed); relationship test over real read_bias_model + boot-wrapper severity"}
+    tests/test_calibration_bin_source_fix1.py: {created: "2026-06-03", last_used: "2026-06-03", note: "FIX-1 antibody: canonical_v2 bin_source wiring + flag-OFF byte-identity + count/fit population agreement"}
     tests/test_migration_converge_settlement_store.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_cert_dual_chain.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_intake_phase_filter.py: {created: "2026-06-03", last_used: "2026-06-03"}
@@ -962,6 +963,9 @@ categories:
     - tests/test_boot_guard_settings_object.py
     # W0 dead calibration-pin config cleanup in src/calibration/manager.py.
     - tests/test_calibration_manager_w0.py
+    # FIX-1 calibration bin_source: canonical_v2 wiring antibody (flag-OFF byte-identity
+    # + flag-ON own-fit + count/fit population agreement).
+    - tests/test_calibration_bin_source_fix1.py
     # W0 ghost-table archive migration (202606_converge_settlement_store).
     - tests/test_migration_converge_settlement_store.py
     # W1 certificate dual-chain source_run binding (benign 00Z->12Z passes; fabricated fails).
