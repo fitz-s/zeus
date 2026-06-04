@@ -142,7 +142,17 @@ def main():
         craw_g = crps_gaussian(X25, np.sqrt(np.exp(L25)), Y25)
         Xf, Lf, Df, Yf = arr(full); pf = fit_cell(Xf, Lf, Df, Yf)
         fitted[key] = {"p": np.array(pf, dtype=float), "n": len(full)}
-        if cemos_g > craw_g - MARGIN:
+        gate_emos = (cemos_g <= craw_g - MARGIN)  # (a) method generalizes 2024->2025
+        # (b) 2026 REGIME ARM (M2, 2026-06-04): gate the FINAL served params (pf) on the
+        # current-regime 2026 OOS too. A cell already regressing in 2026 must NOT ship emos
+        # on a 2025-only license (Tel Aviv/Jeddah JJA low were serving emos at ~3x worse CRPS).
+        te = dd["test"]
+        if gate_emos and len(te) >= 20:
+            Xt, Lt, Dt, Yt = arr(te)
+            mu_t, sig_t = mu_sigma(pf, Xt, Lt, Dt)
+            if crps_gaussian(mu_t, sig_t, Yt) > crps_gaussian(Xt, np.sqrt(np.exp(Lt)), Yt) - MARGIN:
+                gate_emos = False
+        if not gate_emos:
             raw_only.add(key)
 
     # light EB shrinkage of the FULL-fit params toward identity/pool (variance reduction)
