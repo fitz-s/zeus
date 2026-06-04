@@ -21,7 +21,10 @@ from datetime import datetime, timezone
 
 import pytest
 
+import contextlib
+
 from src.state.db import init_schema, init_schema_forecasts
+import src.cron.settlement_attribution as sa
 from src.cron.settlement_attribution import (
     AttributionInputEmptyError,
     load_attribution_input_rows,
@@ -120,3 +123,75 @@ def test_attribution_guard_raises_on_empty_input(world_conn, tmp_path):
 
     with pytest.raises(AttributionInputEmptyError):
         run_receipt_attribution(world_conn=world_conn, now_utc=datetime.now(tz=timezone.utc))
+
+
+# ---------------------------------------------------------------------------
+# H1 — the CLI (the ONLY live entry point) must drive the RECEIPT path.
+# Before this fix, _cli() called run_attribution over decision_events (0 live
+# rows) and silently reported attributed=0. These tests prove the wiring:
+# (a) _cli reads receipts and reports a non-zero input_rows count;
+# (b) _cli with no receipts RAISES the empty antibody (no silent 0).
+# The dead decision_events driver would pass NEITHER: it returns an
+# 'attributed'-keyed dict and never raises on empty receipts.
+# ---------------------------------------------------------------------------
+def _populated_conn(tmp_path) -> sqlite3.Connection:
+    """A WORLD conn with one joinable receipt + an ATTACHed settlement DB."""
+    fcst_path = str(tmp_path / "fcst.db")
+    fconn = sqlite3.connect(fcst_path)
+    init_schema_forecasts(fconn)
+    _insert_settlement(fconn, city="Tokyo", target_date="2026-06-01",
+                       metric="high", value=17.0, unit="C", settlement_id="s1")
+    fconn.commit()
+    fconn.close()
+
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _insert_receipt(conn, city="Tokyo", target_date="2026-06-01",
+                    metric="high", direction="buy_yes", bin_label="17°C",
+                    price=0.40, size=5.0, receipt_id="r1")
+    conn.commit()
+    _attach(conn, fcst_path)
+    return conn
+
+
+def test_cli_drives_receipt_path_and_reports_nonzero(tmp_path, monkeypatch, capsys):
+    conn = _populated_conn(tmp_path)
+
+    @contextlib.contextmanager
+    def _fake_open(write_class="bulk"):
+        yield conn
+
+    monkeypatch.setattr(sa, "open_world_with_forecasts", _fake_open)
+
+    # A bare invocation (no flags) is the cron form.
+    sa._cli(argv=[])
+    out = capsys.readouterr().out
+    # The receipt path prints "Receipt-attribution stats: ..." with input_rows.
+    assert "Receipt-attribution stats" in out
+    assert "'input_rows': 1" in out, (
+        f"CLI did not drive the receipt path (input_rows!=1). Output: {out!r}"
+    )
+    conn.close()
+
+
+def test_cli_raises_empty_antibody_when_no_receipts(tmp_path, monkeypatch):
+    """An empty join through the CLI must RAISE, not silently print 0 —
+    the dead decision_events driver did the latter and that is the bug."""
+    fcst_path = str(tmp_path / "fcst.db")
+    fconn = sqlite3.connect(fcst_path)
+    init_schema_forecasts(fconn)
+    fconn.commit()
+    fconn.close()
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    _attach(conn, fcst_path)
+
+    @contextlib.contextmanager
+    def _fake_open(write_class="bulk"):
+        yield conn
+
+    monkeypatch.setattr(sa, "open_world_with_forecasts", _fake_open)
+
+    with pytest.raises(AttributionInputEmptyError):
+        sa._cli(argv=[])
+    conn.close()

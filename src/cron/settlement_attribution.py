@@ -1,7 +1,9 @@
 # Created: 2026-05-22
-# Last reused or audited: 2026-05-22
+# Last reused or audited: 2026-06-03
 # Authority basis: PROMOTION_PIPELINE_DESIGN.md §4 (Track L-2) + §2 (EvidenceReport contract)
 #                  + INV-37 (ATTACH+SAVEPOINT for cross-DB writes)
+#                  + STRUCTURAL_FIX_PLAN_2026-06-03 §P0.4 (N2 — CLI repointed off
+#                    dead decision_events onto live edli_no_submit_receipts; H1)
 """Track L-2: Settlement-attribution cron job.
 
 Offline job (never imported by live daemon paths).  Matches
@@ -29,7 +31,12 @@ Design constraints
 
 CLI
 ---
-  python -m src.cron.settlement_attribution [--dry-run] [--strategy KEY]
+  python -m src.cron.settlement_attribution [--allow-empty]
+
+The CLI drives the RECEIPT path (``run_receipt_attribution`` over
+``edli_no_submit_receipts``), not the legacy ``decision_events`` join
+(``run_attribution``, kept only for the v1 regression suite). An empty join
+RAISES ``AttributionInputEmptyError`` unless ``--allow-empty`` is passed.
 
 Entry point for cron use:
   python -m src.cron.settlement_attribution
@@ -40,6 +47,7 @@ import argparse
 import json
 import logging
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -574,29 +582,35 @@ def open_world_with_forecasts(write_class: str = "bulk"):
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-def _cli() -> None:
+def _cli(argv: Optional[list[str]] = None) -> None:
+    # H1 — DEAD-LOOP REPOINT (STRUCTURAL_FIX_PLAN §P0.4 / N2).
+    # The CLI is the ONLY live entry point for this job (cron + `python -m`).
+    # It previously drove ``run_attribution`` over ``decision_events`` — a table
+    # with 0 live rows. That made the learning loop a silent no-op: every cron
+    # tick reported ``attributed=0`` against an empty left side and nobody noticed
+    # because zero looked like "nothing to do". The read-side fix
+    # (``run_receipt_attribution`` over ``edli_no_submit_receipts``, 60k+ live
+    # rows) already shipped on this branch but NOTHING called it. This wires it.
+    #
+    # The ``AttributionInputEmptyError`` antibody stays armed (require_nonempty
+    # defaults True): a genuinely empty join now RAISES LOUD instead of returning
+    # a comfortable zero. That is the point — a dead driver can no longer
+    # masquerade as success.
     parser = argparse.ArgumentParser(
-        description="Track L-2 settlement-attribution cron: joins shadow "
-                    "decision_events to settlement_outcomes, writes regret_decompositions.",
+        description="Track L-2 settlement-attribution cron: joins live "
+                    "edli_no_submit_receipts to VERIFIED settlement_outcomes via "
+                    "grade_receipt (Direction Law), counts wins/losses. Raises "
+                    "AttributionInputEmptyError on an empty join (never a silent 0).",
     )
     parser.add_argument(
-        "--strategy",
-        default=None,
-        help="Optional strategy_key filter (e.g. 'shoulder_sell'). "
-             "Default: attribute all shadow_decision rows.",
-    )
-    parser.add_argument(
-        "--dry-run",
+        "--allow-empty",
         action="store_true",
         default=False,
-        help="Compute but do not write to DB.",
+        help="Disarm the empty-input antibody (require_nonempty=False). Default "
+             "OFF: an empty join is a FAILURE, not a silent success. Use only for "
+             "an intentionally-empty fixture run.",
     )
-    parser.add_argument(
-        "--cohort-tag",
-        default="l2_settlement_attribution_v1",
-        help="cohort_tag for shadow_experiments registration.",
-    )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=logging.INFO,
@@ -604,14 +618,12 @@ def _cli() -> None:
     )
 
     with open_world_with_forecasts(write_class="bulk") as conn:
-        stats = run_attribution(
+        stats = run_receipt_attribution(
             world_conn=conn,
-            strategy_key=args.strategy,
-            dry_run=args.dry_run,
-            cohort_tag=args.cohort_tag,
+            require_nonempty=not args.allow_empty,
         )
 
-    print(f"Attribution stats: {stats}")
+    print(f"Receipt-attribution stats: {stats}")
 
 
 if __name__ == "__main__":
