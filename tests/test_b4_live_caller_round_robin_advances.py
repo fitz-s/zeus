@@ -93,7 +93,7 @@ def test_live_caller_source_covers_all_cities_within_ceil_n_over_limit(monkeypat
 def test_live_redecision_source_is_distinct_per_cycle_for_idempotency(monkeypatch):
     """The source must ALSO stay distinct per cycle so the re-emitted FSR-equivalent does
     not dedup to the consumed FSR (the original reason an ISO timestamp was used). A
-    monotonic cycle-{EPOCH}-{N} is distinct per cycle, preserving that property."""
+    monotonic cycle-{TOKEN}-{N} is distinct per cycle, preserving that property."""
     main._reset_edli_redecision_cycle_index()
     sources = [main._edli_next_redecision_source() for _ in range(10)]
     assert len(set(sources)) == 10  # all distinct
@@ -101,40 +101,52 @@ def test_live_redecision_source_is_distinct_per_cycle_for_idempotency(monkeypatc
 
 
 def test_cross_restart_sources_never_collide_for_same_family_cycle():
-    """CROSS-RESTART UNIQUENESS (MAJOR-2). stable_idempotency_key includes `source`;
-    available_at is snapshot-stable (not wall-clock per cycle). Without an epoch prefix
-    the post-restart cycle-0 produces the SAME idempotency key as the pre-restart cycle-0
-    for the same family -> dedup -> family not re-decided after restart.
+    """CROSS-RESTART UNIQUENESS (MAJOR-2 + HARDEN-1). stable_idempotency_key includes
+    `source`; available_at is snapshot-stable (not wall-clock per cycle). Without a
+    restart-unique boot token the post-restart cycle-0 produces the SAME idempotency
+    key as the pre-restart cycle-0 for the same family -> dedup -> family skipped.
 
-    This test simulates two process lifetimes (via the boot-epoch test hook) and asserts
-    that the cycle-0 source from each DIFFERS, so the idempotency keys produced for the
-    same (entity_key, available_at, digest) differ and the post-restart re-decision
-    is NOT deduped away."""
+    Tests TWO cases:
+    (a) Normal restart with a different wall-clock second (60s gap).
+    (b) SAME-SECOND crash-loop restart — same int(time.time()), different pid.
+        This is the HARDEN-1 residual: a pure epoch without pid would collide here.
+
+    Uses the boot-token test hook to simulate distinct process lifetimes."""
     from src.events.idempotency import stable_idempotency_key
 
-    # Simulate process-1 (epoch 1717000000) and process-2 (epoch 1717000060 = 60s later)
     entity_key = "chicago|2026-06-04|high"
     available_at = "2026-06-03T12:00:00Z"
     digest = "abc123"
     event_type = "edli_redecision"
 
-    # Process 1 cycle-0
-    main._set_edli_redecision_boot_epoch(1717000000)
-    main._reset_edli_redecision_cycle_index()
-    source_p1 = main._edli_next_redecision_source()
-    key_p1 = stable_idempotency_key(event_type, entity_key, source_p1, available_at, digest)
+    def _run_cycle0(token: str) -> tuple[str, str]:
+        main._set_edli_redecision_boot_token(token)
+        main._reset_edli_redecision_cycle_index()
+        src = main._edli_next_redecision_source()
+        key = stable_idempotency_key(event_type, entity_key, src, available_at, digest)
+        return src, key
 
-    # Process 2 cycle-0 (post-restart, same snapshot family)
-    main._set_edli_redecision_boot_epoch(1717000060)
-    main._reset_edli_redecision_cycle_index()
-    source_p2 = main._edli_next_redecision_source()
-    key_p2 = stable_idempotency_key(event_type, entity_key, source_p2, available_at, digest)
+    # (a) Normal restart: 60s apart, different pid embedded in token.
+    src_p1, key_p1 = _run_cycle0("171700000012345")   # epoch=1717000000, pid=12345
+    src_p2, key_p2 = _run_cycle0("171700006012346")   # epoch=1717000060, pid=12346
 
-    assert source_p1 != source_p2, (
-        f"Cross-restart sources collide: {source_p1!r} == {source_p2!r}; "
-        "post-restart cycle-0 would dedup against pre-restart consumed event"
+    assert src_p1 != src_p2, f"(a) sources collide: {src_p1!r} == {src_p2!r}"
+    assert key_p1 != key_p2, f"(a) idempotency keys collide"
+
+    # (b) SAME-SECOND crash-loop: same epoch (same wall-clock second), different pid.
+    # A pure-epoch token would collide here; the pid suffix breaks the tie.
+    same_epoch = "1717000000"
+    src_s1, key_s1 = _run_cycle0(f"{same_epoch}99901")  # epoch=1717000000, pid=99901
+    src_s2, key_s2 = _run_cycle0(f"{same_epoch}99902")  # epoch=1717000000, pid=99902 (restart)
+
+    assert src_s1 != src_s2, (
+        f"(b) SAME-SECOND crash-loop sources collide: {src_s1!r} == {src_s2!r}. "
+        "PID must be in the boot token so same-second restarts are still unique."
     )
-    assert key_p1 != key_p2, (
-        f"Cross-restart idempotency keys collide: same family, epoch-prefixed sources "
-        f"should produce distinct keys. key_p1={key_p1!r}, key_p2={key_p2!r}"
+    assert key_s1 != key_s2, (
+        f"(b) SAME-SECOND crash-loop idempotency keys collide: {key_s1!r} == {key_s2!r}"
     )
+
+    # Also assert the token contains no hyphens (format contract: split('-')[-1] == N).
+    for token in ("171700000012345", "171700006012346", f"{same_epoch}99901"):
+        assert "-" not in token, f"test token {token!r} must not contain hyphens"

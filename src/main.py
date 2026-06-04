@@ -2008,34 +2008,42 @@ _edli_market_channel_thread = None
 # parseable "cycle-N" suffix; and (2) the source must be distinct per cycle so the
 # re-emitted FSR-equivalent does not dedup to the consumed FSR.
 #
-# CROSS-RESTART UNIQUENESS (MAJOR-2 adversarial finding): the idempotency key is
-# stable_idempotency_key(event_type, entity_key, source, available_at, digest).
+# CROSS-RESTART UNIQUENESS (MAJOR-2 adversarial finding + HARDEN-1): the idempotency
+# key is stable_idempotency_key(event_type, entity_key, source, available_at, digest).
 # available_at is SNAPSHOT-STABLE (it does not advance per cycle), so `source` is
 # the only varying component. A bare counter that resets to 0 on restart means the
 # post-restart cycle-0 emit produces the SAME idempotency key as the pre-restart
 # cycle-0 emit for the same snapshot family → dedup → family not re-decided for the
-# early post-restart cycles. Fix: embed a per-process epoch (captured once at module
-# init from int(time.time())) so the format is `cycle-{EPOCH}-{N}`. The round-robin
-# still parses N via int(source.split('-')[-1]) (last component). Within a process the
-# counter advances normally; across restarts the epoch changes → keys never collide.
+# early post-restart cycles.
+#
+# Fix (HARDEN-1): the boot token is `f"{int(time.time())}{os.getpid()}"` — a single
+# decimal string with NO internal hyphens so source.split('-') stays ['cycle', TOKEN, N]
+# and int(source.split('-')[-1]) still yields N. The PID changes on EVERY restart
+# (even a crash-loop restart within the same wall-clock second), so the token is
+# guaranteed restart-unique regardless of timing. int(time.time()) is included for
+# human readability; PID alone would also suffice for correctness.
+#
+# Format: `cycle-{EPOCH}{PID}-{N}` where EPOCH and PID are concatenated (no separator)
+# so the only hyphens in the string are the two that delimit the three components.
 import time as _time
 
-_edli_redecision_boot_epoch: int = int(_time.time())
+_edli_redecision_boot_token: str = f"{int(_time.time())}{os.getpid()}"
 _edli_redecision_cycle_index: int = 0
 
 
 def _edli_next_redecision_source() -> str:
-    """Return the next continuous-redecision emit source as ``cycle-{EPOCH}-{N}``.
+    """Return the next continuous-redecision emit source as ``cycle-{TOKEN}-{N}``.
 
-    The EPOCH is frozen at daemon boot (process-lifetime constant). N advances
-    monotonically. The round-robin parses N via int(source.split('-')[-1]); the epoch
-    prefix ensures cross-restart uniqueness so post-restart emits are never deduped
-    against pre-restart consumed events for the same snapshot family.
+    TOKEN = f"{int(time.time())}{os.getpid()}" captured once at module init — no
+    internal hyphens, so split('-')[-1] == str(N) always. PID changes on every
+    restart (including crash-loop restarts within the same wall-clock second), so
+    the token is restart-unique unconditionally. N advances monotonically within a
+    process, ensuring within-process sources are also distinct.
     """
     global _edli_redecision_cycle_index
     n = _edli_redecision_cycle_index
     _edli_redecision_cycle_index = n + 1
-    return f"cycle-{_edli_redecision_boot_epoch}-{n}"
+    return f"cycle-{_edli_redecision_boot_token}-{n}"
 
 
 def _reset_edli_redecision_cycle_index() -> None:
@@ -2044,10 +2052,14 @@ def _reset_edli_redecision_cycle_index() -> None:
     _edli_redecision_cycle_index = 0
 
 
-def _set_edli_redecision_boot_epoch(epoch: int) -> None:
-    """Test hook: set the boot epoch to a fixed value for deterministic testing."""
-    global _edli_redecision_boot_epoch
-    _edli_redecision_boot_epoch = epoch
+def _set_edli_redecision_boot_token(token: str) -> None:
+    """Test hook: set the boot token to a fixed value for deterministic testing.
+
+    The token must contain NO hyphens (see format contract above).
+    """
+    global _edli_redecision_boot_token
+    assert "-" not in token, f"boot token must not contain hyphens, got {token!r}"
+    _edli_redecision_boot_token = token
 
 
 USER_CHANNEL_REQUIRED_ENV_VARS = (
