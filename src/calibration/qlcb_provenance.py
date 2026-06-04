@@ -71,7 +71,19 @@ class QlcbProvenance:
     # q_lcb<0 both yield a negative robust trade score so the bin loses selection
     # identically) and record that the clamp fired — restoring legacy family-formation
     # under the merge safety contract (flag-OFF == legacy).
+    #
+    # SELECTION BYTE-IDENTITY (MAJOR-1 adversarial finding): the clamped .q_lcb MUST
+    # NOT flow into the _CandidateProof selection-ranking key. Legacy stored the raw
+    # negative in the plain-float carrier; the selector ranked by that raw value (so
+    # two distinct negatives -0.05/-0.02 produced a deterministic ordering). Clamping
+    # both to 0.0 then ranking by q_lcb_5pct would flip the "selected loser" on
+    # no-submit receipts (telemetry/measurement substrate drift). The fix: expose the
+    # PRE-CLAMP raw value via `raw_q_lcb` so the selection/trade-score path can use
+    # raw (byte-identical to legacy) while the typed storage holds clamped (no raise).
     clamped: bool = False
+    # The raw (pre-clamp) value. Equals q_lcb when clamped=False; preserves the legacy
+    # float when clamped=True so the selection-ranking path stays byte-identical.
+    raw_q_lcb: float = 0.0
 
     def __post_init__(self) -> None:
         if self.calibration_source not in CALIBRATION_SOURCES:
@@ -94,11 +106,13 @@ class QlcbProvenance:
                 f"QlcbProvenance.q_lcb={q!r} is not finite; a probability lower "
                 f"bound cannot live there."
             )
+        raw = q  # preserve the raw (pre-clamp) value for selection byte-identity
         clamped = not (0.0 <= q <= 1.0)
         if clamped:
             q = 0.0 if q < 0.0 else 1.0
-        # frozen dataclass — write the (possibly clamped) value + the flag through the
-        # object door so the carrier stays a single immutable truth object.
+        # frozen dataclass — write through the object door so the carrier stays
+        # a single immutable truth object.
+        object.__setattr__(self, "raw_q_lcb", raw)
         object.__setattr__(self, "q_lcb", q)
         object.__setattr__(self, "clamped", clamped)
 
@@ -158,12 +172,29 @@ class QlcbByDirection(dict):
 def _qlcb_float(value) -> float:  # noqa: ANN001
     """Read the float out of a q_lcb carrier entry.
 
-    Polymorphic: accepts a ``QlcbProvenance`` (returns ``.q_lcb``) OR a bare float
-    (returns it). This is the single read door every consumer uses so the type can
-    sit at the boundary without forcing a branch at each of the ~6 read sites.
+    Polymorphic: accepts a ``QlcbProvenance`` (returns ``.q_lcb``, the CLAMPED
+    value) OR a bare float (returns it). Use for probability consumers that must
+    stay inside [0,1]. For the selection/trade-score path use ``_qlcb_raw_float``
+    so no-submit receipt ordering stays byte-identical to legacy.
     """
     if isinstance(value, QlcbProvenance):
         return float(value.q_lcb)
+    return float(value)
+
+
+def _qlcb_raw_float(value) -> float:  # noqa: ANN001
+    """Read the RAW (pre-clamp) float out of a q_lcb carrier entry.
+
+    Returns ``QlcbProvenance.raw_q_lcb`` (the value before any [0,1] clamp was
+    applied) so the selection-ranking path stays byte-identical to legacy when
+    deep-OTM bins carry a legitimately negative bootstrap q_lcb. For in-range
+    values raw_q_lcb == q_lcb, so this function is safe for all callers that
+    previously used ``_qlcb_float`` for selection/trade-score purposes.
+
+    Falls back to the bare-float path for plain-dict carriers used in unit tests.
+    """
+    if isinstance(value, QlcbProvenance):
+        return float(value.raw_q_lcb)
     return float(value)
 
 

@@ -119,3 +119,49 @@ def test_clamp_to_zero_is_decision_equivalent_to_legacy_raw_negative():
     # Both lose selection (strictly negative score) — the decision is identical.
     assert score_legacy < 0.0
     assert score_clamped < 0.0
+
+
+def test_selection_ordering_among_losers_is_byte_identical_with_clamp(monkeypatch):
+    """SELECTION BYTE-IDENTITY (MAJOR-1). When ALL executable bins are no-edge losers
+    (all trade_scores < 0), _selected_candidate_proof picks the max by q_lcb_5pct.
+    Two deep-OTM bins with DISTINCT negative q_lcb (-0.05, -0.02) in legacy select the
+    SAME bin as the clamped path — because the selection/trade-score path uses
+    _qlcb_raw_float (the pre-clamp value), not the clamped .q_lcb. If we accidentally
+    used the clamped value (both become 0.0), the tie-break would be arbitrary/flipped.
+
+    This test constructs QlcbProvenance carriers for two distinct negative raw values,
+    reads them back via _qlcb_raw_float, and asserts the ordering is preserved."""
+    from src.calibration.qlcb_provenance import QlcbProvenance, _qlcb_raw_float
+
+    # Two deep-OTM bins: bin_A has raw=-0.05, bin_B has raw=-0.02.
+    # Legacy plain-float ordering: max(-0.05, -0.02) = -0.02 -> bin_B selected.
+    prov_A = QlcbProvenance(q_lcb=-0.05, calibration_source="FORECAST_BOOTSTRAP")
+    prov_B = QlcbProvenance(q_lcb=-0.02, calibration_source="FORECAST_BOOTSTRAP")
+
+    # The clamped values are both 0.0 — ordering lost.
+    assert prov_A.q_lcb == pytest.approx(0.0)
+    assert prov_B.q_lcb == pytest.approx(0.0)
+
+    # The raw values are preserved.
+    raw_A = _qlcb_raw_float(prov_A)
+    raw_B = _qlcb_raw_float(prov_B)
+    assert raw_A == pytest.approx(-0.05)
+    assert raw_B == pytest.approx(-0.02)
+
+    # Using raw preserves the legacy ordering: bin_B wins (less negative).
+    assert raw_B > raw_A, "raw ordering must match legacy plain-float ordering"
+
+    # Simulate the selector: max of two "proofs" by q_lcb_5pct (the selection key field)
+    # where q_lcb_5pct was set from _qlcb_raw_float — proves WHICH bin is selected.
+    class _FakeProof:
+        def __init__(self, name: str, q: float) -> None:
+            self.name = name
+            self.q_lcb_5pct = q  # set from _qlcb_raw_float, as the fixed path does
+
+    proof_A = _FakeProof("A", raw_A)
+    proof_B = _FakeProof("B", raw_B)
+    selected = max([proof_A, proof_B], key=lambda p: p.q_lcb_5pct)
+    assert selected.name == "B", (
+        "Selection must pick bin_B (raw=-0.02, less negative) — same as legacy. "
+        "If clamped values (both 0.0) were used the ordering would be arbitrary."
+    )

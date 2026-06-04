@@ -2006,34 +2006,48 @@ _edli_market_channel_thread = None
 # a per-cycle distinct `source` to scan_committed_snapshots for TWO reasons: (1) the
 # B4 round-robin derives its window index from int(source.split('-')[-1]) — it needs a
 # parseable "cycle-N" suffix; and (2) the source must be distinct per cycle so the
-# re-emitted FSR-equivalent does not dedup to the consumed FSR. A monotonic process-
-# lifetime counter satisfies BOTH: cycle-N advances the round-robin AND is distinct per
-# cycle. (Idempotency uniqueness across daemon restarts is still guaranteed by the
-# event's available_at timestamp, which is part of stable_idempotency_key, so resetting
-# to 0 on restart cannot collide an old consumed event.) Replaces the prior ISO-timestamp
-# source whose split('-')[-1] raised ValueError -> cycle_index frozen at 0 -> cities
-# 21..N stayed dark even with coverage_fairness_emit_enabled ON.
-_edli_redecision_cycle_index = 0
+# re-emitted FSR-equivalent does not dedup to the consumed FSR.
+#
+# CROSS-RESTART UNIQUENESS (MAJOR-2 adversarial finding): the idempotency key is
+# stable_idempotency_key(event_type, entity_key, source, available_at, digest).
+# available_at is SNAPSHOT-STABLE (it does not advance per cycle), so `source` is
+# the only varying component. A bare counter that resets to 0 on restart means the
+# post-restart cycle-0 emit produces the SAME idempotency key as the pre-restart
+# cycle-0 emit for the same snapshot family → dedup → family not re-decided for the
+# early post-restart cycles. Fix: embed a per-process epoch (captured once at module
+# init from int(time.time())) so the format is `cycle-{EPOCH}-{N}`. The round-robin
+# still parses N via int(source.split('-')[-1]) (last component). Within a process the
+# counter advances normally; across restarts the epoch changes → keys never collide.
+import time as _time
+
+_edli_redecision_boot_epoch: int = int(_time.time())
+_edli_redecision_cycle_index: int = 0
 
 
 def _edli_next_redecision_source() -> str:
-    """Return the next continuous-redecision emit source as ``cycle-N`` and advance N.
+    """Return the next continuous-redecision emit source as ``cycle-{EPOCH}-{N}``.
 
-    Monotonic across the daemon process lifetime. The round-robin parses N via
-    int(source.split('-')[-1]); a fresh N each cycle slides the coverage window so all
-    cities are reached within ceil(num_cities/limit) cycles, AND keeps the source
-    distinct per cycle for re-emit idempotency.
+    The EPOCH is frozen at daemon boot (process-lifetime constant). N advances
+    monotonically. The round-robin parses N via int(source.split('-')[-1]); the epoch
+    prefix ensures cross-restart uniqueness so post-restart emits are never deduped
+    against pre-restart consumed events for the same snapshot family.
     """
     global _edli_redecision_cycle_index
     n = _edli_redecision_cycle_index
     _edli_redecision_cycle_index = n + 1
-    return f"cycle-{n}"
+    return f"cycle-{_edli_redecision_boot_epoch}-{n}"
 
 
 def _reset_edli_redecision_cycle_index() -> None:
     """Test hook: reset the monotonic redecision cycle counter to 0."""
     global _edli_redecision_cycle_index
     _edli_redecision_cycle_index = 0
+
+
+def _set_edli_redecision_boot_epoch(epoch: int) -> None:
+    """Test hook: set the boot epoch to a fixed value for deterministic testing."""
+    global _edli_redecision_boot_epoch
+    _edli_redecision_boot_epoch = epoch
 
 
 USER_CHANNEL_REQUIRED_ENV_VARS = (

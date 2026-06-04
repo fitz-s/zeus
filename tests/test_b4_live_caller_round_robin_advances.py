@@ -93,8 +93,48 @@ def test_live_caller_source_covers_all_cities_within_ceil_n_over_limit(monkeypat
 def test_live_redecision_source_is_distinct_per_cycle_for_idempotency(monkeypatch):
     """The source must ALSO stay distinct per cycle so the re-emitted FSR-equivalent does
     not dedup to the consumed FSR (the original reason an ISO timestamp was used). A
-    monotonic cycle-N is distinct per cycle, preserving that property."""
+    monotonic cycle-{EPOCH}-{N} is distinct per cycle, preserving that property."""
     main._reset_edli_redecision_cycle_index()
     sources = [main._edli_next_redecision_source() for _ in range(10)]
     assert len(set(sources)) == 10  # all distinct
     assert all(s.startswith("cycle-") for s in sources)  # parseable form
+
+
+def test_cross_restart_sources_never_collide_for_same_family_cycle():
+    """CROSS-RESTART UNIQUENESS (MAJOR-2). stable_idempotency_key includes `source`;
+    available_at is snapshot-stable (not wall-clock per cycle). Without an epoch prefix
+    the post-restart cycle-0 produces the SAME idempotency key as the pre-restart cycle-0
+    for the same family -> dedup -> family not re-decided after restart.
+
+    This test simulates two process lifetimes (via the boot-epoch test hook) and asserts
+    that the cycle-0 source from each DIFFERS, so the idempotency keys produced for the
+    same (entity_key, available_at, digest) differ and the post-restart re-decision
+    is NOT deduped away."""
+    from src.events.idempotency import stable_idempotency_key
+
+    # Simulate process-1 (epoch 1717000000) and process-2 (epoch 1717000060 = 60s later)
+    entity_key = "chicago|2026-06-04|high"
+    available_at = "2026-06-03T12:00:00Z"
+    digest = "abc123"
+    event_type = "edli_redecision"
+
+    # Process 1 cycle-0
+    main._set_edli_redecision_boot_epoch(1717000000)
+    main._reset_edli_redecision_cycle_index()
+    source_p1 = main._edli_next_redecision_source()
+    key_p1 = stable_idempotency_key(event_type, entity_key, source_p1, available_at, digest)
+
+    # Process 2 cycle-0 (post-restart, same snapshot family)
+    main._set_edli_redecision_boot_epoch(1717000060)
+    main._reset_edli_redecision_cycle_index()
+    source_p2 = main._edli_next_redecision_source()
+    key_p2 = stable_idempotency_key(event_type, entity_key, source_p2, available_at, digest)
+
+    assert source_p1 != source_p2, (
+        f"Cross-restart sources collide: {source_p1!r} == {source_p2!r}; "
+        "post-restart cycle-0 would dedup against pre-restart consumed event"
+    )
+    assert key_p1 != key_p2, (
+        f"Cross-restart idempotency keys collide: same family, epoch-prefixed sources "
+        f"should produce distinct keys. key_p1={key_p1!r}, key_p2={key_p2!r}"
+    )

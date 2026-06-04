@@ -3125,10 +3125,16 @@ def _generate_candidate_proofs(
         if yes_q is None or yes_lcb_entry is None or no_lcb_entry is None:
             raise ValueError(f"missing q_live for condition {condition_id}")
         # K3: q_lcb carrier entries are QlcbProvenance (or bare float on the day0
-        # generated path); _qlcb_float reads the number out either way.
-        from src.calibration.qlcb_provenance import _qlcb_float
-        yes_lcb = _qlcb_float(yes_lcb_entry)
-        no_lcb = _qlcb_float(no_lcb_entry)
+        # generated path); _qlcb_raw_float reads the RAW (pre-clamp) value so the
+        # selection-ranking key (trade_score, q_lcb_5pct) stays byte-identical to
+        # legacy when deep-OTM bins carry a legitimately negative bootstrap q_lcb.
+        # Clamped vs raw only differs when clamped=True; for in-range bins they are
+        # identical. Using raw here restores legacy loser-selection ordering on
+        # no-submit receipts (the measurement/telemetry substrate). _qlcb_float
+        # (the clamped door) is still used everywhere a value must be in [0,1].
+        from src.calibration.qlcb_provenance import _qlcb_raw_float
+        yes_lcb = _qlcb_raw_float(yes_lcb_entry)
+        no_lcb = _qlcb_raw_float(no_lcb_entry)
         row = rows_by_condition.get(condition_id)
         for token_id, direction, q_value, q_lcb in (
             (str(candidate.yes_token_id or ""), "buy_yes", yes_q, yes_lcb),
