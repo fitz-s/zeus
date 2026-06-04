@@ -42,6 +42,7 @@ import re
 import sqlite3
 import sys
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Optional
 
 # Ensure the repo root is on sys.path so src.* imports resolve correctly
@@ -107,58 +108,298 @@ _FORECASTS_DB = os.path.join(_REPO_ROOT, "state", "zeus-forecasts.db")
 
 
 # ---------------------------------------------------------------------------
-# Pure win-logic function (importable for unit tests)
+# Per-row grading — the ONE truth path (H2 consolidation, STRUCTURAL_FIX_PLAN
+# §P0.1). Grading is delegated to src.contracts.graded_receipt.grade_receipt —
+# the single settlement-grounded, unit-correct, BinKind-aware win function. The
+# former local ``is_win`` heuristic (a raw-float range test with no unit, no
+# BinKind, no per-city rounding) is DELETED: it was a second grading path, and
+# two grading paths is exactly the consolidation debt this fix retires. The
+# Direction Law now has ONE implementation, exercised here and antibody-tested
+# in tests/test_arm_gate_direction_law.py against grade_receipt.
 # ---------------------------------------------------------------------------
 
-def is_win(direction: str, traded_bin_lo: Optional[float], traded_bin_hi: Optional[float],
-           settlement_value: float, tolerance: float = 1e-9) -> bool:
-    """Return True iff this shadow position wins under the Direction Law.
 
-    Direction Law:
-        buy_yes on bin B: WIN iff settlement lands IN bin B
-        buy_no  on bin B: WIN iff settlement does NOT land in bin B
+@dataclass(frozen=True)
+class _SettlementStandin:
+    """Minimal settlement object satisfying grade_receipt's _SettlementLike.
 
-    Args:
-        direction: "buy_yes" or "buy_no"
-        traded_bin_lo: lower bound of traded bin (None = left-shoulder, i.e. "X or below")
-        traded_bin_hi: upper bound of traded bin (None = right-shoulder, i.e. "X or higher")
-        settlement_value: the WMO-half-up rounded settlement temperature
-        tolerance: float comparison tolerance (default 1e-9)
+    grade_receipt reads only ``settlement_value`` + ``settlement_unit``; this
+    carries exactly those two, keeping the truth function decoupled from the
+    settlement_outcomes row shape.
+    """
 
-    Returns:
-        True if the position wins, False if it loses.
+    settlement_value: float
+    settlement_unit: str
+
+
+def _grade_row_won(
+    direction: str,
+    traded_bin_lo: Optional[float],
+    traded_bin_hi: Optional[float],
+    settlement_value: float,
+    settlement_unit: str,
+    bin_label: str,
+) -> Optional[bool]:
+    """Grade one shadow position via the canonical ``grade_receipt`` truth fn.
+
+    Returns ``won`` (bool) for a gradeable row, or ``None`` when the row cannot
+    be graded (bin label un-buildable into a ``Bin``, or a unit mismatch). A
+    ``None`` return tells the caller to EXCLUDE the row — the same skip
+    semantics the legacy path applied to None/None parses and unit mismatches,
+    but now enforced through the typed antibodies rather than ad-hoc float
+    checks. The caller logs the exclusion so a silent cohort shift is visible.
 
     Raises:
-        ValueError: if direction is not 'buy_yes' or 'buy_no'.
-
-    None handling:
-        traded_bin_lo=None, traded_bin_hi set  → left-shoulder bin ("X or below")
-        traded_bin_lo set, traded_bin_hi=None  → right-shoulder bin ("X or higher")
-        Both None                               → bin parse failed; returns False (cannot
-            determine win/loss, must not count as win). Callers should skip such rows
-            before calling is_win() to avoid silently dropping valid data.
+        ValueError: if ``direction`` is not 'buy_yes' / 'buy_no' (propagated
+            from grade_receipt — an unknown direction is a programmer error,
+            not a data-skip case).
     """
+    from src.contracts.graded_receipt import grade_receipt
+    from src.types.market import Bin
+    from src.types.temperature import UnitMismatchError
+
     # Both None means the bin label failed to parse — cannot evaluate win/loss.
     if traded_bin_lo is None and traded_bin_hi is None:
-        return False
+        return None
 
-    # Determine whether settlement lands in the traded bin
-    if traded_bin_lo is None:
-        # Left-shoulder: "X or below" — settlement_value <= hi
-        in_bin = settlement_value <= traded_bin_hi + tolerance
-    elif traded_bin_hi is None:
-        # Right-shoulder: "X or higher" — settlement_value >= lo
-        in_bin = settlement_value >= traded_bin_lo - tolerance
-    else:
-        # Point or bounded range
-        in_bin = (traded_bin_lo - tolerance) <= settlement_value <= (traded_bin_hi + tolerance)
+    try:
+        bin_obj = Bin(
+            low=traded_bin_lo,
+            high=traded_bin_hi,
+            unit=settlement_unit,
+            label=bin_label,
+        )
+    except Exception:  # noqa: BLE001 — malformed/width-invalid bin → exclude, never crash
+        return None
 
-    if direction == "buy_yes":
-        return in_bin
-    elif direction == "buy_no":
-        return not in_bin
+    # Minimal settlement stand-in (settlement_value already WMO-rounded at
+    # write time — grade_receipt is called WITHOUT semantics, using the value
+    # as-is, matching the legacy path that range-tested the rounded value).
+    settlement = _SettlementStandin(
+        settlement_value=float(settlement_value),
+        settlement_unit=settlement_unit,
+    )
+
+    try:
+        graded = grade_receipt(bin_obj, direction, settlement)
+    except UnitMismatchError:
+        return None
+    return graded.won
+
+
+# ---------------------------------------------------------------------------
+# Capital-weighted ARM verdict (F3 — STRUCTURAL_FIX_PLAN §P0.2)
+#
+# The equal-row win-rate is row-democracy: every settled position counts the
+# same regardless of how much capital it carried. That hides the K2 failure
+# mode where the system sizes UP on the bets it is most wrong about — a cohort
+# can clear 51% by row count while LOSING money capital-weighted. The ARM
+# decision must therefore consume a CAPITAL-WEIGHTED verdict, and it must fail
+# CLOSED when any settled row is missing its size (never silently equal-weight).
+# ---------------------------------------------------------------------------
+
+# A per-city capital-weighted ROI cluster this negative DENIES arming even when
+# the pooled CW-ROI is positive (one strong city must not mask a losing one).
+_PER_CITY_CW_ROI_TOLERANCE = -1e-9
+
+
+@dataclass(frozen=True)
+class CapitalWeightedArmVerdict:
+    """Capital-weighted ARM measurement. ALL fields required — no Optional.
+
+    The dataclass cannot be constructed without every metric, so a caller can
+    never receive a verdict that silently dropped the capital dimension.
+    """
+
+    equal_row_win_rate: float       # row-democracy win-rate (the headline number)
+    equal_row_ev_sigma: float       # σ of equal-row mean EV above 0
+    capital_weighted_roi: float     # Σ net / Σ invested (size-weighted)
+    capital_weighted_ev_sigma: float  # σ of the size-weighted mean EV above 0
+    per_city_cw_roi: dict           # city -> capital-weighted ROI for that city
+    n: int = 0                      # pooled row count
+    per_city_n: dict = field(default_factory=dict)  # city -> row count
+
+
+def _compute_capital_weighted_verdict(rows: list[dict]) -> CapitalWeightedArmVerdict:
+    """Build a CapitalWeightedArmVerdict from graded ARM rows.
+
+    Each row needs: ``win`` (bool), ``price`` (entry cost in 0-1 USDC space),
+    ``kelly_size_usd`` (the capital staked — the size source verified present
+    in edli_no_submit_receipts).
+
+    Fails CLOSED:
+        ValueError('MISSING_SIZE') if any row has kelly_size_usd None or <= 0.
+        Missing size must never be silently treated as equal weight — that
+        would reintroduce the exact row-democracy blindspot this guards against.
+    """
+    n = len(rows)
+    if n == 0:
+        return CapitalWeightedArmVerdict(
+            equal_row_win_rate=0.0,
+            equal_row_ev_sigma=0.0,
+            capital_weighted_roi=0.0,
+            capital_weighted_ev_sigma=0.0,
+            per_city_cw_roi={},
+            n=0,
+            per_city_n={},
+        )
+
+    # Fail closed on any missing/non-positive size BEFORE any aggregation.
+    for r in rows:
+        sz = r.get("kelly_size_usd")
+        if sz is None or sz <= 0:
+            raise ValueError(
+                f"MISSING_SIZE: row city={r.get('city')!r} has kelly_size_usd="
+                f"{sz!r} (None or <=0). Capital-weighted ARM cannot equal-weight "
+                f"a sizeless row — fix the size source, do not impute."
+            )
+
+    # --- Equal-row stats (row democracy) ---
+    wins = sum(1 for r in rows if r["win"])
+    equal_row_win_rate = wins / n
+    equal_evs = [(1.0 - r["price"]) if r["win"] else (-r["price"]) for r in rows]
+    mean_equal_ev = sum(equal_evs) / n
+    if n > 1:
+        var_equal = sum((e - mean_equal_ev) ** 2 for e in equal_evs) / n
+        se_equal = math.sqrt(var_equal / n) if var_equal > 0 else 0.0
     else:
-        raise ValueError(f"Unknown direction: {direction!r}. Expected 'buy_yes' or 'buy_no'.")
+        se_equal = 0.0
+    equal_row_ev_sigma = (mean_equal_ev / se_equal) if se_equal > 0 else 0.0
+
+    # --- Capital-weighted stats (size democracy) ---
+    # Net dollars on a position of size S at price p:
+    #   win  → S * (1/p - 1)   (S buys S/p shares, each pays $1, cost S)
+    #   loss → -S
+    # ROI = Σ net / Σ invested(=Σ S).
+    def _net_usd(r: dict) -> float:
+        s = float(r["kelly_size_usd"])
+        p = float(r["price"])
+        if p <= 0:
+            return 0.0
+        return s * (1.0 / p - 1.0) if r["win"] else -s
+
+    total_invested = sum(float(r["kelly_size_usd"]) for r in rows)
+    total_net = sum(_net_usd(r) for r in rows)
+    capital_weighted_roi = (total_net / total_invested) if total_invested > 0 else 0.0
+
+    # Size-weighted per-trade EV (per dollar staked) and its σ.
+    per_dollar_ev = [_net_usd(r) / float(r["kelly_size_usd"]) for r in rows]
+    weights = [float(r["kelly_size_usd"]) for r in rows]
+    wsum = sum(weights)
+    mean_cw_ev = sum(w * e for w, e in zip(weights, per_dollar_ev)) / wsum if wsum > 0 else 0.0
+    if n > 1 and wsum > 0:
+        var_cw = sum(w * (e - mean_cw_ev) ** 2 for w, e in zip(weights, per_dollar_ev)) / wsum
+        # effective sample size for a weighted mean (Kish): (Σw)^2 / Σw^2
+        n_eff = (wsum * wsum) / sum(w * w for w in weights)
+        se_cw = math.sqrt(var_cw / n_eff) if (var_cw > 0 and n_eff > 0) else 0.0
+    else:
+        se_cw = 0.0
+    capital_weighted_ev_sigma = (mean_cw_ev / se_cw) if se_cw > 0 else 0.0
+
+    # --- Per-city capital-weighted ROI ---
+    by_city: dict[str, list] = defaultdict(list)
+    for r in rows:
+        by_city[r["city"]].append(r)
+    per_city_cw_roi: dict[str, float] = {}
+    per_city_n: dict[str, int] = {}
+    for city, crows in by_city.items():
+        inv = sum(float(r["kelly_size_usd"]) for r in crows)
+        net = sum(_net_usd(r) for r in crows)
+        per_city_cw_roi[city] = (net / inv) if inv > 0 else 0.0
+        per_city_n[city] = len(crows)
+
+    return CapitalWeightedArmVerdict(
+        equal_row_win_rate=equal_row_win_rate,
+        equal_row_ev_sigma=equal_row_ev_sigma,
+        capital_weighted_roi=capital_weighted_roi,
+        capital_weighted_ev_sigma=capital_weighted_ev_sigma,
+        per_city_cw_roi=per_city_cw_roi,
+        n=n,
+        per_city_n=per_city_n,
+    )
+
+
+def _capital_weighted_arm_decision(
+    verdict: CapitalWeightedArmVerdict,
+    *,
+    min_n_pooled: int = 20,
+    min_n_per_city: int = 5,
+    min_cw_sigma: float = 2.0,
+    min_equal_row_win_rate: float = 0.51,
+) -> tuple[bool, str]:
+    """ARM decision from a capital-weighted verdict. Fail closed on ALL of:
+
+        1. pooled n >= min_n_pooled
+        2. capital_weighted_roi > 0           (size-weighted money is positive)
+        3. NO per-city capital cluster negative beyond tolerance
+        4. capital_weighted_ev_sigma >= min_cw_sigma
+        5. equal_row_win_rate > min_equal_row_win_rate (headline sanity)
+        6. every active city has n >= min_n_per_city
+    """
+    if verdict.n == 0:
+        return False, "INSUFFICIENT: empty cohort (no settled rows)"
+
+    # CORRECTNESS VETOES — these run BEFORE the sufficiency (n-floor) gates,
+    # because a money-losing or per-city-negative cohort is DENIED on the
+    # merits regardless of how large it is. Ordering the n-floor first would
+    # let a small losing cohort report the softer "INSUFFICIENT" and hide the
+    # fact that, even at scale, this cohort should never arm.
+
+    # Veto 1 — pooled capital-weighted ROI must be strictly positive.
+    if verdict.capital_weighted_roi <= 0.0:
+        return False, (
+            f"DENIED: capital_weighted_roi={verdict.capital_weighted_roi:.4f} <= 0 "
+            f"(the cohort loses money once sized — row-rate "
+            f"{verdict.equal_row_win_rate:.3f} is row-democracy only)"
+        )
+
+    # Veto 2 — no per-city capital cluster may be negative beyond tolerance.
+    neg_cities = sorted(
+        c for c, roi in verdict.per_city_cw_roi.items()
+        if roi < _PER_CITY_CW_ROI_TOLERANCE
+    )
+    if neg_cities:
+        detail = ", ".join(
+            f"{c}(roi={verdict.per_city_cw_roi[c]:.3f})" for c in neg_cities
+        )
+        return False, (
+            f"DENIED: {len(neg_cities)} city/cities capital-weighted NEGATIVE: "
+            f"{detail}. A positive pool must not mask a losing city cluster."
+        )
+
+    # SUFFICIENCY GATES — only reached once the cohort is not money-losing.
+    if verdict.n < min_n_pooled:
+        return False, f"INSUFFICIENT: n={verdict.n} < {min_n_pooled} minimum"
+
+    # Confidence.
+    if verdict.capital_weighted_ev_sigma < min_cw_sigma:
+        return False, (
+            f"DENIED: capital_weighted_ev_sigma="
+            f"{verdict.capital_weighted_ev_sigma:.2f} < {min_cw_sigma:.1f}"
+        )
+
+    # 5 — headline equal-row sanity.
+    if verdict.equal_row_win_rate <= min_equal_row_win_rate:
+        return False, (
+            f"DENIED: equal_row_win_rate={verdict.equal_row_win_rate:.3f} "
+            f"not > {min_equal_row_win_rate}"
+        )
+
+    # 6 — per-city n floor.
+    thin = sorted(c for c, nn in verdict.per_city_n.items() if nn < min_n_per_city)
+    if thin:
+        detail = ", ".join(f"{c}(n={verdict.per_city_n[c]})" for c in thin)
+        return False, (
+            f"DENIED: per-city n<{min_n_per_city} for {len(thin)} city/cities: "
+            f"{detail}."
+        )
+
+    return True, (
+        f"ELIGIBLE: cw_roi={verdict.capital_weighted_roi:.4f}>0, "
+        f"cw_sigma={verdict.capital_weighted_ev_sigma:.2f}>={min_cw_sigma}, "
+        f"win_rate={verdict.equal_row_win_rate:.3f}>{min_equal_row_win_rate}, "
+        f"all {len(verdict.per_city_n)} cities n>={min_n_per_city} & cw_roi>=0"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +439,8 @@ def _load_deduped_receipts(world_db: str) -> list[dict]:
     cur = conn.cursor()
     cur.execute("""
         SELECT receipt_id, token_id, direction, c_fee_adjusted,
-               mainstream_agreement_pass, decision_time, receipt_json
+               kelly_size_usd, mainstream_agreement_pass, decision_time,
+               receipt_json
         FROM edli_no_submit_receipts
         ORDER BY decision_time DESC
     """)
@@ -224,6 +466,7 @@ def _load_deduped_receipts(world_db: str) -> list[dict]:
                 "metric": metric,
                 "direction": direction,
                 "c_fee_adjusted": d["c_fee_adjusted"],
+                "kelly_size_usd": d["kelly_size_usd"],
                 "mainstream_agreement_pass": d["mainstream_agreement_pass"],
                 "decision_time": d["decision_time"],
                 "bin_label": bin_label,
@@ -297,13 +540,36 @@ def _compute_rows(receipts: list[dict], settlements: dict) -> list[dict]:
             # parse failure — skip
             continue
 
-        win = is_win(r["direction"], lo, hi, s["settlement_value"])
+        # H2: grade through the ONE truth function (grade_receipt). A None
+        # return means the typed path could not grade the row (un-buildable Bin
+        # or unit mismatch that slipped past the string check above) — exclude
+        # it and log, never silently count it. On the current live cohort this
+        # is 0 rows (verdict-equivalent to the retired is_win path, verified).
+        won = _grade_row_won(
+            direction=r["direction"],
+            traded_bin_lo=lo,
+            traded_bin_hi=hi,
+            settlement_value=s["settlement_value"],
+            settlement_unit=s["settlement_unit"],
+            bin_label=r["bin_label"],
+        )
+        if won is None:
+            print(
+                f"  [WARN] ungradeable bin (grade_receipt could not build/grade): "
+                f"city={r['city']} date={r['target_date']} label={r['bin_label']!r} "
+                f"— row EXCLUDED",
+                file=sys.stderr,
+            )
+            continue
+
+        win = won
         rows.append({
             "city": r["city"],
             "target_date": r["target_date"],
             "direction": r["direction"],
             "win": win,
             "price": r["c_fee_adjusted"],
+            "kelly_size_usd": r["kelly_size_usd"],
             "gate_pass": r["mainstream_agreement_pass"] == 1,
             "settlement_value": s["settlement_value"],
             "settlement_unit": s["settlement_unit"],
@@ -502,16 +768,42 @@ def main() -> None:
     _print_stats_row(gate_stats)
     _print_per_city_table(gate_rows, "GATE-PASS")
 
-    # --- ARM verdict ---
+    # --- CAPITAL-WEIGHTED verdict (F3 — the authoritative ARM decision) ---
+    # The equal-row verdict (_arm_verdict) is row-democracy and shown for
+    # continuity. The ARM DECISION is the capital-weighted one: a cohort can
+    # clear 51% by row count while losing money once sized.
+    print("\n" + "=" * 78)
+    print("CAPITAL-WEIGHTED ARM VERDICT (gate-PASS cohort) — kelly_size_usd weighted")
+    print("=" * 78)
+    try:
+        cw_verdict = _compute_capital_weighted_verdict(gate_rows)
+        print(f"  equal_row_win_rate      = {_fmt_pct(cw_verdict.equal_row_win_rate)}")
+        print(f"  equal_row_ev_sigma      = {_fmt_f(cw_verdict.equal_row_ev_sigma, '.2f')}")
+        print(f"  capital_weighted_roi    = {_fmt_pct(cw_verdict.capital_weighted_roi)}")
+        print(f"  capital_weighted_sigma  = {_fmt_f(cw_verdict.capital_weighted_ev_sigma, '.2f')}")
+        print(f"  pooled n                = {cw_verdict.n}")
+        if cw_verdict.per_city_cw_roi:
+            print("  per-city capital-weighted ROI:")
+            for c in sorted(cw_verdict.per_city_cw_roi):
+                print(f"    {c:<28s} cw_roi={_fmt_pct(cw_verdict.per_city_cw_roi[c])}  "
+                      f"n={cw_verdict.per_city_n.get(c, 0)}")
+        cw_eligible, cw_reason = _capital_weighted_arm_decision(cw_verdict)
+        print(f"\n  ARM (capital-weighted): {'ELIGIBLE' if cw_eligible else 'DENIED/INSUFFICIENT'}")
+        print(f"  Reason: {cw_reason}")
+    except ValueError as exc:
+        # Fail-closed: a sizeless settled row makes the verdict undeterminable.
+        print(f"  ARM (capital-weighted): DENIED — {exc}")
+
+    # --- Equal-row verdict (continuity; NOT the arming decision) ---
     arm_eligible, arm_reason = _arm_verdict(gate_stats, gate_rows)
     print("\n" + "=" * 78)
-    print("ARM VERDICT (gate-PASS cohort, thresholds: win_rate>51%, sigma>=2.0, n>=20, per-city n>=5)")
+    print("EQUAL-ROW VERDICT (continuity only; thresholds: win_rate>51%, sigma>=2.0, n>=20, per-city n>=5)")
     print("=" * 78)
-    verdict = "ARM: ELIGIBLE" if arm_eligible else "ARM: DENIED/INSUFFICIENT"
+    verdict = "equal-row: ELIGIBLE" if arm_eligible else "equal-row: DENIED/INSUFFICIENT"
     print(f"  {verdict}")
     print(f"  Reason: {arm_reason}")
-    print(f"  NOTE: ARM verdict is based ONLY on gate-PASS cohort, not ALL cohort.")
-    print(f"        A non-gate-PASS win rate, however high, does NOT satisfy the ARM criterion.")
+    print(f"  NOTE: the ARM DECISION is the CAPITAL-WEIGHTED verdict above, not this one.")
+    print(f"        A high row-rate that loses money once sized does NOT arm.")
     print("=" * 78)
 
 
