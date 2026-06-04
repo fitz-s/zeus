@@ -120,7 +120,7 @@ test_trust_policy:
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-06-03", note: "Arm direction-gate footgun antibody (2026-06-03): _assert_edli_arm_requires_direction_gate makes arming with only real_order_submit_enabled (direction gate skipped) a boot failure; tests test_arm_with_*/test_shadow_no_submit_does_not_reach_direction_gate_guard"}
     tests/money_path/test_edli_live_canary.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_mainstream_enforce_on_submit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (B) F1 enforce: mainstream_agreement_enforce_on_submit blocks armed submit when selected candidate's verdict != True (fail-closed); reference selector stays reference-only"}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}

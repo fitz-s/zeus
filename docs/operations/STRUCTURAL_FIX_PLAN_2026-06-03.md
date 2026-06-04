@@ -103,6 +103,11 @@ PHASE 3  VALIDATION → ARM
 ### P0.3 — D2 ARM-artifact boot binding (F1 Option C — promoted to MANDATORY) *(PR-2)*
 - **Antibody:** live boot must additionally require `state/edli_arm_gate_artifact.json` with `{commit_sha, measurement_cmd_hash, capital_weighted_ev>0, gate_pass_n, per_city_n, ev_sigma, date_coverage, coverage_licensed:true}`. Missing/SHA-mismatch/ev≤0 → `RuntimeError` at boot.
 
+#### ARM CRITERIA — two-key operation (direction-gate antibody, 2026-06-03)
+- **ARM is a two-key operation:** `real_order_submit_enabled=true` AND `mainstream_agreement_enforce_on_submit=true` must be set together. The antibody `_assert_edli_arm_requires_direction_gate` (`src/main.py`, invoked in the `edli_live_canary`/`edli_live` armed-mode branch of `_assert_live_execution_mode_contract`, alongside `_assert_edli_arm_gate_artifact`) now makes flipping ONLY the submit flag a BOOT FAILURE (`RuntimeError EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT`).
+- **Why:** the direction-agreement gate (`event_reactor_adapter.py:366-374`) that excludes WRONG-SIDE `buy_no` candidates only fires when BOTH `real_order_submit_enabled` AND `mainstream_agreement_enforce_on_submit` are true. Arming with only the submit key skips the gate → ~1155 gate-FAIL wrong-side candidates (already past proof+kelly+fdr+trade_score) become live-submittable. The guard also requires `mainstream_agreement_reference_enabled=true` so the verdict enforcement reads is actually produced. Fail-closed: a missing flag is NOT-satisfied; only literal `True` satisfies.
+- **Scope:** inert in `edli_shadow_no_submit` (`real_order_submit_enabled=false` → armed branch not entered → guard never reached; shadow boot byte-identical). The antibody does NOT flip `mainstream_agreement_enforce_on_submit` — it stays `false` in config and only blocks ARMING while it is false.
+
 ### P0.4 — N2 attribution driver repoint *(IMPLEMENTED in PR-1)*
 - **Antibody:** `settlement_attribution.py` reads the table the live path writes (`edli_no_submit_receipts`), joined on `(city, target_date, metric, direction)` via `grade_receipt`. Guard: attribution input row-count >0 or the run is FAILED (`AttributionInputEmptyError`) — silent zero = failure.
 
