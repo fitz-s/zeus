@@ -2821,7 +2821,24 @@ def _refresh_pending_family_snapshots(
 
             raw_events_seen: set = set()
             raw_events_collected: list[dict] = []
+            # Time-box the per-family Gamma fetch (2026-06-04 reactor-overrun antibody):
+            # each _gamma_get has up to a 10s timeout; 16 families x slow Gamma can blow
+            # past the 60s reactor interval ("max running instances reached"), so the
+            # cycle never reaches FSR-emit + process_pending -> 0 receipts. Bound the
+            # refresh phase to a deadline that ALWAYS leaves budget for the downstream
+            # emit+process; uncaptured families are picked up next cycle (priority-ordered).
+            _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "25.0")))
+            _refresh_deadline = time.monotonic() + _refresh_budget_s
+            _refreshed_n = 0
             for fam_city, fam_date, fam_metric in families_needing_refresh:
+                if time.monotonic() > _refresh_deadline:
+                    logger.info(
+                        "refresh_pending_family_snapshots: time-box %.0fs hit after %d/%d "
+                        "families; deferring rest to next cycle (leaves budget for emit+process)",
+                        _refresh_budget_s, _refreshed_n, len(families_needing_refresh),
+                    )
+                    break
+                _refreshed_n += 1
                 city_obj = _cbm.get(fam_city)
                 if city_obj is None:
                     logger.warning(
