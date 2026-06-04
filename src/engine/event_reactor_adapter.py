@@ -3708,13 +3708,25 @@ def _market_analysis_from_event_snapshot(
         buy_no_available.append(no_price is not None)
         executable_mask.append(yes_price is not None or no_price is not None)
     sampler = None
-    if family.event_type == "DAY0_EXTREME_UPDATED":
+    is_day0 = family.event_type == "DAY0_EXTREME_UPDATED"
+    if is_day0:
         static_p_cal = np.asarray(p_cal, dtype=float)
 
         def _static_sampler(_analysis, _n_members):
             return static_p_cal
 
         sampler = _static_sampler
+    # K1 — ForecastSharpnessEvidence (Phase-2, REQUIRED ctor param). Day0/imminent
+    # paths are exempt (the realized observation replaces the forecast, so forecast
+    # sharpness is moot). Otherwise load the settlement MAE for (city, unit, lead)
+    # from forecast_skill. The BEHAVIOR (edge suppression) is flag-gated OFF
+    # (edli_v1.forecast_sharpness_gate_enabled) so this evidence is inert on live emit
+    # today; only the TYPE is load-bearing now. Any load failure -> fail-closed
+    # `missing` evidence (also inert while the flag is OFF).
+    forecast_sharpness = _edli_forecast_sharpness_evidence(
+        snapshot=snapshot, family=family, payload=payload, unit=unit, bins=bins,
+        day0_exempt=is_day0,
+    )
     return MarketAnalysis(
         p_raw=np.asarray(p_raw, dtype=float),
         p_cal=np.asarray(p_cal, dtype=float),
@@ -3735,9 +3747,56 @@ def _market_analysis_from_event_snapshot(
         market_complete=True,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
-        bootstrap_signal_type="edli_event_bound_day0" if family.event_type == "DAY0_EXTREME_UPDATED" else "edli_event_bound_forecast",
+        bootstrap_signal_type="edli_event_bound_day0" if is_day0 else "edli_event_bound_forecast",
         representativeness_sigma=representativeness_sigma,  # iron rule 6: honest q_lcb widening on corrected domain
+        forecast_sharpness=forecast_sharpness,  # K1: required sharpness contract
     )
+
+
+def _bin_width_native(bins) -> float:
+    """Return the integer settlement bin width in the native unit (1 °C / 2 °F).
+
+    Reads the first finite-width (non-shoulder) bin so the K1 sharpness threshold
+    is keyed to the actual market grid, not an assumed value.
+    """
+    for b in bins:
+        w = getattr(b, "width", None)
+        if w:
+            return float(w)
+    # No finite-width bin in the family (all shoulders) — fall back to unit default.
+    unit = getattr(bins[0], "unit", "F") if bins else "F"
+    return 2.0 if unit == "F" else 1.0
+
+
+def _edli_forecast_sharpness_evidence(
+    *, snapshot, family, payload, unit, bins, day0_exempt: bool
+):
+    """Build the K1 ForecastSharpnessEvidence for the event-bound q path.
+
+    Day0 -> exempt. Otherwise aggregate settlement MAE from forecast_skill keyed by
+    (city, unit, int(min(lead_days, 7))). Fail-closed `missing` on any error — inert
+    while the gate flag is OFF, conservative when ON.
+    """
+    from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
+
+    if day0_exempt:
+        return ForecastSharpnessEvidence.exempt(unit=unit)
+    bin_width = _bin_width_native(bins)
+    try:
+        lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
+    except Exception:
+        return ForecastSharpnessEvidence.missing(unit=unit, bin_width=bin_width, lead_days=7)
+    try:
+        from src.state.db import get_world_connection_read_only
+
+        conn = get_world_connection_read_only()
+        return ForecastSharpnessEvidence.load_for(
+            conn, city=family.city, unit=unit, lead_days=lead_days, bin_width=bin_width
+        )
+    except Exception:
+        return ForecastSharpnessEvidence.missing(
+            unit=unit, bin_width=bin_width, lead_days=int(min(max(lead_days, 0.0), 7.0))
+        )
 
 
 def _evaluate_and_store_mainstream_agreement(

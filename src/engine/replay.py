@@ -1571,6 +1571,7 @@ def _replay_one_settlement(
     from src.engine.evaluator import _default_weather_fee_rate, _size_at_execution_price_boundary
     from src.contracts.execution_price import polymarket_fee
     from src.strategy.market_analysis import MarketAnalysis
+    from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
     from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE, compute_alpha
     from src.calibration.manager import season_from_month
     from src.data.market_scanner import _parse_temp_range
@@ -1731,6 +1732,10 @@ def _replay_one_settlement(
             unit=city.settlement_unit,
             round_fn=_round_fn,
             posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+            # K1: replay/backtest measures the FULL tested family (the denominator the
+            # live gate is calibrated against), so it stays exempt — the live sharpness
+            # gate is a SHADOW live-q behavior, not an offline-measurement filter.
+            forecast_sharpness=ForecastSharpnessEvidence.exempt(unit=city.settlement_unit),
         )
         _n_bootstrap = edge_n_bootstrap()
         edges = analysis.find_edges(n_bootstrap=_n_bootstrap)

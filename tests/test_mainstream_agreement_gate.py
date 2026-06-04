@@ -34,6 +34,7 @@ from __future__ import annotations
 import pytest
 
 from src.types.market import Bin
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +475,7 @@ def test_gate_fires_through_adapter_not_fail_open():
     p_raw = np.array([0.1, 0.7, 0.2])
     p_cal = np.array([0.1, 0.7, 0.2])
 
-    analysis = MarketAnalysis(
+    analysis = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="C"), 
         p_raw=p_raw, p_cal=p_cal, p_market=None,
         alpha=1.0, bins=bins, member_maxes=members,
         unit="C", precision=1.0,

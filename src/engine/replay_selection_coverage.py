@@ -255,6 +255,7 @@ def _score_one_snapshot(
     from src.data.market_scanner import _parse_temp_range
     from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
     from src.strategy.market_analysis import MarketAnalysis
+    from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 
     _sem = SettlementSemantics.for_city(city)
 
@@ -477,6 +478,8 @@ def _score_one_snapshot(
         unit=city.settlement_unit,
         round_fn=_sem.round_values,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+        # K1: coverage replay measures the full tested family — exempt (see replay.py).
+        forecast_sharpness=ForecastSharpnessEvidence.exempt(unit=city.settlement_unit),
     )
 
     # -- LIVE FDR PATH: scan_full_hypothesis_family + apply_familywise_fdr

@@ -26,6 +26,7 @@ import pytest
 
 from src.contracts.entry_quote_evidence import EntryQuoteEvidence
 from src.strategy.market_analysis import MarketAnalysis
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.types.market import Bin
 
 
@@ -63,7 +64,7 @@ def _make_analysis(*, eqe_yes=None, rng_seed=42) -> MarketAnalysis:
     p_cal = np.array([0.55, 0.45])
     p_market = np.array([0.30, 0.30])
     member_maxes = np.array([25.5, 25.8, 26.0, 26.3, 26.6])
-    return MarketAnalysis(
+    return MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
         p_raw=p_raw,
         p_cal=p_cal,
         p_market=p_market,
@@ -130,7 +131,7 @@ class TestNoEvidencePreservesLegacy:
 
         def _make_with_cal(eqe_yes=None) -> MarketAnalysis:
             bins = _bins()
-            return MarketAnalysis(
+            return MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
                 p_raw=np.array([0.55, 0.45]),
                 p_cal=np.array([0.55, 0.45]),
                 p_market=np.array([0.30, 0.30]),

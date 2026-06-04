@@ -27,6 +27,7 @@ from src.strategy.market_fusion import (
     vwmp,
 )
 from src.strategy.market_analysis import MarketAnalysis
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
 from src.calibration.platt import ExtendedPlattCalibrator, WIDTH_NORMALIZED_SPACE
 from src.types import Bin, BinEdge
@@ -359,7 +360,7 @@ class TestComputePosterior:
             Bin(low=None, high=32, label="32°F or below", unit="F"),
             Bin(low=39, high=40, label="39-40°F", unit="F"),
         ]
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([1.0, 0.0]),
             p_cal=np.array([1.0, 0.0]),
             p_market=np.array([0.5, 0.5]),
@@ -389,7 +390,7 @@ class TestComputePosterior:
             Bin(low=None, high=32, label="32°F or below", unit="F"),
             Bin(low=39, high=40, label="39-40°F", unit="F"),
         ]
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.0, 1.0]),
             p_cal=np.array([0.0, 1.0]),
             p_market=np.array([0.5, 0.5]),
@@ -457,6 +458,7 @@ class TestMarketAnalysis:
             "bins": bins,
             "member_maxes": np.array([30.0, 31.0, 32.0]),
             "unit": "F",
+            "forecast_sharpness": ForecastSharpnessEvidence.exempt(unit="F"),
         }
         kwargs[field] = bad_values
 
@@ -470,7 +472,7 @@ class TestMarketAnalysis:
         ]
 
         with pytest.raises(ValueError, match="member_maxes must be finite"):
-            MarketAnalysis(
+            MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
                 p_raw=np.array([0.5, 0.5]),
                 p_cal=np.array([0.5, 0.5]),
                 p_market=np.array([0.5, 0.5]),
@@ -488,7 +490,7 @@ class TestMarketAnalysis:
         p_cal = np.array([0.65, 0.35])
         executable_quotes = np.array([0.10, 0.90])
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_cal,
             p_cal=p_cal,
             p_market=executable_quotes,
@@ -508,7 +510,7 @@ class TestMarketAnalysis:
         ]
         p_cal = np.array([0.65, 0.35])
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_cal,
             p_cal=p_cal,
             p_market=None,
@@ -530,7 +532,7 @@ class TestMarketAnalysis:
         ]
         p_cal = np.array([0.20, 0.80])
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_cal,
             p_cal=p_cal,
             p_market=np.array([0.40, 0.60]),
@@ -554,7 +556,7 @@ class TestMarketAnalysis:
         ]
         p_cal = np.array([0.20, 0.80])
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_cal,
             p_cal=p_cal,
             p_market=np.array([0.40, 0.60]),
@@ -578,7 +580,7 @@ class TestMarketAnalysis:
         ]
         p_cal = np.array([0.90, 0.05, 0.05])
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_cal,
             p_cal=p_cal,
             p_market=np.array([0.01, 0.02, 0.02]),
@@ -609,7 +611,7 @@ class TestMarketAnalysis:
             Bin(low=None, high=32, label="32°F or below", unit="F"),
             Bin(low=33, high=None, label="33°F or higher", unit="F"),
         ]
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.55, 0.45]),
             p_cal=np.array([0.55, 0.45]),
             p_market=np.array([0.50, 0.50]),
@@ -641,7 +643,7 @@ class TestMarketAnalysis:
             Bin(low=None, high=32, label="32°F or below", unit="F"),
             Bin(low=33, high=None, label="33°F or higher", unit="F"),
         ]
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.55, 0.45]),
             p_cal=np.array([0.55, 0.45]),
             p_market=np.array([0.80, 0.20]),
@@ -670,7 +672,7 @@ class TestMarketAnalysis:
             Bin(low=None, high=32, label="32°F or below", unit="F"),
             Bin(low=33, high=None, label="33°F or higher", unit="F"),
         ]
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.55, 0.45]),
             p_cal=np.array([0.55, 0.45]),
             p_market=np.array([0.80, 0.20]),
@@ -703,7 +705,7 @@ class TestMarketAnalysis:
             calls["n"] += 1
             return np.array([0.90, 0.10])
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.90, 0.10]),
             p_cal=np.array([0.90, 0.10]),
             p_market=np.array([0.20, 0.80]),
@@ -744,7 +746,7 @@ class TestMarketAnalysis:
             validated_for_live=False,
         )
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_cal,
             p_cal=p_cal,
             p_market=np.array([0.25, 0.75]),
@@ -771,7 +773,7 @@ class TestMarketAnalysis:
         calibrator.input_space = WIDTH_NORMALIZED_SPACE
         calibrator.bootstrap_params = [(1.0, 0.0, 0.0)]
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([1.0, 0.0]),
             p_cal=np.array([1.0, 0.0]),
             p_market=np.array([0.5, 0.5]),
@@ -802,7 +804,7 @@ class TestMarketAnalysis:
 
         member_maxes = np.random.default_rng(42).normal(40, 2, 51)
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_raw, p_cal=p_cal, p_market=p_market,
             alpha=0.65, bins=bins, member_maxes=member_maxes, lead_days=3.0,
             **_legacy_kwargs(),
@@ -823,7 +825,7 @@ class TestMarketAnalysis:
         p = np.array([0.05, 0.08, 0.12, 0.18, 0.24, 0.15, 0.08, 0.04, 0.03, 0.02, 0.01])
         member_maxes = np.random.default_rng(42).normal(40, 3, 51)
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p, p_cal=p.copy(), p_market=p.copy(),
             alpha=0.65, bins=bins, member_maxes=member_maxes, lead_days=3.0,
             **_legacy_kwargs(),
@@ -838,7 +840,7 @@ class TestMarketAnalysis:
         p_market = np.array([0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.09, 0.10])
         member_maxes = np.ones(51) * 40.0
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_market, p_cal=p_market, p_market=p_market,
             alpha=0.5, bins=bins, member_maxes=member_maxes,
             **_legacy_kwargs(),
@@ -851,7 +853,7 @@ class TestMarketAnalysis:
         p_market = np.array([0.54, 0.36, 0.18])
         member_maxes = np.ones(51) * 40.0
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=p_cal,
             p_cal=p_cal,
             p_market=p_market,
