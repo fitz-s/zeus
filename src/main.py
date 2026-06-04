@@ -4076,6 +4076,32 @@ def _edli_event_reactor_cycle() -> None:
         # requeues via the reactor's existing EXECUTABLE_SNAPSHOT_RETRY path (fail-closed).
         trade_conn = get_trade_connection_with_world_required(write_class=None)
         store = EventStore(conn)
+
+        # ARCHIVE SWEEP (operator directive 2026-06-04): before the reactor scans,
+        # prune candidates whose target LOCAL day has ENDED in their OWN city tz
+        # (Oceania-frontier anchored, never raw UTC) to terminal 'expired' status so
+        # the active scan (fetch_pending + warm-cache family queries) stops re-reading
+        # ~1.7M already-settled rows every cycle. Marks the MUTABLE processing row
+        # only — the append-only event log (provenance) is untouched. batch_limit
+        # bounds the one-time backlog drain so a giant first sweep does not blow the
+        # 60s cycle budget; subsequent cycles see a steady trickle. Fail-soft: a
+        # sweep error must never crash a decision cycle (the read floor in
+        # fetch_pending still independently drops strictly-past rows from this cycle).
+        try:
+            _archived = store.archive_expired_candidates(decision_time=now.isoformat())
+            if _archived:
+                logger.info(
+                    "EDLI reactor: archived %d expired (target-local-day-ended) "
+                    "candidates → 'expired' (excluded from future scans)",
+                    _archived,
+                )
+        except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
+            logger.warning(
+                "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
+                "fetch_pending read floor still drops strictly-past rows): %r",
+                _sweep_exc,
+            )
+
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
