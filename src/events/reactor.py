@@ -100,6 +100,13 @@ class EventSubmissionReceipt:
     mainstream_bin_label: str | None = None
     mainstream_source: str | None = None
     mainstream_fetched_at_utc: str | None = None
+    # B2 (PR-4, 2026-06-03): edge-axis plumbing.
+    # alpha_gap = q_live - c_fee_adjusted (direction-adjusted posterior minus
+    # executable market price).  Positive = our estimate exceeds the ask price.
+    # NULL when c_fee_adjusted is NULL (no executable quote available — fail-closed;
+    # the Phase-2 gate will handle NULL explicitly).  Read-only observation column;
+    # no selection or gate behavior here.
+    alpha_gap: float | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
