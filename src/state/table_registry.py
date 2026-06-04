@@ -570,3 +570,93 @@ def assert_writer_jobs_registered(ingest_main_source: str | None = None) -> None
         raise RegistryAssertionError(
             "assert_writer_jobs_registered: FATAL — writer job wiring mismatch:\n" + "\n".join(errors)
         )
+
+
+# ---------------------------------------------------------------------------
+# F2 (fix/persistence-bypass 2026-06-03): assert_no_raw_find_weather_markets_in_daemon_callers
+# Boot-check: src/main.py and src/ingest_main.py must NOT contain a bare
+# find_weather_markets( call.  All daemon callers must go through
+# find_weather_markets_or_raise so that persistence failures are surfaced.
+# Raises RegistryAssertionError (FATAL) if any bare call is detected.
+# ---------------------------------------------------------------------------
+
+def assert_no_raw_find_weather_markets_in_daemon_callers(
+    main_source: str | None = None,
+    ingest_source: str | None = None,
+) -> None:
+    """Verify no daemon file calls find_weather_markets( directly.
+
+    AST-scans src/main.py and src/ingest_main.py for any Call node whose
+    function name is exactly ``find_weather_markets`` (not
+    ``find_weather_markets_or_raise`` or ``find_slug_pattern_weather_markets``).
+    Raises RegistryAssertionError with a descriptive message if any bare call
+    is found.
+
+    Args:
+        main_source:    Python source of src/main.py.  Injected by tests;
+                        production callers pass None (auto-resolved).
+        ingest_source:  Python source of src/ingest_main.py.  Same convention.
+    """
+    import ast
+
+    repo_root = _REGISTRY_PATH.parent.parent
+
+    sources: dict[str, str] = {}
+
+    for label, source, rel_path in (
+        ("src/main.py", main_source, "src/main.py"),
+        ("src/ingest_main.py", ingest_source, "src/ingest_main.py"),
+    ):
+        if source is None:
+            path = repo_root / rel_path
+            try:
+                source = path.read_text(encoding="utf-8")
+            except Exception as exc:
+                raise RegistryAssertionError(
+                    f"assert_no_raw_find_weather_markets_in_daemon_callers: "
+                    f"could not read {label}: {exc}"
+                ) from exc
+        sources[label] = source
+
+    violations: list[str] = []
+
+    for label, source in sources.items():
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            raise RegistryAssertionError(
+                f"assert_no_raw_find_weather_markets_in_daemon_callers: "
+                f"could not parse {label}: {exc}"
+            ) from exc
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # Match: find_weather_markets(...)  — bare name or attribute call.
+            # Must NOT match find_weather_markets_or_raise or find_slug_pattern_weather_markets.
+            if isinstance(func, ast.Name) and func.id == "find_weather_markets":
+                violations.append(
+                    f"  {label}:{node.lineno}: bare find_weather_markets( call — "
+                    f"use find_weather_markets_or_raise instead"
+                )
+            elif isinstance(func, ast.Attribute) and func.attr == "find_weather_markets":
+                # e.g. ms.find_weather_markets(...)  or market_scanner.find_weather_markets(...)
+                # Scope: catches bare-name calls (Name.id) at call sites in main.py and
+                # ingest_main.py, and attribute-qualified calls (Attribute.attr) such as
+                # market_scanner.find_weather_markets(...). Does NOT catch aliased imports
+                # (`find_weather_markets as _fwm`) — aliases bind a different Name.id and
+                # are not detected by this check. Also does NOT catch the indirect path
+                # cycle_runner → cycle_runtime (find_weather_markets at cycle_runtime:~4311)
+                # because that file is not in the daemon-callers list passed to this guard.
+                violations.append(
+                    f"  {label}:{node.lineno}: bare attribute find_weather_markets( call — "
+                    f"use find_weather_markets_or_raise instead"
+                )
+
+    if violations:
+        raise RegistryAssertionError(
+            "assert_no_raw_find_weather_markets_in_daemon_callers: FATAL — "
+            "bare find_weather_markets( calls detected in daemon sources "
+            "(must use find_weather_markets_or_raise):\n" + "\n".join(violations)
+        )
