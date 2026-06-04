@@ -2922,8 +2922,14 @@ def _refresh_pending_family_snapshots(
             }
 
         # Step 4: CLOB fetch + cache write.
-        #         max_outcomes=None: bypass per-city cap so ALL bins of each family
-        #         are captured (e.g. 11-bin Seoul negRisk event needs all 11).
+        #         max_outcomes=0 is the UNLIMITED sentinel: bypass the per-city cap so
+        #         ALL bins of each pending family are captured in ONE cycle (e.g. an
+        #         11-bin negRisk family needs all 11 — incl. non-tradeable tail bins —
+        #         for the FDR full-family proof / entry gate). max_outcomes=None did NOT
+        #         bypass the cap: it fell through to ZEUS_..._MAX_OUTCOMES (default 4),
+        #         so families stalled at 4-of-22 candidates → EXECUTABLE_SNAPSHOT_BLOCKED
+        #         (2026-06-04 root cause). This caller is scoped to pending families only
+        #         (bounded set), so uncapped capture stays within the wall-clock budget.
         #         tolerate_missing_book=True is already hardwired inside
         #         refresh_executable_market_substrate_snapshots, so illiquid bins
         #         snapshot as top_ask=None / executable_allowed=False — never tradeable.
@@ -2938,7 +2944,7 @@ def _refresh_pending_family_snapshots(
                 clob=clob,
                 captured_at=now_utc,
                 scan_authority="VERIFIED",
-                max_outcomes=None,
+                max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
             )
         write_conn.commit()
 

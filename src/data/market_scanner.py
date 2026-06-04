@@ -1,5 +1,7 @@
-# Last reused or audited: 2026-06-03
-# Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03
+# Last reused or audited: 2026-06-04
+# Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03;
+#   2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED root-cause fix — substrate refresh admits
+#   non-tradeable family-identity bins to capture + max_outcomes=0 UNLIMITED sentinel
 """Gamma API market scanner: discover active weather markets.
 
 Queries Polymarket's Gamma API for temperature events.
@@ -3288,8 +3290,15 @@ def read_persisted_weather_markets(
 
 
 def _snapshot_max_outcomes_from_env(max_outcomes: int | None) -> int:
+    # UNLIMITED sentinel (2026-06-04): max_outcomes=0 means "no per-city cap —
+    # capture EVERY family bin". refresh_pending_family_snapshots passes this so a
+    # scoped pending-family set captures all MECE siblings (incl. non-tradeable tail
+    # bins) in ONE cycle, satisfying the FDR full-family proof / entry gate. (The
+    # 51-city universe sweep keeps the default cap below to stay within budget.)
+    # Returning 0 here propagates the sentinel to the cap-application site.
     if max_outcomes is not None:
-        return max(1, int(max_outcomes))
+        value = int(max_outcomes)
+        return 0 if value <= 0 else value
     # Per-city cap: how many (condition_id, direction) pairs to capture per city.
     # Default 4 = 2 priority bins × 2 directions.  Previously this was a global
     # cap of 8 which limited coverage to ~4 cities regardless of input size.
@@ -3500,7 +3509,25 @@ def refresh_executable_market_substrate_snapshots(
             if not condition_id:
                 skipped += 1
                 continue
-            if not outcome.get("executable"):
+            # FAMILY-IDENTITY admission (2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED root):
+            # admit on IDENTITY (condition_id + yes/no tokens), NOT on tradeability.
+            # The entry gate (executable_snapshot_gate_from_trade_conn) and the FDR
+            # full-family proof require an executable_market_snapshots row for EVERY
+            # active MECE family sibling, including non-tradeable (orderbook-disabled)
+            # tail bins. Dropping non-executable bins here stalled families at N-of-M
+            # forever (8/11), so every retry dead-lettered as EXECUTABLE_SNAPSHOT_BLOCKED
+            # and zero receipts reached the trade_score edge gate. capture_executable_
+            # market_snapshot is invoked below with tolerate_missing_book=True and
+            # persists illiquid bins as NON-tradeable identity (executable_allowed=False,
+            # top_ask=None) — the strict submit contract is preserved by
+            # assert_snapshot_executable, not by excluding identity here. Operator design
+            # law 2026-05-30: "freshness 针对价格不针对市场; 市场捕捉了不会突然消失."
+            # A bin with no usable token identity is genuinely uncapturable (capture
+            # would raise) — it is still skipped.
+            if not (
+                str(outcome.get("token_id") or "").strip()
+                and str(outcome.get("no_token_id") or "").strip()
+            ):
                 skipped += 1
                 continue
             end_at = _outcome_market_end_at(market, outcome)
@@ -3534,7 +3561,8 @@ def refresh_executable_market_substrate_snapshots(
     per_city_sorted: list[list[tuple]] = []
     for city_key in sorted(city_candidates):
         city_list = sorted(city_candidates[city_key], key=lambda item: (item[0], item[1]))
-        if len(city_list) > per_city_limit:
+        # per_city_limit == 0 is the UNLIMITED sentinel: capture every family bin.
+        if per_city_limit and len(city_list) > per_city_limit:
             cap_truncated += len(city_list) - per_city_limit
             skipped += len(city_list) - per_city_limit
             city_list = city_list[:per_city_limit]

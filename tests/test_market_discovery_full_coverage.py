@@ -1,6 +1,8 @@
 # Created: 2026-05-24
-# Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
-# Authority basis: fix(discovery): restore full-city market substrate coverage (50→7 regression)
+# Lifecycle: created=2026-05-24; last_reviewed=2026-06-04; last_reused=2026-06-04
+# Authority basis: fix(discovery): restore full-city market substrate coverage (50→7 regression);
+#   2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED antibody — non-tradeable family-identity bins
+#   must reach capture so executable_market_snapshots is family-COMPLETE (FDR full-family proof)
 # Purpose: Relationship antibody — refresh_executable_market_substrate_snapshots must
 #   (R1) cap per CITY not per slug — a city with high+low slugs is 1 city, not 2;
 #   (R2) _market_discovery_cycle calls find_weather_markets (tag path), not slug-only;
@@ -468,3 +470,139 @@ def test_fetch_events_by_tags_stops_when_budget_exhausted(monkeypatch):
         f"elapsed={elapsed:.3f}s"
     )
     assert isinstance(result, list), "Must return a list even when budget exhausted early"
+
+
+# ---------------------------------------------------------------------------
+# FDR (NON_EXECUTABLE_BIN_IDENTITY_REACHES_CAPTURE): every active MECE family
+# sibling — including non-tradeable (orderbook-disabled) tail bins — must reach
+# capture so the executable_market_snapshots family is COMPLETE.
+# ---------------------------------------------------------------------------
+
+def _make_family_market_with_tail(
+    city_name: str = "Chicago",
+    target_date: str = "2026-06-04",
+    metric: str = "highest",
+) -> dict:
+    """One family event whose outcomes include 2 EXECUTABLE bins + 1 NON-EXECUTABLE
+    tail bin that still carries a VALID identity (condition_id + yes/no tokens).
+
+    Mirrors live Gamma: the hot/cold tail bins of a weather MECE family have
+    enableOrderBook=False (no liquidity), so ``_market_child_is_tradable`` returns
+    False → ``executable=False`` — yet their condition_id + token identity is fully
+    known (present in market_events). ``find_weather_markets`` surfaces them in
+    ``support_outcomes`` (ALL bins), so they DO reach
+    ``refresh_executable_market_substrate_snapshots`` with executable=False.
+    """
+    city_slug = city_name.lower().replace(" ", "-")
+    slug = _slug(city_slug, metric, target_date)
+    city_obj = ms.cities_by_name.get(city_name, city_name)
+
+    def _bin(seq: int, *, executable: bool) -> dict:
+        cid = f"0x{seq:02x}" + "c" * 62
+        cid = cid[:66]
+        return {
+            "title": f"bin-{seq}",
+            "condition_id": cid,
+            "market_id": cid,
+            # Identity is ALWAYS known — even for the non-executable tail bin.
+            "token_id": f"0x{seq:02x}" + "a" * 62,
+            "no_token_id": f"0x{seq:02x}" + "b" * 62,
+            "question_id": cid,
+            "executable": executable,
+            "accepting_orders": executable,
+            "closed": False,
+            "enable_orderbook": executable,
+            "gamma_market_raw": {
+                "conditionId": cid,
+                "acceptingOrders": executable,
+                "closed": False,
+                "active": True,
+                "enableOrderBook": executable,
+            },
+        }
+
+    return {
+        "event_id": f"evt-{city_slug}-{metric}-{target_date}",
+        "slug": slug,
+        "title": f"{metric.capitalize()} temperature in {city_name} on {target_date}?",
+        "city": city_obj,
+        "target_date": target_date,
+        "temperature_metric": metric,
+        "hours_to_resolution": 12.0,
+        "hours_since_open": 6.0,
+        # support_outcomes = ALL bins (find_weather_markets surfaces every MECE
+        # sibling regardless of executability). Two liquid bins + one illiquid tail.
+        "outcomes": [
+            _bin(1, executable=True),
+            _bin(2, executable=True),
+            _bin(3, executable=False),  # non-tradeable tail bin, valid identity
+        ],
+        "condition_ids": [
+            o["condition_id"]
+            for o in (_bin(1, executable=True), _bin(2, executable=True))
+        ],
+        "source_contract": {"status": "MATCH"},
+    }
+
+
+def test_non_executable_tail_bin_identity_reaches_capture():
+    """FDR (NON_EXECUTABLE_BIN_IDENTITY_REACHES_CAPTURE): the substrate refresh
+    must hand EVERY active MECE family sibling to ``capture_executable_market_snapshot``,
+    including the non-tradeable (orderbook-disabled) tail bin — because the entry
+    gate and the FDR full-family proof require an executable_market_snapshots row
+    for EVERY family condition_id, not just the liquid subset.
+
+    Root cause (2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED): the candidate-enumeration
+    loop dropped non-executable outcomes (``if not outcome.get("executable"):
+    continue``) BEFORE capture, so illiquid tail bins never got an IDENTITY row.
+    A weather family then stalled at 8/11 captured siblings forever, the entry gate
+    (executable_snapshot_gate_from_trade_conn) required all 11, the event retried 8×
+    and dead-lettered as EXECUTABLE_SNAPSHOT_BLOCKED → zero receipts reached the
+    trade_score edge gate. This contradicts the function's own design
+    (``tolerate_missing_book=True``, "capture IDENTITY for every active MECE bin
+    including illiquid no-ask tail bins").
+
+    RED pre-fix: the executable filter drops bin-3 → only 2 of 3 condition_ids reach
+    capture → assertion fails.
+    GREEN post-fix: all 3 condition_ids reach capture (bin-3 captures as
+    non-tradeable identity: executable_allowed=False, top_ask=None).
+    """
+    market = _make_family_market_with_tail()
+    family_condition_ids = {o["condition_id"] for o in market["outcomes"]}
+    assert len(family_condition_ids) == 3
+
+    captured_condition_ids: set[str] = set()
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority,
+                     execution_side="BUY", prefetched_orderbook=None,
+                     tolerate_missing_book=False, **kwargs):
+        cid = str(decision.tokens.get("market_id") or "")
+        if cid:
+            captured_condition_ids.add(cid)
+
+    clob = _make_clob_mock()
+    conn = _make_in_memory_trade_db()
+
+    with patch(
+        "src.data.market_scanner.capture_executable_market_snapshot",
+        side_effect=_spy_capture,
+    ):
+        refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[market],
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,  # UNLIMITED sentinel — mirrors refresh_pending_family_snapshots
+        )
+
+    missing = family_condition_ids - captured_condition_ids
+    assert not missing, (
+        "Every active MECE family sibling — including the non-tradeable tail bin — "
+        "must reach capture so executable_market_snapshots is family-COMPLETE for the "
+        "FDR full-family proof. Missing condition_ids (dropped before capture): "
+        f"{sorted(missing)}. Captured: {sorted(captured_condition_ids)}. "
+        "Pre-fix root cause: the executable-only filter in the candidate loop dropped "
+        "non-executable (orderbook-disabled) bins, stalling families at N-of-M and "
+        "raising EXECUTABLE_SNAPSHOT_BLOCKED."
+    )
