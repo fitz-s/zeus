@@ -251,10 +251,116 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
 # db_writer_lock.py: that serializes write *intent* across processes; this
 # serializes write *transactions* across THREADS within one process. They are
 # orthogonal and composable.
-_WORLD_DB_WRITE_MUTEX = threading.Lock()
+#
+# CATEGORY ANTIBODY (2026-06-04, M5 lock-starvation kill — the K<<N structural
+# fix): the docstring contract "MUST NOT be held across network/HTTP calls" was
+# UNENFORCED. STEP-7 (5638cf59c6) and #95 each fixed ONE site by hand; M5
+# exchange_reconcile was an uncovered third instance and wedged the daemon for
+# hours (STAT=U, WAL bloat). A by-hand fix per site is whack-a-mole. Instead we
+# make "blocking network/chain I/O while the world write lock is held"
+# STRUCTURALLY DETECTABLE: the mutex is wrapped so every acquire()/release()
+# (whether via world_write_lock, world_write_mutex().acquire(), or a bare
+# context-manager use) maintains a process-global held depth. The venue HTTP
+# client + on-chain RPC entrypoints assert that depth is zero before doing I/O
+# and raise WorldMutexIOViolation otherwise — converting a silent multi-hour
+# wedge into an immediate, located failure at the exact violating call site.
 
 
-def world_write_mutex() -> "threading.Lock":
+class WorldMutexIOViolation(RuntimeError):
+    """Raised when blocking network/on-chain I/O is attempted while the
+    process-global zeus-world.db write mutex is held.
+
+    Holding the world write mutex (and the WAL write lock it guards) across a
+    venue HTTP fetch or an on-chain RPC call serializes every world write behind
+    that I/O and wedges the daemon (the M5 / #95 / STEP-7 starvation disease).
+    The contract on ``world_write_lock`` / ``world_write_mutex`` is explicit:
+    NEVER hold across HTTP. This exception makes the contract self-enforcing.
+    """
+
+
+class _GuardedWorldMutex:
+    """A ``threading.Lock`` facade that tracks process-global held depth.
+
+    Wraps the real lock so that EVERY acquisition path — ``world_write_lock``
+    (the BEGIN/COMMIT context manager), ``world_write_mutex().acquire()`` (the
+    reactor / ingestor / emit direct-acquire sites), and ``with mutex:`` — feeds
+    one shared held counter with ZERO caller changes. The counter is the single
+    source of truth that ``assert_no_world_mutex_held_for_io`` reads.
+
+    The held counter is a simple integer guarded by the lock's own ownership:
+    only the holder mutates it, and the world mutex is non-reentrant, so the
+    count is 0 or 1 in practice. We model it as a depth (int) purely so a future
+    reentrant variant cannot silently corrupt the flag.
+    """
+
+    __slots__ = ("_lock",)
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def acquire(self, *args: Any, **kwargs: Any) -> bool:
+        acquired = self._lock.acquire(*args, **kwargs)
+        if acquired:
+            global _WORLD_MUTEX_HELD_DEPTH
+            _WORLD_MUTEX_HELD_DEPTH += 1
+        return acquired
+
+    def release(self) -> None:
+        global _WORLD_MUTEX_HELD_DEPTH
+        # Decrement BEFORE releasing the OS lock so the flag is already clear
+        # the instant another thread can observe an un-held mutex.
+        if _WORLD_MUTEX_HELD_DEPTH > 0:
+            _WORLD_MUTEX_HELD_DEPTH -= 1
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> "bool":
+        return self.acquire()
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
+
+# Process-global "is the world write mutex held right now" depth. Mutated only
+# by _GuardedWorldMutex under the lock's ownership (see class docstring).
+_WORLD_MUTEX_HELD_DEPTH: int = 0
+
+_WORLD_DB_WRITE_MUTEX = _GuardedWorldMutex()
+
+
+def world_mutex_is_held() -> bool:
+    """True iff the process-global zeus-world.db write mutex is currently held.
+
+    Read by ``assert_no_world_mutex_held_for_io`` and by relationship tests that
+    pin the "no I/O under the world write lock" invariant.
+    """
+    return _WORLD_MUTEX_HELD_DEPTH > 0
+
+
+def assert_no_world_mutex_held_for_io(operation: str) -> None:
+    """Fail loudly if blocking I/O is attempted while the world mutex is held.
+
+    Wire this at venue HTTP / on-chain RPC entrypoints (the two client surfaces
+    that perform blocking network/chain reads). When the world write mutex is
+    held, raising here turns a silent WAL-lock starvation wedge into an
+    immediate, located ``WorldMutexIOViolation`` naming the offending I/O.
+
+    ``operation`` is a short label for the I/O being attempted (e.g.
+    ``"venue.get_trades"``, ``"onchain.eth_call"``); it appears in the error so
+    the wedge's root call site is identified at the moment of the violation.
+    """
+    if world_mutex_is_held():
+        raise WorldMutexIOViolation(
+            f"blocking I/O {operation!r} attempted while the zeus-world.db write "
+            f"mutex is held — this serializes every world write behind the I/O "
+            f"and wedges the daemon (WAL-lock starvation). The world write lock "
+            f"MUST be released before any venue/on-chain call. See db.world_write_lock."
+        )
+
+
+def world_write_mutex() -> "_GuardedWorldMutex":
     """Return the process-global zeus-world.db write mutex.
 
     For callers that manage their own transaction lifecycle (e.g. the EDLI
