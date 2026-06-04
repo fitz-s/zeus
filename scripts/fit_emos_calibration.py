@@ -66,14 +66,16 @@ def main():
                     help="exclude ensemble_snapshots whose local-day-max window overlap is below "
                          "this many hours — the truncated D+6 reads (~6h overlap) are a fake-cold "
                          "artifact that poisons mu=a+b*xbar (the cold-shift root cause, wogx7y03g).")
+    ap.add_argument("--world", default=WORLD, help="zeus-world.db path (default: this checkout's state/)")
+    ap.add_argument("--fcst", default=FCST, help="zeus-forecasts.db path (default: this checkout's state/)")
     args = ap.parse_args()
-    w = sqlite3.connect(f"file:{WORLD}?mode=ro", uri=True); w.row_factory = sqlite3.Row
+    w = sqlite3.connect(f"file:{args.world}?mode=ro", uri=True); w.row_factory = sqlite3.Row
     obs = defaultdict(dict)
     for r in w.execute("SELECT city, target_date d, running_max rm, temp_unit tu FROM observation_instants WHERE running_max IS NOT NULL"):
         c = to_c(r["rm"], r["tu"])
         if c is None or not np.isfinite(c): continue
         if r["d"] not in obs[r["city"]] or c > obs[r["city"]][r["d"]]: obs[r["city"]][r["d"]] = c
-    f = sqlite3.connect(f"file:{FCST}?mode=ro", uri=True); f.row_factory = sqlite3.Row
+    f = sqlite3.connect(f"file:{args.fcst}?mode=ro", uri=True); f.row_factory = sqlite3.Row
     # cell -> {y24:[(xbar,logS2,lead,y)], y25:[...], test(2026):[...]}
     cells = defaultdict(lambda: {"y24": [], "y25": [], "test": []})
     # FIT-CLEAN (#110, 2026-06-04): exclude TRUNCATED daily-max windows. At the D+6 horizon edge
