@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -26,6 +28,28 @@ from src.events.opportunity_event import OpportunityEvent, assert_available_for_
 from src.state.db import world_write_mutex
 
 UTC = timezone.utc
+
+DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 45.0
+
+
+def _cycle_budget_seconds() -> float | None:
+    """Per-cycle wall-clock budget for process_pending (E1 / STEP 8).
+
+    Default 45.0s; override via ``ZEUS_REACTOR_CYCLE_BUDGET_SECONDS``. A value of
+    0 or negative disables the budget (unbounded cycle, legacy behavior). A
+    malformed env value falls back to the default rather than crashing the
+    reactor.
+    """
+    raw = os.environ.get("ZEUS_REACTOR_CYCLE_BUDGET_SECONDS")
+    if raw is None:
+        return DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS
+    try:
+        budget = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS
+    return budget if budget > 0 else None
+
+
 DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
 LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
     "SUBMITTED",
@@ -199,8 +223,18 @@ class OpportunityEventReactor:
         # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
         # taken under the world-DB write mutex.
         events = self._store.fetch_pending(decision_time=decision_time.astimezone(UTC).isoformat(), limit=limit)
+        # E1 (STEP 8): per-cycle wall-clock budget. A cycle must not run unbounded;
+        # once the budget is exceeded, stop after the current event and leave the
+        # rest PENDING (not consumed, not dropped) for the next cycle. This caps a
+        # cycle so the scheduler never hits "max running instances reached" and
+        # fresh candidates (freshest-target-first, STEP 3) are reached promptly.
+        # Default 45s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
+        budget = _cycle_budget_seconds()
+        cycle_start = time.monotonic()
         for event in events:
             self._process_event_unit(event, decision_time=decision_time, result=result)
+            if budget is not None and (time.monotonic() - cycle_start) >= budget:
+                break
         return result
 
     def _process_event_unit(
