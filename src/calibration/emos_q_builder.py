@@ -33,14 +33,15 @@ def build_emos_q(
     members_native: "np.ndarray",
     unit: str,
     bins: Sequence,
-) -> Optional[tuple["np.ndarray", float]]:
+) -> Optional[tuple["np.ndarray", float, float]]:
     """Build the traded bin-probability vector from the EMOS calibrator alone.
 
-    Returns ``(q_vector, sigma_native)`` where ``q_vector`` is normalized over ``bins`` and
-    ``sigma_native`` is the predictive std-dev in the bins' native unit — carried out so the
-    point q and the q_lcb derive from ONE sigma (fixing the point under-dispersion). Returns
-    ``None`` when the EMOS cell is served=raw or missing: the caller then falls back to the
-    honest raw analytic p_raw, NEVER to the bias/grid maze.
+    Returns ``(q_vector, mu_native, sigma_native)`` where ``q_vector`` is normalized over
+    ``bins`` and ``(mu_native, sigma_native)`` are the predictive mean/std-dev in the bins'
+    native unit. The caller uses ``q_vector`` as the point p_cal AND draws the lcb bootstrap
+    from ``N(mu_native, sigma_native)`` — so the point q and the q_lcb derive from ONE sigma
+    (fixing the point under-dispersion). Returns ``None`` when the EMOS cell is served=raw or
+    missing: the caller then falls back to the honest raw analytic p_raw, NEVER to the bias maze.
 
     Args:
         city:           city name matching the EMOS table key.
@@ -78,4 +79,4 @@ def build_emos_q(
     total = float(q.sum())
     if not np.isfinite(total) or total <= 0.0:
         return None
-    return q / total, float(sigma_native)
+    return q / total, float(mu_native), float(sigma_native)

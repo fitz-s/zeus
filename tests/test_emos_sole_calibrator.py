@@ -101,10 +101,11 @@ def test_inv1_build_emos_q_returns_full_distribution(emos_table):
         unit="C", bins=bins,
     )
     assert out is not None, "served=emos cell must produce a distribution"
-    q_vec, sigma_native = out
+    q_vec, mu_native, sigma_native = out
     assert len(q_vec) == len(bins)
     assert abs(float(np.sum(q_vec)) - 1.0) < 1e-6, "q vector must be normalized"
     assert sigma_native > 0.0, "the point/lcb sigma must travel with the distribution"
+    assert np.isfinite(mu_native), "mu must travel out so the lcb bootstrap can sample N(mu,sigma)"
 
 
 def test_inv1_served_raw_returns_none_for_honest_fallback(monkeypatch):
