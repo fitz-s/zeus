@@ -35,11 +35,14 @@ Dedup: one final shadow position per (city, target_date, token_id, direction) �
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import math
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -59,17 +62,50 @@ if _ROOT_CANDIDATE not in sys.path:
 # common directory (i.e. the real working tree with live DBs).
 # ---------------------------------------------------------------------------
 
+def _is_populated_world_db(probe: str) -> bool:
+    """True iff ``probe`` is a non-stub world DB carrying the receipts table.
+
+    A worktree may ship an EMPTY ``state/zeus-world.db`` stub (e.g. a 4KB shell
+    with no rows). Treating that as the repo root makes the measurement read an
+    empty DB and silently report a vacuous DENIED — masking the real cohort.
+    We therefore require the live table to exist before accepting a candidate;
+    an empty stub is skipped so the git-common-dir fallback reaches the live
+    checkout's populated state. (Anti-fabrication: never measure the wrong DB.)
+    """
+    if not os.path.exists(probe) or os.path.getsize(probe) == 0:
+        return False
+    try:
+        c = sqlite3.connect(f"file:{probe}?mode=ro", uri=True)
+        try:
+            c.execute("SELECT 1 FROM edli_no_submit_receipts LIMIT 1").fetchone()
+            return True
+        finally:
+            c.close()
+    except sqlite3.OperationalError:
+        return False
+    except Exception:  # noqa: BLE001 — any access failure → not usable
+        return False
+
+
 def _find_repo_root() -> str:
-    """Return the repo root directory that contains state/zeus-world.db.
+    """Return the repo root directory that contains a POPULATED state/zeus-world.db.
 
     Search order:
-      1. Walk up from this script's location until state/zeus-world.db found.
-      2. Fall back to git rev-parse --show-toplevel (handles worktrees).
+      0. ``ZEUS_STATE_DIR`` env override (parent of the state dir) — lets the
+         ARM measurement run from any worktree against the LIVE state.
+      1. Walk up from this script's location until a populated state/zeus-world.db.
+      2. Fall back to git rev-parse --git-common-dir (handles worktrees → main).
+    Empty stub DBs are skipped (see _is_populated_world_db).
     """
+    env_state = os.environ.get("ZEUS_STATE_DIR")
+    if env_state:
+        # ZEUS_STATE_DIR points AT the state dir; the repo root is its parent.
+        return os.path.dirname(os.path.abspath(env_state.rstrip("/")))
+
     candidate = os.path.dirname(os.path.abspath(__file__))
     while True:
         probe = os.path.join(candidate, "state", "zeus-world.db")
-        if os.path.exists(probe):
+        if _is_populated_world_db(probe):
             return candidate
         parent = os.path.dirname(candidate)
         if parent == candidate:
@@ -93,7 +129,7 @@ def _find_repo_root() -> str:
         else:
             repo_root = os.path.dirname(common_git)
         probe = os.path.join(repo_root, "state", "zeus-world.db")
-        if os.path.exists(probe):
+        if _is_populated_world_db(probe):
             return repo_root
     except Exception:
         pass
@@ -715,10 +751,160 @@ def _print_per_city_table(rows: list[dict], title: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ARM-GATE ARTIFACT EMITTER (H3 — close the producer/consumer gap)
+#
+# PR-2's live boot gate (D2) consumes ``state/edli_arm_gate_artifact.json`` and
+# REFUSES to arm unless it carries every required field AND
+# ``capital_weighted_ev > 0`` AND ``coverage_licensed is True`` (plus a
+# commit_sha / measurement_cmd_hash match). NO producer wrote that file — so
+# arming was structurally impossible: the consumer existed, the producer did
+# not. This emitter is the missing producer.
+#
+# ANTIBODY / fail-closed: the artifact reflects the HONEST measured verdict.
+# With current data the cohort is DENIED, so the emitted artifact MUST carry
+# ``capital_weighted_ev <= 0`` and ``coverage_licensed: false`` — values the
+# consumer REJECTS. An ARM_ELIGIBLE artifact is NEVER emitted on DENIED data;
+# the producer cannot manufacture an arming license the measurement did not
+# earn. ``coverage_licensed`` is hardcoded False because no settlement-
+# calibrated coverage license (K3) exists yet on this branch — when one lands,
+# this is the single line that flips.
+# ---------------------------------------------------------------------------
+
+ARM_ARTIFACT_SCHEMA = "edli_arm_gate_artifact/v1"
+
+# The 9 fields PR-2's D2 boot gate requires. Kept here as the explicit contract
+# the producer fills — a missing key is a producer bug caught by the H3 test.
+ARM_ARTIFACT_REQUIRED_FIELDS = frozenset({
+    "schema",
+    "commit_sha",
+    "measurement_cmd_hash",
+    "capital_weighted_ev",
+    "gate_pass_n",
+    "per_city_n",
+    "ev_sigma",
+    "date_coverage",
+    "coverage_licensed",
+})
+
+
+def _git_head_sha() -> str:
+    """Return the current HEAD commit SHA, or 'UNKNOWN' if git is unavailable.
+
+    The boot gate matches this against the running checkout's SHA; emitting
+    'UNKNOWN' guarantees a mismatch (fail-closed) rather than a false pass.
+    """
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_SCRIPT_DIR,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip() or "UNKNOWN"
+    except Exception:  # noqa: BLE001 — git missing/detached → fail-closed sentinel
+        return "UNKNOWN"
+
+
+def _measurement_cmd_hash(argv: list[str]) -> str:
+    """Hash of (this script's source bytes + sorted argv).
+
+    Binds the artifact to the EXACT measurement code + invocation that produced
+    it. The boot gate re-derives this hash from the live checkout's script; any
+    drift (script edited, different args) changes the hash and fails the gate.
+    Sorting argv makes the hash invocation-order-insensitive but argument-set-
+    sensitive.
+    """
+    h = hashlib.sha256()
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            h.update(fh.read())
+    except OSError:
+        h.update(b"SCRIPT_SOURCE_UNREADABLE")
+    h.update(b"\x00")
+    for a in sorted(argv):
+        h.update(a.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def build_arm_artifact(
+    cw_verdict: "CapitalWeightedArmVerdict",
+    gate_rows: list[dict],
+    *,
+    argv: list[str],
+    coverage_licensed: bool = False,
+) -> dict:
+    """Build the boot-gate artifact dict from the CURRENT measurement.
+
+    The artifact is a faithful projection of the measured cohort — never an
+    aspiration. ``capital_weighted_ev`` is the size-weighted ROI (Σnet/Σinvested):
+    the field the consumer's ``>0`` rule tests, and the honest "does this cohort
+    make money once sized" signal. On a DENIED cohort it is <=0, so the consumer
+    rejects.
+
+    Args:
+        cw_verdict: the capital-weighted verdict for the gate-PASS cohort.
+        gate_rows: the graded gate-PASS rows (for date-coverage evidence).
+        argv: the script argv (for the measurement_cmd_hash binding).
+        coverage_licensed: K3 settlement-calibrated coverage license. False
+            until such a license exists — do NOT pass True without one.
+
+    Returns:
+        A dict carrying exactly ``ARM_ARTIFACT_REQUIRED_FIELDS``.
+    """
+    # date_coverage: the distinct (city, target_date) settled pairs the gate-PASS
+    # cohort actually covers — count + the sorted list as evidence.
+    date_pairs = sorted({(r["city"], r["target_date"]) for r in gate_rows})
+    artifact = {
+        "schema": ARM_ARTIFACT_SCHEMA,
+        "commit_sha": _git_head_sha(),
+        "measurement_cmd_hash": _measurement_cmd_hash(argv),
+        # capital_weighted_ev = size-weighted ROI; the consumer rejects on <=0.
+        "capital_weighted_ev": cw_verdict.capital_weighted_roi,
+        "gate_pass_n": cw_verdict.n,
+        "per_city_n": dict(cw_verdict.per_city_n),
+        "ev_sigma": cw_verdict.capital_weighted_ev_sigma,
+        "date_coverage": {
+            "n_pairs": len(date_pairs),
+            "pairs": [list(p) for p in date_pairs],
+        },
+        # Hardcoded False: no settlement-calibrated coverage license yet (K3).
+        "coverage_licensed": bool(coverage_licensed),
+    }
+    return artifact
+
+
+def emit_arm_artifact(path: str, artifact: dict) -> None:
+    """Atomically write the artifact JSON (tmp + os.replace), per repo convention."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(artifact, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main(argv: Optional[list[str]] = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = argparse.ArgumentParser(
+        description="Measure after-cost settlement win-rate for EDLI shadow "
+                    "positions and compute the capital-weighted ARM verdict.",
+    )
+    parser.add_argument(
+        "--emit-artifact",
+        metavar="PATH",
+        default=None,
+        help="Write the boot-gate artifact (state/edli_arm_gate_artifact.json "
+             "contract) reflecting the CURRENT measurement to PATH. On a DENIED "
+             "cohort the artifact carries capital_weighted_ev<=0 / "
+             "coverage_licensed:false so PR-2's D2 boot gate REJECTS it — arming "
+             "stays blocked. An ARM_ELIGIBLE artifact is never emitted on DENIED data.",
+    )
+    args = parser.parse_args(argv)
+
     print("=" * 78)
     print("EDLI ARM-GATE SETTLEMENT WIN-RATE MEASUREMENT")
     print(f"DB sources:  {_WORLD_DB}")
@@ -775,6 +961,8 @@ def main() -> None:
     print("\n" + "=" * 78)
     print("CAPITAL-WEIGHTED ARM VERDICT (gate-PASS cohort) — kelly_size_usd weighted")
     print("=" * 78)
+    cw_verdict: Optional[CapitalWeightedArmVerdict] = None
+    cw_eligible = False
     try:
         cw_verdict = _compute_capital_weighted_verdict(gate_rows)
         print(f"  equal_row_win_rate      = {_fmt_pct(cw_verdict.equal_row_win_rate)}")
@@ -792,6 +980,7 @@ def main() -> None:
         print(f"  Reason: {cw_reason}")
     except ValueError as exc:
         # Fail-closed: a sizeless settled row makes the verdict undeterminable.
+        # cw_verdict stays None → artifact emission below also fails closed.
         print(f"  ARM (capital-weighted): DENIED — {exc}")
 
     # --- Equal-row verdict (continuity; NOT the arming decision) ---
@@ -805,6 +994,48 @@ def main() -> None:
     print(f"  NOTE: the ARM DECISION is the CAPITAL-WEIGHTED verdict above, not this one.")
     print(f"        A high row-rate that loses money once sized does NOT arm.")
     print("=" * 78)
+
+    # --- H3: emit the boot-gate artifact (the missing producer) ---
+    if args.emit_artifact:
+        print("\n" + "=" * 78)
+        print(f"EMITTING ARM-GATE ARTIFACT → {args.emit_artifact}")
+        print("=" * 78)
+        if cw_verdict is None:
+            # MISSING_SIZE fail-closed: we could not compute a capital-weighted
+            # verdict, so we cannot honestly assert any EV. Emit a blocking
+            # artifact (ev<=0, coverage_licensed False) so the consumer rejects,
+            # rather than refusing to write (which would look like "no measurement").
+            blocking = _compute_capital_weighted_verdict([])  # zero-verdict
+            artifact = build_arm_artifact(blocking, [], argv=argv, coverage_licensed=False)
+            artifact["capital_weighted_ev"] = -1.0  # explicit block on undeterminable size
+        else:
+            # coverage_licensed is ALWAYS False here: no settlement-calibrated
+            # coverage license (K3) exists on this branch. The honest verdict on
+            # current data is DENIED, so the artifact is BLOCKING by construction.
+            artifact = build_arm_artifact(
+                cw_verdict, gate_rows, argv=argv, coverage_licensed=False
+            )
+        emit_arm_artifact(args.emit_artifact, artifact)
+        blocks = (artifact["capital_weighted_ev"] <= 0.0) or (not artifact["coverage_licensed"])
+        print(f"  schema               = {artifact['schema']}")
+        print(f"  commit_sha           = {artifact['commit_sha']}")
+        print(f"  measurement_cmd_hash = {artifact['measurement_cmd_hash'][:16]}…")
+        print(f"  capital_weighted_ev  = {artifact['capital_weighted_ev']:.6f}")
+        print(f"  ev_sigma             = {artifact['ev_sigma']:.4f}")
+        print(f"  gate_pass_n          = {artifact['gate_pass_n']}")
+        print(f"  per_city_n           = {artifact['per_city_n']}")
+        print(f"  date_coverage        = {artifact['date_coverage']['n_pairs']} (city,date) pairs")
+        print(f"  coverage_licensed    = {artifact['coverage_licensed']}")
+        print(
+            f"\n  CONSUMER VERDICT: {'BLOCKING (boot gate REJECTS — arming stays blocked)' if blocks else 'NON-BLOCKING'}"
+        )
+        if blocks:
+            print("  This is the HONEST DENIED state. Arming is correctly impossible.")
+        else:
+            # An eligible artifact must never be emitted on DENIED data — if we
+            # reach here on the current cohort it is a producer fabrication bug.
+            print("  WARNING: artifact is NON-BLOCKING — verify this is a genuine ARM_ELIGIBLE cohort.")
+        print("=" * 78)
 
 
 if __name__ == "__main__":
