@@ -123,6 +123,55 @@ def test_inv1_served_raw_returns_none_for_honest_fallback(monkeypatch):
 # INV-5 — WIRE-OR-DELETE. After Phase 3 the maze mean-correction sites are gone.
 #   (RED until deletion; documents the target so a future session cannot re-add them.)
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# INV-6 — ANTIBODY (the loop-breaker). The set of mean-correction mechanisms in the q seam
+#   may only SHRINK toward {EMOS}, never grow. A NEW correction function added to the seam
+#   fails this test in CI — so the next session cannot silently re-add a parallel mechanism
+#   (the exact regression that recurred every life). Models the AST forbidden-call guard
+#   src/state/table_registry.py:assert_no_raw_find_weather_markets_in_daemon_callers.
+#   When Phase 3 deletes the maze, the EXPECTED set shrinks to the EMOS-only frozen set and
+#   this test is the explicit, reviewed record of that deletion.
+_Q_SEAM_FN = "_market_analysis_from_event_snapshot"
+# Every calibration mechanism currently wired into the q seam. The ratchet: this set is the
+# WHOLE registry; adding a name not here (a new parallel corrector) breaks CI; removing one
+# (Phase-3 deletion) requires editing this list in the same reviewed diff.
+_ALLOWED_Q_SEAM_CORRECTORS = frozenset({
+    "_build_emos_q", "_make_emos_bootstrap_sampler",          # the ONE calibrator (target end-state)
+    "_maybe_apply_edli_bias_correction",                      # maze (Phase-3 delete)
+    "_maybe_apply_grid_representativeness_correction",        # maze (Phase-3 delete)
+    "_edli_representativeness_sigma_native",                  # maze (Phase-3 delete)
+})
+
+
+def _q_seam_corrector_calls() -> set:
+    import ast
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "engine" / "event_reactor_adapter.py"
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == _Q_SEAM_FN), None)
+    assert fn is not None, f"{_Q_SEAM_FN} not found — the q seam moved; re-anchor the antibody"
+    import re
+    pat = re.compile(r"bias|grid|representativeness|emos")
+    names: set = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            fname = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if fname and pat.search(fname):
+                names.add(fname)
+    return names
+
+
+def test_inv6_q_seam_correctors_do_not_grow():
+    found = _q_seam_corrector_calls()
+    extra = found - _ALLOWED_Q_SEAM_CORRECTORS
+    assert not extra, (
+        f"NEW calibration corrector(s) {sorted(extra)} wired into the q seam. The one-calibrator "
+        f"antibody forbids parallel mechanisms — route through build_emos_q or delete. If this is "
+        f"an intentional Phase-3 deletion, update _ALLOWED_Q_SEAM_CORRECTORS in the same diff."
+    )
+
+
 @pytest.mark.xfail(strict=True, reason="Phase 3: maze deletion lands only after EMOS is "
                    "settlement-proven per-city + operator sign. Flips to ENFORCED (xpass=fail) "
                    "once the mean-correction sites are deleted — the wire-or-delete antibody.")
