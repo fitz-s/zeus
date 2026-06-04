@@ -23,6 +23,14 @@ KEYED LOOKUP that, on a miss, falls THROUGH to a less-correct surface SILENTLY:
     northern-summer city — or, if even that misses, falls to identity-by-
     starvation (``cal is None``).  Both are silent.
 
+    IMPORTANT SCOPE BOUNDARY: the Platt check is gated on UNCORRECTED cities only.
+    The live reactor early-exits to identity-Platt for bias-corrected cities
+    (``_snapshot_p_cal`` line 4699+: ``if _edli_bias_corrected: return arr/total``),
+    meaning ``get_calibrator`` is NEVER reached for those cities.  Identity-on-bias-
+    corrected-p_raw is the A4 train/serve lockstep by design.  Only cities that
+    reach ``get_calibrator`` live (i.e. the same set the bias check flags as
+    uncorrected) can have a meaningful Platt gap.
+
 This guard converts that silent PARTIAL coverage into a LOUD, ENUMERABLE state.
 It does NOT fix the gaps (those are repaired by data refits elsewhere); it makes
 them VISIBLE so "PARTIAL calibration utilization" can never be a silent default.
@@ -360,14 +368,15 @@ def calibration_coverage_report(
 
             season = season_from_date(today, lat=lat)
             for metric in _LIVE_METRICS:
-                # BIAS layer
-                if not _bias_covered(
+                # BIAS layer — real read_bias_model lookup (exact same key the reactor uses).
+                bias_present = _bias_covered(
                     conn,
                     city_name=city.name,
                     season=season,
                     metric=metric,
                     month=month,
-                ):
+                )
+                if not bias_present:
                     gaps.append(
                         CoverageGap(
                             city=city.name,
@@ -377,20 +386,43 @@ def calibration_coverage_report(
                             fallback=_FALLBACK_RAW,
                         )
                     )
-                # PLATT layer
-                resolution = _platt_resolution(
-                    conn, city=city, today=today, season=season, metric=metric
-                )
-                if resolution.startswith("borrowed:") or resolution == _FALLBACK_IDENTITY:
-                    gaps.append(
-                        CoverageGap(
-                            city=city.name,
-                            metric=metric,
-                            layer=_LAYER_PLATT,
-                            season=season,
-                            fallback=resolution,
-                        )
+
+                # PLATT layer — only relevant for UNCORRECTED cities.
+                #
+                # The live reactor (_snapshot_p_cal, event_reactor_adapter.py:4699+)
+                # early-exits to identity-Platt for ANY bias-corrected city:
+                #
+                #   if _edli_bias_corrected or _edli_grid_corrected:
+                #       return arr / total   # identity on bias-corrected p_raw
+                #
+                # That is the DESIGNED behaviour — identity-on-corrected is the
+                # A4 train/serve lockstep, not a calibration gap. For those cities
+                # ``get_calibrator`` is NEVER reached live, so classifying their
+                # Platt resolution as a borrow or identity-starvation is a false
+                # positive.  We gate the Platt check on uncorrected cities only:
+                # a city is uncorrected iff the BIAS check above found NO VERIFIED
+                # row (bias_present == False) — i.e. the same set the reactor would
+                # NOT bias-correct.
+                if bias_present:
+                    # Bias-corrected -> reactor bypasses Platt via the early-exit.
+                    # This is correct by design; NOT a coverage gap. Skip.
+                    pass
+                else:
+                    # Uncorrected -> reactor reaches get_calibrator live.
+                    # A borrowed or identity resolution here is a REAL gap.
+                    resolution = _platt_resolution(
+                        conn, city=city, today=today, season=season, metric=metric
                     )
+                    if resolution.startswith("borrowed:") or resolution == _FALLBACK_IDENTITY:
+                        gaps.append(
+                            CoverageGap(
+                                city=city.name,
+                                metric=metric,
+                                layer=_LAYER_PLATT,
+                                season=season,
+                                fallback=resolution,
+                            )
+                        )
     finally:
         if owns_conn:
             conn.close()

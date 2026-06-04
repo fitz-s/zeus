@@ -159,13 +159,66 @@ def test_fully_covered_city_is_silent(world_conn, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # PLATT layer — own / borrowed / identity classification
+#
+# Critical: Platt gaps are only checked for UNCORRECTED cities (no VERIFIED
+# bias row).  Bias-corrected cities early-exit to identity-Platt in the live
+# reactor (event_reactor_adapter.py:4699+) — that is CORRECT behavior, NOT a gap.
 # ---------------------------------------------------------------------------
+
+def test_bias_corrected_city_identity_platt_not_a_gap(world_conn, monkeypatch):
+    """A city WITH a VERIFIED bias row resolving to identity-Platt is NOT flagged.
+    The live reactor bypasses get_calibrator for bias-corrected cities, so
+    identity-Platt on a corrected city is DESIGNED behaviour, not a gap.
+    Armed mode must NOT raise on it."""
+    # Write VERIFIED bias rows for both metrics -> city IS bias-corrected.
+    _write_verified_bias(world_conn, city="Tokyo", metric="high", ldv=_HIGH_LDV)
+    _write_verified_bias(world_conn, city="Tokyo", metric="low", ldv=_LOW_LDV)
+    # Platt resolver returns identity (worst case) — must be ignored because
+    # the city is corrected and the reactor bypasses Platt for it.
+    _patch_platt(monkeypatch, lambda conn, *, city, today, season, metric: "identity")
+
+    report = calibration_coverage_report(
+        armed=False, conn=world_conn, cities=[_city("Tokyo")], now=_NOW
+    )
+    platt_gaps = [g for g in report.gaps if g.layer == "platt"]
+    assert platt_gaps == [], (
+        "Bias-corrected city with identity-Platt must NOT be reported as a gap: "
+        + report.summary()
+    )
+    # Armed mode also must not raise (only bias is checked, and it's covered).
+    assert_calibration_coverage(
+        armed=True, conn=world_conn, cities=[_city("Tokyo")], now=_NOW
+    )
+
+
+def test_uncorrected_city_borrowed_platt_is_a_gap(world_conn, monkeypatch):
+    """An UNCORRECTED city (no bias row) whose Platt resolves to a foreign
+    cluster IS a real Platt gap — the reactor DOES reach get_calibrator for it.
+    Armed mode raises."""
+    # Auckland: NO bias rows -> uncorrected.
+    def _resolver(conn, *, city, today, season, metric):
+        return "borrowed:foreign_cluster"
+
+    _patch_platt(monkeypatch, _resolver)
+    cities = [_city("Auckland")]
+
+    report = calibration_coverage_report(
+        armed=False, conn=world_conn, cities=cities, now=_NOW
+    )
+    platt_gaps = [g for g in report.gaps if g.layer == "platt"]
+    assert platt_gaps, "Uncorrected city with borrowed Platt must be reported: " + report.summary()
+    assert all(g.fallback.startswith("borrowed:") for g in platt_gaps)
+
+    # Armed: raises because the city has BOTH bias AND Platt gaps.
+    with pytest.raises(CalibrationCoverageError):
+        assert_calibration_coverage(armed=True, conn=world_conn, cities=cities, now=_NOW)
+
 
 def test_borrowed_foreign_cluster_platt_enumerated(world_conn, monkeypatch):
     """A city whose Platt resolves to a foreign cluster -> guard reports
-    layer=platt, fallback=borrowed:<cluster> (bias fully covered to isolate)."""
-    _write_verified_bias(world_conn, city="Lagos", metric="high", ldv=_HIGH_LDV)
-    _write_verified_bias(world_conn, city="Lagos", metric="low", ldv=_LOW_LDV)
+    layer=platt, fallback=borrowed:<cluster>.
+    NOTE: bias must be ABSENT for the Platt check to run (uncorrected city)."""
+    # Lagos: NO bias rows -> uncorrected -> Platt check applies.
 
     def _resolver(conn, *, city, today, season, metric):
         return "borrowed:Buenos Aires" if metric == "high" else "own"
@@ -182,9 +235,9 @@ def test_borrowed_foreign_cluster_platt_enumerated(world_conn, monkeypatch):
 
 
 def test_identity_by_starvation_platt_enumerated(world_conn, monkeypatch):
-    """A city whose Platt resolves to identity (no calibrator) -> reported."""
-    _write_verified_bias(world_conn, city="Jinan", metric="high", ldv=_HIGH_LDV)
-    _write_verified_bias(world_conn, city="Jinan", metric="low", ldv=_LOW_LDV)
+    """An UNCORRECTED city whose Platt resolves to identity (starvation) -> reported.
+    Bias rows absent -> uncorrected -> Platt check applies."""
+    # Jinan: NO bias rows -> uncorrected.
     _patch_platt(monkeypatch, lambda conn, *, city, today, season, metric: "identity")
 
     report = calibration_coverage_report(
