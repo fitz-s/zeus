@@ -3657,6 +3657,25 @@ def _assert_settlement_unit_identity(*, snapshot: dict[str, Any], payload: dict[
     return snapshot_unit
 
 
+def _make_emos_bootstrap_sampler(mu_native: float, sigma_native: float):
+    """Bootstrap sampler that draws the q_lcb from the EMOS predictive N(mu, sigma).
+
+    The ONE-calibrator lcb (#110): replaces member-resampling so the q_lcb reflects ONLY the
+    EMOS predictive sigma (no ensemble-spread double-count); the point p_cal is the analytic
+    EMOS q_vec. One (mu, sigma) feeds both. Uses the MarketAnalysis rng/settle/bin so the
+    sampled distribution matches the live settlement rounding convention exactly.
+    """
+    def _sampler(analysis, n_members):
+        draws = analysis._rng.normal(float(mu_native), float(sigma_native), int(n_members))
+        measured = analysis._settle(draws)
+        vec = np.array(
+            [analysis._bin_probability(measured, bb) for bb in analysis.bins], dtype=float
+        )
+        s = float(vec.sum())
+        return vec / s if s > 0.0 else vec
+    return _sampler
+
+
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
@@ -3686,53 +3705,81 @@ def _market_analysis_from_event_snapshot(
     # unit-swap (Kelvin leak / source swap / new city) cannot silently invert q
     # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
     unit = _assert_settlement_unit_identity(snapshot=snapshot, payload=payload, city=city, bins=bins)
-    members, _bias_corrected = _maybe_apply_edli_bias_correction(
-        raw_members, snapshot=snapshot, family=family, city=city, payload=payload
-    )
-    if _bias_corrected:
-        payload["_edli_bias_corrected"] = True
-    # Grid→point representativeness correction (lead-invariant, OOS-validated).
-    # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
-    # Applied on the (potentially bias-corrected) member array so both corrections compose.
-    members, _grid_corrected = _maybe_apply_grid_representativeness_correction(
-        members, snapshot=snapshot, family=family, city=city, payload=payload
-    )
-    # payload['_edli_grid_corrected'] set inside the hook when applied.
-    # DOUBLE-COUNT STRUCTURAL ANTIBODY (2026-06-03): bias and grid both subtract a per-city
-    # MEAN temperature residual. If BOTH apply to the same members the warm-shift is applied
-    # ~twice (F = E[r_bias] + E[r_grid], over-correction). Today bias=ON / grid=OFF so this is
-    # inert, but the guard makes the wrong composition UNCONSTRUCTABLE — fail CLOSED rather
-    # than silently double-subtract. Make the error category impossible, not the instance.
-    _assert_single_temperature_mean_correction(
-        bias_applied=_bias_corrected, grid_applied=_grid_corrected,
-        city=getattr(city, "name", family.city), target_date=str(family.target_date),
-    )
-    # REPRESENTATIVENESS VARIANCE (iron rule 6, 2026-06-03): when (and only when) the EDLI
-    # bias correction was applied, the member MEAN was shifted but the spread was NOT widened.
-    # Fold the per-city forecast-vs-settlement residual σ (native unit) into the MC bootstrap
-    # noise so q_lcb widens honestly. σ_repr=0.0 when no correction => MarketAnalysis behaviour
-    # is byte-identical. Does NOT touch the POINT q (p_raw / p_posterior below) — only the CI.
-    representativeness_sigma = (
-        _edli_representativeness_sigma_native(snapshot=snapshot, family=family, city=city)
-        if _bias_corrected
-        else 0.0
-    )
-    p_raw = _snapshot_p_raw(
-        snapshot, family=family, bins=bins, members=members, payload=payload,
-        members_already_corrected=True,
-    )
-    p_cal = _snapshot_p_cal(
-        calibration_conn,
-        snapshot=snapshot,
-        family=family,
-        bins=bins,
-        p_raw=p_raw,
-        payload=payload,
-        decision_time=decision_time,
-    )
-    if family.event_type == "DAY0_EXTREME_UPDATED":
-        p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
-        p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
+    # === ONE-CALIBRATOR SEAM (#110 / ELEVATION S2) ===========================================
+    # When EMOS serves this (city, season) cell and the flag is ON, the traded distribution IS
+    # the EMOS predictive N(mu, sigma): point p_cal = analytic q_vec; the q_lcb bootstrap draws
+    # from the SAME N(mu, sigma) (one sigma, no ensemble-spread double-count). This collapses
+    # the bias/grid/identity-Platt mean-correction maze into a single calibrator. served=raw /
+    # missing / flag-OFF / day0 -> the existing path below runs unchanged (byte-identical).
+    _emos_q = None
+    _emos_sampler = None
+    if (family.event_type != "DAY0_EXTREME_UPDATED"
+            and bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))):
+        from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
+        from src.contracts.season import season_from_date as _season_from_date
+        _emos_q = _build_emos_q(
+            city=city.name,
+            season=_season_from_date(family.target_date, lat=float(getattr(city, "lat", 0.0))),
+            lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
+            members_native=raw_members, unit=unit, bins=bins,
+        )
+    if _emos_q is not None:
+        _q_vec, _emos_mu_native, _emos_sigma_native = _emos_q
+        p_raw = np.asarray(_q_vec, dtype=float)
+        p_cal = np.asarray(_q_vec, dtype=float)  # EMOS IS the calibrated point distribution
+        members = raw_members
+        _bias_corrected = False
+        representativeness_sigma = 0.0  # the EMOS sampler carries the predictive sigma
+        payload["_edli_q_source"] = "emos"
+        _emos_sampler = _make_emos_bootstrap_sampler(_emos_mu_native, _emos_sigma_native)
+    else:
+        members, _bias_corrected = _maybe_apply_edli_bias_correction(
+            raw_members, snapshot=snapshot, family=family, city=city, payload=payload
+        )
+        if _bias_corrected:
+            payload["_edli_bias_corrected"] = True
+        # Grid→point representativeness correction (lead-invariant, OOS-validated).
+        # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
+        # Applied on the (potentially bias-corrected) member array so both corrections compose.
+        members, _grid_corrected = _maybe_apply_grid_representativeness_correction(
+            members, snapshot=snapshot, family=family, city=city, payload=payload
+        )
+        # payload['_edli_grid_corrected'] set inside the hook when applied.
+        # DOUBLE-COUNT STRUCTURAL ANTIBODY (2026-06-03): bias and grid both subtract a per-city
+        # MEAN temperature residual. If BOTH apply to the same members the warm-shift is applied
+        # ~twice (F = E[r_bias] + E[r_grid], over-correction). Today bias=ON / grid=OFF so this is
+        # inert, but the guard makes the wrong composition UNCONSTRUCTABLE — fail CLOSED rather
+        # than silently double-subtract. Make the error category impossible, not the instance.
+        _assert_single_temperature_mean_correction(
+            bias_applied=_bias_corrected, grid_applied=_grid_corrected,
+            city=getattr(city, "name", family.city), target_date=str(family.target_date),
+        )
+        # REPRESENTATIVENESS VARIANCE (iron rule 6, 2026-06-03): when (and only when) the EDLI
+        # bias correction was applied, the member MEAN was shifted but the spread was NOT widened.
+        # Fold the per-city forecast-vs-settlement residual σ (native unit) into the MC bootstrap
+        # noise so q_lcb widens honestly. σ_repr=0.0 when no correction => MarketAnalysis behaviour
+        # is byte-identical. Does NOT touch the POINT q (p_raw / p_posterior below) — only the CI.
+        representativeness_sigma = (
+            _edli_representativeness_sigma_native(snapshot=snapshot, family=family, city=city)
+            if _bias_corrected
+            else 0.0
+        )
+        p_raw = _snapshot_p_raw(
+            snapshot, family=family, bins=bins, members=members, payload=payload,
+            members_already_corrected=True,
+        )
+        p_cal = _snapshot_p_cal(
+            calibration_conn,
+            snapshot=snapshot,
+            family=family,
+            bins=bins,
+            p_raw=p_raw,
+            payload=payload,
+            decision_time=decision_time,
+        )
+        if family.event_type == "DAY0_EXTREME_UPDATED":
+            p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
+            p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
     p_market_yes: list[float] = []
     p_market_no: list[float] = []
     buy_no_available: list[bool] = []
@@ -3747,7 +3794,7 @@ def _market_analysis_from_event_snapshot(
         p_market_no.append(float(no_price) if no_price is not None else 0.999999)
         buy_no_available.append(no_price is not None)
         executable_mask.append(yes_price is not None or no_price is not None)
-    sampler = None
+    sampler = _emos_sampler  # one-calibrator (#110): EMOS N(mu,sigma) lcb bootstrap, else None
     is_day0 = family.event_type == "DAY0_EXTREME_UPDATED"
     if is_day0:
         static_p_cal = np.asarray(p_cal, dtype=float)
