@@ -107,6 +107,94 @@ class PromotionVerification:
     reason: str = "OK"
 
 
+# --- PR-2 (A): D2 ARM-gate artifact boot-binding (F1 Option C) ---------------
+#
+# The settlement-grounded ARM evidence artifact is PRODUCED by
+# scripts/measure_arm_gate_settlement.py (PR-1) and ENFORCED here + at boot
+# (src/main.py). Its existence + integrity is the antibody that makes
+# "flip real_order_submit_enabled=true without proven after-cost edge" a BOOT
+# FAILURE rather than a silent runtime path. Reusing the pure-verifier seam, the
+# boot path and the producer can both be tested without git or a live daemon.
+ARM_GATE_ARTIFACT_SCHEMA = "edli_arm_gate_v1"
+
+# Required keys whose mere ABSENCE fails the artifact closed. Value-level law
+# (SHA match, ev>0, coverage_licensed is True) is checked after presence.
+_ARM_GATE_REQUIRED_FIELDS = (
+    "schema",
+    "commit_sha",
+    "measurement_cmd_hash",
+    "capital_weighted_ev",
+    "gate_pass_n",
+    "per_city_n",
+    "ev_sigma",
+    "date_coverage",
+    "coverage_licensed",
+)
+
+
+@dataclass(frozen=True)
+class ArmGateVerification:
+    ok: bool
+    reason: str = "OK"
+
+
+def verify_edli_arm_gate_artifact(
+    artifact: dict[str, Any] | None,
+    *,
+    head_sha: str | None,
+) -> ArmGateVerification:
+    """Pure verifier for the ARM-gate evidence artifact.
+
+    Returns ``ok=False`` with a stable ``EDLI_LIVE_PROMOTION_ARTIFACT_*`` reason
+    when the artifact is missing, malformed, stale (SHA != HEAD), shows a
+    non-positive capital-weighted EV, or is not coverage-licensed. FAIL-CLOSED:
+    any unexpected shape denies. The reason codes share the
+    ``EDLI_LIVE_PROMOTION_ARTIFACT_`` prefix so the existing boot RuntimeError
+    family (and its grep/alerting) covers them.
+    """
+    if artifact is None:
+        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MISSING")
+    if not isinstance(artifact, dict):
+        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MALFORMED")
+
+    for field in _ARM_GATE_REQUIRED_FIELDS:
+        if field not in artifact:
+            return ArmGateVerification(
+                False, f"EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_FIELD_MISSING:{field}"
+            )
+
+    if artifact.get("schema") != ARM_GATE_ARTIFACT_SCHEMA:
+        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_SCHEMA_INVALID")
+
+    expected_sha = str(head_sha or "").strip()
+    artifact_sha = str(artifact.get("commit_sha") or "").strip()
+    if not expected_sha:
+        # No HEAD SHA to compare against = cannot prove the measurement ran on
+        # the code about to arm. Fail closed.
+        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_HEAD_SHA_UNAVAILABLE")
+    if not artifact_sha:
+        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_COMMIT_SHA_MISSING")
+    if artifact_sha != expected_sha:
+        return ArmGateVerification(
+            False,
+            f"EDLI_LIVE_PROMOTION_ARM_GATE_COMMIT_SHA_MISMATCH:artifact={artifact_sha}:head={expected_sha}",
+        )
+
+    try:
+        ev = float(artifact.get("capital_weighted_ev"))
+    except (TypeError, ValueError):
+        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_EV_INVALID")
+    if not (ev > 0.0):
+        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_EV_NOT_POSITIVE")
+
+    # coverage_licensed MUST be the literal True (not a truthy 1/"true"/etc.):
+    # a settlement-coverage license is a deliberate, unambiguous boolean.
+    if artifact.get("coverage_licensed") is not True:
+        return ArmGateVerification(False, "EDLI_LIVE_PROMOTION_ARM_GATE_COVERAGE_NOT_LICENSED")
+
+    return ArmGateVerification(True)
+
+
 class LiveProfitAuditLedger:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn

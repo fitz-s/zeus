@@ -18,6 +18,17 @@ from src.state.schema.edli_live_cap_usage_schema import ensure_table
 # through); the default here only governs absence.
 DEFAULT_MAX_ORDERS_PER_WINDOW = 1
 
+# PR-2 (C) N3 antibody: a HARD per-order notional ceiling that holds even when
+# tiny_live_notional_cap_enabled is false. #380 removed BOTH the notional cap and
+# the daily cap in a single commit, leaving fractional Kelly as the sole notional
+# bound — one bad edit away from an unbounded order. This ceiling is a SEPARATE
+# rail: the soft cap flag may TUNE max_notional_usd, but it can NEVER remove this
+# ceiling. reserve() clamps every request down to it UNCONDITIONALLY (cap on or
+# off), so a single-commit dual-cap removal still cannot uncap notional. It is a
+# runaway backstop (a Kelly bug emitting thousands), set well above any legitimate
+# canary/early-live order — not a routine sizing constraint.
+HARD_NOTIONAL_CEILING_USD = 250.0
+
 
 def cap_explicitly_disabled(value: object) -> bool:
     """Return True ONLY when ``value`` is the explicit-disable sentinel.
@@ -102,6 +113,14 @@ class LiveCapLedger:
         # the disable sentinel) gets the tight cap, never unbounded.
         if requested_notional_usd <= 0:
             raise LiveCapError("requested_notional_usd must be positive")
+        # PR-2 (C) N3: HARD notional ceiling, INDEPENDENT of the cap flags. Clamp
+        # the request down to HARD_NOTIONAL_CEILING_USD UNCONDITIONALLY — before
+        # the soft-cap check — so a disabled (or misconfigured-too-high) soft cap
+        # can never let a runaway Kelly size through. The soft flag tunes the cap
+        # value; it cannot remove this backstop. Clamp (not reject): a legitimately
+        # large bet still trades, bounded at the ceiling.
+        if requested_notional_usd > HARD_NOTIONAL_CEILING_USD:
+            requested_notional_usd = float(HARD_NOTIONAL_CEILING_USD)
         if notional_cap_enabled and requested_notional_usd > max_notional_usd:
             raise LiveCapError("requested_notional_usd exceeds max_notional_usd")
         # When the notional cap is disabled the persisted row must stay

@@ -55,6 +55,12 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "Full-live canary groundwork cannot claim runtime readiness while no-submit config remains active."
+  tests/money_path/test_mainstream_enforce_on_submit.py:
+    category: money_path
+    protects: [MP-SCH-001, MP-ECO-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "With mainstream_agreement_enforce_on_submit ON, an armed submit whose selected candidate has a failed/missing mainstream verdict must reject MAINSTREAM_AGREEMENT_REQUIRED before the executor (fail-closed); reference selector stays reference-only."
   tests/money_path/test_edli_order_lifecycle.py:
     category: money_path
     protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]

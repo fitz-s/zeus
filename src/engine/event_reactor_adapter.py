@@ -355,6 +355,25 @@ def event_bound_live_adapter_from_trade_conn(
                 reason="EXECUTOR_BOUNDARY_MISSING",
                 proof_accepted=False,
             )
+        # PR-2 (B) F1 ENFORCE: when the operator turns
+        # ``mainstream_agreement_enforce_on_submit`` ON (default OFF), an armed submit
+        # requires the SELECTED candidate's mainstream-agreement verdict to be True
+        # before reaching the executor. FAIL-CLOSED: a missing/stale verdict
+        # (mainstream_agreement_pass is None) or an explicit failure (False) -> reject
+        # MAINSTREAM_AGREEMENT_REQUIRED, executor never called. This is SEPARATE from the
+        # reference-only selector (mainstream_agreement_reference_enabled, which never
+        # excludes a candidate); enforcement is a deliberate submit-time arm control.
+        if real_order_submit_enabled and bool(
+            settings["edli_v1"].get("mainstream_agreement_enforce_on_submit", False)
+        ):
+            if no_submit_receipt.mainstream_agreement_pass is not True:
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="MAINSTREAM_AGREEMENT_REQUIRED",
+                    proof_accepted=False,
+                )
         # Canary knob (§7): force the taker branch (bypassing the governor's
         # maker/taker CHOICE, never its NO_TRADE/risk gates) while the canary is
         # active and below its min fill count. main.py owns the count gate via
@@ -1809,6 +1828,8 @@ def _build_live_cap_certificate_from_ledger(
     daily_order_cap_enabled = not cap_explicitly_disabled(
         _edli_cfg.get("tiny_live_daily_order_cap_enabled")
     )
+    from src.events.live_cap import HARD_NOTIONAL_CEILING_USD
+
     price = _float_or_default(receipt.c_fee_adjusted, 0.01)
     kelly_usd = float(receipt.kelly_size_usd or 0.0)
     if notional_cap_enabled:
@@ -1821,6 +1842,11 @@ def _build_live_cap_certificate_from_ledger(
         # against a sub-tick request; nothing above it is clamped.
         min_order_notional = max(price, 0.01)
         requested_notional = max(kelly_usd, min_order_notional)
+    # PR-2 (C) N3: the HARD notional ceiling is INDEPENDENT of the cap flag —
+    # clamp here too so the recorded ceiling and the persisted request stay
+    # self-consistent. LiveCapLedger.reserve re-applies the same clamp (the
+    # load-bearing antibody); this keeps the adapter-side view aligned.
+    requested_notional = min(float(requested_notional), float(HARD_NOTIONAL_CEILING_USD))
     usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
     # Self-consistent recorded ceiling: the actual size when uncapped, else the
     # configured cap (mirrors LiveCapLedger.reserve's recorded_max_notional_usd).
@@ -1835,6 +1861,11 @@ def _build_live_cap_certificate_from_ledger(
             requested_notional_usd=float(requested_notional),
             max_notional_usd=float(max_notional_usd),
             max_orders_per_day=int(_edli_cfg.get("tiny_live_max_orders_per_day", 1)),
+            # PR-2 (C): pass the configured flood-guard window here too. This first
+            # reservation previously omitted it (falling to the fail-closed default
+            # of 1) while the re-reservation in build_event_bound_submit honoured the
+            # config value — an inconsistency. Both now read the same config key.
+            max_orders_per_window=int(_edli_cfg.get("tiny_live_max_orders_per_window", 1)),
             notional_cap_enabled=notional_cap_enabled,
             daily_order_cap_enabled=daily_order_cap_enabled,
             final_intent_id=receipt.final_intent_id,
@@ -3445,15 +3476,19 @@ def _canonical_probability_and_fdr_proof(
         except Exception:
             pass
 
-    # MAINSTREAM AGREEMENT GATE (#135, 2026-06-03): evaluate per-candidate direction-agreement
+    # MAINSTREAM AGREEMENT REFERENCE (#135, 2026-06-03): evaluate per-candidate direction-agreement
     # against an independent mainstream forecast point (Open-Meteo standard /v1/forecast).
-    # Flag-gated (edli_v1.mainstream_agreement_gate_enabled, default OFF).
+    # Flag-gated (edli_v1.mainstream_agreement_reference_enabled, default OFF). F1 rename
+    # (PR-2 B): was mainstream_agreement_gate_enabled — the selector is genuinely
+    # REFERENCE-ONLY (it never excludes a candidate), so "gate" was a misread.
     # FAIL-OPEN/SILENT: any evaluation error must not affect the live q_by_condition decision.
     # REFERENCE-ONLY: verdicts stored in payload for receipt provenance annotation only.
     # They do NOT filter or exclude candidates in _selected_candidate_proof.
+    # (Submit-time ENFORCEMENT is a SEPARATE, default-OFF flag —
+    # mainstream_agreement_enforce_on_submit — handled in the submit closure, not here.)
     # Key: (condition_id, direction) → verdict dict.
     try:
-        if bool(settings["edli_v1"].get("mainstream_agreement_gate_enabled", False)):
+        if bool(settings["edli_v1"].get("mainstream_agreement_reference_enabled", False)):
             _evaluate_and_store_mainstream_agreement(
                 event=event,
                 family=family,
