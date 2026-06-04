@@ -3949,6 +3949,15 @@ def _edli_forecast_sharpness_evidence(
         lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
     except Exception:
         return ForecastSharpnessEvidence.missing(unit=unit, bin_width=bin_width, lead_days=7)
+    # WAL checkpoint-starvation fix (2026-06-04, part 1a): this is the EDLI
+    # reactor HOT PATH — called per-event (line ~3889). The prior code opened a
+    # zeus-world.db read connection and NEVER closed it: each call leaked a
+    # connection holding a WAL read snapshot (read-mark) that pins the WAL floor
+    # until non-deterministic GC. Under load these accumulate and starve
+    # wal_checkpoint(TRUNCATE) → -wal grows to GBs → lock-starvation. Close the
+    # connection in a finally so its snapshot is released the moment the read
+    # (which load_for fully materializes before returning) completes.
+    conn = None
     try:
         from src.state.db import get_world_connection_read_only
 
@@ -3960,6 +3969,12 @@ def _edli_forecast_sharpness_evidence(
         return ForecastSharpnessEvidence.missing(
             unit=unit, bin_width=bin_width, lead_days=int(min(max(lead_days, 0.0), 7.0))
         )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 — close is best-effort; never mask the result
+                pass
 
 
 def _evaluate_and_store_mainstream_agreement(

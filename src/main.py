@@ -4394,6 +4394,44 @@ def _edli_mainstream_warm_cycle() -> None:
     logger.info("EDLI mainstream warm: warmed=%d of %d pending families", warmed, len(pending_rows))
 
 
+@_scheduler_job("world_wal_checkpoint")
+def _world_wal_checkpoint_cycle() -> None:
+    """Periodic zeus-world.db WAL TRUNCATE backstop (2026-06-04, part 2).
+
+    Root (critic-proven, live): ``state/zeus-world.db-wal`` grew to GBs because
+    long-lived READER connections held a WAL snapshot across cycles, pinning the
+    WAL floor so ``wal_checkpoint`` returned BUSY ``(1,-1,-1)`` and never
+    truncated → unbounded growth → eventual lock-starvation of opportunity_events
+    emission (30-min ZERO candidates). Part 1 releases each long-lived reader's
+    snapshot per cycle so the floor advances; THIS job is the periodic backstop
+    that reclaims the freed frames via ``PRAGMA wal_checkpoint(TRUNCATE)``.
+
+    Observability: the ``(busy, log_frames, checkpointed_frames)`` triple is
+    ALWAYS logged. ``busy == 0`` = truncated; a CHRONIC ``busy == 1`` is a loud
+    signal that a reader is still pinning the floor (a part-1 regression) — it is
+    NOT silenced. Not a table writer; ``checkpoint_world_wal`` uses a dedicated
+    short-lived connection and does NOT take the world write mutex (a checkpoint
+    is not a write txn; SQLite serializes checkpoints internally), so it never
+    blocks world writers for its duration. Fail-soft via the decorator.
+    """
+    from src.state.db import checkpoint_world_wal
+
+    busy, log_frames, ckpt_frames = checkpoint_world_wal()
+    if busy == 0:
+        logger.info(
+            "world WAL checkpoint(TRUNCATE): OK busy=%d log_frames=%d checkpointed=%d",
+            busy, log_frames, ckpt_frames,
+        )
+    else:
+        # BUSY = a reader still pins the WAL floor; TRUNCATE could not run.
+        # Loud (warning) so chronic starvation is visible, not silent.
+        logger.warning(
+            "world WAL checkpoint(TRUNCATE): BUSY busy=%d log_frames=%d checkpointed=%d "
+            "— a reader is pinning the WAL floor (part-1 per-cycle release regression?)",
+            busy, log_frames, ckpt_frames,
+        )
+
+
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
     try:
         value = int(config.get(key, default))
@@ -6294,6 +6332,18 @@ def main():
         )
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
+    # WAL checkpoint-starvation backstop (2026-06-04, part 2): periodic
+    # PRAGMA wal_checkpoint(TRUNCATE) on zeus-world.db so the -wal file cannot
+    # grow unboundedly when a reader transiently pins the floor between part-1
+    # per-cycle releases. Mode-independent (the WAL bloat afflicts every mode),
+    # so registered unconditionally. ~90s cadence (> the 60s reactor interval so
+    # it does not fight an in-flight reactor read every tick; coalesce/max=1 so a
+    # slow checkpoint never stacks).
+    scheduler.add_job(
+        _world_wal_checkpoint_cycle, "interval", seconds=90,
+        id="world_wal_checkpoint", next_run_time=_utc_run_time_after(120.0),
+        max_instances=1, coalesce=True,
+    )
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
     scheduler.add_job(
         _start_venue_heartbeat_loop_if_needed,

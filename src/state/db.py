@@ -486,6 +486,47 @@ def world_write_lock(
         _WORLD_DB_WRITE_MUTEX.release()
 
 
+def checkpoint_world_wal() -> tuple[int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` on zeus-world.db; return its triple.
+
+    THE BACKSTOP (2026-06-04 WAL checkpoint-starvation fix, part 2).
+
+    Root (critic-proven, live): ``state/zeus-world.db-wal`` grows to GBs because
+    long-lived READER connections hold a WAL snapshot (read-mark) across cycles.
+    The checkpointer can only reclaim frames OLDER than the oldest active reader's
+    mark, so while a reader pins the floor ``wal_checkpoint`` returns BUSY
+    (``(1,-1,-1)``) and the -wal file never truncates → unbounded growth →
+    eventual lock-starvation of opportunity_events emission (30-min ZERO
+    candidates). Part 1 of the fix releases each long-lived reader's snapshot
+    per cycle (``conn.rollback()`` between polls) so the floor advances; THIS
+    function is the periodic backstop that actually reclaims the freed frames.
+
+    Returns the ``(busy, log_frames, checkpointed_frames)`` triple from
+    ``wal_checkpoint(TRUNCATE)``:
+      * ``busy == 0`` → checkpoint completed; the WAL was truncated.
+      * ``busy == 1`` → a reader still pinned the floor (TRUNCATE could not run);
+        a CHRONIC busy is the loud signal that a reader is not releasing — it is
+        NOT silenced. The caller logs the triple so this is observable.
+
+    Lock discipline: a checkpoint is NOT a write transaction. SQLite serializes
+    checkpoints internally (the checkpoint lock), so this MUST NOT take the
+    process-global world write mutex — holding it here would needlessly block
+    every world writer for the checkpoint duration. A dedicated short-lived
+    connection is used and closed immediately so it never itself becomes a
+    floor-pinning reader.
+    """
+    conn = _connect(ZEUS_WORLD_DB_PATH, write_class=None)
+    try:
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        # Row is (busy, log, checkpointed). Normalise to ints for callers/logs.
+        busy = int(row[0]) if row is not None else 1
+        log_frames = int(row[1]) if row is not None else -1
+        ckpt_frames = int(row[2]) if row is not None else -1
+        return (busy, log_frames, ckpt_frames)
+    finally:
+        conn.close()
+
+
 @contextlib.contextmanager
 def get_forecasts_connection_with_world(
     *,
