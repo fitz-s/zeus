@@ -71,6 +71,24 @@ from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
+# Store-read infra errors that mean "coverage UNVERIFIABLE for this cell", NOT
+# "a coverage gap was detected" (#90 regression fix). A detector that cannot
+# read its substrate has detected NOTHING and must degrade to a WARN, never
+# fail-close armed boot on its own DB-read failure.
+#   * sqlite3.OperationalError — "no such table: platt_models" (missing
+#     calibration tables on a degenerate / test / broken store).
+#   * sqlite3.DatabaseError — broader DB-level read failure (corrupt page,
+#     mismatched schema). Superclass of OperationalError; listed for clarity.
+#   * sqlite3.ProgrammingError — operating on a CLOSED connection.
+#   * ImportError / ModuleNotFoundError — the store reader module failed to
+#     import (a connection/wiring failure reaching the substrate).
+_STORE_READ_ERRORS: tuple[type[BaseException], ...] = (
+    sqlite3.OperationalError,
+    sqlite3.DatabaseError,
+    sqlite3.ProgrammingError,
+    ImportError,
+)
+
 # The two live calibration substrates this antibody covers.
 _LAYER_BIAS = "bias"
 _LAYER_PLATT = "platt"
@@ -170,6 +188,30 @@ def _open_calibration_read_connection() -> sqlite3.Connection:
             exc,
         )
     return conn
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """True iff ``table`` exists in ANY attached schema (main + forecasts).
+
+    A coverage substrate (``model_bias_ens``, ``platt_models``) may live in the
+    world (main) DB or — once the forecasts DB is ATTACHed — in the attached
+    schema.  We scan every attached database's ``sqlite_master`` so the probe
+    matches the production multi-DB read connection
+    (``_open_calibration_read_connection``).  A connection-level failure (closed
+    DB) propagates as the same ``sqlite3`` error class the per-cell catch
+    already treats as UNVERIFIABLE.
+    """
+    for db_name in (
+        row[1] for row in conn.execute("PRAGMA database_list").fetchall()
+    ):
+        found = conn.execute(
+            f"SELECT 1 FROM \"{db_name}\".sqlite_master "
+            f"WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone()
+        if found is not None:
+            return True
+    return False
 
 
 def _today_iso(now: datetime | None = None) -> str:
@@ -368,61 +410,53 @@ def calibration_coverage_report(
 
             season = season_from_date(today, lat=lat)
             for metric in _LIVE_METRICS:
-                # BIAS layer — real read_bias_model lookup (exact same key the reactor uses).
-                bias_present = _bias_covered(
-                    conn,
-                    city_name=city.name,
-                    season=season,
-                    metric=metric,
-                    month=month,
-                )
-                if not bias_present:
-                    gaps.append(
-                        CoverageGap(
-                            city=city.name,
-                            metric=metric,
-                            layer=_LAYER_BIAS,
-                            season=season,
-                            fallback=_FALLBACK_RAW,
-                        )
+                # STORE-READ RESILIENCE (#90 regression fix).
+                #
+                # The bias + Platt reads below open and SELECT from the live
+                # calibration store. If the store is UNREADABLE for this cell —
+                # missing table (``no such table: platt_models``), a closed /
+                # corrupt connection, or an import failure reaching the reader —
+                # that is an INFRA error, NOT a detected coverage gap.  A
+                # detector that cannot read its substrate has detected NOTHING;
+                # it must not manufacture a phantom gap (which would fail-close
+                # armed boot on its own DB-read failure).  So we catch the
+                # store-read error PER (city, metric), emit a WARN that coverage
+                # is UNVERIFIABLE for this cell, and continue WITHOUT appending a
+                # gap — in BOTH shadow and armed mode.
+                #
+                # Granularity: per-(city, metric) rather than a single global
+                # catch.  The missing-table case does fail for every city, so a
+                # global catch would suffice for the test regression; but a
+                # per-cell catch is strictly more robust — a transient lock or a
+                # single malformed row poisons only that cell's verifiability,
+                # while every OTHER city's gap detection (and its armed
+                # fail-closed on a REAL detected gap) keeps running.  This mirrors
+                # the sibling guard's resilience idiom (_assert_emos_ci_license_
+                # seasonal_coverage in src/main.py wraps its reads and degrades to
+                # a no-op WARN), and it ONLY affects degenerate / test / broken-
+                # store cases: in production the calibration tables always exist,
+                # so the store IS readable and the existing gap-detection +
+                # severity contract are byte-identical.
+                try:
+                    _check_city_metric_coverage(
+                        conn,
+                        gaps=gaps,
+                        city=city,
+                        season=season,
+                        metric=metric,
+                        month=month,
+                        today=today,
                     )
-
-                # PLATT layer — only relevant for UNCORRECTED cities.
-                #
-                # The live reactor (_snapshot_p_cal, event_reactor_adapter.py:4699+)
-                # early-exits to identity-Platt for ANY bias-corrected city:
-                #
-                #   if _edli_bias_corrected or _edli_grid_corrected:
-                #       return arr / total   # identity on bias-corrected p_raw
-                #
-                # That is the DESIGNED behaviour — identity-on-corrected is the
-                # A4 train/serve lockstep, not a calibration gap. For those cities
-                # ``get_calibrator`` is NEVER reached live, so classifying their
-                # Platt resolution as a borrow or identity-starvation is a false
-                # positive.  We gate the Platt check on uncorrected cities only:
-                # a city is uncorrected iff the BIAS check above found NO VERIFIED
-                # row (bias_present == False) — i.e. the same set the reactor would
-                # NOT bias-correct.
-                if bias_present:
-                    # Bias-corrected -> reactor bypasses Platt via the early-exit.
-                    # This is correct by design; NOT a coverage gap. Skip.
-                    pass
-                else:
-                    # Uncorrected -> reactor reaches get_calibrator live.
-                    # A borrowed or identity resolution here is a REAL gap.
-                    resolution = _platt_resolution(
-                        conn, city=city, today=today, season=season, metric=metric
+                except _STORE_READ_ERRORS as exc:
+                    logger.warning(
+                        "CALIBRATION_COVERAGE_UNVERIFIABLE: %s/%s season=%s — "
+                        "store read failed (treated as UNVERIFIABLE, not a gap): %r",
+                        city.name,
+                        metric,
+                        season,
+                        exc,
                     )
-                    if resolution.startswith("borrowed:") or resolution == _FALLBACK_IDENTITY:
-                        gaps.append(
-                            CoverageGap(
-                                city=city.name,
-                                metric=metric,
-                                layer=_LAYER_PLATT,
-                                season=season,
-                                fallback=resolution,
-                            )
-                        )
+                    continue
     finally:
         if owns_conn:
             conn.close()
@@ -433,6 +467,97 @@ def calibration_coverage_report(
         cities_checked=len(city_list),
         gaps=tuple(gaps),
     )
+
+
+def _check_city_metric_coverage(
+    conn: sqlite3.Connection,
+    *,
+    gaps: list[CoverageGap],
+    city: Any,
+    season: str,
+    metric: str,
+    month: int,
+    today: str,
+) -> None:
+    """Detect and append any bias/Platt coverage gap for ONE (city, metric).
+
+    Performs the live calibration store reads (bias + Platt) and appends a
+    ``CoverageGap`` for any silent fall-through.  A store-read infra error
+    (missing table / closed connection / reader import failure) propagates to
+    the caller, which classifies the cell as UNVERIFIABLE — see the resilience
+    note at the call site.  This is a pure helper: SELECT-only, no writes.
+    """
+    # STORE-READABILITY PROBE (#90 regression fix — bias-layer arm).
+    #
+    # ``read_bias_model`` masks a MISSING ``model_bias_ens`` table: with
+    # ``error_model_family`` supplied it runs ``PRAGMA table_info`` (which yields
+    # an EMPTY set, NOT an OperationalError, on a non-existent table) and then
+    # returns None == "no VERIFIED row" (ens_bias_repo.py:699-702).  That None is
+    # indistinguishable from a real RAW fall-through, so a store with NO bias
+    # table would silently manufacture a phantom bias gap for every city and
+    # fail-close armed boot.  The Platt layer already RAISES OperationalError on a
+    # missing ``platt_models`` table, so its unreadability is detected for free;
+    # we make the bias layer symmetric by raising the SAME error class when its
+    # substrate table is absent, so the per-cell catch at the call site classifies
+    # the cell as UNVERIFIABLE rather than a detected gap.  In production both
+    # tables always exist, so this probe is a no-op there.
+    if not _table_exists(conn, "model_bias_ens"):
+        raise sqlite3.OperationalError("no such table: model_bias_ens")
+
+    # BIAS layer — real read_bias_model lookup (exact same key the reactor uses).
+    bias_present = _bias_covered(
+        conn,
+        city_name=city.name,
+        season=season,
+        metric=metric,
+        month=month,
+    )
+    if not bias_present:
+        gaps.append(
+            CoverageGap(
+                city=city.name,
+                metric=metric,
+                layer=_LAYER_BIAS,
+                season=season,
+                fallback=_FALLBACK_RAW,
+            )
+        )
+
+    # PLATT layer — only relevant for UNCORRECTED cities.
+    #
+    # The live reactor (_snapshot_p_cal, event_reactor_adapter.py:4699+)
+    # early-exits to identity-Platt for ANY bias-corrected city:
+    #
+    #   if _edli_bias_corrected or _edli_grid_corrected:
+    #       return arr / total   # identity on bias-corrected p_raw
+    #
+    # That is the DESIGNED behaviour — identity-on-corrected is the
+    # A4 train/serve lockstep, not a calibration gap. For those cities
+    # ``get_calibrator`` is NEVER reached live, so classifying their
+    # Platt resolution as a borrow or identity-starvation is a false
+    # positive.  We gate the Platt check on uncorrected cities only:
+    # a city is uncorrected iff the BIAS check above found NO VERIFIED
+    # row (bias_present == False) — i.e. the same set the reactor would
+    # NOT bias-correct.
+    if bias_present:
+        # Bias-corrected -> reactor bypasses Platt via the early-exit.
+        # This is correct by design; NOT a coverage gap. Skip.
+        return
+    # Uncorrected -> reactor reaches get_calibrator live.
+    # A borrowed or identity resolution here is a REAL gap.
+    resolution = _platt_resolution(
+        conn, city=city, today=today, season=season, metric=metric
+    )
+    if resolution.startswith("borrowed:") or resolution == _FALLBACK_IDENTITY:
+        gaps.append(
+            CoverageGap(
+                city=city.name,
+                metric=metric,
+                layer=_LAYER_PLATT,
+                season=season,
+                fallback=resolution,
+            )
+        )
 
 
 def assert_calibration_coverage(

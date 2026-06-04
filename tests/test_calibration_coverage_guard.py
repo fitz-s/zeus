@@ -333,3 +333,106 @@ def test_coverage_gap_describe_format():
     desc = g.describe()
     for token in ("Hong Kong", "high", "JJA", "platt", "borrowed:Singapore"):
         assert token in desc
+
+
+# ---------------------------------------------------------------------------
+# STORE-UNREADABLE resilience — #90 regression antibody
+#
+# The #90 boot guard manufactured a phantom RAW/Platt gap when the calibration
+# store was UNREADABLE (a minimal fixture / broken DB with NO model_bias_ens /
+# platt_models tables — e.g. the armed-mode boot tests).  ``read_bias_model``
+# masked the missing bias table by returning None (PRAGMA on a non-existent
+# table yields an empty set, not an error), so EVERY city looked like a RAW
+# fall-through and ARMED boot fail-closed-RAISED — crashing a valid armed boot.
+# A detector that cannot READ its substrate has detected NOTHING; "store
+# unreadable" is an INFRA condition, not a coverage gap.  It must WARN
+# (UNVERIFIABLE) and continue WITHOUT raising, in BOTH shadow AND armed.  These
+# tests are the antibody for that regression.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def empty_conn():
+    """A minimal DB with NO calibration tables (model_bias_ens / platt_models) —
+    the degenerate store shape the armed-mode boot fixtures use."""
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    # Deliberately create an UNRELATED table only, so the connection is live but
+    # the calibration substrates are absent.
+    c.execute("CREATE TABLE placeholder (id TEXT)")
+    c.commit()
+    return c
+
+
+def test_store_unreadable_shadow_warns_no_gap_no_raise(empty_conn, caplog):
+    """SHADOW + store missing the calibration tables: the cell is UNVERIFIABLE,
+    so NO gap is produced and the guard does NOT raise — it WARNs and returns."""
+    cities = [_city("Tokyo"), _city("Auckland")]
+
+    with caplog.at_level(logging.WARNING):
+        report = assert_calibration_coverage(
+            armed=False, conn=empty_conn, cities=cities, now=_NOW
+        )
+
+    # Unreadable store => NOT a detected gap => empty gap set, report.ok True.
+    assert report.gaps == (), report.summary()
+    assert report.ok
+    # A per-cell UNVERIFIABLE WARN was emitted (the LOUD infra signal), and NOT a
+    # CALIBRATION_COVERAGE_GAP / PARTIAL line (those are for REAL detected gaps).
+    warn_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "CALIBRATION_COVERAGE_UNVERIFIABLE" in warn_text
+    assert "store read failed" in warn_text
+    assert "CALIBRATION_COVERAGE_GAP" not in warn_text
+
+
+def test_store_unreadable_armed_does_not_raise(empty_conn, caplog):
+    """ARMED + store missing the calibration tables: the guard must NOT raise.
+    This is the EXACT regression — a valid armed boot on a minimal DB crashed
+    when the missing-table read propagated.  Unreadable != a coverage gap, so
+    armed boot proceeds (the real arm gate is the settlement arm-artifact)."""
+    cities = [_city("Tokyo"), _city("Auckland")]
+
+    with caplog.at_level(logging.WARNING):
+        # Must NOT raise CalibrationCoverageError (or any store-read error).
+        report = assert_calibration_coverage(
+            armed=True, conn=empty_conn, cities=cities, now=_NOW
+        )
+
+    assert report.gaps == (), report.summary()
+    assert report.ok
+    warn_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "CALIBRATION_COVERAGE_UNVERIFIABLE" in warn_text
+
+
+def test_partial_store_readable_bias_unreadable_platt_keeps_real_bias_gap(world_conn, caplog):
+    """PARTIAL store: model_bias_ens PRESENT (bias reads succeed) but platt_models
+    ABSENT (Platt reads raise).  The resilience change must be SURGICAL — it
+    suppresses only the gap for the read that actually FAILED, never a gap that
+    was legitimately detected by a read that SUCCEEDED.
+
+    Here the bias substrate IS readable and Auckland genuinely has no bias row, so
+    that RAW bias gap is REAL and MUST stand (armed RAISES on it — preserving the
+    guard's real job).  The UNRELATED Platt read for the same cell is unreadable,
+    so a Platt UNVERIFIABLE WARN fires and NO phantom platt gap is added.  This
+    proves the catch does not over-suppress: a readable-substrate real gap is not
+    masked just because a sibling substrate is unreadable."""
+    # Auckland: no bias row -> uncorrected -> real _platt_resolution runs and hits
+    # the missing platt_models table, raising OperationalError -> Platt UNVERIFIABLE.
+    cities = [_city("Auckland")]
+
+    with caplog.at_level(logging.WARNING):
+        report = assert_calibration_coverage(
+            armed=False, conn=world_conn, cities=cities, now=_NOW
+        )
+
+    # Readable bias substrate + no row => REAL bias gap stands.
+    assert {g.layer for g in report.gaps} == {"bias"}, report.summary()
+    # Unreadable Platt substrate => NO phantom platt gap, but a Platt UNVERIFIABLE WARN.
+    assert all(g.layer != "platt" for g in report.gaps), report.summary()
+    warn_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "CALIBRATION_COVERAGE_UNVERIFIABLE" in warn_text
+    assert "platt_models" in warn_text
+
+    # Armed: the REAL bias gap (readable substrate) correctly fail-closes-RAISES —
+    # the resilience change does NOT relax the genuine-gap arm contract.
+    with pytest.raises(CalibrationCoverageError, match="ARMED"):
+        assert_calibration_coverage(armed=True, conn=world_conn, cities=cities, now=_NOW)
