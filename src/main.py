@@ -2701,12 +2701,13 @@ def _refresh_pending_family_snapshots(
     # ORDER BY priority DESC, available_at ASC), so the highest-priority families are
     # captured first; the remainder are picked up on subsequent cycles. The reactor's
     # own proof_limit still bounds decisions; this bounds the venue-I/O per cycle.
-    # Universe-collapse fix (2026-06-04): the fairness round-robin emits a rotating window of
-    # ~`forecast_snapshot_emit_limit` (50) families/cycle; this cap must keep pace or the
-    # emitted A-L families never get their just-in-time snapshot refresh -> stay incomplete ->
-    # no candidate (the cap was 8 while the universe is ~108 (city,metric) families -> a
-    # second starvation downstream of the emit one). Match it to the emit limit.
-    _FAMILY_REFRESH_CAP = 50
+    # 2026-06-04: with the coverage-fairness emit now covering all ~49 cities, this cap is the
+    # second throttle on the simultaneously-tradeable set (each family = 1 serial JIT /book
+    # fetch). 50 overran the 60s reactor cycle ("max running instances reached"); 8 was the old
+    # 3-city-era value. 16 ≈ 16s of fetches inside a 60s cycle — a safe ~2x of the fresh universe
+    # without overrun. The proper fix (decouple market-identity universe sizing from the 30s
+    # price-freshness TTL — size off identity, enforce freshness only at submit) is the follow-up.
+    _FAMILY_REFRESH_CAP = 16
     if len(families) > _FAMILY_REFRESH_CAP:
         families = families[:_FAMILY_REFRESH_CAP]
 
