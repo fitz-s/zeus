@@ -2628,6 +2628,25 @@ def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
         time.sleep(max(0.1, cadence_seconds - elapsed))
 
 
+def _drop_stale_families(
+    families: list[tuple[str, str, str]], *, today: str
+) -> tuple[list[tuple[str, str, str]], int]:
+    """Drop families whose target_date is strictly before ``today`` (UTC, ISO date).
+
+    Staleness predicate (2026-06-04 reactor-wedge root, K<<N consolidation): a family
+    whose target_date has already passed is settled/closed — untradeable — and MUST
+    NOT consume the bounded per-cycle Gamma refresh budget. Without this, weeks of
+    never-resolved pending families (May-24..) fill the priority-ordered slots, every
+    Gamma fetch whiffs, the 60s reactor cycle overruns ("max running instances
+    reached"), and fresh (today/future) families never get captured → 0 receipts.
+    Same predicate as the channel-universe (market_end_at>now, #180) and FSR-emit
+    (freshest source_run, #182) fixes: nothing past its target may stay in a working
+    set. ISO date strings compare lexicographically, so ``>=`` is a correct date test.
+    """
+    kept = [f for f in families if str(f[1] or "") >= today]
+    return kept, len(families) - len(kept)
+
+
 def _refresh_pending_family_snapshots(
     world_conn,
     forecasts_conn,
@@ -2693,6 +2712,18 @@ def _refresh_pending_family_snapshots(
 
     if not families:
         return {"status": "no_pending_families"}
+
+    # Staleness predicate (2026-06-04 reactor-wedge fix): drop past-target families
+    # BEFORE the priority cap so the bounded budget goes to fresh (today/future)
+    # tradeable families, not weeks of never-resolved stale ones.
+    families, _stale_dropped = _drop_stale_families(families, today=now_utc.date().isoformat())
+    if _stale_dropped:
+        logger.info(
+            "refresh_pending_family_snapshots: dropped %d stale (past target_date) families "
+            "before refresh budget", _stale_dropped,
+        )
+    if not families:
+        return {"status": "no_fresh_pending_families", "stale_dropped": _stale_dropped}
 
     # A2 throughput (2026-05-31): cap per-cycle capture so a cycle COMPLETES fast.
     # Each family's capture makes serial per-token order-book fetches (uncacheable,
