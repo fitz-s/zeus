@@ -108,58 +108,83 @@ _FORECASTS_DB = os.path.join(_REPO_ROOT, "state", "zeus-forecasts.db")
 
 
 # ---------------------------------------------------------------------------
-# Pure win-logic function (importable for unit tests)
+# Per-row grading — the ONE truth path (H2 consolidation, STRUCTURAL_FIX_PLAN
+# §P0.1). Grading is delegated to src.contracts.graded_receipt.grade_receipt —
+# the single settlement-grounded, unit-correct, BinKind-aware win function. The
+# former local ``is_win`` heuristic (a raw-float range test with no unit, no
+# BinKind, no per-city rounding) is DELETED: it was a second grading path, and
+# two grading paths is exactly the consolidation debt this fix retires. The
+# Direction Law now has ONE implementation, exercised here and antibody-tested
+# in tests/test_arm_gate_direction_law.py against grade_receipt.
 # ---------------------------------------------------------------------------
 
-def is_win(direction: str, traded_bin_lo: Optional[float], traded_bin_hi: Optional[float],
-           settlement_value: float, tolerance: float = 1e-9) -> bool:
-    """Return True iff this shadow position wins under the Direction Law.
 
-    Direction Law:
-        buy_yes on bin B: WIN iff settlement lands IN bin B
-        buy_no  on bin B: WIN iff settlement does NOT land in bin B
+@dataclass(frozen=True)
+class _SettlementStandin:
+    """Minimal settlement object satisfying grade_receipt's _SettlementLike.
 
-    Args:
-        direction: "buy_yes" or "buy_no"
-        traded_bin_lo: lower bound of traded bin (None = left-shoulder, i.e. "X or below")
-        traded_bin_hi: upper bound of traded bin (None = right-shoulder, i.e. "X or higher")
-        settlement_value: the WMO-half-up rounded settlement temperature
-        tolerance: float comparison tolerance (default 1e-9)
+    grade_receipt reads only ``settlement_value`` + ``settlement_unit``; this
+    carries exactly those two, keeping the truth function decoupled from the
+    settlement_outcomes row shape.
+    """
 
-    Returns:
-        True if the position wins, False if it loses.
+    settlement_value: float
+    settlement_unit: str
+
+
+def _grade_row_won(
+    direction: str,
+    traded_bin_lo: Optional[float],
+    traded_bin_hi: Optional[float],
+    settlement_value: float,
+    settlement_unit: str,
+    bin_label: str,
+) -> Optional[bool]:
+    """Grade one shadow position via the canonical ``grade_receipt`` truth fn.
+
+    Returns ``won`` (bool) for a gradeable row, or ``None`` when the row cannot
+    be graded (bin label un-buildable into a ``Bin``, or a unit mismatch). A
+    ``None`` return tells the caller to EXCLUDE the row — the same skip
+    semantics the legacy path applied to None/None parses and unit mismatches,
+    but now enforced through the typed antibodies rather than ad-hoc float
+    checks. The caller logs the exclusion so a silent cohort shift is visible.
 
     Raises:
-        ValueError: if direction is not 'buy_yes' or 'buy_no'.
-
-    None handling:
-        traded_bin_lo=None, traded_bin_hi set  → left-shoulder bin ("X or below")
-        traded_bin_lo set, traded_bin_hi=None  → right-shoulder bin ("X or higher")
-        Both None                               → bin parse failed; returns False (cannot
-            determine win/loss, must not count as win). Callers should skip such rows
-            before calling is_win() to avoid silently dropping valid data.
+        ValueError: if ``direction`` is not 'buy_yes' / 'buy_no' (propagated
+            from grade_receipt — an unknown direction is a programmer error,
+            not a data-skip case).
     """
+    from src.contracts.graded_receipt import grade_receipt
+    from src.types.market import Bin
+    from src.types.temperature import UnitMismatchError
+
     # Both None means the bin label failed to parse — cannot evaluate win/loss.
     if traded_bin_lo is None and traded_bin_hi is None:
-        return False
+        return None
 
-    # Determine whether settlement lands in the traded bin
-    if traded_bin_lo is None:
-        # Left-shoulder: "X or below" — settlement_value <= hi
-        in_bin = settlement_value <= traded_bin_hi + tolerance
-    elif traded_bin_hi is None:
-        # Right-shoulder: "X or higher" — settlement_value >= lo
-        in_bin = settlement_value >= traded_bin_lo - tolerance
-    else:
-        # Point or bounded range
-        in_bin = (traded_bin_lo - tolerance) <= settlement_value <= (traded_bin_hi + tolerance)
+    try:
+        bin_obj = Bin(
+            low=traded_bin_lo,
+            high=traded_bin_hi,
+            unit=settlement_unit,
+            label=bin_label,
+        )
+    except Exception:  # noqa: BLE001 — malformed/width-invalid bin → exclude, never crash
+        return None
 
-    if direction == "buy_yes":
-        return in_bin
-    elif direction == "buy_no":
-        return not in_bin
-    else:
-        raise ValueError(f"Unknown direction: {direction!r}. Expected 'buy_yes' or 'buy_no'.")
+    # Minimal settlement stand-in (settlement_value already WMO-rounded at
+    # write time — grade_receipt is called WITHOUT semantics, using the value
+    # as-is, matching the legacy path that range-tested the rounded value).
+    settlement = _SettlementStandin(
+        settlement_value=float(settlement_value),
+        settlement_unit=settlement_unit,
+    )
+
+    try:
+        graded = grade_receipt(bin_obj, direction, settlement)
+    except UnitMismatchError:
+        return None
+    return graded.won
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +540,29 @@ def _compute_rows(receipts: list[dict], settlements: dict) -> list[dict]:
             # parse failure — skip
             continue
 
-        win = is_win(r["direction"], lo, hi, s["settlement_value"])
+        # H2: grade through the ONE truth function (grade_receipt). A None
+        # return means the typed path could not grade the row (un-buildable Bin
+        # or unit mismatch that slipped past the string check above) — exclude
+        # it and log, never silently count it. On the current live cohort this
+        # is 0 rows (verdict-equivalent to the retired is_win path, verified).
+        won = _grade_row_won(
+            direction=r["direction"],
+            traded_bin_lo=lo,
+            traded_bin_hi=hi,
+            settlement_value=s["settlement_value"],
+            settlement_unit=s["settlement_unit"],
+            bin_label=r["bin_label"],
+        )
+        if won is None:
+            print(
+                f"  [WARN] ungradeable bin (grade_receipt could not build/grade): "
+                f"city={r['city']} date={r['target_date']} label={r['bin_label']!r} "
+                f"— row EXCLUDED",
+                file=sys.stderr,
+            )
+            continue
+
+        win = won
         rows.append({
             "city": r["city"],
             "target_date": r["target_date"],
