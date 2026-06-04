@@ -15,7 +15,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from src.calibration.emos import bin_probability_settlement, emos_predictive, load_emos_table
+from src.calibration.emos import bin_probability_settlement, emos_predictive
 
 
 def _bin_bounds(b) -> tuple[Optional[float], Optional[float]]:
@@ -61,17 +61,15 @@ def build_emos_q(
         unit:           'F' or 'C' — the settlement-asserted native unit of members + bins.
         bins:           settlement bins as (low, high) tuples or Bin objects (None = open shoulder).
     """
-    # Metric fail-closed: the table is single-metric; refuse cross-metric serves.
-    _table_metric = str((load_emos_table().get("_meta") or {}).get("metric") or "").lower()
-    if _table_metric and str(metric).lower() != _table_metric:
-        return None
+    # Metric fail-closed is STRUCTURAL: cells are keyed city|season|metric, so a LOW lookup
+    # resolves ONLY a LOW cell — a HIGH fit can never serve a LOW market. Missing cell -> None.
     u = (unit or "").strip().upper()
     arr = np.asarray(members_native, dtype=float)
     if arr.size < 2:
         return None
     members_c = (arr - 32.0) / 1.8 if u.startswith("F") else arr
 
-    pred = emos_predictive(city, season, float(lead_days), members_c)
+    pred = emos_predictive(city, season, float(lead_days), members_c, metric=str(metric).lower())
     if pred is None:
         return None  # served=raw / missing -> honest raw fallback (caller decides)
     mu_c, sigma_c = pred

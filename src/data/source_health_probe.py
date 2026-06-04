@@ -88,13 +88,21 @@ def _probe_open_meteo_archive(timeout: float) -> dict[str, Any]:
                 "longitude": -0.13,
                 "start_date": "2025-01-01",
                 "end_date": "2025-01-01",
-                "daily": "temperature_2m_max",
+                # Probe BOTH extrema: HIGH markets settle on temperature_2m_max, LOW on
+                # temperature_2m_min. A max-only probe would mask a LOW-endpoint outage
+                # (#metric-crossing — different physical quantities, both must be healthy).
+                "daily": "temperature_2m_max,temperature_2m_min",
                 "timezone": "UTC",
             },
             timeout=timeout,
         )
         latency_ms = int((time.monotonic() - start) * 1000)
         resp.raise_for_status()
+        # Both daily fields must be present and non-empty, else the source is degraded for
+        # one metric even if the HTTP call succeeded.
+        _daily = (resp.json() or {}).get("daily", {})
+        if not _daily.get("temperature_2m_max") or not _daily.get("temperature_2m_min"):
+            raise ValueError("open-meteo archive missing temperature_2m_max or temperature_2m_min")
         now = _now_iso()
         return {
             "last_success_at": now,

@@ -29,7 +29,7 @@ _SYNTH_CELL = {"params": [0.5, 1.0, 0.0, 1.0, 0.20], "n": 500, "served": "emos"}
 
 @pytest.fixture
 def emos_table(monkeypatch):
-    table = {"_meta": {"metric": "high"}, "cells": {"TestCity|JJA": dict(_SYNTH_CELL)}}
+    table = {"_meta": {"metric": "multi"}, "cells": {"TestCity|JJA|high": dict(_SYNTH_CELL)}}
     monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
     return table
 
@@ -111,7 +111,7 @@ def test_inv1_build_emos_q_returns_full_distribution(emos_table):
 def test_inv1_served_raw_returns_none_for_honest_fallback(monkeypatch):
     # served=raw cell -> None so the caller uses the honest raw analytic, NOT the bias maze.
     mod = importlib.import_module("src.calibration.emos_q_builder")
-    table = {"_meta": {}, "cells": {"RawCity|JJA": {"params": [0, 1, 0, 1, 0.2], "n": 99, "served": "raw"}}}
+    table = {"_meta": {}, "cells": {"RawCity|JJA|high": {"params": [0, 1, 0, 1, 0.2], "n": 99, "served": "raw"}}}
     monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
     out = mod.build_emos_q(city="RawCity", season="JJA", metric="high", lead_days=3.0,
                            members_native=np.array([20.0, 21.0, 22.0], dtype=float),
@@ -119,23 +119,37 @@ def test_inv1_served_raw_returns_none_for_honest_fallback(monkeypatch):
     assert out is None, "served=raw must fall back (None), never silently apply HIGH EMOS or bias"
 
 
-def test_inv1_metric_crossing_fail_closed(monkeypatch):
-    # METRIC ANTIBODY (2026-06-04): the EMOS table is single-metric (meta.metric, HIGH-only).
-    # A LOW market must NEVER be served the HIGH fit — build_emos_q returns None so the caller
-    # honest-falls-back. Serving HIGH (mu,sigma) onto a LOW member-MIN array is UNCONSTRUCTABLE.
+def test_inv1_metric_keyed_no_crossing_and_low_serves(monkeypatch):
+    # METRIC ANTIBODY (2026-06-04): cells are keyed city|season|metric. HIGH and LOW are
+    # physically different quantities (daily max vs min); a LOW lookup resolves ONLY a LOW
+    # cell. Proves: (1) a LOW market is NEVER served the HIGH fit; (2) when a LOW cell exists
+    # the LOW path serves from it (LOW is calibrated, not quarantined).
     mod = importlib.import_module("src.calibration.emos_q_builder")
-    table = {"_meta": {"metric": "high"},
-             "cells": {"X|JJA": {"params": [0, 1, 0, 1, 0.2], "n": 99, "served": "emos"}}}
-    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
     members = np.array([10.0, 11.0, 12.0, 13.0], dtype=float)
     bins = [(None, 11.0), (12.0, 12.0), (13.0, None)]
-    # HIGH metric on a HIGH table -> serves.
+
+    # HIGH-only table: low lookup misses -> None (no cross-metric serve).
+    table_high_only = {"_meta": {"metric": "multi"},
+                       "cells": {"X|JJA|high": {"params": [0, 1, 0, 1, 0.2], "n": 99, "served": "emos"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table_high_only, raising=False)
     assert mod.build_emos_q(city="X", season="JJA", metric="high", lead_days=3.0,
                             members_native=members, unit="C", bins=bins) is not None
-    # LOW metric on a HIGH table -> fail-closed None (no cross-metric serve).
     assert mod.build_emos_q(city="X", season="JJA", metric="low", lead_days=3.0,
                             members_native=members, unit="C", bins=bins) is None, \
-        "LOW market must NOT receive the HIGH EMOS fit — metric-crossing is fail-closed"
+        "LOW market must NOT receive the HIGH EMOS fit — metric key isolates them"
+
+    # Add a LOW cell with a DISTINCT mean shift -> LOW now serves from its OWN cell.
+    table_both = {"_meta": {"metric": "multi"},
+                  "cells": {"X|JJA|high": {"params": [0, 1, 0, 1, 0.2], "n": 99, "served": "emos"},
+                            "X|JJA|low": {"params": [-2.0, 1, 0, 1, 0.2], "n": 99, "served": "emos"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table_both, raising=False)
+    hi = mod.build_emos_q(city="X", season="JJA", metric="high", lead_days=3.0,
+                          members_native=members, unit="C", bins=bins)
+    lo = mod.build_emos_q(city="X", season="JJA", metric="low", lead_days=3.0,
+                          members_native=members, unit="C", bins=bins)
+    assert hi is not None and lo is not None, "both metrics serve from their own cells"
+    # The LOW cell's a=-2 mean-shift makes its mu distinct from HIGH's -> not the same fit.
+    assert abs(hi[1] - lo[1]) > 1.5, "LOW must use the LOW cell's params, not the HIGH cell's"
 
 
 # ----------------------------------------------------------------------------
