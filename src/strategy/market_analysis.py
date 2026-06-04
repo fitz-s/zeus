@@ -697,6 +697,33 @@ class MarketAnalysis:
             # Buy NO direction: payoff probability is complement; executable
             # entry price must come from the native NO side when available.
             if self.supports_buy_no_edges(i):
+                # DIRECTION LAW (operator, load-bearing): buy_no ⟺ bin ≠ forecast.
+                # Our forecast bin is argmax(p_posterior) — the single outcome we predict most
+                # likely. A buy_no on THAT bin bets against our own forecast = wrong side by
+                # definition. edge_no>0 usually filters it (the modal bin has the lowest q_no),
+                # but a cheap NO quote can still manufacture a positive wrong-side edge there.
+                # Make it UNCONSTRUCTABLE (rule 5 — kill the category, not the instance): never
+                # build a buy_no on the modal bin, regardless of price. buy_no on NON-modal bins
+                # is unaffected (predicting modal j ⟹ "not i" for i≠j is consistent, allowed).
+                _post_max = float(np.max(self.p_posterior))
+                if float(self.p_posterior[i]) >= _post_max - 1e-12:
+                    trace.append(
+                        EdgeScanTrace(
+                            support_index=i,
+                            bin_label=b.label,
+                            executable=True,
+                            direction="buy_no",
+                            p_posterior=1.0 - float(self.p_posterior[i]),
+                            p_market=self.buy_no_market_price(i),
+                            raw_edge=None,
+                            ci_lower=None,
+                            ci_upper=None,
+                            p_value=None,
+                            decision="direction_law_veto:buy_no_on_forecast_modal_bin",
+                            native_quote_available=True,
+                        )
+                    )
+                    continue  # wrong-side by the direction law — never construct it
                 p_model_no = 1.0 - float(self.p_cal[i])
                 p_market_no = self.buy_no_market_price(i)
                 p_post_no = 1.0 - float(self.p_posterior[i])

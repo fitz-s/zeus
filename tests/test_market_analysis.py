@@ -630,7 +630,10 @@ class TestMarketAnalysis:
         assert edges == []
         by_decision = {item.decision for item in trace}
         assert "yes_ci_lower_nonpositive" in by_decision
-        assert "no_raw_edge_nonpositive" in by_decision
+        # bin 0 (p_posterior=0.55) is the forecast MODAL bin and carries the only buy_no quote;
+        # the DIRECTION LAW antibody vetoes a buy_no on our own forecast bin BEFORE the edge
+        # check, so the trace now explains it as a direction-law veto (was no_raw_edge_nonpositive).
+        assert "direction_law_veto:buy_no_on_forecast_modal_bin" in by_decision
         assert "non_executable_bin" in by_decision
         yes_trace = next(item for item in trace if item.decision == "yes_ci_lower_nonpositive")
         assert yes_trace.raw_edge == pytest.approx(0.05)
