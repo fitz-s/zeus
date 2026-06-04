@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-05-20
-# Authority basis: slug-pattern discovery (2026-05-19 alpha window) — tag-based gamma queries
-#   do not surface newly-opened weather markets until tag is applied; direct slug lookup works immediately.
-# Lifecycle: created=2026-05-19; last_reviewed=2026-05-19; last_reused=2026-05-20
+# Last reused or audited: 2026-06-03
+# Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03 — SLUG_DISCOVERY_CITIES
+#   now derived from configured universe; antibody test_discovery_covers_configured_universe added.
+# Lifecycle: created=2026-05-19; last_reviewed=2026-06-03; last_reused=2026-06-03
 # Purpose: Antibody tests for _fetch_events_by_slug_pattern — slug fallback discovery path in market_scanner.
 # Reuse: Run when modifying SLUG_DISCOVERY_CITIES, SLUG_DISCOVERY_PREFIXES, _fetch_events_by_slug_pattern,
 #   or _fetch_events_by_tags integration. Verify CLOB cross-check still applies on slug path.

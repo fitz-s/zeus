@@ -1,3 +1,5 @@
+# Last reused or audited: 2026-06-03
+# Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03
 """Gamma API market scanner: discover active weather markets.
 
 Queries Polymarket's Gamma API for temperature events.
