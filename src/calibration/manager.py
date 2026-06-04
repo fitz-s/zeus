@@ -7,6 +7,7 @@ Spec §3.2-3.4:
 - Fallback: cluster+season → season → global → uncalibrated
 """
 
+import contextlib
 import logging
 from typing import Literal, Optional
 
@@ -1241,26 +1242,70 @@ def _fit_from_pairs(
         f":{_eff_dv}:{_eff_cycle}:{_eff_source_id}:{_eff_horizon}:{cal.input_space}"
     )
 
-    # Save to DB for future use (B3cont: canonical save_platt_model — HIGH-only, v2 kwargs)
-    save_platt_model(
-        conn,
-        metric_identity=HIGH_LOCALDAY_MAX,
-        cluster=cluster,
-        season=season,
-        data_version=_eff_dv,
-        param_A=cal.A,
-        param_B=cal.B,
-        param_C=cal.C,
-        bootstrap_params=cal.bootstrap_params,
-        n_samples=cal.n_samples,
-        input_space=cal.input_space,
-        cycle=_eff_cycle,
-        source_id=_eff_source_id,
-        horizon_profile=_eff_horizon,
+    # Persist for future reads (B3cont: canonical save_platt_model — HIGH-only,
+    # v2 kwargs). BEST-EFFORT: `cal` is ALREADY a valid in-memory calibrator;
+    # the DB write is a cache side-effect. A persistence fault must NOT destroy
+    # `cal` nor propagate (R4/#174 — a swallowed DB error became 870x/day
+    # per-candidate trade rejections when this raised out of the fit). See
+    # _persist_calibrator_best_effort.
+    _persist_calibrator_best_effort(
+        conn, cal,
+        cluster=cluster, season=season,
+        cycle=_eff_cycle, source_id=_eff_source_id,
+        horizon_profile=_eff_horizon, data_version=_eff_dv,
     )
-    conn.commit()
 
     return cal
+
+
+def _persist_calibrator_best_effort(
+    conn, cal, *, cluster: str, season: str,
+    cycle: str, source_id: str, horizon_profile: str, data_version: str,
+) -> bool:
+    """Persist a read-time-fit HIGH calibrator; never raise.
+
+    R4 antibody (#174): the in-memory ``cal`` is the candidate's belief and is
+    already valid. Persistence to ``platt_models`` is a cache side-effect for
+    future reads. If the write faults (UNIQUE collision — now made idempotent
+    by INSERT OR REPLACE in save_platt_model — or any other sqlite3 error:
+    locked DB, disk full, schema drift), this MUST degrade loudly rather than
+    propagate out of _fit_from_pairs into the reactor's UNKNOWN_REVIEW_REQUIRED
+    dead-letter, which mislabels a tradeable candidate as a no-trade.
+
+    Returns True if the row was written+committed, False if it degraded.
+    Makes "calibrator persistence is best-effort" an explicit, testable
+    relationship (iron rule #4: kill the category, not just the instance).
+    """
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX  # lazy — circular guard
+    try:
+        save_platt_model(
+            conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster=cluster,
+            season=season,
+            data_version=data_version,
+            param_A=cal.A,
+            param_B=cal.B,
+            param_C=cal.C,
+            bootstrap_params=cal.bootstrap_params,
+            n_samples=cal.n_samples,
+            input_space=cal.input_space,
+            cycle=cycle,
+            source_id=source_id,
+            horizon_profile=horizon_profile,
+        )
+        conn.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 — persistence is best-effort by contract
+        logger.warning(
+            "CALIBRATION_STORE_DEGRADED: persist of read-time-fit calibrator "
+            "for %s_%s failed (%s: %s) — serving the valid in-memory calibrator, "
+            "candidate NOT rejected.",
+            cluster, season, type(exc).__name__, exc,
+        )
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        return False
 
 
 def _canonical_pair_groups_valid(pairs: list[dict], *, unit: str | None = None) -> bool:

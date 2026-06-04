@@ -149,8 +149,18 @@ class TestPlattModelV2FamilyIsolation:
             f"got {dv!r} (R-4D). Peak-window tag is quarantined."
         )
 
-    def test_duplicate_high_model_raises_integrity_error(self):
-        """R-4D: Inserting two high models with the same business key must raise IntegrityError."""
+    def test_duplicate_high_model_refit_is_idempotent_single_row(self):
+        """R-4D family isolation: a re-fit of the same business key must leave
+        EXACTLY ONE row (no duplicate-key coexistence), holding the latest params.
+
+        Updated 2026-06-04 (#174): the invariant is "one active row per business
+        key," not "the second insert raises." The old IntegrityError-on-collision
+        was the live defect — it propagated out of the read-time fit and became
+        870x/day per-candidate trade rejections (R4). save_platt_model now does
+        INSERT OR REPLACE, which still enforces single-row isolation but updates
+        in place instead of raising. The isolation invariant is preserved (and
+        strengthened: it now holds even under concurrent refit).
+        """
         from src.calibration.store import save_platt_model
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
@@ -170,9 +180,17 @@ class TestPlattModelV2FamilyIsolation:
         save_platt_model(**kwargs)
         conn.commit()
 
-        with pytest.raises((sqlite3.IntegrityError, RuntimeError)):
-            save_platt_model(**dict(kwargs, param_A=0.5))
-            conn.commit()
+        # Second refit of the identical business key must NOT raise.
+        save_platt_model(**dict(kwargs, param_A=0.5))
+        conn.commit()
+
+        rows = conn.execute(
+            "SELECT param_A FROM platt_models "
+            "WHERE temperature_metric='high' AND cluster='NYC_F_2' "
+            "AND season='spring' AND is_active=1"
+        ).fetchall()
+        assert len(rows) == 1, f"family isolation: expected 1 active row, got {len(rows)}"
+        assert rows[0][0] == 0.5, "latest refit params must win"
 
     def test_model_row_has_no_city_or_target_date_column(self):
         """R-4D + R-N cross-check: platt_models must not have city or target_date."""
