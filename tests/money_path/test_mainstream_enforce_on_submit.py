@@ -1,5 +1,5 @@
 # Created: 2026-06-03
-# Last reused or audited: 2026-06-03
+# Last reused/audited: 2026-06-03
 # Authority basis: PR-2 (B) F1 enforce — mainstream_agreement_enforce_on_submit. When the
 #   operator turns enforcement ON (default OFF), an armed submit must require the SELECTED
 #   candidate's mainstream_agreement_pass to be True before executor_submit, FAIL-CLOSED on a
