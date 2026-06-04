@@ -1,12 +1,13 @@
 """Market types: Bin and BinEdge."""
 
 from dataclasses import dataclass, field
+from functools import cached_property
 import logging
 import math
 
 import numpy as np
 
-from typing import TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 from src.contracts.execution_price import ExecutionPrice
 
@@ -14,6 +15,16 @@ if TYPE_CHECKING:
     from src.contracts.entry_quote_evidence import EntryQuoteEvidence
 
 logger = logging.getLogger(__name__)
+
+
+# A bin's grading KIND, derived solely from which bounds are open.
+#   exact   — both bounds finite (°C point bin "17°C" or °F range "64-65°F")
+#   ceiling — open-high "X or higher"  (low set, high None/+inf)
+#   floor   — open-low  "X or below"   (low None/-inf, high set)
+# grade_receipt switches on this so a ceiling/floor bin can never be graded
+# with exact-membership endpoint-equality semantics — that error category is
+# made unconstructable by giving the type ONE canonical classification.
+BinKind = Literal["exact", "ceiling", "floor"]
 
 
 _INF_LOW_SENTINEL = -32768
@@ -123,6 +134,35 @@ class Bin:
     def is_point(self) -> bool:
         """°C point bin: low == high, covers exactly one integer degree."""
         return self.low is not None and self.high is not None and self.low == self.high
+
+    @cached_property
+    def bin_kind(self) -> BinKind:
+        """Canonical grading kind for this bin (exact | ceiling | floor).
+
+        Derived ONLY from open/closed bounds — the single source of truth
+        ``grade_receipt`` switches on:
+          - open-high (low set, high open)  → ``"ceiling"``  ("X°F or higher")
+          - open-low  (low open, high set)  → ``"floor"``    ("X°C or below")
+          - both bounds finite              → ``"exact"``    (point or range)
+
+        Cached because ``Bin`` is frozen and immutable. Making this a property
+        of the TYPE (not a local heuristic at each grading site) is the
+        antibody: a ceiling bin graded as an exact point becomes structurally
+        impossible — there is one classification, and it lives here.
+        """
+        open_low = self.is_open_low
+        open_high = self.is_open_high
+        # An open-open bin is not a valid market bin (Bin.__post_init__ forbids
+        # both-None; staged ±inf both-open is caught here as a fail-loud guard).
+        if open_low and open_high:
+            raise ValueError(
+                f"Bin {self.label!r} is open on both ends — not a gradeable bin kind"
+            )
+        if open_high:
+            return "ceiling"
+        if open_low:
+            return "floor"
+        return "exact"
 
     @property
     def width(self) -> float | None:

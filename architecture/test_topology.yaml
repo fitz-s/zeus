@@ -48,6 +48,9 @@ test_trust_policy:
     tests/test_representativeness_sigma_widens_q_lcb.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: sigma_repr -> wider (lower) q_lcb on corrected domain"}
     tests/test_no_certain_no_ceiling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: no certain-NO (q_no_lcb<1) structural antibody on corrected domain"}
     tests/test_arm_gate_direction_law.py: {created: "2026-06-03", last_used: "2026-06-03", note: "Direction Law antibody: buy_yes/buy_no win-logic unconstructably correct — all 4 cases + complement + known losses"}
+    tests/test_graded_receipt.py: {created: "2026-06-03", last_used: "2026-06-03", note: "D1 keystone RT: grade_receipt unit TypeError + BinKind dispatch + fractional membership; Direction Law win"}
+    tests/test_arm_gate_settlement_capital_weight.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: capital-weighted ARM verdict — row-democracy wr>51% but cw_roi<0 -> DENIED; MISSING_SIZE fail-closed; per-city negative cluster veto"}
+    tests/test_attribution_receipt_repoint.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: attribution reads edli_no_submit_receipts (live writer) not dead decision_events; empty input raises (silent-zero=failure)"}
     tests/test_full_predictive_residual_sd.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: full predictive sigma (sigma_resid * sqrt(1+1/n)) producer antibody"}
     tests/test_main_harvester_edli_scheduling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: harvester_cycle scheduled in all EDLI modes (not legacy_cron only)"}
     tests/test_harvester_resolver_settles_and_enqueues_redeem.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: VERIFIED settlement -> position settled + REDEEM_INTENT_CREATED"}
