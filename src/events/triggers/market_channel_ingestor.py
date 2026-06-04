@@ -348,6 +348,7 @@ def active_weather_token_metadata_from_snapshots(
     *,
     limit: int = 2000,
     priority_token_ids: set[str] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, MarketTokenMetadata]:
     """Read active weather token metadata from executable snapshot truth.
 
@@ -388,6 +389,18 @@ def active_weather_token_metadata_from_snapshots(
         predicates.append("COALESCE(closed, 0) = 0")
     if "event_slug" in columns:
         predicates.append("(LOWER(COALESCE(event_slug, '')) LIKE '%weather%' OR LOWER(COALESCE(event_slug, '')) LIKE '%temperature%')")
+    # SETTLED-EXCLUSION (2026-06-04 candidate-flow root): EMS active/closed lifecycle
+    # flags are never maintained (live rows all show active=1/closed=0), so the two
+    # predicates above exclude nothing — settled weather markets stay in the universe.
+    # The only honest tradeability signal is market_end_at vs now: a market whose
+    # market_end_at is in the PAST cannot be a tradeable candidate and must NOT enter
+    # the live subscription / REST-seed universe (else the persistent channel thread
+    # drowns its reseed in 404 dead tokens and live BEST_BID_ASK emission starves).
+    # NULL market_end_at is KEPT (coverage-safe: cannot prove settled → Blocker #52).
+    # now_iso is a self-generated UTC ISO-8601 string (no single quote → injection-safe).
+    if "market_end_at" in columns:
+        now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        predicates.append(f"(market_end_at IS NULL OR market_end_at > '{now_iso}')")
     where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
     # Latest snapshot per market (condition_id). Without a captured_at column we
     # cannot rank temporally, so fall back to one row per condition by rowid.

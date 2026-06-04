@@ -686,3 +686,120 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
         )
         is None
     ), "causal guard must still reject quotes seen after the decision time"
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-04 — Channel universe must EXCLUDE settled markets (market_end_at <= now)
+# Created: 2026-06-04
+# Last reused/audited: 2026-06-04
+# Authority basis: live candidate-flow stall root (this session). EMS active/closed
+#   lifecycle flags are never maintained (all live rows show active=1/closed=0), so
+#   the channel universe selector admitted 3,468 SETTLED weather conditions (June-4
+#   back to May) alongside only 540 live ones — ~8,000 tokens, ~7,000 dead-404. The
+#   persistent market-channel thread drowned its REST reseed / WS subscription in 404
+#   dead tokens (~1 tok/sec, ~2h/pass) → BEST_BID_ASK_CHANGED emission died →
+#   opportunity_events/candidates/receipts went to zero.
+#
+#   RELATIONSHIP INVARIANT (the boundary where EMS lifecycle-flag staleness corrupts
+#   the live subscription universe): a market whose market_end_at is in the PAST
+#   cannot be a tradeable candidate and MUST NOT enter the channel universe,
+#   regardless of the stale active/closed flags. Excluding past-ending markets cannot
+#   drop a live candidate (a settled market is untradeable), so the Blocker #52
+#   coverage invariant — every CANDIDATE token is covered — is preserved.
+# ---------------------------------------------------------------------------
+
+
+def _ems_table_with_end(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            min_tick_size TEXT,
+            min_order_size TEXT,
+            neg_risk INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT,
+            market_end_at TEXT
+        )
+        """
+    )
+
+
+def test_universe_excludes_settled_markets_by_market_end_at():
+    """Settled (past-ending) weather markets must not leak into the channel universe.
+
+    Both rows carry the STALE live-state flags (active=1, closed=0) that EMS never
+    maintains; the only honest signal of tradeability is market_end_at vs now.
+    """
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    # LIVE: future-ending weather market.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-live','0xlive','chicago-weather','yes-live','no-live','0.01','5',0,1,0,"
+        "'2026-06-04T11:00:00+00:00','2026-06-05T12:00:00+00:00')"
+    )
+    # SETTLED: past-ending weather market with STALE active=1/closed=0 flags.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-dead','0xdead','dallas-weather','yes-dead','no-dead','0.01','5',0,1,0,"
+        "'2026-06-04T10:00:00+00:00','2026-06-04T11:30:00+00:00')"
+    )
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-live" in md and "no-live" in md, "live (future-ending) market must be covered"
+    assert "yes-dead" not in md, "settled market (market_end_at<=now) leaked into channel universe"
+    assert "no-dead" not in md
+
+
+def test_universe_includes_market_with_null_end_at():
+    """Defensive: a NULL market_end_at must NOT silently drop the token (coverage-safe).
+
+    Preserves the Blocker #52 invariant when end-time provenance is missing: when we
+    cannot prove a market is settled, we keep it (it may be a live candidate). Only
+    a definitively PAST market_end_at excludes a token.
+    """
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-null','0xnull','miami-weather','yes-null','no-null','0.01','5',0,1,0,"
+        "'2026-06-04T11:00:00+00:00',NULL)"
+    )
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+    assert "yes-null" in md, "NULL market_end_at must be kept (cannot prove settled)"
+
+
+def test_universe_filter_absent_market_end_at_column_is_noop():
+    """Back-compat: EMS schema without a market_end_at column behaves as before."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT, condition_id TEXT, event_slug TEXT,
+            yes_token_id TEXT, no_token_id TEXT,
+            min_tick_size TEXT, min_order_size TEXT, neg_risk INTEGER,
+            active INTEGER, closed INTEGER, captured_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-1','0xc','chicago-weather','yes-1','no-1','0.01','5',0,1,0,'2026-06-04T11:00:00+00:00')"
+    )
+    md = active_weather_token_metadata_from_snapshots(
+        conn, now=datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    )
+    assert "yes-1" in md and "no-1" in md
