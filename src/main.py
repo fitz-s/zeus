@@ -14,9 +14,10 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-06-03
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
+#                  + 2026-06-03 arm direction-gate footgun antibody / pre-arm verification (_assert_edli_arm_requires_direction_gate)
 
 import functools
 import json
@@ -551,6 +552,39 @@ def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
         raise RuntimeError(verified.reason)
 
 
+def _assert_edli_arm_requires_direction_gate(edli_cfg: dict) -> None:
+    """ANTIBODY: arming WITHOUT the direction-agreement gate is a BOOT FAILURE.
+
+    The direction-agreement gate (event_reactor_adapter.py) is what separates
+    direction-CORRECT candidates from WRONG-SIDE buy_no candidates that already
+    pass proof+kelly+fdr+trade_score. That gate only EXCLUDES a candidate at
+    submit time when BOTH:
+      - ``real_order_submit_enabled`` (the ARM key), AND
+      - ``edli_v1.mainstream_agreement_enforce_on_submit`` are true.
+
+    ARM is therefore a TWO-KEY operation. If an operator arms by flipping ONLY
+    ``real_order_submit_enabled=true`` while ``mainstream_agreement_enforce_on_submit``
+    is still false, the direction gate is SKIPPED and gate-FAIL wrong-side
+    candidates become live-submittable. The second key being off is catastrophic
+    and silent. This guard makes "armed without the direction gate" UNCONSTRUCTABLE
+    at boot.
+
+    Invoked only on armed modes (edli_live_canary / edli_live — both require
+    ``real_order_submit_enabled``). In edli_shadow_no_submit the armed-mode branch
+    is never entered, so this guard never fires (shadow boot is byte-identical).
+
+    Asserts BOTH, fail-closed (a MISSING flag is treated as NOT-satisfied; only the
+    explicit literal True satisfies):
+      - ``mainstream_agreement_enforce_on_submit`` is True (enforcement is live), AND
+      - ``mainstream_agreement_reference_enabled`` is True (the verdict the
+        enforcement reads is actually produced).
+    """
+    enforce = edli_cfg.get("mainstream_agreement_enforce_on_submit", False)
+    reference = edli_cfg.get("mainstream_agreement_reference_enabled", False)
+    if enforce is not True or reference is not True:
+        raise RuntimeError("EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT")
+
+
 def evaluate_edli_stage_readiness(
     *,
     stage: str,
@@ -975,6 +1009,13 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
         # Ordered AFTER the (edli_live-only) promotion-artifact gate so the
         # promotion gate's specific reason still surfaces first for edli_live.
         _assert_edli_arm_gate_artifact(edli_cfg)
+        # ANTIBODY (arm direction-gate footgun): ARM is a two-key operation.
+        # Flipping ONLY real_order_submit_enabled (without
+        # mainstream_agreement_enforce_on_submit) skips the direction-agreement
+        # gate -> wrong-side buy_no candidates become live-submittable. Make that
+        # state a boot failure. Fires for BOTH armed modes; inert in shadow (this
+        # branch is not entered when real_order_submit_enabled is false).
+        _assert_edli_arm_requires_direction_gate(edli_cfg)
     return mode
 
 
