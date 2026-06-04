@@ -123,6 +123,7 @@
     "no_submit_visible_depth_fill_lcb": 0.05,
     "tiny_live_max_notional_usd": 5.0,
     "tiny_live_max_orders_per_day": 1,
+    "tiny_live_max_orders_per_window": 1,
     "tiny_live_notional_cap_enabled": false,
     "tiny_live_daily_order_cap_enabled": false,
     "mainstream_agreement_reference_enabled": true,
