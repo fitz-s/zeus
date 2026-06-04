@@ -245,3 +245,58 @@ def test_onchain_rpc_raises_under_world_mutex():
             _json_rpc_call("https://example.invalid/rpc", "eth_call", [])
     finally:
         mutex.release()
+
+
+# ---------------------------------------------------------------------------
+# 5th instance — PolymarketClient.get_orderbook_snapshot (the live WAL offender)
+# ---------------------------------------------------------------------------
+
+
+def test_polymarket_client_get_orderbook_snapshot_raises_under_world_mutex():
+    """CATEGORY CLOSE — 5th instance. PolymarketClient.get_orderbook_snapshot is
+    the call path that caused the 488→601 MB zeus-world.db WAL bloat:
+    market_channel_ingestor.on_connect→seed_from_rest→fetch_orderbook (REST /book)
+    while holding with _world_mutex.
+
+    After adding the guard to get_orderbook_snapshot, holding the world mutex and
+    calling it must raise WorldMutexIOViolation BEFORE any HTTP socket is touched.
+    """
+    _reset_guard()
+    from unittest.mock import MagicMock, patch
+
+    from src.data.polymarket_client import PolymarketClient
+
+    client = PolymarketClient.__new__(PolymarketClient)
+
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        with pytest.raises(WorldMutexIOViolation):
+            client.get_orderbook_snapshot("0xdeadbeef")
+    finally:
+        mutex.release()
+
+
+def test_polymarket_client_get_orderbook_snapshot_guard_not_raised_off_mutex():
+    """REGRESSION: off the lock, get_orderbook_snapshot passes the guard (no
+    WorldMutexIOViolation).  The call will fail at the network layer (no real
+    CLOB connection in tests), but the guard itself must be silent — proving the
+    antibody does not break legitimate off-lock snapshot fetches."""
+    _reset_guard()
+    from unittest.mock import MagicMock, patch
+
+    from src.data.polymarket_client import PolymarketClient
+
+    client = PolymarketClient.__new__(PolymarketClient)
+    # Patch _public_get so we never touch the network in CI — we only want to
+    # confirm the guard does NOT fire (the mock result replaces the HTTP layer).
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"asks": [], "bids": [], "asset_id": "0xabc"}
+
+    assert world_mutex_is_held() is False
+    with patch.object(client, "_public_get", return_value=fake_resp):
+        result = client.get_orderbook_snapshot("0xabc")
+    assert isinstance(result, dict)
+    # Guard must not have fired — if it had, WorldMutexIOViolation would have
+    # been raised before we reached _public_get.

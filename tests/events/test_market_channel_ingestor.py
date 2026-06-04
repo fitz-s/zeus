@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-06-04
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
 from __future__ import annotations
 
@@ -839,3 +839,130 @@ def test_universe_filter_absent_market_end_at_column_is_noop():
         conn, now=datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
     )
     assert "yes-1" in md and "no-1" in md
+
+
+# ---------------------------------------------------------------------------
+# 5th-instance fix (2026-06-04): pre-capture pattern + world-mutex guard
+# ---------------------------------------------------------------------------
+
+
+def _fake_book(token_id: str) -> dict:
+    return {
+        "asset_id": token_id,
+        "market": "0xcondition",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+        "hash": "hash-x",
+    }
+
+
+def test_on_connect_with_pre_captured_books_seeds_cache_without_fetch_call():
+    """RELATIONSHIP TEST (5th-instance fix): when pre_captured_books is passed to
+    on_connect, seed_from_rest uses the cached data and the fetch_orderbook callable
+    is NOT invoked (guard never tripped by I/O under the mutex).
+
+    Relationship invariant: Module A (MarketChannelOnlineService.on_connect called
+    inside with _world_mutex) → Module B (seed_from_rest) must NOT call the REST
+    fetch callable when pre-cached data is available.
+    """
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    fetch_calls: list[str] = []
+
+    def recording_fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return _fake_book(token_id)
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=recording_fetch)
+
+    pre_captured = {"token-1": _fake_book("token-1")}
+    results = service.on_connect(
+        received_at="2026-06-04T10:00:00+00:00",
+        pre_captured_books=pre_captured,
+    )
+
+    # Seed must still populate the book cache and write the event row
+    assert len(results) == 1
+    assert cache.get("token-1") is not None
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'"
+        ).fetchone()[0]
+        == 1
+    )
+    # The REST callable must NOT have been invoked — I/O happened before the lock
+    assert fetch_calls == [], (
+        "fetch_orderbook was called inside on_connect with pre_captured_books — "
+        "this means I/O under the world mutex was NOT eliminated"
+    )
+
+
+def test_on_connect_pre_capture_failure_skips_seed_gracefully():
+    """Fail-closed per-token: when pre-capture fails for a token (pre_captured_books
+    contains no entry), seed_from_rest falls back to fetch_orderbook for that token.
+    If that also fails, the token is skipped gracefully — no crash, no exception
+    propagation, no WorldMutexIOViolation."""
+    from src.state.db import WorldMutexIOViolation
+
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    def always_failing_fetch(token_id: str) -> dict:
+        raise ConnectionError("simulated pre-fetch failure")
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=always_failing_fetch)
+
+    # Pass an empty pre_captured_books (token absent → fallback fetch → also fails)
+    results = service.on_connect(
+        received_at="2026-06-04T10:00:00+00:00",
+        pre_captured_books={},  # token-1 absent → fallback to fetch_orderbook
+    )
+
+    # Graceful: no exception, no crash, empty results (seed skipped for all tokens)
+    assert results == []
+    assert cache.get("token-1") is None
+    # No rows written — seed was skipped
+    assert (
+        conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    )
+
+
+def test_on_connect_pre_captured_books_none_uses_legacy_direct_fetch():
+    """Backwards-compatibility: when pre_captured_books is None (legacy callers),
+    seed_from_rest calls fetch_orderbook directly — the original behaviour is
+    preserved for callers that haven't adopted the pre-capture pattern."""
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    fetch_calls: list[str] = []
+
+    def recording_fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return _fake_book(token_id)
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=recording_fetch)
+
+    results = service.on_connect(received_at="2026-06-04T10:00:00+00:00")  # pre_captured_books=None
+
+    assert len(results) == 1
+    assert cache.get("token-1") is not None
+    assert fetch_calls == ["token-1"], "legacy direct fetch must still fire when pre_captured_books=None"
