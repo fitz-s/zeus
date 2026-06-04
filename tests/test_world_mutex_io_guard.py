@@ -106,19 +106,27 @@ def test_guard_flag_clears_after_exception_inside_lock():
 
 
 def test_held_flag_is_thread_local_to_the_holder_window_not_leaked():
-    """The held flag reflects the global lock state: while the holder thread is
-    inside the critical section, world_mutex_is_held() is True for any observer
-    (the I/O assertion runs on whatever thread attempts the I/O). Confirm a
-    second thread blocked on acquire does NOT see a false 'unheld' window."""
+    """THREAD-LOCAL SEMANTICS (2026-06-04 P1 fix): world_mutex_is_held() returns
+    True ONLY in the thread that acquired the mutex. An observer thread that has
+    NOT acquired the mutex sees False even while the holder is inside the critical
+    section. This is the correct property: background I/O threads are NOT
+    violating the "no I/O under the mutex" contract just because some OTHER thread
+    holds it.
+
+    This test was previously documenting the WRONG cross-thread behaviour (observer
+    saw True). After the thread-local fix the observer correctly sees False.
+    """
     _reset_guard()
     mutex = world_write_mutex()
-    observed_held_while_holder_inside: list[bool] = []
+    observer_saw_held: list[bool] = []
+    holder_saw_held: list[bool] = []
     holder_inside = threading.Event()
     release_holder = threading.Event()
 
     def _holder() -> None:
         mutex.acquire()
         try:
+            holder_saw_held.append(world_mutex_is_held())  # holder's own view: True
             holder_inside.set()
             release_holder.wait(timeout=2.0)
         finally:
@@ -127,10 +135,15 @@ def test_held_flag_is_thread_local_to_the_holder_window_not_leaked():
     t = threading.Thread(target=_holder, name="holder", daemon=True)
     t.start()
     assert holder_inside.wait(timeout=2.0)
-    observed_held_while_holder_inside.append(world_mutex_is_held())
+    # Observer thread (main) has NOT acquired the mutex → must see False
+    observer_saw_held.append(world_mutex_is_held())
     release_holder.set()
     t.join(timeout=2.0)
-    assert observed_held_while_holder_inside == [True]
+    assert holder_saw_held == [True], "holder must see its own acquisition as held"
+    assert observer_saw_held == [False], (
+        "observer thread must NOT see the holder's acquisition — thread-local "
+        "semantics: only the acquiring thread's held flag is True"
+    )
     assert world_mutex_is_held() is False
 
 
@@ -300,3 +313,81 @@ def test_polymarket_client_get_orderbook_snapshot_guard_not_raised_off_mutex():
     assert isinstance(result, dict)
     # Guard must not have fired — if it had, WorldMutexIOViolation would have
     # been raised before we reached _public_get.
+
+
+# ---------------------------------------------------------------------------
+# Thread-local semantics — background-thread I/O correctness
+# ---------------------------------------------------------------------------
+
+
+def test_background_thread_io_not_flagged_when_reactor_thread_holds_mutex():
+    """RELATIONSHIP TEST (Phase 1 / thread-local fix 2026-06-04): the false-positive
+    root cause of 283× advisory/2min in prod was the process-global held depth.
+    When Thread A (reactor/emit) holds the world mutex, Thread B (venue background
+    maintenance) called get_open_orders → assert_no_world_mutex_held_for_io →
+    world_mutex_is_held() returned True (reading Thread A's flag) → advisory fired
+    → WAL held → 2.9 GB bloat.
+
+    After the thread-local fix: Thread B's world_mutex_is_held() returns False
+    while Thread A holds the mutex. Background I/O is NOT a violation.
+
+    This test verifies the cross-thread isolation directly:
+    - Thread A holds the world mutex (reactor role)
+    - Thread B calls assert_no_world_mutex_held_for_io (venue maintenance role)
+    - Thread B must NOT raise WorldMutexIOViolation
+    """
+    _reset_guard()
+    mutex = world_write_mutex()
+    errors_in_background: list[Exception] = []
+    holder_inside = threading.Event()
+    background_done = threading.Event()
+    release_holder = threading.Event()
+
+    def _holder() -> None:
+        mutex.acquire()
+        try:
+            holder_inside.set()
+            release_holder.wait(timeout=2.0)
+        finally:
+            mutex.release()
+
+    def _background_io() -> None:
+        """Simulates venue background maintenance thread doing I/O."""
+        try:
+            holder_inside.wait(timeout=2.0)
+            # This is the guard call that was falsely raising in production.
+            # After thread-local fix it must be silent (the background thread
+            # does NOT hold the mutex).
+            assert_no_world_mutex_held_for_io("background.venue_maintenance_io")
+        except Exception as exc:
+            errors_in_background.append(exc)
+        finally:
+            background_done.set()
+
+    t_holder = threading.Thread(target=_holder, name="reactor", daemon=True)
+    t_bg = threading.Thread(target=_background_io, name="bg-maintenance", daemon=True)
+    t_holder.start()
+    t_bg.start()
+    assert background_done.wait(timeout=3.0), "background thread did not complete"
+    release_holder.set()
+    t_holder.join(timeout=2.0)
+    t_bg.join(timeout=2.0)
+
+    assert errors_in_background == [], (
+        f"Background thread raised unexpectedly (cross-thread false positive "
+        f"still present): {errors_in_background}"
+    )
+
+
+def test_same_thread_io_still_raises_with_thread_local_fix():
+    """Regression: the thread-local fix must NOT disable the guard for the
+    same-thread case. If the CALLING thread holds the mutex AND tries to do I/O,
+    WorldMutexIOViolation must still raise — this is the actual disease."""
+    _reset_guard()
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        with pytest.raises(WorldMutexIOViolation):
+            assert_no_world_mutex_held_for_io("same_thread.venue_call_under_mutex")
+    finally:
+        mutex.release()

@@ -1,3 +1,11 @@
+# Created: prior to 2026-04-26
+# Last reused or audited: 2026-06-04
+# Authority basis: Zeus DB schema + world_write_mutex CATEGORY ANTIBODY.
+#   2026-06-04 Phase 1: thread-local held depth (_GuardedWorldMutex) — eliminates
+#   cross-thread false positives that caused background venue I/O to trip the guard
+#   (283× advisory/2min in prod → WAL re-bloat). Phase 2: guard armed fatal (always
+#   raises, ZEUS_WORLD_MUTEX_IO_ADVISORY=1 to downgrade in emergency).
+#   Plan: architecture/world_mutex_io_offmutex_refactor_2026_06_04.md
 """Zeus database schema and connection management.
 
 All tables enforce the 4-timestamp constraint where applicable.
@@ -260,10 +268,18 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
 # make "blocking network/chain I/O while the world write lock is held"
 # STRUCTURALLY DETECTABLE: the mutex is wrapped so every acquire()/release()
 # (whether via world_write_lock, world_write_mutex().acquire(), or a bare
-# context-manager use) maintains a process-global held depth. The venue HTTP
-# client + on-chain RPC entrypoints assert that depth is zero before doing I/O
-# and raise WorldMutexIOViolation otherwise — converting a silent multi-hour
-# wedge into an immediate, located failure at the exact violating call site.
+# context-manager use) maintains a THREAD-LOCAL held depth. The venue HTTP
+# client + on-chain RPC entrypoints assert that THIS THREAD's depth is zero
+# before doing I/O and raise WorldMutexIOViolation otherwise — converting a
+# silent multi-hour wedge into an immediate, located failure at the exact
+# violating call site.
+#
+# CRITICAL: the held counter MUST be thread-local (not process-global). Using a
+# shared global would make background threads observing a DIFFERENT thread's
+# mutex acquisition falsely fire the guard — background I/O is NOT a violation.
+# The property we enforce is "this thread holds the mutex AND is about to do
+# blocking I/O", NOT "some thread holds the mutex". threading.local() provides
+# the correct per-thread isolation. (2026-06-04 P1 fix, commit: see git log.)
 
 
 class WorldMutexIOViolation(RuntimeError):
@@ -279,18 +295,26 @@ class WorldMutexIOViolation(RuntimeError):
 
 
 class _GuardedWorldMutex:
-    """A ``threading.Lock`` facade that tracks process-global held depth.
+    """A ``threading.Lock`` facade that tracks THREAD-LOCAL held depth.
 
     Wraps the real lock so that EVERY acquisition path — ``world_write_lock``
     (the BEGIN/COMMIT context manager), ``world_write_mutex().acquire()`` (the
     reactor / ingestor / emit direct-acquire sites), and ``with mutex:`` — feeds
-    one shared held counter with ZERO caller changes. The counter is the single
-    source of truth that ``assert_no_world_mutex_held_for_io`` reads.
+    one thread-local held counter with ZERO caller changes. The counter is the
+    single source of truth that ``assert_no_world_mutex_held_for_io`` reads.
 
-    The held counter is a simple integer guarded by the lock's own ownership:
-    only the holder mutates it, and the world mutex is non-reentrant, so the
-    count is 0 or 1 in practice. We model it as a depth (int) purely so a future
-    reentrant variant cannot silently corrupt the flag.
+    THREAD-LOCAL SEMANTICS (2026-06-04 P1 fix): the counter is stored in a
+    ``threading.local()`` so it reflects only the CALLING THREAD'S acquisitions.
+    A background thread doing venue I/O while a DIFFERENT thread holds the mutex
+    must NOT be flagged — that is correct concurrent operation. The property we
+    enforce is "this thread holds the world mutex AND is about to do blocking I/O",
+    which is the actual WAL-starvation condition. A shared global counter caused
+    background threads to observe a False-positive "held" flag from the reactor
+    thread's acquisition, generating spurious advisories and (when fatal) daemon
+    instability.
+
+    The held counter is a depth (not bool) so a future reentrant variant cannot
+    silently corrupt the flag; in practice it is 0 or 1 (non-reentrant lock).
     """
 
     __slots__ = ("_lock",)
@@ -301,16 +325,17 @@ class _GuardedWorldMutex:
     def acquire(self, *args: Any, **kwargs: Any) -> bool:
         acquired = self._lock.acquire(*args, **kwargs)
         if acquired:
-            global _WORLD_MUTEX_HELD_DEPTH
-            _WORLD_MUTEX_HELD_DEPTH += 1
+            _tls = _world_mutex_tls()
+            _tls.held_depth = getattr(_tls, "held_depth", 0) + 1
         return acquired
 
     def release(self) -> None:
-        global _WORLD_MUTEX_HELD_DEPTH
-        # Decrement BEFORE releasing the OS lock so the flag is already clear
-        # the instant another thread can observe an un-held mutex.
-        if _WORLD_MUTEX_HELD_DEPTH > 0:
-            _WORLD_MUTEX_HELD_DEPTH -= 1
+        # Decrement the thread-local depth BEFORE releasing the OS lock so the
+        # flag is already clear the instant another thread can re-acquire.
+        _tls = _world_mutex_tls()
+        d = getattr(_tls, "held_depth", 0)
+        if d > 0:
+            _tls.held_depth = d - 1
         self._lock.release()
 
     def locked(self) -> bool:
@@ -323,9 +348,16 @@ class _GuardedWorldMutex:
         self.release()
 
 
-# Process-global "is the world write mutex held right now" depth. Mutated only
-# by _GuardedWorldMutex under the lock's ownership (see class docstring).
-_WORLD_MUTEX_HELD_DEPTH: int = 0
+# Thread-local storage for the world mutex held depth.
+# Each thread tracks its own depth independently — see _GuardedWorldMutex
+# docstring for the rationale (thread-local vs process-global).
+_WORLD_MUTEX_TLS = threading.local()
+
+
+def _world_mutex_tls() -> threading.local:
+    """Return the thread-local storage for the world mutex held depth."""
+    return _WORLD_MUTEX_TLS
+
 
 # Operations already warned about under the advisory (prod) posture of
 # ``assert_no_world_mutex_held_for_io`` — warn once per operation, not per call,
@@ -336,12 +368,17 @@ _WORLD_DB_WRITE_MUTEX = _GuardedWorldMutex()
 
 
 def world_mutex_is_held() -> bool:
-    """True iff the process-global zeus-world.db write mutex is currently held.
+    """True iff THIS THREAD currently holds the zeus-world.db write mutex.
+
+    Returns True only when the calling thread has acquired the mutex and not
+    yet released it. A background thread observing this function while a DIFFERENT
+    thread holds the mutex correctly gets False — that thread's I/O is not
+    a violation.
 
     Read by ``assert_no_world_mutex_held_for_io`` and by relationship tests that
     pin the "no I/O under the world write lock" invariant.
     """
-    return _WORLD_MUTEX_HELD_DEPTH > 0
+    return getattr(_world_mutex_tls(), "held_depth", 0) > 0
 
 
 def assert_no_world_mutex_held_for_io(operation: str) -> None:
@@ -356,40 +393,34 @@ def assert_no_world_mutex_held_for_io(operation: str) -> None:
     ``"venue.get_trades"``, ``"onchain.eth_call"``); it appears in the error so
     the wedge's root call site is identified at the moment of the violation.
 
-    DEPLOYMENT POSTURE (2026-06-04, plan
-    architecture/world_mutex_io_offmutex_refactor_2026_06_04.md): FATAL in
-    CI/tests (under pytest) and when armed via ``ZEUS_WORLD_MUTEX_IO_FATAL=1``;
-    ADVISORY (warn-once-per-operation) in the live daemon otherwise. Flipping a
-    brand-new strict assertion to fatal in production while >0 pre-existing
-    I/O-under-mutex sites remain turns the daemon into a guard-raise storm AND
-    leaks the open write txn the raise unwinds (uncommitted BEGIN → the WAL
-    cannot checkpoint → UNBOUNDED bloat), strictly worse than the bounded
-    slow-wedge. The antibody keeps full value: any NEW instance fails CI (tests
-    run under pytest = fatal) and every live violation is logged once for the
-    off-mutex refactor. Arm prod-fatal only after the Phase-2 audit proves zero
-    remaining sites.
+    DEPLOYMENT POSTURE (Phase 2 armed 2026-06-04): ALWAYS FATAL.
+    The thread-local held-depth fix (same commit) eliminated all cross-thread
+    false positives, so the only remaining violations are genuine same-thread
+    I/O-under-mutex sites. With zero confirmed remaining sites this is safe to
+    arm unconditionally — any new violation raises immediately, named, at the
+    exact call site, preventing WAL-starvation regression permanently.
+
+    To temporarily downgrade to advisory in an emergency (not recommended):
+    set ``ZEUS_WORLD_MUTEX_IO_ADVISORY=1`` in the daemon environment.
     """
     if not world_mutex_is_held():
         return
-    _fatal = bool(os.environ.get("PYTEST_CURRENT_TEST")) or (
-        os.environ.get("ZEUS_WORLD_MUTEX_IO_FATAL") == "1"
+    if os.environ.get("ZEUS_WORLD_MUTEX_IO_ADVISORY") == "1":
+        if operation not in _WORLD_MUTEX_IO_ADVISED:
+            _WORLD_MUTEX_IO_ADVISED.add(operation)
+            logging.getLogger(__name__).warning(
+                "WORLD_MUTEX_IO_ADVISORY: blocking I/O %r attempted under the "
+                "world write mutex. Set ZEUS_WORLD_MUTEX_IO_ADVISORY=1 to "
+                "suppress; remove to restore fatal enforcement.",
+                operation,
+            )
+        return
+    raise WorldMutexIOViolation(
+        f"blocking I/O {operation!r} attempted while the zeus-world.db write "
+        f"mutex is held — this serializes every world write behind the I/O "
+        f"and wedges the daemon (WAL-lock starvation). The world write lock "
+        f"MUST be released before any venue/on-chain call. See db.world_write_lock."
     )
-    if _fatal:
-        raise WorldMutexIOViolation(
-            f"blocking I/O {operation!r} attempted while the zeus-world.db write "
-            f"mutex is held — this serializes every world write behind the I/O "
-            f"and wedges the daemon (WAL-lock starvation). The world write lock "
-            f"MUST be released before any venue/on-chain call. See db.world_write_lock."
-        )
-    if operation not in _WORLD_MUTEX_IO_ADVISED:
-        _WORLD_MUTEX_IO_ADVISED.add(operation)
-        logging.getLogger(__name__).warning(
-            "WORLD_MUTEX_IO_ADVISORY: blocking I/O %r attempted under the world "
-            "write mutex (pre-existing site pending off-mutex refactor). Advisory "
-            "in prod; fatal under pytest / ZEUS_WORLD_MUTEX_IO_FATAL=1. See "
-            "db.world_write_lock + architecture/world_mutex_io_offmutex_refactor_2026_06_04.md.",
-            operation,
-        )
 
 
 def world_write_mutex() -> "_GuardedWorldMutex":
