@@ -42,6 +42,7 @@ test_trust_policy:
     tests/engine/test_executable_snapshot_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/engine/test_cost_basis_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/test_mainstream_agreement_gate.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_bias_family_unify_d2.py: {created: "2026-06-03", last_used: "2026-06-03", note: "D2 bias-family entry/exit unify shadow flag — RT: flag-OFF byte-identity (no DB read), flag-ON edli_per_city_v1 resolves (legacy ft 0-row miss proven), entry/exit same-family+same-shift cross-module invariant"}
     # PR #380 honest-q + settlement-unit deployment antibodies (2026-06-03)
     tests/test_settlement_unit_trigger_deployment_2026_06_03.py: {created: "2026-06-03", last_used: "2026-06-03", note: "deployment RT: settlement_unit VERIFIED triggers on EXISTING DB via migration"}
     tests/test_d7_rolling_edli_bias.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: D-7 rolling bias producer — causality, unit, thin-n, idempotency"}
@@ -3395,3 +3396,20 @@ test_metadata:
       (c) flag ON + no model row = plain fallback + WARNING logged.
     created: 2026-05-25
     last_reused_or_audited: 2026-05-25
+
+  tests/test_bias_family_unify_d2.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/operations/EXEC_EXIT_AUDIT_2026-06-02.md
+    notes: >
+      Relationship tests for the D2 bias-family entry/exit unify shadow flag
+      (feature_flags.exit_bias_family_unify_enabled, default OFF). Cross-module invariants:
+      (a) flag OFF = both resolvers return None and do NO bias-model read (byte-identical to
+      pre-fix); (b) flag ON = both resolvers resolve the populated edli_per_city_v1 family
+      (the SAME DB returns None under the legacy full_transport_v1 + month=0 + computed
+      lead_bucket read shape — 0-row miss proven); (c) entry and exit resolve the SAME family
+      (event_reactor_adapter._EDLI_BIAS_FAMILY) and apply the SAME native-unit bias shift,
+      so EXIT belief matches ENTRY belief (A4 lockstep: bias-shift + identity-Platt).
+    created: 2026-06-03
+    last_reused_or_audited: 2026-06-03

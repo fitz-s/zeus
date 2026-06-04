@@ -1,9 +1,12 @@
 # Created: prior
-# Last reused/audited: 2026-05-23
+# Last reused/audited: 2026-06-03
 # Authority basis: phase 1K live decision snapshot causality gate
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 #   P0-3 (2026-05-23): period_extrema guard before remaining_member_extrema_for_day0 call.
 #   P0-D (2026-05-23): shadow sanity telemetry for non-day0 strategies.
+#   D2 bias-family unify (2026-06-03): _resolve_unified_entry_bias_native + flag-gated
+#     bias-shift + identity-Platt on the FT entry sites. Authority basis: D2 bias-family
+#     unify / wiring verdict 2026-06-03.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
 
 Contains ALL business logic for edge detection. Doesn't know about scheduling,
@@ -3293,6 +3296,73 @@ def _layer7_dedup_fires(conn, portfolio: "PortfolioState", token_id: str) -> boo
     return has_same_token_open(portfolio, token_id)
 
 
+def _resolve_unified_entry_bias_native(
+    conn,
+    city,
+    target_date: str,
+    metric_str: str,
+) -> "float | None":
+    """D2 bias-family unify (2026-06-03): cycle-evaluator analogue of the LIVE EDLI
+    reactor entry bias correction (``event_reactor_adapter._maybe_apply_edli_bias_correction``)
+    and ``monitor_refresh._resolve_unified_exit_bias_native``.
+
+    Returns the native-unit per-city bias SHIFT to subtract from member extrema BEFORE p_raw,
+    or None. Flag-gated by ``feature_flags.exit_bias_family_unify_enabled`` (default OFF →
+    None → byte-identical to today). When ON, reads the SAME populated VERIFIED family the
+    reactor entry uses (``event_reactor_adapter._EDLI_BIAS_FAMILY`` = 'edli_per_city_v1')
+    with the reactor's EXACT read shape (month=target_month, target_month=target_month,
+    authority='VERIFIED', lead_bucket=None) — the legacy ft read shape (month=0,
+    lead_bucket=computed) 0-row-missed the stored lead_bucket='LEGACY_POOLED' rows.
+
+    A4 lockstep: bias-SHIFT only (NO residual widening). The caller MUST apply identity-Platt
+    on the corrected domain (Platt models were fit on the UNCORRECTED p_raw domain). FAIL-CLOSED:
+    missing flag/config/row/field or any error → None (caller uses today's plain-p_raw + real
+    Platt path). Mirrors monitor_refresh._resolve_unified_exit_bias_native exactly so entry and
+    exit share ONE treatment. Authority: D2 bias-family unify / wiring verdict 2026-06-03.
+    """
+    try:
+        if not bool(settings["feature_flags"].get("exit_bias_family_unify_enabled", False)):
+            return None
+        from src.engine.event_reactor_adapter import _EDLI_BIAS_FAMILY  # noqa: PLC0415
+        try:
+            cfg = entry_forecast_config()
+            track = track_for_metric(cfg, metric_str)
+            live_data_version = data_version_for_track(track)
+        except Exception:
+            return None
+        season = season_from_date(str(target_date), lat=city.lat)
+        _tmonth = int(str(target_date)[5:7])
+        row = _read_bias_model_for_entry(
+            conn,
+            city=city.name,
+            season=season,
+            metric=metric_str,
+            live_data_version=live_data_version,
+            month=_tmonth,
+            target_month=_tmonth,
+            authority="VERIFIED",
+            error_model_family=_EDLI_BIAS_FAMILY,
+            lead_bucket=None,
+        )
+        if row is None:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "exit_bias_family_unify entry: flag ON but no VERIFIED %s row for "
+                "city=%r season=%r metric=%r live_data_version=%r month=%r — plain p_raw",
+                _EDLI_BIAS_FAMILY, city.name, season, metric_str, live_data_version, _tmonth,
+            )
+            return None
+        keys = set(row.keys())
+        eff = row["effective_bias_c"] if "effective_bias_c" in keys else None
+        wl = row["weight_live"] if "weight_live" in keys else 0.0
+        if eff is None or float(wl or 0.0) <= 0.0:
+            return None
+        unit = getattr(city, "settlement_unit", "C")
+        return float(eff) * 1.8 if unit == "F" else float(eff)
+    except Exception:  # fail-closed: never break the entry decision path
+        return None
+
+
 def _resolve_ft_error_model_for_entry(
     conn,
     city,
@@ -3410,6 +3480,11 @@ def evaluate_candidate(
     is_day0_mode = is_settlement_day_dispatch(candidate)
     # T4 F4: stash for deferred Day0 nowcast write (populated inside is_day0_mode block).
     _nowcast_write_params: "dict | None" = None
+    # D2 bias-family unify (2026-06-03): set True when the unified exit/entry bias SHIFT
+    # was applied on the period_extrema/ens FT sites (flag exit_bias_family_unify_enabled).
+    # When True, the calibration step below uses identity-Platt (A4 lockstep) so this
+    # entry path's belief matches the EDLI reactor entry belief. Default False → unchanged.
+    _unified_bias_applied = False
     selected_method = (
         EntryMethod.DAY0_OBSERVATION.value
         if is_day0_mode
@@ -4131,7 +4206,22 @@ def evaluate_candidate(
                 conn, city, target_date, temperature_metric.temperature_metric,
                 lead_hours=lead_days * 24.0,
             )
-            if _ft_model is not None:
+            # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON;
+            # takes precedence over the legacy ft model. Identity-Platt set downstream.
+            _unified_bias_native = _resolve_unified_entry_bias_native(
+                conn, city, target_date, temperature_metric.temperature_metric,
+            )
+            if _unified_bias_native is not None:
+                member_extrema = member_extrema - float(_unified_bias_native)
+                p_raw = p_raw_vector_from_maxes(
+                    member_extrema,
+                    city,
+                    settlement_semantics,
+                    bins,
+                    n_mc=ensemble_n_mc(),
+                )
+                _unified_bias_applied = True
+            elif _ft_model is not None:
                 p_raw = _p_raw_vector_with_error_model(
                     member_extrema,
                     _ft_model,
@@ -4161,6 +4251,8 @@ def evaluate_candidate(
                 "period_extrema_members_adapter",
                 "mc_instrument_noise",
             ]
+            if _unified_bias_applied:
+                entry_validations.append("exit_bias_family_unify")
             # P0 follow-up §2: surface the legacy-NULL-passthrough record (and any
             # other extrema-authority validation tokens) the bundle layer attached,
             # so the passthrough is auditable in the decision's applied_validations.
@@ -4177,7 +4269,22 @@ def evaluate_candidate(
                 conn, city, target_date, temperature_metric.temperature_metric,
                 lead_hours=lead_days * 24.0,
             )
-            if _ft_model_ens is not None:
+            # D2 unify: bias-SHIFT only (no residual widening) when the new flag is ON.
+            _unified_bias_native = _resolve_unified_entry_bias_native(
+                conn, city, target_date, temperature_metric.temperature_metric,
+            )
+            if _unified_bias_native is not None:
+                _shifted = np.asarray(ens.member_extrema, dtype=float) - float(_unified_bias_native)
+                p_raw = p_raw_vector_from_maxes(
+                    _shifted,
+                    city,
+                    settlement_semantics,
+                    bins,
+                    n_mc=ensemble_n_mc(),
+                )
+                _unified_bias_applied = True
+                analysis_member_extrema = _shifted
+            elif _ft_model_ens is not None:
                 p_raw = _p_raw_vector_with_error_model(
                     ens.member_extrema,
                     _ft_model_ens,
@@ -4188,11 +4295,14 @@ def evaluate_candidate(
                     n_mc=ensemble_n_mc(),
                     rng=None,
                 )
+                analysis_member_extrema = ens.member_extrema
             else:
                 p_raw = ens.p_raw_vector(bins, n_mc=ensemble_n_mc())
+                analysis_member_extrema = ens.member_extrema
             ensemble_spread = ens.spread()
-            analysis_member_extrema = ens.member_extrema
             entry_validations = ["ens_fetch", "mc_instrument_noise"]
+            if _unified_bias_applied:
+                entry_validations.append("exit_bias_family_unify")
         day0_forecast_context = None
         lead_days_for_calibration = lead_days
 
@@ -4537,7 +4647,18 @@ def evaluate_candidate(
         horizon_profile=_phase2_horizon_profile,
     )
 
-    if cal is not None:
+    if _unified_bias_applied:
+        # D2 unify A4 lockstep: member maxes were bias-SHIFTED above, so the existing Platt
+        # models (fit on the UNCORRECTED p_raw domain) would mis-calibrate the shifted domain.
+        # Use identity Platt (p_cal = normalized p_raw) — EXACT mirror of the EDLI reactor
+        # entry path (event_reactor_adapter._snapshot_p_cal). No Platt row is consumed, so the
+        # market-fusion authority gate is not applicable to Platt rows (same as cal-None path).
+        _authority_verified = True
+        _arr = np.asarray(p_raw, dtype=float)
+        _tot = float(_arr.sum())
+        p_cal = (_arr / _tot) if _tot > 0.0 else _arr
+        entry_validations.extend(["identity_platt_bias_unify", "normalization"])
+    elif cal is not None:
         p_cal = calibrate_and_normalize(
             p_raw,
             cal,
