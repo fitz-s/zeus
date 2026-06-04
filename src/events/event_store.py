@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 from src.events.opportunity_event import OpportunityEvent
@@ -79,7 +79,28 @@ class EventStore:
         return inserted
 
     def fetch_pending(self, *, decision_time: str, limit: int = 100) -> list[OpportunityEvent]:
-        """Fetch pending events in deterministic replay/inference order."""
+        """Fetch pending events in deterministic replay/inference order.
+
+        STEP 3 timeliness fix (consolidated timeliness/tradeability design):
+
+        (a) **Claim floor** — a past-target event (its whole target LOCAL day
+            already settled at ``decision_time``) is NEVER returned. Enforced by
+            the canonical ``is_forecast_only_admissible`` cheap predicate as a
+            Python post-filter (timezone resolution is per-city Python, not SQL).
+            This is the conservative lower bound of the reactor's full phase
+            gate, so it never starves a candidate the reactor would admit.
+
+        (b) **Freshest-target-first ordering** — within each urgency tier the
+            rows are sorted by ``target_date DESC`` then ``available_at DESC`` so
+            the reactor reaches fresh candidates before its per-cycle budget is
+            exhausted, instead of draining the budget on the oldest (often
+            already-settled) events first.
+
+        Non-FORECAST_SNAPSHOT_READY events carry no per-city forecast target and
+        are NOT phase-filtered here (market-channel/day0 events have their own
+        scope); only events that expose a city+target_date are subject to the
+        timeliness floor.
+        """
 
         self._require_world_event_tables()
         parsed_decision_time = _parse_utc(decision_time)
@@ -119,7 +140,14 @@ class EventStore:
                 THEN 2
                 ELSE 1
               END ASC,
-              e.priority DESC, e.available_at ASC, e.received_at ASC, e.event_id ASC
+              e.priority DESC,
+              -- FRESHEST-TARGET-FIRST: reach fresh candidates before the per-cycle
+              -- budget is spent on stale ones. NULL target_date (non-forecast
+              -- events) sorts last within its tier (json_extract → NULL → last
+              -- under DESC in SQLite, which orders NULLs first for ASC / last for
+              -- DESC). available_at DESC breaks ties freshest-first.
+              json_extract(e.payload_json, '$.target_date') DESC,
+              e.available_at DESC, e.received_at DESC, e.event_id ASC
             LIMIT ?
             """,
             (
@@ -128,10 +156,81 @@ class EventStore:
                 parsed_decision_time.isoformat(),
                 parsed_decision_time.isoformat(),
                 parsed_decision_time.isoformat(),
-                limit,
+                # Fetch extra rows so the post-filter can drop stale events
+                # without under-filling the caller's requested limit.
+                max(limit * 4, limit + 50),
             ),
         ).fetchall()
-        return [_event_from_row(row) for row in rows]
+
+        events = [_event_from_row(row) for row in rows]
+        admissible = [e for e in events if self._is_timely(e, parsed_decision_time)]
+        return admissible[:limit]
+
+    def _is_timely(self, event: OpportunityEvent, decision_time_utc: datetime) -> bool:
+        """Claim-floor timeliness gate (STEP 3a).
+
+        Rejects a FORECAST_SNAPSHOT_READY event whose target LOCAL day is
+        ALREADY STRICTLY PAST at ``decision_time`` — i.e. the event refers to a
+        market that has already entered POST_TRADING/settled. This is the bug
+        the operator reported: the reactor burned its per-cycle budget on
+        already-closed June-4 markets while the June-5 decision ran, never
+        reaching fresh candidates.
+
+        Scope deliberately STRICTLY-PAST, not same-day: a same-day
+        (SETTLEMENT_DAY) FORECAST_SNAPSHOT_READY event is still allowed through
+        so the reactor's own bind-time gate
+        (``EVENT_BOUND_MARKET_PHASE_CLOSED``) rejects-and-CONSUMES it cleanly.
+        Dropping same-day events here would strand them as permanently-pending
+        (never returned ⇒ never claimed ⇒ never marked processed ⇒ leak). The
+        strictly-past floor only removes events that can neither produce a
+        receipt nor need the reactor's settlement-day handling — pure budget
+        waste.
+
+        Strictly-past is computed via the canonical settlement geometry: the
+        target local day is entirely in the past iff ``decision_time`` is at or
+        after local-midnight of the day AFTER ``target_local_date`` (the
+        SETTLEMENT_DAY-entry instant of ``target_date + 1``). tz arithmetic,
+        never lexicographic string compare.
+
+        Events with no city+target_date (market-channel/day0) are not
+        phase-filtered here and pass through. Fail-closed on an unresolvable
+        city/target → reject (cannot be timely-verified).
+        """
+        if event.event_type != "FORECAST_SNAPSHOT_READY":
+            return True
+        try:
+            payload = json.loads(event.payload_json)
+        except (ValueError, TypeError):
+            return False
+        city = payload.get("city")
+        target_date = payload.get("target_date")
+        if not city or not target_date:
+            return False
+
+        from datetime import timedelta as _timedelta
+
+        from src.config import runtime_cities_by_name
+        from src.strategy.market_phase import settlement_day_entry_utc
+
+        city_config = runtime_cities_by_name().get(city)
+        tz = getattr(city_config, "timezone", None) if city_config is not None else None
+        if not tz:
+            return False
+        try:
+            target_local_date = date.fromisoformat(str(target_date))
+        except ValueError:
+            return False
+
+        try:
+            day_after_entry = settlement_day_entry_utc(
+                target_local_date=target_local_date + _timedelta(days=1),
+                city_timezone=tz,
+            )
+        except Exception:
+            return False
+
+        # Strictly past ⇒ decision is at/after local-midnight of the next day.
+        return decision_time_utc < day_after_entry
 
     def replay_events(self) -> list[OpportunityEvent]:
         """Replay all event rows in deterministic event order."""
