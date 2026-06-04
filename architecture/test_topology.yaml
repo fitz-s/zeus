@@ -33,6 +33,7 @@ test_trust_policy:
     tests/test_edli_market_channel_refresh_authority.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P1-1: scan_authority=VERIFIED contract; trigger reason separate (relationship test)"}
     tests/test_market_events_persistence_observability.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P2-2: market_events persistence failure surfaces to scheduler health (relationship test)"}
     tests/test_calibration_manager_w0.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_calibration_coverage_guard.py: {created: "2026-06-03", last_used: "2026-06-03", note: "#90: loud bias+Platt calibration-coverage antibody — warn(shadow)/fail-closed(armed); relationship test over real read_bias_model + boot-wrapper severity"}
     tests/test_migration_converge_settlement_store.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_cert_dual_chain.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_intake_phase_filter.py: {created: "2026-06-03", last_used: "2026-06-03"}

@@ -890,6 +890,51 @@ def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
     )
 
 
+def _assert_calibration_coverage_contract(edli_cfg: dict) -> None:
+    """Antibody #90: loud per-city bias+Platt calibration-coverage guard.
+
+    For EVERY live runtime city × metric, assert the current-season bias row
+    (VERIFIED edli_per_city_v1) AND a non-borrowed/non-identity-by-starvation
+    Platt exist.  Any city that would silently fall to RAW bias / borrow a
+    foreign-cluster Platt / fall to identity is enumerated LOUDLY.
+
+    SEVERITY (gated solely on real_order_submit_enabled):
+      * SHADOW (real_order_submit_enabled=False): WARN-only, never raises, never
+        starves the reactor — today's behaviour is byte-identical except new
+        warning log lines.
+      * ARMED (real_order_submit_enabled=True): raises CalibrationCoverageError
+        (fail-closed — arming with silent partial calibration is forbidden).
+
+    Read-only (SELECT on the world DB).  Wrapped so an UNEXPECTED import/probe
+    error never blocks the SHADOW daemon (fail-open on infra error in shadow);
+    in ARMED mode an unexpected error is re-raised (fail-closed) rather than
+    masking a coverage check.
+    """
+    armed = bool(edli_cfg.get("real_order_submit_enabled", False))
+    try:
+        from src.observability.calibration_coverage_guard import (
+            assert_calibration_coverage,
+        )
+    except Exception as exc:  # pragma: no cover — import wiring
+        if armed:
+            raise
+        logger.warning(
+            "calibration-coverage guard import failed (shadow, ignored): %s", exc
+        )
+        return
+    try:
+        assert_calibration_coverage(armed=armed)
+    except Exception:
+        # CalibrationCoverageError (armed) and any unexpected probe error must
+        # surface when armed; in shadow only the WARN logging matters and the
+        # guard itself never raises for gaps — re-raise only when armed.
+        if armed:
+            raise
+        logger.warning(
+            "calibration-coverage guard probe error (shadow, ignored)", exc_info=True
+        )
+
+
 def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
     mode = _live_execution_mode(edli_cfg)
     _assert_edli_live_scope(edli_cfg)
@@ -5914,6 +5959,7 @@ def main():
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
     _assert_emos_ci_license_seasonal_coverage(edli_cfg)
+    _assert_calibration_coverage_contract(edli_cfg)
     if live_execution_mode == "legacy_cron":
         scheduler.add_job(
             lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",
