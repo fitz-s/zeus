@@ -1,3 +1,5 @@
+# Last reused or audited: 2026-06-04
+# Authority basis: Operator GOAL 2026-06-04 — Kelly size=0 observability (zero-receipt root-cause)
 """No-submit money-path adapter contracts for EDLI redemption."""
 
 from __future__ import annotations
@@ -27,6 +29,19 @@ class KellyProof:
     execution_price: ExecutionPrice
     size_usd: float
     passed: bool
+    # Optional diagnostic fields (all default None — existing constructors unaffected).
+    # Populated by evaluate_kelly to pinpoint why size collapsed to 0.
+    effective_multiplier: float | None = None
+    sizing_bankroll: float | None = None
+    eff_corr_bankroll: float | None = None
+    eff_raw_bankroll: float | None = None
+    corr_committed_usd: float | None = None
+    raw_committed_usd: float | None = None
+    ci_width: float | None = None
+    lead_days: float | None = None
+    portfolio_heat: float | None = None
+    single_cap_usd: float | None = None
+    binding_constraint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -206,17 +221,92 @@ def evaluate_kelly(
     # a first (uncommitted) bet, so this hard clamp against the FULL bankroll is
     # the second belt. Only ever shrinks (never amplifies, INV-K8). Applied only
     # on the portfolio-aware path; unwired callers keep exact single-Kelly.
+    _single_cap_usd: float | None = None
     if sizing_context is not None and sizing_context.has_portfolio_context:
         max_single_pct = float(sizing_defaults()["max_single_position_pct"])
-        single_cap_usd = max_single_pct * float(sizing_context.bankroll_usd)
-        if size_usd > single_cap_usd:
-            size_usd = single_cap_usd
+        _single_cap_usd = max_single_pct * float(sizing_context.bankroll_usd)
+        if size_usd > _single_cap_usd:
+            size_usd = _single_cap_usd
+
+    # ── Diagnostic: compute binding_constraint (purely observational) ────────
+    # Determines WHICH limit drove size to 0 (or which path produced the result).
+    # Does NOT alter size_usd or passed.
+    _binding: str | None = None
+    if sizing_context is not None:
+        _ci_w = float(sizing_context.ci_width)
+        _lead = float(sizing_context.lead_days)
+    else:
+        _ci_w = None
+        _lead = None
+
+    # Capture intermediate bankrolls for the non-portfolio path too.
+    _eff_corr_diag: float | None = None
+    _eff_raw_diag: float | None = None
+    _corr_committed_diag: float | None = None
+    _raw_committed_diag: float | None = None
+
+    if sizing_context is not None and sizing_context.has_portfolio_context:
+        _corr_committed_diag = float(sizing_context.corr_committed_usd)
+        _raw_committed_diag = float(sizing_context.raw_committed_usd)
+        # _eff_corr / _eff_raw were already computed above.
+        _eff_corr_diag = float(_eff_corr)
+        _eff_raw_diag = float(_eff_raw)
+
+    # Determine binding_constraint label.
+    if size_usd == 0.0:
+        # Check if zero-edge: would kelly_size on the UNCONSTRAINED full bankroll
+        # also be 0? (i.e., edge itself is non-positive, not a budget limit)
+        _unconstrained = kelly_size(
+            float(p_posterior),
+            execution_price,
+            float(bankroll_usd),
+            kelly_mult=float(effective_multiplier),
+        )
+        if _unconstrained <= 0.0:
+            _binding = "zero_edge"
+        elif (
+            sizing_context is not None
+            and sizing_context.has_portfolio_context
+            and _eff_corr_diag is not None
+            and _eff_raw_diag is not None
+        ):
+            if _eff_corr_diag <= _eff_raw_diag:
+                _binding = "corr_budget"
+            else:
+                _binding = "raw_heat_budget"
+        else:
+            # Non-portfolio path collapsed — should not normally happen if edge>0.
+            _binding = "sized_ok" if size_usd > 0.0 else "zero_edge"
+    elif (
+        _single_cap_usd is not None
+        and size_usd == _single_cap_usd
+        and size_usd < kelly_size(
+            float(p_posterior),
+            execution_price,
+            float(sizing_bankroll),
+            kelly_mult=float(effective_multiplier),
+        )
+    ):
+        _binding = "single_cap"
+    else:
+        _binding = "sized_ok"
 
     return KellyProof(
         kelly_decision_id=kelly_decision_id,
         execution_price=execution_price,
         size_usd=size_usd,
         passed=size_usd > 0,
+        effective_multiplier=float(effective_multiplier),
+        sizing_bankroll=float(sizing_bankroll),
+        eff_corr_bankroll=_eff_corr_diag,
+        eff_raw_bankroll=_eff_raw_diag,
+        corr_committed_usd=_corr_committed_diag,
+        raw_committed_usd=_raw_committed_diag,
+        ci_width=_ci_w,
+        lead_days=_lead,
+        portfolio_heat=float(portfolio_heat),
+        single_cap_usd=_single_cap_usd,
+        binding_constraint=_binding,
     )
 
 

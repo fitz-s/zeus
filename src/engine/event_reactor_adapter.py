@@ -1,3 +1,5 @@
+# Last reused or audited: 2026-06-04
+# Authority basis: Operator GOAL 2026-06-04 — Kelly size=0 observability (zero-receipt root-cause)
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -994,11 +996,24 @@ def build_event_bound_no_submit_receipt(
             family_complete=True,
         )
     if not kelly.passed:
+        _kr_reason = (
+            f"KELLY_REJECTED"
+            f":{kelly.binding_constraint or 'unknown'}"
+            f":size={kelly.size_usd:.4f}"
+            f":sb={kelly.sizing_bankroll}"
+            f":effcorr={kelly.eff_corr_bankroll}"
+            f":effraw={kelly.eff_raw_bankroll}"
+            f":corrcom={kelly.corr_committed_usd}"
+            f":rawcom={kelly.raw_committed_usd}"
+            f":mult={kelly.effective_multiplier}"
+            f":ci={kelly.ci_width}"
+            f":lead={kelly.lead_days}"
+        )
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason="KELLY_REJECTED",
+            reason=_kr_reason,
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
