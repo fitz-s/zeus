@@ -38,17 +38,38 @@ def test_qlcb_provenance_rejects_unknown_calibration_source():
         )
 
 
-def test_qlcb_provenance_rejects_out_of_range_q_lcb():
-    """q_lcb is a probability lower bound; it must live in [0, 1]. A 1.4 is a
-    domain error, not a silently-clamped value."""
+def test_qlcb_provenance_clamps_out_of_range_q_lcb_and_flags_it():
+    """q_lcb is a probability lower bound; it must live in [0, 1]. A FINITE
+    out-of-range value (e.g. a deep-OTM bin's ci_lower+cost < 0, or a 1.4) is the
+    legitimate tail legacy tolerated — it is CLAMPED into range with clamped=True,
+    NOT raised. (Raising propagated to the family catch and collapsed the WHOLE
+    family even with the K3 shadow flag OFF — the flag-OFF production regression
+    this fix removes.) A non-finite q_lcb (NaN/inf) is still a hard error."""
     from src.calibration.qlcb_provenance import QlcbProvenance
 
+    above = QlcbProvenance(
+        q_lcb=1.4,
+        calibration_source="FORECAST_BOOTSTRAP",
+        n_settlement_observations=None,
+        coverage_ratio=None,
+    )
+    assert above.q_lcb == pytest.approx(1.0)
+    assert above.clamped is True
+
+    below = QlcbProvenance(
+        q_lcb=-0.05,
+        calibration_source="FORECAST_BOOTSTRAP",
+        n_settlement_observations=None,
+        coverage_ratio=None,
+    )
+    assert below.q_lcb == pytest.approx(0.0)
+    assert below.clamped is True
+
+    # A non-finite value cannot be rescued by a clamp — still raises.
     with pytest.raises(ValueError):
         QlcbProvenance(
-            q_lcb=1.4,
+            q_lcb=float("nan"),
             calibration_source="FORECAST_BOOTSTRAP",
-            n_settlement_observations=None,
-            coverage_ratio=None,
         )
 
 

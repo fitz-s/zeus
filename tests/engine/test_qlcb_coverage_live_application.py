@@ -142,3 +142,40 @@ def test_flag_on_insufficient_data_keeps_lcb(tmp_path, monkeypatch):
     )
     assert lcb[("cond0", "buy_no")].q_lcb == pytest.approx(0.90)  # unchanged
     assert lcb[("cond0", "buy_no")].calibration_source == "FORECAST_BOOTSTRAP"
+
+
+def test_deep_otm_bin_forecast_bootstrap_write_does_not_collapse_family():
+    """K3 family-formation regression (adversarial-verify finding #1, CRITICAL).
+
+    The FORECAST_BOOTSTRAP restore at adapter:3402 writes
+    ``float(hyp.ci_lower) + cost`` into the typed lcb_by_direction. For a deep-OTM
+    bin (p_posterior~0) the edge CI lower bound is negative, so the restored q_lcb
+    is NEGATIVE. Pre-fix, QlcbProvenance raised ValueError on the out-of-range value;
+    that propagated to the family catch (adapter:732) -> LIVE_INFERENCE_INPUTS_MISSING
+    and collapsed the WHOLE family even with the K3 shadow flag OFF (the unconditional
+    type, not the flag). Legacy (origin/main, plain dict) tolerated it: the bin lost
+    selection, the family still formed.
+
+    This drives the SAME write helper the family scan uses with a negative deep-tail
+    value and asserts: (1) it does NOT raise (the family still forms), and (2) the
+    value is clamped to 0.0 with clamped=True — decision-equivalent to the legacy raw
+    negative (q_lcb=0.0 and q_lcb<0 both yield a negative robust trade score, so the
+    bin loses selection identically). Flag is irrelevant — the type is unconditional.
+    """
+    from src.calibration.qlcb_provenance import (
+        QlcbByDirection,
+        _qlcb_float,
+        _set_qlcb_provenance,
+    )
+
+    lcb = QlcbByDirection()
+    # ci_lower=-0.07 (deep-OTM edge CI), cost=0.02 -> restored q_lcb = -0.05.
+    deep_tail_q_lcb = -0.07 + 0.02
+    # Must NOT raise — pre-fix this raised ValueError -> LIVE_INFERENCE_INPUTS_MISSING.
+    _set_qlcb_provenance(
+        lcb, ("cond_deep_otm", "buy_no"), deep_tail_q_lcb, source="FORECAST_BOOTSTRAP"
+    )
+    entry = lcb[("cond_deep_otm", "buy_no")]
+    assert entry.q_lcb == pytest.approx(0.0)  # clamped into [0,1]
+    assert entry.clamped is True
+    assert _qlcb_float(entry) == pytest.approx(0.0)  # consumer reads 0.0, loses selection

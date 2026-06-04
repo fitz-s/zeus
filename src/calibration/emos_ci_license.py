@@ -133,44 +133,14 @@ def emos_ci_k_cov(city: str) -> Optional[float]:
     return k
 
 
-def k_cov_from_settlement_coverage(forward_k_cov: float, coverage_ratio: Optional[float]) -> float:
-    """Fold a settlement-backward-coverage ratio INTO the EMOS k_cov (K3, K<<N).
-
-    Today ``emos_ci_k_cov`` is derived from a FORWARD-PIT ``cov90`` only. K3 makes
-    the settlement-backward coverage ratio (realized / claimed, from
-    settlement_backward_coverage_check) the SAME k_cov input — it is NOT a 7th
-    coverage layer bolted atop the EMOS CI, it is an additional INPUT to the one
-    k_cov that already widens sigma.
-
-    Semantics: a coverage_ratio < 1.0 means the settled record realizes LESS than
-    the claimed band — the CI was too tight — so k_cov must INFLATE to widen sigma:
-
-        k_settlement = forward_k_cov / coverage_ratio        (ratio < 1 → larger k)
-
-    Then clamp to the floor (sigma is NEVER tightened: ratio > 1 would shrink k, so
-    we take the MAX of the forward k and the floor — a well-covered band cannot make
-    the CI optimistic). coverage_ratio None (INSUFFICIENT_DATA) → forward k unchanged.
-
-    This function is PURE; wiring it into the live emos_ci_k_cov path is gated by
-    the K3 shadow flag (q_lcb_settlement_coverage_gate_enabled, default OFF), so the
-    served k_cov is unchanged today.
-    """
-    try:
-        fk = float(forward_k_cov)
-    except (TypeError, ValueError):
-        fk = _K_COV_FLOOR
-    if not (fk >= _K_COV_FLOOR):
-        fk = _K_COV_FLOOR
-    if coverage_ratio is None:
-        return fk
-    try:
-        ratio = float(coverage_ratio)
-    except (TypeError, ValueError):
-        return fk
-    if not (ratio > 0.0):  # NaN / non-positive → cannot divide; keep forward k.
-        return fk
-    if ratio >= 1.0:
-        # Well-covered (or over-covered): never TIGHTEN sigma below the forward k.
-        return fk
-    inflated = fk / ratio
-    return max(inflated, _K_COV_FLOOR)
+# NOTE (2026-06-03, Phase-2 K3 adversarial-verify finding): a
+# ``k_cov_from_settlement_coverage`` helper formerly lived here, claiming to fold the
+# settlement-backward coverage_ratio INTO the EMOS k_cov "gated by the K3 shadow flag".
+# That claim was FALSE — the function had ZERO live callers (referenced only by tests).
+# It is removed rather than wired because (1) the live settlement-coverage mechanism is
+# the per-(bin,direction) shrink in event_reactor_adapter._maybe_apply_settlement_
+# coverage_to_lcb (flag q_lcb_settlement_coverage_gate_enabled), which already grounds
+# the q_lcb against the settled record; and (2) k_cov is a per-FAMILY (city-level) sigma
+# factor while coverage_ratio is per-(bin,direction), so there is no well-defined
+# per-family ratio to fold — wiring it would invent a new aggregate AND double-apply
+# settlement coverage on top of the shrink. One mechanism, not two (Fitz #1: K<<N).

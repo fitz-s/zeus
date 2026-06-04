@@ -4398,11 +4398,18 @@ def _edli_representativeness_sigma_native(
                     # Phase-2 K2 D4 (task #167): when bias_treatment_v2_enabled is ON and the
                     # fit is low-n (n_live<20), fold the bias-MEAN standard error
                     # (shift_se = residual_sd/sqrt(n)) into the representativeness σ IN
-                    # QUADRATURE. This is a DISTINCT term from total_residual_sd_c: the latter
-                    # is the per-day predictive scatter (already includes σ_resid·sqrt(1+1/n));
-                    # shift_se is the uncertainty in WHERE the mean shift itself sits, which a
-                    # mean-only correction silently treats as exact. A low-n correction then
-                    # WIDENS q_lcb rather than applying a hard point shift (iron rule 6).
+                    # QUADRATURE so a low-n correction WIDENS q_lcb rather than applying a
+                    # hard point shift (iron rule 6).
+                    #
+                    # K2 D4 DOUBLE-COUNT FIX (2026-06-03, adversarial-verify finding #2):
+                    # the quadrature BASE must be the IN-SAMPLE residual_sd_c (= σ_resid),
+                    # NOT total_residual_sd_c. total_residual_sd_c = σ_resid·sqrt(1 + 1/n)
+                    # ALREADY contains the 1/n mean-estimation-drift term, so folding
+                    # shift_se² = σ_resid²/n onto total² gave σ_resid²·(1 + 2/n) — the 1/n is
+                    # counted TWICE (~6% over-wide q_lcb at n=7). Basing the fold on
+                    # residual_sd_c reconstructs exactly the intended predictive σ:
+                    #   sqrt(σ_resid² + σ_resid²/n) = σ_resid·sqrt(1 + 1/n) = total_residual_sd_c.
+                    # The fold therefore widens to the honest predictive σ once, never twice.
                     # Flag OFF -> sigma_native returned unchanged (byte-identical legacy).
                     try:
                         if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
@@ -4413,10 +4420,17 @@ def _edli_representativeness_sigma_native(
                                 else 0
                             )
                             if 0 < _n < 20 and resid_c is not None and float(resid_c) > 0.0:
+                                # IN-SAMPLE σ is the quadrature base (no 1/n term in it).
+                                in_sample_native = float(resid_c) * _scale
                                 shift_se_native = (float(resid_c) / _math.sqrt(_n)) * _scale
-                                sigma_native = float(
-                                    _math.sqrt(sigma_native ** 2 + shift_se_native ** 2)
+                                folded = float(
+                                    _math.sqrt(in_sample_native ** 2 + shift_se_native ** 2)
                                 )
+                                # Defensive: never let the D4 fold TIGHTEN below the σ already
+                                # chosen (total_residual_sd_c floor). With honest producer
+                                # stamps folded == sigma_native; the max only guards a row
+                                # whose total < σ_resid·sqrt(1+1/n) (stale/legacy stamp).
+                                sigma_native = max(sigma_native, folded)
                     except Exception:
                         pass
                     return sigma_native

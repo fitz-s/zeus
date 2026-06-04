@@ -159,6 +159,16 @@ class ForecastSharpnessEvidence:
         settlement temperature, so ``AVG(ABS(error))`` IS the settlement MAE.
 
         A row-count of 0 for the key -> fail-closed ``missing`` evidence.
+
+        TODO (K1 promotion-time, before flag-ON): this MAE is SEASON-BLENDED — the
+        aggregate spans every season in forecast_skill for the (city, unit, lead) key.
+        Forecast skill varies by season (e.g. a city flat in summer but sharp in
+        winter), so a blended MAE can mis-rank a market whose target_date sits in the
+        sharper/flatter season. Before promoting the sharpness gate to flag-ON, restrict
+        the aggregate to the target season (add a season column / target_month filter
+        keyed off the market's target_date), matching the per-season construction the
+        EMOS μ/σ fits use. While the gate ships flag-OFF this is reference-only, so the
+        blend does not affect any live decision.
         """
         lead_bucket = int(min(max(float(lead_days), 0.0), 7.0))
         row = conn.execute(

@@ -2002,6 +2002,39 @@ _user_channel_ingestor = None
 _user_channel_thread = None
 _edli_market_channel_thread = None
 
+# B4 (Phase-2): monotonic redecision cycle index. The continuous-redecision emit passes
+# a per-cycle distinct `source` to scan_committed_snapshots for TWO reasons: (1) the
+# B4 round-robin derives its window index from int(source.split('-')[-1]) — it needs a
+# parseable "cycle-N" suffix; and (2) the source must be distinct per cycle so the
+# re-emitted FSR-equivalent does not dedup to the consumed FSR. A monotonic process-
+# lifetime counter satisfies BOTH: cycle-N advances the round-robin AND is distinct per
+# cycle. (Idempotency uniqueness across daemon restarts is still guaranteed by the
+# event's available_at timestamp, which is part of stable_idempotency_key, so resetting
+# to 0 on restart cannot collide an old consumed event.) Replaces the prior ISO-timestamp
+# source whose split('-')[-1] raised ValueError -> cycle_index frozen at 0 -> cities
+# 21..N stayed dark even with coverage_fairness_emit_enabled ON.
+_edli_redecision_cycle_index = 0
+
+
+def _edli_next_redecision_source() -> str:
+    """Return the next continuous-redecision emit source as ``cycle-N`` and advance N.
+
+    Monotonic across the daemon process lifetime. The round-robin parses N via
+    int(source.split('-')[-1]); a fresh N each cycle slides the coverage window so all
+    cities are reached within ceil(num_cities/limit) cycles, AND keeps the source
+    distinct per cycle for re-emit idempotency.
+    """
+    global _edli_redecision_cycle_index
+    n = _edli_redecision_cycle_index
+    _edli_redecision_cycle_index = n + 1
+    return f"cycle-{n}"
+
+
+def _reset_edli_redecision_cycle_index() -> None:
+    """Test hook: reset the monotonic redecision cycle counter to 0."""
+    global _edli_redecision_cycle_index
+    _edli_redecision_cycle_index = 0
+
 
 USER_CHANNEL_REQUIRED_ENV_VARS = (
     "ZEUS_USER_CHANNEL_WS_ENABLED",
@@ -3819,7 +3852,12 @@ def _edli_event_reactor_cycle() -> None:
             if bool(edli_cfg.get("redecision_continuous_enabled", False)):
                 try:
                     _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
-                    _rd_source = f"edli_redecision:{now.isoformat()}"
+                    # B4 (Phase-2): a monotonic `cycle-N` source so the coverage-fairness
+                    # round-robin (int(source.split('-')[-1])) advances its window each cycle
+                    # and reaches all cities within ceil(N/limit) cycles. Still distinct per
+                    # cycle (re-emit idempotency). The prior ISO-timestamp source raised
+                    # ValueError in the parse -> cycle_index frozen at 0 -> cities 21..N dark.
+                    _rd_source = _edli_next_redecision_source()
                     _rd_pending = _edli_pending_entity_keys(conn)
                     _rd_n = _edli_emit_forecast_snapshot_events(
                         conn,

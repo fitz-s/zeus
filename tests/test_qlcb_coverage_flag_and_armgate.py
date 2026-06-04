@@ -191,36 +191,12 @@ def test_arm_gate_passes_on_licensed_in_tolerance():
 
 
 # ---------------------------------------------------------------------------
-# 3. K<<N FOLD — the settlement coverage_ratio is the EMOS k_cov INPUT, not a
-#    7th layer. ratio<1 (under-covered) inflates k_cov; ratio>=1 never tightens.
+# 3. (REMOVED 2026-06-03, Phase-2 K3 adversarial-verify) The former
+#    ``k_cov_from_settlement_coverage`` fold helper and its four tests are removed.
+#    The function had ZERO live callers (the "fold into EMOS k_cov gated by the K3
+#    flag" claim was false). The live settlement-coverage mechanism is the per-
+#    (bin,direction) shrink in _maybe_apply_settlement_coverage_to_lcb; folding a
+#    per-(bin,direction) coverage_ratio into the per-FAMILY EMOS k_cov is ill-defined
+#    and would double-apply settlement coverage on top of the shrink. One mechanism,
+#    not two. See src/calibration/emos_ci_license.py for the removal rationale.
 # ---------------------------------------------------------------------------
-def test_k_cov_fold_under_coverage_inflates():
-    """coverage_ratio=0.7 (settled record realizes only 70% of the claimed band)
-    means the CI was too tight -> k_cov inflates from 1.0 to 1.0/0.7 ≈ 1.4286."""
-    from src.calibration.emos_ci_license import k_cov_from_settlement_coverage
-
-    k = k_cov_from_settlement_coverage(forward_k_cov=1.0, coverage_ratio=0.7)
-    assert k == pytest.approx(1.0 / 0.7, abs=1e-9)
-
-
-def test_k_cov_fold_well_covered_never_tightens():
-    """coverage_ratio>=1.0 (well/over-covered) must NEVER tighten sigma below the
-    forward k_cov — the EMOS CI-honesty law (k_cov never < forward, never < 1.0)."""
-    from src.calibration.emos_ci_license import k_cov_from_settlement_coverage
-
-    assert k_cov_from_settlement_coverage(1.5, 1.3) == pytest.approx(1.5)  # not shrunk
-    assert k_cov_from_settlement_coverage(1.0, 2.0) == pytest.approx(1.0)  # floor held
-
-
-def test_k_cov_fold_insufficient_ratio_none_keeps_forward():
-    """coverage_ratio None (INSUFFICIENT_DATA) -> forward k_cov unchanged."""
-    from src.calibration.emos_ci_license import k_cov_from_settlement_coverage
-
-    assert k_cov_from_settlement_coverage(1.7, None) == pytest.approx(1.7)
-
-
-def test_k_cov_fold_clamps_below_floor():
-    """A fat-fingered forward k_cov < 1.0 is clamped to the floor before any fold."""
-    from src.calibration.emos_ci_license import k_cov_from_settlement_coverage
-
-    assert k_cov_from_settlement_coverage(0.5, 1.2) == pytest.approx(1.0)

@@ -60,6 +60,18 @@ class QlcbProvenance:
     calibration_source: CalibrationSource
     n_settlement_observations: Optional[int] = None
     coverage_ratio: Optional[float] = None
+    # Provenance honesty: True when the constructed q_lcb was a finite value outside
+    # [0,1] and was clamped into range. A deep-OTM bin's FORECAST_BOOTSTRAP restore
+    # (ci_lower + cost) is legitimately negative; legacy (origin/main) stored that
+    # raw negative in a plain-float lcb_by_direction and the bin simply lost selection
+    # while the FAMILY still formed. The K3 type is introduced UNCONDITIONALLY (not
+    # flag-gated), so a raise here propagates to the family catch (event_reactor_adapter
+    # :732) -> LIVE_INFERENCE_INPUTS_MISSING and collapses the WHOLE family even with
+    # the shadow flag OFF. We therefore CLAMP (decision-equivalent: q_lcb=0.0 and
+    # q_lcb<0 both yield a negative robust trade score so the bin loses selection
+    # identically) and record that the clamp fired — restoring legacy family-formation
+    # under the merge safety contract (flag-OFF == legacy).
+    clamped: bool = False
 
     def __post_init__(self) -> None:
         if self.calibration_source not in CALIBRATION_SOURCES:
@@ -68,17 +80,27 @@ class QlcbProvenance:
                 f"not in the closed vocabulary {sorted(CALIBRATION_SOURCES)!r}. An "
                 f"un-vocabularied source cannot reach the coverage gate."
             )
+        if self.q_lcb is None:
+            raise ValueError("QlcbProvenance.q_lcb must be a real number, got None")
         try:
             q = float(self.q_lcb)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"QlcbProvenance.q_lcb must be a real number: {exc}") from exc
-        # q_lcb is a probability lower bound. Out-of-[0,1] is a domain error, not a
-        # value to silently clamp (a clamp would hide an upstream sign/scale bug).
-        if not (0.0 <= q <= 1.0):
+        # A non-finite q_lcb (NaN/inf) is a genuine scale/sign bug a clamp cannot
+        # rescue — keep that a hard error. Only a FINITE out-of-[0,1] value is the
+        # legitimate deep-tail case legacy tolerated, so we clamp THAT and flag it.
+        if q != q or q == float("inf") or q == float("-inf"):
             raise ValueError(
-                f"QlcbProvenance.q_lcb={q!r} is outside [0, 1]; a probability lower "
+                f"QlcbProvenance.q_lcb={q!r} is not finite; a probability lower "
                 f"bound cannot live there."
             )
+        clamped = not (0.0 <= q <= 1.0)
+        if clamped:
+            q = 0.0 if q < 0.0 else 1.0
+        # frozen dataclass — write the (possibly clamped) value + the flag through the
+        # object door so the carrier stays a single immutable truth object.
+        object.__setattr__(self, "q_lcb", q)
+        object.__setattr__(self, "clamped", clamped)
 
 
 class QlcbByDirection(dict):

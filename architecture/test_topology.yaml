@@ -46,6 +46,19 @@ test_trust_policy:
     tests/test_settlement_unit_trigger_deployment_2026_06_03.py: {created: "2026-06-03", last_used: "2026-06-03", note: "deployment RT: settlement_unit VERIFIED triggers on EXISTING DB via migration"}
     tests/test_d7_rolling_edli_bias.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: D-7 rolling bias producer — causality, unit, thin-n, idempotency"}
     tests/test_representativeness_sigma_widens_q_lcb.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: sigma_repr -> wider (lower) q_lcb on corrected domain"}
+    # Phase-2 structural-fix consolidation (B4/K1/K2/K3) — 2026-06-03
+    tests/events/test_coverage_fairness_emit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "B4 RT: CoverageFairnessRequest round-robin covers all cities within ceil(N/limit) cycles; flag-OFF==legacy ORDER BY"}
+    tests/test_b4_live_caller_round_robin_advances.py: {created: "2026-06-03", last_used: "2026-06-03", note: "B4 fix RT: LIVE caller cycle-N source advances round-robin (was ISO-timestamp -> ValueError -> frozen at 0); distinct per cycle for idempotency"}
+    tests/test_k1_forecast_sharpness_gate.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K1 RT: ForecastSharpnessEvidence required-type antibody + flag-gated suppress; flag-OFF byte-identical"}
+    tests/contracts/test_bias_treatment.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 RT: BiasTreatment corrected XOR haircut (kills N1 double-penalty) + provenance/stale fail-close + D4 shift_se"}
+    tests/engine/test_bias_treatment_v2_wiring.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 RT: bias_treatment_v2 live wiring; flag-OFF byte-identical to legacy correction+haircut"}
+    tests/test_k2_d4_no_double_count_one_over_n.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 fix RT: D4 fold bases on in-sample residual_sd_c (no 1/n) -> composed sigma == total_residual_sd_c, NOT double-counted (~6% over-wide at n=7); flag-OFF byte-identical"}
+    tests/test_qlcb_provenance_type.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: QlcbProvenance typed carrier antibody + clamp-not-raise on finite out-of-range tail"}
+    tests/test_k3_qlcb_clamp_legacy_family_formation.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 fix RT: deep-OTM negative q_lcb clamps to [0,1] (clamped=True) instead of raising -> family still forms; decision-equivalent to legacy raw negative"}
+    tests/test_settlement_backward_coverage.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-backward coverage check + isotonic realized rate + ARM-gate coverage predicate"}
+    tests/test_qlcb_coverage_flag_and_armgate.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-coverage shadow flag OFF==byte-identical + ARM gate reads coverage verdict unconditionally"}
+    tests/engine/test_qlcb_coverage_adapter_wiring.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: carrier helpers round-trip float; flag-OFF apply is byte-identical; default shadow flag OFF"}
+    tests/engine/test_qlcb_coverage_live_application.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: live coverage application via grade_receipt loader; flag-OFF byte-identical; deep-OTM write does not collapse family"}
     tests/test_no_certain_no_ceiling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: no certain-NO (q_no_lcb<1) structural antibody on corrected domain"}
     tests/test_arm_gate_direction_law.py: {created: "2026-06-03", last_used: "2026-06-03", note: "Direction Law antibody: buy_yes/buy_no win-logic unconstructably correct — all 4 cases + complement + known losses"}
     tests/test_graded_receipt.py: {created: "2026-06-03", last_used: "2026-06-03", note: "D1 keystone RT: grade_receipt unit TypeError + BinKind dispatch + fractional membership; Direction Law win"}
