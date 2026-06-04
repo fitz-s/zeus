@@ -664,6 +664,110 @@ def test_edli_live_requires_promotion_artifact(monkeypatch):
         )
 
 
+def _arm_gate_artifact_updates(tmp_path, **overrides):
+    """Stage a VALID ARM-gate evidence artifact and turn the boot requirement ON.
+
+    The harness pins ``_capture_boot_state`` to sha="abc123", so the artifact's
+    commit_sha must match that for the SHA binding to pass.
+    """
+    art_path = tmp_path / "arm_gate_artifact.json"
+    art = {
+        "schema": "edli_arm_gate_v1",
+        "commit_sha": "abc123",
+        "measurement_cmd_hash": "f" * 64,
+        "capital_weighted_ev": 0.012,
+        "gate_pass_n": 40,
+        "per_city_n": {"shanghai": 6, "singapore": 7},
+        "ev_sigma": 2.1,
+        "date_coverage": ["2026-06-01", "2026-06-02"],
+        "coverage_licensed": True,
+    }
+    art.update(overrides)
+    art_path.write_text(json.dumps(art))
+    return {
+        "edli_arm_gate_artifact_required": True,
+        "edli_arm_gate_artifact_path": str(art_path),
+    }
+
+
+def test_live_boot_fails_without_arm_artifact(monkeypatch, tmp_path):
+    # PR-2 (A) RED: with the ARM-gate requirement ON but NO artifact on disk,
+    # arming the live daemon is a BOOT FAILURE, not a runtime path. A
+    # well-formed positive promotion artifact is staged so the failure is
+    # ATTRIBUTABLE to the missing ARM artifact (not the promotion gate).
+    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
+
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MISSING"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(
+                edli_live_promotion_artifact_path=str(artifact),
+                **_stage_evidence_updates(tmp_path),
+                edli_arm_gate_artifact_required=True,
+                edli_arm_gate_artifact_path=str(tmp_path / "does-not-exist.json"),
+            ),
+            world_db_path=db_path,
+        )
+
+
+def test_capital_weighted_arm_denial_blocks_boot(monkeypatch, tmp_path):
+    # PR-2 (A) RED: an ARM artifact that exists and matches HEAD but reports a
+    # NON-POSITIVE capital-weighted EV must DENY the boot. The capital-weighted
+    # edge is THE arm criterion; a zero/negative one cannot arm.
+    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
+    arm_updates = _arm_gate_artifact_updates(tmp_path, capital_weighted_ev=0.0)
+
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_EV_NOT_POSITIVE"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(
+                edli_live_promotion_artifact_path=str(artifact),
+                **_stage_evidence_updates(tmp_path),
+                **arm_updates,
+            ),
+            world_db_path=db_path,
+        )
+
+
+def test_arm_artifact_sha_mismatch_blocks_boot(monkeypatch, tmp_path):
+    # PR-2 (A): a stale ARM artifact (measured on a DIFFERENT commit) cannot arm
+    # the current code — SHA binding makes "armed on unproven code" unconstructable.
+    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.01)
+    arm_updates = _arm_gate_artifact_updates(tmp_path, commit_sha="deadbeefdeadbeef")
+
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_PROMOTION_ARM_GATE_COMMIT_SHA_MISMATCH"):
+        _run_main_with_fake_scheduler(
+            monkeypatch,
+            _edli_live_updates(
+                edli_live_promotion_artifact_path=str(artifact),
+                **_stage_evidence_updates(tmp_path),
+                **arm_updates,
+            ),
+            world_db_path=db_path,
+        )
+
+
+def test_live_boot_accepts_valid_arm_artifact(monkeypatch, tmp_path):
+    # PR-2 (A) GREEN: a valid, HEAD-bound, positive-EV, coverage-licensed ARM
+    # artifact lets the armed boot proceed (alongside the promotion artifact).
+    artifact, db_path = _write_db_backed_promotion_artifact(tmp_path, realized_edge=0.000001)
+    arm_updates = _arm_gate_artifact_updates(tmp_path)
+
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _edli_live_updates(
+            edli_live_promotion_artifact_path=str(artifact),
+            **_stage_evidence_updates(tmp_path),
+            **arm_updates,
+        ),
+        world_db_path=db_path,
+    )
+
+    assert scheduler.started is True
+    assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
+    assert settings_copy["edli_v1"]["edli_arm_gate_artifact_required"] is True
+
+
 def test_edli_live_blocks_unresolved_unknowns(monkeypatch, tmp_path):
     artifact, db_path = _write_db_backed_promotion_artifact(
         tmp_path,
@@ -813,6 +917,14 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
 
     settings_source = main.settings._data if hasattr(main.settings, "_data") else main.settings
     settings_copy = deepcopy(settings_source)
+    # PR-2 (A) ARM-gate boot binding: armed modes (canary/live) now ALSO require
+    # state/edli_arm_gate_artifact.json. These boot tests exercise EDLI boot
+    # logic, NOT the arm-gate artifact shape (which has dedicated coverage in
+    # tests/events/test_arm_gate_artifact_boot_binding.py and the explicit
+    # *_arm_artifact tests below). Default the requirement OFF here so the broad
+    # boot fixtures stay focused; a test that asserts the arm-gate fires sets
+    # edli_arm_gate_artifact_required=True explicitly (and wins via the update).
+    settings_copy["edli_v1"]["edli_arm_gate_artifact_required"] = False
     settings_copy["edli_v1"].update(edli_updates)
     monkeypatch.setattr(main, "settings", settings_copy)
     monkeypatch.setattr(main, "get_mode", lambda: "live")

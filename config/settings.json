@@ -113,6 +113,8 @@
     "taker_fok_fak_live_enabled": false,
     "edli_live_scaleout_enabled": false,
     "edli_live_promotion_artifact_required": true,
+    "edli_arm_gate_artifact_required": true,
+    "edli_arm_gate_artifact_path": "state/edli_arm_gate_artifact.json",
     "edli_live_canary_artifact_path": "state/edli_live_canary_artifact.json",
     "edli_live_promotion_artifact_path": "state/edli_live_promotion_artifact.json",
     "edli_live_min_canary_count": 1,

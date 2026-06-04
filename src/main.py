@@ -508,6 +508,46 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
         raise RuntimeError(verified.reason)
 
 
+def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
+    """PR-2 (A) / F1 Option C: bind the live/canary ARM to settlement-grounded evidence.
+
+    Whenever the daemon is about to arm (real_order_submit_enabled — true for BOTH
+    edli_live_canary AND edli_live), it MUST find a state/edli_arm_gate_artifact.json
+    proving — on THIS commit (commit_sha == booted HEAD) — a positive
+    capital-weighted after-cost settlement EV with coverage licensed. The artifact
+    is produced by scripts/measure_arm_gate_settlement.py (PR-1). Here we ENFORCE it.
+
+    ANTIBODY: flipping ``real_order_submit_enabled=true`` without that artifact is now a
+    BOOT FAILURE (RuntimeError ``EDLI_LIVE_PROMOTION_ARM_GATE_*``), not a silent runtime
+    path. The whole category "armed without proven edge" becomes unconstructable at boot.
+
+    Fail-closed: ``edli_arm_gate_artifact_required`` defaults to True; a missing flag
+    still requires the artifact. Only the explicit literal False — set by an operator
+    who is knowingly de-binding — relaxes it, and even then the existing
+    promotion-artifact gate and the live-cap hard ceiling remain in force.
+    """
+    if not bool(edli_cfg.get("edli_arm_gate_artifact_required", True)):
+        return
+
+    artifact_path = str(edli_cfg.get("edli_arm_gate_artifact_path") or "").strip()
+    if not artifact_path:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_PATH_MISSING")
+    try:
+        artifact = json.loads(Path(artifact_path).read_text())
+    except FileNotFoundError as exc:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MISSING") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_INVALID_JSON") from exc
+
+    head_sha = str(_capture_boot_state().get("sha") or "").strip()
+
+    from src.events.live_profit_audit import verify_edli_arm_gate_artifact
+
+    verified = verify_edli_arm_gate_artifact(artifact, head_sha=head_sha)
+    if not verified.ok:
+        raise RuntimeError(verified.reason)
+
+
 def evaluate_edli_stage_readiness(
     *,
     stage: str,
@@ -879,6 +919,14 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
         )
     if mode == "edli_live":
         _assert_edli_live_promotion_artifact(edli_cfg)
+    if mode in {"edli_live_canary", "edli_live"}:
+        # PR-2 (A) / F1 Option C: ANY armed mode (canary OR live —
+        # real_order_submit_enabled is required for both) must ALSO carry the
+        # settlement-grounded ARM evidence artifact bound to THIS commit. Missing
+        # / SHA-mismatch / ev<=0 / not-coverage-licensed -> boot RuntimeError.
+        # Ordered AFTER the (edli_live-only) promotion-artifact gate so the
+        # promotion gate's specific reason still surfaces first for edli_live.
+        _assert_edli_arm_gate_artifact(edli_cfg)
     return mode
 
 

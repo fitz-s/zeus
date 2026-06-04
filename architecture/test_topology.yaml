@@ -98,6 +98,7 @@ test_trust_policy:
     tests/events/test_live_order_aggregate.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/events/test_live_order_reconcile.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/events/test_live_profit_audit.py: {created: "2026-05-26", last_used: "2026-05-26"}
+    tests/events/test_arm_gate_artifact_boot_binding.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (A) D2 ARM-artifact boot binding: armed boot (canary/live) fails-closed without HEAD-bound positive-EV coverage-licensed ARM evidence artifact"}
     tests/scripts/test_check_edli_live_canary_gate.py: {created: "2026-05-26", last_used: "2026-05-26"}
     tests/decision_kernel/test_certificate_time_filtration.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/decision_kernel/test_certificate_hashing.py: {created: "2026-05-25", last_used: "2026-05-25"}
