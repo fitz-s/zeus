@@ -1205,29 +1205,13 @@ def _market_scan_tick():
     """
     try:
         from src.data.market_scanner import (
-            find_weather_markets,
-            get_last_market_events_persistence_result,
+            find_weather_markets_or_raise,
         )
-        markets = find_weather_markets()
+        markets = find_weather_markets_or_raise()
         logger.info("ingest_market_scan: found %d active weather markets", len(markets))
-        persistence = get_last_market_events_persistence_result()
-        if markets and persistence is not None and persistence.status == "failed":
-            result = {
-                "status": "market_events_persistence_failed",
-                "market_count": len(markets),
-                "persistence": persistence.as_dict(),
-                "error": persistence.error,
-            }
-            logger.warning(
-                "ingest_market_scan: market_events persistence failed after %d active markets: %s",
-                len(markets),
-                persistence.error,
-            )
-            return result
         return {
             "status": "ok",
             "market_count": len(markets),
-            "persistence": persistence.as_dict() if persistence is not None else None,
         }
     except Exception as exc:
         logger.warning("ingest_market_scan tick error: %s", exc)
@@ -1620,6 +1604,17 @@ def main() -> None:
         # @_scheduler_job(...) in this file.  Prevents silent writer death.
         assert_writer_jobs_registered()
         logger.info("assert_writer_jobs_registered: all declared daemon writers are wired")
+
+        # F2 (fix/persistence-bypass 2026-06-03): assert no daemon caller uses bare
+        # find_weather_markets() — all must go through find_weather_markets_or_raise.
+        from src.state.table_registry import (
+            assert_no_raw_find_weather_markets_in_daemon_callers,
+        )
+        assert_no_raw_find_weather_markets_in_daemon_callers()
+        logger.info(
+            "assert_no_raw_find_weather_markets_in_daemon_callers: "
+            "all daemon callers use find_weather_markets_or_raise"
+        )
 
     # Write sentinel BEFORE scheduler.start() (design §4.2).
     _write_world_schema_ready_sentinel()

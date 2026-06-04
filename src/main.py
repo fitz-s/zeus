@@ -2091,14 +2091,20 @@ def _auto_derive_user_channel_condition_ids(
     try:
         from src.data.market_scanner import (
             extract_executable_condition_ids,
-            find_weather_markets,
+            find_weather_markets_or_raise,
         )
 
-        events = find_weather_markets(
+        events = find_weather_markets_or_raise(
             min_hours_to_resolution=0.0,
             include_slug_pattern=False,
         )
         return extract_executable_condition_ids(events)
+    except RuntimeError as exc:
+        logger.warning(
+            "user-channel WS scanner: market_events persistence failure — "
+            "degrading to empty condition_ids: %s", exc,
+        )
+        return []
     except Exception as exc:
         logger.warning("user-channel WS scanner failed: %s", exc)
         return []
@@ -2637,7 +2643,7 @@ def _refresh_pending_family_snapshots(
             # the liquid-bin capture already relies on. Use it as the discovery source so
             # every bin (incl never-seen illiquid MECE tails) captures; the downstream
             # gamma_by_family filter scopes CLOB capture to the pending families.
-            from src.data.market_scanner import find_weather_markets as _fwm
+            from src.data.market_scanner import find_weather_markets_or_raise as _fwm
             discovered_events = _fwm(min_hours_to_resolution=0.0)
             logger.info(
                 "refresh_pending_family_snapshots: slug fetch complete "
@@ -2738,29 +2744,16 @@ def _market_discovery_cycle() -> None:
         return
     try:
         from src.data.market_scanner import (
-            find_weather_markets,
-            get_last_market_events_persistence_result,
+            find_weather_markets_or_raise,
             refresh_executable_market_substrate_snapshots,
         )
         from src.data.polymarket_client import PolymarketClient
         from src.state.db import get_trade_connection
 
-        events = find_weather_markets(
+        events = find_weather_markets_or_raise(
             min_hours_to_resolution=0.0,
             include_slug_pattern=True,
         )
-        persistence = get_last_market_events_persistence_result()
-        if events and persistence is not None and persistence.status == "failed":
-            logger.error(
-                "market_discovery: %d weather events parsed but market_events persistence "
-                "failed — topology substrate will be stale: %s",
-                len(events),
-                persistence.error,
-            )
-            raise RuntimeError(
-                f"market_events persistence failed after {len(events)} active events: "
-                f"{persistence.error}"
-            )
         conn = get_trade_connection(write_class="live")
         try:
             _discovery_clob_timeout = max(
@@ -5303,17 +5296,25 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
             def _refresh_snapshot_action(action: MarketChannelAction) -> None:
                 from src.data.market_scanner import (
-                    find_weather_markets,
+                    find_weather_markets_or_raise,
                     refresh_executable_market_substrate_snapshots,
                 )
                 from src.state.db import get_trade_connection
 
                 trade_conn = get_trade_connection(write_class="live")
                 try:
-                    markets = find_weather_markets(
-                        min_hours_to_resolution=0.0,
-                        include_slug_pattern=True,
-                    )
+                    try:
+                        markets = find_weather_markets_or_raise(
+                            min_hours_to_resolution=0.0,
+                            include_slug_pattern=True,
+                        )
+                    except RuntimeError as _persistence_exc:
+                        logger.error(
+                            "EDLI market-channel refresh aborted: market_events persistence "
+                            "failure — snapshot substrate not refreshed: %s",
+                            _persistence_exc,
+                        )
+                        return
                     if action.condition_id:
                         markets = _edli_filter_markets_for_condition(markets, action.condition_id)
                         if not markets:

@@ -856,6 +856,41 @@ def find_weather_markets(
     )
 
 
+def find_weather_markets_or_raise(
+    min_hours_to_resolution: float = 6.0,
+    *,
+    include_slug_pattern: bool = True,
+) -> list[dict]:
+    """Persistence-checked wrapper around find_weather_markets for daemon callers.
+
+    Calls find_weather_markets(**kwargs) and then checks the thread-local
+    persistence result.  If events were returned but market_events persistence
+    failed, raises RuntimeError so the caller (or its @_scheduler_job decorator)
+    surfaces the failure instead of silently trusting a stale topology substrate.
+
+    Caller contract:
+      - Daemon callers that need fail-loud behaviour use this function.
+      - Failure-tolerant callers (e.g. user-channel condition-id derivation) must
+        still call this and catch the RuntimeError, returning a safe degraded value.
+      - Script / backfill callers (backfill_*, capture_replay_artifact, onboard_cities)
+        continue to use find_weather_markets directly — they are not daemon paths.
+      - The AST boot guard assert_no_raw_find_weather_markets_in_daemon_callers in
+        src/state/table_registry.py enforces that no daemon caller bypasses this wrapper.
+    """
+    events = find_weather_markets(
+        min_hours_to_resolution=min_hours_to_resolution,
+        include_slug_pattern=include_slug_pattern,
+    )
+    p = get_last_market_events_persistence_result()
+    if events and p is not None and p.status == "failed":
+        raise RuntimeError(
+            f"MARKET_EVENTS_PERSISTENCE_FAILED: {len(events)} active events parsed but "
+            f"market_events write failed — topology substrate is stale. "
+            f"persistence_error={p.error!r}"
+        )
+    return events
+
+
 def find_slug_pattern_weather_markets(
     min_hours_to_resolution: float = 0.0,
     *,
