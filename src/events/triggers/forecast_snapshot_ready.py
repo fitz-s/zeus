@@ -21,6 +21,35 @@ from src.strategy.market_phase import market_phase_admits
 UTC = timezone.utc
 
 
+def _target_local_day_strictly_past(
+    *, city_timezone: str, target_local_date: date, decision_time: datetime
+) -> bool:
+    """True iff ``target_local_date``'s whole LOCAL day is already in the PAST at
+    ``decision_time`` — the cheap, unconditional emission-floor predicate
+    (STEP 2 / consolidated timeliness fix).
+
+    Already-settled iff ``decision_time`` is at/after local-midnight of the day
+    AFTER ``target_local_date`` (the SETTLEMENT_DAY-entry instant of target+1).
+    tz arithmetic via the canonical ``settlement_day_entry_utc`` geometry —
+    never a lexicographic string compare. Fail-CLOSED on an unresolvable tz
+    (treat as NOT-past so a tz glitch never silently zeroes the FSR stream; the
+    reactor backstop + STEP-3 claim floor remain the authority). Mirrors the
+    EventStore claim-floor predicate so source and claim agree on a verdict.
+    """
+    from src.strategy.market_phase import settlement_day_entry_utc
+
+    if not city_timezone:
+        return False
+    try:
+        day_after_entry = settlement_day_entry_utc(
+            target_local_date=target_local_date + timedelta(days=1),
+            city_timezone=city_timezone,
+        )
+    except Exception:  # noqa: BLE001 — unknown tz must not zero the FSR stream
+        return False
+    return decision_time.astimezone(UTC) >= day_after_entry
+
+
 def _intake_phase_filter_enabled() -> bool:
     """Read edli_v1.edli_intake_phase_filter_enabled (default OFF in code).
 
@@ -550,6 +579,27 @@ class ForecastSnapshotReadyTrigger:
                 source_run_id = str(source_run.get("source_run_id") or coverage.get("source_run_id") or "")
                 entity_key = "|".join((city, target_date, metric, source_run_id))
                 if entity_key in pending_skip:
+                    continue
+            # STEP 2 emission floor S1 (UNCONDITIONAL, not flag-gated): never
+            # manufacture an opportunity_event for a target whose LOCAL day is
+            # already strictly PAST at decision_time. This is the highest-leverage
+            # point-fix — the cheap source-form of the timeliness predicate, a
+            # conservative lower bound of the reactor's full phase gate, so it can
+            # never starve a candidate the reactor would admit. Same-day
+            # (SETTLEMENT_DAY) families are left to the flag-gated W1-T1 intake
+            # filter below / the reactor backstop.
+            _src_tz = str(coverage.get("city_timezone") or "")
+            _src_target = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
+            if _src_tz and _src_target:
+                try:
+                    _src_target_date = date.fromisoformat(_src_target)
+                except ValueError:
+                    _src_target_date = None
+                if _src_target_date is not None and _target_local_day_strictly_past(
+                    city_timezone=_src_tz,
+                    target_local_date=_src_target_date,
+                    decision_time=decision_time,
+                ):
                     continue
             if _intake_phase_filter_on:
                 city = str(snapshot.get("city") or coverage.get("city") or "")

@@ -342,6 +342,104 @@ def test_scan_committed_snapshots_emits_from_source_run_coverage():
     assert json.loads(payload)["completeness_status"] == "COMPLETE"
 
 
+def _seed_committed_chicago_2026_05_24(forecasts_conn) -> None:
+    """Insert a COMPLETE/LIVE_ELIGIBLE Chicago high coverage for target 2026-05-24
+    (the same shape as test_scan_committed_snapshots_emits_from_source_run_coverage)."""
+    from src.state.db import init_schema_forecasts
+
+    init_schema_forecasts(forecasts_conn)
+    forecasts_conn.execute(
+        """
+        INSERT INTO source_run (
+            source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
+            source_cycle_time, source_available_at, captured_at, target_local_date,
+            city_id, city_timezone, temperature_metric, dataset_id,
+            expected_members, observed_members, expected_steps_json, observed_steps_json,
+            completeness_status, status
+        ) VALUES (
+            'run-1', 'ecmwf-open-data', 'ens', '2026-05-24T00', 'SCHEDULED_LIVE', 'SCHEDULED_LIVE',
+            '2026-05-24T00:00:00+00:00', '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00',
+            '2026-05-24', 'chicago', 'America/Chicago', 'high', 'v1',
+            51, 51, '[0,3,6]', '[0,3,6]', 'COMPLETE', 'SUCCESS'
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport, release_calendar_key, track,
+            city_id, city, city_timezone, target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members, observed_members, expected_steps_json,
+            observed_steps_json, snapshot_ids_json, target_window_start_utc, target_window_end_utc,
+            completeness_status, readiness_status, computed_at, expires_at
+        ) VALUES (
+            'cov-1', 'run-1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', '2026-05-24T00', 'ens',
+            'chicago', 'Chicago', 'America/Chicago', '2026-05-24', 'high', 'temperature',
+            'high_temp', 'v1', 51, 51, '[0,3,6]', '[0,3,6]', '[1]',
+            '2026-05-24T05:00:00+00:00', '2026-05-25T05:00:00+00:00',
+            'COMPLETE', 'LIVE_ELIGIBLE', '2026-05-24T04:16:00+00:00', '2026-05-25T04:16:00+00:00'
+        )
+        """
+    )
+    forecasts_conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+            issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+            model_version, dataset_id, source_id, source_transport, source_run_id,
+            release_calendar_key, source_cycle_time, source_release_time, source_available_at,
+            authority, causality_status, boundary_ambiguous, contributes_to_target_extrema,
+            forecast_window_attribution_status, local_day_start_utc, step_horizon_hours,
+            members_unit, raw_orderbook_hash_transition_delta_ms
+        ) VALUES (
+            1, 'Chicago', '2026-05-24', 'high', 'temperature', 'high_temp',
+            '2026-05-24T00:00:00+00:00', '2026-05-24T06:00:00+00:00',
+            '2026-05-24T04:15:00+00:00', '2026-05-24T04:16:00+00:00', 6,
+            '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51]',
+            'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', 'run-1',
+            '2026-05-24T00', '2026-05-24T00:00:00+00:00', '2026-05-24T03:00:00+00:00',
+            '2026-05-24T04:15:00+00:00', 'VERIFIED', 'OK', 0, 1,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', '2026-05-24T05:00:00+00:00', 6, 'F', 0
+        )
+        """
+    )
+
+
+def test_scan_emits_zero_for_strictly_past_target_local_day():
+    """T1 (STEP 2 emission floor S1): a committed coverage row whose target LOCAL
+    day is already STRICTLY PAST at decision_time emits ZERO opportunity_events.
+
+    The same COMPLETE/LIVE_ELIGIBLE row emits exactly one event when decided on
+    its own local day (proven by
+    test_scan_committed_snapshots_emits_from_source_run_coverage); here, deciding
+    a full day later (Chicago-local 2026-06-05) makes target 2026-05-24
+    already-settled, so the emission floor drops it at the SOURCE — it never
+    reaches the reactor's bounded decision-proof budget. This is the highest-
+    leverage point-fix: stop manufacturing stale candidates at emission.
+    """
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    _seed_committed_chicago_2026_05_24(forecasts_conn)
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+    )
+
+    # Decide a full local day after target 2026-05-24 → strictly past.
+    results = trigger.scan_committed_snapshots(
+        forecasts_conn=forecasts_conn,
+        decision_time=datetime(2026, 5, 25, 12, 0, tzinfo=UTC),  # Chicago local 2026-05-25 07:00
+        received_at="2026-05-25T12:01:00+00:00",
+    )
+
+    assert results == [], "strictly-past target must emit ZERO events at the source"
+    count = world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0]
+    assert count == 0, "no opportunity_event row may be written for an already-settled target"
+
+
 def test_scan_emits_only_for_families_with_a_market_when_markets_exist():
     """Decision-first emission relationship.
 
