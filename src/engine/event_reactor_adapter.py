@@ -3715,19 +3715,26 @@ def _market_analysis_from_event_snapshot(
     _emos_sampler = None
     if (family.event_type != "DAY0_EXTREME_UPDATED"
             and bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))):
-        from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
-        # NH month-season, MATCHING emos_calibration.json keying (scripts/fit_emos_calibration.py
-        # season()). MUST NOT be hemisphere-aware: the fit groups e.g. Sao Paulo|June under "JJA"
-        # (NH label); serving with a lat-flipped season would miss the cell and silently fall back.
-        _emos_m = (family.target_date.month if hasattr(family.target_date, "month")
-                   else int(str(family.target_date)[5:7]))
-        _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
-                        else "JJA" if _emos_m in (6, 7, 8) else "SON")
-        _emos_q = _build_emos_q(
-            city=city.name, season=_emos_season,
-            lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
-            members_native=raw_members, unit=unit, bins=bins,
-        )
+        # M1 (critic 2026-06-04): the EMOS branch must degrade to the honest path on ANY failure,
+        # mirroring the flag-OFF try/except around _snapshot_lead_days — otherwise a lead-missing
+        # snapshot fail-closes the whole family (coverage regression) when the flag is ON.
+        try:
+            from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
+            # NH month-season, MATCHING emos_calibration.json keying (fit_emos_calibration.season()).
+            # MUST NOT be hemisphere-aware: the fit groups e.g. Sao Paulo|June under "JJA" (NH label);
+            # a lat-flipped season would serve the OPPOSITE-season cell (critic C1). Month-only keys
+            # the cell fit on the SAME calendar months as the target.
+            _emos_m = (family.target_date.month if hasattr(family.target_date, "month")
+                       else int(str(family.target_date)[5:7]))
+            _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
+                            else "JJA" if _emos_m in (6, 7, 8) else "SON")
+            _emos_q = _build_emos_q(
+                city=city.name, season=_emos_season,
+                lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
+                members_native=raw_members, unit=unit, bins=bins,
+            )
+        except Exception:
+            _emos_q = None  # honest path; EMOS is best-effort, never fail-closes a family
     if _emos_q is not None:
         _q_vec, _emos_mu_native, _emos_sigma_native = _emos_q
         p_raw = np.asarray(_q_vec, dtype=float)

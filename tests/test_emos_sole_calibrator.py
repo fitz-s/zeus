@@ -137,29 +137,66 @@ _Q_SEAM_FN = "_market_analysis_from_event_snapshot"
 # (Phase-3 deletion) requires editing this list in the same reviewed diff.
 _ALLOWED_Q_SEAM_CORRECTORS = frozenset({
     "_build_emos_q", "_make_emos_bootstrap_sampler",          # the ONE calibrator (target end-state)
-    "_maybe_apply_edli_bias_correction",                      # maze (Phase-3 delete)
-    "_maybe_apply_grid_representativeness_correction",        # maze (Phase-3 delete)
-    "_edli_representativeness_sigma_native",                  # maze (Phase-3 delete)
+    "_maybe_apply_edli_bias_correction",                      # maze (off by flag; never deleted)
+    "_maybe_apply_grid_representativeness_correction",        # maze (off by flag; never deleted)
+    "_edli_representativeness_sigma_native",                  # maze (off by flag; never deleted)
+    "_assert_single_temperature_mean_correction",            # double-count GUARD (not a corrector)
 })
 
 
 def _q_seam_corrector_calls() -> set:
     import ast
     import pathlib
+    import re
     src = pathlib.Path(__file__).resolve().parents[1] / "src" / "engine" / "event_reactor_adapter.py"
     tree = ast.parse(src.read_text(encoding="utf-8"))
     fn = next((n for n in ast.walk(tree)
                if isinstance(n, ast.FunctionDef) and n.name == _Q_SEAM_FN), None)
     assert fn is not None, f"{_Q_SEAM_FN} not found — the q seam moved; re-anchor the antibody"
-    import re
-    pat = re.compile(r"bias|grid|representativeness|emos")
+    # Widened name pattern (critic m1: the old regex missed _apply_warm_shift / _recenter / etc.).
+    pat = re.compile(r"bias|grid|representativ|emos|shift|offset|recenter|anchor|climatolog|"
+                     r"correct|warm|cold|calibrat|platt|adjust|debias")
     names: set = set()
     for node in ast.walk(fn):
         if isinstance(node, ast.Call):
             fname = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
-            if fname and pat.search(fname):
+            if fname and pat.search(fname.lower()):
                 names.add(fname)
+        # CATEGORY-SCOPED (critic m1): ANY call whose result is assigned to the `members` binding is
+        # a member-mutator — caught regardless of its name. This is the true structural invariant.
+        if isinstance(node, ast.Assign):
+            tnames: set = set()
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    tnames.add(t.id)
+                elif isinstance(t, ast.Tuple):
+                    tnames.update(e.id for e in t.elts if isinstance(e, ast.Name))
+            if "members" in tnames:
+                v = node.value
+                for cand in (v.elts if isinstance(v, ast.Tuple) else [v]):
+                    if isinstance(cand, ast.Call):
+                        cn = getattr(cand.func, "id", None) or getattr(cand.func, "attr", None)
+                        if cn:
+                            names.add(cn)
     return names
+
+
+def test_inv_seam_season_matches_fit_season_all_months():
+    # C1 (critic 2026-06-04) — fit<->seam boundary. The seam keys the EMOS lookup by NH month-season;
+    # the fit (fit_emos_calibration.season) keys cells by NH month-season. They MUST agree for EVERY
+    # month, including SH dates — else SH cities (Wellington/Sao Paulo/...) are served the
+    # OPPOSITE-season cell (the silent wrong-season corruption the program exists to kill). A prior
+    # seam used season_from_date(lat) (hemisphere-flipped) and broke this. Cross the real boundary.
+    from scripts.fit_emos_calibration import season as fit_season
+
+    def seam_season(m):  # the inline logic in event_reactor_adapter.py EMOS branch
+        return ("DJF" if m in (12, 1, 2) else "MAM" if m in (3, 4, 5)
+                else "JJA" if m in (6, 7, 8) else "SON")
+
+    for m in range(1, 13):
+        assert seam_season(m) == fit_season(m), (
+            f"month {m}: seam keys {seam_season(m)} but fit built {fit_season(m)} — SH wrong-season"
+        )
 
 
 def test_inv6_q_seam_correctors_do_not_grow():
