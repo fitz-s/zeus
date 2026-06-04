@@ -96,7 +96,7 @@ def test_inv1_build_emos_q_returns_full_distribution(emos_table):
     # built ONLY from emos_predictive (no bias shift, no separate Platt).
     bins = [(None, 20.0), (21.0, 21.0), (22.0, 22.0), (23.0, 23.0), (24.0, None)]
     out = mod.build_emos_q(
-        city="TestCity", season="JJA", lead_days=3.0,
+        city="TestCity", season="JJA", metric="high", lead_days=3.0,
         members_native=np.array([20.0, 21.0, 22.0, 23.0, 24.0], dtype=float),
         unit="C", bins=bins,
     )
@@ -113,10 +113,29 @@ def test_inv1_served_raw_returns_none_for_honest_fallback(monkeypatch):
     mod = importlib.import_module("src.calibration.emos_q_builder")
     table = {"_meta": {}, "cells": {"RawCity|JJA": {"params": [0, 1, 0, 1, 0.2], "n": 99, "served": "raw"}}}
     monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
-    out = mod.build_emos_q(city="RawCity", season="JJA", lead_days=3.0,
+    out = mod.build_emos_q(city="RawCity", season="JJA", metric="high", lead_days=3.0,
                            members_native=np.array([20.0, 21.0, 22.0], dtype=float),
                            unit="C", bins=[(None, 21.0), (22.0, None)])
     assert out is None, "served=raw must fall back (None), never silently apply HIGH EMOS or bias"
+
+
+def test_inv1_metric_crossing_fail_closed(monkeypatch):
+    # METRIC ANTIBODY (2026-06-04): the EMOS table is single-metric (meta.metric, HIGH-only).
+    # A LOW market must NEVER be served the HIGH fit — build_emos_q returns None so the caller
+    # honest-falls-back. Serving HIGH (mu,sigma) onto a LOW member-MIN array is UNCONSTRUCTABLE.
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    table = {"_meta": {"metric": "high"},
+             "cells": {"X|JJA": {"params": [0, 1, 0, 1, 0.2], "n": 99, "served": "emos"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    members = np.array([10.0, 11.0, 12.0, 13.0], dtype=float)
+    bins = [(None, 11.0), (12.0, 12.0), (13.0, None)]
+    # HIGH metric on a HIGH table -> serves.
+    assert mod.build_emos_q(city="X", season="JJA", metric="high", lead_days=3.0,
+                            members_native=members, unit="C", bins=bins) is not None
+    # LOW metric on a HIGH table -> fail-closed None (no cross-metric serve).
+    assert mod.build_emos_q(city="X", season="JJA", metric="low", lead_days=3.0,
+                            members_native=members, unit="C", bins=bins) is None, \
+        "LOW market must NOT receive the HIGH EMOS fit — metric-crossing is fail-closed"
 
 
 # ----------------------------------------------------------------------------

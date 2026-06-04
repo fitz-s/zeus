@@ -1,5 +1,5 @@
 # Created: 2026-06-03
-# Last reused/audited: 2026-06-03
+# Last reused/audited: 2026-06-04 (metric-crossing fix: metric-matched daily field)
 # Authority basis: Task #135 mainstream-forecast direction-agreement gate;
 #   open-meteo.com/v1/forecast (standard, non-ECMWF endpoint — independent
 #   from our raw ECMWF ensemble). City coords from config/cities.json (airport
@@ -82,14 +82,27 @@ def fetch_mainstream_point(
     city: str,
     target_date: str,
     *,
+    metric: str,
     max_age_hours: float = _MAX_AGE_HOURS_DEFAULT,
-    _cache: dict[tuple[str, str], dict[str, Any]] | None = None,
+    _cache: dict[tuple[str, str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
-    """Return the mainstream daily-max temperature point for (city, target_date).
+    """Return the mainstream daily-extremum temperature point for (city, target_date, metric).
+
+    METRIC IS REQUIRED AND LOAD-BEARING. HIGH and LOW are physically different
+    quantities — the daily MAX and the daily MIN of the temperature series — and a
+    market settles against exactly one of them. This function fetches the matching
+    Open-Meteo daily field:
+        metric == "high" -> temperature_2m_max
+        metric == "low"  -> temperature_2m_min
+    A HIGH-only default is FORBIDDEN: a LOW market graded against the daily max
+    compares two different physical quantities (the original #135 metric-crossing
+    defect — Paris LOW 13°C bin scored against the 20°C daily high). `metric` has no
+    default so omission raises TypeError; an unknown value raises ValueError.
 
     Returns a dict with keys:
-        point        — float, daily max temperature in city's native unit (C or F)
+        point        — float, daily extremum (max for high / min for low) in native unit
         unit         — "C" or "F"
+        metric       — "high" | "low" (echoed for provenance)
         source       — "open_meteo_standard_forecast"
         authority_tier — "mainstream"
         fetched_at_utc — ISO8601 UTC timestamp of the HTTP response
@@ -100,9 +113,17 @@ def fetch_mainstream_point(
     Returns None (fail-closed) on any error or staleness.
 
     _cache is an optional dict shared by the caller across candidates for the
-    same city/date cycle — avoids duplicate HTTP calls. Keys are (city, target_date).
+    same city/date/metric cycle — avoids duplicate HTTP calls. Keys are
+    (city, target_date, metric); metric is in the key so high/low never collide.
     """
-    cache_key = (city.lower(), target_date)
+    metric_norm = str(metric).lower()
+    if metric_norm not in ("high", "low"):
+        raise ValueError(
+            f"fetch_mainstream_point: metric must be 'high' or 'low', got {metric!r}"
+        )
+    daily_field = "temperature_2m_max" if metric_norm == "high" else "temperature_2m_min"
+
+    cache_key = (city.lower(), target_date, metric_norm)
 
     # Serve from cache if fresh.
     if _cache is not None and cache_key in _cache:
@@ -133,7 +154,7 @@ def fetch_mainstream_point(
     params = {
         "latitude": lat,
         "longitude": lon,
-        "daily": "temperature_2m_max",
+        "daily": daily_field,  # metric-matched: max for high, min for low
         "temperature_unit": temp_unit_param,
         "forecast_days": 16,
         "timezone": entry.get("timezone", "UTC"),
@@ -157,7 +178,7 @@ def fetch_mainstream_point(
         )
         return None
 
-    point = _extract_daily_max(resp, target_date)
+    point = _extract_daily_value(resp, target_date, daily_field)
     if point is None:
         logger.debug(
             "mainstream_forecast_source: %r %s not in response window — fail-closed",
@@ -169,6 +190,7 @@ def fetch_mainstream_point(
     result: dict[str, Any] = {
         "point": float(point),
         "unit": unit_raw,
+        "metric": metric_norm,
         "source": "open_meteo_standard_forecast",
         "authority_tier": "mainstream",
         "fetched_at_utc": fetched_at,
@@ -183,17 +205,23 @@ def fetch_mainstream_point(
     return result
 
 
-def _extract_daily_max(resp: dict[str, Any], target_date: str) -> float | None:
-    """Pull temperature_2m_max for target_date from Open-Meteo /v1/forecast response."""
+def _extract_daily_value(
+    resp: dict[str, Any], target_date: str, field: str
+) -> float | None:
+    """Pull the daily `field` value for target_date from an Open-Meteo /v1/forecast response.
+
+    `field` is the metric-matched Open-Meteo variable name
+    (temperature_2m_max for HIGH, temperature_2m_min for LOW).
+    """
     try:
         daily = resp.get("daily", {})
         dates = daily.get("time", [])
-        values = daily.get("temperature_2m_max", [])
+        values = daily.get(field, [])
         for d, v in zip(dates, values):
             if str(d) == target_date and v is not None:
                 return float(v)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("mainstream_forecast_source: _extract_daily_max error: %s", exc)
+        logger.debug("mainstream_forecast_source: _extract_daily_value error: %s", exc)
     return None
 
 

@@ -15,7 +15,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from src.calibration.emos import bin_probability_settlement, emos_predictive
+from src.calibration.emos import bin_probability_settlement, emos_predictive, load_emos_table
 
 
 def _bin_bounds(b) -> tuple[Optional[float], Optional[float]]:
@@ -29,6 +29,7 @@ def build_emos_q(
     *,
     city: str,
     season: str,
+    metric: str,
     lead_days: float,
     members_native: "np.ndarray",
     unit: str,
@@ -43,14 +44,27 @@ def build_emos_q(
     (fixing the point under-dispersion). Returns ``None`` when the EMOS cell is served=raw or
     missing: the caller then falls back to the honest raw analytic p_raw, NEVER to the bias maze.
 
+    METRIC FAIL-CLOSED ANTIBODY (2026-06-04): HIGH and LOW are physically different quantities
+    (daily max vs daily min) with separate fits. The EMOS table is single-metric (``_meta.metric``;
+    HIGH-only today). If ``metric`` does not match the table's metric, this returns ``None`` —
+    serving HIGH-fit (mu, sigma) onto a LOW market's member-MIN array is UNCONSTRUCTABLE here, so
+    the caller honest-falls-back instead of trading a cross-metric calibration. This makes the
+    metric-crossing CATEGORY impossible, not just the mainstream-gate instance.
+
     Args:
         city:           city name matching the EMOS table key.
         season:         season code (DJF/MAM/JJA/SON) — must match the table's hemisphere convention.
+        metric:         'high' | 'low' — the market's settlement metric. MUST match the EMOS table
+                        metric or build returns None (no cross-metric serve).
         lead_days:      decision lead in days (lead enters sigma via the e*lead EMOS term).
-        members_native: 1-D ensemble member maxima in the bins' native unit (F or C).
+        members_native: 1-D ensemble member extrema (max for high / min for low) in native unit.
         unit:           'F' or 'C' — the settlement-asserted native unit of members + bins.
         bins:           settlement bins as (low, high) tuples or Bin objects (None = open shoulder).
     """
+    # Metric fail-closed: the table is single-metric; refuse cross-metric serves.
+    _table_metric = str((load_emos_table().get("_meta") or {}).get("metric") or "").lower()
+    if _table_metric and str(metric).lower() != _table_metric:
+        return None
     u = (unit or "").strip().upper()
     arr = np.asarray(members_native, dtype=float)
     if arr.size < 2:

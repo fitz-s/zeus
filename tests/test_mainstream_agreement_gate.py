@@ -486,6 +486,7 @@ def test_gate_fires_through_adapter_not_fail_open():
     family = SimpleNamespace(
         city="Wellington",
         target_date="2026-06-04",
+        metric="high",  # the gate fetches metric-matched mainstream (LOW->min, HIGH->max)
         candidates=[candidate_stub],
     )
     payload: dict = {}
