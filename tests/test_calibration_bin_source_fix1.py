@@ -491,18 +491,20 @@ class TestSettingsFlagRead:
             f"Constant regressed: {CANONICAL_CALIBRATION_PAIR_BIN_SOURCE!r}"
         )
 
-    def test_actual_settings_json_has_flag_false(self):
-        """The committed settings.json must have the flag present and False
-        (default-off requirement for operator-promotable shadow flags)."""
+    def test_actual_settings_json_has_flag_true(self):
+        """The committed settings.json must have the flag present and True
+        (operator-promoted 2026-06-03: uncorrected cities get own canonical_v2
+        fit instead of foreign Amsterdam-cluster borrow)."""
         settings_path = Path(__file__).resolve().parents[1] / "config" / "settings.json"
         if not settings_path.exists():
             pytest.skip("config/settings.json not found")
         cfg = json.loads(settings_path.read_text())
         ff = cfg.get("feature_flags", {})
         assert "calibration_bin_source_v2_fit_enabled" in ff, (
-            "flag must be declared in feature_flags (not absent — absent reads as False "
-            "but explicit False is required for operator visibility)"
+            "flag must be declared in feature_flags (not absent — explicit True "
+            "required for operator visibility after promotion)"
         )
-        assert ff["calibration_bin_source_v2_fit_enabled"] is False, (
-            f"flag must be False in committed settings.json; got {ff['calibration_bin_source_v2_fit_enabled']!r}"
+        assert ff["calibration_bin_source_v2_fit_enabled"] is True, (
+            f"flag must be True in committed settings.json after operator promotion; "
+            f"got {ff['calibration_bin_source_v2_fit_enabled']!r}"
         )
