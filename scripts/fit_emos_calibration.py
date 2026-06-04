@@ -56,16 +56,37 @@ def mu_sigma(p, xbar, logS2, lead):
     return a + b*xbar, np.sqrt(np.exp(np.clip(c + d*logS2 + e*lead, -20, 20)))
 
 def main():
-    w = sqlite3.connect(WORLD); w.row_factory = sqlite3.Row
+    import argparse
+    ap = argparse.ArgumentParser(description="Fit EMOS/NGR per (city,season). FIT-CLEAN #110 2026-06-04.")
+    ap.add_argument("--out", default=os.path.join(REPO, "state", "emos_calibration_candidate.json"),
+                    help="output table path. DEFAULT = a CANDIDATE file, NOT the live "
+                         "emos_calibration.json (preserve-original: the operator promotes the "
+                         "candidate after a before/after review). Pass the live path to overwrite.")
+    ap.add_argument("--min-overlap-hours", type=float, default=18.0,
+                    help="exclude ensemble_snapshots whose local-day-max window overlap is below "
+                         "this many hours — the truncated D+6 reads (~6h overlap) are a fake-cold "
+                         "artifact that poisons mu=a+b*xbar (the cold-shift root cause, wogx7y03g).")
+    args = ap.parse_args()
+    w = sqlite3.connect(f"file:{WORLD}?mode=ro", uri=True); w.row_factory = sqlite3.Row
     obs = defaultdict(dict)
     for r in w.execute("SELECT city, target_date d, running_max rm, temp_unit tu FROM observation_instants WHERE running_max IS NOT NULL"):
         c = to_c(r["rm"], r["tu"])
         if c is None or not np.isfinite(c): continue
         if r["d"] not in obs[r["city"]] or c > obs[r["city"]][r["d"]]: obs[r["city"]][r["d"]] = c
-    f = sqlite3.connect(FCST); f.row_factory = sqlite3.Row
+    f = sqlite3.connect(f"file:{FCST}?mode=ro", uri=True); f.row_factory = sqlite3.Row
     # cell -> {y24:[(xbar,logS2,lead,y)], y25:[...], test(2026):[...]}
     cells = defaultdict(lambda: {"y24": [], "y25": [], "test": []})
-    for r in f.execute("SELECT city, target_date, members_json, members_unit, lead_hours FROM ensemble_snapshots WHERE temperature_metric='high'"):
+    # FIT-CLEAN (#110, 2026-06-04): exclude TRUNCATED daily-max windows. At the D+6 horizon edge
+    # the OpenData mx2t3 daily-max window covers only ~6h (vs ~18-21h full) for western-hemisphere
+    # cities -> a fake ~12C-cold member-mean that poisons mu=a+b*xbar (the cold-shift artifact root
+    # cause, root-cause workflow wogx7y03g). Require near-full local-day coverage so the fit never
+    # ingests a truncated read. NULL overlap (pre-column rows) is kept (COALESCE high).
+    for r in f.execute(
+        "SELECT city, target_date, members_json, members_unit, lead_hours "
+        "FROM ensemble_snapshots WHERE temperature_metric='high' "
+        "AND COALESCE(forecast_window_local_day_overlap_hours, 99.0) >= ?",
+        (args.min_overlap_hours,),
+    ):
         try:
             m = np.array(json.loads(r["members_json"]), dtype=float); m = m[np.isfinite(m)]
         except Exception: continue
@@ -130,8 +151,11 @@ def main():
         serve["cells"][f"{key[0]}|{key[1]}"] = {
             "params": [round(float(x), 5) for x in fv["p"]], "n": int(fv["n"]),
             "served": "raw" if key in raw_only else "emos"}
-    with open(os.path.join(REPO, "state", "emos_calibration.json"), "w") as fh:
+    serve["_meta"]["min_overlap_hours"] = args.min_overlap_hours
+    serve["_meta"]["fit_clean"] = "truncated-window excluded (#110, 2026-06-04)"
+    with open(args.out, "w") as fh:
         json.dump(serve, fh, indent=2)
+    print(f"\nWROTE {args.out} (candidate unless --out=live). cells={len(serve['cells'])}")
 
     rows = []; agg = {"craw": [], "cemos": [], "pit": []}
     for key, dd in cells.items():

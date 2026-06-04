@@ -3716,10 +3716,15 @@ def _market_analysis_from_event_snapshot(
     if (family.event_type != "DAY0_EXTREME_UPDATED"
             and bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))):
         from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
-        from src.contracts.season import season_from_date as _season_from_date
+        # NH month-season, MATCHING emos_calibration.json keying (scripts/fit_emos_calibration.py
+        # season()). MUST NOT be hemisphere-aware: the fit groups e.g. Sao Paulo|June under "JJA"
+        # (NH label); serving with a lat-flipped season would miss the cell and silently fall back.
+        _emos_m = (family.target_date.month if hasattr(family.target_date, "month")
+                   else int(str(family.target_date)[5:7]))
+        _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
+                        else "JJA" if _emos_m in (6, 7, 8) else "SON")
         _emos_q = _build_emos_q(
-            city=city.name,
-            season=_season_from_date(family.target_date, lat=float(getattr(city, "lat", 0.0))),
+            city=city.name, season=_emos_season,
             lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
             members_native=raw_members, unit=unit, bins=bins,
         )
