@@ -102,6 +102,8 @@
     "no_trade_regret_enabled": true,
     "reports_enabled": true,
     "forecast_snapshot_emit_limit": 20,
+    "coverage_fairness_emit_enabled": false,
+    "_coverage_fairness_emit_enabled_note": "Phase-2 B4. When true, scan_committed_snapshots deduplicates emitted rows to <=1 per (city,target_date,metric) per cycle and round-robins across cities so no city is starved beyond ceil(N/LIMIT) cycles. Fixes: ORDER BY snapshot_id DESC + identical batch computed_at monopolises first 2-3 cities, ~35 dark. When false (default), legacy ORDER BY is used byte-identical to pre-B4. Shadow-safe: live q is unchanged. Promote per-operator when Phase-2 consolidates.",
     "day0_catchup_emit_limit": 20,
     "no_submit_proof_limit": 50,
     "market_channel_refresh_max_actions_per_window": 5,
