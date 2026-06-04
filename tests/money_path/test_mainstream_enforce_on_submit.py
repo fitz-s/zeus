@@ -1,20 +1,21 @@
 # Created: 2026-06-03
-# Last reused/audited: 2026-06-03
-# Authority basis: PR-2 (B) F1 enforce — mainstream_agreement_enforce_on_submit. When the
-#   operator turns enforcement ON (default OFF), an armed submit must require the SELECTED
-#   candidate's mainstream_agreement_pass to be True before executor_submit, FAIL-CLOSED on a
-#   missing/stale verdict. The reference selector stays reference-only (never excludes);
-#   enforcement is a SEPARATE, submit-time, opt-in control.
-"""Relationship test: mainstream-agreement verdict -> armed submit boundary.
+# Last reused/audited: 2026-06-04
+# Authority basis: SUPERSEDED 2026-06-04 by operator directive (Rule-4 antibody) — mainstream
+#   is OBSERVATIONAL / DISPLAY-ONLY and NEVER a decision input. The former
+#   ``mainstream_agreement_enforce_on_submit`` submit-time decision branch is DELETED, so a
+#   failed/missing mainstream verdict can no longer block a submit. The original PR-2 (B) F1
+#   enforce contract (a failed verdict BLOCKS the venue submit) is RETIRED; these tests now
+#   assert the INVERSE law — mainstream takes NO part in the submit decision.
+"""Relationship test: mainstream verdict -> armed submit boundary == NO EFFECT.
 
-Two executable proofs of the cross-module contract:
-  * reference mode (mainstream_agreement_reference_enabled): the selector still picks the
-    higher trade_score candidate even when its verdict FAILED (proven in
-    tests/test_mainstream_agreement_gate.py::test_mainstream_gate_is_reference_only...).
-  * enforce mode (mainstream_agreement_enforce_on_submit): the SAME failed verdict on the
-    selected candidate now BLOCKS the venue submit (executor_submit is never called).
-
-The test crosses the verdict->submit boundary that prose cannot guarantee.
+These tests previously proved the (now-deleted) enforce-on-submit branch BLOCKED a
+submit on a failed verdict. Under the 2026-06-04 operator law (mainstream is
+display-only, never a decision input), the inverse is the contract: a failed / missing /
+passing mainstream verdict all reach the IDENTICAL submit decision. No value of the
+verdict, and no value of the (now-inert) ``mainstream_agreement_enforce_on_submit``
+config key, may produce a MAINSTREAM_AGREEMENT_REQUIRED rejection — that reason no
+longer exists. The richer cross-boundary proof lives in
+tests/money_path/test_mainstream_display_only_unconstructable.py.
 """
 from __future__ import annotations
 
@@ -33,7 +34,6 @@ DT = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
 
 
 def _event():
-    # Reuse the canary test's forecast-event builder (same family/condition shape).
     from tests.money_path.test_edli_live_canary import _forecast_event
 
     return _forecast_event()
@@ -78,57 +78,34 @@ def _build_submit(monkeypatch, event, *, mainstream_agreement_pass, called):
     ), _executor
 
 
-def test_enforce_off_does_not_block_failed_verdict(monkeypatch):
-    # Default (enforce OFF): a failed verdict does NOT block submit at this gate.
-    # (The submit proceeds past the mainstream gate; downstream cert build may still
-    # reject, but NOT with MAINSTREAM_AGREEMENT_REQUIRED.)
-    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", False)
+@pytest.mark.parametrize("enforce_posture", [True, False])
+@pytest.mark.parametrize("verdict", [True, False, None])
+def test_mainstream_verdict_never_blocks_submit(monkeypatch, enforce_posture, verdict):
+    """No mainstream verdict value, under any (inert) enforce_on_submit posture, may
+    block the submit with MAINSTREAM_AGREEMENT_REQUIRED — the branch is deleted."""
+    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", enforce_posture)
     event = _event()
     called = {"count": 0}
-    submit, _ = _build_submit(monkeypatch, event, mainstream_agreement_pass=False, called=called)
+    submit, _ = _build_submit(monkeypatch, event, mainstream_agreement_pass=verdict, called=called)
 
     receipt = submit(event, DT)
 
-    assert receipt.reason != "MAINSTREAM_AGREEMENT_REQUIRED"
+    assert receipt.reason != "MAINSTREAM_AGREEMENT_REQUIRED", (
+        f"mainstream verdict={verdict} (enforce={enforce_posture}) blocked submit — "
+        "the display-only law was violated; the enforce branch was not deleted."
+    )
 
 
-def test_enforce_on_blocks_failed_verdict_before_executor(monkeypatch):
-    # Enforce ON + selected candidate's verdict FAILED -> reject before executor_submit.
+def test_failed_and_passing_verdict_reach_identical_decision(monkeypatch):
+    """A FAILED verdict and a PASSING verdict reach the byte-identical submit decision:
+    mainstream is inert at the submit boundary."""
     monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", True)
-    event = _event()
-    called = {"count": 0}
-    submit, _ = _build_submit(monkeypatch, event, mainstream_agreement_pass=False, called=called)
-
-    receipt = submit(event, DT)
-
-    assert receipt.reason == "MAINSTREAM_AGREEMENT_REQUIRED"
-    assert receipt.proof_accepted is False
-    assert called["count"] == 0, "executor must NOT be called when enforcement rejects"
-
-
-def test_enforce_on_fail_closed_on_missing_verdict(monkeypatch):
-    # FAIL-CLOSED: a missing/stale verdict (mainstream_agreement_pass is None) must reject
-    # under enforcement, never silently submit.
-    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", True)
-    event = _event()
-    called = {"count": 0}
-    submit, _ = _build_submit(monkeypatch, event, mainstream_agreement_pass=None, called=called)
-
-    receipt = submit(event, DT)
-
-    assert receipt.reason == "MAINSTREAM_AGREEMENT_REQUIRED"
-    assert called["count"] == 0
-
-
-def test_enforce_on_passes_verdict_true_through_gate(monkeypatch):
-    # Enforce ON + verdict True -> the mainstream gate does NOT block. (It may still die
-    # downstream at cert build in this minimal harness; what matters is the reason is NOT
-    # MAINSTREAM_AGREEMENT_REQUIRED — the gate let it through.)
-    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", True)
-    event = _event()
-    called = {"count": 0}
-    submit, _ = _build_submit(monkeypatch, event, mainstream_agreement_pass=True, called=called)
-
-    receipt = submit(event, DT)
-
-    assert receipt.reason != "MAINSTREAM_AGREEMENT_REQUIRED"
+    reasons = {}
+    for verdict in (True, False, None):
+        event = _event()
+        called = {"count": 0}
+        submit, _ = _build_submit(monkeypatch, event, mainstream_agreement_pass=verdict, called=called)
+        reasons[verdict] = submit(event, DT).reason
+    assert reasons[True] == reasons[False] == reasons[None], (
+        f"mainstream verdict changed the submit decision: {reasons!r}"
+    )

@@ -362,25 +362,14 @@ def event_bound_live_adapter_from_trade_conn(
                 reason="EXECUTOR_BOUNDARY_MISSING",
                 proof_accepted=False,
             )
-        # PR-2 (B) F1 ENFORCE: when the operator turns
-        # ``mainstream_agreement_enforce_on_submit`` ON (default OFF), an armed submit
-        # requires the SELECTED candidate's mainstream-agreement verdict to be True
-        # before reaching the executor. FAIL-CLOSED: a missing/stale verdict
-        # (mainstream_agreement_pass is None) or an explicit failure (False) -> reject
-        # MAINSTREAM_AGREEMENT_REQUIRED, executor never called. This is SEPARATE from the
-        # reference-only selector (mainstream_agreement_reference_enabled, which never
-        # excludes a candidate); enforcement is a deliberate submit-time arm control.
-        if real_order_submit_enabled and bool(
-            settings["edli_v1"].get("mainstream_agreement_enforce_on_submit", False)
-        ):
-            if no_submit_receipt.mainstream_agreement_pass is not True:
-                return EventSubmissionReceipt(
-                    False,
-                    event.event_id,
-                    event.causal_snapshot_id,
-                    reason="MAINSTREAM_AGREEMENT_REQUIRED",
-                    proof_accepted=False,
-                )
+        # OPERATOR LAW (2026-06-04, Rule-4 antibody): mainstream is OBSERVATIONAL /
+        # DISPLAY-ONLY — it is NEVER a decision input. The former submit-time mainstream
+        # enforce branch (which rejected an armed submit on a missing/failed mainstream
+        # verdict) is DELETED so mainstream has NO code path to gate / reject / skip /
+        # alter direction, q, q_lcb, trade_score, selection, or submit. The verdict is
+        # computed + annotated on the receipt for the operator's ARM review only; it can
+        # never change a decision. This makes "mainstream changes a decision"
+        # UNCONSTRUCTABLE (not merely flag-OFF). The dead config key is left inert.
         # Canary knob (§7): force the taker branch (bypassing the governor's
         # maker/taker CHOICE, never its NO_TRADE/risk gates) while the canary is
         # active and below its min fill count. main.py owns the count gate via
@@ -3552,29 +3541,30 @@ def _canonical_probability_and_fdr_proof(
         except Exception:
             pass
 
-    # MAINSTREAM AGREEMENT REFERENCE (#135, 2026-06-03): evaluate per-candidate direction-agreement
-    # against an independent mainstream forecast point (Open-Meteo standard /v1/forecast).
-    # Flag-gated (edli_v1.mainstream_agreement_reference_enabled, default OFF). F1 rename
-    # (PR-2 B): was mainstream_agreement_gate_enabled — the selector is genuinely
-    # REFERENCE-ONLY (it never excludes a candidate), so "gate" was a misread.
-    # FAIL-OPEN/SILENT: any evaluation error must not affect the live q_by_condition decision.
-    # REFERENCE-ONLY: verdicts stored in payload for receipt provenance annotation only.
-    # They do NOT filter or exclude candidates in _selected_candidate_proof.
-    # (Submit-time ENFORCEMENT is a SEPARATE, default-OFF flag —
-    # mainstream_agreement_enforce_on_submit — handled in the submit closure, not here.)
+    # MAINSTREAM AGREEMENT ANNOTATION (#135 / operator directive 2026-06-04 #2):
+    # ALWAYS compute + annotate the per-candidate mainstream/bias agreement value, DECOUPLED
+    # from the reference flag (mainstream_agreement_reference_enabled). The operator wants the
+    # number SHOWN ("数值显示") on every receipt without flipping the foreign config — so the
+    # evaluation is UNCONDITIONAL here. It is purely OBSERVATIONAL: verdicts are stored in the
+    # payload for receipt annotation only; they do NOT filter / exclude candidates in
+    # _selected_candidate_proof, and (post-2026-06-04) there is NO submit-time enforce branch.
+    # WARM-CACHE-ONLY: the eval helper below reads read_mainstream_point_cached
+    # (the STEP-7 off-mutex path, never the synchronous fetch under the world mutex). Cache cold
+    # -> verdict carries mainstream_available=False (pass annotated as unknown); the candidate
+    # still forms (mainstream is display-only and can never block). FAIL-OPEN/SILENT: any
+    # evaluation error must not affect the live q_by_condition decision.
     # Key: (condition_id, direction) → verdict dict.
     try:
-        if bool(settings["edli_v1"].get("mainstream_agreement_reference_enabled", False)):
-            _evaluate_and_store_mainstream_agreement(
-                event=event,
-                family=family,
-                analysis=analysis,
-                payload=payload,
-            )
+        _evaluate_and_store_mainstream_agreement(
+            event=event,
+            family=family,
+            analysis=analysis,
+            payload=payload,
+        )
     except Exception as _gate_exc:
         try:
             logging.getLogger("zeus.mainstream_gate").warning(
-                "mainstream-agreement gate evaluation failed (non-fatal): %s", _gate_exc
+                "mainstream-agreement annotation failed (non-fatal): %s", _gate_exc
             )
         except Exception:
             pass
@@ -4042,7 +4032,17 @@ def _evaluate_and_store_mainstream_agreement(
                     raw_our_point=raw_our_point,
                     precision=precision,
                 )
-                verdicts[(condition_id, direction)] = verdict.to_dict()
+                _vd = verdict.to_dict()
+                # DISPLAY-ONLY (operator directive 2026-06-04 #2): a COLD cache
+                # (mainstream_pt is None) is UNKNOWN, not a failure. Annotate
+                # mainstream_agreement_pass=None (unknown) rather than False so the
+                # operator's review set distinguishes "no mainstream point yet" from a
+                # genuine bias mismatch. The candidate STILL forms (mainstream never
+                # blocks); the order-able ∩ bias-pass review query treats None as
+                # excluded (unknown != pass), the same as a fail.
+                if mainstream_pt is None:
+                    _vd["mainstream_agreement_pass"] = None
+                verdicts[(condition_id, direction)] = _vd
                 verdicts[(condition_id, direction)]["mainstream_authority_tier"] = (
                     mainstream_snap.get("authority_tier") if mainstream_snap else None
                 )

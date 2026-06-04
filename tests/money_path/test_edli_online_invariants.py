@@ -1,9 +1,9 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-03
+# Last reused/audited: 2026-06-04
 # Authority basis: EDLI PR332 deploy-ready review; Day0 must not be advertised
 # live while the online observation-context hook is absent.
-#                  + 2026-06-03 arm direction-gate footgun antibody / pre-arm verification
-#                    (_assert_edli_arm_requires_direction_gate boot guard)
+#                  + 2026-06-04 arm direction-gate boot guard DELETED (mainstream is
+#                    display-only, never a decision/arm input — operator Rule-4 antibody)
 from __future__ import annotations
 
 import json
@@ -411,102 +411,25 @@ def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# ANTIBODY: arming WITHOUT the direction-agreement gate is a BOOT FAILURE.
-#
-# ARM is a two-key operation: real_order_submit_enabled=true AND
-# mainstream_agreement_enforce_on_submit=true must be set together. Flipping ONLY
-# the submit flag skips the direction-agreement gate in event_reactor_adapter.py,
-# so gate-FAIL wrong-side buy_no candidates (which already pass
-# proof+kelly+fdr+trade_score) become live-submittable. _assert_edli_arm_requires_
-# direction_gate makes that state unconstructable at boot.
+# RETIRED 2026-06-04 (operator directive, Rule-4 antibody): the two-key arm
+# direction-gate boot guard (_assert_edli_arm_requires_direction_gate) is DELETED.
+# It coupled arming to the mainstream-enforcement flag, but mainstream is now
+# OBSERVATIONAL / DISPLAY-ONLY and is NEVER a decision/arm input. The submit-time
+# enforce branch it guarded was also deleted, so there is no "direction gate" left to
+# require at arm time. The inverse law (mainstream cannot block boot/arm/submit) is
+# proven in tests/money_path/test_mainstream_display_only_unconstructable.py.
 # ---------------------------------------------------------------------------
 
 
-def test_arm_with_enforce_off_raises_direction_gate_boot_failure():
-    """Armed (submit flag on) but enforce_on_submit=false -> BOOT FAILURE."""
+def test_arm_direction_gate_boot_guard_is_deleted():
+    """The two-key arm direction-gate boot guard must NOT exist — mainstream is
+    display-only and can never block arming."""
     import src.main as main
 
-    edli_cfg = {
-        "real_order_submit_enabled": True,
-        "mainstream_agreement_enforce_on_submit": False,
-        "mainstream_agreement_reference_enabled": True,
-    }
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT"):
-        main._assert_edli_arm_requires_direction_gate(edli_cfg)
-
-
-def test_arm_with_both_keys_true_passes_direction_gate():
-    """Armed with enforce_on_submit=true AND reference_enabled=true -> passes."""
-    import src.main as main
-
-    edli_cfg = {
-        "real_order_submit_enabled": True,
-        "mainstream_agreement_enforce_on_submit": True,
-        "mainstream_agreement_reference_enabled": True,
-    }
-    # Must not raise — the two-key requirement is satisfied.
-    main._assert_edli_arm_requires_direction_gate(edli_cfg)
-
-
-def test_arm_with_reference_off_raises_direction_gate_boot_failure():
-    """enforce_on_submit=true but reference_enabled=false -> BOOT FAILURE.
-
-    Enforcement reads the mainstream-agreement verdict; if the reference selector
-    that PRODUCES the verdict is off, enforcement has nothing to read. Fail-closed.
-    """
-    import src.main as main
-
-    edli_cfg = {
-        "real_order_submit_enabled": True,
-        "mainstream_agreement_enforce_on_submit": True,
-        "mainstream_agreement_reference_enabled": False,
-    }
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT"):
-        main._assert_edli_arm_requires_direction_gate(edli_cfg)
-
-
-def test_arm_with_missing_flags_raises_fail_closed():
-    """A MISSING flag is treated as NOT-satisfied (fail-closed); only literal True passes."""
-    import src.main as main
-
-    # enforce present-True but reference flag absent entirely -> raise.
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT"):
-        main._assert_edli_arm_requires_direction_gate(
-            {"mainstream_agreement_enforce_on_submit": True}
-        )
-    # Both flags absent -> raise.
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT"):
-        main._assert_edli_arm_requires_direction_gate({})
-
-
-def test_shadow_no_submit_does_not_reach_direction_gate_guard(monkeypatch):
-    """SHADOW byte-identity: with real_order_submit_enabled=false the armed-mode
-    branch in _assert_live_execution_mode_contract is NOT entered, so the
-    direction-gate guard is never reached and boot proceeds (today's shadow boot
-    is byte-identical). The contract returns 'edli_shadow_no_submit' without raising.
-    """
-    import src.main as main
-
-    edli_cfg = {
-        "enabled": True,
-        "live_execution_mode": "edli_shadow_no_submit",
-        "reactor_mode": "live_no_submit",
-        "event_writer_enabled": True,
-        "forecast_snapshot_trigger_enabled": True,
-        # ARM key OFF -> armed-mode branch (and the direction-gate guard) never entered.
-        "real_order_submit_enabled": False,
-        # Direction-gate flags left at the production posture (enforce OFF): the
-        # guard would RAISE on these if it were reached. It must NOT be reached.
-        "mainstream_agreement_enforce_on_submit": False,
-        "mainstream_agreement_reference_enabled": True,
-        "edli_live_scope": "forecast_only",
-    }
-    # Prove the guard would raise on these flags if invoked directly...
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT"):
-        main._assert_edli_arm_requires_direction_gate(edli_cfg)
-    # ...yet the full shadow contract does NOT raise and returns the shadow mode,
-    # proving the guard is not on the shadow boot path.
-    assert main._assert_live_execution_mode_contract(edli_cfg) == "edli_shadow_no_submit"
+    assert not hasattr(main, "_assert_edli_arm_requires_direction_gate"), (
+        "the deleted arm direction-gate boot guard reappeared; mainstream must NOT "
+        "be coupled to arming (operator law: observational/display-only)."
+    )
 
 
 def test_live_canary_requires_stage_evidence_file_paths(monkeypatch):
@@ -723,13 +646,9 @@ def _edli_live_canary_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
-        # Arm direction-gate antibody (2026-06-03): armed boot is now a two-key
-        # operation. A canary config that is meant to PROCEED past the arm
-        # contract must carry both direction-gate keys, otherwise
-        # _assert_edli_arm_requires_direction_gate raises
-        # EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT before any
-        # downstream arm gate is reached. Tests that exercise the direction gate
-        # itself override these (see test_arm_with_* above).
+        # 2026-06-04: the arm direction-gate boot guard is DELETED (mainstream is
+        # display-only). These keys are now INERT (no boot guard reads them); retained
+        # here only to keep this canary config explicit. They do not affect boot.
         "mainstream_agreement_enforce_on_submit": True,
         "mainstream_agreement_reference_enabled": True,
     }
@@ -753,7 +672,7 @@ def _edli_live_updates(**overrides):
         "edli_live_min_canary_count": 1,
         "edli_live_max_unresolved_unknowns": 0,
         "edli_live_min_realized_edge_bps": 0,
-        # Arm direction-gate antibody (2026-06-03): see _edli_live_canary_updates.
+        # 2026-06-04: inert keys (arm direction-gate guard DELETED). See _edli_live_canary_updates.
         "mainstream_agreement_enforce_on_submit": True,
         "mainstream_agreement_reference_enabled": True,
     }
