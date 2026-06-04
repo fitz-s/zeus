@@ -12,7 +12,7 @@ entries:
     status: tracking
     owner: topology-maintenance
     first_observed: "2026-05-21"
-    review_by: "2026-06-04"
+    review_by: "2026-06-17"
     evidence: "python3 scripts/topology_doctor.py --scripts --json failed on unrelated script-manifest debt while live-release gate script was registered."
     active_task_scope: "docs/operations/task_2026-05-21_live_release_proof_p0p3"
     allowed_only_if: "The active change registers its own scripts and does not add to the unrelated script-manifest debt."
@@ -21,7 +21,7 @@ entries:
     status: tracking
     owner: topology-maintenance
     first_observed: "2026-05-21"
-    review_by: "2026-06-04"
+    review_by: "2026-06-17"
     evidence: "python3 scripts/topology_doctor.py --tests --json failed on unrelated test-topology/law-gate debt while live-release tests were registered."
     active_task_scope: "docs/operations/task_2026-05-21_live_release_proof_p0p3"
     allowed_only_if: "The active change registers its own tests and does not add to the unrelated test-topology debt."

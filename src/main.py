@@ -2141,6 +2141,7 @@ def _auto_derive_user_channel_condition_ids(
         return []
     try:
         from src.data.market_scanner import (
+            MarketEventsPersistenceError,
             extract_executable_condition_ids,
             find_weather_markets_or_raise,
         )
@@ -2150,7 +2151,7 @@ def _auto_derive_user_channel_condition_ids(
             include_slug_pattern=False,
         )
         return extract_executable_condition_ids(events)
-    except RuntimeError as exc:
+    except MarketEventsPersistenceError as exc:
         logger.warning(
             "user-channel WS scanner: market_events persistence failure — "
             "degrading to empty condition_ids: %s", exc,
@@ -5347,6 +5348,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
             def _refresh_snapshot_action(action: MarketChannelAction) -> None:
                 from src.data.market_scanner import (
+                    MarketEventsPersistenceError,
                     find_weather_markets_or_raise,
                     refresh_executable_market_substrate_snapshots,
                 )
@@ -5359,7 +5361,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
                             min_hours_to_resolution=0.0,
                             include_slug_pattern=True,
                         )
-                    except RuntimeError as _persistence_exc:
+                    except MarketEventsPersistenceError as _persistence_exc:
                         logger.error(
                             "EDLI market-channel refresh aborted: market_events persistence "
                             "failure — snapshot substrate not refreshed: %s",

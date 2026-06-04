@@ -1,7 +1,6 @@
 """Market types: Bin and BinEdge."""
 
 from dataclasses import dataclass, field
-from functools import cached_property
 import logging
 import math
 
@@ -135,7 +134,7 @@ class Bin:
         """°C point bin: low == high, covers exactly one integer degree."""
         return self.low is not None and self.high is not None and self.low == self.high
 
-    @cached_property
+    @property
     def bin_kind(self) -> BinKind:
         """Canonical grading kind for this bin (exact | ceiling | floor).
 
@@ -145,10 +144,14 @@ class Bin:
           - open-low  (low open, high set)  → ``"floor"``    ("X°C or below")
           - both bounds finite              → ``"exact"``    (point or range)
 
-        Cached because ``Bin`` is frozen and immutable. Making this a property
-        of the TYPE (not a local heuristic at each grading site) is the
-        antibody: a ceiling bin graded as an exact point becomes structurally
-        impossible — there is one classification, and it lives here.
+        Plain @property (not cached_property): ``Bin`` is a frozen dataclass
+        whose ``__dict__`` is write-protected, so ``cached_property`` would
+        raise ``FrozenInstanceError`` on Python 3.12/3.13 when the descriptor
+        tries to store the cached value. The computation is a trivial boolean
+        comparison — no caching needed. Making this a property of the TYPE
+        (not a local heuristic at each grading site) is the antibody: a ceiling
+        bin graded as an exact point becomes structurally impossible — there is
+        one classification, and it lives here.
         """
         open_low = self.is_open_low
         open_high = self.is_open_high
