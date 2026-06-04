@@ -355,6 +355,25 @@ def event_bound_live_adapter_from_trade_conn(
                 reason="EXECUTOR_BOUNDARY_MISSING",
                 proof_accepted=False,
             )
+        # PR-2 (B) F1 ENFORCE: when the operator turns
+        # ``mainstream_agreement_enforce_on_submit`` ON (default OFF), an armed submit
+        # requires the SELECTED candidate's mainstream-agreement verdict to be True
+        # before reaching the executor. FAIL-CLOSED: a missing/stale verdict
+        # (mainstream_agreement_pass is None) or an explicit failure (False) -> reject
+        # MAINSTREAM_AGREEMENT_REQUIRED, executor never called. This is SEPARATE from the
+        # reference-only selector (mainstream_agreement_reference_enabled, which never
+        # excludes a candidate); enforcement is a deliberate submit-time arm control.
+        if real_order_submit_enabled and bool(
+            settings["edli_v1"].get("mainstream_agreement_enforce_on_submit", False)
+        ):
+            if no_submit_receipt.mainstream_agreement_pass is not True:
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="MAINSTREAM_AGREEMENT_REQUIRED",
+                    proof_accepted=False,
+                )
         # Canary knob (§7): force the taker branch (bypassing the governor's
         # maker/taker CHOICE, never its NO_TRADE/risk gates) while the canary is
         # active and below its min fill count. main.py owns the count gate via
@@ -3445,15 +3464,19 @@ def _canonical_probability_and_fdr_proof(
         except Exception:
             pass
 
-    # MAINSTREAM AGREEMENT GATE (#135, 2026-06-03): evaluate per-candidate direction-agreement
+    # MAINSTREAM AGREEMENT REFERENCE (#135, 2026-06-03): evaluate per-candidate direction-agreement
     # against an independent mainstream forecast point (Open-Meteo standard /v1/forecast).
-    # Flag-gated (edli_v1.mainstream_agreement_gate_enabled, default OFF).
+    # Flag-gated (edli_v1.mainstream_agreement_reference_enabled, default OFF). F1 rename
+    # (PR-2 B): was mainstream_agreement_gate_enabled — the selector is genuinely
+    # REFERENCE-ONLY (it never excludes a candidate), so "gate" was a misread.
     # FAIL-OPEN/SILENT: any evaluation error must not affect the live q_by_condition decision.
     # REFERENCE-ONLY: verdicts stored in payload for receipt provenance annotation only.
     # They do NOT filter or exclude candidates in _selected_candidate_proof.
+    # (Submit-time ENFORCEMENT is a SEPARATE, default-OFF flag —
+    # mainstream_agreement_enforce_on_submit — handled in the submit closure, not here.)
     # Key: (condition_id, direction) → verdict dict.
     try:
-        if bool(settings["edli_v1"].get("mainstream_agreement_gate_enabled", False)):
+        if bool(settings["edli_v1"].get("mainstream_agreement_reference_enabled", False)):
             _evaluate_and_store_mainstream_agreement(
                 event=event,
                 family=family,

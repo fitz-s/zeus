@@ -472,8 +472,11 @@ def _validate_boot(settings_path=None) -> int:
 
 
 def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
-    if not bool(edli_cfg.get("edli_live_scaleout_enabled", False)):
-        raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED")
+    # F1 rename (PR-2 B): edli_live_scaleout_enabled -> edli_live_operator_authorized.
+    # The flag's real semantic is the operator ARM kill-switch for edli_live, not a
+    # scale-out knob. Renamed so the name matches the control it actually performs.
+    if not bool(edli_cfg.get("edli_live_operator_authorized", False)):
+        raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED")
     if not bool(edli_cfg.get("edli_live_promotion_artifact_required", True)):
         raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT_REQUIRED")
 

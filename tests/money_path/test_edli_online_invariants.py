@@ -45,7 +45,7 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["stale_book_directional_trading_enabled"] is False
     assert edli["real_order_submit_enabled"] is False
     assert edli["taker_fok_fak_live_enabled"] is False
-    assert edli["edli_live_scaleout_enabled"] is False
+    assert edli["edli_live_operator_authorized"] is False
     assert edli["edli_live_promotion_artifact_required"] is True
     assert edli["edli_live_min_canary_count"] == 1
     assert edli["edli_live_max_unresolved_unknowns"] == 0
@@ -638,7 +638,7 @@ def _edli_live_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
-        "edli_live_scaleout_enabled": True,
+        "edli_live_operator_authorized": True,
         "edli_live_promotion_artifact_required": True,
         "edli_live_min_canary_count": 1,
         "edli_live_max_unresolved_unknowns": 0,
@@ -648,11 +648,13 @@ def _edli_live_updates(**overrides):
     return values
 
 
-def test_edli_live_requires_scaleout_flag(monkeypatch):
-    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED"):
+def test_edli_live_requires_operator_authorized_flag(monkeypatch):
+    # F1 rename (PR-2 B): edli_live_scaleout_enabled -> edli_live_operator_authorized
+    # (the flag is the operator ARM kill-switch, not a scale-out knob).
+    with pytest.raises(RuntimeError, match="EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED"):
         _run_main_with_fake_scheduler(
             monkeypatch,
-            _edli_live_updates(edli_live_scaleout_enabled=False),
+            _edli_live_updates(edli_live_operator_authorized=False),
         )
 
 
@@ -831,7 +833,7 @@ def test_edli_live_accepts_positive_promotion_artifact(monkeypatch, tmp_path):
     assert "edli_market_channel_ingestor" in job_ids
     assert "edli_user_channel_reconcile" in job_ids
     assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live"
-    assert settings_copy["edli_v1"]["edli_live_scaleout_enabled"] is True
+    assert settings_copy["edli_v1"]["edli_live_operator_authorized"] is True
 
 
 def test_market_discovery_constructs_public_clob_with_bounded_timeout(monkeypatch):

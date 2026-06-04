@@ -111,7 +111,7 @@
     "stale_book_directional_trading_enabled": false,
     "real_order_submit_enabled": false,
     "taker_fok_fak_live_enabled": false,
-    "edli_live_scaleout_enabled": false,
+    "edli_live_operator_authorized": false,
     "edli_live_promotion_artifact_required": true,
     "edli_arm_gate_artifact_required": true,
     "edli_arm_gate_artifact_path": "state/edli_arm_gate_artifact.json",
@@ -125,7 +125,8 @@
     "tiny_live_max_orders_per_day": 1,
     "tiny_live_notional_cap_enabled": false,
     "tiny_live_daily_order_cap_enabled": false,
-    "mainstream_agreement_gate_enabled": true
+    "mainstream_agreement_reference_enabled": true,
+    "mainstream_agreement_enforce_on_submit": false
   },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
