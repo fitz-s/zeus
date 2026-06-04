@@ -760,6 +760,42 @@ def test_universe_excludes_settled_markets_by_market_end_at():
     assert "no-dead" not in md
 
 
+def test_universe_filter_agrees_with_canonical_market_open_predicate():
+    """STEP 5 relationship test: the bulk SQL `market_end_at > now` universe filter
+    gives the SAME keep/drop verdict as the ONE canonical POST_TRADING-boundary
+    authority ``market_phase.market_open_at_decision`` for every (market_end_at,
+    now) pair — so the universe filter and the phase axis cannot diverge on the
+    end-boundary. (NULL end-time is the coverage-safe exception, covered
+    separately; this pins the explicit-end-time agreement.)"""
+    from src.strategy.market_phase import market_open_at_decision
+
+    now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    cases = [
+        ("yes-future", "2026-06-05T12:00:00+00:00"),  # open → kept
+        ("yes-boundary", "2026-06-04T12:00:00+00:00"),  # exactly now → POST_TRADING → dropped
+        ("yes-past", "2026-06-04T11:30:00+00:00"),  # closed → dropped
+    ]
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    for i, (tok, end_at) in enumerate(cases):
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES "
+            f"('snap-{i}','0xc{i}','x-weather','{tok}','no-{i}','0.01','5',0,1,0,"
+            f"'2026-06-04T11:00:00+00:00','{end_at}')"
+        )
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    for tok, end_at in cases:
+        from datetime import datetime as _dt
+        end_utc = _dt.fromisoformat(end_at)
+        predicate_open = market_open_at_decision(polymarket_end_utc=end_utc, as_of_utc=now)
+        sql_kept = tok in md
+        assert sql_kept == predicate_open, (
+            f"SQL universe filter and market_open_at_decision disagree for "
+            f"end_at={end_at}: sql_kept={sql_kept} predicate_open={predicate_open}"
+        )
+
+
 def test_universe_includes_market_with_null_end_at():
     """Defensive: a NULL market_end_at must NOT silently drop the token (coverage-safe).
 

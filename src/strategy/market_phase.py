@@ -340,6 +340,30 @@ def market_phase_admits(
     return evidence.phase in FORECAST_ONLY_ADMIT_PHASES
 
 
+def market_open_at_decision(
+    *,
+    polymarket_end_utc: datetime,
+    as_of_utc: datetime,
+) -> bool:
+    """Canonical POST_TRADING-boundary predicate: True iff the market is still
+    OPEN (NOT POST_TRADING) at ``as_of``.
+
+    This is the single authority for the "is this market end-time still in the
+    future" universe filter. It is exactly the complement of the POST_TRADING
+    transition that ``market_phase_for_decision`` applies
+    (``decision_time_utc >= polymarket_end_utc → POST_TRADING``), so the
+    market-channel universe filter and the phase axis cannot diverge on the
+    end-boundary. A market with ``as_of >= polymarket_end_utc`` is closed and
+    must not enter the live subscription / REST-seed universe.
+
+    NOTE: this is intentionally NOT the forecast_only-admission predicate
+    (``is_forecast_only_admissible``). The universe legitimately includes
+    SETTLEMENT_DAY markets (day0 / exit scopes); only POST_TRADING is excluded
+    here. tz-aware: both sides are normalized to UTC before comparison.
+    """
+    return as_of_utc.astimezone(timezone.utc) < polymarket_end_utc.astimezone(timezone.utc)
+
+
 def is_forecast_only_admissible(
     *,
     target_local_date: date,

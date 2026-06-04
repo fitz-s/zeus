@@ -398,6 +398,17 @@ def active_weather_token_metadata_from_snapshots(
     # drowns its reseed in 404 dead tokens and live BEST_BID_ASK emission starves).
     # NULL market_end_at is KEPT (coverage-safe: cannot prove settled → Blocker #52).
     # now_iso is a self-generated UTC ISO-8601 string (no single quote → injection-safe).
+    #
+    # STEP 5 (consolidated timeliness fix): this SQL `market_end_at > now` is the
+    # bulk-set expression of the ONE canonical POST_TRADING-boundary authority,
+    # ``src.strategy.market_phase.market_open_at_decision`` (= as_of <
+    # polymarket_end_utc, the exact complement of market_phase_for_decision's
+    # POST_TRADING transition). executable_market_snapshots carries no
+    # city/target_date, so the per-row forecast-phase form cannot run here; the
+    # end-boundary IS the shared authority and a relationship test pins SQL ≡
+    # predicate so the universe filter and the phase axis cannot diverge. NOT the
+    # forecast_only-admission predicate — the universe legitimately keeps
+    # SETTLEMENT_DAY markets (day0/exit); only POST_TRADING is excluded.
     if "market_end_at" in columns:
         now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         predicates.append(f"(market_end_at IS NULL OR market_end_at > '{now_iso}')")
