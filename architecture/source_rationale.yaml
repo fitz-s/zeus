@@ -2504,6 +2504,23 @@ files:
     zone: K2_runtime
     authority_role: package_marker
     why: Marks observability namespace.
+  src/observability/calibration_coverage_guard.py:
+    zone: K2_runtime
+    authority_role: calibration_coverage_antibody
+    why: >
+      Antibody #90. LOUD per-city bias+Platt calibration-coverage detector. For
+      every live runtime city x metric, asserts the current-season VERIFIED
+      edli_per_city_v1 bias row AND a non-borrowed/non-identity Platt exist;
+      enumerates any city that would silently fall to RAW bias / borrow a foreign
+      cluster's Platt / fall to identity. SHADOW (real_order_submit_enabled=False)
+      = WARN-only, never blocks boot or starves the reactor; ARMED
+      (real_order_submit_enabled=True) = HARD fail-closed RuntimeError. Read-only
+      (SELECT on world + ATTACHed forecasts); never writes, never alters trade flow.
+    hazards:
+    - DERIVED_ONLY
+    - NO_WRITE_PATH
+    downstream:
+    - src/main.py
   src/observability/scheduler_health.py:
     zone: K2_runtime
     authority_role: derived_scheduler_health
