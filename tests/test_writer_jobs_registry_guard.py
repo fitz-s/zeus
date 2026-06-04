@@ -63,7 +63,7 @@ def test_market_scan_tick_reports_persistence_failure_to_scheduler_health(monkey
     )
     monkeypatch.setattr(
         "src.data.market_scanner.find_weather_markets",
-        lambda: [{"event_id": "evt-1"}],
+        lambda **_kw: [{"event_id": "evt-1"}],
     )
     monkeypatch.setattr(
         "src.data.market_scanner.get_last_market_events_persistence_result",
@@ -97,7 +97,7 @@ def test_market_scan_tick_duplicate_only_stays_scheduler_healthy(monkeypatch) ->
     )
     monkeypatch.setattr(
         "src.data.market_scanner.find_weather_markets",
-        lambda: [{"event_id": "evt-1"}],
+        lambda **_kw: [{"event_id": "evt-1"}],
     )
     monkeypatch.setattr(
         "src.data.market_scanner.get_last_market_events_persistence_result",

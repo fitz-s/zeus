@@ -2354,6 +2354,8 @@ scripts:
       Registered in SQLITE_CONNECT_ALLOWLIST for writer-lock antibody compliance.
     required_helpers:
       - src/data/market_scanner.py::_parse_temp_range
-      - scripts/measure_arm_gate_settlement.py::is_win
+      - scripts/measure_arm_gate_settlement.py::_compute_capital_weighted_verdict
+      - scripts/measure_arm_gate_settlement.py::_capital_weighted_arm_decision
     required_tests:
       - tests/test_arm_gate_direction_law.py
+      - tests/test_arm_gate_settlement_capital_weight.py

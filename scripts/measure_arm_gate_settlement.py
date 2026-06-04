@@ -35,13 +35,17 @@ Dedup: one final shadow position per (city, target_date, token_id, direction) �
 """
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
 import math
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Optional
 
 # Ensure the repo root is on sys.path so src.* imports resolve correctly
@@ -58,17 +62,50 @@ if _ROOT_CANDIDATE not in sys.path:
 # common directory (i.e. the real working tree with live DBs).
 # ---------------------------------------------------------------------------
 
+def _is_populated_world_db(probe: str) -> bool:
+    """True iff ``probe`` is a non-stub world DB carrying the receipts table.
+
+    A worktree may ship an EMPTY ``state/zeus-world.db`` stub (e.g. a 4KB shell
+    with no rows). Treating that as the repo root makes the measurement read an
+    empty DB and silently report a vacuous DENIED — masking the real cohort.
+    We therefore require the live table to exist before accepting a candidate;
+    an empty stub is skipped so the git-common-dir fallback reaches the live
+    checkout's populated state. (Anti-fabrication: never measure the wrong DB.)
+    """
+    if not os.path.exists(probe) or os.path.getsize(probe) == 0:
+        return False
+    try:
+        c = sqlite3.connect(f"file:{probe}?mode=ro", uri=True)
+        try:
+            c.execute("SELECT 1 FROM edli_no_submit_receipts LIMIT 1").fetchone()
+            return True
+        finally:
+            c.close()
+    except sqlite3.OperationalError:
+        return False
+    except Exception:  # noqa: BLE001 — any access failure → not usable
+        return False
+
+
 def _find_repo_root() -> str:
-    """Return the repo root directory that contains state/zeus-world.db.
+    """Return the repo root directory that contains a POPULATED state/zeus-world.db.
 
     Search order:
-      1. Walk up from this script's location until state/zeus-world.db found.
-      2. Fall back to git rev-parse --show-toplevel (handles worktrees).
+      0. ``ZEUS_STATE_DIR`` env override (parent of the state dir) — lets the
+         ARM measurement run from any worktree against the LIVE state.
+      1. Walk up from this script's location until a populated state/zeus-world.db.
+      2. Fall back to git rev-parse --git-common-dir (handles worktrees → main).
+    Empty stub DBs are skipped (see _is_populated_world_db).
     """
+    env_state = os.environ.get("ZEUS_STATE_DIR")
+    if env_state:
+        # ZEUS_STATE_DIR points AT the state dir; the repo root is its parent.
+        return os.path.dirname(os.path.abspath(env_state.rstrip("/")))
+
     candidate = os.path.dirname(os.path.abspath(__file__))
     while True:
         probe = os.path.join(candidate, "state", "zeus-world.db")
-        if os.path.exists(probe):
+        if _is_populated_world_db(probe):
             return candidate
         parent = os.path.dirname(candidate)
         if parent == candidate:
@@ -92,7 +129,7 @@ def _find_repo_root() -> str:
         else:
             repo_root = os.path.dirname(common_git)
         probe = os.path.join(repo_root, "state", "zeus-world.db")
-        if os.path.exists(probe):
+        if _is_populated_world_db(probe):
             return repo_root
     except Exception:
         pass
@@ -107,58 +144,298 @@ _FORECASTS_DB = os.path.join(_REPO_ROOT, "state", "zeus-forecasts.db")
 
 
 # ---------------------------------------------------------------------------
-# Pure win-logic function (importable for unit tests)
+# Per-row grading — the ONE truth path (H2 consolidation, STRUCTURAL_FIX_PLAN
+# §P0.1). Grading is delegated to src.contracts.graded_receipt.grade_receipt —
+# the single settlement-grounded, unit-correct, BinKind-aware win function. The
+# former local ``is_win`` heuristic (a raw-float range test with no unit, no
+# BinKind, no per-city rounding) is DELETED: it was a second grading path, and
+# two grading paths is exactly the consolidation debt this fix retires. The
+# Direction Law now has ONE implementation, exercised here and antibody-tested
+# in tests/test_arm_gate_direction_law.py against grade_receipt.
 # ---------------------------------------------------------------------------
 
-def is_win(direction: str, traded_bin_lo: Optional[float], traded_bin_hi: Optional[float],
-           settlement_value: float, tolerance: float = 1e-9) -> bool:
-    """Return True iff this shadow position wins under the Direction Law.
 
-    Direction Law:
-        buy_yes on bin B: WIN iff settlement lands IN bin B
-        buy_no  on bin B: WIN iff settlement does NOT land in bin B
+@dataclass(frozen=True)
+class _SettlementStandin:
+    """Minimal settlement object satisfying grade_receipt's _SettlementLike.
 
-    Args:
-        direction: "buy_yes" or "buy_no"
-        traded_bin_lo: lower bound of traded bin (None = left-shoulder, i.e. "X or below")
-        traded_bin_hi: upper bound of traded bin (None = right-shoulder, i.e. "X or higher")
-        settlement_value: the WMO-half-up rounded settlement temperature
-        tolerance: float comparison tolerance (default 1e-9)
+    grade_receipt reads only ``settlement_value`` + ``settlement_unit``; this
+    carries exactly those two, keeping the truth function decoupled from the
+    settlement_outcomes row shape.
+    """
 
-    Returns:
-        True if the position wins, False if it loses.
+    settlement_value: float
+    settlement_unit: str
+
+
+def _grade_row_won(
+    direction: str,
+    traded_bin_lo: Optional[float],
+    traded_bin_hi: Optional[float],
+    settlement_value: float,
+    settlement_unit: str,
+    bin_label: str,
+) -> Optional[bool]:
+    """Grade one shadow position via the canonical ``grade_receipt`` truth fn.
+
+    Returns ``won`` (bool) for a gradeable row, or ``None`` when the row cannot
+    be graded (bin label un-buildable into a ``Bin``, or a unit mismatch). A
+    ``None`` return tells the caller to EXCLUDE the row — the same skip
+    semantics the legacy path applied to None/None parses and unit mismatches,
+    but now enforced through the typed antibodies rather than ad-hoc float
+    checks. The caller logs the exclusion so a silent cohort shift is visible.
 
     Raises:
-        ValueError: if direction is not 'buy_yes' or 'buy_no'.
-
-    None handling:
-        traded_bin_lo=None, traded_bin_hi set  → left-shoulder bin ("X or below")
-        traded_bin_lo set, traded_bin_hi=None  → right-shoulder bin ("X or higher")
-        Both None                               → bin parse failed; returns False (cannot
-            determine win/loss, must not count as win). Callers should skip such rows
-            before calling is_win() to avoid silently dropping valid data.
+        ValueError: if ``direction`` is not 'buy_yes' / 'buy_no' (propagated
+            from grade_receipt — an unknown direction is a programmer error,
+            not a data-skip case).
     """
+    from src.contracts.graded_receipt import grade_receipt
+    from src.types.market import Bin
+    from src.types.temperature import UnitMismatchError
+
     # Both None means the bin label failed to parse — cannot evaluate win/loss.
     if traded_bin_lo is None and traded_bin_hi is None:
-        return False
+        return None
 
-    # Determine whether settlement lands in the traded bin
-    if traded_bin_lo is None:
-        # Left-shoulder: "X or below" — settlement_value <= hi
-        in_bin = settlement_value <= traded_bin_hi + tolerance
-    elif traded_bin_hi is None:
-        # Right-shoulder: "X or higher" — settlement_value >= lo
-        in_bin = settlement_value >= traded_bin_lo - tolerance
-    else:
-        # Point or bounded range
-        in_bin = (traded_bin_lo - tolerance) <= settlement_value <= (traded_bin_hi + tolerance)
+    try:
+        bin_obj = Bin(
+            low=traded_bin_lo,
+            high=traded_bin_hi,
+            unit=settlement_unit,
+            label=bin_label,
+        )
+    except Exception:  # noqa: BLE001 — malformed/width-invalid bin → exclude, never crash
+        return None
 
-    if direction == "buy_yes":
-        return in_bin
-    elif direction == "buy_no":
-        return not in_bin
+    # Minimal settlement stand-in (settlement_value already WMO-rounded at
+    # write time — grade_receipt is called WITHOUT semantics, using the value
+    # as-is, matching the legacy path that range-tested the rounded value).
+    settlement = _SettlementStandin(
+        settlement_value=float(settlement_value),
+        settlement_unit=settlement_unit,
+    )
+
+    try:
+        graded = grade_receipt(bin_obj, direction, settlement)
+    except UnitMismatchError:
+        return None
+    return graded.won
+
+
+# ---------------------------------------------------------------------------
+# Capital-weighted ARM verdict (F3 — STRUCTURAL_FIX_PLAN §P0.2)
+#
+# The equal-row win-rate is row-democracy: every settled position counts the
+# same regardless of how much capital it carried. That hides the K2 failure
+# mode where the system sizes UP on the bets it is most wrong about — a cohort
+# can clear 51% by row count while LOSING money capital-weighted. The ARM
+# decision must therefore consume a CAPITAL-WEIGHTED verdict, and it must fail
+# CLOSED when any settled row is missing its size (never silently equal-weight).
+# ---------------------------------------------------------------------------
+
+# A per-city capital-weighted ROI cluster this negative DENIES arming even when
+# the pooled CW-ROI is positive (one strong city must not mask a losing one).
+_PER_CITY_CW_ROI_TOLERANCE = -1e-9
+
+
+@dataclass(frozen=True)
+class CapitalWeightedArmVerdict:
+    """Capital-weighted ARM measurement. ALL fields required — no Optional.
+
+    The dataclass cannot be constructed without every metric, so a caller can
+    never receive a verdict that silently dropped the capital dimension.
+    """
+
+    equal_row_win_rate: float       # row-democracy win-rate (the headline number)
+    equal_row_ev_sigma: float       # σ of equal-row mean EV above 0
+    capital_weighted_roi: float     # Σ net / Σ invested (size-weighted)
+    capital_weighted_ev_sigma: float  # σ of the size-weighted mean EV above 0
+    per_city_cw_roi: dict           # city -> capital-weighted ROI for that city
+    n: int = 0                      # pooled row count
+    per_city_n: dict = field(default_factory=dict)  # city -> row count
+
+
+def _compute_capital_weighted_verdict(rows: list[dict]) -> CapitalWeightedArmVerdict:
+    """Build a CapitalWeightedArmVerdict from graded ARM rows.
+
+    Each row needs: ``win`` (bool), ``price`` (entry cost in 0-1 USDC space),
+    ``kelly_size_usd`` (the capital staked — the size source verified present
+    in edli_no_submit_receipts).
+
+    Fails CLOSED:
+        ValueError('MISSING_SIZE') if any row has kelly_size_usd None or <= 0.
+        Missing size must never be silently treated as equal weight — that
+        would reintroduce the exact row-democracy blindspot this guards against.
+    """
+    n = len(rows)
+    if n == 0:
+        return CapitalWeightedArmVerdict(
+            equal_row_win_rate=0.0,
+            equal_row_ev_sigma=0.0,
+            capital_weighted_roi=0.0,
+            capital_weighted_ev_sigma=0.0,
+            per_city_cw_roi={},
+            n=0,
+            per_city_n={},
+        )
+
+    # Fail closed on any missing/non-positive size BEFORE any aggregation.
+    for r in rows:
+        sz = r.get("kelly_size_usd")
+        if sz is None or sz <= 0:
+            raise ValueError(
+                f"MISSING_SIZE: row city={r.get('city')!r} has kelly_size_usd="
+                f"{sz!r} (None or <=0). Capital-weighted ARM cannot equal-weight "
+                f"a sizeless row — fix the size source, do not impute."
+            )
+
+    # --- Equal-row stats (row democracy) ---
+    wins = sum(1 for r in rows if r["win"])
+    equal_row_win_rate = wins / n
+    equal_evs = [(1.0 - r["price"]) if r["win"] else (-r["price"]) for r in rows]
+    mean_equal_ev = sum(equal_evs) / n
+    if n > 1:
+        var_equal = sum((e - mean_equal_ev) ** 2 for e in equal_evs) / n
+        se_equal = math.sqrt(var_equal / n) if var_equal > 0 else 0.0
     else:
-        raise ValueError(f"Unknown direction: {direction!r}. Expected 'buy_yes' or 'buy_no'.")
+        se_equal = 0.0
+    equal_row_ev_sigma = (mean_equal_ev / se_equal) if se_equal > 0 else 0.0
+
+    # --- Capital-weighted stats (size democracy) ---
+    # Net dollars on a position of size S at price p:
+    #   win  → S * (1/p - 1)   (S buys S/p shares, each pays $1, cost S)
+    #   loss → -S
+    # ROI = Σ net / Σ invested(=Σ S).
+    def _net_usd(r: dict) -> float:
+        s = float(r["kelly_size_usd"])
+        p = float(r["price"])
+        if p <= 0:
+            return 0.0
+        return s * (1.0 / p - 1.0) if r["win"] else -s
+
+    total_invested = sum(float(r["kelly_size_usd"]) for r in rows)
+    total_net = sum(_net_usd(r) for r in rows)
+    capital_weighted_roi = (total_net / total_invested) if total_invested > 0 else 0.0
+
+    # Size-weighted per-trade EV (per dollar staked) and its σ.
+    per_dollar_ev = [_net_usd(r) / float(r["kelly_size_usd"]) for r in rows]
+    weights = [float(r["kelly_size_usd"]) for r in rows]
+    wsum = sum(weights)
+    mean_cw_ev = sum(w * e for w, e in zip(weights, per_dollar_ev)) / wsum if wsum > 0 else 0.0
+    if n > 1 and wsum > 0:
+        var_cw = sum(w * (e - mean_cw_ev) ** 2 for w, e in zip(weights, per_dollar_ev)) / wsum
+        # effective sample size for a weighted mean (Kish): (Σw)^2 / Σw^2
+        n_eff = (wsum * wsum) / sum(w * w for w in weights)
+        se_cw = math.sqrt(var_cw / n_eff) if (var_cw > 0 and n_eff > 0) else 0.0
+    else:
+        se_cw = 0.0
+    capital_weighted_ev_sigma = (mean_cw_ev / se_cw) if se_cw > 0 else 0.0
+
+    # --- Per-city capital-weighted ROI ---
+    by_city: dict[str, list] = defaultdict(list)
+    for r in rows:
+        by_city[r["city"]].append(r)
+    per_city_cw_roi: dict[str, float] = {}
+    per_city_n: dict[str, int] = {}
+    for city, crows in by_city.items():
+        inv = sum(float(r["kelly_size_usd"]) for r in crows)
+        net = sum(_net_usd(r) for r in crows)
+        per_city_cw_roi[city] = (net / inv) if inv > 0 else 0.0
+        per_city_n[city] = len(crows)
+
+    return CapitalWeightedArmVerdict(
+        equal_row_win_rate=equal_row_win_rate,
+        equal_row_ev_sigma=equal_row_ev_sigma,
+        capital_weighted_roi=capital_weighted_roi,
+        capital_weighted_ev_sigma=capital_weighted_ev_sigma,
+        per_city_cw_roi=per_city_cw_roi,
+        n=n,
+        per_city_n=per_city_n,
+    )
+
+
+def _capital_weighted_arm_decision(
+    verdict: CapitalWeightedArmVerdict,
+    *,
+    min_n_pooled: int = 20,
+    min_n_per_city: int = 5,
+    min_cw_sigma: float = 2.0,
+    min_equal_row_win_rate: float = 0.51,
+) -> tuple[bool, str]:
+    """ARM decision from a capital-weighted verdict. Fail closed on ALL of:
+
+        1. pooled n >= min_n_pooled
+        2. capital_weighted_roi > 0           (size-weighted money is positive)
+        3. NO per-city capital cluster negative beyond tolerance
+        4. capital_weighted_ev_sigma >= min_cw_sigma
+        5. equal_row_win_rate > min_equal_row_win_rate (headline sanity)
+        6. every active city has n >= min_n_per_city
+    """
+    if verdict.n == 0:
+        return False, "INSUFFICIENT: empty cohort (no settled rows)"
+
+    # CORRECTNESS VETOES — these run BEFORE the sufficiency (n-floor) gates,
+    # because a money-losing or per-city-negative cohort is DENIED on the
+    # merits regardless of how large it is. Ordering the n-floor first would
+    # let a small losing cohort report the softer "INSUFFICIENT" and hide the
+    # fact that, even at scale, this cohort should never arm.
+
+    # Veto 1 — pooled capital-weighted ROI must be strictly positive.
+    if verdict.capital_weighted_roi <= 0.0:
+        return False, (
+            f"DENIED: capital_weighted_roi={verdict.capital_weighted_roi:.4f} <= 0 "
+            f"(the cohort loses money once sized — row-rate "
+            f"{verdict.equal_row_win_rate:.3f} is row-democracy only)"
+        )
+
+    # Veto 2 — no per-city capital cluster may be negative beyond tolerance.
+    neg_cities = sorted(
+        c for c, roi in verdict.per_city_cw_roi.items()
+        if roi < _PER_CITY_CW_ROI_TOLERANCE
+    )
+    if neg_cities:
+        detail = ", ".join(
+            f"{c}(roi={verdict.per_city_cw_roi[c]:.3f})" for c in neg_cities
+        )
+        return False, (
+            f"DENIED: {len(neg_cities)} city/cities capital-weighted NEGATIVE: "
+            f"{detail}. A positive pool must not mask a losing city cluster."
+        )
+
+    # SUFFICIENCY GATES — only reached once the cohort is not money-losing.
+    if verdict.n < min_n_pooled:
+        return False, f"INSUFFICIENT: n={verdict.n} < {min_n_pooled} minimum"
+
+    # Confidence.
+    if verdict.capital_weighted_ev_sigma < min_cw_sigma:
+        return False, (
+            f"DENIED: capital_weighted_ev_sigma="
+            f"{verdict.capital_weighted_ev_sigma:.2f} < {min_cw_sigma:.1f}"
+        )
+
+    # 5 — headline equal-row sanity.
+    if verdict.equal_row_win_rate <= min_equal_row_win_rate:
+        return False, (
+            f"DENIED: equal_row_win_rate={verdict.equal_row_win_rate:.3f} "
+            f"not > {min_equal_row_win_rate}"
+        )
+
+    # 6 — per-city n floor.
+    thin = sorted(c for c, nn in verdict.per_city_n.items() if nn < min_n_per_city)
+    if thin:
+        detail = ", ".join(f"{c}(n={verdict.per_city_n[c]})" for c in thin)
+        return False, (
+            f"DENIED: per-city n<{min_n_per_city} for {len(thin)} city/cities: "
+            f"{detail}."
+        )
+
+    return True, (
+        f"ELIGIBLE: cw_roi={verdict.capital_weighted_roi:.4f}>0, "
+        f"cw_sigma={verdict.capital_weighted_ev_sigma:.2f}>={min_cw_sigma}, "
+        f"win_rate={verdict.equal_row_win_rate:.3f}>{min_equal_row_win_rate}, "
+        f"all {len(verdict.per_city_n)} cities n>={min_n_per_city} & cw_roi>=0"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +475,8 @@ def _load_deduped_receipts(world_db: str) -> list[dict]:
     cur = conn.cursor()
     cur.execute("""
         SELECT receipt_id, token_id, direction, c_fee_adjusted,
-               mainstream_agreement_pass, decision_time, receipt_json
+               kelly_size_usd, mainstream_agreement_pass, decision_time,
+               receipt_json
         FROM edli_no_submit_receipts
         ORDER BY decision_time DESC
     """)
@@ -224,6 +502,7 @@ def _load_deduped_receipts(world_db: str) -> list[dict]:
                 "metric": metric,
                 "direction": direction,
                 "c_fee_adjusted": d["c_fee_adjusted"],
+                "kelly_size_usd": d["kelly_size_usd"],
                 "mainstream_agreement_pass": d["mainstream_agreement_pass"],
                 "decision_time": d["decision_time"],
                 "bin_label": bin_label,
@@ -297,13 +576,36 @@ def _compute_rows(receipts: list[dict], settlements: dict) -> list[dict]:
             # parse failure — skip
             continue
 
-        win = is_win(r["direction"], lo, hi, s["settlement_value"])
+        # H2: grade through the ONE truth function (grade_receipt). A None
+        # return means the typed path could not grade the row (un-buildable Bin
+        # or unit mismatch that slipped past the string check above) — exclude
+        # it and log, never silently count it. On the current live cohort this
+        # is 0 rows (verdict-equivalent to the retired is_win path, verified).
+        won = _grade_row_won(
+            direction=r["direction"],
+            traded_bin_lo=lo,
+            traded_bin_hi=hi,
+            settlement_value=s["settlement_value"],
+            settlement_unit=s["settlement_unit"],
+            bin_label=r["bin_label"],
+        )
+        if won is None:
+            print(
+                f"  [WARN] ungradeable bin (grade_receipt could not build/grade): "
+                f"city={r['city']} date={r['target_date']} label={r['bin_label']!r} "
+                f"— row EXCLUDED",
+                file=sys.stderr,
+            )
+            continue
+
+        win = won
         rows.append({
             "city": r["city"],
             "target_date": r["target_date"],
             "direction": r["direction"],
             "win": win,
             "price": r["c_fee_adjusted"],
+            "kelly_size_usd": r["kelly_size_usd"],
             "gate_pass": r["mainstream_agreement_pass"] == 1,
             "settlement_value": s["settlement_value"],
             "settlement_unit": s["settlement_unit"],
@@ -449,10 +751,160 @@ def _print_per_city_table(rows: list[dict], title: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ARM-GATE ARTIFACT EMITTER (H3 — close the producer/consumer gap)
+#
+# PR-2's live boot gate (D2) consumes ``state/edli_arm_gate_artifact.json`` and
+# REFUSES to arm unless it carries every required field AND
+# ``capital_weighted_ev > 0`` AND ``coverage_licensed is True`` (plus a
+# commit_sha / measurement_cmd_hash match). NO producer wrote that file — so
+# arming was structurally impossible: the consumer existed, the producer did
+# not. This emitter is the missing producer.
+#
+# ANTIBODY / fail-closed: the artifact reflects the HONEST measured verdict.
+# With current data the cohort is DENIED, so the emitted artifact MUST carry
+# ``capital_weighted_ev <= 0`` and ``coverage_licensed: false`` — values the
+# consumer REJECTS. An ARM_ELIGIBLE artifact is NEVER emitted on DENIED data;
+# the producer cannot manufacture an arming license the measurement did not
+# earn. ``coverage_licensed`` is hardcoded False because no settlement-
+# calibrated coverage license (K3) exists yet on this branch — when one lands,
+# this is the single line that flips.
+# ---------------------------------------------------------------------------
+
+ARM_ARTIFACT_SCHEMA = "edli_arm_gate_artifact/v1"
+
+# The 9 fields PR-2's D2 boot gate requires. Kept here as the explicit contract
+# the producer fills — a missing key is a producer bug caught by the H3 test.
+ARM_ARTIFACT_REQUIRED_FIELDS = frozenset({
+    "schema",
+    "commit_sha",
+    "measurement_cmd_hash",
+    "capital_weighted_ev",
+    "gate_pass_n",
+    "per_city_n",
+    "ev_sigma",
+    "date_coverage",
+    "coverage_licensed",
+})
+
+
+def _git_head_sha() -> str:
+    """Return the current HEAD commit SHA, or 'UNKNOWN' if git is unavailable.
+
+    The boot gate matches this against the running checkout's SHA; emitting
+    'UNKNOWN' guarantees a mismatch (fail-closed) rather than a false pass.
+    """
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_SCRIPT_DIR,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip() or "UNKNOWN"
+    except Exception:  # noqa: BLE001 — git missing/detached → fail-closed sentinel
+        return "UNKNOWN"
+
+
+def _measurement_cmd_hash(argv: list[str]) -> str:
+    """Hash of (this script's source bytes + sorted argv).
+
+    Binds the artifact to the EXACT measurement code + invocation that produced
+    it. The boot gate re-derives this hash from the live checkout's script; any
+    drift (script edited, different args) changes the hash and fails the gate.
+    Sorting argv makes the hash invocation-order-insensitive but argument-set-
+    sensitive.
+    """
+    h = hashlib.sha256()
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            h.update(fh.read())
+    except OSError:
+        h.update(b"SCRIPT_SOURCE_UNREADABLE")
+    h.update(b"\x00")
+    for a in sorted(argv):
+        h.update(a.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
+def build_arm_artifact(
+    cw_verdict: "CapitalWeightedArmVerdict",
+    gate_rows: list[dict],
+    *,
+    argv: list[str],
+    coverage_licensed: bool = False,
+) -> dict:
+    """Build the boot-gate artifact dict from the CURRENT measurement.
+
+    The artifact is a faithful projection of the measured cohort — never an
+    aspiration. ``capital_weighted_ev`` is the size-weighted ROI (Σnet/Σinvested):
+    the field the consumer's ``>0`` rule tests, and the honest "does this cohort
+    make money once sized" signal. On a DENIED cohort it is <=0, so the consumer
+    rejects.
+
+    Args:
+        cw_verdict: the capital-weighted verdict for the gate-PASS cohort.
+        gate_rows: the graded gate-PASS rows (for date-coverage evidence).
+        argv: the script argv (for the measurement_cmd_hash binding).
+        coverage_licensed: K3 settlement-calibrated coverage license. False
+            until such a license exists — do NOT pass True without one.
+
+    Returns:
+        A dict carrying exactly ``ARM_ARTIFACT_REQUIRED_FIELDS``.
+    """
+    # date_coverage: the distinct (city, target_date) settled pairs the gate-PASS
+    # cohort actually covers — count + the sorted list as evidence.
+    date_pairs = sorted({(r["city"], r["target_date"]) for r in gate_rows})
+    artifact = {
+        "schema": ARM_ARTIFACT_SCHEMA,
+        "commit_sha": _git_head_sha(),
+        "measurement_cmd_hash": _measurement_cmd_hash(argv),
+        # capital_weighted_ev = size-weighted ROI; the consumer rejects on <=0.
+        "capital_weighted_ev": cw_verdict.capital_weighted_roi,
+        "gate_pass_n": cw_verdict.n,
+        "per_city_n": dict(cw_verdict.per_city_n),
+        "ev_sigma": cw_verdict.capital_weighted_ev_sigma,
+        "date_coverage": {
+            "n_pairs": len(date_pairs),
+            "pairs": [list(p) for p in date_pairs],
+        },
+        # Hardcoded False: no settlement-calibrated coverage license yet (K3).
+        "coverage_licensed": bool(coverage_licensed),
+    }
+    return artifact
+
+
+def emit_arm_artifact(path: str, artifact: dict) -> None:
+    """Atomically write the artifact JSON (tmp + os.replace), per repo convention."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(artifact, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main(argv: Optional[list[str]] = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = argparse.ArgumentParser(
+        description="Measure after-cost settlement win-rate for EDLI shadow "
+                    "positions and compute the capital-weighted ARM verdict.",
+    )
+    parser.add_argument(
+        "--emit-artifact",
+        metavar="PATH",
+        default=None,
+        help="Write the boot-gate artifact (state/edli_arm_gate_artifact.json "
+             "contract) reflecting the CURRENT measurement to PATH. On a DENIED "
+             "cohort the artifact carries capital_weighted_ev<=0 / "
+             "coverage_licensed:false so PR-2's D2 boot gate REJECTS it — arming "
+             "stays blocked. An ARM_ELIGIBLE artifact is never emitted on DENIED data.",
+    )
+    args = parser.parse_args(argv)
+
     print("=" * 78)
     print("EDLI ARM-GATE SETTLEMENT WIN-RATE MEASUREMENT")
     print(f"DB sources:  {_WORLD_DB}")
@@ -502,17 +954,88 @@ def main() -> None:
     _print_stats_row(gate_stats)
     _print_per_city_table(gate_rows, "GATE-PASS")
 
-    # --- ARM verdict ---
+    # --- CAPITAL-WEIGHTED verdict (F3 — the authoritative ARM decision) ---
+    # The equal-row verdict (_arm_verdict) is row-democracy and shown for
+    # continuity. The ARM DECISION is the capital-weighted one: a cohort can
+    # clear 51% by row count while losing money once sized.
+    print("\n" + "=" * 78)
+    print("CAPITAL-WEIGHTED ARM VERDICT (gate-PASS cohort) — kelly_size_usd weighted")
+    print("=" * 78)
+    cw_verdict: Optional[CapitalWeightedArmVerdict] = None
+    cw_eligible = False
+    try:
+        cw_verdict = _compute_capital_weighted_verdict(gate_rows)
+        print(f"  equal_row_win_rate      = {_fmt_pct(cw_verdict.equal_row_win_rate)}")
+        print(f"  equal_row_ev_sigma      = {_fmt_f(cw_verdict.equal_row_ev_sigma, '.2f')}")
+        print(f"  capital_weighted_roi    = {_fmt_pct(cw_verdict.capital_weighted_roi)}")
+        print(f"  capital_weighted_sigma  = {_fmt_f(cw_verdict.capital_weighted_ev_sigma, '.2f')}")
+        print(f"  pooled n                = {cw_verdict.n}")
+        if cw_verdict.per_city_cw_roi:
+            print("  per-city capital-weighted ROI:")
+            for c in sorted(cw_verdict.per_city_cw_roi):
+                print(f"    {c:<28s} cw_roi={_fmt_pct(cw_verdict.per_city_cw_roi[c])}  "
+                      f"n={cw_verdict.per_city_n.get(c, 0)}")
+        cw_eligible, cw_reason = _capital_weighted_arm_decision(cw_verdict)
+        print(f"\n  ARM (capital-weighted): {'ELIGIBLE' if cw_eligible else 'DENIED/INSUFFICIENT'}")
+        print(f"  Reason: {cw_reason}")
+    except ValueError as exc:
+        # Fail-closed: a sizeless settled row makes the verdict undeterminable.
+        # cw_verdict stays None → artifact emission below also fails closed.
+        print(f"  ARM (capital-weighted): DENIED — {exc}")
+
+    # --- Equal-row verdict (continuity; NOT the arming decision) ---
     arm_eligible, arm_reason = _arm_verdict(gate_stats, gate_rows)
     print("\n" + "=" * 78)
-    print("ARM VERDICT (gate-PASS cohort, thresholds: win_rate>51%, sigma>=2.0, n>=20, per-city n>=5)")
+    print("EQUAL-ROW VERDICT (continuity only; thresholds: win_rate>51%, sigma>=2.0, n>=20, per-city n>=5)")
     print("=" * 78)
-    verdict = "ARM: ELIGIBLE" if arm_eligible else "ARM: DENIED/INSUFFICIENT"
+    verdict = "equal-row: ELIGIBLE" if arm_eligible else "equal-row: DENIED/INSUFFICIENT"
     print(f"  {verdict}")
     print(f"  Reason: {arm_reason}")
-    print(f"  NOTE: ARM verdict is based ONLY on gate-PASS cohort, not ALL cohort.")
-    print(f"        A non-gate-PASS win rate, however high, does NOT satisfy the ARM criterion.")
+    print(f"  NOTE: the ARM DECISION is the CAPITAL-WEIGHTED verdict above, not this one.")
+    print(f"        A high row-rate that loses money once sized does NOT arm.")
     print("=" * 78)
+
+    # --- H3: emit the boot-gate artifact (the missing producer) ---
+    if args.emit_artifact:
+        print("\n" + "=" * 78)
+        print(f"EMITTING ARM-GATE ARTIFACT → {args.emit_artifact}")
+        print("=" * 78)
+        if cw_verdict is None:
+            # MISSING_SIZE fail-closed: we could not compute a capital-weighted
+            # verdict, so we cannot honestly assert any EV. Emit a blocking
+            # artifact (ev<=0, coverage_licensed False) so the consumer rejects,
+            # rather than refusing to write (which would look like "no measurement").
+            blocking = _compute_capital_weighted_verdict([])  # zero-verdict
+            artifact = build_arm_artifact(blocking, [], argv=argv, coverage_licensed=False)
+            artifact["capital_weighted_ev"] = -1.0  # explicit block on undeterminable size
+        else:
+            # coverage_licensed is ALWAYS False here: no settlement-calibrated
+            # coverage license (K3) exists on this branch. The honest verdict on
+            # current data is DENIED, so the artifact is BLOCKING by construction.
+            artifact = build_arm_artifact(
+                cw_verdict, gate_rows, argv=argv, coverage_licensed=False
+            )
+        emit_arm_artifact(args.emit_artifact, artifact)
+        blocks = (artifact["capital_weighted_ev"] <= 0.0) or (not artifact["coverage_licensed"])
+        print(f"  schema               = {artifact['schema']}")
+        print(f"  commit_sha           = {artifact['commit_sha']}")
+        print(f"  measurement_cmd_hash = {artifact['measurement_cmd_hash'][:16]}…")
+        print(f"  capital_weighted_ev  = {artifact['capital_weighted_ev']:.6f}")
+        print(f"  ev_sigma             = {artifact['ev_sigma']:.4f}")
+        print(f"  gate_pass_n          = {artifact['gate_pass_n']}")
+        print(f"  per_city_n           = {artifact['per_city_n']}")
+        print(f"  date_coverage        = {artifact['date_coverage']['n_pairs']} (city,date) pairs")
+        print(f"  coverage_licensed    = {artifact['coverage_licensed']}")
+        print(
+            f"\n  CONSUMER VERDICT: {'BLOCKING (boot gate REJECTS — arming stays blocked)' if blocks else 'NON-BLOCKING'}"
+        )
+        if blocks:
+            print("  This is the HONEST DENIED state. Arming is correctly impossible.")
+        else:
+            # An eligible artifact must never be emitted on DENIED data — if we
+            # reach here on the current cohort it is a producer fabrication bug.
+            print("  WARNING: artifact is NON-BLOCKING — verify this is a genuine ARM_ELIGIBLE cohort.")
+        print("=" * 78)
 
 
 if __name__ == "__main__":

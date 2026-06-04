@@ -174,7 +174,7 @@ def _settings_for_stage(stage: str, **overrides: object) -> dict[str, object]:
         "edli_user_channel_reconcile_enabled": stage in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"},
         "real_order_submit_enabled": stage in {"edli_live_canary", "edli_live"},
         "live_canary_enabled": stage in {"edli_live_canary", "edli_live"},
-        "edli_live_scaleout_enabled": stage == "edli_live",
+        "edli_live_operator_authorized": stage == "edli_live",
     }
     edli.update(overrides)
     return {"edli_v1": edli}

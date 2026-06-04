@@ -520,6 +520,83 @@ def test_disabled_caps_still_reject_nonpositive_notional():
         )
 
 
+# ---------------------------------------------------------------------------
+# PR-2 (C) N3: HARD notional ceiling, INDEPENDENT of the cap flags.
+# #380 removed BOTH the notional cap and the daily cap in one commit, leaving a
+# fractional-Kelly size as the sole notional bound. A flag-independent hard
+# ceiling makes that single-commit dual-rail removal unable to uncap notional:
+# the tiny_live_notional_cap_enabled flag may TUNE the soft cap value, but it
+# can NEVER REMOVE the hard ceiling. ANTIBODY: a runaway Kelly (e.g. a sizing
+# bug emitting $5000) is structurally clamped, armed or not.
+# ---------------------------------------------------------------------------
+def test_hard_notional_ceiling_clamps_even_when_cap_flag_disabled():
+    # RED-first: with the soft notional cap EXPLICITLY disabled, a full-Kelly
+    # request ABOVE the hard ceiling is CLAMPED to the ceiling (today it passes
+    # through uncapped). The order still reserves — clamped, not rejected.
+    from src.events.live_cap import HARD_NOTIONAL_CEILING_USD
+
+    ledger = LiveCapLedger(_conn())
+
+    over = HARD_NOTIONAL_CEILING_USD + 1000.0
+    reservation = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=over,
+        max_notional_usd=5.0,
+        max_orders_per_day=1,
+        notional_cap_enabled=False,
+        daily_order_cap_enabled=False,
+    )
+
+    assert reservation.reservation_status == "RESERVED"
+    assert reservation.reserved_notional_usd == HARD_NOTIONAL_CEILING_USD, (
+        "full-Kelly above the hard ceiling must be clamped to the ceiling"
+    )
+
+
+def test_hard_notional_ceiling_clamps_when_soft_cap_enabled_but_ceiling_lower():
+    # The hard ceiling also bounds a soft cap that is (mis)configured ABOVE it:
+    # max_notional_usd > HARD_NOTIONAL_CEILING_USD cannot lift the real bound.
+    from src.events.live_cap import HARD_NOTIONAL_CEILING_USD
+
+    ledger = LiveCapLedger(_conn())
+
+    huge_soft_cap = HARD_NOTIONAL_CEILING_USD * 10
+    reservation = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=huge_soft_cap,
+        max_notional_usd=huge_soft_cap,
+        max_orders_per_day=1,
+        notional_cap_enabled=True,
+    )
+
+    assert reservation.reserved_notional_usd == HARD_NOTIONAL_CEILING_USD
+
+
+def test_hard_notional_ceiling_does_not_touch_sizes_below_it():
+    # Sizes at/under the ceiling are unchanged — the ceiling is a backstop, not a
+    # haircut. (Guards the existing $43 uncapped passthrough.)
+    from src.events.live_cap import HARD_NOTIONAL_CEILING_USD
+
+    ledger = LiveCapLedger(_conn())
+
+    under = HARD_NOTIONAL_CEILING_USD - 1.0
+    reservation = ledger.reserve(
+        event_id="event-1",
+        decision_time=NOW,
+        cap_scope="tiny_live_canary",
+        requested_notional_usd=under,
+        max_notional_usd=5.0,
+        max_orders_per_day=1,
+        notional_cap_enabled=False,
+    )
+
+    assert reservation.reserved_notional_usd == under
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

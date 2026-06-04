@@ -4,14 +4,19 @@
 #   project_live_goal_2026_06_03.md, task #135 W5 gate). Locks all four Direction
 #   Law cases + complement property + known-loss regression guards.
 #
-# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=never
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
 # Purpose: Structural antibody — makes the buy_no/buy_yes win-logic asymmetry error
 #   unconstructable. The recurring bug is treating buy_no win-logic as the mirror of
 #   buy_yes incorrectly (wrong side fires on the bin that actually settled).
-#   This test must be RED if is_win() gets the direction wrong, then GREEN when fixed.
-# Reuse: run in CI on every commit that touches EDLI win-logic, direction assignment,
-#   or settlement measurement. If any assertion fails, the Direction Law is violated.
-"""Direction Law antibody tests for EDLI ARM-gate win-logic.
+#   This test must be RED if grade_receipt() gets the direction wrong, GREEN when right.
+#
+# H2 CONSOLIDATION (2026-06-03): these tests were migrated off the deleted local
+#   ``is_win`` heuristic onto the ONE truth function, ``grade_receipt``. The ARM
+#   measurement script no longer carries a second grading path; the Direction Law
+#   has a single implementation and this antibody now guards THAT implementation
+#   directly. A tiny ``_won`` adapter below builds the typed ``Bin`` + settlement
+#   stand-in and reads ``graded.won`` — it adds NO win-logic of its own.
+"""Direction Law antibody tests for EDLI ARM-gate win-logic (via grade_receipt).
 
 The Direction Law (must hold exactly):
     buy_yes on bin B: WIN iff settlement lands IN bin B  (settled_bin == B)
@@ -25,26 +30,43 @@ i.e., as if buy_no WON when the settlement matched the traded bin (backwards).
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import pytest
 
-from scripts.measure_arm_gate_settlement import is_win
+from src.contracts.graded_receipt import grade_receipt
+from src.types.market import Bin
+
 
 # ---------------------------------------------------------------------------
-# Known bin constants used across tests
+# Adapter: build the typed Bin + settlement stand-in and read graded.won.
+# This is the SAME path the ARM script's _grade_row_won uses — no second
+# win-logic lives here. Unit is supplied explicitly because grade_receipt is
+# unit-correct by construction (the retired is_win had no unit and that was a
+# latent °C/°F bug surface). Tests pass the unit matching their bin.
 # ---------------------------------------------------------------------------
+class _FakeSettlement:
+    def __init__(self, value: float, unit: str):
+        self.settlement_value = value
+        self.settlement_unit = unit
 
-# Point bin: 28°C  (lo=28.0, hi=28.0)
-B_POINT_LO = 28.0
-B_POINT_HI = 28.0
 
-# Other temperature, clearly different from the traded bin
-OTHER_TEMP = 30.0
+def _won(direction: str, lo: Optional[float], hi: Optional[float],
+         settled: float, unit: str, label: str) -> bool:
+    """Grade via the one truth function and return ``won``."""
+    bin_obj = Bin(low=lo, high=hi, unit=unit, label=label)
+    return grade_receipt(bin_obj, direction, _FakeSettlement(settled, unit)).won
 
-# Shoulder bins
-SHOULDER_HI_LO = None    # left-shoulder: None means "X or below" when hi=19.0
-SHOULDER_HI_VAL = 19.0
-SHOULDER_LO_VAL = 29.0
-SHOULDER_LO_HI = None    # right-shoulder: hi=None means "X or higher" when lo=29.0
+
+# Canonical bins used across tests (explicit unit + label, per Bin's contract).
+# 28°C point bin.
+_POINT_28C = dict(lo=28.0, hi=28.0, unit="C", label="28°C")
+# 68-69°F width-2 range bin.
+_RANGE_68_69F = dict(lo=68.0, hi=69.0, unit="F", label="68-69°F")
+# Left-shoulder (floor) "19°C or below".
+_FLOOR_19C = dict(lo=None, hi=19.0, unit="C", label="19°C or below")
+# Right-shoulder (ceiling) "29°C or higher".
+_CEIL_29C = dict(lo=29.0, hi=None, unit="C", label="29°C or higher")
 
 
 # ---------------------------------------------------------------------------
@@ -52,24 +74,24 @@ SHOULDER_LO_HI = None    # right-shoulder: hi=None means "X or higher" when lo=2
 # ---------------------------------------------------------------------------
 
 class TestFourCases:
-    """Lock all four Direction Law cases exactly."""
+    """Lock all four Direction Law cases exactly (graded via grade_receipt)."""
 
     def test_buy_yes_bin_match_is_win(self):
         """buy_yes on bin B, settlement IN bin B → WIN."""
-        assert is_win("buy_yes", B_POINT_LO, B_POINT_HI, B_POINT_LO) is True
+        assert _won("buy_yes", settled=28.0, **_POINT_28C) is True
 
     def test_buy_yes_bin_mismatch_is_loss(self):
         """buy_yes on bin B, settlement NOT in bin B → LOSS."""
-        assert is_win("buy_yes", B_POINT_LO, B_POINT_HI, OTHER_TEMP) is False
+        assert _won("buy_yes", settled=30.0, **_POINT_28C) is False
 
     def test_buy_no_bin_match_is_loss(self):
         """buy_no on bin B, settlement IN bin B → LOSS (the recurring bug direction)."""
         # This is the critical case: the historical bug made this return True.
-        assert is_win("buy_no", B_POINT_LO, B_POINT_HI, B_POINT_LO) is False
+        assert _won("buy_no", settled=28.0, **_POINT_28C) is False
 
     def test_buy_no_bin_mismatch_is_win(self):
         """buy_no on bin B, settlement NOT in bin B → WIN."""
-        assert is_win("buy_no", B_POINT_LO, B_POINT_HI, OTHER_TEMP) is True
+        assert _won("buy_no", settled=30.0, **_POINT_28C) is True
 
 
 # ---------------------------------------------------------------------------
@@ -79,30 +101,30 @@ class TestFourCases:
 class TestComplementProperty:
     """For any (B, settled), buy_yes win == NOT buy_no win."""
 
-    @pytest.mark.parametrize("lo,hi,settled", [
-        # Point bins
-        (28.0, 28.0, 28.0),    # in bin
-        (28.0, 28.0, 29.0),    # out of bin
-        (28.0, 28.0, 27.0),    # out of bin
-        # Range bins
-        (68.0, 69.0, 68.5),    # in range (F)
-        (68.0, 69.0, 70.0),    # above range
-        (68.0, 69.0, 67.0),    # below range
-        # Left-shoulder
-        (None, 19.0, 17.0),    # below shoulder -> in bin
-        (None, 19.0, 19.0),    # at boundary -> in bin
-        (None, 19.0, 20.0),    # above shoulder -> out of bin
-        # Right-shoulder
-        (29.0, None, 31.0),    # above shoulder -> in bin
-        (29.0, None, 29.0),    # at boundary -> in bin
-        (29.0, None, 28.0),    # below shoulder -> out of bin
+    @pytest.mark.parametrize("binspec,settled", [
+        # Point bins (°C)
+        (_POINT_28C, 28.0),    # in bin
+        (_POINT_28C, 29.0),    # out of bin
+        (_POINT_28C, 27.0),    # out of bin
+        # Range bins (°F). 68.5 rounds-to-membership inside [68,69].
+        (_RANGE_68_69F, 68.5),  # in range (F)
+        (_RANGE_68_69F, 70.0),  # above range
+        (_RANGE_68_69F, 67.0),  # below range
+        # Left-shoulder / floor (°C)
+        (_FLOOR_19C, 17.0),    # below shoulder -> in bin
+        (_FLOOR_19C, 19.0),    # at boundary -> in bin
+        (_FLOOR_19C, 20.0),    # above shoulder -> out of bin
+        # Right-shoulder / ceiling (°C)
+        (_CEIL_29C, 31.0),     # above shoulder -> in bin
+        (_CEIL_29C, 29.0),     # at boundary -> in bin
+        (_CEIL_29C, 28.0),     # below shoulder -> out of bin
     ])
-    def test_complement_holds(self, lo, hi, settled):
-        """is_win(buy_yes) == NOT is_win(buy_no) for all (bin, settled) combinations."""
-        yes_win = is_win("buy_yes", lo, hi, settled)
-        no_win = is_win("buy_no", lo, hi, settled)
+    def test_complement_holds(self, binspec, settled):
+        """buy_yes won == NOT buy_no won for all (bin, settled) combinations."""
+        yes_win = _won("buy_yes", settled=settled, **binspec)
+        no_win = _won("buy_no", settled=settled, **binspec)
         assert yes_win == (not no_win), (
-            f"Complement violated: bin=({lo},{hi}) settled={settled} "
+            f"Complement violated: bin={binspec['label']} settled={settled} "
             f"buy_yes_win={yes_win} buy_no_win={no_win} (should be exact opposites)"
         )
 
@@ -115,28 +137,28 @@ class TestShoulderBins:
     """Shoulder bins have one open end — verify win logic handles them correctly."""
 
     def test_left_shoulder_settlement_in_bin_buy_yes_wins(self):
-        """Left shoulder 'X or below': settlement <= hi → in bin → buy_yes wins."""
-        assert is_win("buy_yes", None, 19.0, 17.0) is True
+        """Floor 'X or below': settlement <= hi → in bin → buy_yes wins."""
+        assert _won("buy_yes", settled=17.0, **_FLOOR_19C) is True
 
     def test_left_shoulder_settlement_in_bin_buy_no_loses(self):
-        """Left shoulder 'X or below': settlement <= hi → in bin → buy_no loses."""
-        assert is_win("buy_no", None, 19.0, 17.0) is False
+        """Floor 'X or below': settlement <= hi → in bin → buy_no loses."""
+        assert _won("buy_no", settled=17.0, **_FLOOR_19C) is False
 
     def test_left_shoulder_settlement_above_buy_yes_loses(self):
-        """Left shoulder 'X or below': settlement > hi → out of bin → buy_yes loses."""
-        assert is_win("buy_yes", None, 19.0, 20.0) is False
+        """Floor 'X or below': settlement > hi → out of bin → buy_yes loses."""
+        assert _won("buy_yes", settled=20.0, **_FLOOR_19C) is False
 
     def test_left_shoulder_settlement_above_buy_no_wins(self):
-        """Left shoulder 'X or below': settlement > hi → out of bin → buy_no wins."""
-        assert is_win("buy_no", None, 19.0, 20.0) is True
+        """Floor 'X or below': settlement > hi → out of bin → buy_no wins."""
+        assert _won("buy_no", settled=20.0, **_FLOOR_19C) is True
 
     def test_right_shoulder_settlement_in_bin_buy_yes_wins(self):
-        """Right shoulder 'X or higher': settlement >= lo → in bin → buy_yes wins."""
-        assert is_win("buy_yes", 29.0, None, 31.0) is True
+        """Ceiling 'X or higher': settlement >= lo → in bin → buy_yes wins."""
+        assert _won("buy_yes", settled=31.0, **_CEIL_29C) is True
 
     def test_right_shoulder_settlement_in_bin_buy_no_loses(self):
-        """Right shoulder 'X or higher': settlement >= lo → in bin → buy_no loses."""
-        assert is_win("buy_no", 29.0, None, 31.0) is False
+        """Ceiling 'X or higher': settlement >= lo → in bin → buy_no loses."""
+        assert _won("buy_no", settled=31.0, **_CEIL_29C) is False
 
 
 # ---------------------------------------------------------------------------
@@ -147,23 +169,23 @@ class TestRangeBins:
     """Bounded range bins like '68-69°F' — settlement must be within [lo, hi]."""
 
     def test_range_in_bin_buy_yes_wins(self):
-        assert is_win("buy_yes", 68.0, 69.0, 68.0) is True
+        assert _won("buy_yes", settled=68.0, **_RANGE_68_69F) is True
 
     def test_range_in_bin_buy_yes_wins_at_hi(self):
-        assert is_win("buy_yes", 68.0, 69.0, 69.0) is True
+        assert _won("buy_yes", settled=69.0, **_RANGE_68_69F) is True
 
     def test_range_below_buy_yes_loses(self):
-        assert is_win("buy_yes", 68.0, 69.0, 67.0) is False
+        assert _won("buy_yes", settled=67.0, **_RANGE_68_69F) is False
 
     def test_range_above_buy_no_wins(self):
-        assert is_win("buy_no", 68.0, 69.0, 70.0) is True
+        assert _won("buy_no", settled=70.0, **_RANGE_68_69F) is True
 
 
 # ---------------------------------------------------------------------------
 # Known Historical Losses (regression guard)
 # These are buy_no trades on the bin that ACTUALLY settled — they must be LOSSES.
-# Source: project_shadow_settlement_edge_2026_06_03.md (MEMORY) — the shoulder-bins
-# negative cases and the buy_no-on-the-bin-that-settled loss pattern.
+# Source: project_shadow_settlement_edge_2026_06_03.md (MEMORY) — the buy_no-on-
+# the-bin-that-settled loss pattern. All °C point bins.
 # ---------------------------------------------------------------------------
 
 class TestKnownHistoricalLosses:
@@ -171,61 +193,30 @@ class TestKnownHistoricalLosses:
 
     def test_taipei_buy_no_on_settled_bin(self):
         """Taipei traded buy_no on 37°C, settlement=37°C → LOSS (in-bin settlement)."""
-        # buy_no on 37°C, settlement landed at 37°C → settlement in traded bin → LOSS
-        assert is_win("buy_no", 37.0, 37.0, 37.0) is False
+        assert _won("buy_no", lo=37.0, hi=37.0, settled=37.0, unit="C", label="37°C") is False
 
     def test_shanghai_buy_no_on_settled_bin(self):
         """Shanghai traded buy_no on 31°C, settlement=31°C → LOSS (in-bin settlement)."""
-        # buy_no on 31°C, settlement landed at 31°C → settlement in traded bin → LOSS
-        assert is_win("buy_no", 31.0, 31.0, 31.0) is False
+        assert _won("buy_no", lo=31.0, hi=31.0, settled=31.0, unit="C", label="31°C") is False
 
     def test_singapore_buy_no_on_settled_bin(self):
         """Singapore traded buy_no on 33°C, settlement=33°C → LOSS."""
-        assert is_win("buy_no", 33.0, 33.0, 33.0) is False
+        assert _won("buy_no", lo=33.0, hi=33.0, settled=33.0, unit="C", label="33°C") is False
 
     def test_buy_no_not_on_settled_bin_is_win(self):
         """Counter-check: buy_no on bin that did NOT settle is a WIN."""
-        # buy_no on 31°C, settlement landed at 30°C (different bin) → WIN
-        assert is_win("buy_no", 31.0, 31.0, 30.0) is True
+        assert _won("buy_no", lo=31.0, hi=31.0, settled=30.0, unit="C", label="31°C") is True
 
 
 # ---------------------------------------------------------------------------
-# None-bin safety (both lo and hi are None = parse failure)
-# ---------------------------------------------------------------------------
-
-class TestNoneBin:
-    """Both traded_bin_lo and traded_bin_hi None = bin parse failure.
-
-    A missing bin can't be won or lost — is_win returns False for both directions
-    without raising, so callers that forget to guard don't silently count wins.
-    The _compute_rows function already skips None-None rows before calling is_win,
-    so this is a defensive contract test for the importable helper.
-    """
-
-    def test_both_none_buy_yes_returns_false(self):
-        """buy_yes with both bounds None → False (not a win, not a crash)."""
-        assert is_win("buy_yes", None, None, 28.0) is False
-
-    def test_both_none_buy_no_returns_false(self):
-        """buy_no with both bounds None → False (not a win, not a crash)."""
-        assert is_win("buy_no", None, None, 28.0) is False
-
-    def test_both_none_does_not_count_as_win_regardless_of_settlement(self):
-        """A missing bin never produces a win for any settlement value."""
-        for settlement in [0.0, 28.0, 100.0, -10.0]:
-            assert is_win("buy_yes", None, None, settlement) is False
-            assert is_win("buy_no", None, None, settlement) is False
-
-
-# ---------------------------------------------------------------------------
-# Invalid direction raises ValueError
+# Invalid direction raises ValueError (propagated from grade_receipt)
 # ---------------------------------------------------------------------------
 
 class TestInvalidDirection:
     def test_unknown_direction_raises(self):
-        with pytest.raises(ValueError, match="Unknown direction"):
-            is_win("sell", 28.0, 28.0, 28.0)
+        with pytest.raises(ValueError):
+            _won("sell", lo=28.0, hi=28.0, settled=28.0, unit="C", label="28°C")
 
     def test_empty_direction_raises(self):
-        with pytest.raises(ValueError, match="Unknown direction"):
-            is_win("", 28.0, 28.0, 28.0)
+        with pytest.raises(ValueError):
+            _won("", lo=28.0, hi=28.0, settled=28.0, unit="C", label="28°C")

@@ -472,8 +472,11 @@ def _validate_boot(settings_path=None) -> int:
 
 
 def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
-    if not bool(edli_cfg.get("edli_live_scaleout_enabled", False)):
-        raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_SCALEOUT_ENABLED")
+    # F1 rename (PR-2 B): edli_live_scaleout_enabled -> edli_live_operator_authorized.
+    # The flag's real semantic is the operator ARM kill-switch for edli_live, not a
+    # scale-out knob. Renamed so the name matches the control it actually performs.
+    if not bool(edli_cfg.get("edli_live_operator_authorized", False)):
+        raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED")
     if not bool(edli_cfg.get("edli_live_promotion_artifact_required", True)):
         raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT_REQUIRED")
 
@@ -504,6 +507,46 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
         )
     finally:
         conn.close()
+    if not verified.ok:
+        raise RuntimeError(verified.reason)
+
+
+def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
+    """PR-2 (A) / F1 Option C: bind the live/canary ARM to settlement-grounded evidence.
+
+    Whenever the daemon is about to arm (real_order_submit_enabled — true for BOTH
+    edli_live_canary AND edli_live), it MUST find a state/edli_arm_gate_artifact.json
+    proving — on THIS commit (commit_sha == booted HEAD) — a positive
+    capital-weighted after-cost settlement EV with coverage licensed. The artifact
+    is produced by scripts/measure_arm_gate_settlement.py (PR-1). Here we ENFORCE it.
+
+    ANTIBODY: flipping ``real_order_submit_enabled=true`` without that artifact is now a
+    BOOT FAILURE (RuntimeError ``EDLI_LIVE_PROMOTION_ARM_GATE_*``), not a silent runtime
+    path. The whole category "armed without proven edge" becomes unconstructable at boot.
+
+    Fail-closed: ``edli_arm_gate_artifact_required`` defaults to True; a missing flag
+    still requires the artifact. Only the explicit literal False — set by an operator
+    who is knowingly de-binding — relaxes it, and even then the existing
+    promotion-artifact gate and the live-cap hard ceiling remain in force.
+    """
+    if not bool(edli_cfg.get("edli_arm_gate_artifact_required", True)):
+        return
+
+    artifact_path = str(edli_cfg.get("edli_arm_gate_artifact_path") or "").strip()
+    if not artifact_path:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_PATH_MISSING")
+    try:
+        artifact = json.loads(Path(artifact_path).read_text())
+    except FileNotFoundError as exc:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_MISSING") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_INVALID_JSON") from exc
+
+    head_sha = str(_capture_boot_state().get("sha") or "").strip()
+
+    from src.events.live_profit_audit import verify_edli_arm_gate_artifact
+
+    verified = verify_edli_arm_gate_artifact(artifact, head_sha=head_sha)
     if not verified.ok:
         raise RuntimeError(verified.reason)
 
@@ -879,6 +922,14 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
         )
     if mode == "edli_live":
         _assert_edli_live_promotion_artifact(edli_cfg)
+    if mode in {"edli_live_canary", "edli_live"}:
+        # PR-2 (A) / F1 Option C: ANY armed mode (canary OR live —
+        # real_order_submit_enabled is required for both) must ALSO carry the
+        # settlement-grounded ARM evidence artifact bound to THIS commit. Missing
+        # / SHA-mismatch / ev<=0 / not-coverage-licensed -> boot RuntimeError.
+        # Ordered AFTER the (edli_live-only) promotion-artifact gate so the
+        # promotion gate's specific reason still surfaces first for edli_live.
+        _assert_edli_arm_gate_artifact(edli_cfg)
     return mode
 
 
@@ -2090,15 +2141,22 @@ def _auto_derive_user_channel_condition_ids(
         return []
     try:
         from src.data.market_scanner import (
+            MarketEventsPersistenceError,
             extract_executable_condition_ids,
-            find_weather_markets,
+            find_weather_markets_or_raise,
         )
 
-        events = find_weather_markets(
+        events = find_weather_markets_or_raise(
             min_hours_to_resolution=0.0,
             include_slug_pattern=False,
         )
         return extract_executable_condition_ids(events)
+    except MarketEventsPersistenceError as exc:
+        logger.warning(
+            "user-channel WS scanner: market_events persistence failure — "
+            "degrading to empty condition_ids: %s", exc,
+        )
+        return []
     except Exception as exc:
         logger.warning("user-channel WS scanner failed: %s", exc)
         return []
@@ -2637,7 +2695,7 @@ def _refresh_pending_family_snapshots(
             # the liquid-bin capture already relies on. Use it as the discovery source so
             # every bin (incl never-seen illiquid MECE tails) captures; the downstream
             # gamma_by_family filter scopes CLOB capture to the pending families.
-            from src.data.market_scanner import find_weather_markets as _fwm
+            from src.data.market_scanner import find_weather_markets_or_raise as _fwm
             discovered_events = _fwm(min_hours_to_resolution=0.0)
             logger.info(
                 "refresh_pending_family_snapshots: slug fetch complete "
@@ -2738,29 +2796,16 @@ def _market_discovery_cycle() -> None:
         return
     try:
         from src.data.market_scanner import (
-            find_weather_markets,
-            get_last_market_events_persistence_result,
+            find_weather_markets_or_raise,
             refresh_executable_market_substrate_snapshots,
         )
         from src.data.polymarket_client import PolymarketClient
         from src.state.db import get_trade_connection
 
-        events = find_weather_markets(
+        events = find_weather_markets_or_raise(
             min_hours_to_resolution=0.0,
             include_slug_pattern=True,
         )
-        persistence = get_last_market_events_persistence_result()
-        if events and persistence is not None and persistence.status == "failed":
-            logger.error(
-                "market_discovery: %d weather events parsed but market_events persistence "
-                "failed — topology substrate will be stale: %s",
-                len(events),
-                persistence.error,
-            )
-            raise RuntimeError(
-                f"market_events persistence failed after {len(events)} active events: "
-                f"{persistence.error}"
-            )
         conn = get_trade_connection(write_class="live")
         try:
             _discovery_clob_timeout = max(
@@ -5303,17 +5348,26 @@ def _edli_market_channel_ingestor_cycle() -> None:
 
             def _refresh_snapshot_action(action: MarketChannelAction) -> None:
                 from src.data.market_scanner import (
-                    find_weather_markets,
+                    MarketEventsPersistenceError,
+                    find_weather_markets_or_raise,
                     refresh_executable_market_substrate_snapshots,
                 )
                 from src.state.db import get_trade_connection
 
                 trade_conn = get_trade_connection(write_class="live")
                 try:
-                    markets = find_weather_markets(
-                        min_hours_to_resolution=0.0,
-                        include_slug_pattern=True,
-                    )
+                    try:
+                        markets = find_weather_markets_or_raise(
+                            min_hours_to_resolution=0.0,
+                            include_slug_pattern=True,
+                        )
+                    except MarketEventsPersistenceError as _persistence_exc:
+                        logger.error(
+                            "EDLI market-channel refresh aborted: market_events persistence "
+                            "failure — snapshot substrate not refreshed: %s",
+                            _persistence_exc,
+                        )
+                        return
                     if action.condition_id:
                         markets = _edli_filter_markets_for_condition(markets, action.condition_id)
                         if not markets:
