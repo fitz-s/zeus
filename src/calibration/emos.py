@@ -93,6 +93,8 @@ def emos_predictive(
     season: str,
     lead_days: float,
     members_c: "np.ndarray",
+    *,
+    metric: str = "high",
 ) -> Optional[tuple[float, float]]:
     """Compute the EMOS predictive mean and std-dev (both in °C).
 
@@ -107,16 +109,22 @@ def emos_predictive(
       - cell missing from table
       - any computation error (fail-closed)
 
+    METRIC-KEYED (2026-06-04): cells are keyed ``city|season|metric``. HIGH and LOW are
+    physically different quantities (daily max vs daily min) with separate fits; a LOW
+    lookup resolves ONLY ``…|low`` and can never return a HIGH cell. ``metric`` defaults to
+    "high" so legacy HIGH callers are unchanged after the table is re-keyed to ``…|high``.
+
     Args:
         city:       City name matching the calibration table key (e.g. "Amsterdam").
         season:     Season code DJF/MAM/JJA/SON.
         lead_days:  Lead time in days (float; e.g. lead_hours/24).
-        members_c:  1-D numpy array of ensemble member maxima in °C.
+        members_c:  1-D numpy array of ensemble member extrema in °C (max for high / min for low).
+        metric:     "high" | "low" — the market's settlement metric (keys the cell lookup).
     """
     try:
         table = load_emos_table()
         cells = table.get("cells", {})
-        key = f"{city}|{season}"
+        key = f"{city}|{season}|{str(metric).lower()}"
         cell = cells.get(key)
         if cell is None:
             return None

@@ -54,7 +54,7 @@ def _make_emos_table_file(tmp_path, served="emos"):
     p = tmp_path / "emos_calibration.json"
     p.write_text(json.dumps({
         "_meta": {"note": "test"},
-        "cells": {f"{CITY}|{SEASON}": {"params": _PARAMS, "n": 1450, "served": served}},
+        "cells": {f"{CITY}|{SEASON}|high": {"params": _PARAMS, "n": 1450, "served": served}},
     }))
     return p
 
@@ -290,7 +290,7 @@ class TestFlagOnLicensedNoEmosCell:
         """Licensed city but emos cell served='raw' → emos_predictive None → MC lcb stands."""
         # Overwrite the table with served='raw' for this city
         emos_env.table_path.write_text(json.dumps({
-            "_meta": {}, "cells": {f"{CITY}|{SEASON}": {"params": _PARAMS, "n": 1450, "served": "raw"}},
+            "_meta": {}, "cells": {f"{CITY}|{SEASON}|high": {"params": _PARAMS, "n": 1450, "served": "raw"}},
         }))
         monkeypatch.setattr(emos_mod, "_emos_table_cache", None, raising=False)
         _make_license_file(emos_env.tmp_path, {CITY: {"k_cov": 1.5}})
