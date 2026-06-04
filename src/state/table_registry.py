@@ -642,8 +642,13 @@ def assert_no_raw_find_weather_markets_in_daemon_callers(
                 )
             elif isinstance(func, ast.Attribute) and func.attr == "find_weather_markets":
                 # e.g. ms.find_weather_markets(...)  or market_scanner.find_weather_markets(...)
-                # Also catch aliased imports like `find_weather_markets as _fwm`
-                # via Name check above; attribute form is the module-qualified form.
+                # Scope: catches bare-name calls (Name.id) at call sites in main.py and
+                # ingest_main.py, and attribute-qualified calls (Attribute.attr) such as
+                # market_scanner.find_weather_markets(...). Does NOT catch aliased imports
+                # (`find_weather_markets as _fwm`) — aliases bind a different Name.id and
+                # are not detected by this check. Also does NOT catch the indirect path
+                # cycle_runner → cycle_runtime (find_weather_markets at cycle_runtime:~4311)
+                # because that file is not in the daemon-callers list passed to this guard.
                 violations.append(
                     f"  {label}:{node.lineno}: bare attribute find_weather_markets( call — "
                     f"use find_weather_markets_or_raise instead"

@@ -84,6 +84,18 @@ class MarketSnapshot:
     stale_age_seconds: float | None = None
 
 
+class MarketEventsPersistenceError(RuntimeError):
+    """Raised by find_weather_markets_or_raise when market_events persistence fails.
+
+    Typed so callers (e.g. _market_scan_tick) can distinguish a persistence failure
+    from an unrelated scan error and surface the correct scheduler-health status.
+    """
+
+    def __init__(self, message: str, persistence_error: str | None = None) -> None:
+        super().__init__(message)
+        self.persistence_error = persistence_error
+
+
 @dataclass(frozen=True)
 class MarketEventsPersistenceResult:
     """Outcome of persisting parsed Gamma market topology to market_events."""
@@ -863,30 +875,35 @@ def find_weather_markets_or_raise(
 ) -> list[dict]:
     """Persistence-checked wrapper around find_weather_markets for daemon callers.
 
-    Calls find_weather_markets(**kwargs) and then checks the thread-local
-    persistence result.  If events were returned but market_events persistence
-    failed, raises RuntimeError so the caller (or its @_scheduler_job decorator)
-    surfaces the failure instead of silently trusting a stale topology substrate.
+    Calls find_weather_markets(**kwargs) via the module-level name so test
+    monkeypatches on ``src.data.market_scanner.find_weather_markets`` are
+    respected.  If events were returned but market_events persistence failed,
+    raises ``MarketEventsPersistenceError`` (a typed RuntimeError subclass) so
+    the caller can distinguish a persistence failure from an unrelated scan error.
 
     Caller contract:
       - Daemon callers that need fail-loud behaviour use this function.
       - Failure-tolerant callers (e.g. user-channel condition-id derivation) must
-        still call this and catch the RuntimeError, returning a safe degraded value.
+        still call this and catch MarketEventsPersistenceError, returning a safe
+        degraded value.
       - Script / backfill callers (backfill_*, capture_replay_artifact, onboard_cities)
         continue to use find_weather_markets directly — they are not daemon paths.
       - The AST boot guard assert_no_raw_find_weather_markets_in_daemon_callers in
         src/state/table_registry.py enforces that no daemon caller bypasses this wrapper.
     """
-    events = find_weather_markets(
+    import src.data.market_scanner as _self  # module-level ref so monkeypatches bite
+
+    events = _self.find_weather_markets(
         min_hours_to_resolution=min_hours_to_resolution,
         include_slug_pattern=include_slug_pattern,
     )
     p = get_last_market_events_persistence_result()
     if events and p is not None and p.status == "failed":
-        raise RuntimeError(
+        raise MarketEventsPersistenceError(
             f"MARKET_EVENTS_PERSISTENCE_FAILED: {len(events)} active events parsed but "
             f"market_events write failed — topology substrate is stale. "
-            f"persistence_error={p.error!r}"
+            f"persistence_error={p.error!r}",
+            persistence_error=p.error,
         )
     return events
 

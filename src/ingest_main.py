@@ -1205,6 +1205,7 @@ def _market_scan_tick():
     """
     try:
         from src.data.market_scanner import (
+            MarketEventsPersistenceError,
             find_weather_markets_or_raise,
         )
         markets = find_weather_markets_or_raise()
@@ -1212,6 +1213,12 @@ def _market_scan_tick():
         return {
             "status": "ok",
             "market_count": len(markets),
+        }
+    except MarketEventsPersistenceError as exc:
+        logger.warning("ingest_market_scan persistence failure: %s", exc)
+        return {
+            "status": "market_events_persistence_failed",
+            "error": exc.persistence_error or str(exc),
         }
     except Exception as exc:
         logger.warning("ingest_market_scan tick error: %s", exc)
