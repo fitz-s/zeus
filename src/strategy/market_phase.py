@@ -338,3 +338,73 @@ def market_phase_admits(
         uma_resolved_source=uma_resolved_source,
     )
     return evidence.phase in FORECAST_ONLY_ADMIT_PHASES
+
+
+def is_forecast_only_admissible(
+    *,
+    target_local_date: date,
+    city_timezone: str,
+    as_of_utc: datetime,
+    polymarket_end_utc: Optional[datetime] = None,
+) -> bool:
+    """ONE canonical timeliness predicate for forecast_only candidates.
+
+    ``as_of`` = decision_time (UTC). Returns True iff the family is still
+    forecast-only-admissible (the whole target LOCAL day is in the future →
+    ``MarketPhase.PRE_SETTLEMENT_DAY``).
+
+    Two forms with a guaranteed monotone relationship:
+
+    - **Cheap (source) form** — ``polymarket_end_utc is None``: the market
+      end-boundary is unknown, so we apply the conservative lower bound: the
+      target local day must still be entirely in the future at ``as_of``. This
+      is exactly ``as_of < settlement_day_entry_utc`` (city-local 00:00 of
+      ``target_local_date``). Computed via tz arithmetic — never by
+      lexicographic string compare.
+
+    - **Full form** — ``polymarket_end_utc`` known: delegate to
+      ``market_phase_for_decision`` and admit iff the verdict is
+      ``PRE_SETTLEMENT_DAY``. This is byte-identical to the reactor's
+      bind-time gate (and to ``market_phase_admits`` for the same inputs).
+
+    Monotonicity (relationship invariant, RED test T4): cheap==False ⟹
+    full==False. The cheap form only adds the SETTLEMENT_DAY-entry boundary
+    (settled local day ⇒ reject); the full form additionally rejects
+    POST_TRADING (``as_of >= polymarket_end_utc``) and PRE_TRADING. Because
+    ``polymarket_end_utc`` for a weather market falls on ``target_date`` (F1:
+    12:00 UTC of target_date, never before SETTLEMENT_DAY entry), every
+    instant the cheap form rejects (``as_of >= sd_entry``) is also rejected by
+    the full form — either SETTLEMENT_DAY or POST_TRADING. So applying the
+    cheap form at a source boundary can never starve a candidate the full
+    reactor would admit.
+
+    Fail-closed on an unknown/empty timezone (undeterminable phase → reject).
+    """
+    if not city_timezone:
+        return False
+    try:
+        sd_entry = settlement_day_entry_utc(
+            target_local_date=target_local_date,
+            city_timezone=city_timezone,
+        )
+    except Exception:
+        # Unknown/invalid tz → undeterminable phase → fail-closed reject.
+        return False
+
+    as_of_utc = as_of_utc.astimezone(timezone.utc)
+
+    if polymarket_end_utc is None:
+        # Cheap source form: admit only while the whole target local day is
+        # still future (as_of strictly before local-midnight of target_date).
+        return as_of_utc < sd_entry
+
+    return (
+        market_phase_for_decision(
+            target_local_date=target_local_date,
+            city_timezone=city_timezone,
+            decision_time_utc=as_of_utc,
+            polymarket_start_utc=None,
+            polymarket_end_utc=polymarket_end_utc,
+        )
+        in FORECAST_ONLY_ADMIT_PHASES
+    )
