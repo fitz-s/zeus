@@ -327,6 +327,11 @@ class _GuardedWorldMutex:
 # by _GuardedWorldMutex under the lock's ownership (see class docstring).
 _WORLD_MUTEX_HELD_DEPTH: int = 0
 
+# Operations already warned about under the advisory (prod) posture of
+# ``assert_no_world_mutex_held_for_io`` — warn once per operation, not per call,
+# so a pre-existing site does not spam the log thousands of times per minute.
+_WORLD_MUTEX_IO_ADVISED: set[str] = set()
+
 _WORLD_DB_WRITE_MUTEX = _GuardedWorldMutex()
 
 
@@ -350,13 +355,40 @@ def assert_no_world_mutex_held_for_io(operation: str) -> None:
     ``operation`` is a short label for the I/O being attempted (e.g.
     ``"venue.get_trades"``, ``"onchain.eth_call"``); it appears in the error so
     the wedge's root call site is identified at the moment of the violation.
+
+    DEPLOYMENT POSTURE (2026-06-04, plan
+    architecture/world_mutex_io_offmutex_refactor_2026_06_04.md): FATAL in
+    CI/tests (under pytest) and when armed via ``ZEUS_WORLD_MUTEX_IO_FATAL=1``;
+    ADVISORY (warn-once-per-operation) in the live daemon otherwise. Flipping a
+    brand-new strict assertion to fatal in production while >0 pre-existing
+    I/O-under-mutex sites remain turns the daemon into a guard-raise storm AND
+    leaks the open write txn the raise unwinds (uncommitted BEGIN → the WAL
+    cannot checkpoint → UNBOUNDED bloat), strictly worse than the bounded
+    slow-wedge. The antibody keeps full value: any NEW instance fails CI (tests
+    run under pytest = fatal) and every live violation is logged once for the
+    off-mutex refactor. Arm prod-fatal only after the Phase-2 audit proves zero
+    remaining sites.
     """
-    if world_mutex_is_held():
+    if not world_mutex_is_held():
+        return
+    _fatal = bool(os.environ.get("PYTEST_CURRENT_TEST")) or (
+        os.environ.get("ZEUS_WORLD_MUTEX_IO_FATAL") == "1"
+    )
+    if _fatal:
         raise WorldMutexIOViolation(
             f"blocking I/O {operation!r} attempted while the zeus-world.db write "
             f"mutex is held — this serializes every world write behind the I/O "
             f"and wedges the daemon (WAL-lock starvation). The world write lock "
             f"MUST be released before any venue/on-chain call. See db.world_write_lock."
+        )
+    if operation not in _WORLD_MUTEX_IO_ADVISED:
+        _WORLD_MUTEX_IO_ADVISED.add(operation)
+        logging.getLogger(__name__).warning(
+            "WORLD_MUTEX_IO_ADVISORY: blocking I/O %r attempted under the world "
+            "write mutex (pre-existing site pending off-mutex refactor). Advisory "
+            "in prod; fatal under pytest / ZEUS_WORLD_MUTEX_IO_FATAL=1. See "
+            "db.world_write_lock + architecture/world_mutex_io_offmutex_refactor_2026_06_04.md.",
+            operation,
         )
 
 
