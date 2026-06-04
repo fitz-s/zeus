@@ -4743,7 +4743,7 @@ def _write_emos_shadow_ledger(
             # Distinguish raw vs missing by checking table directly
             from src.calibration.emos import load_emos_table
             tbl = load_emos_table()
-            cell = tbl.get("cells", {}).get(f"{family.city}|{season}")
+            cell = tbl.get("cells", {}).get(f"{family.city}|{season}|high")  # 3-key (HIGH path)
             if cell is not None:
                 served_status = str(cell.get("served", "missing"))
             else:
@@ -5004,7 +5004,8 @@ def _maybe_override_lcb_with_emos_ci(
         # (raw 51 members from snapshot["members_json"], °F→°C convert, season hemisphere-aware).
         city_obj = runtime_cities_by_name().get(family.city)
         lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
-        season = season_from_date(str(family.target_date), lat=lat)
+        from src.calibration.emos import emos_season as _emos_season
+        season = _emos_season(family.target_date)  # NH-month canonical (no SH season-crossing)
         lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
         try:
             members_native = _snapshot_members(snapshot).astype(float)

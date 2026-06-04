@@ -268,7 +268,7 @@ def emos_predictive(
     """
     month = int(target_date_str[5:7])
     season = _season(month)
-    key = f"{city}|{season}"
+    key = f"{city}|{season}|high"  # 3-key (metric-keyed table; this validator is HIGH-path)
     cell = cells.get(key)
     if cell is None or cell.get("served") != "emos":
         return None, None, "raw"

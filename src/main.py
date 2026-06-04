@@ -880,9 +880,7 @@ def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
         return
     try:
         from src.calibration.emos_ci_license import load_emos_ci_license
-        from src.calibration.emos import load_emos_table
-        from src.contracts.season import season_from_date
-        from src.config import runtime_cities_by_name
+        from src.calibration.emos import load_emos_table, emos_season, emos_cell_key
     except Exception as exc:  # pragma: no cover — import wiring
         logger.warning("EMOS-CI license boot guard import failed (override left disabled): %s", exc)
         return
@@ -897,18 +895,18 @@ def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
 
     table = load_emos_table()
     cells = table.get("cells", {}) if isinstance(table, dict) else {}
-    cities_by_name = runtime_cities_by_name()
     today = datetime.now(timezone.utc).date().isoformat()
 
+    # EMOS-CI license is HIGH-metric (the override replaces the MC q_5pct on the HIGH q_lcb).
+    # Canonical NH-month season + 3-key lookup: a hemisphere-aware season SH-flips and a 2-key
+    # lookup misses the metric-keyed table — both silently drop the whole license (C1/C2 fix).
     dropped: list[str] = []
     for city in list(license_map.keys()):
-        city_obj = cities_by_name.get(city)
-        lat = getattr(city_obj, "lat", 90.0) if city_obj is not None else 90.0
-        season = season_from_date(today, lat=lat)
-        cell = cells.get(f"{city}|{season}")
+        season = emos_season(today)
+        cell = cells.get(emos_cell_key(city, season, "high"))
         served = str(cell.get("served", "")) if isinstance(cell, dict) else ""
         if served != "emos":
-            dropped.append(f"{city}|{season}(served={served or 'missing'})")
+            dropped.append(f"{city}|{season}|high(served={served or 'missing'})")
             del license_map[city]
 
     if dropped:

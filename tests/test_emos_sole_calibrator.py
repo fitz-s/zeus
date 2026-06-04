@@ -119,6 +119,27 @@ def test_inv1_served_raw_returns_none_for_honest_fallback(monkeypatch):
     assert out is None, "served=raw must fall back (None), never silently apply HIGH EMOS or bias"
 
 
+def test_inv_canonical_season_is_nh_month_no_hemisphere_flip():
+    # SEASON-CROSSING ANTIBODY (critic 2026-06-04): EMOS cells are NH-month-keyed
+    # (fit_emos_calibration.season()). A hemisphere-aware season SH-flips and serves the
+    # OPPOSITE-season cell for SH cities — the twin of the metric-crossing bug. The ONE
+    # canonical emos_season() must be NH-month-only for ALL callers (seam, shadow, CI, boot).
+    from src.calibration.emos import emos_season, emos_cell_key
+    # December = DJF in BOTH hemispheres under NH-month keying (an SH city in its summer
+    # must still resolve the DJF cell, because that is how the fit stored it).
+    assert emos_season("2026-12-15") == "DJF"
+    assert emos_season("2026-06-15") == "JJA"
+    # Accepts date objects too.
+    import datetime as _dt
+    assert emos_season(_dt.date(2026, 1, 10)) == "DJF"
+    # Contrast: the hemisphere-aware season WOULD flip an SH city to the opposite label.
+    from src.contracts.season import season_from_date
+    assert season_from_date("2026-12-15", lat=-33.0) != emos_season("2026-12-15"), \
+        "the OLD season_from_date(lat<0) flips SH summer to JJA — exactly the bug; callers must use emos_season"
+    # 3-key helper is the only correct cell address.
+    assert emos_cell_key("Sao Paulo", "DJF", "high") == "Sao Paulo|DJF|high"
+
+
 def test_inv1_metric_keyed_no_crossing_and_low_serves(monkeypatch):
     # METRIC ANTIBODY (2026-06-04): cells are keyed city|season|metric. HIGH and LOW are
     # physically different quantities (daily max vs min); a LOW lookup resolves ONLY a LOW

@@ -109,8 +109,9 @@ def _emos_predictive(
     season: str,
     lead_days: float,
     members_c: np.ndarray,
+    metric: str = "high",
 ) -> tuple[float, float] | None:
-    key = f"{city}|{season}"
+    key = f"{city}|{season}|{str(metric).lower()}"  # 3-key (metric-keyed table)
     cell = emos_cells.get(key)
     if cell is None:
         return None

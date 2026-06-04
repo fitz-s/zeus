@@ -88,6 +88,35 @@ def season_for(target_date: date) -> str:
     return "SON"
 
 
+def emos_season(target_date) -> str:
+    """Canonical NH month-only season for EMOS cell lookup. Accepts a date or 'YYYY-MM-DD' str.
+
+    EMOS cells are keyed by NH month-season (fit_emos_calibration.season()). A
+    hemisphere-aware season (season_from_date(lat)) SH-flips and would serve the
+    OPPOSITE-season cell for Southern-Hemisphere cities — the season-crossing twin of
+    the metric-crossing defect. EVERY EMOS caller (seam, shadow ledger, EMOS-CI override,
+    boot guard, offline scorers) MUST use THIS function so the lookup season always
+    matches the fit's keying. Do not reintroduce season_from_date(lat) on an EMOS path.
+    """
+    mm = target_date.month if hasattr(target_date, "month") else int(str(target_date)[5:7])
+    if mm in (12, 1, 2):
+        return "DJF"
+    if mm in (3, 4, 5):
+        return "MAM"
+    if mm in (6, 7, 8):
+        return "JJA"
+    return "SON"
+
+
+def emos_cell_key(city: str, season: str, metric: str) -> str:
+    """The canonical 3-key for the EMOS table: ``city|season|metric`` (metric lowercased).
+
+    The ONLY correct way to address a cell. Direct ``f"{city}|{season}"`` 2-key reads miss
+    the metric-keyed table (silently None -> served=missing). Use this everywhere.
+    """
+    return f"{city}|{season}|{str(metric).lower()}"
+
+
 def emos_predictive(
     city: str,
     season: str,
