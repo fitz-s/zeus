@@ -3140,6 +3140,26 @@ def _generate_candidate_proofs(
             (str(candidate.yes_token_id or ""), "buy_yes", yes_q, yes_lcb),
             (str(candidate.no_token_id or ""), "buy_no", 1.0 - yes_q, no_lcb),
         ):
+            # R5/#176 boundary antibody (2026-06-04): a recorded lower bound can
+            # never exceed its own recorded point. q_value is the inference-engine
+            # NORMALIZED point (1 - yes_q); q_lcb is the market_analysis bootstrap
+            # lower bound, clamped only against market_analysis's OWN un-normalized
+            # p_posterior (the BUG #129 within-module clamp). When the two modules'
+            # normalizations diverge (sum(P)<1) the raw q_lcb can land ABOVE
+            # q_value (43% of live buy_no on 2026-06-03, worst gap 0.79) — a
+            # definitionally-impossible lower bound. Enforce q_lcb <= q_value at the
+            # single boundary where both legs are present, making the recorded
+            # inversion unconstructable regardless of which estimator's domain
+            # drifts. The decision path's trade_score already min()'d internally;
+            # this also fixes the recorded receipt/telemetry value the spine grades.
+            if q_lcb > q_value:
+                import logging  # module uses lazy per-fn logging imports
+                logging.getLogger("zeus.qlcb_restore").debug(
+                    "qlcb_restore_inversion_clamped condition=%s direction=%s "
+                    "q_lcb=%.6f q_value=%.6f gap=%.6f",
+                    condition_id, direction, q_lcb, q_value, q_lcb - q_value,
+                )
+                q_lcb = q_value
             execution_price: ExecutionPrice | None = None
             c_cost_95pct: float | None = None
             p_fill_lcb = 0.0
