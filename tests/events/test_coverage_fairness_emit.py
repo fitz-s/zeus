@@ -319,3 +319,53 @@ def test_flag_off_legacy_order(monkeypatch: Any) -> None:
     assert len(cities_flag_off) == len(cities), (
         f"flag-OFF count mismatch: expected={len(cities)}, got={len(cities_flag_off)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-04 — FRESHEST-source_run tie-break (P1 no-trade root)
+# Created: 2026-06-04
+# Last reused/audited: 2026-06-04
+# Authority basis: live 0-receipts root. select_rows dedups multiple source_runs
+#   for the same (city,target,metric) to one row, but tie-broke on LOWEST
+#   snapshot_id ("oldest = most stable") — which emits a STALE source_run. The
+#   reader (read_executable_forecast) elects the FRESHEST run for the q, so
+#   causal-run (emitter, stale) != executable-run (reader, fresh) → every live
+#   candidate dies at NO_SUBMIT_CERTIFICATE:source_truth.source_run_id !=
+#   forecast.source_run_id. 2026-06-04: 26/28 emitted June-5 FSR were May-31,
+#   ZERO were the fresh June-4 run that was committed AND reader-elected → 0
+#   receipts. Invariant: the emitted source_run MUST be the freshest available.
+# ---------------------------------------------------------------------------
+from src.events.triggers.forecast_snapshot_ready import CoverageFairnessRequest  # noqa: E402
+
+
+def _frow(issue, sid, run):
+    return {
+        "snapshot_city": "Seoul",
+        "snapshot_target_date": "2026-06-05",
+        "snapshot_temperature_metric": "high",
+        "readiness_status": "LIVE_ELIGIBLE",
+        "snapshot_id": sid,
+        "sr_source_issue_time": issue,
+        "source_run_id": run,
+    }
+
+
+def test_select_rows_picks_freshest_source_run_not_oldest_snapshot_id():
+    stale = _frow("2026-05-31T00:00:00+00:00", 2, "ecmwf_open_data:mx2t6_high:2026-05-31T00Z")
+    fresh = _frow("2026-06-04T00:00:00+00:00", 9, "ecmwf_open_data:mx2t6_high:2026-06-04T00Z")
+    # snapshot_id and freshness DISAGREE (stale has the LOWER snapshot_id), so the
+    # legacy lowest-snapshot_id tie-break selects the STALE run — the live bug.
+    for order in ([stale, fresh], [fresh, stale]):
+        out = CoverageFairnessRequest(limit=20, cycle_index=0).select_rows(order)
+        assert len(out) == 1
+        assert out[0]["source_run_id"].endswith("2026-06-04T00Z"), (
+            f"emitter must pick the FRESHEST source_run; picked {out[0]['source_run_id']}"
+        )
+
+
+def test_select_rows_freshest_handles_null_issue_time_via_snapshot_id_fallback():
+    # When issue_time is NULL on both, fall back to the freshest proxy (higher
+    # snapshot_id = inserted later) rather than the oldest — never silently stale.
+    a = _frow(None, 2, "run-a"); b = _frow(None, 9, "run-b")
+    out = CoverageFairnessRequest(limit=20, cycle_index=0).select_rows([a, b])
+    assert len(out) == 1 and out[0]["source_run_id"] == "run-b"

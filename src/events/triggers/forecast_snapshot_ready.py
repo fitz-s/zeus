@@ -93,8 +93,12 @@ class CoverageFairnessRequest:
         """Return up to ``limit`` rows for this cycle, one per city-family key.
 
         A city-family key is (city, target_date, metric).  Among multiple rows
-        for the same key, the LIVE_ELIGIBLE row wins; ties broken by snapshot_id
-        ascending (lowest = most stable / oldest).
+        for the same key, the LIVE_ELIGIBLE row wins; ties broken by the FRESHEST
+        forecast run (latest source_issue_time, then available_at, then highest
+        snapshot_id). The emitted FSR's source_run MUST equal the run the reader
+        elects for inference (always the freshest); a stale tie-break emits a
+        stale causal run that disagrees with the reader's executable run, killing
+        every candidate at NO_SUBMIT_CERTIFICATE (2026-06-04 0-receipts root).
         """
         # Step 1: dedup to best row per city-family key.
         best: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -115,13 +119,13 @@ class CoverageFairnessRequest:
                 continue
             if old_ready == "LIVE_ELIGIBLE" and new_ready != "LIVE_ELIGIBLE":
                 continue
-            # Both same readiness: lower snapshot_id wins (stable tie-break).
-            try:
-                new_sid = int(row.get("snapshot_id") or 0)
-                old_sid = int(existing.get("snapshot_id") or 0)
-            except (ValueError, TypeError):
-                new_sid = old_sid = 0
-            if new_sid < old_sid:
+            # Both same readiness: the FRESHEST forecast run wins. The emitted FSR's
+            # source_run MUST equal the run the reader elects for inference (always
+            # the freshest), else causal-run != executable-run and the candidate dies
+            # at NO_SUBMIT_CERTIFICATE (2026-06-04 0-receipts root: 26/28 June-5 FSR
+            # were the stale May-31 run, 0 the fresh June-4 run). The old lowest-
+            # snapshot_id tie-break deliberately picked the OLDEST run — backwards.
+            if _row_freshness_key(row) > _row_freshness_key(existing):
                 best[key] = row
 
         # Step 2: stable ordering of unique keys (insertion order of first seen).
@@ -144,6 +148,25 @@ class CoverageFairnessRequest:
         window_keys = ordered_keys[start:end]
 
         return [best[k] for k in window_keys if k in best]
+
+def _row_freshness_key(row: dict[str, Any]) -> tuple[str, str, int]:
+    """Freshness ordering key for a committed-snapshot row (higher = fresher).
+
+    Latest source_issue_time wins (the forecast run's issue time); ties broken by
+    latest available_at, then highest snapshot_id (inserted-later proxy when
+    issue_time is NULL). Used so the emitted FSR carries the FRESHEST source_run —
+    the same run the reader elects — keeping causal-run == executable-run.
+    """
+    try:
+        sid = int(row.get("snapshot_id") or 0)
+    except (ValueError, TypeError):
+        sid = 0
+    return (
+        str(row.get("sr_source_issue_time") or ""),
+        str(row.get("snapshot_available_at") or row.get("sr_source_available_at") or ""),
+        sid,
+    )
+
 
 LiveEligibilityReader = Callable[[dict[str, Any], dict[str, Any], dict[str, Any], datetime], bool]
 
