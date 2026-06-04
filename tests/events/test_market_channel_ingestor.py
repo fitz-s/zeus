@@ -966,3 +966,101 @@ def test_on_connect_pre_captured_books_none_uses_legacy_direct_fetch():
     assert len(results) == 1
     assert cache.get("token-1") is not None
     assert fetch_calls == ["token-1"], "legacy direct fetch must still fire when pre_captured_books=None"
+
+
+def test_seed_from_rest_empty_pre_cached_under_world_mutex_raises_not_fetches():
+    """RED→GREEN (production fix 2026-06-04): the production bug was
+    seed_from_rest with empty pre_cached under the world mutex falling through
+    to the fallback-fetch branch → 283× WorldMutexIOViolation per 2min +
+    481 MB WAL re-bloat.
+
+    AFTER the fix: the fallback-fetch branch has its own
+    assert_no_world_mutex_held_for_io guard, so it raises WorldMutexIOViolation
+    BEFORE calling fetch_orderbook — zero I/O under the mutex.
+
+    This test verifies:
+    1. No fetch_orderbook call is made (guard fires before reaching I/O).
+    2. WorldMutexIOViolation is raised (not silently skipped).
+    3. The token is caught by the except block → WARNING logged, results=[].
+    """
+    import logging
+
+    from src.state.db import WorldMutexIOViolation, world_write_mutex
+
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    fetch_reached: list[str] = []
+
+    def should_not_be_called(token_id: str) -> dict:
+        fetch_reached.append(token_id)
+        return _fake_book(token_id)
+
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        # Empty pre_cached → fallback-fetch branch → guard fires → exception caught
+        # by seed_from_rest's per-token try/except → token skipped → results = []
+        results = ingestor.seed_from_rest(
+            should_not_be_called,
+            received_at="2026-06-04T10:00:00+00:00",
+            pre_cached={},  # empty — token-1 absent → fallback path
+        )
+    finally:
+        mutex.release()
+
+    # Guard fires BEFORE the fetch callable → fetch must never be reached
+    assert fetch_reached == [], (
+        "fetch_orderbook was called under the world mutex — the under-mutex "
+        "fetch fallback was NOT eliminated"
+    )
+    # Token skipped → empty results (fail-closed per token)
+    assert results == []
+    # Nothing written — seed was skipped
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+
+
+def test_on_reconnect_empty_pre_captured_under_world_mutex_raises_not_fetches():
+    """Same structural guarantee for on_reconnect: empty pre_captured_books under
+    the world mutex must NOT reach fetch_orderbook."""
+    from src.state.db import world_write_mutex
+
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    fetch_reached: list[str] = []
+
+    def should_not_be_called(token_id: str) -> dict:
+        fetch_reached.append(token_id)
+        return _fake_book(token_id)
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=should_not_be_called)
+    service.connected = False
+    service.gap_start = "2026-06-04T09:00:00+00:00"
+
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        results = service.on_reconnect(
+            received_at="2026-06-04T10:00:00+00:00",
+            pre_captured_books={},  # empty — token-1 absent → fallback path → guard
+        )
+    finally:
+        mutex.release()
+
+    assert fetch_reached == [], (
+        "fetch_orderbook was called under the world mutex in on_reconnect"
+    )
+    assert results == []

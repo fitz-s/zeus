@@ -163,14 +163,24 @@ class MarketChannelIngestor:
     ) -> list[EventWriteResult]:
         """REST-seed current books on connect/reconnect before channel deltas.
 
-        ``pre_cached`` is an optional {token_id: book_dict} map built by the
-        caller BEFORE acquiring any world-DB write mutex (STEP-7 / pre-capture
+        LOCK DISCIPLINE (2026-06-04): this method MUST NOT be called while the
+        process-global zeus-world.db write mutex is held, UNLESS every active
+        token is already present in ``pre_cached`` (i.e. the I/O happened
+        off-lock). The fallback-fetch branch (``pre_cached`` absent for a
+        token) asserts the mutex is NOT held via
+        ``assert_no_world_mutex_held_for_io`` so any under-mutex regression
+        raises ``WorldMutexIOViolation`` immediately at this callsite rather
+        than wedging the daemon (WAL-lock starvation).
+
+        ``pre_cached`` is a {token_id: book_dict} map built by the caller
+        BEFORE acquiring any world-DB write mutex (STEP-7 / pre-capture
         pattern). When present, the cached dict is used instead of calling
-        ``fetch_orderbook`` again — the live REST fetch already happened outside
-        the lock.  Tokens absent from ``pre_cached`` (or when ``pre_cached`` is
-        ``None``) fall back to calling ``fetch_orderbook`` directly (legacy path,
-        safe only when NO world mutex is held).
+        ``fetch_orderbook`` — zero I/O under the lock.  Tokens absent from
+        ``pre_cached`` (or when ``pre_cached`` is ``None``) fall back to
+        calling ``fetch_orderbook`` directly; this path is only safe (and
+        only reached in practice) when the world mutex is NOT held.
         """
+        from src.state.db import assert_no_world_mutex_held_for_io
 
         results: list[EventWriteResult] = []
         for token_id in sorted(self._active_token_ids):
@@ -178,6 +188,11 @@ class MarketChannelIngestor:
                 if pre_cached is not None and token_id in pre_cached:
                     message = dict(pre_cached[token_id])
                 else:
+                    # Fallback: live fetch.  STRUCTURALLY FORBIDDEN under the
+                    # world mutex — assert here so any regression raises at
+                    # this exact site rather than wedging the daemon deeper in
+                    # the call stack at get_orderbook_snapshot.
+                    assert_no_world_mutex_held_for_io("seed_from_rest.fallback_fetch")
                     message = dict(fetch_orderbook(token_id))
             except Exception as exc:
                 _logger.warning(
@@ -606,15 +621,40 @@ class MarketChannelOnlineService:
         self.connected = False
         self.gap_start = gap_start
 
-    def on_reconnect(self, *, received_at: str) -> list[EventWriteResult]:
+    def on_reconnect(
+        self,
+        *,
+        received_at: str,
+        pre_captured_books: "dict[str, dict] | None" = None,
+    ) -> list[EventWriteResult]:
+        """Seed gap-close books on reconnect.
+
+        ``pre_captured_books`` is an optional {token_id: book_dict} map
+        captured BEFORE the caller acquired any world-DB write mutex (STEP-7
+        / pre-capture pattern — 5th-instance fix 2026-06-04).  When provided,
+        no network I/O happens inside this method.  When ``None``, the legacy
+        per-token direct-fetch path is used — ONLY valid when the world mutex
+        is NOT held (enforced structurally via the assert inside
+        ``reconnect_gap_snapshot`` → ``seed_from_rest`` fallback branch).
+        """
         self.connected = True
         if self.fetch_orderbook is None:
             self.gap_start = None
             return []
         results = []
+        from src.state.db import assert_no_world_mutex_held_for_io
+
+        gap_start_captured = self.gap_start or received_at
         for token_id in sorted(self.ingestor._active_token_ids):
             try:
-                message = dict(self.fetch_orderbook(token_id))
+                if pre_captured_books is not None and token_id in pre_captured_books:
+                    message = dict(pre_captured_books[token_id])
+                else:
+                    # Fallback: live fetch — STRUCTURALLY FORBIDDEN under the world
+                    # mutex.  Assert here (earlier than the get_orderbook_snapshot
+                    # guard) so the violation fires at this callsite with context.
+                    assert_no_world_mutex_held_for_io("on_reconnect.fallback_fetch")
+                    message = dict(self.fetch_orderbook(token_id))
             except Exception as exc:
                 _logger.warning(
                     "on_reconnect: skipping token %s — fetch failed (%s: %s)",
@@ -627,7 +667,7 @@ class MarketChannelOnlineService:
             message.setdefault("asset_id", token_id)
             event = self.ingestor.reconnect_gap_snapshot(
                 message,
-                gap_start=self.gap_start or received_at,
+                gap_start=gap_start_captured,
                 received_at=received_at,
             )
             if event is not None:
@@ -756,12 +796,29 @@ class MarketChannelOnlineService:
                         pass
                 await asyncio.sleep(reconnect_delay_seconds)
                 try:
-                    # Reconnect seed write unit — serialized against the reactor.
-                    # Rare error-path; on_reconnect does per-token REST seeds but
-                    # this path is not the steady-state hot loop, so guarding the
-                    # whole seed+commit keeps the in-process serialization simple.
+                    # Pre-capture reconnect books OFF the mutex (same STEP-7
+                    # pre-capture pattern as the initial connect path above).
+                    _reconnect_at = datetime.now(UTC).isoformat()
+                    _pre_reconnect_books: dict[str, dict] | None = None
+                    if self.fetch_orderbook is not None:
+                        _pre_reconnect_books = {}
+                        for _tid in sorted(self.ingestor._active_token_ids):
+                            try:
+                                _pre_reconnect_books[_tid] = self.fetch_orderbook(_tid)
+                            except Exception as _exc:
+                                _logger.warning(
+                                    "market_channel: reconnect pre-fetch failed for"
+                                    " token %s (will skip seed): %s: %s",
+                                    _tid,
+                                    type(_exc).__name__,
+                                    _exc,
+                                )
+                    # Reconnect seed write unit — only fast DB writes under the mutex.
                     with _world_mutex:
-                        self.on_reconnect(received_at=datetime.now(UTC).isoformat())
+                        self.on_reconnect(
+                            received_at=_reconnect_at,
+                            pre_captured_books=_pre_reconnect_books,
+                        )
                         if commit is not None:
                             commit()
                 except Exception as seed_exc:  # noqa: BLE001

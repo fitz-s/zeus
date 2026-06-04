@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused or audited: 2026-06-01
+# Last reused or audited: 2026-06-04
 # Authority basis: ingestor seed per-token isolation, live-feed revival (GATE #84 PRE_SUBMIT_BOOK_AUTHORITY_MISSING)
 from __future__ import annotations
 
