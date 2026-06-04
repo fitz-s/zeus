@@ -3671,8 +3671,15 @@ def _make_emos_bootstrap_sampler(mu_native: float, sigma_native: float):
         vec = np.array(
             [analysis._bin_probability(measured, bb) for bb in analysis.bins], dtype=float
         )
+        # Guard: NaN/inf or zero-sum => fall back to p_cal so the caller always
+        # receives a valid finite normalized distribution (avoids fail-close in
+        # _finite_probability_distribution when the flag is ON).
+        if not np.all(np.isfinite(vec)):
+            return np.asarray(analysis.p_cal, dtype=float)
         s = float(vec.sum())
-        return vec / s if s > 0.0 else vec
+        if s <= 0.0:
+            return np.asarray(analysis.p_cal, dtype=float)
+        return vec / s
     return _sampler
 
 
