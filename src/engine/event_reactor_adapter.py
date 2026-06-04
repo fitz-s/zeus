@@ -3389,7 +3389,10 @@ def _canonical_probability_and_fdr_proof(
         snapshot=snapshot,
         family=family,
         native_costs=native_costs,
-        payload=_payload(event),
+        # #120/#149: the seam mutates payload['_edli_q_source'] (+ bias/grid flags);
+        # must be the THREADED payload, not a fresh _payload(event) throwaway, or
+        # the q_source provenance is set on a discarded dict and the proof reads None.
+        payload=payload,
         decision_time=decision_time,
     )
     from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
