@@ -3933,6 +3933,32 @@ def _maybe_bias_decay_kelly_haircut(
         city = runtime_cities_by_name().get(family.city)
         if city is None:
             return kelly_multiplier, False, None, "no_city"
+        # Phase-2 K2+N1+#122 (task #167): corrected XOR haircut. When v2 is ON, consult the
+        # single typed BiasTreatment. If this (city,bucket) is on the CORRECT path the bias
+        # was already consumed by the p_raw shift — the haircut MUST NOT also fire on the
+        # same row (the N1 double penalty). The XOR invariant lives in BiasTreatment.
+        # kelly_factor(): a CORRECT treatment returns factor 1.0 (residual-after-correction
+        # is 0). Flag OFF -> this block is skipped -> legacy haircut byte-identical.
+        if bool(ev.get("bias_treatment_v2_enabled", False)):
+            _treatment = _edli_bias_treatment_for_bucket(family=family, city=city)
+            if _treatment is not None:
+                _unit = getattr(city, "settlement_unit", "C")
+                _thr = float(ev.get("bias_decay_threshold_f", 3.0)) if _unit == "F" else float(
+                    ev.get("bias_decay_threshold_c", 2.0)
+                )
+                _factor = float(ev.get("bias_decay_kelly_factor", 0.5))
+                _kf = _treatment.kelly_factor(threshold_native=_thr, haircut_factor=_factor)
+                if _kf < 1.0:
+                    logging.getLogger("zeus.edli_bias").info(
+                        "bias-decay haircut (v2 BiasTreatment) APPLIED city=%s residual=%.2f "
+                        "thr=%.2f factor=%.2f", family.city, _treatment.residual_native, _thr, _kf,
+                    )
+                    return kelly_multiplier * _kf, True, _treatment.residual_native, "bias_exceeds_v2"
+                # CORRECT path or within-threshold: NO haircut (XOR honoured).
+                return kelly_multiplier, False, _treatment.residual_native, "treated_v2_no_haircut"
+            # treatment is None: either no VERIFIED row, or correction flag OFF with no row.
+            # Fall through to the legacy fail-safe (data-absent -> conservative haircut),
+            # preserving the operator's data-insufficient-phase intent for uncovered buckets.
         unit = getattr(city, "settlement_unit", "C")
         metric = family.metric
         ldv = (
@@ -4029,6 +4055,123 @@ def _assert_single_temperature_mean_correction(
         )
 
 
+def _edli_bias_treatment_for_bucket(
+    *,
+    family,
+    city,
+    snapshot: dict[str, Any] | None = None,
+):
+    """Build the single typed ``BiasTreatment`` decision for a (city,bucket).
+
+    Phase-2 K2+N1+#122 (task #167). This is the ONE place the per-(city,bucket) bias is
+    turned into a decision; both the p_raw correction and the Kelly haircut consult it so a
+    bias is corrected XOR haircut, never both (kills the N1 double penalty). The fail-closed
+    BiasTreatment factory refuses NULL/non-VERIFIED authority (#122) and a training_cutoff
+    outside the target season (stale-fit gate). Returns ``None`` when:
+      * ``edli_v1.bias_treatment_v2_enabled`` is OFF (legacy paths own the decision), OR
+      * no VERIFIED row / weight_live<=0 / effective_bias missing, OR
+      * the row fails the provenance or staleness gate (fail-closed).
+
+    The returned mode is CORRECT whenever the correction would be live for this bucket
+    (``edli_v1.edli_bias_correction_enabled`` ON), else HAIRCUT — so the two consumers are
+    mutually exclusive by construction. Native unit: degC for C-cities, degF (x1.8) for
+    F-settled cities (matches the legacy member-array unit).
+    """
+    try:
+        ev = settings["edli_v1"]
+        if not bool(ev.get("bias_treatment_v2_enabled", False)):
+            return None
+        import contextlib
+        from src.calibration.manager import season_from_date
+        from src.calibration.ens_bias_repo import read_bias_model
+        from src.state.db import get_world_connection
+        from src.contracts.bias_treatment import (
+            BiasProvenanceError,
+            BiasStaleError,
+            BiasTreatment,
+            BiasTreatmentMode,
+        )
+
+        metric = family.metric
+        ldv = (
+            "ecmwf_opendata_mx2t3_local_calendar_day_max"
+            if metric == "high"
+            else "ecmwf_opendata_mn2t3_local_calendar_day_min"
+        )
+        season = season_from_date(str(family.target_date), lat=city.lat)
+        month = int(str(family.target_date)[5:7])
+        with contextlib.closing(get_world_connection()) as conn:
+            try:
+                conn.row_factory = sqlite3.Row
+            except Exception:
+                pass
+            row = read_bias_model(
+                conn,
+                city=city.name,
+                season=season,
+                metric=metric,
+                live_data_version=ldv,
+                month=month,
+                target_month=month,
+                authority="VERIFIED",
+                error_model_family=_EDLI_BIAS_FAMILY,
+            )
+        if row is None:
+            return None
+        keys = set(row.keys())
+        eff = row["effective_bias_c"] if "effective_bias_c" in keys else None
+        wl = row["weight_live"] if "weight_live" in keys else 0.0
+        if eff is None or float(wl or 0.0) <= 0.0:
+            return None
+
+        unit = getattr(city, "settlement_unit", "C")
+        scale = 1.8 if unit == "F" else 1.0
+        eff_native = float(eff) * scale
+        resid_c = row["residual_sd_c"] if "residual_sd_c" in keys else None
+        resid_native = abs(float(resid_c)) * scale if resid_c is not None else 0.0
+        n_live = int(row["n_live"]) if ("n_live" in keys and row["n_live"] is not None) else 0
+        cs = row["correction_strength"] if "correction_strength" in keys else None
+        cs = float(cs) if cs is not None else 1.0
+        authority = row["authority"] if "authority" in keys else None
+        training_cutoff = row["training_cutoff"] if "training_cutoff" in keys else None
+
+        thr = float(ev.get("bias_decay_threshold_f", 3.0)) if unit == "F" else float(
+            ev.get("bias_decay_threshold_c", 2.0)
+        )
+        correction_on = bool(ev.get("edli_bias_correction_enabled", False))
+        mode = BiasTreatmentMode.CORRECT if correction_on else BiasTreatmentMode.HAIRCUT
+        try:
+            return BiasTreatment.from_row(
+                effective_bias_native=eff_native,
+                residual_sd_native=resid_native,
+                n_live=n_live,
+                correction_strength=cs,
+                authority=authority,
+                training_cutoff=training_cutoff,
+                target_date=str(family.target_date),
+                lat=float(city.lat),
+                threshold_native=thr,
+                mode=mode,
+            )
+        except (BiasProvenanceError, BiasStaleError) as exc:
+            # Fail closed: a NULL-authority or stale row never enters live q.
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "BiasTreatment refused (fail-closed) city=%s metric=%s: %s",
+                getattr(city, "name", family.city), metric, exc,
+            )
+            return None
+    except Exception as exc:  # never break the live decision path
+        try:
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "BiasTreatment build skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
 def _maybe_apply_edli_bias_correction(
     members: np.ndarray,
     *,
@@ -4055,6 +4198,26 @@ def _maybe_apply_edli_bias_correction(
     try:
         if not bool(settings["edli_v1"].get("edli_bias_correction_enabled", False)):
             return members, False
+        # Phase-2 K2+N1+#122 (task #167): when bias_treatment_v2_enabled is ON, the typed
+        # BiasTreatment gate is the single fail-closed decision. A NULL-authority (#122) or
+        # stale-cutoff row yields treatment=None -> NO correction (raw members), so an
+        # unverified/out-of-season bias never enters live q. The shift it applies is
+        # IDENTICAL to the legacy subtraction (eff_native = eff * (1.8 if F else 1)); only
+        # the fail-closed GATE is added. Flag OFF -> this block is skipped -> byte-identical.
+        if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
+            _treatment = _edli_bias_treatment_for_bucket(
+                family=family, city=city, snapshot=snapshot
+            )
+            if _treatment is None or not _treatment.is_correcting:
+                return members, False
+            corrected = np.asarray(members, dtype=float) - float(_treatment.shift_native)
+            import logging
+            logging.getLogger("zeus.edli_bias").info(
+                "EDLI bias correction (v2 BiasTreatment) city=%s metric=%s shift_native=%.3f "
+                "n_live=%d authority=%s", city.name, family.metric,
+                float(_treatment.shift_native), int(_treatment.n_live), _treatment.authority,
+            )
+            return corrected, True
         import contextlib
         from src.calibration.manager import season_from_date
         from src.calibration.ens_bias_repo import read_bias_model
@@ -4197,7 +4360,32 @@ def _edli_representativeness_sigma_native(
                 if chosen is not None:
                     if resid_c is not None and float(resid_c) > 0.0 and np.isfinite(float(resid_c)):
                         chosen = max(chosen, float(resid_c))
-                    return chosen * _scale
+                    sigma_native = chosen * _scale
+                    # Phase-2 K2 D4 (task #167): when bias_treatment_v2_enabled is ON and the
+                    # fit is low-n (n_live<20), fold the bias-MEAN standard error
+                    # (shift_se = residual_sd/sqrt(n)) into the representativeness σ IN
+                    # QUADRATURE. This is a DISTINCT term from total_residual_sd_c: the latter
+                    # is the per-day predictive scatter (already includes σ_resid·sqrt(1+1/n));
+                    # shift_se is the uncertainty in WHERE the mean shift itself sits, which a
+                    # mean-only correction silently treats as exact. A low-n correction then
+                    # WIDENS q_lcb rather than applying a hard point shift (iron rule 6).
+                    # Flag OFF -> sigma_native returned unchanged (byte-identical legacy).
+                    try:
+                        if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
+                            import math as _math
+                            _n = (
+                                int(row["n_live"])
+                                if ("n_live" in keys and row["n_live"] is not None)
+                                else 0
+                            )
+                            if 0 < _n < 20 and resid_c is not None and float(resid_c) > 0.0:
+                                shift_se_native = (float(resid_c) / _math.sqrt(_n)) * _scale
+                                sigma_native = float(
+                                    _math.sqrt(sigma_native ** 2 + shift_se_native ** 2)
+                                )
+                    except Exception:
+                        pass
+                    return sigma_native
     except Exception as exc:
         try:
             import logging

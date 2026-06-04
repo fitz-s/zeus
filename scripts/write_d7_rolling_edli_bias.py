@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from datetime import datetime, timezone
@@ -352,6 +353,15 @@ def write_city_bias(
         total_sd = sd
     het_var = float(bias.get("heterogeneity_var_c2", 0.0))
     n = int(bias["n_window"])
+    # G1 (Phase-2 K2, task #167): posterior SD of the bias-MEAN estimate. The per-day
+    # residual scatter `sd` divided by sqrt(n) is the standard error of the mean — how
+    # tightly the SHIFT itself is pinned. This is what bias_sd_c must carry (the live
+    # representativeness reader treats residual_sd_c as the per-day spread separately).
+    bias_sd_post = (sd / math.sqrt(n)) if n > 0 else sd
+    # G2 (Phase-2 K2, task #167): the shrinkage lambda actually applied = effective/raw.
+    # raw==0 (no signal) -> nothing to shrink -> strength 1.0 (degenerate, recorded as such).
+    _raw = float(bias.get("raw_bias_c", eff))
+    correction_strength_lambda = (eff / _raw) if abs(_raw) > 1e-12 else 1.0
     cov_end_month = int(str(bias["window_end"])[5:7])
     if months is None:
         months = (cov_end_month,)
@@ -375,12 +385,21 @@ def write_city_bias(
             estimator="d7_rolling_per_city_settled",
             bias_unit="C",
             bias_c=eff,
-            bias_sd_c=sd,
+            # G1 (Phase-2 K2, task #167): bias_sd_c is the POSTERIOR SD of the bias-MEAN
+            # estimate (= residual_sd / sqrt(n)), the uncertainty in WHERE the shift sits —
+            # NOT residual_sd_c (the per-day scatter). The old code stamped the per-day
+            # residual here, overstating the mean's uncertainty by sqrt(n). residual_sd_c
+            # keeps the per-day scatter; bias_sd_c is now the mean SE.
+            bias_sd_c=bias_sd_post,
             residual_sd_c=sd,
             heterogeneity_var_c2=het_var,
             effective_bias_c=eff,
             total_residual_sd_c=total_sd,
-            correction_strength=1.0,
+            # G2 (Phase-2 K2, task #167): correction_strength is the shrinkage lambda
+            # actually applied (= effective/raw in [0,1]), so a heavily-shrunk noisy city
+            # records strength<1 — NOT a false hardcoded 1.0. raw==0 -> strength 1.0
+            # (no shrink to record).
+            correction_strength=correction_strength_lambda,
             error_model_family=FAMILY,
             error_model_key=f"{city_name}|{season}|{mo}|{metric}|{METHOD}",
             authority=authority,

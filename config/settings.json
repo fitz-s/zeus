@@ -85,6 +85,8 @@
     "redecision_max_per_cycle": 50,
     "edli_bias_correction_enabled": true,
     "bias_decay_kelly_haircut_enabled": true,
+    "bias_treatment_v2_enabled": false,
+    "_bias_treatment_v2_note": "2026-06-03 Phase-2 K2+N1+#122 (SHADOW-SAFE, default OFF). When ON, the per-(city,bucket) ensemble bias becomes a single typed BiasTreatment decision (src/contracts/bias_treatment.py): a bucket is EITHER corrected (shift p_raw) XOR haircut (size Kelly down) — never BOTH on the same row (kills the N1 double-penalty live today on ~20 high-|bias| buckets). Also fail-closes on NULL/non-VERIFIED authority (#122) and on a training_cutoff outside the target season (the recurring 'May fit applied in June' defect), and folds the bias-mean SE (=residual_sd/sqrt(n)) in QUADRATURE into representativeness_sigma so a low-n correction WIDENS q_lcb (D4). With this flag OFF, _maybe_apply_edli_bias_correction + _maybe_bias_decay_kelly_haircut behave BYTE-IDENTICAL to today (legacy paths untouched). The type is introduced unconditionally; only the behaviour it enables is flag-gated.",
     "bias_decay_threshold_c": 2.0,
     "bias_decay_threshold_f": 3.0,
     "bias_decay_kelly_factor": 0.5,
