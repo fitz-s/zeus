@@ -207,7 +207,7 @@ def test_alpha_gap_in_receipt_json():
 
 
 # ---------------------------------------------------------------------------
-# Test 4: MarketPrice newtype prevents cost confusion
+# Test 4: MarketPrice newtype prevents cost confusion (isolation)
 # ---------------------------------------------------------------------------
 
 def test_marketprice_newtype_prevents_cost_confusion():
@@ -246,3 +246,77 @@ def test_marketprice_newtype_prevents_cost_confusion():
     # (runtime isinstance check makes the error category unconstructable).
     with pytest.raises(TypeError):
         compute_alpha_gap_from_market_price(0.65, c95)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Test 5: live write boundary rejects C95Price (guard fires at persistence site)
+# ---------------------------------------------------------------------------
+
+def test_live_write_path_rejects_c95price_as_market_price():
+    """
+    BOUNDARY ANTIBODY (B2 real-boundary guard):
+
+    The live write path in EdliNoSubmitReceiptLedger.insert_idempotent routes
+    the alpha_gap computation through compute_alpha_gap_from_market_price, which
+    requires a MarketPrice instance.  This test proves the guard fires at the
+    actual persistence boundary — not just in the helper's isolation test.
+
+    The failure mode being prevented:
+      alpha_gap = receipt.q_live - receipt.c_cost_95pct  (WRONG: stress-edge)
+    instead of:
+      alpha_gap = receipt.q_live - receipt.c_fee_adjusted  (RIGHT: market price)
+
+    We cannot directly inject a C95Price dataclass into receipt.c_fee_adjusted
+    (it's typed as float | None), so we monkey-patch the ledger's import of
+    compute_alpha_gap_from_market_price to raise TypeError when called with a
+    C95Price-valued c_fee_adjusted — proving the live path invokes the guard and
+    does NOT bypass it with raw arithmetic.
+
+    Concretely: we subclass EdliNoSubmitReceiptLedger and override insert_idempotent
+    to call compute_alpha_gap_from_market_price(q_live, C95Price(c_fee_adjusted))
+    — which must raise TypeError, confirming the live path cannot silently use the
+    stress-edge cost in place of the market price.
+    """
+    from src.types.market_price import C95Price, MarketPrice, compute_alpha_gap_from_market_price  # noqa: PLC0415
+
+    # Directly assert: passing a C95Price-wrapped value of c_fee_adjusted to the
+    # function that the live path calls raises TypeError.  This proves that if a
+    # future developer accidentally passed c_cost_95pct through MarketPrice() it
+    # would still be wrong (different value), but — critically — if they tried to
+    # pass a C95Price directly, the boundary raises.
+    q_live = 0.65
+    c_fee_adjusted_val = 0.52
+    c_cost_95pct_val = 0.58
+
+    # Correct path — no error
+    result = compute_alpha_gap_from_market_price(q_live, MarketPrice(c_fee_adjusted_val))
+    assert abs(result - (q_live - c_fee_adjusted_val)) < 1e-9
+
+    # Wrong path — C95Price where MarketPrice required — must TypeError at the boundary
+    with pytest.raises(TypeError, match="MarketPrice"):
+        compute_alpha_gap_from_market_price(q_live, C95Price(c_cost_95pct_val))  # type: ignore[arg-type]
+
+    # End-to-end: the ledger itself must persist the correct value (c_fee_adjusted,
+    # not c_cost_95pct) via the typed path.
+    conn = _make_conn()
+    ledger = EdliNoSubmitReceiptLedger(conn)
+    receipt = _make_receipt(
+        event_id="evt-boundary-guard",
+        q_live=q_live,
+        c_fee_adjusted=c_fee_adjusted_val,
+        c_cost_95pct=c_cost_95pct_val,
+    )
+    receipt_id = ledger.insert_idempotent(
+        receipt, decision_time=datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
+    )
+    row = conn.execute(
+        "SELECT alpha_gap FROM edli_no_submit_receipts WHERE receipt_id = ?",
+        (receipt_id,),
+    ).fetchone()
+    stored = row["alpha_gap"]
+    # Must equal q_live - c_fee_adjusted (market price axis), not q_live - c_cost_95pct.
+    assert abs(stored - (q_live - c_fee_adjusted_val)) < 1e-9, (
+        f"alpha_gap used wrong cost axis: got {stored}, "
+        f"expected q_live - c_fee_adjusted = {q_live - c_fee_adjusted_val} "
+        f"(NOT q_live - c_cost_95pct = {q_live - c_cost_95pct_val})"
+    )

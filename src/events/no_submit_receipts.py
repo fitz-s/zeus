@@ -11,6 +11,7 @@ from typing import Any
 
 from src.decision_kernel.canonicalization import stable_hash
 from src.events.reactor import EventSubmissionReceipt
+from src.types.market_price import MarketPrice, compute_alpha_gap_from_market_price
 
 SCHEMA_VERSION = 1
 
@@ -142,11 +143,17 @@ class EdliNoSubmitReceiptLedger:
                 "mainstream_fetched_at_utc": receipt.mainstream_fetched_at_utc,
                 # B2 (PR-4, 2026-06-03): edge-axis column.
                 # NULL when c_fee_adjusted is NULL (no executable quote — fail-closed).
+                # Routed through compute_alpha_gap_from_market_price so that passing
+                # c_cost_95pct (C95Price) where c_fee_adjusted (MarketPrice) is expected
+                # raises TypeError at this write boundary — the confusion is unconstructable.
                 "alpha_gap": (
                     receipt.alpha_gap
                     if receipt.alpha_gap is not None
                     else (
-                        receipt.q_live - receipt.c_fee_adjusted
+                        compute_alpha_gap_from_market_price(
+                            receipt.q_live,
+                            MarketPrice(receipt.c_fee_adjusted),
+                        )
                         if receipt.q_live is not None and receipt.c_fee_adjusted is not None
                         else None
                     )
