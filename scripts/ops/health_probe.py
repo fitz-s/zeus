@@ -236,10 +236,13 @@ def check_artifacts() -> None:
         rows.append(("receipts", "RED", detail))
     else:
         rows.append(("receipts", "GREEN" if age is not None else "WARN", detail))
-    # FSR freshness
+    # FSR freshness — MUST use created_at (emission time), NOT available_at:
+    # available_at is the fixed 00Z cycle anchor (e.g. 2026-06-04T00:00:00),
+    # so it reads ~constant and falsely looks "stale" even when the emitter
+    # is healthy. created_at is when the FSR row was actually written.
     fsr = _scalar(
         conn,
-        "SELECT MAX(available_at) FROM opportunity_events "
+        "SELECT MAX(created_at) FROM opportunity_events "
         "WHERE event_type='FORECAST_SNAPSHOT_READY'",
     )
     fage = _age_min(fsr if isinstance(fsr, str) and not str(fsr).startswith("__ERR__") else None)
