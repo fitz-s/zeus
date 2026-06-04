@@ -1,3 +1,7 @@
+# Created: 2026-06-04
+# Last reused/audited: 2026-06-04
+# Authority basis: Operator P1 2026-06-04 — channel-sweep keeper query index-back
+#                  (category-kill of 85s json_extract full-scan)
 """EDLI opportunity_events schema owner."""
 
 from __future__ import annotations
@@ -41,6 +45,17 @@ CREATE INDEX IF NOT EXISTS idx_opportunity_events_type_available
     ON opportunity_events(event_type, available_at)
 """
 
+# Expression index backing the keeper-subquery GROUP BY in
+# EventStore.archive_superseded_channel_events (Step 1).  Without this index
+# SQLite full-scans the table parsing json_extract three times per cycle —
+# confirmed 85.6 s at 1.78 M rows on 2026-06-04.  The expression text
+# MUST be byte-identical to the GROUP BY / WHERE expressions in the query
+# so SQLite's expression-index matching fires.
+CREATE_CHANNEL_TOKEN_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_opportunity_events_channel_token
+    ON opportunity_events(event_type, json_extract(payload_json, '$.token_id'), available_at)
+"""
+
 CREATE_NO_UPDATE_TRIGGER_SQL = """
 CREATE TRIGGER IF NOT EXISTS trg_opportunity_events_no_update
 BEFORE UPDATE ON opportunity_events
@@ -62,5 +77,6 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_PENDING_ORDER_INDEX_SQL)
     conn.execute(CREATE_TYPE_AVAILABLE_INDEX_SQL)
+    conn.execute(CREATE_CHANNEL_TOKEN_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)

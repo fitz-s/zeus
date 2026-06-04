@@ -1,3 +1,7 @@
+# Created: 2026-06-04
+# Last reused/audited: 2026-06-04
+# Authority basis: Operator P1 2026-06-04 — channel-sweep keeper query index-back
+#                  (category-kill of 85s json_extract full-scan); Step-3 batch UPDATE
 """World-DB event store for EDLI opportunity events."""
 
 from __future__ import annotations
@@ -389,19 +393,31 @@ class EventStore:
 
         superseded_ids = [row[0] for row in candidate_rows if row[0] not in keeper_ids]
 
+        if not superseded_ids:
+            return 0
+
+        # Step 3: batch UPDATE in chunks of 500 instead of one statement per row.
+        # Replaces the prior per-row loop that issued up to batch_limit (100k)
+        # individual statements per cycle.  Chunk size 500 keeps the IN-list well
+        # below SQLite's SQLITE_MAX_VARIABLE_NUMBER (999 default) while reducing
+        # round-trips by ~200×.  Semantics are identical: only pending/processing
+        # rows transition to expired.
         now = _utc_now()
-        for event_id in superseded_ids:
+        _CHUNK = 500
+        for chunk_start in range(0, len(superseded_ids), _CHUNK):
+            chunk = superseded_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
             self.conn.execute(
-                """
+                f"""
                 UPDATE opportunity_event_processing
                    SET processing_status = 'expired',
                        processed_at = ?,
                        updated_at = ?
                  WHERE consumer_name = ?
-                   AND event_id = ?
+                   AND event_id IN ({placeholders})
                    AND processing_status IN ('pending', 'processing')
                 """,
-                (now, now, self.consumer_name, event_id),
+                (now, now, self.consumer_name, *chunk),
             )
         return len(superseded_ids)
 

@@ -317,3 +317,90 @@ def test_book_snapshot_events_also_swept():
     archived = store.archive_superseded_channel_events()
     assert archived == 3, "3 of 4 BOOK_SNAPSHOT events should be superseded"
     assert _pending_count(conn) == 1
+
+
+def test_keeper_query_uses_channel_token_index():
+    """RED->GREEN performance antibody: the keeper subquery in
+    archive_superseded_channel_events must use idx_opportunity_events_channel_token
+    (the expression index on event_type + json_extract(payload_json, '$.token_id')
+    + available_at) rather than a full table SCAN.
+
+    Without the index the GROUP BY over json_extract hits every row in
+    opportunity_events -- confirmed 85.6 s at 1.78 M rows on live DB 2026-06-04.
+    With the index the plan shows USING INDEX / SEARCH, collapsing to sub-second.
+
+    Two assertions:
+    (1) Structural: idx_opportunity_events_channel_token exists in sqlite_master.
+        RED before the index DDL is added to ensure_table, GREEN after.
+    (2) Planner: with realistic volume (20 tokens x 50 events = 1000 rows) +
+        ANALYZE the planner uses that index not a full SCAN.  This proves the
+        expression text is byte-identical to the query GROUP BY / WHERE terms.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+
+    # --- assertion (1): structural existence ---
+    index_names = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='opportunity_events'"
+        ).fetchall()
+    }
+    assert "idx_opportunity_events_channel_token" in index_names, (
+        "idx_opportunity_events_channel_token must be declared in "
+        "opportunity_events_schema.ensure_table(); index is absent from sqlite_master."
+    )
+
+    # --- populate enough rows for ANALYZE statistics to tip the planner ---
+    # 20 tokens x 50 events = 1000 rows; with ANALYZE the planner drives from
+    # opportunity_events via the expression index rather than the PK-join path
+    # that a tiny table would choose.
+    for tok in range(20):
+        for j in range(50):
+            store.insert_or_ignore(
+                _channel_event(
+                    "BEST_BID_ASK_CHANGED",
+                    f"tok-plan-{tok}",
+                    f"0xcplan-{tok}",
+                    f"2026-06-04T{j % 24:02d}:{j // 24:02d}:00+00:00",
+                    seq=tok * 50 + j,
+                )
+            )
+    conn.execute("ANALYZE")
+
+    consumer = "edli_reactor_v1"
+    channel_types = ("BEST_BID_ASK_CHANGED", "BOOK_SNAPSHOT", "NEW_MARKET_DISCOVERED")
+    type_placeholders = ",".join("?" * len(channel_types))
+
+    # --- assertion (2): planner uses the expression index ---
+    plan_rows = conn.execute(
+        f"""
+        EXPLAIN QUERY PLAN
+        SELECT e2.event_type,
+               json_extract(e2.payload_json, '$.token_id') AS token_id,
+               MAX(e2.available_at) AS max_available_at
+        FROM opportunity_events e2
+        JOIN opportunity_event_processing p2
+          ON p2.event_id = e2.event_id
+         AND p2.consumer_name = ?
+        WHERE e2.event_type IN ({type_placeholders})
+          AND p2.processing_status IN ('pending', 'processing')
+          AND json_extract(e2.payload_json, '$.token_id') IS NOT NULL
+        GROUP BY e2.event_type, json_extract(e2.payload_json, '$.token_id')
+        """,
+        (consumer, *channel_types),
+    ).fetchall()
+
+    # EXPLAIN QUERY PLAN columns: id, parent, notused, detail
+    plan_text = " ".join(
+        (r["detail"] if isinstance(r, sqlite3.Row) else r[-1]) for r in plan_rows
+    ).upper()
+
+    assert "IDX_OPPORTUNITY_EVENTS_CHANNEL_TOKEN" in plan_text, (
+        f"keeper query must use idx_opportunity_events_channel_token after ANALYZE "
+        f"(got: {plan_text!r}). The expression text in the DDL must be byte-identical "
+        "to json_extract(payload_json, '$.token_id') in the GROUP BY / WHERE."
+    )
+    assert "SCAN E2" not in plan_text and "SCAN OPPORTUNITY_EVENTS" not in plan_text, (
+        f"keeper query must not full-scan opportunity_events (got: {plan_text!r})"
+    )
