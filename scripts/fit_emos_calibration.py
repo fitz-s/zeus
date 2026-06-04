@@ -68,13 +68,29 @@ def main():
                          "artifact that poisons mu=a+b*xbar (the cold-shift root cause, wogx7y03g).")
     ap.add_argument("--world", default=WORLD, help="zeus-world.db path (default: this checkout's state/)")
     ap.add_argument("--fcst", default=FCST, help="zeus-forecasts.db path (default: this checkout's state/)")
+    ap.add_argument("--metric", default="high", choices=["high", "low"],
+                    help="temperature metric to fit. HIGH=daily max (truth=obs daily MAX, ensemble "
+                         "temperature_metric='high'); LOW=daily min (truth=obs daily MIN, ensemble "
+                         "temperature_metric='low'). HIGH and LOW are different quantities with "
+                         "separate fits — never cross them (#metric-crossing).")
     args = ap.parse_args()
+    metric = args.metric
+    agg_high = (metric == "high")
     w = sqlite3.connect(f"file:{args.world}?mode=ro", uri=True); w.row_factory = sqlite3.Row
+    # observation_instants.running_max is the HOURLY instantaneous temperature (misnamed; non-monotone).
+    # Daily MAX over the day's rows = the high truth; daily MIN = the low truth. Same source, metric-
+    # matched aggregation — keeps HIGH and LOW provenance identical, only the extremum differs.
     obs = defaultdict(dict)
     for r in w.execute("SELECT city, target_date d, running_max rm, temp_unit tu FROM observation_instants WHERE running_max IS NOT NULL"):
         c = to_c(r["rm"], r["tu"])
         if c is None or not np.isfinite(c): continue
-        if r["d"] not in obs[r["city"]] or c > obs[r["city"]][r["d"]]: obs[r["city"]][r["d"]] = c
+        d, city = r["d"], r["city"]
+        if d not in obs[city]:
+            obs[city][d] = c
+        elif agg_high and c > obs[city][d]:
+            obs[city][d] = c
+        elif (not agg_high) and c < obs[city][d]:
+            obs[city][d] = c
     f = sqlite3.connect(f"file:{args.fcst}?mode=ro", uri=True); f.row_factory = sqlite3.Row
     # cell -> {y24:[(xbar,logS2,lead,y)], y25:[...], test(2026):[...]}
     cells = defaultdict(lambda: {"y24": [], "y25": [], "test": []})
@@ -85,9 +101,9 @@ def main():
     # ingests a truncated read. NULL overlap (pre-column rows) is kept (COALESCE high).
     for r in f.execute(
         "SELECT city, target_date, members_json, members_unit, lead_hours "
-        "FROM ensemble_snapshots WHERE temperature_metric='high' "
+        "FROM ensemble_snapshots WHERE temperature_metric=? "
         "AND COALESCE(forecast_window_local_day_overlap_hours, 99.0) >= ?",
-        (args.min_overlap_hours,),
+        (metric, args.min_overlap_hours),
     ):
         try:
             m = np.array(json.loads(r["members_json"]), dtype=float); m = m[np.isfinite(m)]
@@ -143,14 +159,16 @@ def main():
             fitted[k]["p"] = (1 - B) * fitted[k]["p"] + B * tgt
 
     # write serve table (params + per-cell served=emos|raw + meta)
-    serve = {"_meta": {"created": "2026-06-02", "metric": "high",
+    serve = {"_meta": {"created": "2026-06-02", "metric": metric,
                        "model": "mu=a+b*xbar; sigma2=exp(c+d*logS2+e*lead_days)",
                        "params_order": ["a", "b", "c", "d", "e"],
                        "do_no_harm": "time-ordered held-out gate (fit2024->gate2025); raw served where no generalizing gain",
                        "authority": "emos_ngr_v1"},
              "cells": {}}
+    # Cell key carries the metric (city|season|metric) so HIGH and LOW cells coexist in ONE
+    # table and a LOW lookup can NEVER resolve a HIGH cell (#metric-crossing fail-closed).
     for key, fv in fitted.items():
-        serve["cells"][f"{key[0]}|{key[1]}"] = {
+        serve["cells"][f"{key[0]}|{key[1]}|{metric}"] = {
             "params": [round(float(x), 5) for x in fv["p"]], "n": int(fv["n"]),
             "served": "raw" if key in raw_only else "emos"}
     serve["_meta"]["min_overlap_hours"] = args.min_overlap_hours

@@ -4732,7 +4732,10 @@ def _write_emos_shadow_ledger(
     emos_sigma_c: float | None = None
     served_status = "missing"
     if is_high_metric:
-        emos_result = emos_predictive(family.city, season, lead_days, members_c)
+        emos_result = emos_predictive(
+            family.city, season, lead_days, members_c,
+            metric=str(getattr(family, "metric", "high") or "high").lower(),
+        )
         if emos_result is not None:
             emos_mu_c, emos_sigma_c = emos_result
             served_status = "emos"
@@ -5013,7 +5016,10 @@ def _maybe_override_lcb_with_emos_ci(
         else:
             members_c = members_native
 
-        emos_result = emos_predictive(family.city, season, lead_days, members_c)
+        emos_result = emos_predictive(
+            family.city, season, lead_days, members_c,
+            metric=str(getattr(family, "metric", "high") or "high").lower(),
+        )
         if emos_result is None:
             # served != emos (raw/missing cell) or insufficient members → fail-closed, MC stands.
             return
