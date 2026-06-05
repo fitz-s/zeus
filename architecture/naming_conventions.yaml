@@ -75,6 +75,7 @@ file_naming:
         evaluate_calibration_transfer_oos.py: established calibration-transfer OOS evidence writer name retained to match validated_calibration_transfers and operator-facing policy terminology
         force_lifecycle.py: established repair command name; dangerous and packet-gated
         fill_obs_dst_gaps.py: established obs_v2 targeted fill helper; fill_ prefix kept for explicit gap-repair semantics
+        fit_settlement_sigma_floor.py: empirical settlement sigma-floor fitter retained to match operator-facing calibration artifact terminology
 
         healthcheck.py: established operator entrypoint
         heartbeat_dispatcher.py: established runtime dispatcher

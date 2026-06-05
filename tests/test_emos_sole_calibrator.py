@@ -217,6 +217,112 @@ def test_inv1_metric_keyed_no_crossing_and_low_serves(monkeypatch):
 
 
 # ----------------------------------------------------------------------------
+# EMPIRICAL SETTLEMENT σ-FLOOR (loop-breaker, investigation 2026-06-05) — the EMOS σ-model is
+#   SYSTEMICALLY under-dispersed (median σ_emos/σ_settled = 0.49). The correct floor is the
+#   DETRENDED trailing-window settlement std per (city, season, metric): σ_eff =
+#   max(model_σ, k·σ_settled_floor), k=0.8, applied UNIVERSALLY (EMOS-served AND raw-served).
+#   Flag-gated via the builders' apply_settlement_floor param (seam reads
+#   edli_v1.edli_settlement_sigma_floor_enabled). Flag OFF ⇒ byte-identical. max() only WIDENS σ →
+#   lower q_lcb → fewer overconfident bets; can NEVER tighten or create a wrong-side trade (iron rule 5).
+# ----------------------------------------------------------------------------
+def _floor_cell(city, season, metric, sigma_floor_c, k=0.8):
+    return {
+        "_meta": {"k_default": k},
+        "cells": {f"{city}|{season}|{str(metric).lower()}":
+                  {"sigma_floor_c": sigma_floor_c, "n": 30, "window": "45d"}},
+    }
+
+
+def test_settlement_floor_flag_off_is_byte_identical_emos(monkeypatch):
+    # Flag OFF (default) ⇒ build_emos_q output is identical with/without a floor table present.
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    table = {"_meta": {"metric": "multi"},
+             "cells": {"TelAviv|JJA|high": {"params": [0.0, 1.0, -0.4, 0.5, 0.0], "n": 99, "served": "emos"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    # a floor table that WOULD widen if applied
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _floor_cell("TelAviv", "JJA", "high", 2.9), raising=False)
+    members = np.array([26.6, 27.0, 27.4, 27.0], dtype=float)  # tight raw spread
+    bins = [(None, 30.0), (31.0, 31.0), (32.0, 32.0), (33.0, None)]
+    kw = dict(city="TelAviv", season="JJA", metric="high", lead_days=3.0,
+              members_native=members, unit="C", bins=bins)
+    off_default = mod.build_emos_q(**kw)                         # default param OFF
+    off_explicit = mod.build_emos_q(apply_settlement_floor=False, **kw)
+    assert off_default is not None and off_explicit is not None
+    assert np.allclose(off_default[0], off_explicit[0]) and off_default[2] == off_explicit[2], \
+        "flag OFF (default vs explicit-False) must be byte-identical — no floor applied"
+
+
+def test_settlement_floor_flag_off_is_byte_identical_honest_raw(monkeypatch):
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    table = {"_meta": {}, "cells": {"RawCity|JJA|high": {"params": [0.0, 1.0, -0.4, 0.5, 0.0], "n": 99, "served": "raw"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _floor_cell("RawCity", "JJA", "high", 2.9), raising=False)
+    members = np.array([22.0, 22.3, 22.6, 22.9], dtype=float)
+    bins = [(None, 21.0), (22.0, 22.0), (23.0, None)]
+    kw = dict(city="RawCity", season="JJA", metric="high", lead_days=5.0,
+              members_native=members, unit="C", bins=bins)
+    off_default = mod.build_honest_raw_q(**kw)
+    off_explicit = mod.build_honest_raw_q(apply_settlement_floor=False, **kw)
+    assert off_default is not None and off_explicit is not None
+    assert np.allclose(off_default[0], off_explicit[0]) and off_default[2] == off_explicit[2], \
+        "honest-raw flag OFF must be byte-identical (keeps existing emos_sigma_model floor only)"
+
+
+def test_settlement_floor_on_widens_sigma_emos(monkeypatch):
+    # Flag ON + model σ (~0.83) < k·σ_settled (0.8·2.9 = 2.32) ⇒ sigma_native ≥ 2.32.
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    # params chosen so EMOS σ ≈ 0.83 for this member spread: sqrt(exp(c + d*log(S2))).
+    table = {"_meta": {"metric": "multi"},
+             "cells": {"TelAviv|JJA|high": {"params": [0.0, 1.0, -0.4, 0.5, 0.0], "n": 99, "served": "emos"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _floor_cell("TelAviv", "JJA", "high", 2.9), raising=False)
+    members = np.array([26.6, 27.0, 27.4, 27.0], dtype=float)
+    bins = [(None, 30.0), (31.0, 31.0), (32.0, 32.0), (33.0, None)]
+    off = mod.build_emos_q(city="TelAviv", season="JJA", metric="high", lead_days=3.0,
+                           members_native=members, unit="C", bins=bins, apply_settlement_floor=False)
+    on = mod.build_emos_q(city="TelAviv", season="JJA", metric="high", lead_days=3.0,
+                          members_native=members, unit="C", bins=bins, apply_settlement_floor=True)
+    assert off is not None and on is not None
+    assert off[2] < 1.5, "model σ must be the tight under-dispersed value (floor source: investigation)"
+    assert on[2] >= 0.8 * 2.9 - 1e-6, "floor ON must widen sigma to ≥ k·σ_settled = 2.32"
+    assert on[2] > off[2], "floor only WIDENS, never tightens"
+
+
+def test_settlement_floor_defangs_telaviv_degenerate_q(monkeypatch):
+    # Tel Aviv reproduction: model σ≈0.81 (matches investigation ≈0.83), σ_settled≈2.9, μ≈27.
+    # The "33°C or higher" open-high far bin: floor-OFF gets LITERALLY ZERO probability mass
+    # (degenerate q_yes=0.000 ⇒ q_no=1.000, the overconfident expensive-NO-on-the-winner trap);
+    # floor-ON it receives materially > 0 mass (q_no de-fanged below the degenerate 1.000). The
+    # nearer "32" interior bin's q_no drops well under 0.99 — the investigation's q_no≈0.96 read.
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    table = {"_meta": {"metric": "multi"},
+             "cells": {"TelAviv|JJA|high": {"params": [0.0, 1.0, -0.4, 0.5, 0.0], "n": 99, "served": "emos"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", _floor_cell("TelAviv", "JJA", "high", 2.9), raising=False)
+    members = np.array([25.8, 27.0, 28.2, 27.0], dtype=float)  # μ=27, S2≈0.96 ⇒ σ_emos≈0.81
+    # bins: (None,30) shoulder, 31, 32 interior, 33+ open-high ("33°C or higher")
+    bins = [(None, 30.0), (31.0, 31.0), (32.0, 32.0), (33.0, None)]
+    far_idx = len(bins) - 1   # the 33+ bin
+    near_idx = 2              # the 32 interior bin
+
+    off = mod.build_emos_q(city="TelAviv", season="JJA", metric="high", lead_days=3.0,
+                           members_native=members, unit="C", bins=bins, apply_settlement_floor=False)
+    on = mod.build_emos_q(city="TelAviv", season="JJA", metric="high", lead_days=3.0,
+                          members_native=members, unit="C", bins=bins, apply_settlement_floor=True)
+    assert off is not None and on is not None
+    assert off[2] == pytest.approx(0.81, abs=0.05), "model σ must reproduce the investigation's ~0.83"
+    # FAR bin (33+): degenerate-zero under OFF → materially positive under ON.
+    q_far_off, q_far_on = float(off[0][far_idx]), float(on[0][far_idx])
+    assert q_far_off < 1e-6, f"OFF: far-bin q_yes is degenerate-zero (q_no=1.000), got {q_far_off:.7f}"
+    assert (1.0 - q_far_on) < 0.999, f"ON: far-bin q_no de-fanged below degenerate 1.000, got {1 - q_far_on:.5f}"
+    assert q_far_on > q_far_off, "ON must move real mass onto the previously-starved far bin"
+    # NEAR bin (32): the investigation's q_no≈0.96 read — buy_no on 32 is no longer near-certain.
+    q_no_near_off, q_no_near_on = 1.0 - float(off[0][near_idx]), 1.0 - float(on[0][near_idx])
+    assert q_no_near_off > 0.999, f"OFF: near-bin q_no degenerate, got {q_no_near_off:.5f}"
+    assert q_no_near_on < 0.99, f"ON: near-bin q_no de-fanged below 0.99, got {q_no_near_on:.5f}"
+
+
+# ----------------------------------------------------------------------------
 # INV-5 — WIRE-OR-DELETE. After Phase 3 the maze mean-correction sites are gone.
 #   (RED until deletion; documents the target so a future session cannot re-add them.)
 # ----------------------------------------------------------------------------

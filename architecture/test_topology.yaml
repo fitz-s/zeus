@@ -484,6 +484,7 @@ test_trust_policy:
     tests/test_calibration_pin_eligibility.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_calibration_read_path_asymmetry_fixes_2026_05_06.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_calibration_serving_status.py: {created: "2026-05-09", last_used: "2026-05-09"}
+    tests/calibration/test_settlement_sigma_floor.py: {created: "2026-06-05", last_used: "2026-06-05", note: "Empirical settlement sigma-floor relationship tests: detrended residual std, cached accessor, and EMOS/raw q-builder widening guardrails"}
     tests/test_calibration_transfer_policy_legacy_bridge.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_calibration_transfer_policy_with_evidence.py: {created: "2026-05-05", last_used: "2026-05-08"}
     tests/test_calibration_world_attach_reads.py: {created: "2026-05-02", last_used: "2026-05-02"}
@@ -1094,6 +1095,7 @@ categories:
     - tests/test_calibration_pin_eligibility.py
     - tests/test_calibration_read_path_asymmetry_fixes_2026_05_06.py
     - tests/test_calibration_serving_status.py
+    - tests/calibration/test_settlement_sigma_floor.py
     - tests/test_calibration_transfer_policy_legacy_bridge.py
     - tests/test_calibration_transfer_policy_with_evidence.py
     - tests/test_calibration_world_attach_reads.py
