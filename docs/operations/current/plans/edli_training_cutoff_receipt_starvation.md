@@ -37,6 +37,19 @@ compile against already-persisted calibration authority or fail closed when that
 authority is missing. It must not train Platt models inside the live reactor
 proof window.
 
+After replacing runtime Platt fitting with persisted-model reads, shadow live
+restarted on `8b6f23d194a29bb824164af4a23a6ab44fc054b7`, and the next SIGUSR1
+stack showed the reactor moved forward but then pinned in:
+
+`main._edli_event_reactor_cycle ->
+EventStore.archive_superseded_channel_events`.
+
+The existing channel sweep was batch-bounded for candidate rows, but its keeper
+CTE still performed a large expression join / grouping over active channel
+backlog. The sweep must remain semantics-preserving while making keeper lookup
+per-key and index-backed so receipt emission is not starved before
+`process_pending`.
+
 ## Change
 
 - Add `platt_models.training_cutoff` to canonical schema and schema fingerprint.
@@ -50,6 +63,12 @@ proof window.
   `_fit_from_pairs`. Missing persisted authority remains fail-closed.
 - Add regression coverage proving the no-submit receipt path does not call
   `get_calibrator()` and therefore cannot perform runtime Platt fitting.
+- In `EventStore.archive_superseded_channel_events`, replace the keeper CTE with
+  per-key indexed probes on `idx_opportunity_events_channel_token`, preserving
+  all rows tied at max `available_at` while avoiding a large active-backlog
+  GROUP BY inside the reactor worker.
+- Add channel-sweep regression coverage for tied max timestamps and the actual
+  emitted keeper probes' query plans.
 
 ## Verification
 
