@@ -444,6 +444,129 @@ def test_K8_never_amplifies_vs_single_kelly(p_post, held_committed):
         )
 
 
+# ── FIX A (P1 zero-submit): budget ceiling ≠ variance haircut ────────────────
+#
+# ROOT CAUSE the next two tests pin: ``evaluate_kelly`` passed
+# ``effective_bankroll(..., f_cap=effective_multiplier)`` — the Kelly VARIANCE
+# HAIRCUT (~0.04–0.18 live) — where ``effective_bankroll``'s contract requires
+# ``f_cap`` to be the CORRELATED-RISK CEILING ``max_correlated_pct`` (~0.25).
+# The corr budget is ``f_cap·B``; with ``f_cap`` set to the haircut the budget
+# collapses to ``mult·B`` (≈ $8.9 at mult=0.0525, B=170) instead of
+# ``max_correlated_pct·B`` ($42.5). So the first same-cycle candidate's stake
+# exhausts the tiny budget and every later positive-edge candidate gets
+# ``corr_budget:size=0.0000`` — the zero-submit P1 defect.
+#
+# The existing K1–K8 suite did NOT catch this because its ``_size`` helper uses
+# a TIGHT CI (q_lcb = q − 0.01) and lead_days=1.0, which produce
+# ``effective_multiplier == 0.25 == max_correlated_pct`` — the bug is masked
+# only when the haircut happens to equal the ceiling. These tests use a WIDE CI
+# + LONG lead so the haircut is strictly below the ceiling, exposing it.
+
+# max_correlated_pct from config (the corr-budget ceiling). Distinct concept
+# from F_CAP=kelly_multiplier even though both are 0.25 in current config.
+MAX_CORRELATED_PCT = 0.25
+
+
+def _size_haircut(
+    *,
+    new_city: str,
+    held: list[Position],
+    bankroll: float = BANKROLL,
+    p_posterior: float = 0.92,
+    price: float = 0.50,
+    extra_reserved: list[tuple[str, float]] | None = None,
+) -> float:
+    """Like ``_size`` but with a WIDE CI + LONG lead so the dynamic Kelly
+    multiplier is HAIRCUT strictly below ``max_correlated_pct``.
+
+    q_lcb = q − 0.20 → ci_width = 0.40 → ci haircut ×0.7×0.5; lead_days=5 →
+    ×0.6.  effective_multiplier = 0.25·0.7·0.5·0.6 = 0.0525 (≪ 0.25). This is
+    the live regime that collapsed the corr budget to ~$8.9 and zeroed every
+    later same-cycle candidate.
+    """
+    state = PortfolioState(positions=list(held))
+    corr_committed = correlated_committed_usd(
+        state, new_city=new_city, extra_reserved=extra_reserved
+    )
+    raw_committed = total_exposure_usd(state) + sum(
+        float(usd) for _, usd in (extra_reserved or [])
+    )
+    ctx = SizingContext.from_candidate_proof_with_portfolio(
+        q_posterior=p_posterior,
+        q_lcb_5pct=p_posterior - 0.20,  # WIDE CI → ci_width 0.40 → haircut
+        lead_days=5.0,  # LONG lead → ×0.6 haircut
+        bankroll_usd=bankroll,
+        corr_committed_usd=corr_committed,
+        raw_committed_usd=raw_committed,
+    )
+    proof = evaluate_kelly(
+        kelly_decision_id="k_haircut",
+        p_posterior=p_posterior,
+        execution_price=_kelly_safe_price(price),
+        bankroll_usd=bankroll,
+        sizing_context=ctx,
+        kelly_multiplier=F_CAP,
+    )
+    return proof.size_usd
+
+
+def test_FIXA_haircut_does_not_collapse_corr_budget_to_zero():
+    """RED→GREEN (Fix A): with a healthy bankroll, the config ceiling, a wide-CI
+    / long-lead candidate (heavy variance haircut), and a single small open
+    correlated position (~the live Shanghai $1.34 open), the candidate STILL
+    sizes > 0.
+
+    BEFORE the fix the corr budget was ``mult·B`` (≈ $8.9), so a same-cycle
+    committed capital of ~$9 (well below the live exposure floor) zeroed every
+    later candidate → ``corr_budget:size=0.0000``.  AFTER the fix the budget is
+    ``max_correlated_pct·B`` ($42.5) and the candidate sizes positively.
+    """
+    # One small correlated open position, plus a same-cycle reservation that
+    # together commit ~$10 (corr-weighted) — under the OLD mult·B≈$8.9 budget
+    # this exhausts it and zeroes the bet; under the CORRECT max_correlated_pct·B
+    # budget ($42.5) the bet still sizes.
+    open_pos = _held_position(city=NEAR_CITY, committed_usd=1.34, tid="shanghai_open")
+    s = _size_haircut(
+        new_city=NEAR_CITY,
+        held=[open_pos],
+        extra_reserved=[(NEAR_CITY, 9.0)],  # earlier same-cycle accepted bet
+        p_posterior=0.92,
+    )
+    assert s > 0.0, (
+        f"FIX A regression: positive-edge candidate zeroed by corr_budget "
+        f"(size={s:.4f}); budget collapsed to mult·B instead of "
+        f"max_correlated_pct·B"
+    )
+
+
+def test_FIXA_haircut_path_still_respects_INV_K1_budget():
+    """Fix A must NOT breach INV-K1 (over-sizing = ruin): even under the
+    haircut path, Σ correlation-weighted simultaneous stakes ≤
+    ``max_correlated_pct·B``.
+
+    Two maximally-correlated (same-city) wide-CI strong-edge candidates sized in
+    sequence against a running reservation must still sum below the ceiling. The
+    fix restores would-submit sizing WITHOUT loosening the ceiling.
+    """
+    reserved: list[tuple[str, float]] = []
+    sizes: list[float] = []
+    for _ in range(6):  # several same-family same-cycle bets
+        s = _size_haircut(
+            new_city=NEAR_CITY,
+            held=[],
+            extra_reserved=list(reserved),
+            p_posterior=0.95,  # strong edge to stress the budget
+        )
+        sizes.append(s)
+        reserved.append((NEAR_CITY, s))
+    total = sum(sizes)
+    budget = BANKROLL * MAX_CORRELATED_PCT
+    assert total <= budget + 1e-6, (
+        f"INV-K1 BREACHED by Fix A: Σ stakes={total:.4f} > "
+        f"max_correlated_pct·B={budget:.4f} (over-sizing = ruin)"
+    )
+
+
 # ── Input validation — finite check covers NaN AND inf ───────────────────────
 
 @pytest.mark.parametrize("bad_field,bad_value", [

@@ -1,5 +1,7 @@
-# Last reused or audited: 2026-06-04
-# Authority basis: Operator GOAL 2026-06-04 — Kelly size=0 observability (zero-receipt root-cause)
+# Last reused or audited: 2026-06-05
+# Authority basis: Operator GOAL 2026-06-04 — Kelly size=0 observability (zero-receipt root-cause);
+#   P1 ZERO-SUBMIT FIX A (2026-06-05, iron-rule-1) — f_cap budget-ceiling vs variance-haircut
+#   semantic mismatch in evaluate_kelly (corr/raw effective-bankroll). INV-K1/K1b preserved.
 """No-submit money-path adapter contracts for EDLI redemption."""
 
 from __future__ import annotations
@@ -193,18 +195,48 @@ def evaluate_kelly(
     if sizing_context is not None and sizing_context.has_portfolio_context:
         _sdc = sizing_defaults()
         _b = float(sizing_context.bankroll_usd)
-        # Corr-weighted limit (existing).
+        # P1 ZERO-SUBMIT FIX A (2026-06-05): ``f_cap`` is the BUDGET CEILING, not
+        # the variance haircut. Two DISTINCT concepts were previously wired to one
+        # variable: ``effective_bankroll``/``effective_bankroll_raw`` were passed
+        # ``f_cap=effective_multiplier`` (the Kelly VARIANCE HAIRCUT ~0.04–0.18),
+        # but their contract (sizing_context.py:47-93/96-133) is that ``f_cap`` is
+        # the CORRELATED-RISK / heat CEILING that committed capital draws down. The
+        # haircut is far below the ceiling live, so ``f_cap·B`` collapsed the corr
+        # budget to ~$8.9 (mult·B) instead of $42.5 (max_correlated_pct·B); the
+        # first same-cycle candidate exhausted it and every later positive-edge
+        # candidate got KELLY_REJECTED:corr_budget:size=0.0000 → zero submits.
+        #
+        # The ceiling and the per-bet haircut are INDEPENDENT (proven by the
+        # INV-K1/K1b relationship tests, NOT by the §3a "cancellation" prose):
+        #   stake = f*·effective_multiplier·effective_bankroll(B, committed, f_cap)
+        #         = f*·m·(f_cap·B − committed)/f_cap = (f*·m/f_cap)·(f_cap·B − committed)
+        # Since m ≤ base ≤ kelly_multiplier and f* ≤ 1, choosing
+        #   f_cap_corr = max_correlated_pct  AND  f_cap_raw = the kelly base cap
+        # gives f*·m/f_cap ≤ 1, so each corr-weighted stake ≤ (max_correlated_pct·B
+        # − committed) → Σ ≤ max_correlated_pct·B (INV-K1) and each raw stake ≤
+        # (max_portfolio_heat_pct·B − raw) → Σ ≤ max_portfolio_heat_pct·B (INV-K1b).
+        # The /f_cap and ·m do NOT cancel — and must not: the haircut only makes
+        # each bet smaller (more conservative), never breaching the ceiling.
+        #
+        # The raw-path ceiling is the kelly base cap (== the MAXIMUM possible
+        # ``effective_multiplier``, since every dynamic_kelly_mult factor is ≤ 1.0).
+        # When ``kelly_multiplier`` is supplied it is that base; else the
+        # ``evaluate_kelly`` default of 0.25.
+        _f_cap_corr = float(_sdc["max_correlated_pct"])
+        _kelly_base_cap = 0.25 if kelly_multiplier is None else float(kelly_multiplier)
+        # Corr-weighted limit (INV-K1): ceiling = max_correlated_pct·B.
         _eff_corr = effective_bankroll(
             _b,
             float(sizing_context.corr_committed_usd),
-            f_cap=float(effective_multiplier),
+            f_cap=_f_cap_corr,
         )
-        # Absolute raw-dollar limit (verifier fix).
+        # Absolute raw-dollar limit (INV-K1b): ceiling = max_portfolio_heat_pct·B,
+        # reproduced in raw-bankroll space by the kelly base cap so f*·m/f_cap ≤ 1.
         _eff_raw = effective_bankroll_raw(
             _b,
             float(sizing_context.raw_committed_usd),
             float(_sdc["max_portfolio_heat_pct"]),
-            f_cap=float(effective_multiplier),
+            f_cap=_kelly_base_cap,
         )
         sizing_bankroll = min(_eff_corr, _eff_raw)
 
