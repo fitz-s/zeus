@@ -14,8 +14,9 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-06-04
-# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+# Last reused/audited: 2026-06-05
+# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md;
+#   MAJOR #1 antibody (2026-06-05) — assert_kelly_multiplier_within_correlated_ceiling boot guard (over-size door / iron rule 5)
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
 #                  + 2026-06-04 mainstream made display-only/unconstructable-as-decision (arm direction-gate boot guard + submit enforce branch DELETED)
 
@@ -296,6 +297,50 @@ def assert_frozen_as_of_not_stale(
         )
 
 
+def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
+    """Fail-closed guard: sizing.kelly_multiplier must not exceed
+    sizing.max_correlated_pct (the over-size door / iron rule 5 = ruin).
+
+    WHY (MAJOR #1 antibody, P1 sizing fix a281ba14a2/efe91afdb5): the corr
+    ceiling ``Σ corr-weighted stakes ≤ max_correlated_pct·B`` (the whole point
+    of FIX A in money_path_adapters.evaluate_kelly) holds ONLY when the Kelly
+    base cap ``kelly_multiplier`` is ≤ the corr ceiling ``max_correlated_pct``.
+    The sized stake is
+        s = (f*·m / f_cap_corr)·(f_cap_corr·B − committed),  f_cap_corr = max_correlated_pct
+    and ``f*·m ≤ kelly_multiplier``. So ``f*·m / f_cap_corr ≤ 1`` — and Σ stays
+    under the ceiling — ONLY while ``kelly_multiplier ≤ max_correlated_pct``.
+    These are TWO INDEPENDENT config knobs (sizing.kelly_multiplier vs
+    sizing.max_correlated_pct), equal at 0.25 today only by coincidence — the
+    SAME coincidence that masked the original bug. A legal operator value of
+    e.g. 0.5 silently breaches the ceiling (3 same-cycle same-city bets summed
+    to $51 > $42.50 at B=170 in the critic repro, a 20% over-size) even with the
+    INV-K3 single cap intact. ``_runtime_kelly_multiplier`` only rejects ≤ 0, so
+    0.5 is accepted at runtime — this guard closes the door at boot instead.
+
+    Raises RuntimeError("KELLY_MULT_EXCEEDS_CORR_CEILING: ...") when
+    kelly_multiplier > max_correlated_pct. No-op when either key is absent
+    (other config validation owns presence) or when within the ceiling.
+    """
+    sizing = cfg.get("sizing") or {}
+    raw_mult = sizing.get("kelly_multiplier")
+    raw_corr = sizing.get("max_correlated_pct")
+    if raw_mult is None or raw_corr is None:
+        # Presence is owned by Settings/config validation elsewhere; this guard
+        # only enforces the RELATIONSHIP between the two knobs when both exist.
+        return
+    kelly_mult = float(raw_mult)
+    max_corr = float(raw_corr)
+    if kelly_mult > max_corr:
+        raise RuntimeError(
+            f"KELLY_MULT_EXCEEDS_CORR_CEILING: sizing.kelly_multiplier="
+            f"{kelly_mult} must not exceed sizing.max_correlated_pct={max_corr} "
+            f"— would breach the correlated-capital ceiling "
+            f"(Σ corr-weighted stakes ≤ max_correlated_pct·B) = over-size = ruin "
+            f"(iron rule 5). Lower kelly_multiplier to ≤ {max_corr} or raise "
+            f"max_correlated_pct."
+        )
+
+
 # ---------------------------------------------------------------------------
 # W0-T3: _run_boot_guards / _validate_boot — safe pre-restart smoke
 # (2026-06-03)
@@ -310,6 +355,9 @@ def _run_boot_guards(raw_cfg: dict) -> list:
     Guards included (same set the real boot path runs, in the same order):
       1. assert_calibration_pin_shape_is_dict  — model_keys must be dict/absent
       2. assert_frozen_as_of_not_stale         — WARN>10d, FATAL>21d
+      3. assert_kelly_multiplier_within_correlated_ceiling
+                                               — kelly_multiplier ≤ max_correlated_pct
+                                                 (over-size door / iron rule 5)
 
     Read-only: no DB writes, no network calls, no exclusive locks acquired.
     """
@@ -334,6 +382,19 @@ def _run_boot_guards(raw_cfg: dict) -> list:
         results.append(("frozen_as_of_staleness", False, str(exc)))
     except Exception as exc:  # pragma: no cover
         results.append(("frozen_as_of_staleness", False, f"unexpected: {exc}"))
+
+    # Guard 3: kelly_multiplier ≤ max_correlated_pct (over-size door / iron rule 5)
+    try:
+        assert_kelly_multiplier_within_correlated_ceiling(raw_cfg)
+        results.append((
+            "kelly_mult_corr_ceiling",
+            True,
+            "kelly_multiplier ≤ max_correlated_pct (or absent) — corr ceiling intact",
+        ))
+    except RuntimeError as exc:
+        results.append(("kelly_mult_corr_ceiling", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("kelly_mult_corr_ceiling", False, f"unexpected: {exc}"))
 
     return results
 

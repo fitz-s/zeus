@@ -2,6 +2,8 @@
 # Authority basis: Operator GOAL 2026-06-04 — Kelly size=0 observability (zero-receipt root-cause);
 #   P1 ZERO-SUBMIT FIX A (2026-06-05, iron-rule-1) — f_cap budget-ceiling vs variance-haircut
 #   semantic mismatch in evaluate_kelly (corr/raw effective-bankroll). INV-K1/K1b preserved.
+#   MINOR (2026-06-05): tightened the raw-cap comment — every factor IN THIS CALL (ci/lead/heat)
+#   is ≤ 1.0; city/strategy multipliers ([0.0,2.0] fail-open) are intentionally NOT passed here.
 """No-submit money-path adapter contracts for EDLI redemption."""
 
 from __future__ import annotations
@@ -219,8 +221,13 @@ def evaluate_kelly(
         # each bet smaller (more conservative), never breaching the ceiling.
         #
         # The raw-path ceiling is the kelly base cap (== the MAXIMUM possible
-        # ``effective_multiplier``, since every dynamic_kelly_mult factor is ≤ 1.0).
-        # When ``kelly_multiplier`` is supplied it is that base; else the
+        # ``effective_multiplier`` FOR THIS CALL, since every factor IN THIS CALL
+        # — ci, lead, heat — is ≤ 1.0). city/strategy multipliers are intentionally
+        # NOT passed to the dynamic_kelly_mult call above (no city=/strategy_key=),
+        # so the [0.0, 2.0] fail-open city_kelly_multiplier (kelly.py:341-369)
+        # cannot apply here. Do NOT add city=/strategy_key= to that call without
+        # re-deriving the raw cap — a city mult can reach 2.0 and would breach
+        # INV-K1b. When ``kelly_multiplier`` is supplied it is that base; else the
         # ``evaluate_kelly`` default of 0.25.
         _f_cap_corr = float(_sdc["max_correlated_pct"])
         _kelly_base_cap = 0.25 if kelly_multiplier is None else float(kelly_multiplier)
