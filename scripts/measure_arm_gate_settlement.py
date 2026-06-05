@@ -770,7 +770,19 @@ def _print_per_city_table(rows: list[dict], title: str) -> None:
 # this is the single line that flips.
 # ---------------------------------------------------------------------------
 
-ARM_ARTIFACT_SCHEMA = "edli_arm_gate_artifact/v1"
+# SINGLE SOURCE OF TRUTH (2026-06-04 antibody): the artifact ``schema`` string is
+# OWNED BY THE CONSUMER (the boot gate is the authority that gates arming). This
+# producer must emit EXACTLY what ``verify_edli_arm_gate_artifact`` enforces, else
+# the boot gate rejects every artifact with ARM_GATE_ARTIFACT_SCHEMA_INVALID — a
+# permanent un-armable state no amount of re-emission could fix. The prior literal
+# ``"edli_arm_gate_artifact/v1"`` here diverged from the consumer's
+# ``"edli_arm_gate_v1"`` (producer/consumer schema-string mismatch — caught by the
+# CROSS-MODULE relationship test tests/test_arm_gate_emit_scheduler_job.py, which
+# the older same-island test missed by asserting producer-vs-producer). Importing
+# the consumer's constant makes the divergence category unconstructable.
+from src.events.live_profit_audit import (  # noqa: E402 — after sys.path injection above
+    ARM_GATE_ARTIFACT_SCHEMA as ARM_ARTIFACT_SCHEMA,
+)
 
 # The 9 fields PR-2's D2 boot gate requires. Kept here as the explicit contract
 # the producer fills — a missing key is a producer bug caught by the H3 test.
