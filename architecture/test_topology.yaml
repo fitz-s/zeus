@@ -102,7 +102,6 @@ test_trust_policy:
     tests/events/test_market_event_coalescer.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_day0_extreme_updated_trigger.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/strategy/live_inference/test_day0_absorbing_boundary.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}

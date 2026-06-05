@@ -1,5 +1,5 @@
 # Created: 2026-06-05
-# Last reused or audited: 2026-06-05
+# Last reused/audited: 2026-06-05
 # Authority basis: day0 phased plan P2 (architect 2026-06-05) — collapse the two
 #   absorbing-mask implementations to ONE. The complete-but-dark
 #   evaluate_day0_absorbing_boundary (src/strategy/live_inference/absorbing_boundary.py)

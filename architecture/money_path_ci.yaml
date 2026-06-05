@@ -233,7 +233,6 @@ segments:
       - tests/events/test_event_store_idempotency.py
       - tests/state/test_edli_table_ownership.py
       - tests/events/test_day0_extreme_updated_trigger.py
-      - tests/strategy/live_inference/test_day0_absorbing_boundary.py
       - tests/strategy/live_inference/test_live_bin_inference.py
       - tests/strategy/live_inference/test_executable_cost.py
       - tests/strategy/live_inference/test_trade_score.py

@@ -1,5 +1,5 @@
 # Created: 2026-06-05
-# Last reused or audited: 2026-06-05
+# Last reused/audited: 2026-06-05
 # Authority basis: day0 deep investigation 2026-06-05 (architect) — P0 of the phased day0 plan.
 #   The LIVE day0 absorbing mask `_edli_day0_mask_for_analysis` (src/engine/evaluator.py:2531) was
 #   directionally correct but pinned by ZERO relationship tests, and carries dead `1.0 if … else 1.0`

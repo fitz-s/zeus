@@ -1,5 +1,5 @@
 # Created: 2026-06-05
-# Last reused or audited: 2026-06-05
+# Last reused/audited: 2026-06-05
 # Authority basis: day0 phased plan P3 (architect 2026-06-05) — runtime probability-vector
 #   correctness gate. After the day0 absorbing mask is applied + renormalized at the live
 #   seam (_apply_edli_live_family_before_selection, evaluator.py DAY0_EXTREME_UPDATED branch),

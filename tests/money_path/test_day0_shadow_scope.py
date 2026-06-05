@@ -1,5 +1,5 @@
 # Created: 2026-06-05
-# Last reused or audited: 2026-06-05
+# Last reused/audited: 2026-06-05
 # Authority basis: day0 phased plan P1 (architect 2026-06-05). Adds the `day0_shadow`
 #   edli_live_scope: a scope that ADMITS day0 (does not raise DAY0_OUT_OF_SCOPE_FOR_PR332
 #   when day0 flags are on) while keeping forecast_only byte-identical, AND structurally
