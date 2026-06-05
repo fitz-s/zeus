@@ -5,6 +5,9 @@
 #   receipts carried only scalar q_live with NO calibrator tag, so settlement
 #   could not attribute EMOS-cells vs maze-cells (the per-city PROMOTE evidence).
 #   _edli_q_source was computed (era.py:3772) but never persisted (audit A5).
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Relationship antibody — q_source (EMOS vs maze calibrator) rides the receipt_json blob; q_source=None is hash-stable vs the pre-#120 baseline (#120).
+# Reuse: Re-run when receipt serialization or _edli_q_source persistence changes.
 """Relationship tests for #120 — q_source rides the receipt_json blob.
 
 Two invariants:

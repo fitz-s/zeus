@@ -7,6 +7,9 @@
 #   RELATIONSHIP TEST: the metric flowing into the gate MUST select the Open-Meteo
 #   daily field — LOW -> temperature_2m_min, HIGH -> temperature_2m_max — and the
 #   extracted point MUST be the matching value, never the opposite extremum.
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Relationship antibody — the mainstream gate must fetch the Open-Meteo field matching the market metric (LOW->temperature_2m_min, HIGH->temperature_2m_max), never the opposite extremum.
+# Reuse: Re-run when fetch_mainstream_point / mainstream_forecast_source metric selection changes.
 import src.data.mainstream_forecast_source as mfs
 
 # Capture the REAL implementation at import time — BEFORE the conftest autouse

@@ -6,6 +6,9 @@
 #   SETTLEMENT_ISOTONIC) so an un-provenanced LCB is UNCONSTRUCTABLE at the seam.
 #   Antibody discipline: make the error CATEGORY ("a q_lcb with no idea where it
 #   came from reached trade_score") a TypeError at assignment, not a patch.
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Relationship antibody — a q_lcb crossing lcb_by_direction must carry QlcbProvenance; an un-provenanced bare-float LCB is a TypeError at the seam (Phase-2 K3).
+# Reuse: Re-run when the QlcbProvenance carrier type or the q_lcb producer/consumer boundary changes.
 """Relationship tests for the QlcbProvenance type + QlcbByDirection typed dict.
 
 RELATIONSHIP under test: the q_lcb PRODUCER (event_reactor_adapter, building

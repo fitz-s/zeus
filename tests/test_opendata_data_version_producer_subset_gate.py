@@ -5,6 +5,9 @@
 #   inline _v1 normalization (commit referenced "#38 / #362"). Antibody for
 #   the 2026-05-30 DataVersionQuarantinedError on
 #   data_version='ecmwf_opendata_mx2t3_local_calendar_day_max_v1'.
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Relationship antibody — the OpenData producer's data_version must be a subset of the CANONICAL_ENSEMBLE_DATA_VERSIONS gate (no _v1 quarantine drift).
+# Reuse: Re-run when CANONICAL_ENSEMBLE_DATA_VERSIONS or the OpenData ingest normalization changes.
 """Relationship test: OpenData producer ⊆ ensemble_snapshots gate.
 
 CROSS-MODULE INVARIANT under test

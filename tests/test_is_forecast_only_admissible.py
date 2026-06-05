@@ -2,6 +2,9 @@
 # Last reused/audited: 2026-06-04
 # Authority basis: docs/operations consolidated timeliness/tradeability fix (architect design);
 #                  src/strategy/market_phase.py is_forecast_only_admissible canonical predicate.
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Relationship antibody — the cheap source-form is_forecast_only_admissible predicate is a conservative lower bound of the full reactor phase verdict (cheap-reject => full-reject).
+# Reuse: Re-run when market_phase.is_forecast_only_admissible or the full reactor phase verdict changes.
 """RED→GREEN T4: canonical timeliness predicate is_forecast_only_admissible.
 
 The cheap source-form (no market boundary) must be a CONSERVATIVE LOWER BOUND

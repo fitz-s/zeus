@@ -9,6 +9,9 @@
 #   q_lcb ~6% at n=7. FIX: base the D4 fold on the IN-SAMPLE residual_sd_c (no 1/n
 #   term), not total_residual_sd_c, so the composed σ reconstructs exactly the intended
 #   predictive σ = total_residual_sd_c (= sqrt(residual_sd_c² + shift_se²)).
+# Lifecycle: created=2026-06-03; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Relationship antibody — the D4 representativeness-sigma fold must NOT double-count the 1/n mean-drift term already in total_residual_sd_c (Phase-2 K2 D4).
+# Reuse: Re-run when _edli_representativeness_sigma_native or ens_error_model residual-sd composition changes.
 """K2 D4 double-count relationship test.
 
 RELATIONSHIP under test: the bias-fit PRODUCER stamps two σ's on model_bias_ens —

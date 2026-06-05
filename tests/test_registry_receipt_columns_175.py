@@ -4,6 +4,9 @@
 #                  R4/#175 — the receipt writer's _ensure_column-migrated columns
 #                  must be in required_columns so a stale live DB FATALs at boot
 #                  instead of silently failing 37 receipt writes as no-trades.
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Boot-guard antibody — _ensure_column-migrated receipt columns must be in required_columns so a stale live DB FATALs at boot, not silently fail receipt writes as no-trades (R4/#175).
+# Reuse: Re-run when the edli_no_submit_receipts schema or assert_db_matches_registry column set changes.
 """Boot-guard antibody for the edli_no_submit_receipts column-drift defect.
 
 Live evidence (state/zeus-world.db, 2026-06-03T14:21-14:25): 37x
