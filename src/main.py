@@ -3489,15 +3489,37 @@ def _startup_wallet_check(clob=None):
     `assert_buy_preflight` / `assert_sell_preflight` with
     `collateral_ledger_unconfigured` or `sqlite3.ProgrammingError`.
     """
-    if clob is None:
-        from src.data.polymarket_client import PolymarketClient
-        clob = PolymarketClient()
-    try:
-        balance = float(clob.get_balance())
-        logger.info("Startup wallet check: $%.2f pUSD available", balance)
-    except Exception as exc:
-        logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
-        sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+    if clob is not None:
+        # TEST-INJECTION PATH: an explicit clob was supplied. Use it directly
+        # and keep the same fail-closed semantics. Production never reaches here.
+        try:
+            balance = float(clob.get_balance())
+            logger.info("Startup wallet check: $%.2f pUSD available", balance)
+        except Exception as exc:
+            logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
+            sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+    else:
+        # PRODUCTION PATH: route the fail-closed wallet-reachability gate through
+        # bankroll_provider.current() instead of constructing a SECOND
+        # PolymarketClient. Site A (the "Capital (on-chain)" log line in run())
+        # warmed the 30s cache <30s earlier, so this is a fresh CACHE HIT with NO
+        # additional on-chain RPC. If Site A failed (cache empty), current() does a
+        # real fetch here (cache miss) and still fail-closes on None — the gate
+        # holds either way; the happy path saves one 5-30s on-chain wallet RPC.
+        from src.runtime.bankroll_provider import current as _bankroll_current
+
+        rec = _bankroll_current()
+        if rec is None:
+            logger.critical(
+                "FAIL-CLOSED: wallet query failed at daemon start "
+                "(bankroll_provider returned None)"
+            )
+            sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+        balance = rec.value_usd
+        logger.info(
+            "Startup wallet check: $%.2f pUSD available (source=%s cached=%s)",
+            balance, rec.source, rec.cached,
+        )
 
     # Install the process-wide collateral ledger singleton with a ledger-owned
     # persistent conn so downstream executor / riskguard preflight callers do
