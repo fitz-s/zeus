@@ -50,6 +50,19 @@ backlog. The sweep must remain semantics-preserving while making keeper lookup
 per-key and index-backed so receipt emission is not starved before
 `process_pending`.
 
+After making the channel keeper lookup per-key/index-backed and restarting on
+`ab6ab47750f6d6be7c13fe067d6b385671a0cb69`, the next SIGUSR1 stack showed the
+reactor reached the earlier expired-candidate sweep and pinned in:
+
+`main._edli_event_reactor_cycle ->
+EventStore.archive_expired_candidates`.
+
+That query filters and orders `FORECAST_SNAPSHOT_READY` rows by
+`json_extract(payload_json, '$.target_date')` without an expression index, so a
+large stale FSR backlog can still occupy the reactor before receipt generation.
+The expired sweep needs the same bounded/index-backed treatment as the channel
+sweep.
+
 ## Change
 
 - Add `platt_models.training_cutoff` to canonical schema and schema fingerprint.
@@ -69,6 +82,11 @@ per-key and index-backed so receipt emission is not starved before
   GROUP BY inside the reactor worker.
 - Add channel-sweep regression coverage for tied max timestamps and the actual
   emitted keeper probes' query plans.
+- Add `idx_opportunity_events_fsr_target_date` for the expired FSR sweep's
+  `(event_type, target_date, available_at)` predicate/order, force the query to
+  use it, and chunk the terminal-status updates.
+- Add expired-sweep regression coverage proving the actual emitted candidate
+  query uses the target-date expression index.
 
 ## Verification
 

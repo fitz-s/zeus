@@ -235,7 +235,7 @@ class EventStore:
             SELECT e.event_id,
                    json_extract(e.payload_json, '$.city')        AS city,
                    json_extract(e.payload_json, '$.target_date') AS target_date
-            FROM opportunity_events e
+            FROM opportunity_events e INDEXED BY idx_opportunity_events_fsr_target_date
             JOIN opportunity_event_processing p
               ON p.event_id = e.event_id
              AND p.consumer_name = ?
@@ -257,23 +257,22 @@ class EventStore:
             if self._strictly_past_in_tz(city, target_date, decision_time_utc):
                 expired_ids.append(event_id)
 
-        for event_id in expired_ids:
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(expired_ids), _CHUNK):
+            chunk = expired_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
             self.conn.execute(
-                """
+                f"""
                 UPDATE opportunity_event_processing
                    SET processing_status = 'expired',
                        processed_at = ?,
                        updated_at = ?
                  WHERE consumer_name = ?
-                   AND event_id = ?
+                   AND event_id IN ({placeholders})
                    AND processing_status IN ('pending', 'processing')
                 """,
-                (
-                    decision_time_utc.isoformat(),
-                    _utc_now(),
-                    self.consumer_name,
-                    event_id,
-                ),
+                (decision_time_utc.isoformat(), now, self.consumer_name, *chunk),
             )
         return len(expired_ids)
 
