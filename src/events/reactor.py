@@ -16,6 +16,10 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 #   so a candidate rejected downstream of Kelly (DECISION_CERTIFICATE /
 #   EXECUTOR_EXPRESSIBILITY) never inflates corr/raw committed for later
 #   same-cycle candidates (INV-K7 preserved for emitted bets).
+#   MAJOR #5 (2026-06-05): the network-submit ``except`` now also rolls back the
+#   provisional reservation (_finalize_reservation emitted=False) so a _submit
+#   that raises AFTER reserve() — mid-submit DB/HTTP fault — cannot orphan a live
+#   reservation that over-counts committed for the next same-cycle event.
 
 from __future__ import annotations
 
@@ -329,6 +333,22 @@ class OpportunityEventReactor:
         except Exception as exc:
             mutex.acquire()
             try:
+                # MAJOR #5 (P1 zero-submit, network-submit window, 2026-06-05): the
+                # adapter reserves this event's stake PROVISIONALLY *inside*
+                # _submit (event_reactor_adapter.py ~1097), before the unguarded
+                # receipt-build / serialize / proof-bundle steps. If any of those
+                # raises (sqlite3.Error / KeyError / AttributeError on a live
+                # HTTP/DB fault), control lands HERE — and without this rollback the
+                # reservation is orphaned-but-LIVE in the ledger, over-counting
+                # committed for the NEXT same-cycle event → under-sizes / re-zeros
+                # later candidates = the exact zero-submit symptom this fix kills.
+                # Symmetric to the post-submit window (~383). Idempotent: a _submit
+                # that raised BEFORE reserve leaves nothing to roll back —
+                # PortfolioReservationLedger.rollback is a no-op for an unknown
+                # event_id — and the whole call is suppressed so a rollback failure
+                # never masks the original submit exception.
+                with contextlib.suppress(Exception):
+                    self._finalize_reservation(event, emitted=False)
                 self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
             finally:
                 mutex.release()
