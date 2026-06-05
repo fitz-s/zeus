@@ -75,6 +75,7 @@ test_trust_policy:
     tests/test_harvester_resolver_settles_and_enqueues_redeem.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: VERIFIED settlement -> position settled + REDEEM_INTENT_CREATED"}
     tests/engine/test_bias_grid_mutual_exclusion.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: bias-grid mutual-exclusion contract"}
     tests/engine/test_emos_seam_serve_loud.py: {created: "2026-06-04", last_used: "2026-06-04", note: "RT (live seam): served=emos engages through _market_analysis_from_event_snapshot (q_source=emos); EMOS build failure is LOUD (distinct EMOS_SERVE_FAILED log w/ cell identity) not silently swallowed (#149 fail-open-inert antibody); served=raw quiet legacy fallback"}
+    tests/engine/test_emos_seam_sigma_floor.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT (seam boundary): honest-raw σ-floor (max(raw_σ, emos_σ)) propagates from build_honest_raw_q through _market_analysis_from_event_snapshot into the N(mu,sigma) lcb bootstrap sampler; floored σ asserted in sampler closure; antibody: floor removal turns test RED (#390/#388/#389)"}
     tests/engine/test_bias_decay_kelly_haircut.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/engine/test_chain_sync_exit_wired_in_edli_mode.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_edli_stage_status_summary_freshness.py: {created: "2026-05-31", last_used: "2026-05-31"}
