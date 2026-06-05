@@ -3475,7 +3475,90 @@ def _startup_db_schema_ready_check() -> None:
     )
 
 
-def _startup_wallet_check(clob=None):
+class _BootWalletWarmHolder:
+    """Thread-safe-by-join handoff slot for the boot wallet warm thread.
+
+    The warm thread writes ``record`` exactly once (success → BankrollOfRecord,
+    swallowed failure → stays None). main() reads it ONLY after joining the
+    thread, so no lock is required — the join is the happens-before barrier.
+    """
+
+    __slots__ = ("record",)
+
+    def __init__(self):
+        self.record = None
+
+
+# Default join bound for the boot wallet warm thread. The on-chain wallet RPC
+# is 5-30s; this caps the worst-case wait so a wedged RPC can't hang boot past
+# the gate's own fail-closed budget. A timeout that leaves the thread alive is
+# treated as a cold cache (record stays None) → gate fail-closes — never a hang.
+_BOOT_WALLET_WARM_JOIN_TIMEOUT_SECONDS = 35.0
+
+
+def _start_boot_wallet_warm():
+    """Spawn a daemon thread that warms bankroll_provider.current() at boot.
+
+    Efficiency #3: the wallet RPC is network-bound while the schema-ready gate /
+    registry assert / f109 consolidator / freshness / boot-guards are DB-bound.
+    Starting the wallet warm on a background thread right after the venue
+    heartbeat lets those DB steps run CONCURRENTLY with the RPC; main() joins
+    this thread immediately before the (deterministic) wallet gate.
+
+    The warm fn swallows+logs ANY exception so a warm-thread failure NEVER
+    crashes boot — it just leaves a cold cache (holder.record stays None) and
+    the wallet gate does its own fail-closed handling. Returns (thread, holder);
+    read holder.record only AFTER _join_boot_wallet_warm(thread).
+    """
+    holder = _BootWalletWarmHolder()
+
+    def _warm():
+        try:
+            from src.runtime.bankroll_provider import current as _bankroll_current
+
+            holder.record = _bankroll_current()
+        except Exception as exc:  # noqa: BLE001 — must never crash boot
+            logger.warning(
+                "boot wallet warm thread failed (cold cache; wallet gate will "
+                "do its own fail-closed fetch): %s",
+                exc,
+            )
+
+    thread = threading.Thread(
+        target=_warm, name="boot-wallet-warm", daemon=True
+    )
+    thread.start()
+    return thread, holder
+
+
+def _join_boot_wallet_warm(
+    thread, timeout: float = _BOOT_WALLET_WARM_JOIN_TIMEOUT_SECONDS
+) -> None:
+    """Join the boot wallet warm thread so the wallet gate stays deterministic.
+
+    Bounded by ``timeout``: if the warm RPC wedges past it, the thread is left
+    running (daemon → dies with the process) and the holder record stays None,
+    so the wallet gate fail-closes rather than the boot hanging forever. A
+    None/missing thread is a no-op (warm never started → gate self-fetches).
+    """
+    if thread is None:
+        return
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        logger.warning(
+            "boot wallet warm thread did not finish within %.0fs; proceeding "
+            "with a cold cache — the wallet gate will fail-closed if the RPC "
+            "stays unreachable.",
+            timeout,
+        )
+
+
+# Sentinel: distinguishes "caller handed a warm record (possibly None)" from
+# "no warm record supplied — gate must self-fetch via current()".
+_WALLET_RECORD_UNSET = object()
+
+
+def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
     """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
 
     Accepts an optional clob for testing. In production, creates a live
@@ -3501,14 +3584,25 @@ def _startup_wallet_check(clob=None):
     else:
         # PRODUCTION PATH: route the fail-closed wallet-reachability gate through
         # bankroll_provider.current() instead of constructing a SECOND
-        # PolymarketClient. Site A (the "Capital (on-chain)" log line in run())
-        # warmed the 30s cache <30s earlier, so this is a fresh CACHE HIT with NO
-        # additional on-chain RPC. If Site A failed (cache empty), current() does a
-        # real fetch here (cache miss) and still fail-closes on None — the gate
-        # holds either way; the happy path saves one 5-30s on-chain wallet RPC.
-        from src.runtime.bankroll_provider import current as _bankroll_current
+        # PolymarketClient.
+        #
+        # Efficiency #3 (warm-overlap): when main() hands a ``bankroll_record``
+        # (the result the boot warm thread already fetched via current(), then
+        # joined), the gate CONSUMES it — warm + gate together issue exactly ONE
+        # current() acquisition. A handed None means the warm fetch failed or
+        # was never warmed → the gate fail-closes below (correct fail-safe).
+        #
+        # When no record is supplied (_WALLET_RECORD_UNSET — direct callers /
+        # tests / a boot path without the warm thread) the gate self-fetches via
+        # current(). Efficiency #1 still holds: Site A warmed the 30s cache, so
+        # current() here is a fresh CACHE HIT with no additional on-chain RPC; on
+        # a cold cache it does a real fetch and still fail-closes on None.
+        if bankroll_record is _WALLET_RECORD_UNSET:
+            from src.runtime.bankroll_provider import current as _bankroll_current
 
-        rec = _bankroll_current()
+            rec = _bankroll_current()
+        else:
+            rec = bankroll_record
         if rec is None:
             logger.critical(
                 "FAIL-CLOSED: wallet query failed at daemon start "
@@ -6137,17 +6231,16 @@ def main():
     # leave existing orders without heartbeats while slow checks complete.
     _start_venue_heartbeat_loop_if_needed()
 
-    # Capital truth: query on-chain wallet via bankroll_provider. Startup must
-    # never log retired config-literal capital as if it were wallet truth.
-    try:
-        from src.runtime.bankroll_provider import current as _bankroll_current
-        _record = _bankroll_current()
-        _capital_str = f"${_record.value_usd:.2f}" if _record else "<wallet_unreachable>"
-    except Exception as _exc:
-        _capital_str = f"<wallet_query_error: {_exc}>"
-    logger.info("Capital (on-chain): %s | Kelly: %.0f%%",
-                _capital_str,
-                settings["sizing"]["kelly_multiplier"] * 100)
+    # Efficiency #3 — boot wallet warm-overlap. The single on-chain wallet RPC
+    # (#1 collapsed two into one) is network-bound (5-30s, ~38/hr blips); the
+    # schema-ready gate / registry assert / f109 consolidator / freshness /
+    # boot-guards below are DB-bound. Warm the wallet on a daemon thread NOW so
+    # those DB steps run CONCURRENTLY with the RPC; we JOIN immediately before
+    # the wallet gate so the gate stays deterministic (warm cache, no race).
+    # MUST stay AFTER the venue heartbeat (heartbeat-before-boot-http invariant)
+    # and BEFORE the DB-bound boot work. A warm-thread failure is swallowed →
+    # cold cache → the wallet gate fail-closes (fail-safe; boot never hangs).
+    _wallet_warm_thread, _wallet_warm_holder = _start_boot_wallet_warm()
 
     # §4.2 DB schema-ready gate — fail-closed (Phase 3 enforcement).
     # Must run before the first world DB open/read so missing or uninitialized
@@ -6248,9 +6341,25 @@ def main():
     # _assert_live_safe_strategies_or_exit() (which hydrates _control_state).
     _boot_deployment_freshness_auto_resume()
 
+    # Efficiency #3 — JOIN the boot wallet warm thread NOW (the DB-bound boot
+    # work above ran concurrently with the wallet RPC). After the join the warm
+    # record is deterministic (present, or None if the warm failed/timed out),
+    # so the wallet gate sees a settled value with no race. One capital log,
+    # emitted once the value is known, right before the gate.
+    _join_boot_wallet_warm(_wallet_warm_thread)
+    _warm_rec = _wallet_warm_holder.record
+    _capital_str = (
+        f"${_warm_rec.value_usd:.2f}" if _warm_rec is not None else "<wallet_unreachable>"
+    )
+    logger.info("Capital (on-chain): %s | Kelly: %.0f%%",
+                _capital_str,
+                settings["sizing"]["kelly_multiplier"] * 100)
+
     # P7: Fail-closed wallet gate — must run before first cycle.
     # GATE SPLIT (§3.7): wallet failure is ALWAYS fatal, no operator override.
-    _startup_wallet_check()
+    # Consume the warm record (efficiency #3): warm + gate = exactly ONE
+    # current() acquisition. A None warm record → the gate fail-closes.
+    _startup_wallet_check(bankroll_record=_warm_rec)
     _start_user_channel_ingestor_if_enabled()
 
     # MF-1: durable self-healing capital spine — AT BOOT, before any new trading,
