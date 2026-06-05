@@ -260,6 +260,44 @@ def assert_data_version_allowed(data_version: str | None, *, context: str = "") 
         )
 
 
+def normalize_opendata_data_version(data_version: str | None) -> str:
+    """Strip the legacy ``_v1`` suffix from ``ecmwf_opendata_*`` data_versions.
+
+    PRODUCER→GATE reconciliation point (2026-06-04). The version-eradication
+    collapse (commit 6490f9c462, "#362") dropped the trailing ``_v1`` from every
+    canonical OpenData ``data_version`` and from ``CANONICAL_ENSEMBLE_DATA_VERSIONS``.
+    The OpenData extractor lives in the out-of-repo staging tree
+    (``../51 source data/scripts/extract_open_ens_localday.py``) and was NOT
+    reachable by that in-repo collapse, so it still hardcodes the ``_v1`` suffix
+    in the payload JSON it emits. Without normalization, every live OpenData
+    ingest cycle tripped ``assert_data_version_allowed`` and quarantined — the
+    2026-05-30 ``DataVersionQuarantinedError`` that produced zero fresh
+    ensemble_snapshots.
+
+    This is the SINGLE shared normalizer that every OpenData ingest write-path
+    must call before the gate, so the strip logic cannot drift between call
+    sites. ``test_opendata_data_version_producer_subset_gate.py`` asserts the
+    cross-module invariant ``normalize(producer_emit) ∈ CANONICAL_ENSEMBLE_DATA_VERSIONS``.
+
+    Scope is deliberately narrow:
+    - Only ``ecmwf_opendata_*`` versions ending in ``_v1`` are stripped. TIGGE
+      ``_v1`` versions (e.g. ``tigge_mx2t6_local_calendar_day_max_v1``) are a
+      DIFFERENT physical lineage where ``_v1`` is canonical — they are left
+      intact so TIGGE provenance is not corrupted.
+    - Any other string (including the already-canonical no-suffix OpenData
+      forms) passes through unchanged — the function is idempotent.
+
+    This is normalization, NOT gate-broadening: the gate's allowlist is never
+    widened to admit ``_v1``; the producer string is mapped onto an
+    already-canonical member.
+    """
+    if not data_version:
+        return data_version or ""
+    if data_version.startswith("ecmwf_opendata_") and data_version.endswith("_v1"):
+        return data_version[:-3]
+    return data_version
+
+
 _VALID_MEMBERS_UNITS: frozenset[str] = frozenset({"degC", "degF"})
 
 

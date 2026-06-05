@@ -33,6 +33,7 @@ from __future__ import annotations
 import numpy as np
 
 from src.strategy.market_analysis import MarketAnalysis
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.types.market import Bin
 
 
@@ -49,7 +50,7 @@ def _make_analysis(*, representativeness_sigma: float = 0.0, rng_seed: int = 42,
     if member_maxes is None:
         member_maxes = np.array([25.5, 25.8, 26.0, 26.3, 26.6])
     # Both YES and NO native markets executable so the NO leg is independently grounded.
-    return MarketAnalysis(
+    return MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"),
         p_raw=np.array([0.55, 0.45]),
         p_cal=np.array([0.55, 0.45]),
         p_market=np.array([0.30, 0.30]),
@@ -84,6 +85,7 @@ class TestZeroSigmaIsBitIdentical:
             member_maxes=np.array([25.5, 25.8, 26.0, 26.3, 26.6]),
             executable_mask=np.array([True, True]),
             rng_seed=42,
+            forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"),
         )
         a_legacy = MarketAnalysis(**common)
         a_zero = MarketAnalysis(**common, representativeness_sigma=0.0)
@@ -165,7 +167,7 @@ class TestHighSigmaCityWiderThanLowSigmaCity:
         members = np.array([23.0, 24.0, 25.0, 26.0, 27.0])
 
         def _city(sig: float) -> MarketAnalysis:
-            return MarketAnalysis(
+            return MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"),
                 p_raw=np.array([0.75, 0.25]),
                 p_cal=np.array([0.75, 0.25]),
                 p_market=np.array([0.15, 0.15]),

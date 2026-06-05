@@ -1,3 +1,5 @@
+# Last reused or audited: 2026-06-04
+# Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -97,6 +99,13 @@ class _CandidateProof:
     # NOT gate production selection (see _selected_candidate_proof). `.passed` is
     # an arm-decision reference signal, never a selection filter.
     mainstream_agreement: dict | None = None
+    # #120 (2026-06-04): the calibrator that produced q_posterior for this
+    # candidate's family ("emos" | "bias_platt" | "platt"). Read from
+    # payload["_edli_q_source"] (set by the ONE-CALIBRATOR SEAM, era.py:3735-3818)
+    # at proof construction — instance-safe (same payload threaded by the #149
+    # fix). Carried to the receipt so 06-05+ settlement can attribute EMOS-cells
+    # vs maze-cells per city (the PROMOTE evidence).
+    q_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -214,8 +223,12 @@ def executable_snapshot_gate_from_trade_conn(
         )
         if not rows:
             return False
-        if sorted(set(condition_ids)) != sorted(_snapshot_token_maps_by_condition(rows)):
-            return False
+        # Entry gate: at least one sibling snapshot present AND the event's own selected
+        # bin has a snapshot. The full-family q/FDR proof is enforced inside
+        # build_event_bound_no_submit_receipt; here we only need to know the market
+        # family is partially live and the selected bin is executable. Illiquid tail
+        # bins absent from executable_market_snapshots are non-tradeable but still part
+        # of the full MECE topology — exact-set-equality is the wrong predicate here.
         return _selected_snapshot_row_for_event(rows, payload) is not None
 
     return _gate
@@ -355,25 +368,14 @@ def event_bound_live_adapter_from_trade_conn(
                 reason="EXECUTOR_BOUNDARY_MISSING",
                 proof_accepted=False,
             )
-        # PR-2 (B) F1 ENFORCE: when the operator turns
-        # ``mainstream_agreement_enforce_on_submit`` ON (default OFF), an armed submit
-        # requires the SELECTED candidate's mainstream-agreement verdict to be True
-        # before reaching the executor. FAIL-CLOSED: a missing/stale verdict
-        # (mainstream_agreement_pass is None) or an explicit failure (False) -> reject
-        # MAINSTREAM_AGREEMENT_REQUIRED, executor never called. This is SEPARATE from the
-        # reference-only selector (mainstream_agreement_reference_enabled, which never
-        # excludes a candidate); enforcement is a deliberate submit-time arm control.
-        if real_order_submit_enabled and bool(
-            settings["edli_v1"].get("mainstream_agreement_enforce_on_submit", False)
-        ):
-            if no_submit_receipt.mainstream_agreement_pass is not True:
-                return EventSubmissionReceipt(
-                    False,
-                    event.event_id,
-                    event.causal_snapshot_id,
-                    reason="MAINSTREAM_AGREEMENT_REQUIRED",
-                    proof_accepted=False,
-                )
+        # OPERATOR LAW (2026-06-04, Rule-4 antibody): mainstream is OBSERVATIONAL /
+        # DISPLAY-ONLY — it is NEVER a decision input. The former submit-time mainstream
+        # enforce branch (which rejected an armed submit on a missing/failed mainstream
+        # verdict) is DELETED so mainstream has NO code path to gate / reject / skip /
+        # alter direction, q, q_lcb, trade_score, selection, or submit. The verdict is
+        # computed + annotated on the receipt for the operator's ARM review only; it can
+        # never change a decision. This makes "mainstream changes a decision"
+        # UNCONSTRUCTABLE (not merely flag-OFF). The dead config key is left inert.
         # Canary knob (§7): force the taker branch (bypassing the governor's
         # maker/taker CHOICE, never its NO_TRADE/risk gates) while the canary is
         # active and below its min fill count. main.py owns the count gate via
@@ -647,19 +649,25 @@ def build_event_bound_no_submit_receipt(
     if not family_rows:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING")
     snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
-    missing_snapshot_conditions = sorted(set(family_condition_ids) - set(snapshot_token_maps))
-    if missing_snapshot_conditions:
-        return EventSubmissionReceipt(
-            False,
-            event.event_id,
-            event.causal_snapshot_id,
-            reason="FDR_FULL_FAMILY_PROOF_MISSING:missing executable snapshots for sibling conditions "
-            + ",".join(missing_snapshot_conditions),
-            family_complete=False,
-        )
+    # Full-family topology: the family domain is ALWAYS the complete market_events
+    # partition (MECE, all bins). Bins WITH a snapshot are tradeable; bins WITHOUT a
+    # snapshot are non-tradeable (executable_mask=False) but still carry their bin so
+    # q/FDR are computed over the full MECE family. Removing any bin would renormalize
+    # q over the subset (~1.2× inflation at 3/11 missing) and shrink fdr_hypothesis_count
+    # from 22 to 16 — both unsafe. The selected-bin gate below handles the only fatal
+    # case: the event's own target bin has no snapshot.
+    #
+    # For non-tradeable bins (no snapshot in executable_market_snapshots) we use the
+    # market_events.token_id (YES token only) as identity; no_token_id is None. The
+    # executable_mask in _generate_candidate_proofs already falls back to
+    # executable_mask=False when native_costs has no price for a condition (line ~3877).
     try:
         topology = tuple(
-            _topology_candidate_from_market_event(row, snapshot_token_maps[str(row.get("condition_id") or "")], payload)
+            _topology_candidate_from_market_event(
+                row,
+                snapshot_token_maps.get(str(row.get("condition_id") or "")),
+                payload,
+            )
             for row in family_topology_rows
         )
     except ValueError as exc:
@@ -998,11 +1006,24 @@ def build_event_bound_no_submit_receipt(
             family_complete=True,
         )
     if not kelly.passed:
+        _kr_reason = (
+            f"KELLY_REJECTED"
+            f":{kelly.binding_constraint or 'unknown'}"
+            f":size={kelly.size_usd:.4f}"
+            f":sb={kelly.sizing_bankroll}"
+            f":effcorr={kelly.eff_corr_bankroll}"
+            f":effraw={kelly.eff_raw_bankroll}"
+            f":corrcom={kelly.corr_committed_usd}"
+            f":rawcom={kelly.raw_committed_usd}"
+            f":mult={kelly.effective_multiplier}"
+            f":ci={kelly.ci_width}"
+            f":lead={kelly.lead_days}"
+        )
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason="KELLY_REJECTED",
+            reason=_kr_reason,
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
@@ -1084,6 +1105,7 @@ def build_event_bound_no_submit_receipt(
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
             "q_live": proof.q_posterior,
             "q_lcb_5pct": proof.q_lcb_5pct,
+            "q_source": proof.q_source,  # #120 calibrator provenance
             "c_fee_adjusted": execution_price.value,
             "c_cost_95pct": proof.c_cost_95pct,
             "p_fill_lcb": proof.p_fill_lcb,
@@ -1208,6 +1230,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_bin_label=raw_receipt.get("mainstream_bin_label"),
         mainstream_source=raw_receipt.get("mainstream_source"),
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
+        q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
     )
 
 
@@ -3088,6 +3111,78 @@ def _calibration_authority_payload_and_clock(
     return payload_out, EvidenceClock(source_time, persisted_time, persisted_time)
 
 
+# ── Market-disagreement guard (settlement-grounded, 2026-06-04) ──────────────
+# Default thresholds. Overridable via settings["edli_v1"] WITHOUT touching the
+# operator-owned config file (safe .get defaults): the guard is ACTIVE by default
+# (conservative posture — it only ever DEMOTES a contrarian bet, never creates one).
+#
+# q_lcb SEMANTICS (the seam the 2026-06-05 review caught — DIRECTION LAW / Fitz
+# #4): for direction="buy_no", q_lcb_5pct is the conservative lower bound of
+# p(NO) = "the bin will NOT settle here" (market_analysis_family_scan derives the
+# buy_no hypothesis from p_posterior_no = 1 - p_posterior and bootstraps ci_lo in
+# NO-space). So "OVERWHELMING settlement-licensed evidence the bin won't settle"
+# means q_lcb_5pct is HIGH (→1), not low. The original guard read the escape in
+# YES-space (low q_lcb), which inverted it: it demoted exactly the high-conviction
+# contrarian (high NO-lower-bound) and waved through the weakest one. Corrected
+# below to NO-space.
+#
+#   market_disagree_no_price_max  — a NO token cheaper than this means the market
+#     prices the bin as LIKELY to settle (YES expensive). Buying NO here is betting
+#     AGAINST a confident multi-center market. Default 0.15.
+#   market_disagree_qlcb_min_escape  — the ONLY licence to override the market: a
+#     HIGH, independently-grounded NO-space q_lcb (the settlement-licensed lower
+#     bound on p(NO) says the bin overwhelmingly will NOT settle). Default 0.95.
+_MARKET_DISAGREE_NO_PRICE_MAX = 0.15
+_MARKET_DISAGREE_QLCB_MIN_ESCAPE = 0.95
+
+
+def _market_disagreement_demotes_buy_no(
+    *,
+    direction: str,
+    market_no_price: float | None,
+    q_lcb_5pct: float,
+    no_price_max: float = _MARKET_DISAGREE_NO_PRICE_MAX,
+    qlcb_min_escape: float = _MARKET_DISAGREE_QLCB_MIN_ESCAPE,
+) -> bool:
+    """Settlement-grounded market-disagreement antibody.
+
+    ROOT (settled outcomes, NOT shadow homework): the dominant capital bleed is
+    buy_no on CHEAP bins — the market prices YES>0.8 / NO<0.2 (confident the bin
+    settles there), the system buys NO on a miscalibrated overconfident q tail
+    (assigns ~0 mass to a bin the market+reality say is likely), and the bin
+    settles there. buy_no at NO-price<0.2 went 0/12 (-71%). The market is right;
+    the q tail is overconfident (Fitz #4 / iron-rule-5).
+
+    Structural principle (NOT the thin n=12 number): you cannot out-predict a
+    confident multi-center market without OVERWHELMING settlement-licensed
+    evidence. So a buy_no candidate on a bin the market prices as likely
+    (market_no_price <= no_price_max) is UNCONSTRUCTABLE as a tradeable proof
+    UNLESS its NO-space lower bound is overwhelming — q_lcb_5pct >= qlcb_min_escape
+    (an independent conservative lower bound on p(NO), not the point estimate,
+    saying the bin truly won't settle). q_lcb_5pct here is in NO-probability space
+    for buy_no (see module note above), so the escape is a HIGH q_lcb, not a low
+    one — a wide/overconfident tail whose honest lower bound is NOT near 1 is
+    exactly the miscalibration we distrust against a confident market.
+
+    Returns True iff the candidate must be DEMOTED (cheap-NO AND the NO-space lower
+    bound is NOT overwhelming). The guard is a CONJUNCTION: it never touches
+    buy_yes, never touches a buy_no whose NO price is not cheap, and never touches
+    a buy_no whose q_lcb is overwhelmingly high (legitimate, settlement-licensed
+    high-conviction disagreement survives).
+    """
+    if direction != "buy_no":
+        return False
+    if market_no_price is None:
+        # No executable price → the proof is already non-tradeable upstream
+        # (missing_reason set); leave the demotion decision to that path.
+        return False
+    if market_no_price > no_price_max:
+        return False
+    # Cheap NO. Only an overwhelming, independently-grounded NO-space q_lcb
+    # licences the bet against a confident market.
+    return q_lcb_5pct < qlcb_min_escape
+
+
 def _generate_candidate_proofs(
     *,
     event: OpportunityEvent,
@@ -3120,15 +3215,46 @@ def _generate_candidate_proofs(
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
-        yes_lcb = q_lcb_by_direction.get((condition_id, "buy_yes"))
-        no_lcb = q_lcb_by_direction.get((condition_id, "buy_no"))
-        if yes_q is None or yes_lcb is None or no_lcb is None:
+        yes_lcb_entry = q_lcb_by_direction.get((condition_id, "buy_yes"))
+        no_lcb_entry = q_lcb_by_direction.get((condition_id, "buy_no"))
+        if yes_q is None or yes_lcb_entry is None or no_lcb_entry is None:
             raise ValueError(f"missing q_live for condition {condition_id}")
+        # K3: q_lcb carrier entries are QlcbProvenance (or bare float on the day0
+        # generated path); _qlcb_raw_float reads the RAW (pre-clamp) value so the
+        # selection-ranking key (trade_score, q_lcb_5pct) stays byte-identical to
+        # legacy when deep-OTM bins carry a legitimately negative bootstrap q_lcb.
+        # Clamped vs raw only differs when clamped=True; for in-range bins they are
+        # identical. Using raw here restores legacy loser-selection ordering on
+        # no-submit receipts (the measurement/telemetry substrate). _qlcb_float
+        # (the clamped door) is still used everywhere a value must be in [0,1].
+        from src.calibration.qlcb_provenance import _qlcb_raw_float
+        yes_lcb = _qlcb_raw_float(yes_lcb_entry)
+        no_lcb = _qlcb_raw_float(no_lcb_entry)
         row = rows_by_condition.get(condition_id)
         for token_id, direction, q_value, q_lcb in (
             (str(candidate.yes_token_id or ""), "buy_yes", yes_q, yes_lcb),
             (str(candidate.no_token_id or ""), "buy_no", 1.0 - yes_q, no_lcb),
         ):
+            # R5/#176 boundary antibody (2026-06-04): a recorded lower bound can
+            # never exceed its own recorded point. q_value is the inference-engine
+            # NORMALIZED point (1 - yes_q); q_lcb is the market_analysis bootstrap
+            # lower bound, clamped only against market_analysis's OWN un-normalized
+            # p_posterior (the BUG #129 within-module clamp). When the two modules'
+            # normalizations diverge (sum(P)<1) the raw q_lcb can land ABOVE
+            # q_value (43% of live buy_no on 2026-06-03, worst gap 0.79) — a
+            # definitionally-impossible lower bound. Enforce q_lcb <= q_value at the
+            # single boundary where both legs are present, making the recorded
+            # inversion unconstructable regardless of which estimator's domain
+            # drifts. The decision path's trade_score already min()'d internally;
+            # this also fixes the recorded receipt/telemetry value the spine grades.
+            if q_lcb > q_value:
+                import logging  # module uses lazy per-fn logging imports
+                logging.getLogger("zeus.qlcb_restore").debug(
+                    "qlcb_restore_inversion_clamped condition=%s direction=%s "
+                    "q_lcb=%.6f q_value=%.6f gap=%.6f",
+                    condition_id, direction, q_lcb, q_value, q_lcb - q_value,
+                )
+                q_lcb = q_value
             execution_price: ExecutionPrice | None = None
             c_cost_95pct: float | None = None
             p_fill_lcb = 0.0
@@ -3153,8 +3279,53 @@ def _generate_candidate_proofs(
                 c_cost_95pct=c_cost_95pct,
                 p_fill_lcb=p_fill_lcb,
             )
+            # ── Market-disagreement antibody (settlement-grounded, 2026-06-04) ──
+            # Make the dominant capital-bleed pattern UNCONSTRUCTABLE: a buy_no
+            # candidate on a bin the market prices as LIKELY to settle (cheap NO,
+            # i.e. confident YES) cannot become tradeable unless its q_lcb is
+            # extreme (independent settlement-licensed evidence the bin truly will
+            # NOT settle). The thresholds are .get-overridable from edli_v1 WITHOUT
+            # touching the operator-owned config (active-by-default = conservative).
+            # This demotes (score→0) the contrarian bet that lost 0/12 (-71%); it
+            # never creates a trade (iron-rule-2) and never touches buy_yes or
+            # high-conviction disagreement (the NO-space high-q_lcb escape).
+            market_no_price = execution_price.value if execution_price is not None else None
+            try:
+                _md_cfg = settings["edli_v1"]
+                _md_no_max = float(_md_cfg.get("market_disagree_no_price_max", _MARKET_DISAGREE_NO_PRICE_MAX))
+                # New canonical key (NO-space, high q_lcb = overwhelming evidence);
+                # fall back to the legacy key name only if the new one is absent.
+                _md_qlcb = float(
+                    _md_cfg.get(
+                        "market_disagree_qlcb_min_escape",
+                        _md_cfg.get("market_disagree_qlcb_extreme", _MARKET_DISAGREE_QLCB_MIN_ESCAPE),
+                    )
+                )
+            except Exception:
+                _md_no_max = _MARKET_DISAGREE_NO_PRICE_MAX
+                _md_qlcb = _MARKET_DISAGREE_QLCB_MIN_ESCAPE
+            _market_disagreement_demoted = _market_disagreement_demotes_buy_no(
+                direction=direction,
+                market_no_price=market_no_price,
+                q_lcb_5pct=q_lcb,
+                no_price_max=_md_no_max,
+                qlcb_min_escape=_md_qlcb,
+            )
+            if _market_disagreement_demoted:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = (
+                        "MARKET_DISAGREEMENT_BUY_NO_DEMOTED:"
+                        f"no_price={market_no_price:.4f}<={_md_no_max:.4f} "
+                        f"q_lcb={q_lcb:.4f}<{_md_qlcb:.4f}"
+                    )
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
+            # A demoted contrarian buy_no must not enter the FDR family as a
+            # "passed" hypothesis — it is structurally non-tradeable, not merely
+            # low-scoring. Force prefilter False so it can never be selected.
+            if _market_disagreement_demoted:
+                passed_prefilter = False
             proofs.append(
                 _CandidateProof(
                     candidate=candidate,
@@ -3177,6 +3348,10 @@ def _generate_candidate_proofs(
                     mainstream_agreement=payload.get(
                         "_mainstream_agreement_verdicts", {}
                     ).get((condition_id, direction)),
+                    # #120: calibrator provenance — per-family, set by the
+                    # ONE-CALIBRATOR SEAM (era.py:3772 emos / 3774 maze). Same
+                    # payload instance (#149 fix), so this is the actual q_source.
+                    q_source=payload.get("_edli_q_source"),
                 )
             )
     return tuple(proofs)
@@ -3345,7 +3520,10 @@ def _canonical_probability_and_fdr_proof(
         snapshot=snapshot,
         family=family,
         native_costs=native_costs,
-        payload=_payload(event),
+        # #120/#149: the seam mutates payload['_edli_q_source'] (+ bias/grid flags);
+        # must be the THREADED payload, not a fresh _payload(event) throwaway, or
+        # the q_source provenance is set on a discarded dict and the proof reads None.
+        payload=payload,
         decision_time=decision_time,
     )
     from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
@@ -3357,7 +3535,13 @@ def _canonical_probability_and_fdr_proof(
         for hypothesis in hypotheses
     }
     q_by_condition: dict[str, float] = {}
-    lcb_by_direction: dict[tuple[str, str], float] = {}
+    # K3 (Phase-2): the live q_lcb carrier is the typed QlcbByDirection — a bare
+    # float is unconstructable at this boundary (it raises TypeError at __setitem__).
+    # Every entry travels WITH its calibration provenance (FORECAST_BOOTSTRAP here,
+    # EMOS_ANALYTIC on the licensed override, SETTLEMENT_ISOTONIC on the coverage
+    # shrink). Consumers read the float back via _qlcb_float(...).q_lcb.
+    from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
+    lcb_by_direction: QlcbByDirection = QlcbByDirection()
     p_values: dict[tuple[str, str], float] = {}
     prefilter: dict[tuple[str, str], bool] = {}
     # Live FDR truth comes from the family hypothesis scan above (the same
@@ -3388,7 +3572,12 @@ def _canonical_probability_and_fdr_proof(
             hyp = hypothesis_by_label_direction.get((range_label, direction))
             if hyp is not None and hyp.p_value is not None and hyp.ci_lower is not None:
                 p_values[(condition_id, direction)] = float(hyp.p_value)
-                lcb_by_direction[(condition_id, direction)] = float(hyp.ci_lower) + cost_by_direction[direction]
+                _set_qlcb_provenance(
+                    lcb_by_direction,
+                    (condition_id, direction),
+                    float(hyp.ci_lower) + cost_by_direction[direction],
+                    source="FORECAST_BOOTSTRAP",
+                )
                 prefilter[(condition_id, direction)] = bool(hyp.passed_prefilter)
             else:
                 # scan_full_hypothesis_family omits a direction when that side has no executable
@@ -3398,7 +3587,12 @@ def _canonical_probability_and_fdr_proof(
                 # (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed raise.
                 q_point = yes_posterior if direction == "buy_yes" else (1.0 - yes_posterior)
                 p_values[(condition_id, direction)] = 1.0
-                lcb_by_direction[(condition_id, direction)] = q_point
+                _set_qlcb_provenance(
+                    lcb_by_direction,
+                    (condition_id, direction),
+                    q_point,
+                    source="FORECAST_BOOTSTRAP",
+                )
                 prefilter[(condition_id, direction)] = False
 
     # EMOS-CI LIVE OVERRIDE (Option B, 2026-06-02, /tmp/design_emos_ci.md §6).
@@ -3415,6 +3609,19 @@ def _canonical_probability_and_fdr_proof(
         analysis=analysis,
         native_costs=native_costs,
         payload=_payload(event),
+        lcb_by_direction=lcb_by_direction,
+    )
+
+    # K3 (Phase-2) SETTLEMENT-BACKWARD COVERAGE — license each q_lcb against the
+    # REALIZED settlement win-rate in its band, shrinking an UNLICENSED band to the
+    # realized rate minus 1pp (source SETTLEMENT_ISOTONIC). SHADOW FLAG, DEFAULT OFF
+    # (edli_v1.q_lcb_settlement_coverage_gate_enabled): with the flag OFF this is a
+    # pure no-op and the q_lcb is byte-identical to the EMOS/MC value above. The
+    # coverage table is built ONLY through the spine grade_receipt. FAIL-OPEN: any
+    # error keeps the upstream lcb (never crash, never widen optimistically).
+    _maybe_apply_settlement_coverage_to_lcb(
+        family=family,
+        forecast_conn=conn,
         lcb_by_direction=lcb_by_direction,
     )
 
@@ -3476,29 +3683,30 @@ def _canonical_probability_and_fdr_proof(
         except Exception:
             pass
 
-    # MAINSTREAM AGREEMENT REFERENCE (#135, 2026-06-03): evaluate per-candidate direction-agreement
-    # against an independent mainstream forecast point (Open-Meteo standard /v1/forecast).
-    # Flag-gated (edli_v1.mainstream_agreement_reference_enabled, default OFF). F1 rename
-    # (PR-2 B): was mainstream_agreement_gate_enabled — the selector is genuinely
-    # REFERENCE-ONLY (it never excludes a candidate), so "gate" was a misread.
-    # FAIL-OPEN/SILENT: any evaluation error must not affect the live q_by_condition decision.
-    # REFERENCE-ONLY: verdicts stored in payload for receipt provenance annotation only.
-    # They do NOT filter or exclude candidates in _selected_candidate_proof.
-    # (Submit-time ENFORCEMENT is a SEPARATE, default-OFF flag —
-    # mainstream_agreement_enforce_on_submit — handled in the submit closure, not here.)
+    # MAINSTREAM AGREEMENT ANNOTATION (#135 / operator directive 2026-06-04 #2):
+    # ALWAYS compute + annotate the per-candidate mainstream/bias agreement value, DECOUPLED
+    # from the reference flag (mainstream_agreement_reference_enabled). The operator wants the
+    # number SHOWN ("数值显示") on every receipt without flipping the foreign config — so the
+    # evaluation is UNCONDITIONAL here. It is purely OBSERVATIONAL: verdicts are stored in the
+    # payload for receipt annotation only; they do NOT filter / exclude candidates in
+    # _selected_candidate_proof, and (post-2026-06-04) there is NO submit-time enforce branch.
+    # WARM-CACHE-ONLY: the eval helper below reads read_mainstream_point_cached
+    # (the STEP-7 off-mutex path, never the synchronous fetch under the world mutex). Cache cold
+    # -> verdict carries mainstream_available=False (pass annotated as unknown); the candidate
+    # still forms (mainstream is display-only and can never block). FAIL-OPEN/SILENT: any
+    # evaluation error must not affect the live q_by_condition decision.
     # Key: (condition_id, direction) → verdict dict.
     try:
-        if bool(settings["edli_v1"].get("mainstream_agreement_reference_enabled", False)):
-            _evaluate_and_store_mainstream_agreement(
-                event=event,
-                family=family,
-                analysis=analysis,
-                payload=payload,
-            )
+        _evaluate_and_store_mainstream_agreement(
+            event=event,
+            family=family,
+            analysis=analysis,
+            payload=payload,
+        )
     except Exception as _gate_exc:
         try:
             logging.getLogger("zeus.mainstream_gate").warning(
-                "mainstream-agreement gate evaluation failed (non-fatal): %s", _gate_exc
+                "mainstream-agreement annotation failed (non-fatal): %s", _gate_exc
             )
         except Exception:
             pass
@@ -3617,6 +3825,32 @@ def _assert_settlement_unit_identity(*, snapshot: dict[str, Any], payload: dict[
     return snapshot_unit
 
 
+def _make_emos_bootstrap_sampler(mu_native: float, sigma_native: float):
+    """Bootstrap sampler that draws the q_lcb from the EMOS predictive N(mu, sigma).
+
+    The ONE-calibrator lcb (#110): replaces member-resampling so the q_lcb reflects ONLY the
+    EMOS predictive sigma (no ensemble-spread double-count); the point p_cal is the analytic
+    EMOS q_vec. One (mu, sigma) feeds both. Uses the MarketAnalysis rng/settle/bin so the
+    sampled distribution matches the live settlement rounding convention exactly.
+    """
+    def _sampler(analysis, n_members):
+        draws = analysis._rng.normal(float(mu_native), float(sigma_native), int(n_members))
+        measured = analysis._settle(draws)
+        vec = np.array(
+            [analysis._bin_probability(measured, bb) for bb in analysis.bins], dtype=float
+        )
+        # Guard: NaN/inf or zero-sum => fall back to p_cal so the caller always
+        # receives a valid finite normalized distribution (avoids fail-close in
+        # _finite_probability_distribution when the flag is ON).
+        if not np.all(np.isfinite(vec)):
+            return np.asarray(analysis.p_cal, dtype=float)
+        s = float(vec.sum())
+        if s <= 0.0:
+            return np.asarray(analysis.p_cal, dtype=float)
+        return vec / s
+    return _sampler
+
+
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
@@ -3646,53 +3880,114 @@ def _market_analysis_from_event_snapshot(
     # unit-swap (Kelvin leak / source swap / new city) cannot silently invert q
     # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
     unit = _assert_settlement_unit_identity(snapshot=snapshot, payload=payload, city=city, bins=bins)
-    members, _bias_corrected = _maybe_apply_edli_bias_correction(
-        raw_members, snapshot=snapshot, family=family, city=city, payload=payload
-    )
-    if _bias_corrected:
-        payload["_edli_bias_corrected"] = True
-    # Grid→point representativeness correction (lead-invariant, OOS-validated).
-    # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
-    # Applied on the (potentially bias-corrected) member array so both corrections compose.
-    members, _grid_corrected = _maybe_apply_grid_representativeness_correction(
-        members, snapshot=snapshot, family=family, city=city, payload=payload
-    )
-    # payload['_edli_grid_corrected'] set inside the hook when applied.
-    # DOUBLE-COUNT STRUCTURAL ANTIBODY (2026-06-03): bias and grid both subtract a per-city
-    # MEAN temperature residual. If BOTH apply to the same members the warm-shift is applied
-    # ~twice (F = E[r_bias] + E[r_grid], over-correction). Today bias=ON / grid=OFF so this is
-    # inert, but the guard makes the wrong composition UNCONSTRUCTABLE — fail CLOSED rather
-    # than silently double-subtract. Make the error category impossible, not the instance.
-    _assert_single_temperature_mean_correction(
-        bias_applied=_bias_corrected, grid_applied=_grid_corrected,
-        city=getattr(city, "name", family.city), target_date=str(family.target_date),
-    )
-    # REPRESENTATIVENESS VARIANCE (iron rule 6, 2026-06-03): when (and only when) the EDLI
-    # bias correction was applied, the member MEAN was shifted but the spread was NOT widened.
-    # Fold the per-city forecast-vs-settlement residual σ (native unit) into the MC bootstrap
-    # noise so q_lcb widens honestly. σ_repr=0.0 when no correction => MarketAnalysis behaviour
-    # is byte-identical. Does NOT touch the POINT q (p_raw / p_posterior below) — only the CI.
-    representativeness_sigma = (
-        _edli_representativeness_sigma_native(snapshot=snapshot, family=family, city=city)
-        if _bias_corrected
-        else 0.0
-    )
-    p_raw = _snapshot_p_raw(
-        snapshot, family=family, bins=bins, members=members, payload=payload,
-        members_already_corrected=True,
-    )
-    p_cal = _snapshot_p_cal(
-        calibration_conn,
-        snapshot=snapshot,
-        family=family,
-        bins=bins,
-        p_raw=p_raw,
-        payload=payload,
-        decision_time=decision_time,
-    )
-    if family.event_type == "DAY0_EXTREME_UPDATED":
-        p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
-        p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
+    # === ONE-CALIBRATOR SEAM (#110 / ELEVATION S2) ===========================================
+    # When EMOS serves this (city, season) cell and the flag is ON, the traded distribution IS
+    # the EMOS predictive N(mu, sigma): point p_cal = analytic q_vec; the q_lcb bootstrap draws
+    # from the SAME N(mu, sigma) (one sigma, no ensemble-spread double-count). This collapses
+    # the bias/grid/identity-Platt mean-correction maze into a single calibrator. served=raw /
+    # missing / flag-OFF / day0 -> the existing path below runs unchanged (byte-identical).
+    _emos_q = None
+    _emos_sampler = None
+    if (family.event_type != "DAY0_EXTREME_UPDATED"
+            and bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))):
+        # M1 (critic 2026-06-04): the EMOS branch must degrade to the honest path on ANY failure,
+        # mirroring the flag-OFF try/except around _snapshot_lead_days — otherwise a lead-missing
+        # snapshot fail-closes the whole family (coverage regression) when the flag is ON.
+        # NH month-season, MATCHING emos_calibration.json keying (fit_emos_calibration.season()).
+        # MUST NOT be hemisphere-aware: the fit groups e.g. Sao Paulo|June under "JJA" (NH label);
+        # a lat-flipped season would serve the OPPOSITE-season cell (critic C1). Month-only keys
+        # the cell fit on the SAME calendar months as the target. Computed BEFORE the try so it is
+        # always available for the failure log (city|season|metric cell identity).
+        _emos_m = (family.target_date.month if hasattr(family.target_date, "month")
+                   else int(str(family.target_date)[5:7]))
+        _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
+                        else "JJA" if _emos_m in (6, 7, 8) else "SON")
+        try:
+            from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
+            _emos_q = _build_emos_q(
+                city=city.name, season=_emos_season, metric=family.metric,
+                lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
+                members_native=raw_members, unit=unit, bins=bins,
+            )
+        except Exception as _emos_exc:
+            # DE-SILENCED ANTIBODY (#149 / live-diagnosis 2026-06-04): a bare
+            # `except Exception: _emos_q = None` swallowed EVERY EMOS failure with NO log, so a
+            # flag-ON-but-always-failing calibrator was INDISTINGUISHABLE from flag-OFF (q_source
+            # absent; legacy ran invisibly — the exact fail-open-inert class). EMOS stays
+            # best-effort (degrades to the honest legacy path, never fail-closes a family), BUT
+            # the degrade is now LOUD: a distinct EMOS_SERVE_FAILED line carrying the exception
+            # type+message and the served cell identity (city|season|metric|unit) so monitoring
+            # catches a served cell that has silently stopped serving. A silent fall-back on a
+            # served cell is forbidden; this makes that category UNCONSTRUCTABLE in CI
+            # (tests/engine/test_emos_seam_serve_loud.py). `_emos_q` left None -> legacy path.
+            _emos_q = None
+            payload["_edli_emos_serve_failed"] = True
+            import logging  # module uses lazy per-fn logging imports
+            logging.getLogger("zeus.emos_serve").warning(
+                "EMOS_SERVE_FAILED cell=%s|%s|%s unit=%s exc=%s: %s",
+                getattr(city, "name", family.city), _emos_season, family.metric, unit,
+                type(_emos_exc).__name__, _emos_exc,
+            )
+    if _emos_q is not None:
+        _q_vec, _emos_mu_native, _emos_sigma_native = _emos_q
+        p_raw = np.asarray(_q_vec, dtype=float)
+        p_cal = np.asarray(_q_vec, dtype=float)  # EMOS IS the calibrated point distribution
+        members = raw_members
+        _bias_corrected = False
+        representativeness_sigma = 0.0  # the EMOS sampler carries the predictive sigma
+        payload["_edli_q_source"] = "emos"
+        _emos_sampler = _make_emos_bootstrap_sampler(_emos_mu_native, _emos_sigma_native)
+    else:
+        members, _bias_corrected = _maybe_apply_edli_bias_correction(
+            raw_members, snapshot=snapshot, family=family, city=city, payload=payload
+        )
+        if _bias_corrected:
+            payload["_edli_bias_corrected"] = True
+        # #120: maze-fallback calibrator provenance (EMOS did not serve this cell).
+        # "bias_platt" = bias-corrected members fed to Platt; "platt" = plain.
+        payload["_edli_q_source"] = "bias_platt" if _bias_corrected else "platt"
+        # Grid→point representativeness correction (lead-invariant, OOS-validated).
+        # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
+        # Applied on the (potentially bias-corrected) member array so both corrections compose.
+        members, _grid_corrected = _maybe_apply_grid_representativeness_correction(
+            members, snapshot=snapshot, family=family, city=city, payload=payload
+        )
+        # payload['_edli_grid_corrected'] set inside the hook when applied.
+        # DOUBLE-COUNT STRUCTURAL ANTIBODY (2026-06-03): bias and grid both subtract a per-city
+        # MEAN temperature residual. If BOTH apply to the same members the warm-shift is applied
+        # ~twice (F = E[r_bias] + E[r_grid], over-correction). Today bias=ON / grid=OFF so this is
+        # inert, but the guard makes the wrong composition UNCONSTRUCTABLE — fail CLOSED rather
+        # than silently double-subtract. Make the error category impossible, not the instance.
+        _assert_single_temperature_mean_correction(
+            bias_applied=_bias_corrected, grid_applied=_grid_corrected,
+            city=getattr(city, "name", family.city), target_date=str(family.target_date),
+        )
+        # REPRESENTATIVENESS VARIANCE (iron rule 6, 2026-06-03): when (and only when) the EDLI
+        # bias correction was applied, the member MEAN was shifted but the spread was NOT widened.
+        # Fold the per-city forecast-vs-settlement residual σ (native unit) into the MC bootstrap
+        # noise so q_lcb widens honestly. σ_repr=0.0 when no correction => MarketAnalysis behaviour
+        # is byte-identical. Does NOT touch the POINT q (p_raw / p_posterior below) — only the CI.
+        representativeness_sigma = (
+            _edli_representativeness_sigma_native(snapshot=snapshot, family=family, city=city)
+            if _bias_corrected
+            else 0.0
+        )
+        p_raw = _snapshot_p_raw(
+            snapshot, family=family, bins=bins, members=members, payload=payload,
+            members_already_corrected=True,
+        )
+        p_cal = _snapshot_p_cal(
+            calibration_conn,
+            snapshot=snapshot,
+            family=family,
+            bins=bins,
+            p_raw=p_raw,
+            payload=payload,
+            decision_time=decision_time,
+        )
+        if family.event_type == "DAY0_EXTREME_UPDATED":
+            p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
+            p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
     p_market_yes: list[float] = []
     p_market_no: list[float] = []
     buy_no_available: list[bool] = []
@@ -3707,14 +4002,26 @@ def _market_analysis_from_event_snapshot(
         p_market_no.append(float(no_price) if no_price is not None else 0.999999)
         buy_no_available.append(no_price is not None)
         executable_mask.append(yes_price is not None or no_price is not None)
-    sampler = None
-    if family.event_type == "DAY0_EXTREME_UPDATED":
+    sampler = _emos_sampler  # one-calibrator (#110): EMOS N(mu,sigma) lcb bootstrap, else None
+    is_day0 = family.event_type == "DAY0_EXTREME_UPDATED"
+    if is_day0:
         static_p_cal = np.asarray(p_cal, dtype=float)
 
         def _static_sampler(_analysis, _n_members):
             return static_p_cal
 
         sampler = _static_sampler
+    # K1 — ForecastSharpnessEvidence (Phase-2, REQUIRED ctor param). Day0/imminent
+    # paths are exempt (the realized observation replaces the forecast, so forecast
+    # sharpness is moot). Otherwise load the settlement MAE for (city, unit, lead)
+    # from forecast_skill. The BEHAVIOR (edge suppression) is flag-gated OFF
+    # (edli_v1.forecast_sharpness_gate_enabled) so this evidence is inert on live emit
+    # today; only the TYPE is load-bearing now. Any load failure -> fail-closed
+    # `missing` evidence (also inert while the flag is OFF).
+    forecast_sharpness = _edli_forecast_sharpness_evidence(
+        snapshot=snapshot, family=family, payload=payload, unit=unit, bins=bins,
+        day0_exempt=is_day0,
+    )
     return MarketAnalysis(
         p_raw=np.asarray(p_raw, dtype=float),
         p_cal=np.asarray(p_cal, dtype=float),
@@ -3735,9 +4042,71 @@ def _market_analysis_from_event_snapshot(
         market_complete=True,
         posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
         bootstrap_probability_sampler=sampler,
-        bootstrap_signal_type="edli_event_bound_day0" if family.event_type == "DAY0_EXTREME_UPDATED" else "edli_event_bound_forecast",
+        bootstrap_signal_type="edli_event_bound_day0" if is_day0 else "edli_event_bound_forecast",
         representativeness_sigma=representativeness_sigma,  # iron rule 6: honest q_lcb widening on corrected domain
+        forecast_sharpness=forecast_sharpness,  # K1: required sharpness contract
     )
+
+
+def _bin_width_native(bins) -> float:
+    """Return the integer settlement bin width in the native unit (1 °C / 2 °F).
+
+    Reads the first finite-width (non-shoulder) bin so the K1 sharpness threshold
+    is keyed to the actual market grid, not an assumed value.
+    """
+    for b in bins:
+        w = getattr(b, "width", None)
+        if w:
+            return float(w)
+    # No finite-width bin in the family (all shoulders) — fall back to unit default.
+    unit = getattr(bins[0], "unit", "F") if bins else "F"
+    return 2.0 if unit == "F" else 1.0
+
+
+def _edli_forecast_sharpness_evidence(
+    *, snapshot, family, payload, unit, bins, day0_exempt: bool
+):
+    """Build the K1 ForecastSharpnessEvidence for the event-bound q path.
+
+    Day0 -> exempt. Otherwise aggregate settlement MAE from forecast_skill keyed by
+    (city, unit, int(min(lead_days, 7))). Fail-closed `missing` on any error — inert
+    while the gate flag is OFF, conservative when ON.
+    """
+    from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
+
+    if day0_exempt:
+        return ForecastSharpnessEvidence.exempt(unit=unit)
+    bin_width = _bin_width_native(bins)
+    try:
+        lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
+    except Exception:
+        return ForecastSharpnessEvidence.missing(unit=unit, bin_width=bin_width, lead_days=7)
+    # WAL checkpoint-starvation fix (2026-06-04, part 1a): this is the EDLI
+    # reactor HOT PATH — called per-event (line ~3889). The prior code opened a
+    # zeus-world.db read connection and NEVER closed it: each call leaked a
+    # connection holding a WAL read snapshot (read-mark) that pins the WAL floor
+    # until non-deterministic GC. Under load these accumulate and starve
+    # wal_checkpoint(TRUNCATE) → -wal grows to GBs → lock-starvation. Close the
+    # connection in a finally so its snapshot is released the moment the read
+    # (which load_for fully materializes before returning) completes.
+    conn = None
+    try:
+        from src.state.db import get_world_connection_read_only
+
+        conn = get_world_connection_read_only()
+        return ForecastSharpnessEvidence.load_for(
+            conn, city=family.city, unit=unit, lead_days=lead_days, bin_width=bin_width
+        )
+    except Exception:
+        return ForecastSharpnessEvidence.missing(
+            unit=unit, bin_width=bin_width, lead_days=int(min(max(lead_days, 0.0), 7.0))
+        )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 — close is best-effort; never mask the result
+                pass
 
 
 def _evaluate_and_store_mainstream_agreement(
@@ -3758,12 +4127,7 @@ def _evaluate_and_store_mainstream_agreement(
     the receipt simply omits mainstream_agreement_* fields.
     """
     from src.strategy.mainstream_agreement import evaluate_mainstream_agreement
-    from src.data.mainstream_forecast_source import fetch_mainstream_point
-
-    _msc = getattr(_evaluate_and_store_mainstream_agreement, "_cache", None)
-    if _msc is None:
-        _msc = {}
-        _evaluate_and_store_mainstream_agreement._cache = _msc  # type: ignore[attr-defined]
+    from src.data.mainstream_forecast_source import read_mainstream_point_cached
 
     members = list(float(m) for m in analysis.member_maxes) if analysis.member_maxes is not None else None
     our_point = float(analysis.member_maxes.mean()) if members else None
@@ -3781,10 +4145,14 @@ def _evaluate_and_store_mainstream_agreement(
     unit = str(analysis.unit or "C")
     precision = float(getattr(analysis, "precision", 1.0) or 1.0)
 
-    mainstream_snap = fetch_mainstream_point(
+    # STEP 7 (E2): cache-ONLY read — never fetch on the mutex-held decision path.
+    # A miss yields mainstream_snap=None → mainstream_point=None → the gate's
+    # existing FAIL_CLOSED path (the warm job _edli_mainstream_warm_cycle keeps
+    # this cache populated off the decision path).
+    mainstream_snap = read_mainstream_point_cached(
         family.city,
         family.target_date,
-        _cache=_msc,
+        metric=family.metric,  # METRIC-MATCHED (#metric-crossing fix): LOW->daily min, HIGH->daily max.
     )
     mainstream_pt = float(mainstream_snap["point"]) if mainstream_snap is not None else None
 
@@ -3806,7 +4174,17 @@ def _evaluate_and_store_mainstream_agreement(
                     raw_our_point=raw_our_point,
                     precision=precision,
                 )
-                verdicts[(condition_id, direction)] = verdict.to_dict()
+                _vd = verdict.to_dict()
+                # DISPLAY-ONLY (operator directive 2026-06-04 #2): a COLD cache
+                # (mainstream_pt is None) is UNKNOWN, not a failure. Annotate
+                # mainstream_agreement_pass=None (unknown) rather than False so the
+                # operator's review set distinguishes "no mainstream point yet" from a
+                # genuine bias mismatch. The candidate STILL forms (mainstream never
+                # blocks); the order-able ∩ bias-pass review query treats None as
+                # excluded (unknown != pass), the same as a fail.
+                if mainstream_pt is None:
+                    _vd["mainstream_agreement_pass"] = None
+                verdicts[(condition_id, direction)] = _vd
                 verdicts[(condition_id, direction)]["mainstream_authority_tier"] = (
                     mainstream_snap.get("authority_tier") if mainstream_snap else None
                 )
@@ -3874,6 +4252,32 @@ def _maybe_bias_decay_kelly_haircut(
         city = runtime_cities_by_name().get(family.city)
         if city is None:
             return kelly_multiplier, False, None, "no_city"
+        # Phase-2 K2+N1+#122 (task #167): corrected XOR haircut. When v2 is ON, consult the
+        # single typed BiasTreatment. If this (city,bucket) is on the CORRECT path the bias
+        # was already consumed by the p_raw shift — the haircut MUST NOT also fire on the
+        # same row (the N1 double penalty). The XOR invariant lives in BiasTreatment.
+        # kelly_factor(): a CORRECT treatment returns factor 1.0 (residual-after-correction
+        # is 0). Flag OFF -> this block is skipped -> legacy haircut byte-identical.
+        if bool(ev.get("bias_treatment_v2_enabled", False)):
+            _treatment = _edli_bias_treatment_for_bucket(family=family, city=city)
+            if _treatment is not None:
+                _unit = getattr(city, "settlement_unit", "C")
+                _thr = float(ev.get("bias_decay_threshold_f", 3.0)) if _unit == "F" else float(
+                    ev.get("bias_decay_threshold_c", 2.0)
+                )
+                _factor = float(ev.get("bias_decay_kelly_factor", 0.5))
+                _kf = _treatment.kelly_factor(threshold_native=_thr, haircut_factor=_factor)
+                if _kf < 1.0:
+                    logging.getLogger("zeus.edli_bias").info(
+                        "bias-decay haircut (v2 BiasTreatment) APPLIED city=%s residual=%.2f "
+                        "thr=%.2f factor=%.2f", family.city, _treatment.residual_native, _thr, _kf,
+                    )
+                    return kelly_multiplier * _kf, True, _treatment.residual_native, "bias_exceeds_v2"
+                # CORRECT path or within-threshold: NO haircut (XOR honoured).
+                return kelly_multiplier, False, _treatment.residual_native, "treated_v2_no_haircut"
+            # treatment is None: either no VERIFIED row, or correction flag OFF with no row.
+            # Fall through to the legacy fail-safe (data-absent -> conservative haircut),
+            # preserving the operator's data-insufficient-phase intent for uncovered buckets.
         unit = getattr(city, "settlement_unit", "C")
         metric = family.metric
         ldv = (
@@ -3970,6 +4374,123 @@ def _assert_single_temperature_mean_correction(
         )
 
 
+def _edli_bias_treatment_for_bucket(
+    *,
+    family,
+    city,
+    snapshot: dict[str, Any] | None = None,
+):
+    """Build the single typed ``BiasTreatment`` decision for a (city,bucket).
+
+    Phase-2 K2+N1+#122 (task #167). This is the ONE place the per-(city,bucket) bias is
+    turned into a decision; both the p_raw correction and the Kelly haircut consult it so a
+    bias is corrected XOR haircut, never both (kills the N1 double penalty). The fail-closed
+    BiasTreatment factory refuses NULL/non-VERIFIED authority (#122) and a training_cutoff
+    outside the target season (stale-fit gate). Returns ``None`` when:
+      * ``edli_v1.bias_treatment_v2_enabled`` is OFF (legacy paths own the decision), OR
+      * no VERIFIED row / weight_live<=0 / effective_bias missing, OR
+      * the row fails the provenance or staleness gate (fail-closed).
+
+    The returned mode is CORRECT whenever the correction would be live for this bucket
+    (``edli_v1.edli_bias_correction_enabled`` ON), else HAIRCUT — so the two consumers are
+    mutually exclusive by construction. Native unit: degC for C-cities, degF (x1.8) for
+    F-settled cities (matches the legacy member-array unit).
+    """
+    try:
+        ev = settings["edli_v1"]
+        if not bool(ev.get("bias_treatment_v2_enabled", False)):
+            return None
+        import contextlib
+        from src.calibration.manager import season_from_date
+        from src.calibration.ens_bias_repo import read_bias_model
+        from src.state.db import get_world_connection
+        from src.contracts.bias_treatment import (
+            BiasProvenanceError,
+            BiasStaleError,
+            BiasTreatment,
+            BiasTreatmentMode,
+        )
+
+        metric = family.metric
+        ldv = (
+            "ecmwf_opendata_mx2t3_local_calendar_day_max"
+            if metric == "high"
+            else "ecmwf_opendata_mn2t3_local_calendar_day_min"
+        )
+        season = season_from_date(str(family.target_date), lat=city.lat)
+        month = int(str(family.target_date)[5:7])
+        with contextlib.closing(get_world_connection()) as conn:
+            try:
+                conn.row_factory = sqlite3.Row
+            except Exception:
+                pass
+            row = read_bias_model(
+                conn,
+                city=city.name,
+                season=season,
+                metric=metric,
+                live_data_version=ldv,
+                month=month,
+                target_month=month,
+                authority="VERIFIED",
+                error_model_family=_EDLI_BIAS_FAMILY,
+            )
+        if row is None:
+            return None
+        keys = set(row.keys())
+        eff = row["effective_bias_c"] if "effective_bias_c" in keys else None
+        wl = row["weight_live"] if "weight_live" in keys else 0.0
+        if eff is None or float(wl or 0.0) <= 0.0:
+            return None
+
+        unit = getattr(city, "settlement_unit", "C")
+        scale = 1.8 if unit == "F" else 1.0
+        eff_native = float(eff) * scale
+        resid_c = row["residual_sd_c"] if "residual_sd_c" in keys else None
+        resid_native = abs(float(resid_c)) * scale if resid_c is not None else 0.0
+        n_live = int(row["n_live"]) if ("n_live" in keys and row["n_live"] is not None) else 0
+        cs = row["correction_strength"] if "correction_strength" in keys else None
+        cs = float(cs) if cs is not None else 1.0
+        authority = row["authority"] if "authority" in keys else None
+        training_cutoff = row["training_cutoff"] if "training_cutoff" in keys else None
+
+        thr = float(ev.get("bias_decay_threshold_f", 3.0)) if unit == "F" else float(
+            ev.get("bias_decay_threshold_c", 2.0)
+        )
+        correction_on = bool(ev.get("edli_bias_correction_enabled", False))
+        mode = BiasTreatmentMode.CORRECT if correction_on else BiasTreatmentMode.HAIRCUT
+        try:
+            return BiasTreatment.from_row(
+                effective_bias_native=eff_native,
+                residual_sd_native=resid_native,
+                n_live=n_live,
+                correction_strength=cs,
+                authority=authority,
+                training_cutoff=training_cutoff,
+                target_date=str(family.target_date),
+                lat=float(city.lat),
+                threshold_native=thr,
+                mode=mode,
+            )
+        except (BiasProvenanceError, BiasStaleError) as exc:
+            # Fail closed: a NULL-authority or stale row never enters live q.
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "BiasTreatment refused (fail-closed) city=%s metric=%s: %s",
+                getattr(city, "name", family.city), metric, exc,
+            )
+            return None
+    except Exception as exc:  # never break the live decision path
+        try:
+            import logging
+            logging.getLogger("zeus.edli_bias").warning(
+                "BiasTreatment build skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
 def _maybe_apply_edli_bias_correction(
     members: np.ndarray,
     *,
@@ -3996,6 +4517,26 @@ def _maybe_apply_edli_bias_correction(
     try:
         if not bool(settings["edli_v1"].get("edli_bias_correction_enabled", False)):
             return members, False
+        # Phase-2 K2+N1+#122 (task #167): when bias_treatment_v2_enabled is ON, the typed
+        # BiasTreatment gate is the single fail-closed decision. A NULL-authority (#122) or
+        # stale-cutoff row yields treatment=None -> NO correction (raw members), so an
+        # unverified/out-of-season bias never enters live q. The shift it applies is
+        # IDENTICAL to the legacy subtraction (eff_native = eff * (1.8 if F else 1)); only
+        # the fail-closed GATE is added. Flag OFF -> this block is skipped -> byte-identical.
+        if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
+            _treatment = _edli_bias_treatment_for_bucket(
+                family=family, city=city, snapshot=snapshot
+            )
+            if _treatment is None or not _treatment.is_correcting:
+                return members, False
+            corrected = np.asarray(members, dtype=float) - float(_treatment.shift_native)
+            import logging
+            logging.getLogger("zeus.edli_bias").info(
+                "EDLI bias correction (v2 BiasTreatment) city=%s metric=%s shift_native=%.3f "
+                "n_live=%d authority=%s", city.name, family.metric,
+                float(_treatment.shift_native), int(_treatment.n_live), _treatment.authority,
+            )
+            return corrected, True
         import contextlib
         from src.calibration.manager import season_from_date
         from src.calibration.ens_bias_repo import read_bias_model
@@ -4138,7 +4679,46 @@ def _edli_representativeness_sigma_native(
                 if chosen is not None:
                     if resid_c is not None and float(resid_c) > 0.0 and np.isfinite(float(resid_c)):
                         chosen = max(chosen, float(resid_c))
-                    return chosen * _scale
+                    sigma_native = chosen * _scale
+                    # Phase-2 K2 D4 (task #167): when bias_treatment_v2_enabled is ON and the
+                    # fit is low-n (n_live<20), fold the bias-MEAN standard error
+                    # (shift_se = residual_sd/sqrt(n)) into the representativeness σ IN
+                    # QUADRATURE so a low-n correction WIDENS q_lcb rather than applying a
+                    # hard point shift (iron rule 6).
+                    #
+                    # K2 D4 DOUBLE-COUNT FIX (2026-06-03, adversarial-verify finding #2):
+                    # the quadrature BASE must be the IN-SAMPLE residual_sd_c (= σ_resid),
+                    # NOT total_residual_sd_c. total_residual_sd_c = σ_resid·sqrt(1 + 1/n)
+                    # ALREADY contains the 1/n mean-estimation-drift term, so folding
+                    # shift_se² = σ_resid²/n onto total² gave σ_resid²·(1 + 2/n) — the 1/n is
+                    # counted TWICE (~6% over-wide q_lcb at n=7). Basing the fold on
+                    # residual_sd_c reconstructs exactly the intended predictive σ:
+                    #   sqrt(σ_resid² + σ_resid²/n) = σ_resid·sqrt(1 + 1/n) = total_residual_sd_c.
+                    # The fold therefore widens to the honest predictive σ once, never twice.
+                    # Flag OFF -> sigma_native returned unchanged (byte-identical legacy).
+                    try:
+                        if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
+                            import math as _math
+                            _n = (
+                                int(row["n_live"])
+                                if ("n_live" in keys and row["n_live"] is not None)
+                                else 0
+                            )
+                            if 0 < _n < 20 and resid_c is not None and float(resid_c) > 0.0:
+                                # IN-SAMPLE σ is the quadrature base (no 1/n term in it).
+                                in_sample_native = float(resid_c) * _scale
+                                shift_se_native = (float(resid_c) / _math.sqrt(_n)) * _scale
+                                folded = float(
+                                    _math.sqrt(in_sample_native ** 2 + shift_se_native ** 2)
+                                )
+                                # Defensive: never let the D4 fold TIGHTEN below the σ already
+                                # chosen (total_residual_sd_c floor). With honest producer
+                                # stamps folded == sigma_native; the max only guards a row
+                                # whose total < σ_resid·sqrt(1+1/n) (stale/legacy stamp).
+                                sigma_native = max(sigma_native, folded)
+                    except Exception:
+                        pass
+                    return sigma_native
     except Exception as exc:
         try:
             import logging
@@ -4364,7 +4944,10 @@ def _write_emos_shadow_ledger(
     emos_sigma_c: float | None = None
     served_status = "missing"
     if is_high_metric:
-        emos_result = emos_predictive(family.city, season, lead_days, members_c)
+        emos_result = emos_predictive(
+            family.city, season, lead_days, members_c,
+            metric=str(getattr(family, "metric", "high") or "high").lower(),
+        )
         if emos_result is not None:
             emos_mu_c, emos_sigma_c = emos_result
             served_status = "emos"
@@ -4372,7 +4955,7 @@ def _write_emos_shadow_ledger(
             # Distinguish raw vs missing by checking table directly
             from src.calibration.emos import load_emos_table
             tbl = load_emos_table()
-            cell = tbl.get("cells", {}).get(f"{family.city}|{season}")
+            cell = tbl.get("cells", {}).get(f"{family.city}|{season}|high")  # 3-key (HIGH path)
             if cell is not None:
                 served_status = str(cell.get("served", "missing"))
             else:
@@ -4426,10 +5009,11 @@ def _write_emos_shadow_ledger(
         raw_q_lcb_buy_yes: float | None = None
         raw_q_lcb_buy_no: float | None = None
         if lcb_by_direction is not None:
+            from src.calibration.qlcb_provenance import _qlcb_float
             _lcb_yes = lcb_by_direction.get((condition_id, "buy_yes"))
             _lcb_no = lcb_by_direction.get((condition_id, "buy_no"))
-            raw_q_lcb_buy_yes = float(_lcb_yes) if _lcb_yes is not None else None
-            raw_q_lcb_buy_no = float(_lcb_no) if _lcb_no is not None else None
+            raw_q_lcb_buy_yes = _qlcb_float(_lcb_yes) if _lcb_yes is not None else None
+            raw_q_lcb_buy_no = _qlcb_float(_lcb_no) if _lcb_no is not None else None
 
         # Costs from native_costs (the executable ask the trade score uses).
         # native_costs[(cond, dir)] is a 5-tuple; index [1] is ExecutionPrice | None.
@@ -4632,7 +5216,8 @@ def _maybe_override_lcb_with_emos_ci(
         # (raw 51 members from snapshot["members_json"], °F→°C convert, season hemisphere-aware).
         city_obj = runtime_cities_by_name().get(family.city)
         lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
-        season = season_from_date(str(family.target_date), lat=lat)
+        from src.calibration.emos import emos_season as _emos_season
+        season = _emos_season(family.target_date)  # NH-month canonical (no SH season-crossing)
         lead_days = _snapshot_lead_days(snapshot=snapshot, family=family, payload=payload)
         try:
             members_native = _snapshot_members(snapshot).astype(float)
@@ -4644,7 +5229,10 @@ def _maybe_override_lcb_with_emos_ci(
         else:
             members_c = members_native
 
-        emos_result = emos_predictive(family.city, season, lead_days, members_c)
+        emos_result = emos_predictive(
+            family.city, season, lead_days, members_c,
+            metric=str(getattr(family, "metric", "high") or "high").lower(),
+        )
         if emos_result is None:
             # served != emos (raw/missing cell) or insufficient members → fail-closed, MC stands.
             return
@@ -4684,8 +5272,14 @@ def _maybe_override_lcb_with_emos_ci(
             if key not in lcb_by_direction:
                 # No MC entry for this direction (non-executable side) → nothing to override.
                 continue
-            mc_lcb = lcb_by_direction[key]
-            lcb_by_direction[key] = float(emos_lcb)
+            from src.calibration.qlcb_provenance import _qlcb_float, _set_qlcb_provenance
+            mc_lcb = _qlcb_float(lcb_by_direction[key])
+            # K3: the EMOS analytic CI is its own calibration source. On the live
+            # typed carrier this writes a QlcbProvenance(source=EMOS_ANALYTIC); on a
+            # plain test dict it writes a bare float (legacy EMOS tests unchanged).
+            _set_qlcb_provenance(
+                lcb_by_direction, key, float(emos_lcb), source="EMOS_ANALYTIC"
+            )
             try:
                 log.info(
                     "EMOS-CI override city=%s cond=%s dir=%s k_cov=%.3f mc_lcb=%.6f->emos_lcb=%.6f",
@@ -4693,6 +5287,148 @@ def _maybe_override_lcb_with_emos_ci(
                 )
             except Exception:
                 pass
+
+
+def _settlement_coverage_observations(
+    *,
+    forecast_conn: sqlite3.Connection,
+    city: str,
+    metric: str,
+    bin: Bin,
+    direction: str,
+    claimed_q_lcb: float,
+):
+    """Build the (claimed_q_lcb, won) coverage stream for ONE (bin, direction).
+
+    Backward coverage: for every SETTLED outcome of this (city, metric), grade
+    "had I traded THIS bin in THIS direction, would the settled value have won?"
+    via the spine grade_receipt — the Direction Law + BinKind + unit antibodies are
+    inherited, not re-rolled. Returns a list[CoverageObservation]. FAIL-OPEN: any
+    error / unit mismatch yields an empty stream (→ INSUFFICIENT_DATA → no shrink).
+    """
+    from types import SimpleNamespace
+
+    from src.calibration.settlement_backward_coverage import CoverageObservation
+    from src.contracts.graded_receipt import grade_receipt
+    from src.types.temperature import UnitMismatchError
+
+    obs: list = []
+    try:
+        rows = forecast_conn.execute(
+            "SELECT settlement_value, settlement_unit FROM settlement_outcomes "
+            "WHERE city = ? AND temperature_metric = ? "
+            "AND settlement_value IS NOT NULL AND settlement_unit IS NOT NULL",
+            (str(city), str(metric).lower()),
+        ).fetchall()
+    except Exception:
+        return obs
+    for row in rows:
+        try:
+            settled_value = float(row[0])
+            settled_unit = str(row[1])
+        except (TypeError, ValueError):
+            continue
+        # settlement_outcomes.settlement_value is WMO-rounded at write time, so no
+        # semantics object is needed (grade_receipt grades the stored value as-is).
+        settlement = SimpleNamespace(
+            settlement_value=settled_value, settlement_unit=settled_unit
+        )
+        try:
+            graded = grade_receipt(bin, direction, settlement)
+        except UnitMismatchError:
+            # Cross-unit settlement for this bin — not a valid backward observation.
+            continue
+        except Exception:
+            continue
+        obs.append(CoverageObservation(q_lcb=float(claimed_q_lcb), won=bool(graded.won)))
+    return obs
+
+
+def _maybe_apply_settlement_coverage_to_lcb(
+    *,
+    family,
+    forecast_conn: sqlite3.Connection,
+    lcb_by_direction,
+) -> None:
+    """K3 (Phase-2): shrink an UNLICENSED q_lcb to its realized settlement rate.
+
+    SHADOW FLAG (edli_v1.q_lcb_settlement_coverage_gate_enabled, default FALSE):
+    flag OFF → IMMEDIATE no-op, the q_lcb is byte-identical to the EMOS/MC value.
+    Flag ON → for each (cond, direction) build the backward-coverage stream through
+    grade_receipt, run settlement_backward_coverage_check, and apply the shrink via
+    apply_settlement_coverage (only UNLICENSED moves the number; the shrink only ever
+    LOWERS the LCB). The new entry's calibration_source becomes SETTLEMENT_ISOTONIC.
+
+    FAIL-OPEN: any error keeps the upstream lcb (never crash the hot path, never
+    widen optimistically). Touches ONLY lcb_by_direction; q/p_values/prefilter stay.
+    """
+    import logging as _logging
+
+    try:
+        if not bool(settings["edli_v1"].get("q_lcb_settlement_coverage_gate_enabled", False)):
+            return
+    except Exception:
+        return
+
+    log = _logging.getLogger("zeus.qlcb_settlement_coverage")
+    try:
+        from src.calibration.qlcb_provenance import _qlcb_float, _set_qlcb_provenance
+        from src.calibration.settlement_backward_coverage import (
+            apply_settlement_coverage,
+            settlement_backward_coverage_check,
+        )
+        from src.contracts.season import season_from_date
+
+        metric = str(getattr(family, "metric", "") or "").lower()
+        city_obj = runtime_cities_by_name().get(family.city)
+        lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+        season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
+    except Exception as exc:
+        log.warning("K3 coverage setup failed (non-fatal, lcb kept): %s", exc)
+        return
+
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        bin_obj = getattr(candidate, "bin", None)
+        if bin_obj is None:
+            continue
+        for direction in ("buy_yes", "buy_no"):
+            key = (condition_id, direction)
+            if key not in lcb_by_direction:
+                continue
+            try:
+                claimed = _qlcb_float(lcb_by_direction[key])
+                obs = _settlement_coverage_observations(
+                    forecast_conn=forecast_conn,
+                    city=family.city,
+                    metric=metric,
+                    bin=bin_obj,
+                    direction=direction,
+                    claimed_q_lcb=claimed,
+                )
+                verdict = settlement_backward_coverage_check(
+                    city=family.city, metric=metric, season=season,
+                    q_lcb=claimed, observations=obs, min_n=30,
+                )
+                new_q = apply_settlement_coverage(q_lcb=claimed, verdict=verdict, enabled=True)
+                if new_q != claimed:
+                    _set_qlcb_provenance(
+                        lcb_by_direction, key, new_q,
+                        source="SETTLEMENT_ISOTONIC",
+                        n_settlement_observations=verdict.n_settlement_observations,
+                        coverage_ratio=verdict.coverage_ratio,
+                    )
+                    log.info(
+                        "K3 coverage shrink city=%s cond=%s dir=%s %.6f->%.6f (status=%s n=%d)",
+                        family.city, condition_id, direction, claimed, new_q,
+                        verdict.status, verdict.n_settlement_observations,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "K3 coverage skipped bin %s/%s (non-fatal, lcb kept): %s",
+                    family.city, getattr(bin_obj, "label", "?"), exc,
+                )
+                continue
 
 
 def _snapshot_p_raw(
@@ -4979,8 +5715,15 @@ def _apply_day0_mask_to_generated_probabilities(
             orderbook_event=False,
         )
     )
+    # K3: keep the typed carrier end-to-end so the masked output a day0 family hands
+    # to the candidate consumer (at 3092) is also a provenance-carrying QlcbByDirection.
+    from src.calibration.qlcb_provenance import (
+        QlcbByDirection,
+        _qlcb_float,
+        _set_qlcb_provenance,
+    )
     masked_q_by_condition: dict[str, float] = {}
-    masked_lcb_by_direction: dict[tuple[str, str], float] = {}
+    masked_lcb_by_direction: QlcbByDirection = QlcbByDirection()
     for index, candidate in enumerate(family.candidates):
         condition_id = str(candidate.condition_id or "")
         q_value = float(live_state.probabilities[str(index)])
@@ -4991,10 +5734,22 @@ def _apply_day0_mask_to_generated_probabilities(
         # and killing the ENTIRE family (zero candidates) instead of skipping just the
         # non-executable direction. .get(...,0.0) → that direction gets no fill confidence
         # (min(0.0,·)=0.0 → not acceptable) while bins WITH quotes still proceed.
-        yes_lcb = lcb_by_condition.get((condition_id, "buy_yes"), 0.0)
-        no_lcb = lcb_by_condition.get((condition_id, "buy_no"), 0.0)
-        masked_lcb_by_direction[(condition_id, "buy_yes")] = 0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value)
-        masked_lcb_by_direction[(condition_id, "buy_no")] = min(no_lcb, 1.0 - q_value)
+        yes_lcb = _qlcb_float(lcb_by_condition.get((condition_id, "buy_yes"), 0.0))
+        no_lcb = _qlcb_float(lcb_by_condition.get((condition_id, "buy_no"), 0.0))
+        # The masked LCB inherits the upstream calibration source; the day0 mask is a
+        # downstream transform of the forecast-bootstrap LCB, not a new calibration.
+        _set_qlcb_provenance(
+            masked_lcb_by_direction,
+            (condition_id, "buy_yes"),
+            0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value),
+            source="FORECAST_BOOTSTRAP",
+        )
+        _set_qlcb_provenance(
+            masked_lcb_by_direction,
+            (condition_id, "buy_no"),
+            min(no_lcb, 1.0 - q_value),
+            source="FORECAST_BOOTSTRAP",
+        )
     return masked_q_by_condition, masked_lcb_by_direction
 
 
@@ -5128,21 +5883,38 @@ def _snapshot_token_maps_by_condition(rows: list[dict[str, Any]]) -> dict[str, d
 
 def _topology_candidate_from_market_event(
     row: dict[str, Any],
-    snapshot_token_map: dict[str, str],
+    snapshot_token_map: dict[str, str] | None,
     payload: dict[str, object],
 ) -> MarketTopologyCandidate:
+    """Build a topology candidate for one market_events row.
+
+    ``snapshot_token_map`` is None for bins that have no entry in
+    ``executable_market_snapshots`` (illiquid tail bins).  Those bins are still
+    included in the full-family topology so q/FDR run over the complete MECE
+    partition; they are non-tradeable (yes_token_id from market_events, no_token_id=None)
+    and the executable_mask downstream will mark them as False.
+    """
     city = _nonnull(payload.get("city"))
     target_date = _nonnull(payload.get("target_date"))
     metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
     if not (city and target_date and metric):
         raise ValueError("EDLI event payload missing city/target_date/metric")
+    if snapshot_token_map is not None:
+        # Tradeable bin: use the executable snapshot's token ids
+        yes_token_id: str | None = snapshot_token_map["yes_token_id"]
+        no_token_id: str | None = snapshot_token_map["no_token_id"]
+    else:
+        # Non-tradeable bin: use market_events.token_id (YES side only); no executable
+        # snapshot exists so no_token_id is absent
+        yes_token_id = _nonnull(row.get("token_id")) or None
+        no_token_id = None
     return MarketTopologyCandidate(
         city=city,
         target_date=target_date,
         metric=metric,
         condition_id=_nonnull(row.get("condition_id")),
-        yes_token_id=snapshot_token_map["yes_token_id"],
-        no_token_id=snapshot_token_map["no_token_id"],
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
         bin=_bin_from_market_event(row, payload),
         market_slug=_nonnull(row.get("market_slug") or row.get("event_slug")) or None,
     )
@@ -5974,6 +6746,26 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
+class FamilyKeyingError(ValueError):
+    """A market_events sibling of the bound family carries no resolved condition_id.
+
+    Fitz Constraint #4 antibody (silent keying loss). The family universe for a
+    (city, target_date, metric) is the COMPLETE MECE partition in market_events;
+    q/FDR are computed over that full partition. A sibling row whose condition_id
+    is NULL/empty cannot be keyed to an executable identity. Silently filtering it
+    out (the legacy ``COALESCE(condition_id,'') != ''`` behavior) shrinks the
+    family with NO diagnosable signal — which either kills every sibling later as
+    ``FDR_FAMILY_TOPOLOGY_INCOMPLETE`` or renormalizes q over a subset (~1.2x
+    inflation at 3/11 missing). Both are catastrophic and invisible.
+
+    Raising here converts that silent loss into a LOUD, named failure that points
+    at the exact family. It is byte-identical to legacy behavior when condition_id
+    is clean (the live invariant: 0/21018 market_events rows NULL today), so it
+    fabricates no trade and changes no current decision — it only makes a FUTURE
+    keying regression impossible to swallow silently at the producer->consumer seam.
+    """
+
+
 def _event_family_market_topology_rows(
     conn: sqlite3.Connection,
     payload: dict[str, object],
@@ -5986,6 +6778,12 @@ def _event_family_market_topology_rows(
     the quote gate. The family universe comes from market_events, not from the
     subset of fresh executable snapshots, so a missing sibling cannot shrink the
     FDR denominator.
+
+    Fail-loud keying antibody (Fitz #4): if ANY market_events row matching the
+    family (city, target_date, metric) has a NULL/empty condition_id, the family
+    is keying-broken and ``FamilyKeyingError`` is raised rather than the broken
+    sibling being silently dropped from the MECE partition. See
+    ``FamilyKeyingError`` for why a silent drop is catastrophic and invisible.
     """
 
     city = str(payload.get("city") or "").strip()
@@ -6000,6 +6798,34 @@ def _event_family_market_topology_rows(
     required = {"city", "target_date", "temperature_metric", "condition_id"}
     if not required.issubset(columns):
         return []
+    # ANTIBODY (Fitz #4): detect a keying-broken sibling BEFORE building the
+    # family. A separate count of NULL/empty-condition_id rows scoped to THIS
+    # family (never the whole table) — additive, so when condition_id is clean
+    # the count is 0 and the family construction below is byte-identical to
+    # legacy. A non-zero count means a sibling lost its executable identity at
+    # the producer (market ingest) → fail loud, naming the family, instead of
+    # silently shrinking the MECE partition q/FDR are computed over.
+    broken_siblings = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table_ref}
+        WHERE city = ?
+          AND target_date = ?
+          AND temperature_metric = ?
+          AND COALESCE(condition_id, '') = ''
+        """,
+        (city, target_date, metric),
+    ).fetchone()
+    n_broken = int(broken_siblings[0]) if broken_siblings else 0
+    if n_broken:
+        raise FamilyKeyingError(
+            f"market_events family city={city!r} target_date={target_date!r} "
+            f"metric={metric!r} has {n_broken} sibling row(s) with a NULL/empty "
+            f"condition_id — the bin lost its executable identity at the ingest "
+            f"producer. Refusing to bind a silently-shrunk MECE family (Fitz #4 "
+            f"keying antibody). Fix the market_events writer keying, do NOT drop "
+            f"the sibling."
+        )
     select_fields = [
         "condition_id",
         _optional_column_expr(columns, "market_slug"),

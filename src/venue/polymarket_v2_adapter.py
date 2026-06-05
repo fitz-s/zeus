@@ -1,7 +1,11 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-06-04
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+#                  + 2026-06-04 M5 mutex-IO antibody: venue read entrypoints
+#                    (get_order/get_open_orders/get_trades/get_positions) and the
+#                    on-chain _json_rpc_call assert assert_no_world_mutex_held_for_io
+#                    so blocking I/O under the world write lock fails loud, not wedges.
 """Polymarket CLOB V2 adapter.
 
 This module is the only R3 Z2 surface that may import py_clob_client_v2. It
@@ -33,6 +37,7 @@ from src.contracts.executable_market_snapshot import (
 from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.observability.counters import increment as _cnt_inc
+from src.state.db import assert_no_world_mutex_held_for_io as _assert_no_world_mutex_held_for_io
 
 logger = logging.getLogger(__name__)
 
@@ -530,11 +535,13 @@ class PolymarketV2Adapter:
         return _cancel_result_from_response(order_id, raw)
 
     def get_order(self, order_id: str) -> OrderState:
+        _assert_no_world_mutex_held_for_io("venue.get_order")
         raw = self._sdk_client().get_order(order_id)
         raw_dict = dict(raw or {})
         return OrderState(order_id=_extract_order_id(raw_dict) or order_id, status=str(raw_dict.get("status") or raw_dict.get("state") or "UNKNOWN"), raw=raw_dict)
 
     def get_open_orders(self, filter: OpenOrdersFilter | None = None) -> list[OrderState]:
+        _assert_no_world_mutex_held_for_io("venue.get_open_orders")
         client = self._sdk_client()
         get_orders = getattr(client, "get_open_orders", None)
         if not callable(get_orders):
@@ -553,6 +560,7 @@ class PolymarketV2Adapter:
         return [OrderState(order_id=_extract_order_id(item) or "", status=str(item.get("status") or item.get("state") or "UNKNOWN"), raw=dict(item)) for item in raw]
 
     def get_trades(self, since: Optional[str] = None) -> list[TradeFact]:
+        _assert_no_world_mutex_held_for_io("venue.get_trades")
         get_trades = getattr(self._sdk_client(), "get_trades", None)
         if not callable(get_trades):
             raise V2ReadUnavailable("SDK client does not expose get_trades; trade absence is unknown")
@@ -563,6 +571,7 @@ class PolymarketV2Adapter:
         return [TradeFact(raw=dict(item)) for item in raw]
 
     def get_positions(self) -> list[PositionFact]:
+        _assert_no_world_mutex_held_for_io("venue.get_positions")
         get_positions = getattr(self._sdk_client(), "get_positions", None)
         if not callable(get_positions):
             return self._get_positions_from_data_api()
@@ -2456,6 +2465,10 @@ def _eth_call_uint(
 
 
 def _json_rpc_call(rpc_url: str, method: str, params: list[Any]) -> Any:
+    # CATEGORY ANTIBODY (2026-06-04): the single on-chain RPC entrypoint. A
+    # blocking eth_call here while the world write mutex is held is the M5 /
+    # STEP-7 / #95 starvation disease — fail loud and located, never wedge.
+    _assert_no_world_mutex_held_for_io(f"onchain.{method}")
     payload = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
         separators=(",", ":"),

@@ -11,6 +11,7 @@ import pytest
 
 from src.strategy.market_fusion import LEGACY_POSTERIOR_MODE
 from src.types.market import Bin
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 
 
 def _legacy_kwargs() -> dict[str, object]:
@@ -41,7 +42,7 @@ class TestMarketAnalysisRngSeed:
         bins = _bins_3()
         members = np.random.default_rng(42).normal(65, 5, size=20)
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.15, 0.55, 0.30]),
             p_cal=np.array([0.15, 0.55, 0.30]),
             p_market=np.array([0.18, 0.48, 0.34]),
@@ -74,8 +75,8 @@ class TestMarketAnalysisRngSeed:
             **_legacy_kwargs(),
         )
 
-        ci_a = MarketAnalysis(**kwargs, rng_seed=1)._bootstrap_bin(1, 100)
-        ci_b = MarketAnalysis(**kwargs, rng_seed=2)._bootstrap_bin(1, 100)
+        ci_a = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), **kwargs, rng_seed=1)._bootstrap_bin(1, 100)
+        ci_b = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), **kwargs, rng_seed=2)._bootstrap_bin(1, 100)
         # Different seeds should produce different results (with high probability)
         assert ci_a != ci_b
 

@@ -131,3 +131,16 @@ def emos_ci_k_cov(city: str) -> Optional[float]:
     if not (k >= _K_COV_FLOOR):  # NaN-safe: NaN fails the comparison → floor
         k = _K_COV_FLOOR
     return k
+
+
+# NOTE (2026-06-03, Phase-2 K3 adversarial-verify finding): a
+# ``k_cov_from_settlement_coverage`` helper formerly lived here, claiming to fold the
+# settlement-backward coverage_ratio INTO the EMOS k_cov "gated by the K3 shadow flag".
+# That claim was FALSE — the function had ZERO live callers (referenced only by tests).
+# It is removed rather than wired because (1) the live settlement-coverage mechanism is
+# the per-(bin,direction) shrink in event_reactor_adapter._maybe_apply_settlement_
+# coverage_to_lcb (flag q_lcb_settlement_coverage_gate_enabled), which already grounds
+# the q_lcb against the settled record; and (2) k_cov is a per-FAMILY (city-level) sigma
+# factor while coverage_ratio is per-(bin,direction), so there is no well-defined
+# per-family ratio to fold — wiring it would invent a new aggregate AND double-apply
+# settlement coverage on top of the shrink. One mechanism, not two (Fitz #1: K<<N).

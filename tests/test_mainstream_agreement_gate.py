@@ -34,6 +34,7 @@ from __future__ import annotations
 import pytest
 
 from src.types.market import Bin
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +475,7 @@ def test_gate_fires_through_adapter_not_fail_open():
     p_raw = np.array([0.1, 0.7, 0.2])
     p_cal = np.array([0.1, 0.7, 0.2])
 
-    analysis = MarketAnalysis(
+    analysis = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="C"), 
         p_raw=p_raw, p_cal=p_cal, p_market=None,
         alpha=1.0, bins=bins, member_maxes=members,
         unit="C", precision=1.0,
@@ -485,6 +486,7 @@ def test_gate_fires_through_adapter_not_fail_open():
     family = SimpleNamespace(
         city="Wellington",
         target_date="2026-06-04",
+        metric="high",  # the gate fetches metric-matched mainstream (LOW->min, HIGH->max)
         candidates=[candidate_stub],
     )
     payload: dict = {}
@@ -499,7 +501,14 @@ def test_gate_fires_through_adapter_not_fail_open():
         "longitude": 174.792,
         "target_date": "2026-06-04",
     }
-    with patch("src.data.mainstream_forecast_source.fetch_mainstream_point", return_value=mainstream_result):
+    # STEP 7 (E2): the proof path now reads the WARM CACHE only
+    # (read_mainstream_point_cached), never fetch_mainstream_point — the fetch is
+    # done off the mutex path by _edli_mainstream_warm_cycle. Patch the cache-read
+    # the proof path actually calls.
+    with patch(
+        "src.data.mainstream_forecast_source.read_mainstream_point_cached",
+        return_value=mainstream_result,
+    ):
         _evaluate_and_store_mainstream_agreement(
             event=event,
             family=family,

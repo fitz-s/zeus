@@ -7,6 +7,7 @@ Spec §3.2-3.4:
 - Fallback: cluster+season → season → global → uncalibrated
 """
 
+import contextlib
 import logging
 from typing import Literal, Optional
 
@@ -33,6 +34,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_LOW_CONTRACT_WINDOW_DATA_VERSION,
     TIGGE_LOW_CONTRACT_WINDOW_DATA_VERSION,
 )
+from src.data.calibration_transfer_policy import CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
 
 _EXPECTED_GROUP_ROWS = {"F": F_CANONICAL_GRID.n_bins, "C": C_CANONICAL_GRID.n_bins}
 
@@ -446,6 +448,48 @@ def _low_live_min_decision_groups() -> int:
     """Minimum independent LOW groups allowed through the live read seam."""
     _, level2, _ = calibration_maturity_thresholds()
     return level2
+
+
+def _calibration_bin_source_v2_fit_enabled() -> bool:
+    """Return True when the canonical_v2 bin_source fit flag is ON.
+
+    FIX-1 shadow flag (2026-06-03): gates the correction that makes
+    get_decision_group_count and get_pairs_for_bucket query the SAME
+    population (canonical_v2) via CANONICAL_CALIBRATION_PAIR_BIN_SOURCE.
+
+    Flag-OFF  (default): legacy behavior preserved — bin_source_filter
+              is passed as None to both calls, which on the live corpus
+              (100% canonical_v2 rows) returns 0 pairs → cross-cluster
+              Platt borrow.  BYTE-IDENTICAL to pre-fix behavior.
+    Flag-ON:  both calls filter by CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
+              ("canonical_v2") so the ≤7 uncorrected cities get their own
+              read-time fit instead of a foreign-cluster borrow.
+
+    Default: False.  Operator promotes by setting
+    ``feature_flags.calibration_bin_source_v2_fit_enabled = true``
+    in config/settings.json after reviewing BEFORE_AFTER_canonical_bin_source.md.
+    # Created: 2026-06-03
+    # Last reused or audited: 2026-06-03
+    # Authority basis: FIX-1 canonical bin_source / wiring verdict 2026-06-03
+    """
+    try:
+        import json as _json
+        from pathlib import Path as _Path
+        cfg_path = _Path(__file__).resolve().parent.parent.parent / "config" / "settings.json"
+        if cfg_path.exists():
+            cfg = _json.loads(cfg_path.read_text())
+            return bool(
+                (cfg.get("feature_flags") or {}).get(
+                    "calibration_bin_source_v2_fit_enabled", False
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 — fail-open to legacy behavior
+        logger.warning(
+            "calibration_bin_source_v2_fit_enabled flag read failed: %s; "
+            "defaulting OFF (legacy bin_source behavior)",
+            exc,
+        )
+    return False
 
 
 def _low_n_eff_live_block_reason(n_samples: int) -> tuple[str, ...]:
@@ -943,14 +987,31 @@ def get_calibrator(
     # callers, skip the count + fit attempt and fall through to v2/fallback
     # paths directly. This avoids a metric-blind count whose result would be
     # discarded anyway (`_fit_from_pairs` short-circuits on non-HIGH at L267).
+    #
+    # FIX-1 (2026-06-03): calibration_bin_source_v2_fit_enabled flag gates
+    # the correction that wires CANONICAL_CALIBRATION_PAIR_BIN_SOURCE into
+    # both the count gate and the fit call so they query ONE population.
+    # Flag-OFF: bin_source_filter=None → legacy behavior (0 pairs → cross-
+    #   cluster borrow). BYTE-IDENTICAL to pre-fix behavior.
+    # Flag-ON: bin_source_filter=CANONICAL_CALIBRATION_PAIR_BIN_SOURCE →
+    #   canonical_v2 pairs → own read-time fit for uncorrected cities.
+    # Both states maintain count/fit population agreement (no new mismatch).
     if temperature_metric == "high":
-        n = get_decision_group_count(conn, cluster, season, metric="high")
+        _bin_source_v2 = _calibration_bin_source_v2_fit_enabled()
+        _fit_bin_source: str | None = (
+            CANONICAL_CALIBRATION_PAIR_BIN_SOURCE if _bin_source_v2 else None
+        )
+        n = get_decision_group_count(
+            conn, cluster, season, metric="high",
+            bin_source_filter=_fit_bin_source,
+        )
         if n >= level3:
             cal = _fit_from_pairs(
                 conn, cluster, season, unit=city.settlement_unit,
                 temperature_metric=temperature_metric,
                 cycle=cycle, source_id=source_id, horizon_profile=horizon_profile,
                 data_version=expected_data_version,
+                bin_source_filter=_fit_bin_source,
             )
             if cal is not None:
                 level = maturity_level(n)
@@ -1073,6 +1134,7 @@ def _fit_from_pairs(
     source_id: Optional[str] = None,
     horizon_profile: Optional[str] = None,
     data_version: Optional[str] = None,
+    bin_source_filter: str | None = None,
 ) -> Optional[ExtendedPlattCalibrator]:
     """Fit a new calibrator from stored pairs.
 
@@ -1101,8 +1163,15 @@ def _fit_from_pairs(
     # required because the gate at L267 already short-circuits non-HIGH;
     # passing it explicitly makes the implicit invariant visible at the
     # read seam and satisfies the store-side enforcement landed in slice A1.
+    #
+    # FIX-1 (2026-06-03): bin_source_filter is threaded from get_calibrator
+    # via _calibration_bin_source_v2_fit_enabled(). Flag-OFF: None (legacy,
+    # equivalent to old "canonical_v1" hardcode but now correctly returns 0
+    # on the all-v2 corpus). Flag-ON: CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
+    # ("canonical_v2"). Both states come from ONE constant so a future
+    # bin_source bump auto-propagates to both the count gate and the fit.
     pairs = get_pairs_for_bucket(
-        conn, cluster, season, bin_source_filter="canonical_v1", metric="high",
+        conn, cluster, season, bin_source_filter=bin_source_filter, metric="high",
     )
     _, _, level3 = calibration_maturity_thresholds()
     if len(pairs) < level3:
@@ -1173,26 +1242,70 @@ def _fit_from_pairs(
         f":{_eff_dv}:{_eff_cycle}:{_eff_source_id}:{_eff_horizon}:{cal.input_space}"
     )
 
-    # Save to DB for future use (B3cont: canonical save_platt_model — HIGH-only, v2 kwargs)
-    save_platt_model(
-        conn,
-        metric_identity=HIGH_LOCALDAY_MAX,
-        cluster=cluster,
-        season=season,
-        data_version=_eff_dv,
-        param_A=cal.A,
-        param_B=cal.B,
-        param_C=cal.C,
-        bootstrap_params=cal.bootstrap_params,
-        n_samples=cal.n_samples,
-        input_space=cal.input_space,
-        cycle=_eff_cycle,
-        source_id=_eff_source_id,
-        horizon_profile=_eff_horizon,
+    # Persist for future reads (B3cont: canonical save_platt_model — HIGH-only,
+    # v2 kwargs). BEST-EFFORT: `cal` is ALREADY a valid in-memory calibrator;
+    # the DB write is a cache side-effect. A persistence fault must NOT destroy
+    # `cal` nor propagate (R4/#174 — a swallowed DB error became 870x/day
+    # per-candidate trade rejections when this raised out of the fit). See
+    # _persist_calibrator_best_effort.
+    _persist_calibrator_best_effort(
+        conn, cal,
+        cluster=cluster, season=season,
+        cycle=_eff_cycle, source_id=_eff_source_id,
+        horizon_profile=_eff_horizon, data_version=_eff_dv,
     )
-    conn.commit()
 
     return cal
+
+
+def _persist_calibrator_best_effort(
+    conn, cal, *, cluster: str, season: str,
+    cycle: str, source_id: str, horizon_profile: str, data_version: str,
+) -> bool:
+    """Persist a read-time-fit HIGH calibrator; never raise.
+
+    R4 antibody (#174): the in-memory ``cal`` is the candidate's belief and is
+    already valid. Persistence to ``platt_models`` is a cache side-effect for
+    future reads. If the write faults (UNIQUE collision — now made idempotent
+    by INSERT OR REPLACE in save_platt_model — or any other sqlite3 error:
+    locked DB, disk full, schema drift), this MUST degrade loudly rather than
+    propagate out of _fit_from_pairs into the reactor's UNKNOWN_REVIEW_REQUIRED
+    dead-letter, which mislabels a tradeable candidate as a no-trade.
+
+    Returns True if the row was written+committed, False if it degraded.
+    Makes "calibrator persistence is best-effort" an explicit, testable
+    relationship (iron rule #4: kill the category, not just the instance).
+    """
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX  # lazy — circular guard
+    try:
+        save_platt_model(
+            conn,
+            metric_identity=HIGH_LOCALDAY_MAX,
+            cluster=cluster,
+            season=season,
+            data_version=data_version,
+            param_A=cal.A,
+            param_B=cal.B,
+            param_C=cal.C,
+            bootstrap_params=cal.bootstrap_params,
+            n_samples=cal.n_samples,
+            input_space=cal.input_space,
+            cycle=cycle,
+            source_id=source_id,
+            horizon_profile=horizon_profile,
+        )
+        conn.commit()
+        return True
+    except Exception as exc:  # noqa: BLE001 — persistence is best-effort by contract
+        logger.warning(
+            "CALIBRATION_STORE_DEGRADED: persist of read-time-fit calibrator "
+            "for %s_%s failed (%s: %s) — serving the valid in-memory calibrator, "
+            "candidate NOT rejected.",
+            cluster, season, type(exc).__name__, exc,
+        )
+        with contextlib.suppress(Exception):
+            conn.rollback()
+        return False
 
 
 def _canonical_pair_groups_valid(pairs: list[dict], *, unit: str | None = None) -> bool:

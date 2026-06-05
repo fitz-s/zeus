@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -26,6 +28,28 @@ from src.events.opportunity_event import OpportunityEvent, assert_available_for_
 from src.state.db import world_write_mutex
 
 UTC = timezone.utc
+
+DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 45.0
+
+
+def _cycle_budget_seconds() -> float | None:
+    """Per-cycle wall-clock budget for process_pending (E1 / STEP 8).
+
+    Default 45.0s; override via ``ZEUS_REACTOR_CYCLE_BUDGET_SECONDS``. A value of
+    0 or negative disables the budget (unbounded cycle, legacy behavior). A
+    malformed env value falls back to the default rather than crashing the
+    reactor.
+    """
+    raw = os.environ.get("ZEUS_REACTOR_CYCLE_BUDGET_SECONDS")
+    if raw is None:
+        return DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS
+    try:
+        budget = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS
+    return budget if budget > 0 else None
+
+
 DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({"SUBMIT_DISABLED", "NOT_SUBMITTED_DRY_RUN"})
 LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES = frozenset({
     "SUBMITTED",
@@ -107,6 +131,13 @@ class EventSubmissionReceipt:
     # the Phase-2 gate will handle NULL explicitly).  Read-only observation column;
     # no selection or gate behavior here.
     alpha_gap: float | None = None
+    # #120 (2026-06-04): which calibrator produced q_live for this receipt.
+    # "emos" = EMOS sole-calibrator served this (city,season,metric) cell;
+    # "bias_platt"/"platt" = the maze fallback (bias-corrected / plain Platt).
+    # None = not tagged (gate path / error receipts). Persisted in receipt_json
+    # ONLY when set (omit-when-None for hash stability) so 06-05+ settlement can
+    # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
+    q_source: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
@@ -125,6 +156,17 @@ class ReactorConfig:
     tiny_live_max_orders_per_day: int = 1
     # BUG #99 antibody: order-emission rate limit, independent of the notional cap.
     tiny_live_max_orders_per_window: int = 1
+    # Task #102 (BEST-ORDER SELECTION): book-wide edge-zone admission gate, the
+    # LAST step in the money-path. DEFAULT FALSE => byte-identical to today (the
+    # gate is computed only when this flag is True). When True, a candidate is
+    # admitted ONLY if its honest (q_lcb-based) after-cost EV-per-dollar clears
+    # ``edge_zone_min_ev_per_dollar`` -- a TIGHTENING that demotes the confident
+    # tails (price>0.8 / price<0.5) where after-cost edge is absent and keeps the
+    # market-uncertain mid-range where settlement-grounded edge is real. Pure +
+    # order-independent: it can never admit a negative-EV order ahead of a
+    # positive one. See src/contracts/edge_zone_admission.py.
+    edge_zone_admission_enabled: bool = False
+    edge_zone_min_ev_per_dollar: float = 0.0
 
 
 # An executable market snapshot for the family may simply not be captured yet on the cycle
@@ -192,8 +234,18 @@ class OpportunityEventReactor:
         # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
         # taken under the world-DB write mutex.
         events = self._store.fetch_pending(decision_time=decision_time.astimezone(UTC).isoformat(), limit=limit)
+        # E1 (STEP 8): per-cycle wall-clock budget. A cycle must not run unbounded;
+        # once the budget is exceeded, stop after the current event and leave the
+        # rest PENDING (not consumed, not dropped) for the next cycle. This caps a
+        # cycle so the scheduler never hits "max running instances reached" and
+        # fresh candidates (freshest-target-first, STEP 3) are reached promptly.
+        # Default 45s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
+        budget = _cycle_budget_seconds()
+        cycle_start = time.monotonic()
         for event in events:
             self._process_event_unit(event, decision_time=decision_time, result=result)
+            if budget is not None and (time.monotonic() - cycle_start) >= budget:
+                break
         return result
 
     def _process_event_unit(
@@ -499,7 +551,7 @@ class OpportunityEventReactor:
             reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"
             self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", reason, result, receipt=receipt, decision_time=decision_time)
             return
-        proof_stage, proof_reason = _receipt_money_path_blocker(receipt)
+        proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
             if proof_reason and "SOURCE_CAPTURED_AFTER_DECISION_TIME" in proof_reason:
                 # Transient: the forecast source was re-ingested (source_available_at updated)
@@ -778,7 +830,10 @@ def _receipt_matches_event(event: OpportunityEvent, receipt: EventSubmissionRece
     return True
 
 
-def _receipt_money_path_blocker(receipt: EventSubmissionReceipt) -> tuple[str | None, str]:
+def _receipt_money_path_blocker(
+    receipt: EventSubmissionReceipt,
+    config: "ReactorConfig | None" = None,
+) -> tuple[str | None, str]:
     if receipt.side_effect_status == "COMMAND_CREATED":
         return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN"
     if not receipt.trade_score_positive:
@@ -793,6 +848,26 @@ def _receipt_money_path_blocker(receipt: EventSubmissionReceipt) -> tuple[str | 
         return "KELLY", receipt.reason or "KELLY_TOO_SMALL"
     if not receipt.final_intent_id:
         return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "FINAL_INTENT_RECEIPT_MISSING"
+    # Task #102 — book-wide edge-zone admission, the LAST money-path step (after
+    # trade_score/FDR/Kelly so it only ever further TIGHTENS an already-admissible
+    # proof; never loosens). Gated by ``edge_zone_admission_enabled`` and computed
+    # ONLY when True => OFF is byte-identical to the legacy chain (the function
+    # falls straight through to ``return None, ""`` exactly as before). The gate
+    # is a pure function of THIS receipt's own (q_lcb_5pct, c_fee_adjusted): it
+    # demotes the confident tails where honest after-cost EV-per-dollar (computed
+    # on the CONSERVATIVE q_lcb, never point q) is non-positive, concentrating
+    # admission on the market-uncertain mid-range where settlement-grounded edge
+    # is real. Order-independent by construction — see edge_zone_admission.py.
+    if config is not None and getattr(config, "edge_zone_admission_enabled", False):
+        from src.contracts.edge_zone_admission import edge_zone_admits
+
+        verdict = edge_zone_admits(
+            q_lcb=receipt.q_lcb_5pct,
+            cost=receipt.c_fee_adjusted,
+            min_ev_per_dollar=float(getattr(config, "edge_zone_min_ev_per_dollar", 0.0)),
+        )
+        if not verdict.admits:
+            return "TRADE_SCORE", verdict.reason or "EDGE_ZONE_BLOCKED"
     return None, ""
 
 

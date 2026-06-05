@@ -1,3 +1,10 @@
+# Created: prior to 2026-05-24
+# Last reused or audited: 2026-06-04
+# Authority basis: EDLI v1 §10 online MarketChannelIngestor contract.
+#   2026-06-04: 5th-instance WAL-bloat fix — pre-capture pattern for on_connect
+#   REST orderbook fetch; seed_from_rest gains pre_cached kwarg; on_connect gains
+#   pre_captured_books kwarg; run_websocket_forever pre-captures BEFORE
+#   with _world_mutex (fixes 488→601 MB zeus-world.db WAL lock starvation).
 """Online Polymarket market-channel ingestor for EDLI quote/book evidence."""
 
 from __future__ import annotations
@@ -147,13 +154,46 @@ class MarketChannelIngestor:
             self._cache_event_payload(event)
         return event
 
-    def seed_from_rest(self, fetch_orderbook: RestOrderbookFetch, *, received_at: str) -> list[EventWriteResult]:
-        """REST-seed current books on connect/reconnect before channel deltas."""
+    def seed_from_rest(
+        self,
+        fetch_orderbook: RestOrderbookFetch,
+        *,
+        received_at: str,
+        pre_cached: "dict[str, dict] | None" = None,
+    ) -> list[EventWriteResult]:
+        """REST-seed current books on connect/reconnect before channel deltas.
+
+        LOCK DISCIPLINE (2026-06-04): this method MUST NOT be called while the
+        process-global zeus-world.db write mutex is held, UNLESS every active
+        token is already present in ``pre_cached`` (i.e. the I/O happened
+        off-lock). The fallback-fetch branch (``pre_cached`` absent for a
+        token) asserts the mutex is NOT held via
+        ``assert_no_world_mutex_held_for_io`` so any under-mutex regression
+        raises ``WorldMutexIOViolation`` immediately at this callsite rather
+        than wedging the daemon (WAL-lock starvation).
+
+        ``pre_cached`` is a {token_id: book_dict} map built by the caller
+        BEFORE acquiring any world-DB write mutex (STEP-7 / pre-capture
+        pattern). When present, the cached dict is used instead of calling
+        ``fetch_orderbook`` — zero I/O under the lock.  Tokens absent from
+        ``pre_cached`` (or when ``pre_cached`` is ``None``) fall back to
+        calling ``fetch_orderbook`` directly; this path is only safe (and
+        only reached in practice) when the world mutex is NOT held.
+        """
+        from src.state.db import assert_no_world_mutex_held_for_io
 
         results: list[EventWriteResult] = []
         for token_id in sorted(self._active_token_ids):
             try:
-                message = dict(fetch_orderbook(token_id))
+                if pre_cached is not None and token_id in pre_cached:
+                    message = dict(pre_cached[token_id])
+                else:
+                    # Fallback: live fetch.  STRUCTURALLY FORBIDDEN under the
+                    # world mutex — assert here so any regression raises at
+                    # this exact site rather than wedging the daemon deeper in
+                    # the call stack at get_orderbook_snapshot.
+                    assert_no_world_mutex_held_for_io("seed_from_rest.fallback_fetch")
+                    message = dict(fetch_orderbook(token_id))
             except Exception as exc:
                 _logger.warning(
                     "seed_from_rest: skipping token %s — fetch failed (%s: %s)",
@@ -348,6 +388,7 @@ def active_weather_token_metadata_from_snapshots(
     *,
     limit: int = 2000,
     priority_token_ids: set[str] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, MarketTokenMetadata]:
     """Read active weather token metadata from executable snapshot truth.
 
@@ -388,6 +429,29 @@ def active_weather_token_metadata_from_snapshots(
         predicates.append("COALESCE(closed, 0) = 0")
     if "event_slug" in columns:
         predicates.append("(LOWER(COALESCE(event_slug, '')) LIKE '%weather%' OR LOWER(COALESCE(event_slug, '')) LIKE '%temperature%')")
+    # SETTLED-EXCLUSION (2026-06-04 candidate-flow root): EMS active/closed lifecycle
+    # flags are never maintained (live rows all show active=1/closed=0), so the two
+    # predicates above exclude nothing — settled weather markets stay in the universe.
+    # The only honest tradeability signal is market_end_at vs now: a market whose
+    # market_end_at is in the PAST cannot be a tradeable candidate and must NOT enter
+    # the live subscription / REST-seed universe (else the persistent channel thread
+    # drowns its reseed in 404 dead tokens and live BEST_BID_ASK emission starves).
+    # NULL market_end_at is KEPT (coverage-safe: cannot prove settled → Blocker #52).
+    # now_iso is a self-generated UTC ISO-8601 string (no single quote → injection-safe).
+    #
+    # STEP 5 (consolidated timeliness fix): this SQL `market_end_at > now` is the
+    # bulk-set expression of the ONE canonical POST_TRADING-boundary authority,
+    # ``src.strategy.market_phase.market_open_at_decision`` (= as_of <
+    # polymarket_end_utc, the exact complement of market_phase_for_decision's
+    # POST_TRADING transition). executable_market_snapshots carries no
+    # city/target_date, so the per-row forecast-phase form cannot run here; the
+    # end-boundary IS the shared authority and a relationship test pins SQL ≡
+    # predicate so the universe filter and the phase axis cannot diverge. NOT the
+    # forecast_only-admission predicate — the universe legitimately keeps
+    # SETTLEMENT_DAY markets (day0/exit); only POST_TRADING is excluded.
+    if "market_end_at" in columns:
+        now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        predicates.append(f"(market_end_at IS NULL OR market_end_at > '{now_iso}')")
     where_clause = "WHERE " + " AND ".join(predicates) if predicates else ""
     # Latest snapshot per market (condition_id). Without a captured_at column we
     # cannot rank temporally, so fall back to one row per condition by rowid.
@@ -528,26 +592,69 @@ class MarketChannelOnlineService:
     _refresh_window_start: datetime | None = None
     _refresh_action_keys: set[tuple[str, str, str]] = field(default_factory=set)
 
-    def on_connect(self, *, received_at: str) -> list[EventWriteResult]:
+    def on_connect(
+        self,
+        *,
+        received_at: str,
+        pre_captured_books: "dict[str, dict] | None" = None,
+    ) -> list[EventWriteResult]:
+        """Seed the book cache on connect.
+
+        ``pre_captured_books`` is an optional {token_id: book_dict} map
+        captured BEFORE the caller acquired any world-DB write mutex (STEP-7
+        / pre-capture pattern).  Passing it here avoids re-fetching under the
+        lock and prevents WAL-lock starvation (the 5th instance fix
+        2026-06-04).  When ``None`` the legacy path calls ``fetch_orderbook``
+        directly — only valid when the world mutex is NOT held.
+        """
         self.connected = True
         self.gap_start = None
         if self.fetch_orderbook is None:
             return []
-        return self.ingestor.seed_from_rest(self.fetch_orderbook, received_at=received_at)
+        return self.ingestor.seed_from_rest(
+            self.fetch_orderbook,
+            received_at=received_at,
+            pre_cached=pre_captured_books,
+        )
 
     def on_disconnect(self, *, gap_start: str) -> None:
         self.connected = False
         self.gap_start = gap_start
 
-    def on_reconnect(self, *, received_at: str) -> list[EventWriteResult]:
+    def on_reconnect(
+        self,
+        *,
+        received_at: str,
+        pre_captured_books: "dict[str, dict] | None" = None,
+    ) -> list[EventWriteResult]:
+        """Seed gap-close books on reconnect.
+
+        ``pre_captured_books`` is an optional {token_id: book_dict} map
+        captured BEFORE the caller acquired any world-DB write mutex (STEP-7
+        / pre-capture pattern — 5th-instance fix 2026-06-04).  When provided,
+        no network I/O happens inside this method.  When ``None``, the legacy
+        per-token direct-fetch path is used — ONLY valid when the world mutex
+        is NOT held (enforced structurally via the assert inside
+        ``reconnect_gap_snapshot`` → ``seed_from_rest`` fallback branch).
+        """
         self.connected = True
         if self.fetch_orderbook is None:
             self.gap_start = None
             return []
         results = []
+        from src.state.db import assert_no_world_mutex_held_for_io
+
+        gap_start_captured = self.gap_start or received_at
         for token_id in sorted(self.ingestor._active_token_ids):
             try:
-                message = dict(self.fetch_orderbook(token_id))
+                if pre_captured_books is not None and token_id in pre_captured_books:
+                    message = dict(pre_captured_books[token_id])
+                else:
+                    # Fallback: live fetch — STRUCTURALLY FORBIDDEN under the world
+                    # mutex.  Assert here (earlier than the get_orderbook_snapshot
+                    # guard) so the violation fires at this callsite with context.
+                    assert_no_world_mutex_held_for_io("on_reconnect.fallback_fetch")
+                    message = dict(self.fetch_orderbook(token_id))
             except Exception as exc:
                 _logger.warning(
                     "on_reconnect: skipping token %s — fetch failed (%s: %s)",
@@ -560,7 +667,7 @@ class MarketChannelOnlineService:
             message.setdefault("asset_id", token_id)
             event = self.ingestor.reconnect_gap_snapshot(
                 message,
-                gap_start=self.gap_start or received_at,
+                gap_start=gap_start_captured,
                 received_at=received_at,
             )
             if event is not None:
@@ -597,9 +704,37 @@ class MarketChannelOnlineService:
         while stop_event is None or not stop_event.is_set():
             received_at = datetime.now(UTC).isoformat()
             try:
+                # Pre-capture REST orderbook snapshots BEFORE acquiring the world
+                # mutex (STEP-7 / pre-capture pattern — 5th-instance fix 2026-06-04).
+                # Holding the world mutex across a blocking REST fetch was the direct
+                # cause of zeus-world.db WAL bloat (488→601 MB, STAT=U wedge).
+                # The fetch now runs off the lock; only the fast DB-only seed commit
+                # happens inside the critical section.
+                pre_captured_books: dict[str, dict] | None = None
+                if self.fetch_orderbook is not None:
+                    pre_captured_books = {}
+                    for _token_id in sorted(self.ingestor._active_token_ids):
+                        try:
+                            pre_captured_books[_token_id] = self.fetch_orderbook(_token_id)
+                        except Exception as _exc:
+                            _logger.warning(
+                                "market_channel: pre-fetch failed for token %s"
+                                " (will skip seed for this token): %s: %s",
+                                _token_id,
+                                type(_exc).__name__,
+                                _exc,
+                            )
+                            # Token absent from pre_captured_books → seed_from_rest
+                            # skips it gracefully (fail-closed per token, not per
+                            # connect — the WS connection proceeds normally).
+
                 # Seed-on-connect write unit (REST book seed → event/feasibility rows).
+                # I/O is done; only fast DB writes + commit happen under the mutex.
                 with _world_mutex:
-                    self.on_connect(received_at=received_at)
+                    self.on_connect(
+                        received_at=received_at,
+                        pre_captured_books=pre_captured_books,
+                    )
                     if commit is not None:
                         commit()
                 async with websockets.connect(endpoint, ping_interval=20, ping_timeout=20) as ws:
@@ -661,12 +796,29 @@ class MarketChannelOnlineService:
                         pass
                 await asyncio.sleep(reconnect_delay_seconds)
                 try:
-                    # Reconnect seed write unit — serialized against the reactor.
-                    # Rare error-path; on_reconnect does per-token REST seeds but
-                    # this path is not the steady-state hot loop, so guarding the
-                    # whole seed+commit keeps the in-process serialization simple.
+                    # Pre-capture reconnect books OFF the mutex (same STEP-7
+                    # pre-capture pattern as the initial connect path above).
+                    _reconnect_at = datetime.now(UTC).isoformat()
+                    _pre_reconnect_books: dict[str, dict] | None = None
+                    if self.fetch_orderbook is not None:
+                        _pre_reconnect_books = {}
+                        for _tid in sorted(self.ingestor._active_token_ids):
+                            try:
+                                _pre_reconnect_books[_tid] = self.fetch_orderbook(_tid)
+                            except Exception as _exc:
+                                _logger.warning(
+                                    "market_channel: reconnect pre-fetch failed for"
+                                    " token %s (will skip seed): %s: %s",
+                                    _tid,
+                                    type(_exc).__name__,
+                                    _exc,
+                                )
+                    # Reconnect seed write unit — only fast DB writes under the mutex.
                     with _world_mutex:
-                        self.on_reconnect(received_at=datetime.now(UTC).isoformat())
+                        self.on_reconnect(
+                            received_at=_reconnect_at,
+                            pre_captured_books=_pre_reconnect_books,
+                        )
                         if commit is not None:
                             commit()
                 except Exception as seed_exc:  # noqa: BLE001

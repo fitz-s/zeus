@@ -437,6 +437,7 @@ def get_decision_group_count(
     authority_filter: str = "VERIFIED",
     *,
     metric: Literal["high", "low"] | None = None,
+    bin_source_filter: str | None = None,
 ) -> int:
     """Count independent decision groups in a calibration bucket.
 
@@ -444,24 +445,47 @@ def get_decision_group_count(
     (see `get_pairs_for_bucket` docstring). `metric="low"` raises
     immediately because legacy `calibration_pairs` has no
     `temperature_metric` column.
+
+    `bin_source_filter` mirrors the same parameter on `get_pairs_for_bucket`.
+    When provided, only rows with the matching bin_source value are counted,
+    so the count and fit populations are guaranteed identical (FIX-1
+    canonical bin_source / wiring verdict 2026-06-03: both callers must
+    query ONE population via CANONICAL_CALIBRATION_PAIR_BIN_SOURCE so a
+    future bin_source bump cannot reopen the count/fit mismatch).
     """
+    # Created: 2026-06-03
+    # Last reused or audited: 2026-06-03
+    # Authority basis: FIX-1 canonical bin_source / wiring verdict 2026-06-03
     if metric == "low":
         raise NotImplementedError(
             "get_decision_group_count reads legacy `calibration_pairs`, "
             "which is HIGH-only. For LOW counts use the calibration_pairs API."
         )
     table = _qualified_calibration_read_table(conn, "calibration_pairs")
+    bin_clause = "AND bin_source = ?" if bin_source_filter is not None else ""
     if authority_filter == "any" or not _has_authority_column(conn):
+        params: tuple = (
+            (cluster, season, bin_source_filter)
+            if bin_source_filter is not None
+            else (cluster, season)
+        )
         row = conn.execute(f"""
             SELECT COUNT(DISTINCT decision_group_id) FROM {table}
             WHERE cluster = ? AND season = ? AND decision_group_id IS NOT NULL
-        """, (cluster, season)).fetchone()
+            {bin_clause}
+        """, params).fetchone()
     else:
+        params = (
+            (cluster, season, authority_filter, bin_source_filter)
+            if bin_source_filter is not None
+            else (cluster, season, authority_filter)
+        )
         row = conn.execute(f"""
             SELECT COUNT(DISTINCT decision_group_id) FROM {table}
             WHERE cluster = ? AND season = ? AND authority = ?
               AND decision_group_id IS NOT NULL
-        """, (cluster, season, authority_filter)).fetchone()
+            {bin_clause}
+        """, params).fetchone()
     return int(row[0] or 0)
 
 
@@ -540,8 +564,26 @@ def save_platt_model(
     _emf_col = ", error_model_family" if _has_emf else ""
     _emf_ph = ", ?" if _has_emf else ""
     _emf_val = (error_model_family,) if _has_emf else ()
+    # IDEMPOTENT (2026-06-04, R4 fix): a read-time re-fit of the same bucket
+    # collides on BOTH the model_key PRIMARY KEY (the 8-tuple
+    # metric:cluster:season:data_version:cycle:source_id:horizon_profile:input_space)
+    # and the UNIQUE(...,is_active,...) 9-tuple — both resolve to the same active
+    # row, since this INSERT always sets is_active=1 and model_key encodes the
+    # same 8-tuple. The plain INSERT raised IntegrityError, which propagated out
+    # of the read-time fit (manager._fit_from_pairs) and was swallowed UPSTREAM
+    # into a per-candidate TRADE rejection (870x live on 2026-06-04, puncturing
+    # the only currently-tradeable D-1 window). INSERT OR REPLACE atomically
+    # replaces that one colliding active row — no IntegrityError, no DB fault
+    # masquerading as a no-trade. No separate is_active=0 history row is at risk:
+    # deactivate_model DELETEs (not soft-deactivates), and model_key (PK) is
+    # is_active-independent, so a same-bucket is_active=0 row cannot coexist with
+    # the active one. platt_models is a leaf (read by model_key/bucket columns,
+    # no rowid FK), so REPLACE's delete+insert is safe. Defense-in-depth: the
+    # caller (manager._persist_calibrator_best_effort) also treats this write as
+    # best-effort, so any residual DB fault degrades loudly instead of killing
+    # the candidate (the category kill, iron rule #4).
     conn.execute(f"""
-        INSERT INTO platt_models
+        INSERT OR REPLACE INTO platt_models
         (model_key, temperature_metric, cluster, season, data_version,
          input_space, param_A, param_B, param_C, bootstrap_params_json,
          n_samples, brier_insample, fitted_at, is_active, authority,

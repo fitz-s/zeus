@@ -770,7 +770,19 @@ def _print_per_city_table(rows: list[dict], title: str) -> None:
 # this is the single line that flips.
 # ---------------------------------------------------------------------------
 
-ARM_ARTIFACT_SCHEMA = "edli_arm_gate_artifact/v1"
+# SINGLE SOURCE OF TRUTH (2026-06-04 antibody): the artifact ``schema`` string is
+# OWNED BY THE CONSUMER (the boot gate is the authority that gates arming). This
+# producer must emit EXACTLY what ``verify_edli_arm_gate_artifact`` enforces, else
+# the boot gate rejects every artifact with ARM_GATE_ARTIFACT_SCHEMA_INVALID — a
+# permanent un-armable state no amount of re-emission could fix. The prior literal
+# ``"edli_arm_gate_artifact/v1"`` here diverged from the consumer's
+# ``"edli_arm_gate_v1"`` (producer/consumer schema-string mismatch — caught by the
+# CROSS-MODULE relationship test tests/test_arm_gate_emit_scheduler_job.py, which
+# the older same-island test missed by asserting producer-vs-producer). Importing
+# the consumer's constant makes the divergence category unconstructable.
+from src.events.live_profit_audit import (  # noqa: E402 — after sys.path injection above
+    ARM_GATE_ARTIFACT_SCHEMA as ARM_ARTIFACT_SCHEMA,
+)
 
 # The 9 fields PR-2's D2 boot gate requires. Kept here as the explicit contract
 # the producer fills — a missing key is a producer bug caught by the H3 test.
@@ -958,13 +970,23 @@ def main(argv: Optional[list[str]] = None) -> None:
     # The equal-row verdict (_arm_verdict) is row-democracy and shown for
     # continuity. The ARM DECISION is the capital-weighted one: a cohort can
     # clear 51% by row count while losing money once sized.
+    # OPERATOR INTENT RESTORED (2026-06-04): mainstream-agreement is REFERENCE-ONLY
+    # and must NEVER wire into a production/arm decision. The ARM VERDICT is therefore
+    # computed on the PRODUCTION cohort (all_rows = every deduped receipt that passed
+    # the real trade gates), NOT the gate-PASS (mainstream_agreement_pass=1) subset.
+    # Settlement proves EMOS beats mainstream, so an agreement filter selects the
+    # low-edge subset and makes arming structurally UNREACHABLE (the infinite-deferral
+    # trap). The gate-PASS split above is DIAGNOSTIC only. The statistical bar
+    # (>51%, sigma>=2, per-city n, capital-weighted ROI>0) is unchanged — this is a
+    # cohort correction, not a gate relaxation (all_rows is a superset; currently
+    # DENIED on negative EV).
     print("\n" + "=" * 78)
-    print("CAPITAL-WEIGHTED ARM VERDICT (gate-PASS cohort) — kelly_size_usd weighted")
+    print("CAPITAL-WEIGHTED ARM VERDICT (PRODUCTION cohort — mainstream is diagnostic only)")
     print("=" * 78)
     cw_verdict: Optional[CapitalWeightedArmVerdict] = None
     cw_eligible = False
     try:
-        cw_verdict = _compute_capital_weighted_verdict(gate_rows)
+        cw_verdict = _compute_capital_weighted_verdict(all_rows)
         print(f"  equal_row_win_rate      = {_fmt_pct(cw_verdict.equal_row_win_rate)}")
         print(f"  equal_row_ev_sigma      = {_fmt_f(cw_verdict.equal_row_ev_sigma, '.2f')}")
         print(f"  capital_weighted_roi    = {_fmt_pct(cw_verdict.capital_weighted_roi)}")
@@ -984,7 +1006,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"  ARM (capital-weighted): DENIED — {exc}")
 
     # --- Equal-row verdict (continuity; NOT the arming decision) ---
-    arm_eligible, arm_reason = _arm_verdict(gate_stats, gate_rows)
+    # PRODUCTION cohort (all_rows), per operator reference-only intent (see above).
+    arm_eligible, arm_reason = _arm_verdict(all_stats, all_rows)
     print("\n" + "=" * 78)
     print("EQUAL-ROW VERDICT (continuity only; thresholds: win_rate>51%, sigma>=2.0, n>=20, per-city n>=5)")
     print("=" * 78)
@@ -1012,8 +1035,11 @@ def main(argv: Optional[list[str]] = None) -> None:
             # coverage_licensed is ALWAYS False here: no settlement-calibrated
             # coverage license (K3) exists on this branch. The honest verdict on
             # current data is DENIED, so the artifact is BLOCKING by construction.
+            # PRODUCTION cohort (all_rows) for date-coverage evidence too — the
+            # artifact reflects what the system actually trades, not the
+            # mainstream-agreeing subset (operator reference-only intent).
             artifact = build_arm_artifact(
-                cw_verdict, gate_rows, argv=argv, coverage_licensed=False
+                cw_verdict, all_rows, argv=argv, coverage_licensed=False
             )
         emit_arm_artifact(args.emit_artifact, artifact)
         blocks = (artifact["capital_weighted_ev"] <= 0.0) or (not artifact["coverage_licensed"])

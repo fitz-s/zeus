@@ -129,6 +129,20 @@ class SettlementResolution:
 
         state = outcome_state if outcome_state is not None else _coerce_outcome(row)
 
+        # METRIC/UNIT-CROSSING ANTIBODY (2026-06-04): the winning bin is grid.bin_for_value(value).
+        # If the row's settlement_unit disagrees with the grid's unit (e.g. a °F value graded on a
+        # °C grid), the bin is silently WRONG. Make that cross-unit grading unconstructable rather
+        # than caller-disciplined — fail closed instead of grading a value in the wrong unit.
+        _row_unit = row.get("settlement_unit")
+        _grid_u = grid_unit(grid)
+        if _row_unit and _grid_u and str(_row_unit).upper()[:1] != str(_grid_u).upper()[:1]:
+            raise SettlementResolutionUndeterminedError(
+                f"SettlementResolution refused: settlement_unit={_row_unit!r} != grid_unit={_grid_u!r} "
+                f"for city={row.get('city')!r} date={row.get('target_date')!r} "
+                f"metric={row.get('temperature_metric')!r}. Grading a value in the wrong unit "
+                f"yields the wrong winning bin — fail closed."
+            )
+
         winner_bin: Bin = grid.bin_for_value(settlement_value)
         ordered_bins = grid.as_bins()
         winning_index = _index_of(ordered_bins, winner_bin)

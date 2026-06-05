@@ -19,7 +19,7 @@ from src.events.opportunity_event import (
     make_day0_extreme_updated_event,
     make_opportunity_event,
 )
-from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
+from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig, ReactorResult
 from src.state.db import init_schema
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
@@ -480,7 +480,16 @@ def test_processed_event_terminal_surface_includes_execution_receipt_certificate
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
 
-    result = reactor.process_pending(decision_time=decision_time)
+    # Drive the single event through the reactor's per-event processing unit
+    # directly. This test verifies the terminal execution-receipt CERTIFICATE
+    # surface, not queue admission. The event's fixture is rigidly anchored to
+    # an already-settled (2026-05-24) target at a next-day decision; the STEP-3
+    # fetch_pending timeliness floor (a QUEUE-admission concern) would correctly
+    # drop such a strictly-past event before processing. Bypassing fetch_pending
+    # keeps this test focused on the cert surface while the dedicated
+    # fetch_pending timeliness tests own the queue-floor behavior.
+    result = ReactorResult()
+    reactor._process_event_unit(event, decision_time=decision_time, result=result)
 
     assert result.processed == 1
     assert _terminal_surfaces(conn, event.event_id)["execution_receipt"] == 1
@@ -626,7 +635,16 @@ def test_live_submitted_execution_receipt_certificate_is_terminal_when_submit_en
         regret_ledger=NoTradeRegretLedger(store.conn),
     )
 
-    result = reactor.process_pending(decision_time=decision_time)
+    # Drive the single event through the reactor's per-event processing unit
+    # directly. This test verifies the terminal execution-receipt CERTIFICATE
+    # surface, not queue admission. The event's fixture is rigidly anchored to
+    # an already-settled (2026-05-24) target at a next-day decision; the STEP-3
+    # fetch_pending timeliness floor (a QUEUE-admission concern) would correctly
+    # drop such a strictly-past event before processing. Bypassing fetch_pending
+    # keeps this test focused on the cert surface while the dedicated
+    # fetch_pending timeliness tests own the queue-floor behavior.
+    result = ReactorResult()
+    reactor._process_event_unit(event, decision_time=decision_time, result=result)
 
     assert result.processed == 1
     assert _terminal_surfaces(conn, event.event_id)["execution_receipt"] == 1

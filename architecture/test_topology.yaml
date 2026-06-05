@@ -33,6 +33,8 @@ test_trust_policy:
     tests/test_edli_market_channel_refresh_authority.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P1-1: scan_authority=VERIFIED contract; trigger reason separate (relationship test)"}
     tests/test_market_events_persistence_observability.py: {created: "2026-06-03", last_used: "2026-06-03", note: "P2-2: market_events persistence failure surfaces to scheduler health (relationship test)"}
     tests/test_calibration_manager_w0.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_calibration_coverage_guard.py: {created: "2026-06-03", last_used: "2026-06-03", note: "#90: loud bias+Platt calibration-coverage antibody — warn(shadow)/fail-closed(armed); relationship test over real read_bias_model + boot-wrapper severity"}
+    tests/test_calibration_bin_source_fix1.py: {created: "2026-06-03", last_used: "2026-06-03", note: "FIX-1 antibody: canonical_v2 bin_source wiring + flag-OFF byte-identity + count/fit population agreement"}
     tests/test_migration_converge_settlement_store.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_cert_dual_chain.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/test_unblock_w1_intake_phase_filter.py: {created: "2026-06-03", last_used: "2026-06-03"}
@@ -42,12 +44,28 @@ test_trust_policy:
     tests/engine/test_executable_snapshot_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/engine/test_cost_basis_hash_cert_contract.py: {created: "2026-06-01", last_used: "2026-06-01"}
     tests/test_mainstream_agreement_gate.py: {created: "2026-06-03", last_used: "2026-06-03"}
+    tests/test_bias_family_unify_d2.py: {created: "2026-06-03", last_used: "2026-06-03", note: "D2 bias-family entry/exit unify shadow flag — RT: flag-OFF byte-identity (no DB read), flag-ON edli_per_city_v1 resolves (legacy ft 0-row miss proven), entry/exit same-family+same-shift cross-module invariant"}
     # PR #380 honest-q + settlement-unit deployment antibodies (2026-06-03)
     tests/test_settlement_unit_trigger_deployment_2026_06_03.py: {created: "2026-06-03", last_used: "2026-06-03", note: "deployment RT: settlement_unit VERIFIED triggers on EXISTING DB via migration"}
     tests/test_d7_rolling_edli_bias.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: D-7 rolling bias producer — causality, unit, thin-n, idempotency"}
     tests/test_representativeness_sigma_widens_q_lcb.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: sigma_repr -> wider (lower) q_lcb on corrected domain"}
+    # Phase-2 structural-fix consolidation (B4/K1/K2/K3) — 2026-06-03
+    tests/events/test_coverage_fairness_emit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "B4 RT: CoverageFairnessRequest round-robin covers all cities within ceil(N/limit) cycles; flag-OFF==legacy ORDER BY"}
+    tests/test_b4_live_caller_round_robin_advances.py: {created: "2026-06-03", last_used: "2026-06-03", note: "B4 fix RT: LIVE caller cycle-N source advances round-robin (was ISO-timestamp -> ValueError -> frozen at 0); distinct per cycle for idempotency"}
+    tests/test_k1_forecast_sharpness_gate.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K1 RT: ForecastSharpnessEvidence required-type antibody + flag-gated suppress; flag-OFF byte-identical"}
+    tests/contracts/test_bias_treatment.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 RT: BiasTreatment corrected XOR haircut (kills N1 double-penalty) + provenance/stale fail-close + D4 shift_se"}
+    tests/engine/test_bias_treatment_v2_wiring.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 RT: bias_treatment_v2 live wiring; flag-OFF byte-identical to legacy correction+haircut"}
+    tests/test_k2_d4_no_double_count_one_over_n.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K2 fix RT: D4 fold bases on in-sample residual_sd_c (no 1/n) -> composed sigma == total_residual_sd_c, NOT double-counted (~6% over-wide at n=7); flag-OFF byte-identical"}
+    tests/test_qlcb_provenance_type.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: QlcbProvenance typed carrier antibody + clamp-not-raise on finite out-of-range tail"}
+    tests/test_k3_qlcb_clamp_legacy_family_formation.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 fix RT: deep-OTM negative q_lcb clamps to [0,1] (clamped=True) instead of raising -> family still forms; decision-equivalent to legacy raw negative"}
+    tests/test_settlement_backward_coverage.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-backward coverage check + isotonic realized rate + ARM-gate coverage predicate"}
+    tests/test_qlcb_coverage_flag_and_armgate.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: settlement-coverage shadow flag OFF==byte-identical + ARM gate reads coverage verdict unconditionally"}
+    tests/engine/test_qlcb_coverage_adapter_wiring.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: carrier helpers round-trip float; flag-OFF apply is byte-identical; default shadow flag OFF"}
+    tests/engine/test_qlcb_coverage_live_application.py: {created: "2026-06-03", last_used: "2026-06-03", note: "K3 RT: live coverage application via grade_receipt loader; flag-OFF byte-identical; deep-OTM write does not collapse family"}
+    tests/engine/test_k3_selection_byte_identity_integration.py: {created: "2026-06-03", last_used: "2026-06-03", note: "HARDEN-2 integration antibody: real _generate_candidate_proofs->_selected_candidate_proof path; two negative-raw-q_lcb bins select legacy-correct bin (tok-B-yes); RED-on-revert proven via clamped-reader patch"}
     tests/test_no_certain_no_ceiling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: no certain-NO (q_no_lcb<1) structural antibody on corrected domain"}
     tests/test_arm_gate_direction_law.py: {created: "2026-06-03", last_used: "2026-06-03", note: "Direction Law antibody: buy_yes/buy_no win-logic unconstructably correct — all 4 cases + complement + known losses"}
+    tests/test_emos_sole_calibrator.py: {created: "2026-06-04", last_used: "2026-06-04", note: "INV-6 antibody + q-seam relationship test: one EMOS N(mu,sigma) feeds both p_cal and q_lcb bootstrap; season-keying + corrector-creep guard; flag-OFF byte-identical"}
     tests/test_graded_receipt.py: {created: "2026-06-03", last_used: "2026-06-03", note: "D1 keystone RT: grade_receipt unit TypeError + BinKind dispatch + fractional membership; Direction Law win"}
     tests/test_arm_gate_settlement_capital_weight.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: capital-weighted ARM verdict — row-democracy wr>51% but cw_roi<0 -> DENIED; MISSING_SIZE fail-closed; per-city negative cluster veto"}
     tests/test_arm_gate_artifact_emit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "H3 producer antibody: --emit-artifact writes schema-versioned JSON artifact; _is_populated_world_db guard; artifact path resolves from ZEUS_STATE_DIR"}
@@ -56,6 +74,7 @@ test_trust_policy:
     tests/test_main_harvester_edli_scheduling.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: harvester_cycle scheduled in all EDLI modes (not legacy_cron only)"}
     tests/test_harvester_resolver_settles_and_enqueues_redeem.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: VERIFIED settlement -> position settled + REDEEM_INTENT_CREATED"}
     tests/engine/test_bias_grid_mutual_exclusion.py: {created: "2026-06-03", last_used: "2026-06-03", note: "RT: bias-grid mutual-exclusion contract"}
+    tests/engine/test_emos_seam_serve_loud.py: {created: "2026-06-04", last_used: "2026-06-04", note: "RT (live seam): served=emos engages through _market_analysis_from_event_snapshot (q_source=emos); EMOS build failure is LOUD (distinct EMOS_SERVE_FAILED log w/ cell identity) not silently swallowed (#149 fail-open-inert antibody); served=raw quiet legacy fallback"}
     tests/engine/test_bias_decay_kelly_haircut.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/engine/test_chain_sync_exit_wired_in_edli_mode.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_edli_stage_status_summary_freshness.py: {created: "2026-05-31", last_used: "2026-05-31"}
@@ -92,6 +111,9 @@ test_trust_policy:
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_exit.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/events/test_edge_zone_admission_102.py: {created: "2026-06-04", last_used: "2026-06-05", note: "RT (#102): book-wide EV-per-dollar edge-zone admission — positive after-cost EV admitted / negative rejected regardless of arrival order; flag-gated last money-path step"}
+    tests/engine/test_market_disagreement_buy_no_guard.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody: cheap-NO buy_no with non-overwhelming NO-space q_lcb is unconstructable (settlement-grounded 0/12 loser); escape only on high NO-space q_lcb (DIRECTION LAW / Fitz #4)"}
+    tests/test_reactor_family_keying_antibody.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody (Fitz #4): NULL/empty condition_id sibling at the reactor family seam fails LOUD (FamilyKeyingError), never silently shrinks the MECE family"}
     tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_position_current_trade_schema_migration.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/engine/test_substrate_illiquid_bin_capture.py: {created: "2026-05-30", last_used: "2026-05-30"}
@@ -120,7 +142,7 @@ test_trust_policy:
     tests/engine/test_event_reactor_no_bypass.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_no_trade_regret.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/analysis/test_event_opportunity_report.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-05-24"}
+    tests/money_path/test_edli_online_invariants.py: {created: "2026-05-24", last_used: "2026-06-03", note: "Arm direction-gate footgun antibody (2026-06-03): _assert_edli_arm_requires_direction_gate makes arming with only real_order_submit_enabled (direction gate skipped) a boot failure; tests test_arm_with_*/test_shadow_no_submit_does_not_reach_direction_gate_guard"}
     tests/money_path/test_edli_live_canary.py: {created: "2026-05-25", last_used: "2026-05-25"}
     tests/money_path/test_mainstream_enforce_on_submit.py: {created: "2026-06-03", last_used: "2026-06-03", note: "PR-2 (B) F1 enforce: mainstream_agreement_enforce_on_submit blocks armed submit when selected candidate's verdict != True (fail-closed); reference selector stays reference-only"}
     tests/money_path/test_edli_order_lifecycle.py: {created: "2026-05-25", last_used: "2026-05-25"}
@@ -947,6 +969,9 @@ categories:
     - tests/test_boot_guard_settings_object.py
     # W0 dead calibration-pin config cleanup in src/calibration/manager.py.
     - tests/test_calibration_manager_w0.py
+    # FIX-1 calibration bin_source: canonical_v2 wiring antibody (flag-OFF byte-identity
+    # + flag-ON own-fit + count/fit population agreement).
+    - tests/test_calibration_bin_source_fix1.py
     # W0 ghost-table archive migration (202606_converge_settlement_store).
     - tests/test_migration_converge_settlement_store.py
     # W1 certificate dual-chain source_run binding (benign 00Z->12Z passes; fabricated fails).
@@ -2597,6 +2622,7 @@ test_metadata:
       - SLUG-PATTERN-DEDUP-AGAINST-TAG-RESULTS
       - SLUG-PATH-CLOB-ARCHIVED-CROSS-CHECK
       - SLUG-SEEN-IDS-SHARED-WITH-TAG-PATH
+      - SLUG-DISCOVERY-COVERS-CONFIGURED-UNIVERSE
     source_under_test:
       - src/data/market_scanner.py
     law_dependencies:
@@ -2610,8 +2636,10 @@ test_metadata:
       (T3), CLOB archived cross-check on slug path (T4), shared seen_ids set
       prevents duplicates (T5). Bare slug returns negRisk parent with all bins
       in markets:[...] — one request per (city, date).
+      2026-06-03: SLUG-DISCOVERY-COVERS-CONFIGURED-UNIVERSE antibody added;
+      SLUG_DISCOVERY_CITIES now derived from runtime_config.cities (14→63 slugs).
     created: 2026-05-19
-    last_reused_or_audited: 2026-05-19
+    last_reused_or_audited: 2026-06-03
 
   tests/test_settlement_commands_hexbytes_serializer.py:
     modules: [execution, state, venue]
@@ -3395,3 +3423,20 @@ test_metadata:
       (c) flag ON + no model row = plain fallback + WARNING logged.
     created: 2026-05-25
     last_reused_or_audited: 2026-05-25
+
+  tests/test_bias_family_unify_d2.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/operations/EXEC_EXIT_AUDIT_2026-06-02.md
+    notes: >
+      Relationship tests for the D2 bias-family entry/exit unify shadow flag
+      (feature_flags.exit_bias_family_unify_enabled, default OFF). Cross-module invariants:
+      (a) flag OFF = both resolvers return None and do NO bias-model read (byte-identical to
+      pre-fix); (b) flag ON = both resolvers resolve the populated edli_per_city_v1 family
+      (the SAME DB returns None under the legacy full_transport_v1 + month=0 + computed
+      lead_bucket read shape — 0-row miss proven); (c) entry and exit resolve the SAME family
+      (event_reactor_adapter._EDLI_BIAS_FAMILY) and apply the SAME native-unit bias shift,
+      so EXIT belief matches ENTRY belief (A4 lockstep: bias-shift + identity-Platt).
+    created: 2026-06-03
+    last_reused_or_audited: 2026-06-03

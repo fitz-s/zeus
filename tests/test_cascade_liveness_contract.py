@@ -46,6 +46,17 @@ NON_STATE_MACHINE_JOB_IDS = frozenset({
     "deployment_freshness",
     "wu_daily",
     "imminent_open_capture",
+    # world_wal_checkpoint is pure infrastructure (periodic
+    # PRAGMA wal_checkpoint(TRUNCATE) on zeus-world.db, 2026-06-04 WAL
+    # checkpoint-starvation backstop). It polls NO state-machine table and owns
+    # no cascade-liveness obligation — classed with heartbeat/deployment_freshness.
+    "world_wal_checkpoint",
+    # arm_gate_emit is pure infrastructure (2026-06-04 iron-rule-4 antibody): it
+    # re-emits the settlement-grounded ARM-gate FILE artifact
+    # (state/edli_arm_gate_artifact.json) on startup + every 6h. It polls NO
+    # state-machine table and owns no cascade-liveness obligation — classed with
+    # world_wal_checkpoint / heartbeat / deployment_freshness.
+    "arm_gate_emit",
 })
 
 

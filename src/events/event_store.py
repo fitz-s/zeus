@@ -1,3 +1,7 @@
+# Created: 2026-06-04
+# Last reused/audited: 2026-06-04
+# Authority basis: Operator P1 2026-06-04 — channel-sweep keeper query index-back
+#                  (category-kill of 85s json_extract full-scan); Step-3 batch UPDATE
 """World-DB event store for EDLI opportunity events."""
 
 from __future__ import annotations
@@ -5,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable
 
 from src.events.opportunity_event import OpportunityEvent
@@ -79,7 +83,28 @@ class EventStore:
         return inserted
 
     def fetch_pending(self, *, decision_time: str, limit: int = 100) -> list[OpportunityEvent]:
-        """Fetch pending events in deterministic replay/inference order."""
+        """Fetch pending events in deterministic replay/inference order.
+
+        STEP 3 timeliness fix (consolidated timeliness/tradeability design):
+
+        (a) **Claim floor** — a past-target event (its whole target LOCAL day
+            already settled at ``decision_time``) is NEVER returned. Enforced by
+            the canonical ``is_forecast_only_admissible`` cheap predicate as a
+            Python post-filter (timezone resolution is per-city Python, not SQL).
+            This is the conservative lower bound of the reactor's full phase
+            gate, so it never starves a candidate the reactor would admit.
+
+        (b) **Freshest-target-first ordering** — within each urgency tier the
+            rows are sorted by ``target_date DESC`` then ``available_at DESC`` so
+            the reactor reaches fresh candidates before its per-cycle budget is
+            exhausted, instead of draining the budget on the oldest (often
+            already-settled) events first.
+
+        Non-FORECAST_SNAPSHOT_READY events carry no per-city forecast target and
+        are NOT phase-filtered here (market-channel/day0 events have their own
+        scope); only events that expose a city+target_date are subject to the
+        timeliness floor.
+        """
 
         self._require_world_event_tables()
         parsed_decision_time = _parse_utc(decision_time)
@@ -119,7 +144,14 @@ class EventStore:
                 THEN 2
                 ELSE 1
               END ASC,
-              e.priority DESC, e.available_at ASC, e.received_at ASC, e.event_id ASC
+              e.priority DESC,
+              -- FRESHEST-TARGET-FIRST: reach fresh candidates before the per-cycle
+              -- budget is spent on stale ones. NULL target_date (non-forecast
+              -- events) sorts last within its tier (json_extract → NULL → last
+              -- under DESC in SQLite, which orders NULLs first for ASC / last for
+              -- DESC). available_at DESC breaks ties freshest-first.
+              json_extract(e.payload_json, '$.target_date') DESC,
+              e.available_at DESC, e.received_at DESC, e.event_id ASC
             LIMIT ?
             """,
             (
@@ -128,10 +160,369 @@ class EventStore:
                 parsed_decision_time.isoformat(),
                 parsed_decision_time.isoformat(),
                 parsed_decision_time.isoformat(),
-                limit,
+                # Fetch extra rows so the post-filter can drop stale events
+                # without under-filling the caller's requested limit.
+                max(limit * 4, limit + 50),
             ),
         ).fetchall()
-        return [_event_from_row(row) for row in rows]
+
+        events = [_event_from_row(row) for row in rows]
+        admissible = [e for e in events if self._is_timely(e, parsed_decision_time)]
+        return admissible[:limit]
+
+    def archive_expired_candidates(
+        self, *, decision_time: str, batch_limit: int = 50_000
+    ) -> int:
+        """Sweep strictly-past-in-tz pending/processing candidates to terminal
+        ``expired`` status so the active scan stops re-reading them.
+
+        OPERATOR DIRECTIVE 2026-06-04 — the working set
+        (``opportunity_event_processing``) accumulated ~1.76M ``pending`` rows that
+        ``fetch_pending`` and the warm-cache family queries re-JOIN and re-ORDER every
+        cycle. ``fetch_pending`` filters strictly-past FSR rows on READ (#183) but
+        never PRUNES them; this sweep is the missing prune.
+
+        STRUCTURAL CHOICE (not a patch): the immutable ``opportunity_events`` log is
+        append-only (provenance — protected by a no-DELETE trigger). We mark the
+        MUTABLE processing row ``'expired'`` (a terminal status already reserved in the
+        ``opportunity_event_processing`` CHECK constraint, until now un-wired).
+        ``'expired'`` is excluded from every reader's ``processing_status`` filter
+        (``fetch_pending``, the two warm-cache family queries, ``_edli_pending_entity_keys``),
+        so one sweep removes the row from ALL scan paths without touching provenance.
+
+        EXPIRY is PER-CITY LOCAL TIMEZONE, never raw UTC: a candidate is expired iff
+        its whole target LOCAL day has ENDED in its OWN city tz — exactly the
+        strictly-past boundary ``_is_timely`` rejects (``decision_time >=
+        settlement_day_entry_utc(target_date + 1 day)``). Same predicate, shared with
+        the read floor (``_event_strictly_past_in_tz``) so the two can never diverge.
+
+        OCEANIA-FRONTIER cheap pre-filter: only rows whose ``target_date`` is at or
+        after ``frontier_local_date - 1`` (the current local date in the
+        globally-earliest-rolling timezone, Oceania UTC+13/+12, minus one day for the
+        local-day-still-open margin) can POSSIBLY still be active in any city.
+        Everything strictly older is unconditionally past in every timezone on Earth,
+        so we archive those by the cheap string bound WITHOUT the per-city Python tz
+        round-trip, and only run the expensive per-city check on the frontier band.
+        This bounds the expensive work to the handful of recent target_dates.
+
+        FAIL-CLOSED: an FSR whose city/target_date is missing or whose timezone is
+        unresolvable is KEPT ACTIVE (never archived) — archiving an active row would
+        silently drop a real candidate. Non-FSR (market-channel/day0) events carry no
+        per-city forecast target and are out of scope for this per-city sweep.
+
+        IDEMPOTENT + budget-safe: only ``pending``/``processing`` rows are touched and
+        only those proven strictly-past; a re-run at the same decision time is a no-op.
+        ``batch_limit`` bounds the rows examined per call so a one-time 1.7M backlog
+        drains across cycles instead of in one giant transaction.
+
+        Returns the number of processing rows transitioned to ``expired``.
+        """
+
+        self._require_world_event_tables()
+        decision_time_utc = _parse_utc(decision_time)
+
+        # Oceania-frontier cheap bound: the most-advanced local calendar date on Earth
+        # at decision_time, minus one day of margin. Any target_date strictly before
+        # this is past in EVERY timezone and needs no per-city check.
+        frontier_floor = _oceania_frontier_target_floor(decision_time_utc)
+
+        candidate_rows = self.conn.execute(
+            """
+            SELECT e.event_id,
+                   json_extract(e.payload_json, '$.city')        AS city,
+                   json_extract(e.payload_json, '$.target_date') AS target_date
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p
+              ON p.event_id = e.event_id
+             AND p.consumer_name = ?
+            WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
+              AND p.processing_status IN ('pending', 'processing')
+              AND json_extract(e.payload_json, '$.target_date') IS NOT NULL
+              AND json_extract(e.payload_json, '$.target_date') < ?
+            ORDER BY json_extract(e.payload_json, '$.target_date') ASC
+            LIMIT ?
+            """,
+            (self.consumer_name, frontier_floor, batch_limit),
+        ).fetchall()
+
+        expired_ids: list[str] = []
+        for row in candidate_rows:
+            event_id = row[0]
+            city = row[1]
+            target_date = row[2]
+            if self._strictly_past_in_tz(city, target_date, decision_time_utc):
+                expired_ids.append(event_id)
+
+        for event_id in expired_ids:
+            self.conn.execute(
+                """
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id = ?
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (
+                    decision_time_utc.isoformat(),
+                    _utc_now(),
+                    self.consumer_name,
+                    event_id,
+                ),
+            )
+        return len(expired_ids)
+
+    # Channel event types that carry a per-token price-update stream and are
+    # subject to the superseded-keep-latest sweep. NEW_MARKET_DISCOVERED is
+    # included because a re-discovered market replaces prior discovery events
+    # for the same token just as price ticks do.
+    _CHANNEL_EVENT_TYPES: tuple[str, ...] = (
+        "BEST_BID_ASK_CHANGED",
+        "BOOK_SNAPSHOT",
+        "NEW_MARKET_DISCOVERED",
+    )
+
+    def archive_superseded_channel_events(
+        self, *, batch_limit: int = 100_000
+    ) -> int:
+        """Sweep superseded per-token channel events to terminal ``'expired'`` status.
+
+        OPERATOR DIRECTIVE 2026-06-04 (companion to ``archive_expired_candidates``):
+        ``BEST_BID_ASK_CHANGED`` / ``BOOK_SNAPSHOT`` / ``NEW_MARKET_DISCOVERED`` events
+        are a price-update stream for each market token. For any given ``(event_type,
+        token_id)`` group, only the event with the LATEST ``available_at`` carries live
+        state; every older event in the group is superseded and useless to re-scan —
+        but ~1.7M such pending rows were piling up because nothing ever pruned them.
+
+        INVARIANT (superseded-keep-latest): for each ``(event_type, token_id)`` group
+        in the active working set (``pending`` / ``processing`` only), mark all rows
+        EXCEPT the one with ``MAX(available_at)`` as ``'expired'``. This is strictly
+        correct: the latest tick for a token is the only one the reactor could act on;
+        all older ticks are definitionally superseded regardless of elapsed time.
+
+        WHY NOT A TIME THRESHOLD: a pure age cutoff (e.g. "older than 2h") could
+        wrongly archive a fresh event for a slow-updating token.  The superseded test
+        is definitional and requires no arbitrary threshold: if there is a newer event
+        for the SAME key, the older one cannot contribute new information.
+
+        TOKEN KEY: ``token_id`` from ``payload_json`` (confirmed present in every live
+        ``BEST_BID_ASK_CHANGED`` and ``BOOK_SNAPSHOT`` row sampled 2026-06-04; see
+        ``MarketBookEventPayload.token_id``). Events whose ``token_id`` is NULL or
+        missing are KEPT ACTIVE (fail-closed — never archive an unverifiable row).
+
+        The group key is ``(event_type, token_id)`` — not just ``token_id`` — so a
+        ``BEST_BID_ASK_CHANGED`` and a ``BOOK_SNAPSHOT`` for the same token are
+        treated as independent streams (they carry different information; the latest
+        BA-changed event and the latest book snapshot are both kept).
+
+        APPEND-ONLY PROVENANCE: only ``opportunity_event_processing.processing_status``
+        is mutated; the immutable ``opportunity_events`` row is never deleted.
+
+        BATCH-BOUNDED: ``batch_limit`` caps the rows examined per call so a 1.7M
+        one-time backlog drains across cycles instead of in one giant transaction that
+        could lock the world WAL for seconds. The groups are evaluated in ascending
+        ``available_at`` order so older superseded events are swept first.
+
+        IDEMPOTENT: re-running at the same state archives nothing new (already-expired
+        rows are excluded from the ``pending``/``processing`` filter).
+
+        Returns the number of processing rows transitioned to ``'expired'``.
+        """
+
+        self._require_world_event_tables()
+        type_placeholders = ",".join("?" * len(self._CHANNEL_EVENT_TYPES))
+
+        # Step 1: for each (event_type, token_id) group, find the keeper event_id —
+        # the one whose available_at equals MAX(available_at) for that group.
+        # Pattern: find MAX(available_at) per group in a subquery, then JOIN back to
+        # get the event_id of the row that matches. This is unambiguous in SQLite
+        # (no "bare column in GROUP BY" gotcha). Rows with a NULL token_id are fully
+        # excluded (fail-closed on unverifiable key — they never enter the to-archive
+        # list and are handled separately by the NULL-check below).
+        keeper_rows = self.conn.execute(
+            f"""
+            SELECT e.event_id
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p
+              ON p.event_id = e.event_id
+             AND p.consumer_name = ?
+            JOIN (
+                SELECT e2.event_type,
+                       json_extract(e2.payload_json, '$.token_id') AS token_id,
+                       MAX(e2.available_at) AS max_available_at
+                FROM opportunity_events e2
+                JOIN opportunity_event_processing p2
+                  ON p2.event_id = e2.event_id
+                 AND p2.consumer_name = ?
+                WHERE e2.event_type IN ({type_placeholders})
+                  AND p2.processing_status IN ('pending', 'processing')
+                  AND json_extract(e2.payload_json, '$.token_id') IS NOT NULL
+                GROUP BY e2.event_type, json_extract(e2.payload_json, '$.token_id')
+            ) grp
+              ON e.event_type = grp.event_type
+             AND json_extract(e.payload_json, '$.token_id') = grp.token_id
+             AND e.available_at = grp.max_available_at
+             AND p.processing_status IN ('pending', 'processing')
+            """,
+            (self.consumer_name, self.consumer_name, *self._CHANNEL_EVENT_TYPES),
+        ).fetchall()
+        keeper_ids: set[str] = {row[0] for row in keeper_rows}
+
+        if not keeper_ids:
+            return 0
+
+        # Step 2: fetch all pending/processing channel-event rows with a parseable
+        # token_id (batch-limited). The keepers are excluded in Python after fetch
+        # (avoids a large NOT-IN SQL clause that could be slow on SQLite with 1.7M rows).
+        candidate_rows = self.conn.execute(
+            f"""
+            SELECT e.event_id
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p
+              ON p.event_id = e.event_id
+             AND p.consumer_name = ?
+            WHERE e.event_type IN ({type_placeholders})
+              AND p.processing_status IN ('pending', 'processing')
+              AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
+            ORDER BY e.available_at ASC
+            LIMIT ?
+            """,
+            (self.consumer_name, *self._CHANNEL_EVENT_TYPES, batch_limit),
+        ).fetchall()
+
+        superseded_ids = [row[0] for row in candidate_rows if row[0] not in keeper_ids]
+
+        if not superseded_ids:
+            return 0
+
+        # Step 3: batch UPDATE in chunks of 500 instead of one statement per row.
+        # Replaces the prior per-row loop that issued up to batch_limit (100k)
+        # individual statements per cycle.  Chunk size 500 keeps the IN-list well
+        # below SQLite's SQLITE_MAX_VARIABLE_NUMBER (999 default) while reducing
+        # round-trips by ~200×.  Semantics are identical: only pending/processing
+        # rows transition to expired.
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(superseded_ids), _CHUNK):
+            chunk = superseded_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(superseded_ids)
+
+    @staticmethod
+    def _strictly_past_in_tz(
+        city: str | None, target_date: str | None, decision_time_utc: datetime
+    ) -> bool:
+        """True iff city X's target LOCAL day has ENDED at ``decision_time``.
+
+        Single authority shared by the read floor (``_is_timely``) and the archive
+        sweep: the target local day is strictly past iff ``decision_time`` is at or
+        after city-local midnight of ``target_date + 1`` (the SETTLEMENT_DAY-entry
+        instant of the day AFTER the target). tz arithmetic via the canonical
+        ``settlement_day_entry_utc`` — never a lexicographic string compare.
+
+        Fail-closed: missing city/target_date or an unresolvable timezone → returns
+        False (NOT strictly past) so the caller keeps the row active. A True here
+        archives a row; mislabeling an active row True would silently drop a real
+        candidate, so every uncertain case must return False.
+        """
+        if not city or not target_date:
+            return False
+
+        from src.config import runtime_cities_by_name
+        from src.strategy.market_phase import settlement_day_entry_utc
+
+        city_config = runtime_cities_by_name().get(city)
+        tz = getattr(city_config, "timezone", None) if city_config is not None else None
+        if not tz:
+            return False
+        try:
+            target_local_date = date.fromisoformat(str(target_date))
+        except ValueError:
+            return False
+        try:
+            day_after_entry = settlement_day_entry_utc(
+                target_local_date=target_local_date + timedelta(days=1),
+                city_timezone=tz,
+            )
+        except Exception:
+            return False
+        return decision_time_utc >= day_after_entry
+
+    def _is_timely(self, event: OpportunityEvent, decision_time_utc: datetime) -> bool:
+        """Claim-floor timeliness gate (STEP 3a).
+
+        Rejects a FORECAST_SNAPSHOT_READY event whose target LOCAL day is
+        ALREADY STRICTLY PAST at ``decision_time`` — i.e. the event refers to a
+        market that has already entered POST_TRADING/settled. This is the bug
+        the operator reported: the reactor burned its per-cycle budget on
+        already-closed June-4 markets while the June-5 decision ran, never
+        reaching fresh candidates.
+
+        Scope deliberately STRICTLY-PAST, not same-day: a same-day
+        (SETTLEMENT_DAY) FORECAST_SNAPSHOT_READY event is still allowed through
+        so the reactor's own bind-time gate
+        (``EVENT_BOUND_MARKET_PHASE_CLOSED``) rejects-and-CONSUMES it cleanly.
+        Dropping same-day events here would strand them as permanently-pending
+        (never returned ⇒ never claimed ⇒ never marked processed ⇒ leak). The
+        strictly-past floor only removes events that can neither produce a
+        receipt nor need the reactor's settlement-day handling — pure budget
+        waste.
+
+        Strictly-past is computed via the canonical settlement geometry: the
+        target local day is entirely in the past iff ``decision_time`` is at or
+        after local-midnight of the day AFTER ``target_local_date`` (the
+        SETTLEMENT_DAY-entry instant of ``target_date + 1``). tz arithmetic,
+        never lexicographic string compare.
+
+        Events with no city+target_date (market-channel/day0) are not
+        phase-filtered here and pass through. Fail-closed on an unresolvable
+        city/target → reject (cannot be timely-verified).
+        """
+        if event.event_type != "FORECAST_SNAPSHOT_READY":
+            return True
+        try:
+            payload = json.loads(event.payload_json)
+        except (ValueError, TypeError):
+            return False
+        city = payload.get("city")
+        target_date = payload.get("target_date")
+        if not city or not target_date:
+            return False
+
+        # Timely ⇔ NOT strictly-past-in-its-tz. Shares the SINGLE authority
+        # (_strictly_past_in_tz) with the archive sweep so the read floor and the
+        # prune can never disagree on the boundary. Fail-closed: an unresolvable
+        # city/tz makes _strictly_past_in_tz return False (not provably past), so
+        # the read floor must independently reject the unverifiable event here.
+        from src.config import runtime_cities_by_name
+
+        city_config = runtime_cities_by_name().get(city)
+        tz = getattr(city_config, "timezone", None) if city_config is not None else None
+        if not tz:
+            # Unresolvable tz: read floor fails closed (cannot timely-verify) — but
+            # the archive sweep keeps the same row active. The asymmetry is
+            # deliberate: dropping from a single read cycle is recoverable; archiving
+            # an unverifiable row is not.
+            return False
+        try:
+            date.fromisoformat(str(target_date))
+        except ValueError:
+            return False
+
+        return not self._strictly_past_in_tz(city, target_date, decision_time_utc)
 
     def replay_events(self) -> list[OpportunityEvent]:
         """Replay all event rows in deterministic event order."""
@@ -310,6 +701,43 @@ def _event_from_row(row: sqlite3.Row | tuple) -> OpportunityEvent:
         ]
         data = dict(zip(keys, row))
     return OpportunityEvent(**data)
+
+
+# The globally-earliest-rolling timezone — Oceania (Auckland / Wellington,
+# UTC+13 DST / UTC+12 standard). This is the most-advanced wall clock on Earth,
+# so its local calendar date is the frontier that drives the rollover reference
+# for the archive sweep. Using the earliest-tz "now" (never raw UTC) guarantees a
+# candidate is not declared globally-past while its own city's local day — or the
+# frontier's — is still open.
+_OCEANIA_FRONTIER_TZ = "Pacific/Auckland"
+
+
+def _oceania_frontier_target_floor(decision_time_utc: datetime) -> str:
+    """ISO date string: any FSR ``target_date`` strictly BELOW this is past in
+    EVERY timezone on Earth at ``decision_time``, so it can be archived by a cheap
+    string compare without a per-city tz round-trip.
+
+    Anchored to the earliest-rolling clock (Oceania): the floor is the current
+    local calendar date in ``Pacific/Auckland`` MINUS one day. The one-day margin
+    is conservative — the widest possible spread between the earliest tz (UTC+13)
+    and the latest inhabited tz (UTC-12) is 25h < 2 calendar days, so a target on
+    ``frontier_date - 1`` could still be the active local day for the most-lagging
+    city; only ``< frontier_date - 1`` is unconditionally past everywhere. Rows in
+    the frontier band still get the exact per-city ``_strictly_past_in_tz`` check.
+
+    Fail-open on a tz resolution error → returns a date far in the past so NOTHING
+    is cheap-archived and every row falls through to the exact per-city check
+    (never an over-archive).
+    """
+    from zoneinfo import ZoneInfo
+
+    try:
+        frontier_local_date = decision_time_utc.astimezone(
+            ZoneInfo(_OCEANIA_FRONTIER_TZ)
+        ).date()
+    except Exception:
+        return "0001-01-01"
+    return (frontier_local_date - timedelta(days=1)).isoformat()
 
 
 def _utc_now() -> str:

@@ -1,3 +1,11 @@
+# Created: prior to 2026-04-26
+# Last reused or audited: 2026-06-04
+# Authority basis: Zeus DB schema + world_write_mutex CATEGORY ANTIBODY.
+#   2026-06-04 Phase 1: thread-local held depth (_GuardedWorldMutex) — eliminates
+#   cross-thread false positives that caused background venue I/O to trip the guard
+#   (283× advisory/2min in prod → WAL re-bloat). Phase 2: guard armed fatal (always
+#   raises, ZEUS_WORLD_MUTEX_IO_ADVISORY=1 to downgrade in emergency).
+#   Plan: architecture/world_mutex_io_offmutex_refactor_2026_06_04.md
 """Zeus database schema and connection management.
 
 All tables enforce the 4-timestamp constraint where applicable.
@@ -251,10 +259,171 @@ def get_forecasts_connection_read_only() -> sqlite3.Connection:
 # db_writer_lock.py: that serializes write *intent* across processes; this
 # serializes write *transactions* across THREADS within one process. They are
 # orthogonal and composable.
-_WORLD_DB_WRITE_MUTEX = threading.Lock()
+#
+# CATEGORY ANTIBODY (2026-06-04, M5 lock-starvation kill — the K<<N structural
+# fix): the docstring contract "MUST NOT be held across network/HTTP calls" was
+# UNENFORCED. STEP-7 (5638cf59c6) and #95 each fixed ONE site by hand; M5
+# exchange_reconcile was an uncovered third instance and wedged the daemon for
+# hours (STAT=U, WAL bloat). A by-hand fix per site is whack-a-mole. Instead we
+# make "blocking network/chain I/O while the world write lock is held"
+# STRUCTURALLY DETECTABLE: the mutex is wrapped so every acquire()/release()
+# (whether via world_write_lock, world_write_mutex().acquire(), or a bare
+# context-manager use) maintains a THREAD-LOCAL held depth. The venue HTTP
+# client + on-chain RPC entrypoints assert that THIS THREAD's depth is zero
+# before doing I/O and raise WorldMutexIOViolation otherwise — converting a
+# silent multi-hour wedge into an immediate, located failure at the exact
+# violating call site.
+#
+# CRITICAL: the held counter MUST be thread-local (not process-global). Using a
+# shared global would make background threads observing a DIFFERENT thread's
+# mutex acquisition falsely fire the guard — background I/O is NOT a violation.
+# The property we enforce is "this thread holds the mutex AND is about to do
+# blocking I/O", NOT "some thread holds the mutex". threading.local() provides
+# the correct per-thread isolation. (2026-06-04 P1 fix, commit: see git log.)
 
 
-def world_write_mutex() -> "threading.Lock":
+class WorldMutexIOViolation(RuntimeError):
+    """Raised when blocking network/on-chain I/O is attempted while the
+    process-global zeus-world.db write mutex is held.
+
+    Holding the world write mutex (and the WAL write lock it guards) across a
+    venue HTTP fetch or an on-chain RPC call serializes every world write behind
+    that I/O and wedges the daemon (the M5 / #95 / STEP-7 starvation disease).
+    The contract on ``world_write_lock`` / ``world_write_mutex`` is explicit:
+    NEVER hold across HTTP. This exception makes the contract self-enforcing.
+    """
+
+
+class _GuardedWorldMutex:
+    """A ``threading.Lock`` facade that tracks THREAD-LOCAL held depth.
+
+    Wraps the real lock so that EVERY acquisition path — ``world_write_lock``
+    (the BEGIN/COMMIT context manager), ``world_write_mutex().acquire()`` (the
+    reactor / ingestor / emit direct-acquire sites), and ``with mutex:`` — feeds
+    one thread-local held counter with ZERO caller changes. The counter is the
+    single source of truth that ``assert_no_world_mutex_held_for_io`` reads.
+
+    THREAD-LOCAL SEMANTICS (2026-06-04 P1 fix): the counter is stored in a
+    ``threading.local()`` so it reflects only the CALLING THREAD'S acquisitions.
+    A background thread doing venue I/O while a DIFFERENT thread holds the mutex
+    must NOT be flagged — that is correct concurrent operation. The property we
+    enforce is "this thread holds the world mutex AND is about to do blocking I/O",
+    which is the actual WAL-starvation condition. A shared global counter caused
+    background threads to observe a False-positive "held" flag from the reactor
+    thread's acquisition, generating spurious advisories and (when fatal) daemon
+    instability.
+
+    The held counter is a depth (not bool) so a future reentrant variant cannot
+    silently corrupt the flag; in practice it is 0 or 1 (non-reentrant lock).
+    """
+
+    __slots__ = ("_lock",)
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def acquire(self, *args: Any, **kwargs: Any) -> bool:
+        acquired = self._lock.acquire(*args, **kwargs)
+        if acquired:
+            _tls = _world_mutex_tls()
+            _tls.held_depth = getattr(_tls, "held_depth", 0) + 1
+        return acquired
+
+    def release(self) -> None:
+        # Decrement the thread-local depth BEFORE releasing the OS lock so the
+        # flag is already clear the instant another thread can re-acquire.
+        _tls = _world_mutex_tls()
+        d = getattr(_tls, "held_depth", 0)
+        if d > 0:
+            _tls.held_depth = d - 1
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> "bool":
+        return self.acquire()
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.release()
+
+
+# Thread-local storage for the world mutex held depth.
+# Each thread tracks its own depth independently — see _GuardedWorldMutex
+# docstring for the rationale (thread-local vs process-global).
+_WORLD_MUTEX_TLS = threading.local()
+
+
+def _world_mutex_tls() -> threading.local:
+    """Return the thread-local storage for the world mutex held depth."""
+    return _WORLD_MUTEX_TLS
+
+
+# Operations already warned about under the advisory (prod) posture of
+# ``assert_no_world_mutex_held_for_io`` — warn once per operation, not per call,
+# so a pre-existing site does not spam the log thousands of times per minute.
+_WORLD_MUTEX_IO_ADVISED: set[str] = set()
+
+_WORLD_DB_WRITE_MUTEX = _GuardedWorldMutex()
+
+
+def world_mutex_is_held() -> bool:
+    """True iff THIS THREAD currently holds the zeus-world.db write mutex.
+
+    Returns True only when the calling thread has acquired the mutex and not
+    yet released it. A background thread observing this function while a DIFFERENT
+    thread holds the mutex correctly gets False — that thread's I/O is not
+    a violation.
+
+    Read by ``assert_no_world_mutex_held_for_io`` and by relationship tests that
+    pin the "no I/O under the world write lock" invariant.
+    """
+    return getattr(_world_mutex_tls(), "held_depth", 0) > 0
+
+
+def assert_no_world_mutex_held_for_io(operation: str) -> None:
+    """Fail loudly if blocking I/O is attempted while the world mutex is held.
+
+    Wire this at venue HTTP / on-chain RPC entrypoints (the two client surfaces
+    that perform blocking network/chain reads). When the world write mutex is
+    held, raising here turns a silent WAL-lock starvation wedge into an
+    immediate, located ``WorldMutexIOViolation`` naming the offending I/O.
+
+    ``operation`` is a short label for the I/O being attempted (e.g.
+    ``"venue.get_trades"``, ``"onchain.eth_call"``); it appears in the error so
+    the wedge's root call site is identified at the moment of the violation.
+
+    DEPLOYMENT POSTURE (Phase 2 armed 2026-06-04): ALWAYS FATAL.
+    The thread-local held-depth fix (same commit) eliminated all cross-thread
+    false positives, so the only remaining violations are genuine same-thread
+    I/O-under-mutex sites. With zero confirmed remaining sites this is safe to
+    arm unconditionally — any new violation raises immediately, named, at the
+    exact call site, preventing WAL-starvation regression permanently.
+
+    To temporarily downgrade to advisory in an emergency (not recommended):
+    set ``ZEUS_WORLD_MUTEX_IO_ADVISORY=1`` in the daemon environment.
+    """
+    if not world_mutex_is_held():
+        return
+    if os.environ.get("ZEUS_WORLD_MUTEX_IO_ADVISORY") == "1":
+        if operation not in _WORLD_MUTEX_IO_ADVISED:
+            _WORLD_MUTEX_IO_ADVISED.add(operation)
+            logging.getLogger(__name__).warning(
+                "WORLD_MUTEX_IO_ADVISORY: blocking I/O %r attempted under the "
+                "world write mutex. Set ZEUS_WORLD_MUTEX_IO_ADVISORY=1 to "
+                "suppress; remove to restore fatal enforcement.",
+                operation,
+            )
+        return
+    raise WorldMutexIOViolation(
+        f"blocking I/O {operation!r} attempted while the zeus-world.db write "
+        f"mutex is held — this serializes every world write behind the I/O "
+        f"and wedges the daemon (WAL-lock starvation). The world write lock "
+        f"MUST be released before any venue/on-chain call. See db.world_write_lock."
+    )
+
+
+def world_write_mutex() -> "_GuardedWorldMutex":
     """Return the process-global zeus-world.db write mutex.
 
     For callers that manage their own transaction lifecycle (e.g. the EDLI
@@ -315,6 +484,47 @@ def world_write_lock(
     finally:
         _ = began  # retained for readability; rollback/commit cover both paths
         _WORLD_DB_WRITE_MUTEX.release()
+
+
+def checkpoint_world_wal() -> tuple[int, int, int]:
+    """Run ``PRAGMA wal_checkpoint(TRUNCATE)`` on zeus-world.db; return its triple.
+
+    THE BACKSTOP (2026-06-04 WAL checkpoint-starvation fix, part 2).
+
+    Root (critic-proven, live): ``state/zeus-world.db-wal`` grows to GBs because
+    long-lived READER connections hold a WAL snapshot (read-mark) across cycles.
+    The checkpointer can only reclaim frames OLDER than the oldest active reader's
+    mark, so while a reader pins the floor ``wal_checkpoint`` returns BUSY
+    (``(1,-1,-1)``) and the -wal file never truncates → unbounded growth →
+    eventual lock-starvation of opportunity_events emission (30-min ZERO
+    candidates). Part 1 of the fix releases each long-lived reader's snapshot
+    per cycle (``conn.rollback()`` between polls) so the floor advances; THIS
+    function is the periodic backstop that actually reclaims the freed frames.
+
+    Returns the ``(busy, log_frames, checkpointed_frames)`` triple from
+    ``wal_checkpoint(TRUNCATE)``:
+      * ``busy == 0`` → checkpoint completed; the WAL was truncated.
+      * ``busy == 1`` → a reader still pinned the floor (TRUNCATE could not run);
+        a CHRONIC busy is the loud signal that a reader is not releasing — it is
+        NOT silenced. The caller logs the triple so this is observable.
+
+    Lock discipline: a checkpoint is NOT a write transaction. SQLite serializes
+    checkpoints internally (the checkpoint lock), so this MUST NOT take the
+    process-global world write mutex — holding it here would needlessly block
+    every world writer for the checkpoint duration. A dedicated short-lived
+    connection is used and closed immediately so it never itself becomes a
+    floor-pinning reader.
+    """
+    conn = _connect(ZEUS_WORLD_DB_PATH, write_class=None)
+    try:
+        row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        # Row is (busy, log, checkpointed). Normalise to ints for callers/logs.
+        busy = int(row[0]) if row is not None else 1
+        log_frames = int(row[1]) if row is not None else -1
+        ckpt_frames = int(row[2]) if row is not None else -1
+        return (busy, log_frames, ckpt_frames)
+    finally:
+        conn.close()
 
 
 @contextlib.contextmanager

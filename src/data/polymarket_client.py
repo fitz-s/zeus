@@ -1,5 +1,5 @@
 # Created: prior to 2026-04-26
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-06-04
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + 2026-05-13 collateral_ledger singleton conn lifecycle remediation
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -418,7 +418,16 @@ class PolymarketClient:
         return data
 
     def get_orderbook_snapshot(self, token_id: str) -> dict:
-        """Fetch raw CLOB orderbook facts for executable snapshot capture."""
+        """Fetch raw CLOB orderbook facts for executable snapshot capture.
+
+        LOCK DISCIPLINE (2026-06-04): this method performs blocking HTTP I/O
+        and MUST NOT be called while the process-global zeus-world.db write
+        mutex is held. Doing so serializes every world write behind the socket
+        read and wedges the daemon (WAL-lock starvation). The guard assertion
+        below converts that silent wedge into an immediate located exception.
+        """
+        from src.state.db import assert_no_world_mutex_held_for_io
+        assert_no_world_mutex_held_for_io("get_orderbook_snapshot")
 
         resp = self._public_get("/book", params={"token_id": token_id})
         resp.raise_for_status()

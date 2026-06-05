@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-21
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-05-21
+# Last reused/audited: 2026-06-04
+# Lifecycle: created=2026-04-27; last_reviewed=2026-05-07; last_reused=2026-06-04
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_remaining_mainline/PLAN.md
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -4346,3 +4346,41 @@ def test_findings_actuator_loop_resolves_findings_via_operator_decision(conn):
     assert row["resolved_by"] == "operator-test"
     with pytest.raises(ValueError):
         resolve_finding(conn, "missing", resolution="operator_acknowledged", resolved_by="operator-test")
+
+
+# ---------------------------------------------------------------------------- #
+# M5 mutex-IO antibody (2026-06-04): the reconcile sweep performs BLOCKING venue
+# reads. Holding the world write mutex across it is the lock-starvation disease
+# (STEP-7 / #95 / the M5 wedge). RELATIONSHIP TEST across the (world-mutex,
+# reconcile-venue-read) boundary: the sweep must fail loud, not wedge.
+# ---------------------------------------------------------------------------- #
+
+
+def test_run_reconcile_sweep_raises_when_world_mutex_held(conn):
+    """When a caller holds the world write mutex and enters run_reconcile_sweep
+    (which issues blocking venue reads), the guard raises WorldMutexIOViolation
+    instead of letting the venue I/O wedge the held world txn."""
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.db import WorldMutexIOViolation, world_write_mutex
+
+    adapter = FakeM5Adapter(open_orders=[order(order_id="ord-ghost", status="LIVE")])
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        with pytest.raises(WorldMutexIOViolation):
+            run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+    finally:
+        mutex.release()
+
+
+def test_run_reconcile_sweep_proceeds_off_the_world_mutex(conn):
+    """REGRESSION: the correct off-lock reconcile path (no world mutex held) runs
+    the sweep normally — the antibody does not break legitimate reconcile."""
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+    from src.state.db import world_mutex_is_held
+
+    assert world_mutex_is_held() is False
+    adapter = FakeM5Adapter(open_orders=[order(order_id="ord-ghost", status="LIVE")])
+    result = run_reconcile_sweep(adapter, conn, context="periodic", observed_at=NOW)
+    assert len(result) == 1
+    assert result[0].kind == "exchange_ghost_order"

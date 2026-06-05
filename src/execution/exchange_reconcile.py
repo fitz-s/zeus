@@ -1,3 +1,10 @@
+# Created: 2026-05 (R3 M5)
+# Last reused or audited: 2026-06-04
+# Authority basis: R3 M5 reconcile + 2026-06-04 M5 mutex-IO antibody. The adapter-
+#   touching entrypoints (fresh_reconcile_snapshot, run_reconcile_sweep) assert
+#   the world write mutex is NOT held before any venue read, so a future caller
+#   that holds the lock across the reconcile sweep fails loud (WorldMutexIOViolation)
+#   at the reconcile boundary instead of wedging the daemon (STEP-7 / #95 disease).
 """R3 M5 exchange reconciliation sweep.
 
 This module reconciles read-only exchange observations against Zeus's durable
@@ -5,6 +12,14 @@ venue-command/fact journal.  It is intentionally not an execution actuator:
 exchange-only state becomes an ``exchange_reconcile_findings`` row, not a new
 ``venue_commands`` row, and no live venue submit/cancel/redeem side effects are
 performed here.
+
+LOCK DISCIPLINE (2026-06-04): the venue reads here (``get_open_orders`` /
+``get_trades`` / ``get_positions`` / per-order ``get_order``) are BLOCKING
+network/on-chain I/O.  The runtime callers pre-capture those surfaces OFF any
+DB write lock via ``fresh_reconcile_snapshot`` and then reconcile against the
+immutable snapshot, so no venue read happens while the zeus-world.db write
+mutex is held.  The ``assert_no_world_mutex_held_for_io`` guard at the
+adapter-touching entrypoints enforces that discipline structurally.
 """
 from __future__ import annotations
 
@@ -20,6 +35,7 @@ from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
+from src.state.db import assert_no_world_mutex_held_for_io
 from src.state.portfolio import INACTIVE_RUNTIME_STATES
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
 
@@ -176,6 +192,10 @@ def fresh_reconcile_snapshot(
     reconciles against that immutable evidence object.
     """
 
+    # The snapshot capture below performs the BLOCKING venue reads. It MUST run
+    # off any DB write lock so a stalled venue read never wedges a held world
+    # txn (STEP-7 / #95 / M5 disease). Fail loud + located if a caller holds it.
+    assert_no_world_mutex_held_for_io("m5.fresh_reconcile_snapshot")
     observed = _coerce_dt(observed_at)
     captured: dict[str, Any] = {}
     unavailable: list[str] = []
@@ -444,6 +464,11 @@ def run_reconcile_sweep(
     """
 
     _validate_context(context)
+    # Defence-in-depth: the sweep may issue per-order ``get_order`` venue reads
+    # inside the local-order loop. Runtime callers pass a pre-captured snapshot
+    # adapter (no live I/O), but a future caller handing a LIVE adapter while
+    # holding the world write mutex would re-introduce the wedge — fail loud.
+    assert_no_world_mutex_held_for_io("m5.run_reconcile_sweep")
     init_exchange_reconcile_schema(conn)
     observed = _coerce_dt(observed_at)
 

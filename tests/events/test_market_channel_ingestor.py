@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-06-04
 # Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract.
 from __future__ import annotations
 
@@ -686,3 +686,381 @@ def test_universe_to_witness_relationship_candidate_gets_fresh_evidence_row():
         )
         is None
     ), "causal guard must still reject quotes seen after the decision time"
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-04 — Channel universe must EXCLUDE settled markets (market_end_at <= now)
+# Created: 2026-06-04
+# Last reused/audited: 2026-06-04
+# Authority basis: live candidate-flow stall root (this session). EMS active/closed
+#   lifecycle flags are never maintained (all live rows show active=1/closed=0), so
+#   the channel universe selector admitted 3,468 SETTLED weather conditions (June-4
+#   back to May) alongside only 540 live ones — ~8,000 tokens, ~7,000 dead-404. The
+#   persistent market-channel thread drowned its REST reseed / WS subscription in 404
+#   dead tokens (~1 tok/sec, ~2h/pass) → BEST_BID_ASK_CHANGED emission died →
+#   opportunity_events/candidates/receipts went to zero.
+#
+#   RELATIONSHIP INVARIANT (the boundary where EMS lifecycle-flag staleness corrupts
+#   the live subscription universe): a market whose market_end_at is in the PAST
+#   cannot be a tradeable candidate and MUST NOT enter the channel universe,
+#   regardless of the stale active/closed flags. Excluding past-ending markets cannot
+#   drop a live candidate (a settled market is untradeable), so the Blocker #52
+#   coverage invariant — every CANDIDATE token is covered — is preserved.
+# ---------------------------------------------------------------------------
+
+
+def _ems_table_with_end(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            event_slug TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            min_tick_size TEXT,
+            min_order_size TEXT,
+            neg_risk INTEGER,
+            active INTEGER,
+            closed INTEGER,
+            captured_at TEXT,
+            market_end_at TEXT
+        )
+        """
+    )
+
+
+def test_universe_excludes_settled_markets_by_market_end_at():
+    """Settled (past-ending) weather markets must not leak into the channel universe.
+
+    Both rows carry the STALE live-state flags (active=1, closed=0) that EMS never
+    maintains; the only honest signal of tradeability is market_end_at vs now.
+    """
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    # LIVE: future-ending weather market.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-live','0xlive','chicago-weather','yes-live','no-live','0.01','5',0,1,0,"
+        "'2026-06-04T11:00:00+00:00','2026-06-05T12:00:00+00:00')"
+    )
+    # SETTLED: past-ending weather market with STALE active=1/closed=0 flags.
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-dead','0xdead','dallas-weather','yes-dead','no-dead','0.01','5',0,1,0,"
+        "'2026-06-04T10:00:00+00:00','2026-06-04T11:30:00+00:00')"
+    )
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    assert "yes-live" in md and "no-live" in md, "live (future-ending) market must be covered"
+    assert "yes-dead" not in md, "settled market (market_end_at<=now) leaked into channel universe"
+    assert "no-dead" not in md
+
+
+def test_universe_filter_agrees_with_canonical_market_open_predicate():
+    """STEP 5 relationship test: the bulk SQL `market_end_at > now` universe filter
+    gives the SAME keep/drop verdict as the ONE canonical POST_TRADING-boundary
+    authority ``market_phase.market_open_at_decision`` for every (market_end_at,
+    now) pair — so the universe filter and the phase axis cannot diverge on the
+    end-boundary. (NULL end-time is the coverage-safe exception, covered
+    separately; this pins the explicit-end-time agreement.)"""
+    from src.strategy.market_phase import market_open_at_decision
+
+    now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    cases = [
+        ("yes-future", "2026-06-05T12:00:00+00:00"),  # open → kept
+        ("yes-boundary", "2026-06-04T12:00:00+00:00"),  # exactly now → POST_TRADING → dropped
+        ("yes-past", "2026-06-04T11:30:00+00:00"),  # closed → dropped
+    ]
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    for i, (tok, end_at) in enumerate(cases):
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES "
+            f"('snap-{i}','0xc{i}','x-weather','{tok}','no-{i}','0.01','5',0,1,0,"
+            f"'2026-06-04T11:00:00+00:00','{end_at}')"
+        )
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+
+    for tok, end_at in cases:
+        from datetime import datetime as _dt
+        end_utc = _dt.fromisoformat(end_at)
+        predicate_open = market_open_at_decision(polymarket_end_utc=end_utc, as_of_utc=now)
+        sql_kept = tok in md
+        assert sql_kept == predicate_open, (
+            f"SQL universe filter and market_open_at_decision disagree for "
+            f"end_at={end_at}: sql_kept={sql_kept} predicate_open={predicate_open}"
+        )
+
+
+def test_universe_includes_market_with_null_end_at():
+    """Defensive: a NULL market_end_at must NOT silently drop the token (coverage-safe).
+
+    Preserves the Blocker #52 invariant when end-time provenance is missing: when we
+    cannot prove a market is settled, we keep it (it may be a live candidate). Only
+    a definitively PAST market_end_at excludes a token.
+    """
+
+    conn = sqlite3.connect(":memory:")
+    _ems_table_with_end(conn)
+    now = datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-null','0xnull','miami-weather','yes-null','no-null','0.01','5',0,1,0,"
+        "'2026-06-04T11:00:00+00:00',NULL)"
+    )
+
+    md = active_weather_token_metadata_from_snapshots(conn, now=now)
+    assert "yes-null" in md, "NULL market_end_at must be kept (cannot prove settled)"
+
+
+def test_universe_filter_absent_market_end_at_column_is_noop():
+    """Back-compat: EMS schema without a market_end_at column behaves as before."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT, condition_id TEXT, event_slug TEXT,
+            yes_token_id TEXT, no_token_id TEXT,
+            min_tick_size TEXT, min_order_size TEXT, neg_risk INTEGER,
+            active INTEGER, closed INTEGER, captured_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "('snap-1','0xc','chicago-weather','yes-1','no-1','0.01','5',0,1,0,'2026-06-04T11:00:00+00:00')"
+    )
+    md = active_weather_token_metadata_from_snapshots(
+        conn, now=datetime(2026, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+    )
+    assert "yes-1" in md and "no-1" in md
+
+
+# ---------------------------------------------------------------------------
+# 5th-instance fix (2026-06-04): pre-capture pattern + world-mutex guard
+# ---------------------------------------------------------------------------
+
+
+def _fake_book(token_id: str) -> dict:
+    return {
+        "asset_id": token_id,
+        "market": "0xcondition",
+        "bids": [{"price": "0.48", "size": "10"}],
+        "asks": [{"price": "0.52", "size": "10"}],
+        "hash": "hash-x",
+    }
+
+
+def test_on_connect_with_pre_captured_books_seeds_cache_without_fetch_call():
+    """RELATIONSHIP TEST (5th-instance fix): when pre_captured_books is passed to
+    on_connect, seed_from_rest uses the cached data and the fetch_orderbook callable
+    is NOT invoked (guard never tripped by I/O under the mutex).
+
+    Relationship invariant: Module A (MarketChannelOnlineService.on_connect called
+    inside with _world_mutex) → Module B (seed_from_rest) must NOT call the REST
+    fetch callable when pre-cached data is available.
+    """
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    fetch_calls: list[str] = []
+
+    def recording_fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return _fake_book(token_id)
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=recording_fetch)
+
+    pre_captured = {"token-1": _fake_book("token-1")}
+    results = service.on_connect(
+        received_at="2026-06-04T10:00:00+00:00",
+        pre_captured_books=pre_captured,
+    )
+
+    # Seed must still populate the book cache and write the event row
+    assert len(results) == 1
+    assert cache.get("token-1") is not None
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='BOOK_SNAPSHOT'"
+        ).fetchone()[0]
+        == 1
+    )
+    # The REST callable must NOT have been invoked — I/O happened before the lock
+    assert fetch_calls == [], (
+        "fetch_orderbook was called inside on_connect with pre_captured_books — "
+        "this means I/O under the world mutex was NOT eliminated"
+    )
+
+
+def test_on_connect_pre_capture_failure_skips_seed_gracefully():
+    """Fail-closed per-token: when pre-capture fails for a token (pre_captured_books
+    contains no entry), seed_from_rest falls back to fetch_orderbook for that token.
+    If that also fails, the token is skipped gracefully — no crash, no exception
+    propagation, no WorldMutexIOViolation."""
+    from src.state.db import WorldMutexIOViolation
+
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    def always_failing_fetch(token_id: str) -> dict:
+        raise ConnectionError("simulated pre-fetch failure")
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=always_failing_fetch)
+
+    # Pass an empty pre_captured_books (token absent → fallback fetch → also fails)
+    results = service.on_connect(
+        received_at="2026-06-04T10:00:00+00:00",
+        pre_captured_books={},  # token-1 absent → fallback to fetch_orderbook
+    )
+
+    # Graceful: no exception, no crash, empty results (seed skipped for all tokens)
+    assert results == []
+    assert cache.get("token-1") is None
+    # No rows written — seed was skipped
+    assert (
+        conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+    )
+
+
+def test_on_connect_pre_captured_books_none_uses_legacy_direct_fetch():
+    """Backwards-compatibility: when pre_captured_books is None (legacy callers),
+    seed_from_rest calls fetch_orderbook directly — the original behaviour is
+    preserved for callers that haven't adopted the pre-capture pattern."""
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    fetch_calls: list[str] = []
+
+    def recording_fetch(token_id: str) -> dict:
+        fetch_calls.append(token_id)
+        return _fake_book(token_id)
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=recording_fetch)
+
+    results = service.on_connect(received_at="2026-06-04T10:00:00+00:00")  # pre_captured_books=None
+
+    assert len(results) == 1
+    assert cache.get("token-1") is not None
+    assert fetch_calls == ["token-1"], "legacy direct fetch must still fire when pre_captured_books=None"
+
+
+def test_seed_from_rest_empty_pre_cached_under_world_mutex_raises_not_fetches():
+    """RED→GREEN (production fix 2026-06-04): the production bug was
+    seed_from_rest with empty pre_cached under the world mutex falling through
+    to the fallback-fetch branch → 283× WorldMutexIOViolation per 2min +
+    481 MB WAL re-bloat.
+
+    AFTER the fix: the fallback-fetch branch has its own
+    assert_no_world_mutex_held_for_io guard, so it raises WorldMutexIOViolation
+    BEFORE calling fetch_orderbook — zero I/O under the mutex.
+
+    This test verifies:
+    1. No fetch_orderbook call is made (guard fires before reaching I/O).
+    2. WorldMutexIOViolation is raised (not silently skipped).
+    3. The token is caught by the except block → WARNING logged, results=[].
+    """
+    import logging
+
+    from src.state.db import WorldMutexIOViolation, world_write_mutex
+
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    fetch_reached: list[str] = []
+
+    def should_not_be_called(token_id: str) -> dict:
+        fetch_reached.append(token_id)
+        return _fake_book(token_id)
+
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        # Empty pre_cached → fallback-fetch branch → guard fires → exception caught
+        # by seed_from_rest's per-token try/except → token skipped → results = []
+        results = ingestor.seed_from_rest(
+            should_not_be_called,
+            received_at="2026-06-04T10:00:00+00:00",
+            pre_cached={},  # empty — token-1 absent → fallback path
+        )
+    finally:
+        mutex.release()
+
+    # Guard fires BEFORE the fetch callable → fetch must never be reached
+    assert fetch_reached == [], (
+        "fetch_orderbook was called under the world mutex — the under-mutex "
+        "fetch fallback was NOT eliminated"
+    )
+    # Token skipped → empty results (fail-closed per token)
+    assert results == []
+    # Nothing written — seed was skipped
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+
+
+def test_on_reconnect_empty_pre_captured_under_world_mutex_raises_not_fetches():
+    """Same structural guarantee for on_reconnect: empty pre_captured_books under
+    the world mutex must NOT reach fetch_orderbook."""
+    from src.state.db import world_write_mutex
+
+    conn, writer = _conn_writer()
+    cache = QuoteCache()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids={"token-1"},
+        token_metadata=_metadata(),
+        quote_cache=cache,
+    )
+
+    fetch_reached: list[str] = []
+
+    def should_not_be_called(token_id: str) -> dict:
+        fetch_reached.append(token_id)
+        return _fake_book(token_id)
+
+    service = MarketChannelOnlineService(ingestor, fetch_orderbook=should_not_be_called)
+    service.connected = False
+    service.gap_start = "2026-06-04T09:00:00+00:00"
+
+    mutex = world_write_mutex()
+    mutex.acquire()
+    try:
+        results = service.on_reconnect(
+            received_at="2026-06-04T10:00:00+00:00",
+            pre_captured_books={},  # empty — token-1 absent → fallback path → guard
+        )
+    finally:
+        mutex.release()
+
+    assert fetch_reached == [], (
+        "fetch_orderbook was called under the world mutex in on_reconnect"
+    )
+    assert results == []

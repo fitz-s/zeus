@@ -216,6 +216,12 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload["alpha_gap"] = alpha_gap_val
     else:
         payload.pop("alpha_gap", None)
+    # #120: q_source — omit when None for hash stability (pre-#120 receipts had no
+    # such key; "q_source: null" would change the JSON/hash and trigger
+    # EdliReceiptHashDrift on retry of every existing shadow receipt). When set,
+    # persist it so the serving calibrator is recoverable from the blob forever.
+    if payload.get("q_source") is None:
+        payload.pop("q_source", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

@@ -226,13 +226,16 @@ def _validate_day0_event(payload: dict) -> None:
 
 
 def _validate_complete_token_map(candidates: tuple[MarketTopologyCandidate, ...]) -> None:
+    # Every bin requires a condition_id (used as FDR hypothesis key) and at minimum a
+    # YES token id (used for proof identity).  no_token_id may be None for non-tradeable
+    # bins (illiquid tail bins absent from executable_market_snapshots) — those bins
+    # carry the full MECE family so q/FDR are computed over the complete partition, but
+    # they never generate executable orders (executable_mask=False downstream).
     for candidate in candidates:
         if not candidate.condition_id:
             raise CandidateBindingError("candidate family requires condition_id for every bin")
         if not candidate.yes_token_id:
             raise CandidateBindingError("candidate family requires YES token id for every bin")
-        if not candidate.no_token_id:
-            raise CandidateBindingError("candidate family requires NO token id for every bin")
 
 
 def _unique(values: Iterable[str | None]) -> list[str]:

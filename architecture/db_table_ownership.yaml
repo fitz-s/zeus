@@ -886,10 +886,31 @@ tables:
       - {name: side_effect_status, type: TEXT, nullable: false}
       - {name: receipt_json, type: TEXT, nullable: false}
       - {name: receipt_hash, type: TEXT, nullable: false}
+      # R4/#175 antibody (2026-06-04): the receipt writer (no_submit_receipts.py)
+      # INSERTs these _ensure_column-migrated columns. They are NOT in CREATE_TABLE
+      # (added post-creation), so a live world DB whose migration lagged a code
+      # deploy lacked them and SILENTLY failed 37 writes (2026-06-03T14:21-14:25)
+      # as per-candidate no-trades — the boot guard only checked the 6 creation
+      # columns and booted happily. Declaring them makes assert_db_matches_registry
+      # FATAL at boot on a stale DB (loud) instead of silent write loss. All
+      # nullable (ALTER ADD COLUMN, no NOT NULL); matches live PRAGMA exactly.
+      - {name: kelly_decision_id, type: TEXT, nullable: true}
+      - {name: risk_decision_id, type: TEXT, nullable: true}
+      - {name: mainstream_agreement_pass, type: INTEGER, nullable: true}
+      - {name: mainstream_agreement_fail_reason, type: TEXT, nullable: true}
+      - {name: mainstream_point, type: REAL, nullable: true}
+      - {name: mainstream_delta, type: REAL, nullable: true}
+      - {name: mainstream_bin_label, type: TEXT, nullable: true}
+      - {name: mainstream_source, type: TEXT, nullable: true}
+      - {name: mainstream_fetched_at_utc, type: TEXT, nullable: true}
+      - {name: alpha_gap, type: REAL, nullable: true}
     notes: >
       EDLI v1 durable accepted no-submit receipt ledger. Rows preserve the
       event-bound proof projection without asserting executor or venue submission.
       Decision certificate rows are the authority for proof-carrying decisions.
+      required_columns includes the _ensure_column-migrated columns (mainstream_*,
+      alpha_gap, kelly/risk_decision_id) so a stale live DB FATALs at boot rather
+      than silently failing receipt writes (R4/#175).
 
   - name: decision_certificates
     db: world

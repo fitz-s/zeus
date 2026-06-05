@@ -1,7 +1,9 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-27
+# Last reused/audited: 2026-06-04
 # Authority basis: EDLI PR332 deploy-ready review; Day0 must not be advertised
 # live while the online observation-context hook is absent.
+#                  + 2026-06-04 arm direction-gate boot guard DELETED (mainstream is
+#                    display-only, never a decision/arm input — operator Rule-4 antibody)
 from __future__ import annotations
 
 import json
@@ -408,6 +410,28 @@ def test_live_canary_requires_submit_and_canary_flags(monkeypatch):
         )
 
 
+# ---------------------------------------------------------------------------
+# RETIRED 2026-06-04 (operator directive, Rule-4 antibody): the two-key arm
+# direction-gate boot guard (_assert_edli_arm_requires_direction_gate) is DELETED.
+# It coupled arming to the mainstream-enforcement flag, but mainstream is now
+# OBSERVATIONAL / DISPLAY-ONLY and is NEVER a decision/arm input. The submit-time
+# enforce branch it guarded was also deleted, so there is no "direction gate" left to
+# require at arm time. The inverse law (mainstream cannot block boot/arm/submit) is
+# proven in tests/money_path/test_mainstream_display_only_unconstructable.py.
+# ---------------------------------------------------------------------------
+
+
+def test_arm_direction_gate_boot_guard_is_deleted():
+    """The two-key arm direction-gate boot guard must NOT exist — mainstream is
+    display-only and can never block arming."""
+    import src.main as main
+
+    assert not hasattr(main, "_assert_edli_arm_requires_direction_gate"), (
+        "the deleted arm direction-gate boot guard reappeared; mainstream must NOT "
+        "be coupled to arming (operator law: observational/display-only)."
+    )
+
+
 def test_live_canary_requires_stage_evidence_file_paths(monkeypatch):
     # Post-PR #367: stage paths are configured in settings.json, so
     # _require_stage_file_paths (config-key check) no longer raises.
@@ -622,6 +646,11 @@ def _edli_live_canary_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
+        # 2026-06-04: the arm direction-gate boot guard is DELETED (mainstream is
+        # display-only). These keys are now INERT (no boot guard reads them); retained
+        # here only to keep this canary config explicit. They do not affect boot.
+        "mainstream_agreement_enforce_on_submit": True,
+        "mainstream_agreement_reference_enabled": True,
     }
     values.update(overrides)
     return values
@@ -643,6 +672,9 @@ def _edli_live_updates(**overrides):
         "edli_live_min_canary_count": 1,
         "edli_live_max_unresolved_unknowns": 0,
         "edli_live_min_realized_edge_bps": 0,
+        # 2026-06-04: inert keys (arm direction-gate guard DELETED). See _edli_live_canary_updates.
+        "mainstream_agreement_enforce_on_submit": True,
+        "mainstream_agreement_reference_enabled": True,
     }
     values.update(overrides)
     return values

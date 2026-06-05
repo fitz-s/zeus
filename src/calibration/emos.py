@@ -88,11 +88,42 @@ def season_for(target_date: date) -> str:
     return "SON"
 
 
+def emos_season(target_date) -> str:
+    """Canonical NH month-only season for EMOS cell lookup. Accepts a date or 'YYYY-MM-DD' str.
+
+    EMOS cells are keyed by NH month-season (fit_emos_calibration.season()). A
+    hemisphere-aware season (season_from_date(lat)) SH-flips and would serve the
+    OPPOSITE-season cell for Southern-Hemisphere cities — the season-crossing twin of
+    the metric-crossing defect. EVERY EMOS caller (seam, shadow ledger, EMOS-CI override,
+    boot guard, offline scorers) MUST use THIS function so the lookup season always
+    matches the fit's keying. Do not reintroduce season_from_date(lat) on an EMOS path.
+    """
+    mm = target_date.month if hasattr(target_date, "month") else int(str(target_date)[5:7])
+    if mm in (12, 1, 2):
+        return "DJF"
+    if mm in (3, 4, 5):
+        return "MAM"
+    if mm in (6, 7, 8):
+        return "JJA"
+    return "SON"
+
+
+def emos_cell_key(city: str, season: str, metric: str) -> str:
+    """The canonical 3-key for the EMOS table: ``city|season|metric`` (metric lowercased).
+
+    The ONLY correct way to address a cell. Direct ``f"{city}|{season}"`` 2-key reads miss
+    the metric-keyed table (silently None -> served=missing). Use this everywhere.
+    """
+    return f"{city}|{season}|{str(metric).lower()}"
+
+
 def emos_predictive(
     city: str,
     season: str,
     lead_days: float,
     members_c: "np.ndarray",
+    *,
+    metric: str = "high",
 ) -> Optional[tuple[float, float]]:
     """Compute the EMOS predictive mean and std-dev (both in °C).
 
@@ -107,16 +138,22 @@ def emos_predictive(
       - cell missing from table
       - any computation error (fail-closed)
 
+    METRIC-KEYED (2026-06-04): cells are keyed ``city|season|metric``. HIGH and LOW are
+    physically different quantities (daily max vs daily min) with separate fits; a LOW
+    lookup resolves ONLY ``…|low`` and can never return a HIGH cell. ``metric`` defaults to
+    "high" so legacy HIGH callers are unchanged after the table is re-keyed to ``…|high``.
+
     Args:
         city:       City name matching the calibration table key (e.g. "Amsterdam").
         season:     Season code DJF/MAM/JJA/SON.
         lead_days:  Lead time in days (float; e.g. lead_hours/24).
-        members_c:  1-D numpy array of ensemble member maxima in °C.
+        members_c:  1-D numpy array of ensemble member extrema in °C (max for high / min for low).
+        metric:     "high" | "low" — the market's settlement metric (keys the cell lookup).
     """
     try:
         table = load_emos_table()
         cells = table.get("cells", {})
-        key = f"{city}|{season}"
+        key = f"{city}|{season}|{str(metric).lower()}"
         cell = cells.get(key)
         if cell is None:
             return None

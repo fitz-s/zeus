@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -20,6 +21,35 @@ from src.strategy.market_phase import market_phase_admits
 UTC = timezone.utc
 
 
+def _target_local_day_strictly_past(
+    *, city_timezone: str, target_local_date: date, decision_time: datetime
+) -> bool:
+    """True iff ``target_local_date``'s whole LOCAL day is already in the PAST at
+    ``decision_time`` — the cheap, unconditional emission-floor predicate
+    (STEP 2 / consolidated timeliness fix).
+
+    Already-settled iff ``decision_time`` is at/after local-midnight of the day
+    AFTER ``target_local_date`` (the SETTLEMENT_DAY-entry instant of target+1).
+    tz arithmetic via the canonical ``settlement_day_entry_utc`` geometry —
+    never a lexicographic string compare. Fail-CLOSED on an unresolvable tz
+    (treat as NOT-past so a tz glitch never silently zeroes the FSR stream; the
+    reactor backstop + STEP-3 claim floor remain the authority). Mirrors the
+    EventStore claim-floor predicate so source and claim agree on a verdict.
+    """
+    from src.strategy.market_phase import settlement_day_entry_utc
+
+    if not city_timezone:
+        return False
+    try:
+        day_after_entry = settlement_day_entry_utc(
+            target_local_date=target_local_date + timedelta(days=1),
+            city_timezone=city_timezone,
+        )
+    except Exception:  # noqa: BLE001 — unknown tz must not zero the FSR stream
+        return False
+    return decision_time.astimezone(UTC) >= day_after_entry
+
+
 def _intake_phase_filter_enabled() -> bool:
     """Read edli_v1.edli_intake_phase_filter_enabled (default OFF in code).
 
@@ -33,6 +63,139 @@ def _intake_phase_filter_enabled() -> bool:
         return bool(settings["edli_v1"].get("edli_intake_phase_filter_enabled", False))
     except Exception:  # noqa: BLE001 — config glitch must never zero the FSR stream
         return False
+
+
+def _coverage_fairness_emit_enabled() -> bool:
+    """Read edli_v1.coverage_fairness_emit_enabled (default OFF — shadow-safe).
+
+    Phase-2 B4. FAIL-OPEN on any config error → False (legacy ORDER BY).
+    When OFF, scan_committed_snapshots uses the legacy
+    ``ORDER BY LIVE_ELIGIBLE, computed_at DESC, snapshot_id DESC LIMIT ?``
+    exactly as before this commit — byte-identical behaviour.
+    When ON, selection is keyed by a CoverageFairnessRequest that deduplicates
+    to ≤1 row per (city, target_date, metric) per cycle and round-robins so no
+    city is starved beyond ceil(N/LIMIT) cycles.
+    """
+    try:
+        from src.config import settings
+
+        return bool(settings["edli_v1"].get("coverage_fairness_emit_enabled", False))
+    except Exception:  # noqa: BLE001 — config glitch must never dark all cities
+        return False
+
+
+@dataclass(frozen=True)
+class CoverageFairnessRequest:
+    """Contract object that owns per-cycle city-fair emit selection.
+
+    The contract encapsulates the city-dedup round-robin logic so that the
+    SQL query ORDER BY and the Python selection layer cannot diverge: any
+    caller that wants fair coverage must pass a CoverageFairnessRequest;
+    callers that need legacy ORDER BY must NOT construct one.  This makes
+    snapshot_id-ordering bias unconstructable at the call boundary when
+    fairness is required — you cannot accidentally get unfair selection
+    without explicitly constructing the legacy path.
+
+    Algorithm:
+      1. From the full candidate list (already filtered by the SQL WHERE
+         clause, no LIMIT applied), deduplicate to the BEST row per
+         (city, target_date, metric): best = LIVE_ELIGIBLE > BLOCKED, then
+         lowest snapshot_id (stable tie-break).
+      2. Assign each unique key to a round-robin slot based on insertion
+         order (deterministic: the SQL result order feeds this, but since we
+         deduplicate first, snapshot_id bias in the SQL no longer starves
+         cities — each city gets exactly one slot).
+      3. Return the ``limit`` keys whose slot index falls in
+         [cycle_index * limit, (cycle_index + 1) * limit).
+
+    ``cycle_index`` is derived from the ``source`` string passed to
+    ``scan_committed_snapshots``: when ``source`` matches ``cycle-N``, N is
+    used; otherwise 0 (first-cycle behaviour, same as legacy).
+    """
+
+    limit: int
+    cycle_index: int = 0
+
+    def select_rows(
+        self, candidate_rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return up to ``limit`` rows for this cycle, one per city-family key.
+
+        A city-family key is (city, target_date, metric).  Among multiple rows
+        for the same key, the LIVE_ELIGIBLE row wins; ties broken by the FRESHEST
+        forecast run (latest source_issue_time, then available_at, then highest
+        snapshot_id). The emitted FSR's source_run MUST equal the run the reader
+        elects for inference (always the freshest); a stale tie-break emits a
+        stale causal run that disagrees with the reader's executable run, killing
+        every candidate at NO_SUBMIT_CERTIFICATE (2026-06-04 0-receipts root).
+        """
+        # Step 1: dedup to best row per city-family key.
+        best: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in candidate_rows:
+            city = str(row.get("snapshot_city") or row.get("city") or "")
+            target_date = str(row.get("snapshot_target_date") or row.get("target_local_date") or "")
+            metric = str(row.get("snapshot_temperature_metric") or row.get("temperature_metric") or "")
+            key = (city, target_date, metric)
+            existing = best.get(key)
+            if existing is None:
+                best[key] = row
+                continue
+            # LIVE_ELIGIBLE beats any other readiness.
+            new_ready = str(row.get("readiness_status") or "")
+            old_ready = str(existing.get("readiness_status") or "")
+            if new_ready == "LIVE_ELIGIBLE" and old_ready != "LIVE_ELIGIBLE":
+                best[key] = row
+                continue
+            if old_ready == "LIVE_ELIGIBLE" and new_ready != "LIVE_ELIGIBLE":
+                continue
+            # Both same readiness: the FRESHEST forecast run wins. The emitted FSR's
+            # source_run MUST equal the run the reader elects for inference (always
+            # the freshest), else causal-run != executable-run and the candidate dies
+            # at NO_SUBMIT_CERTIFICATE (2026-06-04 0-receipts root: 26/28 June-5 FSR
+            # were the stale May-31 run, 0 the fresh June-4 run). The old lowest-
+            # snapshot_id tie-break deliberately picked the OLDEST run — backwards.
+            if _row_freshness_key(row) > _row_freshness_key(existing):
+                best[key] = row
+
+        # Step 2: stable ordering of unique keys (insertion order of first seen).
+        # The SQL result feeds this; LIVE_ELIGIBLE rows naturally surface first
+        # (the existing ORDER BY still runs — we just don't cap it at LIMIT).
+        ordered_keys: list[tuple[str, str, str]] = []
+        seen_keys: set[tuple[str, str, str]] = set()
+        for row in candidate_rows:
+            city = str(row.get("snapshot_city") or row.get("city") or "")
+            target_date = str(row.get("snapshot_target_date") or row.get("target_local_date") or "")
+            metric = str(row.get("snapshot_temperature_metric") or row.get("temperature_metric") or "")
+            key = (city, target_date, metric)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                ordered_keys.append(key)
+
+        # Step 3: round-robin window.
+        start = self.cycle_index * self.limit
+        end = start + self.limit
+        window_keys = ordered_keys[start:end]
+
+        return [best[k] for k in window_keys if k in best]
+
+def _row_freshness_key(row: dict[str, Any]) -> tuple[str, str, int]:
+    """Freshness ordering key for a committed-snapshot row (higher = fresher).
+
+    Latest source_issue_time wins (the forecast run's issue time); ties broken by
+    latest available_at, then highest snapshot_id (inserted-later proxy when
+    issue_time is NULL). Used so the emitted FSR carries the FRESHEST source_run —
+    the same run the reader elects — keeping causal-run == executable-run.
+    """
+    try:
+        sid = int(row.get("snapshot_id") or 0)
+    except (ValueError, TypeError):
+        sid = 0
+    return (
+        str(row.get("sr_source_issue_time") or ""),
+        str(row.get("snapshot_available_at") or row.get("sr_source_available_at") or ""),
+        sid,
+    )
+
 
 LiveEligibilityReader = Callable[[dict[str, Any], dict[str, Any], dict[str, Any], datetime], bool]
 
@@ -308,9 +471,22 @@ class ForecastSnapshotReadyTrigger:
                 " AND m.target_date = c.target_local_date"
                 " AND m.temperature_metric = c.temperature_metric))"
             )
-        rows = _dict_rows(
-            forecasts_conn,
-            f"""
+        # B4 coverage-fairness contract (Phase-2, shadow-gated).
+        # When flag ON: fetch ALL candidates (no SQL LIMIT) then apply
+        # CoverageFairnessRequest.select_rows() which deduplicates to ≤1 row per
+        # (city, target_date, metric) per cycle and round-robins so no city is
+        # starved beyond ceil(N/LIMIT) cycles.
+        # When flag OFF: use the legacy LIMIT ? in SQL — byte-identical behaviour.
+        _fairness_on = _coverage_fairness_emit_enabled()
+        _cycle_index = 0
+        if _fairness_on and source is not None:
+            # Derive cycle index from source string "cycle-N" (continuous re-decision).
+            try:
+                _cycle_index = int(source.split("-")[-1])
+            except (ValueError, IndexError):
+                _cycle_index = 0
+
+        _select_sql_base = f"""
             SELECT
                 c.*,
                 sr.source_cycle_time AS sr_source_cycle_time,
@@ -347,15 +523,34 @@ class ForecastSnapshotReadyTrigger:
             ORDER BY
                 CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
                 c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
-            LIMIT ?
-            """,
-            (
-                decision_time.astimezone(UTC).isoformat(),
-                decision_time.astimezone(UTC).isoformat(),
-                decision_time.astimezone(UTC).isoformat(),
-                limit,
-            ),
-        )
+        """
+        _decision_iso = decision_time.astimezone(UTC).isoformat()
+        if _fairness_on:
+            # Fetch all candidates (no LIMIT); fairness contract applies LIMIT per cycle.
+            rows = _dict_rows(
+                forecasts_conn,
+                _select_sql_base,
+                (
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                ),
+            )
+            rows = CoverageFairnessRequest(
+                limit=limit, cycle_index=_cycle_index
+            ).select_rows(rows)
+        else:
+            # Legacy path: SQL LIMIT keeps behaviour byte-identical to pre-B4.
+            rows = _dict_rows(
+                forecasts_conn,
+                _select_sql_base + "\n            LIMIT ?",
+                (
+                    _decision_iso,
+                    _decision_iso,
+                    _decision_iso,
+                    limit,
+                ),
+            )
         # WAVE-1 W1-T1 intake phase filter (gated by
         # edli_v1.edli_intake_phase_filter_enabled, default OFF). When ON, a
         # forecast_only family whose target local day has begun or whose market
@@ -384,6 +579,27 @@ class ForecastSnapshotReadyTrigger:
                 source_run_id = str(source_run.get("source_run_id") or coverage.get("source_run_id") or "")
                 entity_key = "|".join((city, target_date, metric, source_run_id))
                 if entity_key in pending_skip:
+                    continue
+            # STEP 2 emission floor S1 (UNCONDITIONAL, not flag-gated): never
+            # manufacture an opportunity_event for a target whose LOCAL day is
+            # already strictly PAST at decision_time. This is the highest-leverage
+            # point-fix — the cheap source-form of the timeliness predicate, a
+            # conservative lower bound of the reactor's full phase gate, so it can
+            # never starve a candidate the reactor would admit. Same-day
+            # (SETTLEMENT_DAY) families are left to the flag-gated W1-T1 intake
+            # filter below / the reactor backstop.
+            _src_tz = str(coverage.get("city_timezone") or "")
+            _src_target = str(snapshot.get("target_date") or coverage.get("target_local_date") or "")
+            if _src_tz and _src_target:
+                try:
+                    _src_target_date = date.fromisoformat(_src_target)
+                except ValueError:
+                    _src_target_date = None
+                if _src_target_date is not None and _target_local_day_strictly_past(
+                    city_timezone=_src_tz,
+                    target_local_date=_src_target_date,
+                    decision_time=decision_time,
+                ):
                     continue
             if _intake_phase_filter_on:
                 city = str(snapshot.get("city") or coverage.get("city") or "")

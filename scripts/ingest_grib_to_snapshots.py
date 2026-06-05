@@ -1,6 +1,10 @@
 # Created: 2026-03-26
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-06-04
 # Authority basis: Phase 4B audited GRIB ingest + PLAN_v4 Phase 6 SourceRunContext linkage.
+#   2026-06-04: replaced inline ecmwf_opendata `_v1` strip with the shared
+#   ensemble_snapshot_provenance.normalize_opendata_data_version() helper so the
+#   producer→gate reconciliation lives in one tested place (producer⊆gate antibody,
+#   tests/test_opendata_data_version_producer_subset_gate.py).
 #   2026-05-14: added intra-`ingest_track` boundary logs to localize the
 #   2026-05-13 ECMWF wedge (no rglob_end after rglob_start at 17:16:44 PDT,
 #   WAL=0 bytes — wedge is somewhere between rglob and first INSERT or in
@@ -61,6 +65,7 @@ from src.config import runtime_cities_by_name
 from src.contracts.calibration_bins import grid_for_city
 from src.contracts.ensemble_snapshot_provenance import (
     assert_data_version_allowed,
+    normalize_opendata_data_version,
     validate_members_unit,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -520,11 +525,16 @@ def ingest_json_file(
     data_version = str(payload.get("data_version", ""))
     # #38 / #362 version-eradication: OpenData extracted JSON artifacts carry the
     # legacy ``_v1`` suffix on ecmwf_opendata data_versions, but #362 dropped ``_v1``
-    # from the canonical allowlist (same data, redundant version tag). Normalize
-    # before the NC-12 guard so post-#362 ingest accepts pre-existing and freshly
-    # extracted artifacts without a full re-extract. TIGGE ``_v1`` is unaffected.
-    if data_version.startswith("ecmwf_opendata_") and data_version.endswith("_v1"):
-        data_version = data_version[:-3]
+    # from the canonical allowlist (same data, redundant version tag). The OpenData
+    # extractor lives in the out-of-repo staging tree and still emits ``_v1``, so
+    # normalize via the SINGLE shared normalizer (co-located with the gate) before
+    # the NC-12 guard. This keeps the strip logic from drifting between call sites;
+    # the producer⊆gate invariant is asserted in
+    # tests/test_opendata_data_version_producer_subset_gate.py. TIGGE ``_v1`` is
+    # a distinct canonical lineage and is intentionally left untouched.
+    normalized_dv = normalize_opendata_data_version(data_version)
+    if normalized_dv != data_version:
+        data_version = normalized_dv
         payload["data_version"] = data_version
     # NC-12: guard must fire before INSERT
     assert_data_version_allowed(data_version, context="ingest_grib_to_snapshots")

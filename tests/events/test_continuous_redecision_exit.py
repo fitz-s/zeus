@@ -25,6 +25,20 @@ cr = pytest.importorskip(
     reason="continuous_redecision module not yet authored — relationship contract is RED",
 )
 
+# W3 (#133) removed ONLY screen_exit / screen_exit_cancel from
+# continuous_redecision (zero live callers). screen_reprice and
+# select_exit_order_mode were NOT removed — they still exist. Scope the skip to
+# JUST the tests that call the deleted exit-screen API, so the reprice / stale-
+# quote-cancel / exit-order-mode coverage in this same module keeps running
+# (a module-level skipif would silently drop that live-API coverage too —
+# review 2026-06-05). Skip transparently (NOT a silent pass) instead of failing
+# on AttributeError.
+_skip_deleted_exit_api = pytest.mark.skipif(
+    not hasattr(cr, "screen_exit"),
+    reason="screen_exit/screen_exit_cancel deleted in W3 (#133); these exit-screen "
+    "tests reference removed API — rewrite to new exit path pending",
+)
+
 
 def _mem_world() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
@@ -164,6 +178,7 @@ def test_fresh_quote_is_not_cancelled():
 # ===========================================================================
 
 # --- CI-separation: exit on separated evidence, not a single noisy snapshot -------------------
+@_skip_deleted_exit_api
 def test_exit_ci_separated_reversal_exits():
     """SD-7: exit fires when the new belief's CI EXCLUDES the entry belief (separated evidence).
     Entry NO-belief 0.90 [0.86, 0.94]; current NO-belief 0.70 [0.66, 0.74] — the CIs are disjoint
@@ -180,6 +195,7 @@ def test_exit_ci_separated_reversal_exits():
     assert decision.reason in {"BELIEF_EDGE_REVERSAL", "CI_SEPARATED_REVERSAL"}
 
 
+@_skip_deleted_exit_api
 def test_exit_sub_ci_noisy_reversal_holds():
     """A large POINT move (Δ0.20, would pass the flat 0.15) but the current CI still OVERLAPS the
     entry CI (wide/noisy snapshot) → HOLD. CI-separation is STRICTER than the flat threshold: a
@@ -196,6 +212,7 @@ def test_exit_sub_ci_noisy_reversal_holds():
     assert decision is None, "a point move whose CI still overlaps entry must NOT exit (noisy snapshot)"
 
 
+@_skip_deleted_exit_api
 def test_exit_flat_floor_fallback_when_no_ci():
     """Back-compat: when CI inputs are unavailable, fall back to the flat reversal_belief_delta floor
     (the pre-hardening behavior). Δ0.30 ≥ 0.15 → EXIT; Δ0.04 < 0.15 → HOLD."""
@@ -219,6 +236,7 @@ def test_exit_flat_floor_fallback_when_no_ci():
 
 
 # --- EVIDENCE_UNAVAILABLE: degraded day0/obs math → third state -------------------------------
+@_skip_deleted_exit_api
 def test_exit_evidence_unavailable_third_state():
     """SD-7 / plan v2.B: when the belief is UNAVAILABLE (degraded day0 absorbing-mask / obs math —
     belief can't be computed, distinct from belief-reversed), screen_exit returns a THIRD state
@@ -235,6 +253,7 @@ def test_exit_evidence_unavailable_third_state():
     assert getattr(decision, "side", None) == "buy_no"
 
 
+@_skip_deleted_exit_api
 def test_exit_evidence_unavailable_is_not_an_exit_on_price():
     """EVIDENCE_UNAVAILABLE must be distinguishable from an actual EXIT so the caller does NOT route
     it through the exit-submit path (it's a heartbeat flag, not a sell)."""
@@ -250,6 +269,7 @@ def test_exit_evidence_unavailable_is_not_an_exit_on_price():
 
 
 # --- Exit re-reversal before fill → CANCEL pending exit (symmetric anti-twitch) ----------------
+@_skip_deleted_exit_api
 def test_exit_re_reversal_cancels_pending_exit():
     """Symmetric anti-twitch: a pending exit was placed on a CI-separated reversal; before it fills,
     the belief RE-reverses back (current CI re-OVERLAPS the entry CI) → the reversal was noise →
@@ -267,6 +287,7 @@ def test_exit_re_reversal_cancels_pending_exit():
     assert decision.reason == "EXIT_RE_REVERSAL_NOISE"
 
 
+@_skip_deleted_exit_api
 def test_exit_re_reversal_does_not_cancel_when_still_separated():
     """If the belief is STILL CI-separated from entry (reversal sustained), the pending exit must NOT
     be cancelled — let it fill. Cancel only when the reversal proved to be noise."""

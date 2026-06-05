@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md R1 proof kernel.
+# Last reused/audited: 2026-06-04
+# Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 
 import pytest
 
@@ -170,13 +170,19 @@ def test_market_event_never_creates_live_trade_candidate():
         bind_event_to_candidate_family(event, [_candidate()], decision_time=DECISION_TIME)
 
 
-def test_candidate_family_requires_complete_yes_no_token_map():
+def test_candidate_family_requires_yes_token_id_for_every_bin():
+    """condition_id and yes_token_id are required for every bin (identity).
+    no_token_id is optional — None marks a non-tradeable bin (illiquid tail
+    bin absent from executable_market_snapshots).  Such a bin is still part of
+    the full MECE family for q/FDR; it just cannot generate executable orders.
+    A missing YES token is still rejected (no identity for the hypothesis).
+    """
     event = _forecast_event()
 
-    with pytest.raises(CandidateBindingError, match="NO token"):
+    with pytest.raises(CandidateBindingError, match="YES token"):
         bind_event_to_candidate_family(
             event,
-            [_candidate(no_token_id=None)],
+            [_candidate(yes_token_id=None)],
             decision_time=DECISION_TIME,
         )
 

@@ -23,6 +23,7 @@ from src.calibration.platt import (
 )
 from src.config import edge_n_bootstrap
 from src.contracts.execution_price import ExecutionPrice
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
@@ -190,6 +191,7 @@ class MarketAnalysis:
         market_prior: MarketPriorDistribution | None = None,
         allow_legacy_quote_prior: bool = False,
         *,
+        forecast_sharpness: "ForecastSharpnessEvidence",  # K1: REQUIRED (no default) — omission is a TypeError
         transfer_logit_sigma: float = 0.0,
         bootstrap_probability_sampler: BootstrapProbabilitySampler | None = None,
         bootstrap_signal_type: str = "generic_ensemble",
@@ -332,6 +334,46 @@ class MarketAnalysis:
                 f"entry_quote_evidence_no must have length {expected_bins}, "
                 f"got {len(self._entry_quote_evidence_no)}"
             )
+        # K1 — ForecastSharpnessEvidence (Phase-2, required ctor param; omission is a
+        # TypeError raised by Python before this body runs). Re-assert that the
+        # sharpness evidence was measured in the SAME unit as this analysis (B6 ETL
+        # contamination block): a °F skill row paired with a °C market is a unit leak
+        # that would silently mis-threshold the gate. The verdict (whether this city's
+        # forecast is too flat to emit edges) is precomputed and consulted at the ONE
+        # gate site (find_edges_with_trace / _sharpness_suppresses_edges) — it never
+        # touches the POINT q, only whether any edge is emitted at all.
+        if not isinstance(forecast_sharpness, ForecastSharpnessEvidence):
+            raise TypeError(
+                "forecast_sharpness must be a ForecastSharpnessEvidence, got "
+                f"{type(forecast_sharpness).__name__}"
+            )
+        if forecast_sharpness.unit != self._unit:
+            raise ValueError(
+                "ForecastSharpnessEvidence unit mismatch: evidence unit "
+                f"{forecast_sharpness.unit!r} != analysis unit {self._unit!r} "
+                "(B6 ETL-contamination block)"
+            )
+        self._forecast_sharpness = forecast_sharpness
+
+    def _sharpness_suppresses_edges(self) -> bool:
+        """Return True iff the K1 sharpness gate suppresses ALL edges for this market.
+
+        This is the ONE gate site for the K1 invariant. ``find_edges_with_trace`` and
+        ``scan_full_hypothesis_family`` both consult this single verdict — there is no
+        second sharpness check anywhere (no parallel-mechanism creep; the emit query
+        reads the verdict, it does not re-derive it).
+
+        Flag-gated (SHADOW-safe): when ``edli_v1.forecast_sharpness_gate_enabled`` is
+        False (default), this ALWAYS returns False, so live emit is byte-identical to
+        legacy regardless of the evidence carried.
+        """
+        from src.config import settings
+
+        ev = settings["edli_v1"]
+        if not bool(ev.get("forecast_sharpness_gate_enabled", False)):
+            return False
+        multiplier = float(ev.get("forecast_sharpness_mae_multiplier", 1.5))
+        return self._forecast_sharpness.suppresses_edges(multiplier=multiplier)
 
     def _compute_posterior(self, p_cal: np.ndarray) -> np.ndarray:
         if self._posterior_mode == MODEL_ONLY_POSTERIOR_MODE:
@@ -483,6 +525,30 @@ class MarketAnalysis:
         edges: list[BinEdge] = []
         trace: list[EdgeScanTrace] = []
 
+        # K1 — forecast-sharpness gate (ONE site). When the flag is ON and this city's
+        # settlement MAE is wider than N_SIGMA*bin_width, the forecast is too flat to
+        # carry a meaningful edge: emit ZERO edges (the antibody for flat-q -> 96%
+        # buy_no skew). A per-bin trace row records the suppression so BH accounting and
+        # diagnostics see WHY nothing emitted. Flag OFF => never fires => legacy emit.
+        if self._sharpness_suppresses_edges():
+            for i, b in enumerate(self.bins):
+                trace.append(
+                    EdgeScanTrace(
+                        support_index=i,
+                        bin_label=b.label,
+                        executable=self.is_executable_bin(i),
+                        direction="support",
+                        p_posterior=None,
+                        p_market=None,
+                        raw_edge=None,
+                        ci_lower=None,
+                        ci_upper=None,
+                        p_value=None,
+                        decision="forecast_sharpness_gate_suppressed",
+                    )
+                )
+            return [], trace
+
         for i, b in enumerate(self.bins):
             if not self.is_executable_bin(i):
                 trace.append(
@@ -631,6 +697,33 @@ class MarketAnalysis:
             # Buy NO direction: payoff probability is complement; executable
             # entry price must come from the native NO side when available.
             if self.supports_buy_no_edges(i):
+                # DIRECTION LAW (operator, load-bearing): buy_no ⟺ bin ≠ forecast.
+                # Our forecast bin is argmax(p_posterior) — the single outcome we predict most
+                # likely. A buy_no on THAT bin bets against our own forecast = wrong side by
+                # definition. edge_no>0 usually filters it (the modal bin has the lowest q_no),
+                # but a cheap NO quote can still manufacture a positive wrong-side edge there.
+                # Make it UNCONSTRUCTABLE (rule 5 — kill the category, not the instance): never
+                # build a buy_no on the modal bin, regardless of price. buy_no on NON-modal bins
+                # is unaffected (predicting modal j ⟹ "not i" for i≠j is consistent, allowed).
+                _post_max = float(np.max(self.p_posterior))
+                if float(self.p_posterior[i]) >= _post_max - 1e-12:
+                    trace.append(
+                        EdgeScanTrace(
+                            support_index=i,
+                            bin_label=b.label,
+                            executable=True,
+                            direction="buy_no",
+                            p_posterior=1.0 - float(self.p_posterior[i]),
+                            p_market=self.buy_no_market_price(i),
+                            raw_edge=None,
+                            ci_lower=None,
+                            ci_upper=None,
+                            p_value=None,
+                            decision="direction_law_veto:buy_no_on_forecast_modal_bin",
+                            native_quote_available=True,
+                        )
+                    )
+                    continue  # wrong-side by the direction law — never construct it
                 p_model_no = 1.0 - float(self.p_cal[i])
                 p_market_no = self.buy_no_market_price(i)
                 p_post_no = 1.0 - float(self.p_posterior[i])

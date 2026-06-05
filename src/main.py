@@ -14,15 +14,17 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-06-04
 # Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
+#                  + 2026-06-04 mainstream made display-only/unconstructable-as-decision (arm direction-gate boot guard + submit enforce branch DELETED)
 
 import functools
 import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -551,6 +553,14 @@ def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
         raise RuntimeError(verified.reason)
 
 
+# OPERATOR LAW (2026-06-04, Rule-4 antibody): the former
+# ``_assert_edli_arm_requires_direction_gate`` two-key arm boot guard is DELETED.
+# It coupled arming to the mainstream-enforcement flag — but mainstream is now
+# OBSERVATIONAL / DISPLAY-ONLY and is NEVER a decision/arm input. The submit-time
+# enforce branch it guarded was also deleted (event_reactor_adapter submit closure),
+# so there is no "direction gate" left to require. Mainstream cannot block boot/arm.
+
+
 def evaluate_edli_stage_readiness(
     *,
     stage: str,
@@ -846,9 +856,7 @@ def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
         return
     try:
         from src.calibration.emos_ci_license import load_emos_ci_license
-        from src.calibration.emos import load_emos_table
-        from src.contracts.season import season_from_date
-        from src.config import runtime_cities_by_name
+        from src.calibration.emos import load_emos_table, emos_season, emos_cell_key
     except Exception as exc:  # pragma: no cover — import wiring
         logger.warning("EMOS-CI license boot guard import failed (override left disabled): %s", exc)
         return
@@ -863,18 +871,18 @@ def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
 
     table = load_emos_table()
     cells = table.get("cells", {}) if isinstance(table, dict) else {}
-    cities_by_name = runtime_cities_by_name()
     today = datetime.now(timezone.utc).date().isoformat()
 
+    # EMOS-CI license is HIGH-metric (the override replaces the MC q_5pct on the HIGH q_lcb).
+    # Canonical NH-month season + 3-key lookup: a hemisphere-aware season SH-flips and a 2-key
+    # lookup misses the metric-keyed table — both silently drop the whole license (C1/C2 fix).
     dropped: list[str] = []
     for city in list(license_map.keys()):
-        city_obj = cities_by_name.get(city)
-        lat = getattr(city_obj, "lat", 90.0) if city_obj is not None else 90.0
-        season = season_from_date(today, lat=lat)
-        cell = cells.get(f"{city}|{season}")
+        season = emos_season(today)
+        cell = cells.get(emos_cell_key(city, season, "high"))
         served = str(cell.get("served", "")) if isinstance(cell, dict) else ""
         if served != "emos":
-            dropped.append(f"{city}|{season}(served={served or 'missing'})")
+            dropped.append(f"{city}|{season}|high(served={served or 'missing'})")
             del license_map[city]
 
     if dropped:
@@ -888,6 +896,51 @@ def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
         "EMOS-CI live override ENABLED; effective licensed cities (season-covered): %s",
         covered if covered else "(none)",
     )
+
+
+def _assert_calibration_coverage_contract(edli_cfg: dict) -> None:
+    """Antibody #90: loud per-city bias+Platt calibration-coverage guard.
+
+    For EVERY live runtime city × metric, assert the current-season bias row
+    (VERIFIED edli_per_city_v1) AND a non-borrowed/non-identity-by-starvation
+    Platt exist.  Any city that would silently fall to RAW bias / borrow a
+    foreign-cluster Platt / fall to identity is enumerated LOUDLY.
+
+    SEVERITY (gated solely on real_order_submit_enabled):
+      * SHADOW (real_order_submit_enabled=False): WARN-only, never raises, never
+        starves the reactor — today's behaviour is byte-identical except new
+        warning log lines.
+      * ARMED (real_order_submit_enabled=True): raises CalibrationCoverageError
+        (fail-closed — arming with silent partial calibration is forbidden).
+
+    Read-only (SELECT on the world DB).  Wrapped so an UNEXPECTED import/probe
+    error never blocks the SHADOW daemon (fail-open on infra error in shadow);
+    in ARMED mode an unexpected error is re-raised (fail-closed) rather than
+    masking a coverage check.
+    """
+    armed = bool(edli_cfg.get("real_order_submit_enabled", False))
+    try:
+        from src.observability.calibration_coverage_guard import (
+            assert_calibration_coverage,
+        )
+    except Exception as exc:  # pragma: no cover — import wiring
+        if armed:
+            raise
+        logger.warning(
+            "calibration-coverage guard import failed (shadow, ignored): %s", exc
+        )
+        return
+    try:
+        assert_calibration_coverage(armed=armed)
+    except Exception:
+        # CalibrationCoverageError (armed) and any unexpected probe error must
+        # surface when armed; in shadow only the WARN logging matters and the
+        # guard itself never raises for gaps — re-raise only when armed.
+        if armed:
+            raise
+        logger.warning(
+            "calibration-coverage guard probe error (shadow, ignored)", exc_info=True
+        )
 
 
 def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
@@ -930,6 +983,9 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
         # Ordered AFTER the (edli_live-only) promotion-artifact gate so the
         # promotion gate's specific reason still surfaces first for edli_live.
         _assert_edli_arm_gate_artifact(edli_cfg)
+        # OPERATOR LAW (2026-06-04): the former two-key arm direction-gate guard is
+        # DELETED — mainstream is observational/display-only and is NEVER a decision/arm
+        # input, so there is no mainstream-enforcement key to require at arm time.
     return mode
 
 
@@ -2002,6 +2058,65 @@ _user_channel_ingestor = None
 _user_channel_thread = None
 _edli_market_channel_thread = None
 
+# B4 (Phase-2): monotonic redecision cycle index. The continuous-redecision emit passes
+# a per-cycle distinct `source` to scan_committed_snapshots for TWO reasons: (1) the
+# B4 round-robin derives its window index from int(source.split('-')[-1]) — it needs a
+# parseable "cycle-N" suffix; and (2) the source must be distinct per cycle so the
+# re-emitted FSR-equivalent does not dedup to the consumed FSR.
+#
+# CROSS-RESTART UNIQUENESS (MAJOR-2 adversarial finding + HARDEN-1): the idempotency
+# key is stable_idempotency_key(event_type, entity_key, source, available_at, digest).
+# available_at is SNAPSHOT-STABLE (it does not advance per cycle), so `source` is
+# the only varying component. A bare counter that resets to 0 on restart means the
+# post-restart cycle-0 emit produces the SAME idempotency key as the pre-restart
+# cycle-0 emit for the same snapshot family → dedup → family not re-decided for the
+# early post-restart cycles.
+#
+# Fix (HARDEN-1): the boot token is `f"{int(time.time())}{os.getpid()}"` — a single
+# decimal string with NO internal hyphens so source.split('-') stays ['cycle', TOKEN, N]
+# and int(source.split('-')[-1]) still yields N. The PID changes on EVERY restart
+# (even a crash-loop restart within the same wall-clock second), so the token is
+# guaranteed restart-unique regardless of timing. int(time.time()) is included for
+# human readability; PID alone would also suffice for correctness.
+#
+# Format: `cycle-{EPOCH}{PID}-{N}` where EPOCH and PID are concatenated (no separator)
+# so the only hyphens in the string are the two that delimit the three components.
+import time as _time
+
+_edli_redecision_boot_token: str = f"{int(_time.time())}{os.getpid()}"
+_edli_redecision_cycle_index: int = 0
+
+
+def _edli_next_redecision_source() -> str:
+    """Return the next continuous-redecision emit source as ``cycle-{TOKEN}-{N}``.
+
+    TOKEN = f"{int(time.time())}{os.getpid()}" captured once at module init — no
+    internal hyphens, so split('-')[-1] == str(N) always. PID changes on every
+    restart (including crash-loop restarts within the same wall-clock second), so
+    the token is restart-unique unconditionally. N advances monotonically within a
+    process, ensuring within-process sources are also distinct.
+    """
+    global _edli_redecision_cycle_index
+    n = _edli_redecision_cycle_index
+    _edli_redecision_cycle_index = n + 1
+    return f"cycle-{_edli_redecision_boot_token}-{n}"
+
+
+def _reset_edli_redecision_cycle_index() -> None:
+    """Test hook: reset the monotonic redecision cycle counter to 0."""
+    global _edli_redecision_cycle_index
+    _edli_redecision_cycle_index = 0
+
+
+def _set_edli_redecision_boot_token(token: str) -> None:
+    """Test hook: set the boot token to a fixed value for deterministic testing.
+
+    The token must contain NO hyphens (see format contract above).
+    """
+    global _edli_redecision_boot_token
+    assert "-" not in token, f"boot token must not contain hyphens, got {token!r}"
+    _edli_redecision_boot_token = token
+
 
 USER_CHANNEL_REQUIRED_ENV_VARS = (
     "ZEUS_USER_CHANNEL_WS_ENABLED",
@@ -2551,6 +2666,15 @@ def _refresh_pending_family_snapshots(
     if not families:
         return {"status": "no_pending_families"}
 
+    # Staleness pre-filter REMOVED (STEP 4, consolidated timeliness fix): the
+    # local lexicographic _drop_stale_families is now redundant. Strictly-past
+    # (already-settled) targets can no longer become pending events — the
+    # emission floor (STEP 2, forecast_snapshot_ready.scan_committed_snapshots)
+    # never emits them and the EventStore claim floor (STEP 3, fetch_pending)
+    # never returns them — so no stale family reaches this refresh path. The
+    # pending-event query above is the single source of families; it is sourced
+    # from the same already-timeliness-filtered opportunity_events.
+
     # A2 throughput (2026-05-31): cap per-cycle capture so a cycle COMPLETES fast.
     # Each family's capture makes serial per-token order-book fetches (uncacheable,
     # ~1s each); refreshing ALL pending families serially made cycles 10-30 min →
@@ -2558,7 +2682,13 @@ def _refresh_pending_family_snapshots(
     # ORDER BY priority DESC, available_at ASC), so the highest-priority families are
     # captured first; the remainder are picked up on subsequent cycles. The reactor's
     # own proof_limit still bounds decisions; this bounds the venue-I/O per cycle.
-    _FAMILY_REFRESH_CAP = 8
+    # 2026-06-04: with the coverage-fairness emit now covering all ~49 cities, this cap is the
+    # second throttle on the simultaneously-tradeable set (each family = 1 serial JIT /book
+    # fetch). 50 overran the 60s reactor cycle ("max running instances reached"); 8 was the old
+    # 3-city-era value. 16 ≈ 16s of fetches inside a 60s cycle — a safe ~2x of the fresh universe
+    # without overrun. The proper fix (decouple market-identity universe sizing from the 30s
+    # price-freshness TTL — size off identity, enforce freshness only at submit) is the follow-up.
+    _FAMILY_REFRESH_CAP = 16
     if len(families) > _FAMILY_REFRESH_CAP:
         families = families[:_FAMILY_REFRESH_CAP]
 
@@ -2641,7 +2771,24 @@ def _refresh_pending_family_snapshots(
 
             raw_events_seen: set = set()
             raw_events_collected: list[dict] = []
+            # Time-box the per-family Gamma fetch (2026-06-04 reactor-overrun antibody):
+            # each _gamma_get has up to a 10s timeout; 16 families x slow Gamma can blow
+            # past the 60s reactor interval ("max running instances reached"), so the
+            # cycle never reaches FSR-emit + process_pending -> 0 receipts. Bound the
+            # refresh phase to a deadline that ALWAYS leaves budget for the downstream
+            # emit+process; uncaptured families are picked up next cycle (priority-ordered).
+            _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "25.0")))
+            _refresh_deadline = time.monotonic() + _refresh_budget_s
+            _refreshed_n = 0
             for fam_city, fam_date, fam_metric in families_needing_refresh:
+                if time.monotonic() > _refresh_deadline:
+                    logger.info(
+                        "refresh_pending_family_snapshots: time-box %.0fs hit after %d/%d "
+                        "families; deferring rest to next cycle (leaves budget for emit+process)",
+                        _refresh_budget_s, _refreshed_n, len(families_needing_refresh),
+                    )
+                    break
+                _refreshed_n += 1
                 city_obj = _cbm.get(fam_city)
                 if city_obj is None:
                     logger.warning(
@@ -2747,8 +2894,14 @@ def _refresh_pending_family_snapshots(
             }
 
         # Step 4: CLOB fetch + cache write.
-        #         max_outcomes=None: bypass per-city cap so ALL bins of each family
-        #         are captured (e.g. 11-bin Seoul negRisk event needs all 11).
+        #         max_outcomes=0 is the UNLIMITED sentinel: bypass the per-city cap so
+        #         ALL bins of each pending family are captured in ONE cycle (e.g. an
+        #         11-bin negRisk family needs all 11 — incl. non-tradeable tail bins —
+        #         for the FDR full-family proof / entry gate). max_outcomes=None did NOT
+        #         bypass the cap: it fell through to ZEUS_..._MAX_OUTCOMES (default 4),
+        #         so families stalled at 4-of-22 candidates → EXECUTABLE_SNAPSHOT_BLOCKED
+        #         (2026-06-04 root cause). This caller is scoped to pending families only
+        #         (bounded set), so uncapped capture stays within the wall-clock budget.
         #         tolerate_missing_book=True is already hardwired inside
         #         refresh_executable_market_substrate_snapshots, so illiquid bins
         #         snapshot as top_ask=None / executable_allowed=False — never tradeable.
@@ -2763,7 +2916,7 @@ def _refresh_pending_family_snapshots(
                 clob=clob,
                 captured_at=now_utc,
                 scan_authority="VERIFIED",
-                max_outcomes=None,
+                max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
             )
         write_conn.commit()
 
@@ -3795,11 +3948,29 @@ def _edli_event_reactor_cycle() -> None:
                 # candidates already queued from prior cycles. Catch ONLY the transient lock
                 # (narrow, by message) and continue; real schema/logic faults still propagate.
                 try:
+                    # COVERAGE-FAIRNESS (universe-collapse fix 2026-06-04): the emit is
+                    # ORDER BY ... snapshot_id DESC LIMIT N. Under one batch write all families
+                    # share computed_at, so snapshot_id-DESC deterministically emits only the
+                    # alphabetic TAIL (M-W) every cycle and starves A-L forever. The fairness
+                    # round-robin rotates the window by cycle_index, parsed from a monotonic
+                    # `cycle-N` source — so it must be FED that source here (the plain emit
+                    # previously passed none -> cycle_index frozen at 0 -> A-L permanently dark).
+                    # Bounded by `limit` per cycle; covers all 108 (city,metric) families in
+                    # ceil(108/limit) cycles. Gated by edli_v1.coverage_fairness_emit_enabled.
+                    # source ONLY when fairness is ON: a per-cycle `cycle-N` source advances the
+                    # round-robin window AND makes the emit re-emit each cycle. Flag-OFF -> None ->
+                    # the original one-shot catch-up (byte-identical to pre-fix behavior).
+                    _fair_source = (
+                        _edli_next_redecision_source()
+                        if bool(edli_cfg.get("coverage_fairness_emit_enabled", False))
+                        else None
+                    )
                     _edli_emit_forecast_snapshot_events(
                         conn,
                         decision_time=now,
                         received_at=received_at,
                         limit=forecast_emit_limit,
+                        source=_fair_source,
                     )
                 except sqlite3.OperationalError as _emit_lock_exc:
                     if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -3819,7 +3990,12 @@ def _edli_event_reactor_cycle() -> None:
             if bool(edli_cfg.get("redecision_continuous_enabled", False)):
                 try:
                     _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
-                    _rd_source = f"edli_redecision:{now.isoformat()}"
+                    # B4 (Phase-2): a monotonic `cycle-N` source so the coverage-fairness
+                    # round-robin (int(source.split('-')[-1])) advances its window each cycle
+                    # and reaches all cities within ceil(N/limit) cycles. Still distinct per
+                    # cycle (re-emit idempotency). The prior ISO-timestamp source raised
+                    # ValueError in the parse -> cycle_index frozen at 0 -> cities 21..N dark.
+                    _rd_source = _edli_next_redecision_source()
                     _rd_pending = _edli_pending_entity_keys(conn)
                     _rd_n = _edli_emit_forecast_snapshot_events(
                         conn,
@@ -3872,6 +4048,57 @@ def _edli_event_reactor_cycle() -> None:
         # requeues via the reactor's existing EXECUTABLE_SNAPSHOT_RETRY path (fail-closed).
         trade_conn = get_trade_connection_with_world_required(write_class=None)
         store = EventStore(conn)
+
+        # ARCHIVE SWEEP (operator directive 2026-06-04): before the reactor scans,
+        # prune candidates whose target LOCAL day has ENDED in their OWN city tz
+        # (Oceania-frontier anchored, never raw UTC) to terminal 'expired' status so
+        # the active scan (fetch_pending + warm-cache family queries) stops re-reading
+        # ~1.7M already-settled rows every cycle. Marks the MUTABLE processing row
+        # only — the append-only event log (provenance) is untouched. batch_limit
+        # bounds the one-time backlog drain so a giant first sweep does not blow the
+        # 60s cycle budget; subsequent cycles see a steady trickle. Fail-soft: a
+        # sweep error must never crash a decision cycle (the read floor in
+        # fetch_pending still independently drops strictly-past rows from this cycle).
+        try:
+            _archived = store.archive_expired_candidates(decision_time=now.isoformat())
+            if _archived:
+                logger.info(
+                    "EDLI reactor: archived %d expired (target-local-day-ended) "
+                    "candidates → 'expired' (excluded from future scans)",
+                    _archived,
+                )
+        except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
+            logger.warning(
+                "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
+                "fetch_pending read floor still drops strictly-past rows): %r",
+                _sweep_exc,
+            )
+
+        # CHANNEL EVENT SWEEP (operator directive 2026-06-04 companion): prune
+        # superseded BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT / NEW_MARKET_DISCOVERED
+        # pending rows. For each (event_type, token_id) group only the LATEST
+        # available_at survives; all older ones are superseded state and marked
+        # 'expired'. The 1.7M pending channel-event backlog (1743 distinct tokens
+        # × ~990 ticks each) is the main fetch_pending JOIN cost; this sweep
+        # reduces it to ~1 row per token. batch_limit bounds the per-cycle work so
+        # the backlog drains across cycles rather than in one giant transaction.
+        # Fail-soft: a sweep error must never crash a decision cycle.
+        try:
+            _ch_archived = store.archive_superseded_channel_events()
+            if _ch_archived:
+                logger.info(
+                    "EDLI reactor: archived %d superseded channel events "
+                    "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) → "
+                    "'expired'; pending channel-event scan reduced",
+                    _ch_archived,
+                )
+        except Exception as _ch_sweep_exc:  # noqa: BLE001 — fail-soft
+            logger.warning(
+                "EDLI reactor: archive_superseded_channel_events sweep failed "
+                "(non-fatal): %r",
+                _ch_sweep_exc,
+            )
+
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
@@ -3977,6 +4204,11 @@ def _edli_event_reactor_cycle() -> None:
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),
                 tiny_live_max_orders_per_window=int(edli_cfg.get("tiny_live_max_orders_per_window", 1)),
+                # Task #102 book-wide edge-zone admission. Absent key => default
+                # False => byte-identical legacy money-path (the operator owns
+                # config/settings.json; this reads it without writing it).
+                edge_zone_admission_enabled=bool(edli_cfg.get("edge_zone_admission_enabled", False)),
+                edge_zone_min_ev_per_dollar=float(edli_cfg.get("edge_zone_min_ev_per_dollar", 0.0)),
             ),
         )
         _rr = reactor.process_pending(decision_time=now, limit=proof_limit)
@@ -4113,6 +4345,207 @@ def _edli_market_substrate_warm_cycle() -> None:
             conn.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+@_scheduler_job("edli_mainstream_warm")
+def _edli_mainstream_warm_cycle() -> None:
+    """Dedicated EDLI mainstream-forecast point warmer, DECOUPLED from the reactor.
+
+    E2 (STEP 8 efficiency, consolidated timeliness fix). The mainstream
+    direction-agreement reference reads an Open-Meteo HTTP point whose client
+    applies a Retry-After ``time.sleep`` on 429s. The reactor proof path runs
+    UNDER the world_write_mutex, so a synchronous fetch there serialized every
+    world write behind a slow/blocked network call. This job fetches the point
+    on its OWN cadence and stores it in the process-global warm cache
+    (``mainstream_forecast_source._WARM_CACHE``); the reactor proof path reads
+    that cache ONLY (``read_mainstream_point_cached``) and fail-closes to None on
+    a miss — byte-identical to a stale/absent fetch today.
+
+    Mirrors ``_edli_market_substrate_warm_cycle`` (#45): same warm-cache pattern,
+    same fail-soft contract. Scoped to the SAME pending families the reactor will
+    decide (city/target_date/metric of pending opportunity_events), so the cache
+    is populated for exactly the candidates that need it.
+
+    NOTE: ``mainstream_agreement_reference_enabled`` is currently OFF in config
+    (operator unblock). This warmer is safe to run regardless — when the flag is
+    OFF the reactor never reads the cache, and when it is re-enabled the cache is
+    already warm. Not a DB writer (no table owned); the @_scheduler_job decorator
+    is the only wiring needed (B047). Fail-soft: a transient Open-Meteo failure
+    logs but never crashes this job (consumers fail-closed in the interim).
+    """
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    from src.data.mainstream_forecast_source import warm_mainstream_point
+    from src.state.db import get_world_connection
+
+    conn = get_world_connection()
+    try:
+        pending_rows = conn.execute(
+            """
+            SELECT DISTINCT
+                json_extract(e.payload_json, '$.city')        AS city,
+                json_extract(e.payload_json, '$.target_date') AS target_date,
+                json_extract(e.payload_json, '$.metric')      AS metric
+            FROM opportunity_events e
+            JOIN opportunity_event_processing p ON p.event_id = e.event_id
+            WHERE p.consumer_name = 'edli_reactor_v1'
+              AND p.processing_status = 'pending'
+              AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+            """
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
+        logger.error("EDLI mainstream warm: pending-event query failed (non-fatal): %r", exc)
+        return
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    warmed = 0
+    for row in pending_rows:
+        city = str(row[0] or "").strip()
+        target_date = str(row[1] or "").strip()
+        metric = str(row[2] or "").strip().lower()
+        if not (city and target_date and metric in ("high", "low")):
+            continue
+        try:
+            if warm_mainstream_point(city, target_date, metric=metric) is not None:
+                warmed += 1
+        except Exception as exc:  # noqa: BLE001 — fail-soft per-family; never crash the job
+            logger.warning(
+                "EDLI mainstream warm: fetch failed for %s/%s/%s (non-fatal): %r",
+                city, target_date, metric, exc,
+            )
+    logger.info("EDLI mainstream warm: warmed=%d of %d pending families", warmed, len(pending_rows))
+
+
+@_scheduler_job("arm_gate_emit")
+def _arm_gate_emit_cycle() -> None:
+    """Iron-rule-4 antibody: AUTO-RE-EMIT the settlement-grounded ARM-gate artifact.
+
+    THE BREAK THIS MAKES IMPOSSIBLE: the settlement→ARM-evidence loop was WIRED
+    (producer ``scripts/measure_arm_gate_settlement.py --emit-artifact`` +
+    consumer ``_assert_edli_arm_gate_artifact`` / ``verify_edli_arm_gate_artifact``)
+    but never AUTOMATED — nothing RAN the producer. So
+    ``state/edli_arm_gate_artifact.json`` could go missing, or its ``commit_sha``
+    could fall behind the running HEAD on every deploy. Either makes the live/canary
+    boot gate fail-closed (``ARM_GATE_ARTIFACT_MISSING`` / ``COMMIT_SHA_MISMATCH``) —
+    the system is structurally un-armable AND cannot even boot. This job re-emits
+    the artifact on startup (re-stamping ``commit_sha`` to the running HEAD) and on
+    a ~6h interval (refreshing as settlements accrue), so the break can never recur.
+
+    HONESTY PRESERVED: it runs the SAME producer, which is DENIED-safe by
+    construction — it NEVER emits an ARM_ELIGIBLE artifact on denied/insufficient
+    data (ev<=0 / coverage_licensed:false → the consumer rejects). This job does
+    NOT touch the arm verdict logic, the arm threshold, or config — it only
+    re-stamps + refreshes the evidence the consumer already enforces.
+
+    SUBPROCESS (not in-process): the producer does heavy aggregation reading
+    state/zeus-world.db (receipts) + state/zeus-forecasts.db (settlements). Running
+    it as a child process avoids any world/forecasts DB-lock contention with the
+    live reactor running under world_write_mutex in THIS process.
+
+    Not a DB writer (writes a FILE, not a table) — the @_scheduler_job decorator is
+    the only wiring needed (B047 observability); it owns no db_table_ownership entry,
+    so it is OUT of assert_writer_jobs_registered's scope and cannot trip that
+    FATAL boot guard. Flag-gated by ``edli_arm_gate_emit_enabled`` (default True so
+    the antibody is ACTIVE; explicit False == today's no-op for a safe rollback).
+
+    FAILURE ISOLATION: the @_scheduler_job decorator already swallows + marks
+    FAILED on any raise, but this fn additionally wraps the producer call in
+    try/except and RETURNS on failure (fail-soft, mirroring the warm jobs) so a
+    transient git/DB/subprocess hiccup never crashes the daemon and never leaves a
+    half-written artifact (the producer writes atomically via os.replace).
+    """
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if not bool(edli_cfg.get("edli_arm_gate_emit_enabled", True)):
+        # Flag-OFF: strict no-op (byte-identical to pre-antibody behavior).
+        return
+
+    artifact_path = str(edli_cfg.get("edli_arm_gate_artifact_path") or "").strip()
+    if not artifact_path:
+        logger.error(
+            "arm_gate_emit: edli_arm_gate_artifact_path unset — cannot emit (the boot "
+            "gate reads this same key; arming stays blocked). No-op this tick."
+        )
+        return
+
+    repo_root = Path(__file__).resolve().parent.parent
+    producer = repo_root / "scripts" / "measure_arm_gate_settlement.py"
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(producer), "--emit-artifact", artifact_path],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick / next boot retries
+        logger.error(
+            "arm_gate_emit: producer subprocess raised (non-fatal; artifact NOT "
+            "refreshed this tick, consumers stay fail-closed): %r",
+            exc,
+        )
+        return
+
+    if completed.returncode != 0:
+        logger.error(
+            "arm_gate_emit: producer exited rc=%d (non-fatal; artifact NOT refreshed "
+            "this tick). stderr tail: %s",
+            completed.returncode,
+            (completed.stderr or "")[-500:],
+        )
+        return
+
+    logger.info(
+        "arm_gate_emit: re-emitted ARM-gate artifact → %s (commit_sha re-stamped to "
+        "running HEAD; verdict remains the producer's honest settlement-grounded "
+        "DENIED/ELIGIBLE — never fabricated)",
+        artifact_path,
+    )
+
+
+@_scheduler_job("world_wal_checkpoint")
+def _world_wal_checkpoint_cycle() -> None:
+    """Periodic zeus-world.db WAL TRUNCATE backstop (2026-06-04, part 2).
+
+    Root (critic-proven, live): ``state/zeus-world.db-wal`` grew to GBs because
+    long-lived READER connections held a WAL snapshot across cycles, pinning the
+    WAL floor so ``wal_checkpoint`` returned BUSY ``(1,-1,-1)`` and never
+    truncated → unbounded growth → eventual lock-starvation of opportunity_events
+    emission (30-min ZERO candidates). Part 1 releases each long-lived reader's
+    snapshot per cycle so the floor advances; THIS job is the periodic backstop
+    that reclaims the freed frames via ``PRAGMA wal_checkpoint(TRUNCATE)``.
+
+    Observability: the ``(busy, log_frames, checkpointed_frames)`` triple is
+    ALWAYS logged. ``busy == 0`` = truncated; a CHRONIC ``busy == 1`` is a loud
+    signal that a reader is still pinning the floor (a part-1 regression) — it is
+    NOT silenced. Not a table writer; ``checkpoint_world_wal`` uses a dedicated
+    short-lived connection and does NOT take the world write mutex (a checkpoint
+    is not a write txn; SQLite serializes checkpoints internally), so it never
+    blocks world writers for its duration. Fail-soft via the decorator.
+    """
+    from src.state.db import checkpoint_world_wal
+
+    busy, log_frames, ckpt_frames = checkpoint_world_wal()
+    if busy == 0:
+        logger.info(
+            "world WAL checkpoint(TRUNCATE): OK busy=%d log_frames=%d checkpointed=%d",
+            busy, log_frames, ckpt_frames,
+        )
+    else:
+        # BUSY = a reader still pins the WAL floor; TRUNCATE could not run.
+        # Loud (warning) so chronic starvation is visible, not silent.
+        logger.warning(
+            "world WAL checkpoint(TRUNCATE): BUSY busy=%d log_frames=%d checkpointed=%d "
+            "— a reader is pinning the WAL floor (part-1 per-cycle release regression?)",
+            busy, log_frames, ckpt_frames,
+        )
 
 
 def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum: int) -> int:
@@ -5850,6 +6283,7 @@ def main():
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
     _assert_emos_ci_license_seasonal_coverage(edli_cfg)
+    _assert_calibration_coverage_contract(edli_cfg)
     if live_execution_mode == "legacy_cron":
         scheduler.add_job(
             lambda: _run_mode(DiscoveryMode.OPENING_HUNT), "interval",
@@ -5934,6 +6368,50 @@ def main():
             max_instances=1,
             coalesce=True,
         )
+        # MAINSTREAM WARM (E2 / operator directive 2026-06-04 #2): dedicated off-mutex
+        # warmer for the mainstream-forecast point cache (read_mainstream_point_cached),
+        # mirroring _edli_market_substrate_warm_cycle. The reactor proof path now ALWAYS
+        # annotates the mainstream/bias agreement value on every candidate (decoupled from
+        # mainstream_agreement_reference_enabled), reading the WARM CACHE only — so this job
+        # MUST run for the cache to populate, else every receipt carries
+        # mainstream_*=None (unknown). Gated only by edli_v1.enabled (inside the job), NOT
+        # by the reference flag — warming the cache is just a read, off-mutex, safe. The
+        # fetch applies Retry-After backoff on 429s; on its own cadence it never serializes
+        # a world write. Data-only (no orders); fail-soft. Display-only: the value it warms
+        # is NEVER a decision input (the enforce/arm coupling is deleted).
+        scheduler.add_job(
+            _edli_mainstream_warm_cycle,
+            "interval",
+            seconds=90,
+            id="edli_mainstream_warm",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 28.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # IRON-RULE-4 ANTIBODY (2026-06-04): AUTO-RE-EMIT the settlement-grounded
+        # ARM-gate artifact (state/edli_arm_gate_artifact.json). The producer/consumer
+        # loop existed but was never AUTOMATED — nothing RAN the producer, so the
+        # artifact could go missing or its commit_sha fall behind HEAD on a deploy →
+        # the boot gate (_assert_edli_arm_gate_artifact) fail-closes ARM_GATE_ARTIFACT_
+        # MISSING / COMMIT_SHA_MISMATCH → un-armable AND un-bootable in canary/live.
+        # This job re-stamps on startup (~40s after boot, after the warm jobs) and
+        # refreshes every 6h as 06-04/05/06/07 settle. DENIED-safe: it runs the same
+        # producer, which NEVER emits ARM_ELIGIBLE on denied data — it does not touch
+        # the arm verdict/threshold. Writes a FILE (no DB table) so it is out of
+        # assert_writer_jobs_registered's scope. Flag-gated by edli_arm_gate_emit_enabled
+        # (default True; explicit False == today's no-op for safe rollback). Fail-soft:
+        # a producer error logs + marks the @_scheduler_job FAILED but never crashes
+        # the daemon. SUBPROCESS so the heavy world/forecasts aggregation never
+        # contends with the live reactor's world_write_mutex in THIS process.
+        scheduler.add_job(
+            _arm_gate_emit_cycle,
+            "interval",
+            hours=6,
+            id="arm_gate_emit",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 40.0),
+            max_instances=1,
+            coalesce=True,
+        )
         # STRUCTURAL FIX (2026-05-31, #52 follow-up): executable_market_snapshots
         # (EMS) substrate refresh in EDLI modes. market_discovery is the ONLY
         # universe-wide writer of executable_market_snapshots (architecture/
@@ -6014,6 +6492,18 @@ def main():
         )
     scheduler.add_job(_write_heartbeat, "interval", seconds=60, id="heartbeat",
                       max_instances=1, coalesce=True)
+    # WAL checkpoint-starvation backstop (2026-06-04, part 2): periodic
+    # PRAGMA wal_checkpoint(TRUNCATE) on zeus-world.db so the -wal file cannot
+    # grow unboundedly when a reader transiently pins the floor between part-1
+    # per-cycle releases. Mode-independent (the WAL bloat afflicts every mode),
+    # so registered unconditionally. ~90s cadence (> the 60s reactor interval so
+    # it does not fight an in-flight reactor read every tick; coalesce/max=1 so a
+    # slow checkpoint never stacks).
+    scheduler.add_job(
+        _world_wal_checkpoint_cycle, "interval", seconds=90,
+        id="world_wal_checkpoint", next_run_time=_utc_run_time_after(120.0),
+        max_instances=1, coalesce=True,
+    )
     from src.control.heartbeat_supervisor import heartbeat_cadence_seconds_from_env
     scheduler.add_job(
         _start_venue_heartbeat_loop_if_needed,

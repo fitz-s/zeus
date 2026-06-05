@@ -18,6 +18,7 @@ import pytest
 
 from src.strategy.market_fusion import LEGACY_POSTERIOR_MODE, compute_posterior
 from src.types.market import Bin
+from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +206,7 @@ class TestSparseMarketImputation:
         p_cal = np.array([0.15, 0.55, 0.30])
         p_market_sparse = np.array([0.0, 0.50, 0.0])  # held-bin only
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.15, 0.55, 0.30]),
             p_cal=p_cal,
             p_market=p_market_sparse,
@@ -248,7 +249,7 @@ class TestBootstrapAllBins:
         p_cal = np.array([0.15, 0.55, 0.30])
         p_market = np.array([0.18, 0.48, 0.34])
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.15, 0.55, 0.30]),
             p_cal=p_cal,
             p_market=p_market,
@@ -279,7 +280,7 @@ class TestBootstrapAllBins:
         p_market = np.array([0.18, 0.48, 0.34])
 
         def _make():
-            return MarketAnalysis(
+            return MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
                 p_raw=np.array([0.15, 0.55, 0.30]),
                 p_cal=p_cal,
                 p_market=p_market,
@@ -355,7 +356,7 @@ class TestBootstrapWithPlattCalibrator:
         p_cal = np.array([0.15, 0.55, 0.30])
         p_market = np.array([0.18, 0.48, 0.34])
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.15, 0.55, 0.30]),
             p_cal=p_cal,
             p_market=p_market,
@@ -392,7 +393,7 @@ class TestBootstrapWithPlattCalibrator:
             input_space="raw_probability",
         )
 
-        ma = MarketAnalysis(
+        ma = MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.15, 0.55, 0.30]),
             p_cal=np.array([0.15, 0.55, 0.30]),
             p_market=np.array([0.18, 0.48, 0.34]),
@@ -441,7 +442,7 @@ class TestB082HasPlattSingleParamSet:
         from src.strategy.market_analysis import MarketAnalysis
         bins = _bins_3()
         members = np.random.default_rng(42).normal(60, 2, size=20)
-        return MarketAnalysis(
+        return MarketAnalysis(forecast_sharpness=ForecastSharpnessEvidence.exempt(unit="F"), 
             p_raw=np.array([0.15, 0.55, 0.30]),
             p_cal=np.array([0.15, 0.55, 0.30]),
             p_market=np.array([0.18, 0.48, 0.34]),
