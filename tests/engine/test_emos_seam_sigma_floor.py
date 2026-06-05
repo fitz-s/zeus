@@ -171,7 +171,17 @@ def _run_with_patched_builder(monkeypatch, *, returned_sigma_c: float) -> float:
     """
     city = _served_city_unit_c()
 
-    def _controlled_build_hr(*, city, season, metric, lead_days, members_native, unit, bins):
+    def _controlled_build_hr(
+        *,
+        city,
+        season,
+        metric,
+        lead_days,
+        members_native,
+        unit,
+        bins,
+        apply_settlement_floor=False,
+    ):
         n = len(bins)
         q = np.full(n, 1.0 / n, dtype=float)  # arbitrary valid normalized point-q
         mu_native = float(np.mean(np.asarray(members_native, dtype=float)))

@@ -39,6 +39,14 @@ _EMOS_TABLE_PATH = _STATE_DIR / "emos_calibration.json"
 _emos_table_cache: dict | None = None
 _emos_table_lock = threading.Lock()
 
+# EMPIRICAL settlement σ-floor (q=1.000 investigation 2026-06-05; iron rule 5: overconfidence = ruin).
+# The EMOS σ-model is systemically under-dispersed (median σ_emos/σ_settled = 0.49). The correct
+# dispersion FLOOR is the DETRENDED trailing-window settlement std per (city, season, metric),
+# precomputed offline by scripts/fit_settlement_sigma_floor.py into this table.
+_SIGMA_FLOOR_PATH = _STATE_DIR / "settlement_sigma_floor.json"
+_sigma_floor_cache: dict | None = None
+_sigma_floor_lock = threading.Lock()
+
 
 def load_emos_table() -> dict:
     """Return the cached EMOS calibration table dict.
@@ -67,6 +75,72 @@ def load_emos_table() -> dict:
             logger.warning("Failed to load emos_calibration.json: %s", exc)
             _emos_table_cache = {}
     return _emos_table_cache
+
+
+def load_sigma_floor_table() -> dict:
+    """Return the cached EMPIRICAL settlement σ-floor table dict.
+
+    Loaded once per process from state/settlement_sigma_floor.json (cached + thread-safe,
+    mirroring load_emos_table). Structure:
+        {"_meta": {"created":..., "method":..., "k_default": float},
+         "cells": {"City|SEASON|metric": {"sigma_floor_c": float, "n": int, "window": str}}}
+    All values °C. Returns an empty dict if the file is missing or malformed (fail-soft:
+    callers get None from settlement_sigma_floor and keep their model σ — no floor, no crash).
+    """
+    global _sigma_floor_cache
+    if _sigma_floor_cache is not None:
+        return _sigma_floor_cache
+    with _sigma_floor_lock:
+        if _sigma_floor_cache is not None:
+            return _sigma_floor_cache
+        try:
+            raw = _SIGMA_FLOOR_PATH.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                logger.warning("settlement_sigma_floor.json is not a dict — treating as empty")
+                data = {}
+            _sigma_floor_cache = data
+        except FileNotFoundError:
+            logger.debug("state/settlement_sigma_floor.json not found; settlement σ-floor disabled")
+            _sigma_floor_cache = {}
+        except Exception as exc:  # noqa: BLE001 — fail-soft: no floor rather than crash the q seam
+            logger.warning("Failed to load settlement_sigma_floor.json: %s", exc)
+            _sigma_floor_cache = {}
+    return _sigma_floor_cache
+
+
+def settlement_sigma_floor(city: str, season: str, metric: str) -> Optional[float]:
+    """The EMPIRICAL settlement σ-floor (°C) for a (city, season, metric) cell, or None if absent.
+
+    Returns ``k_default · sigma_floor_c`` where ``sigma_floor_c`` is the DETRENDED trailing-window
+    settlement std for the cell and ``k_default`` (default 0.8) is read from the table's ``_meta``.
+    None when the cell is missing from the table — the caller then keeps its model/EMOS σ (no floor).
+
+    The floor is applied UNIVERSALLY at the q seam as ``σ_eff = max(model_σ, this)``: conservative by
+    construction (max() only WIDENS σ → lower q_lcb → fewer overconfident bets; it can NEVER tighten
+    or create a wrong-side trade). This is the loop-breaker for the q=1.000 EMOS under-dispersion
+    (iron rule 5: overconfidence = ruin). Metric is lowercased to match the cell key (no crossing).
+
+    Cached + thread-safe like the EMOS table. Fail-soft: any malformed cell -> None.
+    """
+    try:
+        table = load_sigma_floor_table()
+        cells = table.get("cells", {})
+        cell = cells.get(emos_cell_key(city, season, metric))
+        if cell is None:
+            return None
+        floor_c = cell.get("sigma_floor_c")
+        if floor_c is None:
+            return None
+        floor_c = float(floor_c)
+        if not (floor_c > 0.0):
+            return None
+        k = float(table.get("_meta", {}).get("k_default", 0.8))
+        out = k * floor_c
+        return out if out > 0.0 else None
+    except Exception as exc:  # noqa: BLE001 — fail-soft: no floor rather than crash the q seam
+        logger.warning("settlement_sigma_floor(%r, %r, %r) error: %s", city, season, metric, exc)
+        return None
 
 
 def season_for(target_date: date) -> str:

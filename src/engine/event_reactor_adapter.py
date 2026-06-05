@@ -4056,12 +4056,21 @@ def _market_analysis_from_event_snapshot(
                    else int(str(family.target_date)[5:7]))
         _emos_season = ("DJF" if _emos_m in (12, 1, 2) else "MAM" if _emos_m in (3, 4, 5)
                         else "JJA" if _emos_m in (6, 7, 8) else "SON")
+        # EMPIRICAL settlement σ-floor (loop-breaker, investigation 2026-06-05; iron rule 5:
+        # overconfidence = ruin). The q-builders are pure (no settings import); the SEAM reads the
+        # flag and passes an explicit bool. Default OFF ⇒ byte-identical to today. When ON, the
+        # builder floors σ at k·σ_settled (DETRENDED settlement std) — max() only WIDENS σ → lower
+        # q_lcb → fewer overconfident bets; can NEVER tighten or create a wrong-side trade.
+        _apply_settlement_floor = bool(
+            settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False)
+        )
         try:
             from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
             _emos_q = _build_emos_q(
                 city=city.name, season=_emos_season, metric=family.metric,
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
+                apply_settlement_floor=_apply_settlement_floor,
             )
         except Exception as _emos_exc:
             # DE-SILENCED ANTIBODY (#149 / live-diagnosis 2026-06-04): a bare
@@ -4110,10 +4119,14 @@ def _market_analysis_from_event_snapshot(
         _hr = None
         try:
             from src.calibration.emos_q_builder import build_honest_raw_q as _build_hr
+            # _apply_settlement_floor is defined in the `if _emos_regime:` block above (this elif is
+            # only reached when _emos_regime is True, so the block ran). Pass the same flag so the
+            # honest-raw path composes the EMPIRICAL settlement floor on top of the emos_σ_model floor.
             _hr = _build_hr(
                 city=city.name, season=_emos_season, metric=family.metric,
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
+                apply_settlement_floor=_apply_settlement_floor,
             )
         except Exception as _hr_exc:  # noqa: BLE001 — best-effort floor; degrade to raw analytic, LOUD
             _hr = None
