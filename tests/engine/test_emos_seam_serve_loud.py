@@ -97,12 +97,14 @@ def _run_seam(*, monkeypatch, emos_serves: bool, city: str, mock_legacy_pcal: bo
     one-calibrator regime is active (EMOS-served ∪ honest-raw, maze dead); False = legacy
     (the bias/grid/Platt maze runs), used to pin flag-OFF == byte-identical legacy.
 
-    ``mock_legacy_pcal``: when the path is expected to call the LEGACY p_cal (flag-OFF maze,
-    or a forced EMOS failure), the legacy p_cal needs a calibration store. Tests that only
-    care about the engage/degrade *contract* (not the legacy Platt math) mock _snapshot_p_cal
-    to a normalized point vector so the family forms without a real cal DB — mirroring how
-    tests/engine/test_bias_grid_mutual_exclusion.py mocks the bias/grid hooks. (The honest-raw
-    regime path uses identity p_cal = p_raw and so does NOT need this mock.)
+    ``mock_legacy_pcal``: when the path is expected to call the LEGACY p_cal (flag-OFF maze
+    only), the legacy p_cal needs a calibration store. Tests that only care about the
+    engage/degrade *contract* (not the legacy Platt math) mock _snapshot_p_cal to a normalized
+    point vector so the family forms without a real cal DB — mirroring how
+    tests/engine/test_bias_grid_mutual_exclusion.py mocks the bias/grid hooks. Under the
+    one-calibrator regime (flag ON), an EMOS serve-fail degrades to honest-raw
+    (identity p_cal = p_raw) and does NOT enter the legacy maze, so mock_legacy_pcal is not
+    needed for flag-ON paths.
     """
     season = "JJA"  # target_date 2026-07-15 -> NH month-season JJA (matches the seam keying)
     served = "emos" if emos_serves else "raw"
