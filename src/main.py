@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -4416,6 +4417,94 @@ def _edli_mainstream_warm_cycle() -> None:
     logger.info("EDLI mainstream warm: warmed=%d of %d pending families", warmed, len(pending_rows))
 
 
+@_scheduler_job("arm_gate_emit")
+def _arm_gate_emit_cycle() -> None:
+    """Iron-rule-4 antibody: AUTO-RE-EMIT the settlement-grounded ARM-gate artifact.
+
+    THE BREAK THIS MAKES IMPOSSIBLE: the settlement→ARM-evidence loop was WIRED
+    (producer ``scripts/measure_arm_gate_settlement.py --emit-artifact`` +
+    consumer ``_assert_edli_arm_gate_artifact`` / ``verify_edli_arm_gate_artifact``)
+    but never AUTOMATED — nothing RAN the producer. So
+    ``state/edli_arm_gate_artifact.json`` could go missing, or its ``commit_sha``
+    could fall behind the running HEAD on every deploy. Either makes the live/canary
+    boot gate fail-closed (``ARM_GATE_ARTIFACT_MISSING`` / ``COMMIT_SHA_MISMATCH``) —
+    the system is structurally un-armable AND cannot even boot. This job re-emits
+    the artifact on startup (re-stamping ``commit_sha`` to the running HEAD) and on
+    a ~6h interval (refreshing as settlements accrue), so the break can never recur.
+
+    HONESTY PRESERVED: it runs the SAME producer, which is DENIED-safe by
+    construction — it NEVER emits an ARM_ELIGIBLE artifact on denied/insufficient
+    data (ev<=0 / coverage_licensed:false → the consumer rejects). This job does
+    NOT touch the arm verdict logic, the arm threshold, or config — it only
+    re-stamps + refreshes the evidence the consumer already enforces.
+
+    SUBPROCESS (not in-process): the producer does heavy aggregation reading
+    state/zeus-world.db (receipts) + state/zeus-forecasts.db (settlements). Running
+    it as a child process avoids any world/forecasts DB-lock contention with the
+    live reactor running under world_write_mutex in THIS process.
+
+    Not a DB writer (writes a FILE, not a table) — the @_scheduler_job decorator is
+    the only wiring needed (B047 observability); it owns no db_table_ownership entry,
+    so it is OUT of assert_writer_jobs_registered's scope and cannot trip that
+    FATAL boot guard. Flag-gated by ``edli_arm_gate_emit_enabled`` (default True so
+    the antibody is ACTIVE; explicit False == today's no-op for a safe rollback).
+
+    FAILURE ISOLATION: the @_scheduler_job decorator already swallows + marks
+    FAILED on any raise, but this fn additionally wraps the producer call in
+    try/except and RETURNS on failure (fail-soft, mirroring the warm jobs) so a
+    transient git/DB/subprocess hiccup never crashes the daemon and never leaves a
+    half-written artifact (the producer writes atomically via os.replace).
+    """
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if not bool(edli_cfg.get("edli_arm_gate_emit_enabled", True)):
+        # Flag-OFF: strict no-op (byte-identical to pre-antibody behavior).
+        return
+
+    artifact_path = str(edli_cfg.get("edli_arm_gate_artifact_path") or "").strip()
+    if not artifact_path:
+        logger.error(
+            "arm_gate_emit: edli_arm_gate_artifact_path unset — cannot emit (the boot "
+            "gate reads this same key; arming stays blocked). No-op this tick."
+        )
+        return
+
+    repo_root = Path(__file__).resolve().parent.parent
+    producer = repo_root / "scripts" / "measure_arm_gate_settlement.py"
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(producer), "--emit-artifact", artifact_path],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-soft; next tick / next boot retries
+        logger.error(
+            "arm_gate_emit: producer subprocess raised (non-fatal; artifact NOT "
+            "refreshed this tick, consumers stay fail-closed): %r",
+            exc,
+        )
+        return
+
+    if completed.returncode != 0:
+        logger.error(
+            "arm_gate_emit: producer exited rc=%d (non-fatal; artifact NOT refreshed "
+            "this tick). stderr tail: %s",
+            completed.returncode,
+            (completed.stderr or "")[-500:],
+        )
+        return
+
+    logger.info(
+        "arm_gate_emit: re-emitted ARM-gate artifact → %s (commit_sha re-stamped to "
+        "running HEAD; verdict remains the producer's honest settlement-grounded "
+        "DENIED/ELIGIBLE — never fabricated)",
+        artifact_path,
+    )
+
+
 @_scheduler_job("world_wal_checkpoint")
 def _world_wal_checkpoint_cycle() -> None:
     """Periodic zeus-world.db WAL TRUNCATE backstop (2026-06-04, part 2).
@@ -6291,6 +6380,30 @@ def main():
             seconds=90,
             id="edli_mainstream_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 28.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # IRON-RULE-4 ANTIBODY (2026-06-04): AUTO-RE-EMIT the settlement-grounded
+        # ARM-gate artifact (state/edli_arm_gate_artifact.json). The producer/consumer
+        # loop existed but was never AUTOMATED — nothing RAN the producer, so the
+        # artifact could go missing or its commit_sha fall behind HEAD on a deploy →
+        # the boot gate (_assert_edli_arm_gate_artifact) fail-closes ARM_GATE_ARTIFACT_
+        # MISSING / COMMIT_SHA_MISMATCH → un-armable AND un-bootable in canary/live.
+        # This job re-stamps on startup (~40s after boot, after the warm jobs) and
+        # refreshes every 6h as 06-04/05/06/07 settle. DENIED-safe: it runs the same
+        # producer, which NEVER emits ARM_ELIGIBLE on denied data — it does not touch
+        # the arm verdict/threshold. Writes a FILE (no DB table) so it is out of
+        # assert_writer_jobs_registered's scope. Flag-gated by edli_arm_gate_emit_enabled
+        # (default True; explicit False == today's no-op for safe rollback). Fail-soft:
+        # a producer error logs + marks the @_scheduler_job FAILED but never crashes
+        # the daemon. SUBPROCESS so the heavy world/forecasts aggregation never
+        # contends with the live reactor's world_write_mutex in THIS process.
+        scheduler.add_job(
+            _arm_gate_emit_cycle,
+            "interval",
+            hours=6,
+            id="arm_gate_emit",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 40.0),
             max_instances=1,
             coalesce=True,
         )
