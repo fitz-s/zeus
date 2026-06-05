@@ -346,9 +346,15 @@ class LiveCapLedger:
         ``_reserve_day_slot`` there is no ``max_orders_per_day`` bound: a fresh
         slot is allocated by walking past collisions until a free integer is
         found, so the pool grows without limit. The unique (event_id, cap_scope)
-        index is still honoured for per-event idempotency (NOT a cap), and the
-        flood-guard rate window (reserved separately by the caller) remains the
-        active order-frequency bound.
+        index is still honoured for per-event idempotency (NOT a cap).
+
+        2026-06-05 operator directive ("no trade-count limit"): the flood-guard
+        rate window is itself a per-day order-COUNT cap, so on this disabled-cap
+        path the caller no longer reserves it (the window slot is gated on
+        ``daily_order_cap_enabled``). When the per-day cap is disabled there is
+        therefore NO order-frequency bound at all — fractional Kelly, the
+        collateral ledger, and the per-event idempotency unique-index are the
+        sole remaining constraints.
         """
         existing = self.conn.execute(
             """
