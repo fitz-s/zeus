@@ -439,3 +439,61 @@ def test_keeper_query_uses_channel_token_index():
     assert "SCAN E2" not in plan_text and "SCAN OPPORTUNITY_EVENTS" not in plan_text, (
         f"keeper query must not full-scan opportunity_events (got: {plan_text!r})"
     )
+
+
+def test_candidate_query_uses_processing_status_index():
+    """RED->GREEN performance antibody: the candidate-batch query must not full-scan
+    opportunity_event_processing.
+
+    Live regression 2026-06-05: the keeper lookup was index-backed, but the
+    candidate CTE still planned as SCAN p on a ~2.7M-row processing table, pinning
+    the EDLI reactor worker before process_pending could emit no-submit receipts.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    for tok in range(20):
+        for j in range(50):
+            store.insert_or_ignore(
+                _channel_event(
+                    "BEST_BID_ASK_CHANGED",
+                    f"tok-candidate-plan-{tok}",
+                    f"0xcandidate-plan-{tok}",
+                    f"2026-06-04T{j % 24:02d}:{j // 24:02d}:00+00:00",
+                    seq=tok * 50 + j,
+                )
+            )
+    conn.execute("ANALYZE")
+
+    consumer = "edli_reactor_v1"
+    channel_types = ("BEST_BID_ASK_CHANGED", "BOOK_SNAPSHOT", "NEW_MARKET_DISCOVERED")
+    type_placeholders = ",".join("?" * len(channel_types))
+
+    plan_rows = conn.execute(
+        f"""
+        EXPLAIN QUERY PLAN
+        SELECT e.event_id,
+               e.event_type,
+               json_extract(e.payload_json, '$.token_id') AS token_id
+        FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+        JOIN opportunity_events e
+          ON e.event_id = p.event_id
+        WHERE p.consumer_name = ?
+          AND p.processing_status IN ('pending', 'processing')
+          AND e.event_type IN ({type_placeholders})
+          AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
+        ORDER BY e.available_at ASC
+        LIMIT ?
+        """,
+        (consumer, *channel_types, 5000),
+    ).fetchall()
+
+    plan_text = " ".join(
+        (r["detail"] if isinstance(r, sqlite3.Row) else r[-1]) for r in plan_rows
+    ).upper()
+
+    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan_text, (
+        f"candidate query must use active-status index, got: {plan_text!r}"
+    )
+    assert "SCAN P" not in plan_text, (
+        f"candidate query must not full-scan opportunity_event_processing, got: {plan_text!r}"
+    )

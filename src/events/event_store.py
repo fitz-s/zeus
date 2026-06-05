@@ -344,12 +344,12 @@ class EventStore:
             SELECT e.event_id,
                    e.event_type,
                    json_extract(e.payload_json, '$.token_id') AS token_id
-            FROM opportunity_events e
-            JOIN opportunity_event_processing p
-              ON p.event_id = e.event_id
-             AND p.consumer_name = ?
-            WHERE e.event_type IN ({type_placeholders})
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            JOIN opportunity_events e
+              ON e.event_id = p.event_id
+            WHERE p.consumer_name = ?
               AND p.processing_status IN ('pending', 'processing')
+              AND e.event_type IN ({type_placeholders})
               AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
             ORDER BY e.available_at ASC
             LIMIT ?
@@ -372,12 +372,12 @@ class EventStore:
                        e.event_type,
                        json_extract(e.payload_json, '$.token_id') AS token_id,
                        e.available_at
-                FROM opportunity_events e
-                JOIN opportunity_event_processing p
-                  ON p.event_id = e.event_id
-                 AND p.consumer_name = ?
-                WHERE e.event_type IN ({type_placeholders})
+                FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+                JOIN opportunity_events e
+                  ON e.event_id = p.event_id
+                WHERE p.consumer_name = ?
                   AND p.processing_status IN ('pending', 'processing')
+                  AND e.event_type IN ({type_placeholders})
                   AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
                 ORDER BY e.available_at ASC
                 LIMIT ?
