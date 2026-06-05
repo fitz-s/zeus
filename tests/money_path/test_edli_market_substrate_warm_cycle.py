@@ -97,7 +97,9 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     )
     # The warm job opens world/forecasts connections; stub them so no real DB/venue work
     # runs. The test only asserts the refresh is invoked exactly once.
-    monkeypatch.setattr(main_module, "get_world_connection", lambda: _FakeConn(), raising=False)
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
     monkeypatch.setattr(
         main_module, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
@@ -115,7 +117,9 @@ def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
         "_refresh_pending_family_snapshots",
         lambda *a, **k: calls.append(1),
     )
-    monkeypatch.setattr(main_module, "get_world_connection", lambda: _FakeConn(), raising=False)
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
     monkeypatch.setattr(
         main_module, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
@@ -230,6 +234,46 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
     plan = _explain_plan(conn, capture.sql, capture.params)
     assert "USING INDEX idx_opportunity_event_processing_status" in plan
     assert "SCAN p" not in plan
+
+
+def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
+    monkeypatch.setattr(
+        main_module,
+        "_settings_section",
+        lambda name, default=None: (
+            {"enabled": True, "mainstream_warm_max_families_per_cycle": 2}
+            if name == "edli_v1"
+            else (default if default is not None else {})
+        ),
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+
+    rows = [
+        ("Seoul", "2026-06-06", "high"),
+        ("Tokyo", "2026-06-06", "high"),
+        ("Paris", "2026-06-06", "high"),
+    ]
+    monkeypatch.setattr(
+        main_module,
+        "_pending_family_rows_for_refresh",
+        lambda *a, **k: rows,
+    )
+
+    warmed: list[tuple[str, str, str]] = []
+
+    def _warm(city, target_date, *, metric):
+        warmed.append((city, target_date, metric))
+        return {"point": 1.0}
+
+    import src.data.mainstream_forecast_source as mainstream
+
+    monkeypatch.setattr(mainstream, "warm_mainstream_point", _warm)
+
+    main_module._edli_mainstream_warm_cycle()
+
+    assert warmed == rows[:2]
 
 
 class _FakeConn:

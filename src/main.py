@@ -4571,12 +4571,13 @@ def _edli_mainstream_warm_cycle() -> None:
     decide (city/target_date/metric of pending opportunity_events), so the cache
     is populated for exactly the candidates that need it.
 
-    NOTE: ``mainstream_agreement_reference_enabled`` is currently OFF in config
-    (operator unblock). This warmer is safe to run regardless — when the flag is
-    OFF the reactor never reads the cache, and when it is re-enabled the cache is
-    already warm. Not a DB writer (no table owned); the @_scheduler_job decorator
-    is the only wiring needed (B047). Fail-soft: a transient Open-Meteo failure
-    logs but never crashes this job (consumers fail-closed in the interim).
+    Bounded by ``mainstream_warm_max_families_per_cycle`` and the same fresh-first
+    pending-family order as the substrate warmer. Open-Meteo can 429/sleep on
+    quota pressure; unbounded warming over the historical pending backlog turns a
+    display/reference cache into a scheduler liveness hazard. Not a DB writer (no
+    table owned); the @_scheduler_job decorator is the only wiring needed (B047).
+    Fail-soft: a transient Open-Meteo failure logs but never crashes this job
+    (consumers fail-closed in the interim).
     """
 
     edli_cfg = _settings_section("edli_v1", {})
@@ -4585,21 +4586,14 @@ def _edli_mainstream_warm_cycle() -> None:
     from src.data.mainstream_forecast_source import warm_mainstream_point
     from src.state.db import get_world_connection
 
+    cap = _edli_bounded_positive_int(
+        edli_cfg, "mainstream_warm_max_families_per_cycle", default=8, maximum=50
+    )
     conn = get_world_connection()
     try:
-        pending_rows = conn.execute(
-            """
-            SELECT DISTINCT
-                json_extract(e.payload_json, '$.city')        AS city,
-                json_extract(e.payload_json, '$.target_date') AS target_date,
-                json_extract(e.payload_json, '$.metric')      AS metric
-            FROM opportunity_events e
-            JOIN opportunity_event_processing p ON p.event_id = e.event_id
-            WHERE p.consumer_name = 'edli_reactor_v1'
-              AND p.processing_status = 'pending'
-              AND e.event_type = 'FORECAST_SNAPSHOT_READY'
-            """
-        ).fetchall()
+        pending_rows = _pending_family_rows_for_refresh(
+            conn, consumer_name="edli_reactor_v1"
+        )[:cap]
     except Exception as exc:  # noqa: BLE001 — fail-soft; next tick retries
         logger.error("EDLI mainstream warm: pending-event query failed (non-fatal): %r", exc)
         return
@@ -4624,7 +4618,10 @@ def _edli_mainstream_warm_cycle() -> None:
                 "EDLI mainstream warm: fetch failed for %s/%s/%s (non-fatal): %r",
                 city, target_date, metric, exc,
             )
-    logger.info("EDLI mainstream warm: warmed=%d of %d pending families", warmed, len(pending_rows))
+    logger.info(
+        "EDLI mainstream warm: warmed=%d of %d pending families cap=%d",
+        warmed, len(pending_rows), cap,
+    )
 
 
 @_scheduler_job("arm_gate_emit")

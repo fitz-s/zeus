@@ -111,7 +111,7 @@
     "coverage_fairness_emit_enabled": false,
     "_coverage_fairness_emit_enabled_note": "Phase-2 B4. When true, scan_committed_snapshots deduplicates emitted rows to <=1 per (city,target_date,metric) per cycle and round-robins across cities so no city is starved beyond ceil(N/LIMIT) cycles. Fixes: ORDER BY snapshot_id DESC + identical batch computed_at monopolises first 2-3 cities, ~35 dark. When false (default), legacy ORDER BY is used byte-identical to pre-B4. Shadow-safe: live q is unchanged. Promote per-operator when Phase-2 consolidates.",
     "day0_catchup_emit_limit": 20,
-    "no_submit_proof_limit": 50,
+    "no_submit_proof_limit": 8,
     "market_channel_refresh_max_actions_per_window": 5,
     "market_channel_refresh_window_seconds": 60,
     "pre_submit_max_quote_age_ms": 1000,
@@ -138,7 +138,8 @@
     "mainstream_agreement_enforce_on_submit": false,
     "forecast_sharpness_gate_enabled": false,
     "forecast_sharpness_mae_multiplier": 1.5,
-    "_forecast_sharpness_gate_note": "2026-06-03 Phase-2 K1 (SHADOW, default OFF). When ON, MarketAnalysis emits ZERO edges for a market whose settlement MAE (forecast_skill, native unit) is >= forecast_sharpness_mae_multiplier * bin_width — a flat forecast spreads probability so thin that the cheap-tail buy_no clears the CI bar everywhere (root cause K1: flat-q -> 96% buy_no). The ForecastSharpnessEvidence TYPE is REQUIRED at MarketAnalysis construction regardless of this flag (omission is a TypeError — the antibody); this flag only controls whether the edge-rejection BEHAVIOR fires, so flag-OFF live emit is byte-identical to legacy. The gate lives at ONE site (MarketAnalysis._sharpness_suppresses_edges, consumed by find_edges + scan_full_hypothesis_family). Day0/imminent paths pass day0_exempt evidence (obs replaces forecast). MISSING forecast_skill row fails CLOSED (suppresses). Threshold is operator-tunable: 1.5x passes ~9/51 cities, 2.0x ~20/51; calibrate against settlement MAE before promotion."
+    "_forecast_sharpness_gate_note": "2026-06-03 Phase-2 K1 (SHADOW, default OFF). When ON, MarketAnalysis emits ZERO edges for a market whose settlement MAE (forecast_skill, native unit) is >= forecast_sharpness_mae_multiplier * bin_width — a flat forecast spreads probability so thin that the cheap-tail buy_no clears the CI bar everywhere (root cause K1: flat-q -> 96% buy_no). The ForecastSharpnessEvidence TYPE is REQUIRED at MarketAnalysis construction regardless of this flag (omission is a TypeError — the antibody); this flag only controls whether the edge-rejection BEHAVIOR fires, so flag-OFF live emit is byte-identical to legacy. The gate lives at ONE site (MarketAnalysis._sharpness_suppresses_edges, consumed by find_edges + scan_full_hypothesis_family). Day0/imminent paths pass day0_exempt evidence (obs replaces forecast). MISSING forecast_skill row fails CLOSED (suppresses). Threshold is operator-tunable: 1.5x passes ~9/51 cities, 2.0x ~20/51; calibrate against settlement MAE before promotion.",
+    "mainstream_warm_max_families_per_cycle": 8
   },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
