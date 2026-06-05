@@ -26,7 +26,8 @@
 
 set -euo pipefail
 
-ZEUS_DIR="${ZEUS_DIR:-/Users/leofitz/.openclaw/workspace-venus/zeus}"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ZEUS_DIR="${ZEUS_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
 
 cd "$ZEUS_DIR"

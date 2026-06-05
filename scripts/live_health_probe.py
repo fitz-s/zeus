@@ -24,8 +24,15 @@ Designed to be called by Monitor with grep filter on "ALERT" lines.
 from __future__ import annotations
 import json, os, sqlite3, sys, time, subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
-ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus"
+ROOT = str(
+    Path(
+        os.environ.get("ZEUS_PRIMARY_ROOT")
+        or os.environ.get("ZEUS_DIR")
+        or Path(__file__).resolve().parents[1]
+    ).resolve()
+)
 SNAPSHOT_FILE = "/tmp/zeus_health_snapshot.json"
 FORECAST_LIVE_HEARTBEAT = "state/forecast-live-heartbeat.json"
 FORECAST_LIVE_STALE_SECONDS = 300
@@ -210,9 +217,18 @@ def _settlement_truth_status(root=ROOT):
         }
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10) as conn:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            table = "settlement_outcomes" if "settlement_outcomes" in tables else "settlements"
+            if table not in tables:
+                raise RuntimeError("no settlement truth table found")
             count, max_settled_at, max_recorded_at = conn.execute(
                 "SELECT COUNT(*), COALESCE(MAX(settled_at), ''), "
-                "COALESCE(MAX(recorded_at), '') FROM settlements_v2"
+                f"COALESCE(MAX(recorded_at), '') FROM {table}"
             ).fetchone()
     except Exception as exc:
         return {

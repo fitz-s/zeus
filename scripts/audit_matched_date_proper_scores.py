@@ -30,6 +30,7 @@ Output: markdown report at --out (default: docs/operations/ENS_REFIT_MATCHED_DAT
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sqlite3
 import sys
@@ -437,8 +438,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--db",
-        default="/Users/leofitz/.openclaw/workspace-venus/zeus/state/backups/"
-                "ens_refit_full_2026-05-25.db",
+        default=os.environ.get(
+            "ZEUS_REFIT_STAGE_DB",
+            str(PROJECT_ROOT / "state" / "backups" / "ens_refit_full_2026-05-25.db"),
+        ),
         help="Path to read-only staging DB (default: backup ens_refit_full_2026-05-25.db)",
     )
     ap.add_argument(

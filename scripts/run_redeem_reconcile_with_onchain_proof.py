@@ -28,6 +28,7 @@ import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -36,8 +37,12 @@ USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 NEGRISK_ADAPTER = "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296"
 
-ZEUS_ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus"
-TRADE_DB = f"{ZEUS_ROOT}/state/zeus_trades.db"
+ZEUS_ROOT = Path(
+    os.environ.get("ZEUS_PRIMARY_ROOT")
+    or os.environ.get("ZEUS_DIR")
+    or Path(__file__).resolve().parents[1]
+).resolve()
+TRADE_DB = str(ZEUS_ROOT / "state" / "zeus_trades.db")
 
 
 def _post(rpc_url: str, payload: Dict[str, Any]) -> Any:

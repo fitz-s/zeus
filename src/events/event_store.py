@@ -284,7 +284,7 @@ class EventStore:
     )
 
     def archive_superseded_channel_events(
-        self, *, batch_limit: int = 100_000
+        self, *, batch_limit: int = 5_000
     ) -> int:
         """Sweep superseded per-token channel events to terminal ``'expired'`` status.
 
@@ -319,10 +319,12 @@ class EventStore:
         APPEND-ONLY PROVENANCE: only ``opportunity_event_processing.processing_status``
         is mutated; the immutable ``opportunity_events`` row is never deleted.
 
-        BATCH-BOUNDED: ``batch_limit`` caps the rows examined per call so a 1.7M
-        one-time backlog drains across cycles instead of in one giant transaction that
-        could lock the world WAL for seconds. The groups are evaluated in ascending
-        ``available_at`` order so older superseded events are swept first.
+        BATCH-BOUNDED: ``batch_limit`` caps the candidate rows examined per call so
+        a large backlog drains across cycles without occupying the reactor worker.
+        The keeper lookup is scoped to only the ``(event_type, token_id)`` keys seen
+        in that candidate batch; it must not group-scan the entire channel backlog.
+        The groups are evaluated in ascending ``available_at`` order so older
+        superseded events are swept first.
 
         IDEMPOTENT: re-running at the same state archives nothing new (already-expired
         rows are excluded from the ``pending``/``processing`` filter).
@@ -333,51 +335,15 @@ class EventStore:
         self._require_world_event_tables()
         type_placeholders = ",".join("?" * len(self._CHANNEL_EVENT_TYPES))
 
-        # Step 1: for each (event_type, token_id) group, find the keeper event_id —
-        # the one whose available_at equals MAX(available_at) for that group.
-        # Pattern: find MAX(available_at) per group in a subquery, then JOIN back to
-        # get the event_id of the row that matches. This is unambiguous in SQLite
-        # (no "bare column in GROUP BY" gotcha). Rows with a NULL token_id are fully
-        # excluded (fail-closed on unverifiable key — they never enter the to-archive
-        # list and are handled separately by the NULL-check below).
-        keeper_rows = self.conn.execute(
-            f"""
-            SELECT e.event_id
-            FROM opportunity_events e
-            JOIN opportunity_event_processing p
-              ON p.event_id = e.event_id
-             AND p.consumer_name = ?
-            JOIN (
-                SELECT e2.event_type,
-                       json_extract(e2.payload_json, '$.token_id') AS token_id,
-                       MAX(e2.available_at) AS max_available_at
-                FROM opportunity_events e2
-                JOIN opportunity_event_processing p2
-                  ON p2.event_id = e2.event_id
-                 AND p2.consumer_name = ?
-                WHERE e2.event_type IN ({type_placeholders})
-                  AND p2.processing_status IN ('pending', 'processing')
-                  AND json_extract(e2.payload_json, '$.token_id') IS NOT NULL
-                GROUP BY e2.event_type, json_extract(e2.payload_json, '$.token_id')
-            ) grp
-              ON e.event_type = grp.event_type
-             AND json_extract(e.payload_json, '$.token_id') = grp.token_id
-             AND e.available_at = grp.max_available_at
-             AND p.processing_status IN ('pending', 'processing')
-            """,
-            (self.consumer_name, self.consumer_name, *self._CHANNEL_EVENT_TYPES),
-        ).fetchall()
-        keeper_ids: set[str] = {row[0] for row in keeper_rows}
-
-        if not keeper_ids:
-            return 0
-
-        # Step 2: fetch all pending/processing channel-event rows with a parseable
-        # token_id (batch-limited). The keepers are excluded in Python after fetch
-        # (avoids a large NOT-IN SQL clause that could be slow on SQLite with 1.7M rows).
+        # Step 1: fetch the oldest active channel-event rows with parseable token_id.
+        # This is the only unscoped scan in the sweep and is batch-limited. The prior
+        # implementation first computed keepers across the whole backlog, which could
+        # pin the EDLI reactor for minutes before it reached fetch_pending/receipts.
         candidate_rows = self.conn.execute(
             f"""
-            SELECT e.event_id
+            SELECT e.event_id,
+                   e.event_type,
+                   json_extract(e.payload_json, '$.token_id') AS token_id
             FROM opportunity_events e
             JOIN opportunity_event_processing p
               ON p.event_id = e.event_id
@@ -391,7 +357,54 @@ class EventStore:
             (self.consumer_name, *self._CHANNEL_EVENT_TYPES, batch_limit),
         ).fetchall()
 
-        superseded_ids = [row[0] for row in candidate_rows if row[0] not in keeper_ids]
+        if not candidate_rows:
+            return 0
+
+        # Step 2: for only the token streams represented in the candidate batch,
+        # find the current keeper(s). The keeper may be outside the candidate batch;
+        # preserving it is what makes a small batch safe. Ties at MAX(available_at)
+        # are all kept to avoid arbitrary archiving when the venue emits duplicate
+        # timestamps for distinct payloads.
+        candidate_keys = {
+            (str(row[1]), str(row[2]))
+            for row in candidate_rows
+            if row[2] is not None
+        }
+        keeper_ids: set[str] = set()
+        for event_type, token_id in candidate_keys:
+            keeper_rows = self.conn.execute(
+                """
+                SELECT e.event_id
+                FROM opportunity_events e
+                JOIN opportunity_event_processing p
+                  ON p.event_id = e.event_id
+                 AND p.consumer_name = ?
+                WHERE e.event_type = ?
+                  AND json_extract(e.payload_json, '$.token_id') = ?
+                  AND p.processing_status IN ('pending', 'processing')
+                  AND e.available_at = (
+                    SELECT MAX(e2.available_at)
+                    FROM opportunity_events e2
+                    JOIN opportunity_event_processing p2
+                      ON p2.event_id = e2.event_id
+                     AND p2.consumer_name = ?
+                    WHERE e2.event_type = ?
+                      AND json_extract(e2.payload_json, '$.token_id') = ?
+                      AND p2.processing_status IN ('pending', 'processing')
+                  )
+                """,
+                (
+                    self.consumer_name,
+                    event_type,
+                    token_id,
+                    self.consumer_name,
+                    event_type,
+                    token_id,
+                ),
+            ).fetchall()
+            keeper_ids.update(str(row[0]) for row in keeper_rows)
+
+        superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
 
         if not superseded_ids:
             return 0

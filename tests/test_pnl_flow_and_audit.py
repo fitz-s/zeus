@@ -672,10 +672,11 @@ def test_buy_yes_edge_threshold_clamps_to_ceiling():
 
 
 def test_hardcoded_constants_documented():
+    project_root = Path(__file__).resolve().parents[1]
     settings = json.loads(
-        Path("/Users/leofitz/.openclaw/workspace-venus/zeus/config/settings.json").read_text()
+        (project_root / "config" / "settings.json").read_text()
     )
-    src_root = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/src")
+    src_root = project_root / "src"
     marker_pattern = re.compile(
         r'HARDCODED\(\s*setting_key="([^"]+)",\s*note_key="([^"]+)"',
         re.S,

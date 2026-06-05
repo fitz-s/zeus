@@ -27,6 +27,7 @@ Each check is independent and prints PASS/FAIL + evidence.
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import subprocess
 import sys
@@ -37,8 +38,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# ── Production DB defaults (absolute paths per spec) ─────────────────────────
-_STATE = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/state")
+# -- Production DB defaults ---------------------------------------------------
+_STATE = Path(
+    os.environ.get("ZEUS_PRIMARY_ROOT")
+    or os.environ.get("ZEUS_DIR")
+    or ROOT
+).resolve() / "state"
 DEFAULT_WORLD_DB = str(_STATE / "zeus-world.db")
 DEFAULT_FORECASTS_DB = str(_STATE / "zeus-forecasts.db")
 DEFAULT_STAGE_DB = str(_STATE / "backups" / "ens_refit_full_2026-05-25.db")

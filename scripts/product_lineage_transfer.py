@@ -13,12 +13,18 @@
 # Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
 # Reuse: Inspect hardcoded CSV input/output paths and confirm evidence ledger was built with cycle-strict extraction (dataset_id column, not data_version).
 import csv
+import os
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 
-CSV = "/Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/ens-bias-hierarchical/docs/operations/sd3_validation_evidence/ENS_RESIDUAL_EVIDENCE_12CITY_HIGH.csv"
+ROOT = Path(__file__).resolve().parents[1]
+CSV = os.environ.get(
+    "ZEUS_PRODUCT_LINEAGE_TRANSFER_CSV",
+    str(ROOT / "docs" / "operations" / "sd3_validation_evidence" / "ENS_RESIDUAL_EVIDENCE_12CITY_HIGH.csv"),
+)
 OUT = "/Users/leofitz/.claude/jobs/866db2ea/product_stratified_high.csv"
 RNG = np.random.default_rng(20260528)
 
