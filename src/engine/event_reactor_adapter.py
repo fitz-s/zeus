@@ -3945,24 +3945,48 @@ def _market_analysis_from_event_snapshot(
         payload["_edli_q_source"] = "emos"
         _emos_sampler = _make_emos_bootstrap_sampler(_emos_mu_native, _emos_sigma_native)
     elif _emos_regime:
-        # HONEST RAW (universal, #110 / operator 2026-06-05): EMOS did not serve this non-day0
-        # cell — a do-no-harm served=raw cell, an EMOS-table miss, or a loud serve-fail. Under the
-        # one-calibrator regime the contract is "EMOS, or the do-no-harm-VALIDATED honest raw
-        # N(xbar,S^2), NEVER the bias maze". The fit (fit_emos_calibration) validated raw as the
-        # UN-biased ensemble N(xbar,S^2); applying _maybe_apply_edli_bias_correction here would
-        # trade a q the gate never blessed and re-introduce the under-dispersion+bias the program
-        # exists to kill. So: raw members un-shifted, identity p_cal (= the analytic over bins, no
-        # Platt), no representativeness widening (the dispersion already IS the honest analytic).
-        # members_already_corrected=True tells _snapshot_p_raw NOT to re-apply bias internally.
+        # HONEST RAW (universal, #110 / operator 2026-06-05) with a CALIBRATED σ-FLOOR (residual
+        # under-dispersion fix, counterfactual 2026-06-05). EMOS did not serve this non-day0 cell —
+        # a do-no-harm served=raw cell, an EMOS-table miss, or a loud serve-fail. The contract is
+        # "EMOS, or the do-no-harm raw MEAN with a CALIBRATED dispersion, NEVER the bias maze". The
+        # do-no-harm gate kept the raw MEAN (its EMOS mean did not generalize) — but the raw ensemble
+        # σ (~0.6°C for Singapore-class cells) is too tight: that under-dispersion pinned q_no≈1.0 and
+        # drove the expensive-NO-on-the-winner loss. So build_honest_raw_q keeps x̄ but FLOORS σ at the
+        # cell's EMOS lead-aware σ (max(raw_σ, emos_σ)); the point q AND the q_lcb bootstrap both draw
+        # from N(x̄, floored σ). Conservative: only widens → lower q_lcb. When no EMOS σ-model exists
+        # for the cell (truly absent), degrade to the pure raw analytic (members_already_corrected=True
+        # tells _snapshot_p_raw NOT to re-apply bias — never the maze).
         members = raw_members
         _bias_corrected = False
         representativeness_sigma = 0.0
         payload["_edli_q_source"] = "raw_honest"
-        p_raw = _snapshot_p_raw(
-            snapshot, family=family, bins=bins, members=members, payload=payload,
-            members_already_corrected=True,
-        )
-        p_cal = np.asarray(p_raw, dtype=float)
+        _hr = None
+        try:
+            from src.calibration.emos_q_builder import build_honest_raw_q as _build_hr
+            _hr = _build_hr(
+                city=city.name, season=_emos_season, metric=family.metric,
+                lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
+                members_native=raw_members, unit=unit, bins=bins,
+            )
+        except Exception as _hr_exc:  # noqa: BLE001 — best-effort floor; degrade to raw analytic, LOUD
+            _hr = None
+            import logging
+            logging.getLogger("zeus.emos_serve").warning(
+                "HONEST_RAW_FLOOR_FAILED cell=%s|%s|%s exc=%s: %s",
+                getattr(city, "name", family.city), _emos_season, family.metric,
+                type(_hr_exc).__name__, _hr_exc,
+            )
+        if _hr is not None:
+            _hrq, _hr_mu, _hr_sigma = _hr
+            p_raw = np.asarray(_hrq, dtype=float)
+            p_cal = np.asarray(_hrq, dtype=float)
+            _emos_sampler = _make_emos_bootstrap_sampler(_hr_mu, _hr_sigma)
+        else:
+            p_raw = _snapshot_p_raw(
+                snapshot, family=family, bins=bins, members=members, payload=payload,
+                members_already_corrected=True,
+            )
+            p_cal = np.asarray(p_raw, dtype=float)
     else:
         members, _bias_corrected = _maybe_apply_edli_bias_correction(
             raw_members, snapshot=snapshot, family=family, city=city, payload=payload

@@ -181,6 +181,49 @@ def emos_predictive(
         return None
 
 
+def emos_sigma_model(
+    city: str,
+    season: str,
+    lead_days: float,
+    members_c: "np.ndarray",
+    *,
+    metric: str = "high",
+) -> Optional[float]:
+    """The EMOS predictive std-dev (°C) from the cell's fitted params, IGNORING the served gate.
+
+    ``emos_predictive`` returns None for a served=raw cell (the do-no-harm gate kept that cell's
+    RAW MEAN because EMOS's mean did not generalize). But the σ-model (c, d, e) was still fit for
+    that cell, and the counterfactual (2026-06-05) showed the residual losses are concentrated in
+    raw-served cells whose raw ensemble σ (~0.6 °C) is too tight — the under-dispersion that drives
+    the expensive-NO-on-the-winner loss. This accessor exposes the calibrated lead-aware σ so the
+    honest-raw path can FLOOR its dispersion at it (max(raw_σ, this)) — keeping the do-no-harm raw
+    mean while killing the under-dispersion. Conservative by construction: a floor only WIDENS σ →
+    lowers q_lcb → fewer overconfident bets (iron rule 5). Returns None if the cell is absent or its
+    params are malformed (then the caller keeps the pure raw analytic σ — no model to floor with).
+    """
+    try:
+        table = load_emos_table()
+        cells = table.get("cells", {})
+        cell = cells.get(f"{city}|{season}|{str(metric).lower()}")
+        if cell is None:
+            return None
+        params = cell.get("params")
+        if not isinstance(params, (list, tuple)) or len(params) != 5:
+            return None
+        _a, _b, c, d, e = (float(p) for p in params)
+        arr = np.asarray(members_c, dtype=float)
+        if arr.size < 2:
+            return None
+        s2 = float(np.var(arr, ddof=1))
+        if s2 <= 0.0:
+            s2 = 1e-6
+        sigma = math.sqrt(math.exp(c + d * math.log(s2) + e * lead_days))
+        return sigma if sigma > 0.0 else None
+    except Exception as exc:  # noqa: BLE001 — fail-soft: no floor rather than crash the q seam
+        logger.warning("emos_sigma_model(%r, %r) error: %s", city, season, exc)
+        return None
+
+
 def bin_probability(
     mu: float,
     sigma: float,

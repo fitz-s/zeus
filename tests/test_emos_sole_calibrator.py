@@ -119,6 +119,49 @@ def test_inv1_served_raw_returns_none_for_honest_fallback(monkeypatch):
     assert out is None, "served=raw must fall back (None), never silently apply HIGH EMOS or bias"
 
 
+# ----------------------------------------------------------------------------
+# σ-FLOOR (residual under-dispersion fix, counterfactual 2026-06-05) — a served=raw cell keeps
+#   the do-no-harm raw MEAN but FLOORS its dispersion at the calibrated EMOS lead-aware σ, so the
+#   raw-cell under-dispersion (Singapore-class q_no≈1.0 → expensive-NO-on-the-winner loss) is killed.
+# ----------------------------------------------------------------------------
+def test_emos_sigma_model_ignores_served_gate(monkeypatch):
+    # served=raw -> emos_predictive returns None (the gate kept the raw MEAN), but emos_sigma_model
+    # STILL returns the calibrated σ (the floor source) — the σ params were fit even for raw cells.
+    table = {"_meta": {}, "cells": {"RawCity|JJA|high": {"params": [0.0, 1.0, 0.5, 0.5, 0.30], "n": 99, "served": "raw"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    members = np.array([22.0, 22.3, 22.6, 22.9], dtype=float)
+    assert emos_mod.emos_predictive("RawCity", "JJA", 3.0, members, metric="high") is None, \
+        "served=raw -> emos_predictive None (do-no-harm keeps the raw mean)"
+    sig = emos_mod.emos_sigma_model("RawCity", "JJA", 3.0, members, metric="high")
+    assert sig is not None and sig > 0.0, "emos_sigma_model must expose the calibrated σ even for served=raw"
+
+
+def test_honest_raw_q_floors_dispersion_on_raw_cell(monkeypatch):
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    table = {"_meta": {}, "cells": {"RawCity|JJA|high": {"params": [0.0, 1.0, 0.5, 0.5, 0.30], "n": 99, "served": "raw"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    members = np.array([22.0, 22.3, 22.6, 22.9], dtype=float)  # tight: raw sd ~0.39 (under-dispersed)
+    raw_sd = float(np.std(members, ddof=1))
+    bins = [(None, 21.0), (22.0, 22.0), (23.0, None)]
+    out = mod.build_honest_raw_q(city="RawCity", season="JJA", metric="high", lead_days=5.0,
+                                 members_native=members, unit="C", bins=bins)
+    assert out is not None, "a raw cell with a calibrated σ must produce a floored honest-raw dist"
+    q, mu, sigma = out
+    assert abs(mu - float(np.mean(members))) < 1e-6, "honest-raw keeps the do-no-harm raw MEAN"
+    assert sigma > raw_sd, "dispersion must be FLOORED above the tight raw σ (only widens, never tightens)"
+    assert abs(float(np.sum(q)) - 1.0) < 1e-6, "q normalized"
+
+
+def test_honest_raw_q_none_when_cell_absent(monkeypatch):
+    # Truly-absent cell -> no calibrated floor -> None (caller uses the pure raw analytic).
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", {"_meta": {}, "cells": {}}, raising=False)
+    out = mod.build_honest_raw_q(city="Nowhere", season="JJA", metric="high", lead_days=3.0,
+                                 members_native=np.array([20.0, 21.0, 22.0], dtype=float),
+                                 unit="C", bins=[(None, 21.0), (22.0, None)])
+    assert out is None, "no calibrated σ-model -> None -> caller uses the pure raw analytic"
+
+
 def test_inv_canonical_season_is_nh_month_no_hemisphere_flip():
     # SEASON-CROSSING ANTIBODY (critic 2026-06-04): EMOS cells are NH-month-keyed
     # (fit_emos_calibration.season()). A hemisphere-aware season SH-flips and serves the

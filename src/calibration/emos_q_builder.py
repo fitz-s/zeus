@@ -15,7 +15,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from src.calibration.emos import bin_probability_settlement, emos_predictive
+from src.calibration.emos import bin_probability_settlement, emos_predictive, emos_sigma_model
 
 
 def _bin_bounds(b) -> tuple[Optional[float], Optional[float]]:
@@ -83,6 +83,61 @@ def build_emos_q(
     if not (sigma_native > 0.0):
         return None
 
+    q = np.array(
+        [bin_probability_settlement(mu_native, sigma_native, lo, hi)
+         for lo, hi in (_bin_bounds(b) for b in bins)],
+        dtype=float,
+    )
+    total = float(q.sum())
+    if not np.isfinite(total) or total <= 0.0:
+        return None
+    return q / total, float(mu_native), float(sigma_native)
+
+
+def build_honest_raw_q(
+    *,
+    city: str,
+    season: str,
+    metric: str,
+    lead_days: float,
+    members_native: "np.ndarray",
+    unit: str,
+    bins: Sequence,
+) -> Optional[tuple["np.ndarray", float, float]]:
+    """Honest-raw q with a CALIBRATED DISPERSION FLOOR for served=raw / EMOS-miss cells.
+
+    The do-no-harm gate serves RAW for cells where EMOS's MEAN did not generalize on held-out
+    CRPS. But the counterfactual (2026-06-05) showed the RESIDUAL expensive-NO-on-the-winner losses
+    concentrate in those raw cells, whose raw ensemble σ (~0.6 °C for e.g. Singapore JJA high) is too
+    TIGHT — the under-dispersion that pins q_no near 1.0 and drives the loss. This keeps the do-no-harm
+    raw MEAN (x̄) but FLOORS the dispersion at the cell's calibrated EMOS lead-aware σ:
+    ``σ = max(raw_σ, emos_σ_model)``. The point q AND the lcb bootstrap both derive from N(x̄, σ) —
+    one σ, fixing the residual under-dispersion. Conservative by construction: max() can only WIDEN σ
+    → lower q_lcb → fewer overconfident bets (iron rule 5); it never tightens.
+
+    Returns ``(q_vector, mu_native, sigma_native)`` (raw mean, floored σ, native unit), or ``None`` when
+    NO EMOS σ-model exists for the cell (truly-absent cell) — the caller then uses the pure raw analytic
+    (there is no calibrated floor to apply). Mirrors build_emos_q's unit handling and bin integration.
+    """
+    u = (unit or "").strip().upper()
+    arr = np.asarray(members_native, dtype=float)
+    if arr.size < 2:
+        return None
+    members_c = (arr - 32.0) / 1.8 if u.startswith("F") else arr
+    floor_c = emos_sigma_model(city, season, float(lead_days), members_c, metric=str(metric).lower())
+    if floor_c is None:
+        return None  # no calibrated σ for this cell -> caller uses the pure raw analytic
+    mu_c = float(np.mean(members_c))
+    raw_sigma_c = float(np.std(members_c, ddof=1))
+    sigma_c = max(raw_sigma_c, float(floor_c))
+    if not (sigma_c > 0.0):
+        return None
+    if u.startswith("F"):
+        mu_native = mu_c * 1.8 + 32.0
+        sigma_native = sigma_c * 1.8
+    else:
+        mu_native = mu_c
+        sigma_native = sigma_c
     q = np.array(
         [bin_probability_settlement(mu_native, sigma_native, lo, hi)
          for lo, hi in (_bin_bounds(b) for b in bins)],
