@@ -3110,13 +3110,11 @@ def _calibration_authority_payload_and_clock(
     row = _calibration_model_row(calibration_conn, model_key=model_key)
     if row is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:model_row")
-    recorded_at = _parse_utc(row.get("recorded_at"))
-    fitted_at = _parse_utc(row.get("fitted_at"))
-    if recorded_at is None and fitted_at is None:
+    training_cutoff_raw = row.get("training_cutoff") or _date_cutoff_from_calibration_row(row)
+    training_cutoff_time = _parse_utc(training_cutoff_raw)
+    if training_cutoff_time is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:clock")
-    source_time = recorded_at or fitted_at
-    persisted_time = recorded_at or fitted_at
-    assert source_time is not None and persisted_time is not None
+    materialized_at = row.get("recorded_at") or row.get("fitted_at")
     payload_out = {
         "identity": str(model_key or ""),
         "calibrator_model_key": model_key,
@@ -3125,8 +3123,9 @@ def _calibration_authority_payload_and_clock(
         "raw_source_id": raw_source_id,
         "source_cycle": cycle,
         "horizon_profile": horizon_profile,
-        "training_cutoff": row.get("training_cutoff") or row.get("fitted_at"),
-        "model_available_at": row.get("recorded_at") or row.get("fitted_at"),
+        "training_cutoff": training_cutoff_raw,
+        "model_available_at": training_cutoff_raw,
+        "model_materialized_at": materialized_at,
         "model_hash": _hash_jsonish({
             "model_key": row.get("model_key"),
             "param_A": row.get("param_A"),
@@ -3138,10 +3137,31 @@ def _calibration_authority_payload_and_clock(
         "n_samples": row.get("n_samples"),
         "input_space": row.get("input_space"),
         "authority": row.get("authority"),
-        "recorded_at": row.get("recorded_at"),
-        "fitted_at": row.get("fitted_at"),
     }
-    return payload_out, EvidenceClock(source_time, persisted_time, persisted_time)
+    return payload_out, EvidenceClock(
+        training_cutoff_time,
+        training_cutoff_time,
+        training_cutoff_time,
+    )
+
+
+def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
+    """Return the date-level training cutoff for legacy platt_models rows.
+
+    Older live/cache schemas do not persist ``training_cutoff`` even though the
+    certificate payload requires that semantic. ``fitted_at``/``recorded_at`` are
+    model materialization times and can be created by read-time cache writes during
+    the reactor cycle; using the full timestamp as ``training_cutoff`` makes the
+    proof non-causal by construction. The established calibration producer
+    convention writes date-only cutoffs, so legacy rows degrade to the UTC date of
+    the materialization timestamp.
+    """
+
+    for key in ("fitted_at", "recorded_at"):
+        parsed = _parse_utc(row.get(key))
+        if parsed is not None:
+            return datetime.combine(parsed.date(), time.min, tzinfo=UTC).isoformat()
+    return None
 
 
 # ── Market-disagreement guard (settlement-grounded, 2026-06-04) ──────────────

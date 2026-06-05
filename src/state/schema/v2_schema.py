@@ -595,6 +595,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
                 cycle TEXT NOT NULL DEFAULT '00',
                 source_id TEXT NOT NULL DEFAULT 'tigge_mars',
                 horizon_profile TEXT NOT NULL DEFAULT 'full',
+                training_cutoff TEXT,
                 recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 -- 2026-05-05 critic-opus Blocker 1: UNIQUE extended with
                 -- stratification keys so cross-cycle Platt rows do not collide
@@ -618,6 +619,7 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             "ALTER TABLE platt_models ADD COLUMN cycle TEXT NOT NULL DEFAULT '00'",
             "ALTER TABLE platt_models ADD COLUMN source_id TEXT NOT NULL DEFAULT 'tigge_mars'",
             "ALTER TABLE platt_models ADD COLUMN horizon_profile TEXT NOT NULL DEFAULT 'full'",
+            "ALTER TABLE platt_models ADD COLUMN training_cutoff TEXT",
             "ALTER TABLE platt_models ADD COLUMN error_model_family TEXT NOT NULL DEFAULT 'none'",
             # identity_full_transport_v1 (Zeus #64, 2026-05-25): explicit route for
             # full_transport p_raw when ECE is already low — no Platt transform applied.
