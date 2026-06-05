@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# Created: 2026-06-05
-# Last reused or audited: 2026-06-05
+# Lifecycle: created=2026-06-05; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Fit the EMPIRICAL settlement σ-floor table from VERIFIED settlement_outcomes.
+# Reuse: inspect architecture/script_manifest.yaml and review the generated JSON before enabling.
 # Authority basis: q=1.000 investigation 2026-06-05; EMPIRICAL settlement σ-floor, iron rule 5
 #   (overconfidence = ruin). The EMOS σ-model σ = √exp(c + d·logS² + e·lead) is SYSTEMICALLY
 #   under-dispersed (median σ_emos/σ_settled = 0.49 across 66% of EMOS-served cells). The correct
@@ -77,8 +78,9 @@ def detrended_std(days: "np.ndarray", values: "np.ndarray") -> float:
     deterministic seasonal march, NOT forecast uncertainty, so it must not inflate the dispersion
     floor (the investigation proved the raw same-season std over-widens).
 
-    Fits ``value ≈ a + b·day`` by least squares, returns std(residual, ddof=1). For < 3 points or a
-    degenerate design (all days equal) the trend is unidentifiable → falls back to the raw std.
+    Fits ``value ≈ a + b·day`` by least squares, returns the two-parameter residual standard error
+    (sqrt(SSE / (n - 2))). For < 3 points or a degenerate design (all days equal) the trend is
+    unidentifiable → falls back to the raw std.
     """
     d = np.asarray(days, dtype=float)
     v = np.asarray(values, dtype=float)
