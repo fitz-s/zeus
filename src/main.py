@@ -92,6 +92,12 @@ REACTOR_MODE_BY_LIVE_STAGE = {
     "edli_live_canary": "live",
     "edli_live": "live",
 }
+# Admissible edli_live_scope values. `forecast_only` is the PR-332 scope (day0
+# OUT — day0 flags crash). `day0_shadow` ADMITS day0 (mask runs, shadow certs
+# produced) but carries NO submit authority of its own — it is orthogonal to the
+# arm axis (real_order_submit_enabled), so day0 candidates fall through the same
+# not-armed block as everything else. Any other value fails closed at boot.
+EDLI_LIVE_SCOPES = frozenset({"forecast_only", "day0_shadow"})
 EDLI_RUNTIME_FLAGS = (
     "enabled",
     "event_writer_enabled",
@@ -900,8 +906,17 @@ def _edli_stage_fresh_file_reasons(*, name: str, path: str, max_age_seconds: int
 
 def _assert_edli_live_scope(edli_cfg: dict) -> None:
     scope = str(edli_cfg.get("edli_live_scope") or "forecast_only")
-    if scope != "forecast_only":
+    if scope not in EDLI_LIVE_SCOPES:
         raise RuntimeError(f"UNSUPPORTED_EDLI_LIVE_SCOPE:{scope}")
+    # day0_shadow ADMITS day0 (the absorbing-boundary mask runs and shadow
+    # certificates are produced) but grants NO submit authority of its own:
+    # edli_live_scope is independent of the arm axis (real_order_submit_enabled),
+    # so a day0 candidate routes through the SAME not-armed block as any other
+    # event (reactor.py EDLI_REAL_ORDER_SUBMIT_DISABLED / NO_SUBMIT) unless the
+    # operator separately arms. forecast_only stays byte-identical: day0 flags on
+    # under forecast_only still crash with DAY0_OUT_OF_SCOPE_FOR_PR332.
+    if scope == "day0_shadow":
+        return
     if bool(edli_cfg.get("day0_extreme_trigger_enabled", False)) or bool(
         edli_cfg.get("day0_hard_fact_live_enabled", False)
     ):

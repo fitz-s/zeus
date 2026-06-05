@@ -103,7 +103,6 @@ test_trust_policy:
     tests/events/test_market_event_coalescer.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_forecast_snapshot_ready.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/events/test_day0_extreme_updated_trigger.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/strategy/live_inference/test_day0_absorbing_boundary.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_live_bin_inference.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_executable_cost.py: {created: "2026-05-24", last_used: "2026-05-24"}
     tests/strategy/live_inference/test_trade_score.py: {created: "2026-05-24", last_used: "2026-05-24"}
@@ -719,6 +718,11 @@ test_trust_policy:
     tests/events/test_live_cap_no_caps_directive.py: {created: "2026-06-05", last_used: "2026-06-05", note: "no-caps directive RT: $250 ceiling + rate-window flag-gated — disabled ⇒ no cap; ON ⇒ caps unchanged"}
     tests/events/test_reactor_reservation_rollback_flow.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: reactor reservation rollback flow on the no-caps path"}
     tests/sizing/test_portfolio_reservation_rollback.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: portfolio reservation rollback under multi-bet correlated sizing"}
+    # day0-activate — day0 shadow activation: live absorbing-mask direction antibody + day0_shadow scope (2026-06-05)
+    tests/engine/test_day0_live_mask_direction.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P0 RT: pins LIVE day0 absorbing-mask direction (observed-so-far → mask → posterior) so inversion is UNCONSTRUCTABLE; reproduces #98 Paris low=14°C wrong-side"}
+    tests/money_path/test_day0_shadow_scope.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P1 RT: day0_shadow edli_live_scope admits day0 + structural no-submit (scope ⊥ arm axis); forecast_only stays byte-identical"}
+    tests/engine/test_day0_mask_consolidation.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P2 RT: collapse to ONE absorbing mask — hardened inline _edli_day0_mask_for_analysis truth table (zero behavioral delta), dark module deleted"}
+    tests/engine/test_day0_mask_runtime_gate.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P3 RT: runtime DAY0_MASK_CONTRADICTS_OBSERVATION fail-closed gate — surviving bin contradicting rounded_value raises; future inversion fails CLOSED"}
 
 categories:
   core_law_antibody:
@@ -1219,6 +1223,11 @@ categories:
     - tests/test_boot_guard_kelly_ceiling.py
     - tests/test_startup_wallet_dedup.py
     - tests/test_startup_wallet_warm_overlap.py
+    # day0-activate — day0 shadow activation antibodies (2026-06-05)
+    - tests/engine/test_day0_live_mask_direction.py
+    - tests/money_path/test_day0_shadow_scope.py
+    - tests/engine/test_day0_mask_consolidation.py
+    - tests/engine/test_day0_mask_runtime_gate.py
 
   transitional_advisory:
     - tests/test_calibration_quality.py
