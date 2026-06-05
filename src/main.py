@@ -23,6 +23,7 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 import functools
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -330,6 +331,18 @@ def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
         return
     kelly_mult = float(raw_mult)
     max_corr = float(raw_corr)
+    # Fail-closed on non-finite inputs: ``float('nan') > x`` and ``x > float('nan')``
+    # are ALWAYS False, so a NaN (or an inf max_corr) would slip past the ``>``
+    # comparison below and silently re-open the over-size door. Reject non-finite
+    # values explicitly, consistent with the other fail-closed sizing inputs.
+    if not math.isfinite(kelly_mult) or not math.isfinite(max_corr):
+        raise RuntimeError(
+            f"KELLY_MULT_EXCEEDS_CORR_CEILING (NON_FINITE): non-finite sizing "
+            f"input — sizing.kelly_multiplier={kelly_mult}, "
+            f"sizing.max_correlated_pct={max_corr}. A NaN/inf knob bypasses the "
+            f"corr-ceiling comparison (the over-size door / iron rule 5 = ruin). "
+            f"Both must be finite."
+        )
     if kelly_mult > max_corr:
         raise RuntimeError(
             f"KELLY_MULT_EXCEEDS_CORR_CEILING: sizing.kelly_multiplier="

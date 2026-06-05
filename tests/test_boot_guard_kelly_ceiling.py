@@ -1,5 +1,5 @@
 # Created: 2026-06-05
-# Last reused or audited: 2026-06-05
+# Last reused/audited: 2026-06-05
 # Authority basis: MAJOR #1 antibody on the P1 sizing fix (commits a281ba14a2 +
 #   efe91afdb5, branch fix/remove-live-caps) — the corr-ceiling
 #   ``Σ stakes ≤ max_correlated_pct·B`` holds ONLY when
@@ -7,6 +7,8 @@
 #   knobs, equal at 0.25 only by coincidence — the same coincidence that masked
 #   the original bug. Iron rule 5: over-size = ruin.
 # Lifecycle: created=2026-06-05; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Boot-guard antibody — assert_kelly_multiplier_within_correlated_ceiling makes kelly_multiplier > max_correlated_pct (and any non-finite knob) FATAL at boot, closing the over-size door (iron rule 5 = ruin) the K1–K8 suite cannot see.
+# Reuse: Re-run when the guard, _run_boot_guards wiring, or evaluate_kelly's corr-ceiling sizing (f_cap_corr = max_correlated_pct) changes.
 """ANTIBODY for the unguarded over-size door (MAJOR #1).
 
 The P1 fix (FIX A) makes the corr-weighted budget ``f_cap_corr·B`` with
@@ -110,6 +112,42 @@ def test_guard_registered_passes_on_valid_config():
     assert names["kelly_mult_corr_ceiling"][1] is True, (
         f"valid config must pass the guard; got: {names['kelly_mult_corr_ceiling']}"
     )
+
+
+# ── Non-finite inputs must FAIL-CLOSED (NaN/inf bypass the > comparison) ─────
+
+def test_guard_fires_on_nan_kelly_multiplier():
+    """A NaN kelly_multiplier must make the guard FIRE, not silently pass.
+
+    ``float('nan') > max_corr`` is ALWAYS False, so without an explicit finite
+    check a NaN kelly_multiplier slips past the fail-closed guard (the over-size
+    door stays open). Consistent with the other fail-closed sizing inputs, a
+    non-finite value must be rejected.
+    """
+    from src.main import assert_kelly_multiplier_within_correlated_ceiling
+    with pytest.raises(RuntimeError, match="KELLY_MULT_EXCEEDS_CORR_CEILING|NON_FINITE"):
+        assert_kelly_multiplier_within_correlated_ceiling(
+            _cfg(kelly_multiplier=float("nan"), max_correlated_pct=0.25)
+        )
+
+
+def test_guard_fires_on_nan_max_correlated_pct():
+    """A NaN max_correlated_pct must also FIRE: ``x > nan`` is always False, so
+    the comparison can never catch a breach against a NaN ceiling."""
+    from src.main import assert_kelly_multiplier_within_correlated_ceiling
+    with pytest.raises(RuntimeError, match="KELLY_MULT_EXCEEDS_CORR_CEILING|NON_FINITE"):
+        assert_kelly_multiplier_within_correlated_ceiling(
+            _cfg(kelly_multiplier=0.25, max_correlated_pct=float("nan"))
+        )
+
+
+def test_guard_fires_on_inf_kelly_multiplier():
+    """An infinite kelly_multiplier is unambiguously an over-size — fail-closed."""
+    from src.main import assert_kelly_multiplier_within_correlated_ceiling
+    with pytest.raises(RuntimeError, match="KELLY_MULT_EXCEEDS_CORR_CEILING|NON_FINITE"):
+        assert_kelly_multiplier_within_correlated_ceiling(
+            _cfg(kelly_multiplier=float("inf"), max_correlated_pct=0.25)
+        )
 
 
 # ── The breach the guard prevents: Σ corr-weighted stakes > ceiling ─────────
