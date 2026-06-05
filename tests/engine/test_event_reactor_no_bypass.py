@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
-# Authority basis: EDLI v1 no-submit redemption proof; reactor must not use venue or broad cycle runtime.
+# Last reused/audited: 2026-06-04
+# Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 from __future__ import annotations
 
 import ast
@@ -37,6 +37,25 @@ from src.state.db import init_schema_forecasts
 from src.types.market import Bin
 
 DECISION_TIME = datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_edli_settings(monkeypatch):
+    """Force flag-OFF for EMOS sole calibrator and bias correction.
+
+    The test fixture has no EMOS calibration rows and no model_bias_ens rows.
+    Live settings.json may have these flags ON (edli_emos_sole_calibrator_enabled,
+    edli_bias_correction_enabled).  With EMOS ON and no calibration data, build_emos_q
+    produces a different q distribution than what the fixture encodes, causing
+    TRADE_SCORE_NON_POSITIVE on every receipt assertion.  Isolate all tests in this
+    module from the live flag state.
+    """
+    from src.config import settings
+
+    edli = dict(settings._data["edli_v1"])
+    edli["edli_emos_sole_calibrator_enabled"] = False
+    edli["edli_bias_correction_enabled"] = False
+    monkeypatch.setitem(settings._data, "edli_v1", edli)
 
 
 def _forecast_event(completeness: str = "COMPLETE"):
@@ -1513,13 +1532,28 @@ def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists(
     assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
 
 
-def test_runtime_receipt_rejects_when_family_topology_has_missing_sibling_snapshot():
+def test_runtime_receipt_accepts_family_with_missing_sibling_snapshot_as_non_tradeable():
+    """With the full-family design, a 3-bin family where only 2 of 3 bins have
+    executable snapshots must PASS the FDR proof (the third bin is non-tradeable,
+    not absent).  The selected bin (condition-1) has a snapshot, so the receipt
+    must be accepted with fdr_hypothesis_count == 5 (3 yes-tokens + 2 no-tokens;
+    the non-tradeable bin contributes its yes-token but has no no-token).
+
+    The old exact-set-equality gate (FDR_FULL_FAMILY_PROOF_MISSING) is incorrect
+    because it renormalized q over the 2-bin subset, inflating probabilities ~1.2×
+    and shrinking fdr_hypothesis_count from 5 to 4 — both unsafe.
+    """
     event = _bound_forecast_event(fdr_condition_count=3)
     receipt = _receipt(event, _trade_conn_with_snapshot(condition_count=3, snapshot_condition_count=2))
 
-    assert receipt.submitted is False
-    assert receipt.reason.startswith("FDR_FULL_FAMILY_PROOF_MISSING")
-    assert receipt.family_complete is False
+    # Full-family: receipt must not be rejected for missing sibling snapshot
+    assert receipt.reason != "FDR_FULL_FAMILY_PROOF_MISSING"
+    assert receipt.family_complete is True
+    # 3-bin family: 2 tradeable (yes+no each) + 1 non-tradeable (yes only, no_token_id=None).
+    # yes_token_ids has 3 entries; no_token_ids has 2 entries → 5 total hypotheses.
+    # This is MORE than the broken 2-bin subset (4 hypotheses) and correct for the full
+    # MECE family — q runs over all 3 bins, FDR denominator is 5 (not 4).
+    assert receipt.fdr_hypothesis_count == 5
 
 
 def test_runtime_receipt_generates_fdr_from_family_not_event_payload():

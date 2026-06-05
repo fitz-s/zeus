@@ -1,5 +1,5 @@
 # Last reused or audited: 2026-06-04
-# Authority basis: Operator GOAL 2026-06-04 — Kelly size=0 observability (zero-receipt root-cause)
+# Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -223,8 +223,12 @@ def executable_snapshot_gate_from_trade_conn(
         )
         if not rows:
             return False
-        if sorted(set(condition_ids)) != sorted(_snapshot_token_maps_by_condition(rows)):
-            return False
+        # Entry gate: at least one sibling snapshot present AND the event's own selected
+        # bin has a snapshot. The full-family q/FDR proof is enforced inside
+        # build_event_bound_no_submit_receipt; here we only need to know the market
+        # family is partially live and the selected bin is executable. Illiquid tail
+        # bins absent from executable_market_snapshots are non-tradeable but still part
+        # of the full MECE topology — exact-set-equality is the wrong predicate here.
         return _selected_snapshot_row_for_event(rows, payload) is not None
 
     return _gate
@@ -645,19 +649,25 @@ def build_event_bound_no_submit_receipt(
     if not family_rows:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING")
     snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
-    missing_snapshot_conditions = sorted(set(family_condition_ids) - set(snapshot_token_maps))
-    if missing_snapshot_conditions:
-        return EventSubmissionReceipt(
-            False,
-            event.event_id,
-            event.causal_snapshot_id,
-            reason="FDR_FULL_FAMILY_PROOF_MISSING:missing executable snapshots for sibling conditions "
-            + ",".join(missing_snapshot_conditions),
-            family_complete=False,
-        )
+    # Full-family topology: the family domain is ALWAYS the complete market_events
+    # partition (MECE, all bins). Bins WITH a snapshot are tradeable; bins WITHOUT a
+    # snapshot are non-tradeable (executable_mask=False) but still carry their bin so
+    # q/FDR are computed over the full MECE family. Removing any bin would renormalize
+    # q over the subset (~1.2× inflation at 3/11 missing) and shrink fdr_hypothesis_count
+    # from 22 to 16 — both unsafe. The selected-bin gate below handles the only fatal
+    # case: the event's own target bin has no snapshot.
+    #
+    # For non-tradeable bins (no snapshot in executable_market_snapshots) we use the
+    # market_events.token_id (YES token only) as identity; no_token_id is None. The
+    # executable_mask in _generate_candidate_proofs already falls back to
+    # executable_mask=False when native_costs has no price for a condition (line ~3877).
     try:
         topology = tuple(
-            _topology_candidate_from_market_event(row, snapshot_token_maps[str(row.get("condition_id") or "")], payload)
+            _topology_candidate_from_market_event(
+                row,
+                snapshot_token_maps.get(str(row.get("condition_id") or "")),
+                payload,
+            )
             for row in family_topology_rows
         )
     except ValueError as exc:
@@ -5756,21 +5766,38 @@ def _snapshot_token_maps_by_condition(rows: list[dict[str, Any]]) -> dict[str, d
 
 def _topology_candidate_from_market_event(
     row: dict[str, Any],
-    snapshot_token_map: dict[str, str],
+    snapshot_token_map: dict[str, str] | None,
     payload: dict[str, object],
 ) -> MarketTopologyCandidate:
+    """Build a topology candidate for one market_events row.
+
+    ``snapshot_token_map`` is None for bins that have no entry in
+    ``executable_market_snapshots`` (illiquid tail bins).  Those bins are still
+    included in the full-family topology so q/FDR run over the complete MECE
+    partition; they are non-tradeable (yes_token_id from market_events, no_token_id=None)
+    and the executable_mask downstream will mark them as False.
+    """
     city = _nonnull(payload.get("city"))
     target_date = _nonnull(payload.get("target_date"))
     metric = _nonnull(payload.get("metric") or payload.get("temperature_metric"))
     if not (city and target_date and metric):
         raise ValueError("EDLI event payload missing city/target_date/metric")
+    if snapshot_token_map is not None:
+        # Tradeable bin: use the executable snapshot's token ids
+        yes_token_id: str | None = snapshot_token_map["yes_token_id"]
+        no_token_id: str | None = snapshot_token_map["no_token_id"]
+    else:
+        # Non-tradeable bin: use market_events.token_id (YES side only); no executable
+        # snapshot exists so no_token_id is absent
+        yes_token_id = _nonnull(row.get("token_id")) or None
+        no_token_id = None
     return MarketTopologyCandidate(
         city=city,
         target_date=target_date,
         metric=metric,
         condition_id=_nonnull(row.get("condition_id")),
-        yes_token_id=snapshot_token_map["yes_token_id"],
-        no_token_id=snapshot_token_map["no_token_id"],
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
         bin=_bin_from_market_event(row, payload),
         market_slug=_nonnull(row.get("market_slug") or row.get("event_slug")) or None,
     )
