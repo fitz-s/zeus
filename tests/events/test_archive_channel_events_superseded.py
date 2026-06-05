@@ -44,11 +44,29 @@ from src.state.db import init_schema
 # ---------------------------------------------------------------------------
 
 
-def _world_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+class CaptureConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.executed_sql: list[tuple[str, tuple]] = []
+
+    def execute(self, sql, parameters=(), /):  # type: ignore[override]
+        params = tuple(parameters) if isinstance(parameters, (list, tuple)) else parameters
+        self.executed_sql.append((sql, params))
+        return super().execute(sql, parameters)
+
+
+def _world_conn(*, factory=sqlite3.Connection) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:", factory=factory)
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
+
+
+def _plan_text(conn: sqlite3.Connection, sql: str, params: tuple) -> str:
+    plan_rows = conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+    return " ".join(
+        (r["detail"] if isinstance(r, sqlite3.Row) else r[-1]) for r in plan_rows
+    ).upper()
 
 
 def _channel_event(
@@ -449,7 +467,7 @@ def test_candidate_query_uses_processing_status_index():
     candidate CTE still planned as SCAN p on a ~2.7M-row processing table, pinning
     the EDLI reactor worker before process_pending could emit no-submit receipts.
     """
-    conn = _world_conn()
+    conn = _world_conn(factory=CaptureConnection)
     store = EventStore(conn)
     for tok in range(20):
         for j in range(50):
@@ -464,36 +482,63 @@ def test_candidate_query_uses_processing_status_index():
             )
     conn.execute("ANALYZE")
 
-    consumer = "edli_reactor_v1"
-    channel_types = ("BEST_BID_ASK_CHANGED", "BOOK_SNAPSHOT", "NEW_MARKET_DISCOVERED")
-    type_placeholders = ",".join("?" * len(channel_types))
+    conn.executed_sql.clear()
+    store.archive_superseded_channel_events()
+    candidate_sql, candidate_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "SELECT e.event_id" in sql
+        and "json_extract(e.payload_json, '$.token_id') AS token_id" in sql
+        and "WITH candidate_rows" not in sql
+    )
 
-    plan_rows = conn.execute(
-        f"""
-        EXPLAIN QUERY PLAN
-        SELECT e.event_id,
-               e.event_type,
-               json_extract(e.payload_json, '$.token_id') AS token_id
-        FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-        JOIN opportunity_events e
-          ON e.event_id = p.event_id
-        WHERE p.consumer_name = ?
-          AND p.processing_status IN ('pending', 'processing')
-          AND e.event_type IN ({type_placeholders})
-          AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
-        ORDER BY e.available_at ASC
-        LIMIT ?
-        """,
-        (consumer, *channel_types, 5000),
-    ).fetchall()
-
-    plan_text = " ".join(
-        (r["detail"] if isinstance(r, sqlite3.Row) else r[-1]) for r in plan_rows
-    ).upper()
+    plan_text = _plan_text(conn, candidate_sql, candidate_params)
 
     assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan_text, (
         f"candidate query must use active-status index, got: {plan_text!r}"
     )
     assert "SCAN P" not in plan_text, (
         f"candidate query must not full-scan opportunity_event_processing, got: {plan_text!r}"
+    )
+
+
+def test_fetch_pending_query_uses_processing_status_index():
+    """The reactor's main fetch_pending query must also avoid SCAN p.
+
+    The channel sweep can be fast while process_pending still starves if the
+    final fetch query scans every historical processing row before ordering the
+    active working set.
+    """
+    conn = _world_conn(factory=CaptureConnection)
+    store = EventStore(conn)
+    for tok in range(20):
+        for j in range(50):
+            store.insert_or_ignore(
+                _channel_event(
+                    "BEST_BID_ASK_CHANGED",
+                    f"tok-fetch-plan-{tok}",
+                    f"0xfetch-plan-{tok}",
+                    f"2026-06-04T{j % 24:02d}:{j // 24:02d}:00+00:00",
+                    seq=tok * 50 + j,
+                )
+            )
+    conn.execute("ANALYZE")
+
+    decision_time = "2026-06-05T00:00:00+00:00"
+
+    conn.executed_sql.clear()
+    store.fetch_pending(decision_time=decision_time, limit=90)
+    fetch_sql, fetch_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "SELECT e.*" in sql and "FROM opportunity_event_processing" in sql
+    )
+
+    plan_text = _plan_text(conn, fetch_sql, fetch_params)
+
+    assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in plan_text, (
+        f"fetch_pending must use active-status index, got: {plan_text!r}"
+    )
+    assert "SCAN P" not in plan_text, (
+        f"fetch_pending must not full-scan opportunity_event_processing, got: {plan_text!r}"
     )

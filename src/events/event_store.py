@@ -114,11 +114,11 @@ class EventStore:
         rows = self.conn.execute(
             """
             SELECT e.*
-            FROM opportunity_events e
-            JOIN opportunity_event_processing p
-              ON p.event_id = e.event_id
-             AND p.consumer_name = ?
-            WHERE (
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            JOIN opportunity_events e
+              ON e.event_id = p.event_id
+            WHERE p.consumer_name = ?
+              AND (
                     p.processing_status = 'pending'
                  OR (
                     p.processing_status = 'processing'
