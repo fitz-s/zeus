@@ -1,5 +1,5 @@
 # Created: prior
-# Last reused/audited: 2026-06-03
+# Last reused/audited: 2026-06-05
 # Authority basis: phase 1K live decision snapshot causality gate
 #   Phase 3 live evaluator consumes forecast producer readiness instead of direct-fetching OpenData.
 #   P0-3 (2026-05-23): period_extrema guard before remaining_member_extrema_for_day0 call.
@@ -7,6 +7,15 @@
 #   D2 bias-family unify (2026-06-03): _resolve_unified_entry_bias_native + flag-gated
 #     bias-shift + identity-Platt on the FT entry sites. Authority basis: D2 bias-family
 #     unify / wiring verdict 2026-06-03.
+#   day0-activate P2/P3 (2026-06-05): collapsed to ONE absorbing mask —
+#     _edli_day0_mask_for_analysis truth table hardened inline (dead `1.0 if … else 1.0`
+#     tautology branches replaced with explicit correct logic, ZERO behavioral delta; the
+#     dark single-bin module src/strategy/live_inference/absorbing_boundary.py deleted) +
+#     runtime DAY0_MASK_CONTRADICTS_OBSERVATION fail-closed gate at the live seam
+#     (re-derives the absorbing-boundary invariant independently; a future masker inversion
+#     fails CLOSED at runtime, #98 wrong-side trade unconstructable). Authority basis:
+#     day0 phased plan (architect 2026-06-05); direction pinned by
+#     tests/engine/test_day0_live_mask_direction.py.
 """Evaluator: takes a market candidate, returns an EdgeDecision or NoTradeCase.
 
 Contains ALL business logic for edge detection. Doesn't know about scheduling,
