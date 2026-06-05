@@ -35,6 +35,17 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.state.db import init_schema
 
 
+class CaptureConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.executed_sql: list[tuple[str, tuple]] = []
+
+    def execute(self, sql, parameters=(), /):  # type: ignore[override]
+        params = tuple(parameters) if isinstance(parameters, (list, tuple)) else parameters
+        self.executed_sql.append((sql, params))
+        return super().execute(sql, parameters)
+
+
 def _payload(city: str, target_date: str, snapshot_id: str) -> ForecastSnapshotReadyPayload:
     return ForecastSnapshotReadyPayload(
         city=city,
@@ -77,11 +88,18 @@ def _fsr_event(city: str, target_date: str, snapshot_id: str, *, available_at: s
     )
 
 
-def _world_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+def _world_conn(*, factory=sqlite3.Connection) -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:", factory=factory)
     conn.row_factory = sqlite3.Row
     init_schema(conn)
     return conn
+
+
+def _plan_text(conn: sqlite3.Connection, sql: str, params: tuple) -> str:
+    plan_rows = conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+    return " ".join(
+        (r["detail"] if isinstance(r, sqlite3.Row) else r[-1]) for r in plan_rows
+    ).upper()
 
 
 def _pending_count(conn: sqlite3.Connection, consumer: str = "edli_reactor_v1") -> int:
@@ -279,4 +297,42 @@ def test_unresolvable_tz_candidate_not_archived_failclosed():
 
     assert _status_of(conn, unknown.event_id) == "pending", (
         "an unresolvable-tz candidate must be kept active (fail-closed), never archived"
+    )
+
+
+def test_expired_sweep_candidate_query_uses_fsr_target_date_index():
+    """The expired sweep must not scan all opportunity_events for target_date JSON."""
+    conn = _world_conn(factory=CaptureConnection)
+    store = EventStore(conn)
+    for i, td in enumerate(
+        ["2026-05-30", "2026-05-31", "2026-06-01", "2026-06-02", "2026-06-03"]
+    ):
+        store.insert_or_ignore(
+            _fsr_event("Chicago", td, f"snap-plan-{i}", available_at="2026-06-01T00:00:00+00:00")
+        )
+    conn.execute("ANALYZE")
+
+    index_names = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='opportunity_events'"
+        ).fetchall()
+    }
+    assert "idx_opportunity_events_fsr_target_date" in index_names
+
+    conn.executed_sql.clear()
+    store.archive_expired_candidates(decision_time=_DECISION_TIME)
+    candidate_sql, candidate_params = next(
+        (sql, params)
+        for sql, params in conn.executed_sql
+        if "json_extract(e.payload_json, '$.target_date') AS target_date" in sql
+        and "INDEXED BY idx_opportunity_events_fsr_target_date" in sql
+    )
+
+    plan = _plan_text(conn, candidate_sql, candidate_params)
+    assert "IDX_OPPORTUNITY_EVENTS_FSR_TARGET_DATE" in plan, (
+        f"expired sweep candidate query must use target_date expression index, got: {plan!r}"
+    )
+    assert "SCAN E" not in plan and "SCAN OPPORTUNITY_EVENTS" not in plan, (
+        f"expired sweep candidate query must not full-scan opportunity_events, got: {plan!r}"
     )

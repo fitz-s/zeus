@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-06-05
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 from __future__ import annotations
 
@@ -981,6 +981,20 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
 
 
+def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
+    def _forbid_runtime_fit(*_args, **_kwargs):
+        raise AssertionError("receipt path must not call get_calibrator/runtime fit")
+
+    monkeypatch.setattr("src.calibration.manager.get_calibrator", _forbid_runtime_fit)
+
+    event = _bound_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_snapshot())
+
+    assert receipt.proof_accepted is True
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"] == "platt-world-1"
+
+
 def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
     event = _forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot())
@@ -995,7 +1009,7 @@ def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_recei
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_certificate_rejects_calibration_artifact_available_after_decision():
+def test_legacy_calibration_materialization_time_is_not_training_cutoff():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()
     conn.execute(
@@ -1003,6 +1017,27 @@ def test_certificate_rejects_calibration_artifact_available_after_decision():
         UPDATE platt_models
         SET recorded_at = '2026-05-24T08:13:00+00:00',
             fitted_at = '2026-05-24T08:13:00+00:00'
+        WHERE model_key = 'platt-world-1'
+        """
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+    assert receipt.proof_accepted is True
+    assert receipt.decision_proof_bundle is not None
+    calibration = receipt.decision_proof_bundle.calibration
+    assert calibration.payload["training_cutoff"] == "2026-05-24T00:00:00+00:00"
+    assert calibration.payload["model_materialized_at"] == "2026-05-24T08:13:00+00:00"
+    assert calibration.clock.source_available_at.isoformat() == "2026-05-24T00:00:00+00:00"
+
+
+def test_certificate_rejects_explicit_calibration_training_cutoff_after_decision():
+    event = _forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("ALTER TABLE platt_models ADD COLUMN training_cutoff TEXT")
+    conn.execute(
+        """
+        UPDATE platt_models
+        SET training_cutoff = '2026-05-24T08:13:00+00:00'
         WHERE model_key = 'platt-world-1'
         """
     )

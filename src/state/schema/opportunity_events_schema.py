@@ -45,6 +45,11 @@ CREATE INDEX IF NOT EXISTS idx_opportunity_events_type_available
     ON opportunity_events(event_type, available_at)
 """
 
+CREATE_FSR_TARGET_DATE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_opportunity_events_fsr_target_date
+    ON opportunity_events(event_type, json_extract(payload_json, '$.target_date'), available_at)
+"""
+
 # Expression index backing the keeper-subquery GROUP BY in
 # EventStore.archive_superseded_channel_events (Step 1).  Without this index
 # SQLite full-scans the table parsing json_extract three times per cycle —
@@ -77,6 +82,7 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
     conn.execute(CREATE_PENDING_ORDER_INDEX_SQL)
     conn.execute(CREATE_TYPE_AVAILABLE_INDEX_SQL)
+    conn.execute(CREATE_FSR_TARGET_DATE_INDEX_SQL)
     conn.execute(CREATE_CHANNEL_TOKEN_INDEX_SQL)
     conn.execute(CREATE_NO_UPDATE_TRIGGER_SQL)
     conn.execute(CREATE_NO_DELETE_TRIGGER_SQL)
