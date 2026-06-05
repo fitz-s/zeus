@@ -184,6 +184,27 @@ def _import_keychain_resolver():
     return read_keychain
 
 
+import functools as _functools
+
+
+@_functools.lru_cache(maxsize=1)
+def _cached_keychain_creds() -> tuple[str, str]:
+    """Memoize the two Keychain reads (process-stable per the drift note in _resolve_credentials).
+
+    Efficiency #2 (2026-06-05): each PolymarketClient construction re-shelled `security` (a
+    subprocess) to read the same two values; boot builds the client twice. The keys do not rotate
+    mid-process, so the reads are memoized once. lru_cache never caches exceptions, so a transient
+    Keychain failure is retried on the next call. Returns a tuple (immutable) so no caller can
+    corrupt the cache. Call `_cached_keychain_creds.cache_clear()` if a rotation ever needs a reread.
+    """
+    read_keychain = _import_keychain_resolver()
+    private_key = read_keychain("openclaw-metamask-private-key")
+    funder_address = read_keychain("openclaw-polymarket-funder-address")
+    if not private_key or not funder_address:
+        raise RuntimeError("Missing private_key or funder_address from Keychain")
+    return (private_key, funder_address)
+
+
 def _resolve_credentials() -> dict:
     """Resolve Polymarket credentials from macOS Keychain.
 
@@ -196,18 +217,13 @@ def _resolve_credentials() -> dict:
     where the keychain copy was stale and caused PolyException(401 Invalid
     api key) for the entire trading boot. The adapter now derives at
     construction time so api_creds always match the active signer.
+
+    The two L1 reads are memoized via _cached_keychain_creds (efficiency #2, 2026-06-05); a fresh
+    dict is returned each call so a mutating caller cannot corrupt the shared cache.
     """
     try:
-        read_keychain = _import_keychain_resolver()
-        creds = {
-            "private_key": read_keychain("openclaw-metamask-private-key"),
-            "funder_address": read_keychain("openclaw-polymarket-funder-address"),
-        }
-        if not creds["private_key"] or not creds["funder_address"]:
-            raise RuntimeError(
-                "Missing private_key or funder_address from Keychain"
-            )
-        return creds
+        private_key, funder_address = _cached_keychain_creds()
+        return {"private_key": private_key, "funder_address": funder_address}
     except Exception as e:
         raise RuntimeError(f"Cannot resolve Polymarket credentials: {e}") from e
 

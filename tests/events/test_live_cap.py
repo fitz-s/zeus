@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused or audited: 2026-06-03
+# Last reused/audited: 2026-06-03
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment;
 #   2026-06-03 operator directive: remove artificial notional + per-day caps via explicit unbounded
 #   sentinel, fail-SAFE to capped on missing/malformed config.
@@ -468,38 +468,29 @@ def test_daily_order_cap_default_is_enabled_fail_closed():
         )
 
 
-def test_flood_guard_window_still_bounds_runaway_when_notional_cap_disabled():
-    # (d) THE non-cap safety must survive: with BOTH artificial caps disabled,
-    # the flood-guard per-window rate limit STILL bounds a runaway loop. Prove a
-    # tight window budget blocks the N+1th order even though notional + per-day
-    # are uncapped.
+def test_no_window_cap_when_daily_cap_disabled_operator_2026_06_05():
+    # POLICY REVERSAL (operator directive 2026-06-05 "no trade-count limit", overriding the prior
+    # 2026-06-03 "flood window survives" stance): the per-window rate limit is a per-day order-COUNT
+    # cap (window_key = the date). With the daily order cap DISABLED it must impose NOTHING — the
+    # N+1th same-window order RESERVES, not raises. The runaway bound is now Kelly + the collateral
+    # ledger (you cannot reserve more PUSD than the wallet holds), not an artificial count rail.
     ledger = LiveCapLedger(_conn())
 
     first = ledger.reserve(
-        event_id="event-1",
-        decision_time=NOW,
-        cap_scope="tiny_live_canary",
-        requested_notional_usd=500.0,
-        max_notional_usd=5.0,
-        max_orders_per_day=1,
-        notional_cap_enabled=False,
-        daily_order_cap_enabled=False,
-        max_orders_per_window=1,
+        event_id="event-1", decision_time=NOW, cap_scope="tiny_live_canary",
+        requested_notional_usd=500.0, max_notional_usd=5.0, max_orders_per_day=1,
+        notional_cap_enabled=False, daily_order_cap_enabled=False, max_orders_per_window=1,
     )
     assert first.reservation_status == "RESERVED"
 
-    with pytest.raises(LiveCapError, match="rate"):
-        ledger.reserve(
-            event_id="event-2",
-            decision_time=NOW,
-            cap_scope="tiny_live_canary",
-            requested_notional_usd=500.0,
-            max_notional_usd=5.0,
-            max_orders_per_day=1,
-            notional_cap_enabled=False,
-            daily_order_cap_enabled=False,
-            max_orders_per_window=1,
-        )
+    # Second order, same window — under the OLD policy this raised "rate ... exhausted"; now it must
+    # RESERVE (no trade-count limit when the daily cap is disabled).
+    second = ledger.reserve(
+        event_id="event-2", decision_time=NOW, cap_scope="tiny_live_canary",
+        requested_notional_usd=500.0, max_notional_usd=5.0, max_orders_per_day=1,
+        notional_cap_enabled=False, daily_order_cap_enabled=False, max_orders_per_window=1,
+    )
+    assert second.reservation_status == "RESERVED", "daily cap disabled ⇒ no per-window count limit"
 
 
 def test_disabled_caps_still_reject_nonpositive_notional():
@@ -521,38 +512,43 @@ def test_disabled_caps_still_reject_nonpositive_notional():
 
 
 # ---------------------------------------------------------------------------
-# PR-2 (C) N3: HARD notional ceiling, INDEPENDENT of the cap flags.
-# #380 removed BOTH the notional cap and the daily cap in one commit, leaving a
-# fractional-Kelly size as the sole notional bound. A flag-independent hard
-# ceiling makes that single-commit dual-rail removal unable to uncap notional:
-# the tiny_live_notional_cap_enabled flag may TUNE the soft cap value, but it
-# can NEVER REMOVE the hard ceiling. ANTIBODY: a runaway Kelly (e.g. a sizing
-# bug emitting $5000) is structurally clamped, armed or not.
+# HARD notional ceiling — FLAG-GATED (operator directive 2026-06-05 "no caps").
+# The $250 ceiling is a HARDCODED arbitrary number, not the real safety gate. The operator forbids
+# any artificial cap; the real notional bounds — fractional Kelly (forward-settlement risk
+# allowance, iron rule 5) + the collateral ledger (physical wallet bound) — are preserved. So the
+# ceiling clamps ONLY when the notional cap is ENABLED; disabled ⇒ Kelly + collateral are the sole
+# bound (size limited by your ACTUAL money, not a fixed sentinel). When the cap is ENABLED the
+# ceiling still clamps (regression below + the soft-cap-above-ceiling test).
 # ---------------------------------------------------------------------------
-def test_hard_notional_ceiling_clamps_even_when_cap_flag_disabled():
-    # RED-first: with the soft notional cap EXPLICITLY disabled, a full-Kelly
-    # request ABOVE the hard ceiling is CLAMPED to the ceiling (today it passes
-    # through uncapped). The order still reserves — clamped, not rejected.
+def test_hard_ceiling_does_not_clamp_when_notional_cap_disabled_operator_2026_06_05():
+    # POLICY REVERSAL: with the notional cap DISABLED, an above-ceiling request passes through
+    # UNCLAMPED (Kelly + collateral bound it, not the $250 sentinel).
     from src.events.live_cap import HARD_NOTIONAL_CEILING_USD
 
     ledger = LiveCapLedger(_conn())
-
     over = HARD_NOTIONAL_CEILING_USD + 1000.0
     reservation = ledger.reserve(
-        event_id="event-1",
-        decision_time=NOW,
-        cap_scope="tiny_live_canary",
-        requested_notional_usd=over,
-        max_notional_usd=5.0,
-        max_orders_per_day=1,
-        notional_cap_enabled=False,
-        daily_order_cap_enabled=False,
+        event_id="event-1", decision_time=NOW, cap_scope="tiny_live_canary",
+        requested_notional_usd=over, max_notional_usd=1e12, max_orders_per_day=1,
+        notional_cap_enabled=False, daily_order_cap_enabled=False,
+    )
+    assert reservation.reservation_status == "RESERVED"
+    assert reservation.reserved_notional_usd == over, (
+        "notional cap disabled ⇒ the $250 hard ceiling does NOT clamp (Kelly + collateral bound it)"
     )
 
-    assert reservation.reservation_status == "RESERVED"
-    assert reservation.reserved_notional_usd == HARD_NOTIONAL_CEILING_USD, (
-        "full-Kelly above the hard ceiling must be clamped to the ceiling"
+
+def test_hard_ceiling_still_clamps_when_notional_cap_enabled():
+    # Regression: when the notional cap is ENABLED, the ceiling still clamps a runaway above it.
+    from src.events.live_cap import HARD_NOTIONAL_CEILING_USD
+
+    ledger = LiveCapLedger(_conn())
+    reservation = ledger.reserve(
+        event_id="event-1", decision_time=NOW, cap_scope="tiny_live_canary",
+        requested_notional_usd=HARD_NOTIONAL_CEILING_USD + 1000.0, max_notional_usd=1e12,
+        max_orders_per_day=1, notional_cap_enabled=True, daily_order_cap_enabled=False,
     )
+    assert reservation.reserved_notional_usd == HARD_NOTIONAL_CEILING_USD
 
 
 def test_hard_notional_ceiling_clamps_when_soft_cap_enabled_but_ceiling_lower():

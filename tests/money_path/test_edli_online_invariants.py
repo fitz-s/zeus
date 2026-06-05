@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-06-05
 # Authority basis: EDLI PR332 deploy-ready review; Day0 must not be advertised
 # live while the online observation-context hook is absent.
 #                  + 2026-06-04 arm direction-gate boot guard DELETED (mainstream is
@@ -971,7 +971,7 @@ def _run_main_with_fake_scheduler(monkeypatch, edli_updates, *, world_db_path=No
     monkeypatch.setattr(main, "_startup_freshness_check", lambda: None)
     monkeypatch.setattr(main, "_assert_live_safe_strategies_or_exit", lambda: None)
     monkeypatch.setattr(main, "_boot_deployment_freshness_auto_resume", lambda: None)
-    monkeypatch.setattr(main, "_startup_wallet_check", lambda: None)
+    monkeypatch.setattr(main, "_startup_wallet_check", lambda clob=None, bankroll_record=None: None)
     monkeypatch.setattr(main, "_start_user_channel_ingestor_if_enabled", lambda: None)
     monkeypatch.setattr(main, "_check_s1_without_s2_sla", lambda: None)
     # W0-T2 boot-guards: tests use live settings.json which has model_keys as a list

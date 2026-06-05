@@ -710,6 +710,14 @@ test_trust_policy:
     tests/test_settlement_pairing_contract.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_strict_evidence_row.py: {created: "2026-05-29", last_used: "2026-05-29"}
     tests/test_t4_selection_rule_invariants.py: {created: "2026-05-28", last_used: "2026-05-29"}
+    # PR #391 fix/remove-live-caps — no-caps + boot efficiency + over-size guard antibodies (2026-06-05)
+    tests/test_boot_guard_kelly_ceiling.py: {created: "2026-06-05", last_used: "2026-06-05", note: "MAJOR #1: assert_kelly_multiplier_within_correlated_ceiling boot guard — kelly_multiplier > max_correlated_pct (and non-finite) FATAL at boot (over-size door / iron rule 5)"}
+    tests/test_startup_wallet_dedup.py: {created: "2026-06-05", last_used: "2026-06-05", note: "efficiency #1 RT: production wallet gate routes through bankroll_provider.current() warm cache — no SECOND on-chain RPC"}
+    tests/test_startup_wallet_warm_overlap.py: {created: "2026-06-05", last_used: "2026-06-05", note: "efficiency #3 RT: boot warms current() on a background thread, joins, then the gate consumes the joined record (warm+gate = ONE fetch; None → fail-closed)"}
+    tests/data/test_keychain_cred_memo.py: {created: "2026-06-05", last_used: "2026-06-05", note: "efficiency #2 RT: _resolve_credentials memoizes the keychain read-pair across the double client build; no cross-caller corruption; no failure-memoization"}
+    tests/events/test_live_cap_no_caps_directive.py: {created: "2026-06-05", last_used: "2026-06-05", note: "no-caps directive RT: $250 ceiling + rate-window flag-gated — disabled ⇒ no cap; ON ⇒ caps unchanged"}
+    tests/events/test_reactor_reservation_rollback_flow.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: reactor reservation rollback flow on the no-caps path"}
+    tests/sizing/test_portfolio_reservation_rollback.py: {created: "2026-06-05", last_used: "2026-06-05", note: "RT: portfolio reservation rollback under multi-bet correlated sizing"}
 
 categories:
   core_law_antibody:
@@ -1206,6 +1214,10 @@ categories:
     - tests/test_verify_truth_surfaces_phase2_gate.py
     - tests/test_worktree_doctor.py
     - tests/test_zeus_risk_halt_e2e.py
+    # PR #391 fix/remove-live-caps — boot efficiency + over-size guard antibodies (2026-06-05)
+    - tests/test_boot_guard_kelly_ceiling.py
+    - tests/test_startup_wallet_dedup.py
+    - tests/test_startup_wallet_warm_overlap.py
 
   transitional_advisory:
     - tests/test_calibration_quality.py

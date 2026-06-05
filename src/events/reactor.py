@@ -5,12 +5,21 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 `src.execution`.
 """
 
-# Last reused/audited: 2026-06-01
+# Last reused/audited: 2026-06-05
 # Authority basis: #95 SEV-2.1 — world_write_mutex MUST NOT be held across the
 #   injected submit callable's network I/O (JIT /book HTTP fetch + venue order
 #   POST). _process_event_unit split into two committed world-DB write windows
 #   around the network submit boundary; contract is db.py world_write_lock /
 #   world_write_mutex ("never hold across HTTP") + INV-37.
+#   P1 ZERO-SUBMIT FIX B (2026-06-05, iron-rule-1, co-cause): _finalize_reservation
+#   commits/rolls back the adapter's PROVISIONAL per-cycle in-flight reservation
+#   so a candidate rejected downstream of Kelly (DECISION_CERTIFICATE /
+#   EXECUTOR_EXPRESSIBILITY) never inflates corr/raw committed for later
+#   same-cycle candidates (INV-K7 preserved for emitted bets).
+#   MAJOR #5 (2026-06-05): the network-submit ``except`` now also rolls back the
+#   provisional reservation (_finalize_reservation emitted=False) so a _submit
+#   that raises AFTER reserve() — mid-submit DB/HTTP fault — cannot orphan a live
+#   reservation that over-counts committed for the next same-cycle event.
 
 from __future__ import annotations
 
@@ -324,6 +333,22 @@ class OpportunityEventReactor:
         except Exception as exc:
             mutex.acquire()
             try:
+                # MAJOR #5 (P1 zero-submit, network-submit window, 2026-06-05): the
+                # adapter reserves this event's stake PROVISIONALLY *inside*
+                # _submit (event_reactor_adapter.py ~1097), before the unguarded
+                # receipt-build / serialize / proof-bundle steps. If any of those
+                # raises (sqlite3.Error / KeyError / AttributeError on a live
+                # HTTP/DB fault), control lands HERE — and without this rollback the
+                # reservation is orphaned-but-LIVE in the ledger, over-counting
+                # committed for the NEXT same-cycle event → under-sizes / re-zeros
+                # later candidates = the exact zero-submit symptom this fix kills.
+                # Symmetric to the post-submit window (~383). Idempotent: a _submit
+                # that raised BEFORE reserve leaves nothing to roll back —
+                # PortfolioReservationLedger.rollback is a no-op for an unknown
+                # event_id — and the whole call is suppressed so a rollback failure
+                # never masks the original submit exception.
+                with contextlib.suppress(Exception):
+                    self._finalize_reservation(event, emitted=False)
                 self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
             finally:
                 mutex.release()
@@ -342,8 +367,22 @@ class OpportunityEventReactor:
                 if not self._store.conn.in_transaction:
                     self._store.conn.execute("BEGIN IMMEDIATE")
                 self._store.conn.execute("SAVEPOINT edli_reactor_event")
+                # FIX B (P1 zero-submit co-cause): capture the accept counter
+                # BEFORE post-submit so we can tell whether THIS event was
+                # actually EMITTED (committed) vs rejected downstream of Kelly.
+                _accepted_before = result.proof_accepted
                 post_disposition = self._process_one_post_submit(
                     event, submit_result, decision_time=decision_time, result=result
+                )
+                # FIX B: finalize the per-cycle in-flight reservation. The adapter
+                # PROVISIONALLY reserved this event's stake when it passed
+                # Kelly+RiskGuard; commit it ONLY if the reactor emitted it
+                # (proof_accepted advanced), else roll it back so a candidate
+                # rejected at DECISION_CERTIFICATE / EXECUTOR_EXPRESSIBILITY (or a
+                # transient retry) never inflates corr/raw committed for the next
+                # sequential event. Runs before RELEASE so it shares this unit.
+                self._finalize_reservation(
+                    event, emitted=result.proof_accepted > _accepted_before
                 )
                 # Honour the post-submit disposition exactly as the legacy
                 # single-pass flow did: a transient (_EXECUTABLE_SNAPSHOT_RETRY)
@@ -359,9 +398,43 @@ class OpportunityEventReactor:
                 with contextlib.suppress(Exception):
                     self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                # FIX B: an exception means this event was NOT emitted — roll back
+                # its provisional reservation so it can't leak into the next event.
+                with contextlib.suppress(Exception):
+                    self._finalize_reservation(event, emitted=False)
                 self._dead_letter_unknown(event, exc, decision_time=decision_time, result=result)
         finally:
             mutex.release()
+
+    def _finalize_reservation(self, event: OpportunityEvent, *, emitted: bool) -> None:
+        """Commit or roll back this event's PROVISIONAL in-flight reservation.
+
+        FIX B (P1 zero-submit co-cause, 2026-06-05). The submit adapter reserves
+        a candidate's stake provisionally the moment it passes Kelly + RiskGuard.
+        Passing Kelly is NOT emission — the receipt can still be rejected at
+        DECISION_CERTIFICATE / EXECUTOR_EXPRESSIBILITY (or requeued transiently)
+        in the post-submit phase. This finalizes that provisional reserve:
+
+          - ``emitted=True``  (proof_accepted advanced): commit — the stake is
+            real same-cycle in-flight capital the NEXT event must net (INV-K7).
+          - ``emitted=False`` (rejected / retried / errored): rollback — the
+            stake never reached the venue this cycle, so it must NOT inflate
+            corr_committed_usd / raw_committed_usd for later candidates.
+
+        The ledger is exposed by the adapter on the injected submit callable as
+        ``reservation_ledger``. Absent it (legacy list-backed adapters / tests),
+        this is a no-op — the pre-FIX-B append-only behavior is preserved.
+        """
+        ledger = getattr(self._submit, "reservation_ledger", None)
+        if ledger is None:
+            return
+        event_id = getattr(event, "event_id", None)
+        if event_id is None:
+            return
+        if emitted:
+            ledger.commit(event_id)
+        else:
+            ledger.rollback(event_id)
 
     def _finalize_disposition(
         self,

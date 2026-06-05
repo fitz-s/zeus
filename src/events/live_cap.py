@@ -113,13 +113,14 @@ class LiveCapLedger:
         # the disable sentinel) gets the tight cap, never unbounded.
         if requested_notional_usd <= 0:
             raise LiveCapError("requested_notional_usd must be positive")
-        # PR-2 (C) N3: HARD notional ceiling, INDEPENDENT of the cap flags. Clamp
-        # the request down to HARD_NOTIONAL_CEILING_USD UNCONDITIONALLY — before
-        # the soft-cap check — so a disabled (or misconfigured-too-high) soft cap
-        # can never let a runaway Kelly size through. The soft flag tunes the cap
-        # value; it cannot remove this backstop. Clamp (not reject): a legitimately
-        # large bet still trades, bounded at the ceiling.
-        if requested_notional_usd > HARD_NOTIONAL_CEILING_USD:
+        # 2026-06-05 operator directive ("no caps, no trade-count limits"): the $250 hard ceiling is
+        # a HARDCODED arbitrary number, not the real safety gate. The real bounds — fractional Kelly
+        # (the forward-settlement risk allowance, iron rule 5) and the COLLATERAL ledger (you cannot
+        # reserve more PUSD than the wallet holds) — are preserved and remain the sole notional
+        # constraint. So the ceiling is now FLAG-GATED: it clamps ONLY when the notional cap is
+        # enabled. Disabled (the operator's config) ⇒ no arbitrary clamp; Kelly + collateral bound
+        # the size by your ACTUAL money rather than a fixed sentinel. Clamp (not reject) when on.
+        if notional_cap_enabled and requested_notional_usd > HARD_NOTIONAL_CEILING_USD:
             requested_notional_usd = float(HARD_NOTIONAL_CEILING_USD)
         if notional_cap_enabled and requested_notional_usd > max_notional_usd:
             raise LiveCapError("requested_notional_usd exceeds max_notional_usd")
@@ -182,24 +183,27 @@ class LiveCapLedger:
                 cap_date=cap_date,
                 created_at=created_at,
             )
-        # BUG #99 antibody: reserve an independent rate-window slot. This is a
-        # SECOND control, distinct from the day-slot pool above. Even when the
-        # day-slot pool is large (because the notional cap was raised), the
-        # window cap bounds how many orders may be emitted per window. On failure
-        # we must release BOTH slots to stay fail-closed.
-        try:
-            self._reserve_window_slot(
-                usage_id=usage_id,
-                event_id=event_id,
-                cap_scope=cap_scope,
-                window_key=cap_date,
-                max_orders_per_window=max_orders_per_window,
-                created_at=created_at,
-            )
-        except Exception:
-            with contextlib.suppress(Exception):
-                self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
-            raise
+        # 2026-06-05 operator directive ("no trade-count limit"): the #99 flood-guard rate window is
+        # a per-day order-COUNT cap (window_key = the calendar date, max_orders_per_window) — with
+        # max_orders_per_window=1 it is effectively a hidden 1-order/day cap even when the explicit
+        # daily cap is "disabled". The operator now forbids ANY trade-count limit, overriding the
+        # prior (2026-06-03) directive that kept the flood window active. So the window slot is
+        # reserved ONLY when the daily order cap is ENABLED; disabled ⇒ no order-count cap at all
+        # (Kelly + collateral + the per-event idempotency unique-index remain the only constraints).
+        if daily_order_cap_enabled:
+            try:
+                self._reserve_window_slot(
+                    usage_id=usage_id,
+                    event_id=event_id,
+                    cap_scope=cap_scope,
+                    window_key=cap_date,
+                    max_orders_per_window=max_orders_per_window,
+                    created_at=created_at,
+                )
+            except Exception:
+                with contextlib.suppress(Exception):
+                    self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
+                raise
         try:
             self.conn.execute(
                 """
@@ -342,9 +346,15 @@ class LiveCapLedger:
         ``_reserve_day_slot`` there is no ``max_orders_per_day`` bound: a fresh
         slot is allocated by walking past collisions until a free integer is
         found, so the pool grows without limit. The unique (event_id, cap_scope)
-        index is still honoured for per-event idempotency (NOT a cap), and the
-        flood-guard rate window (reserved separately by the caller) remains the
-        active order-frequency bound.
+        index is still honoured for per-event idempotency (NOT a cap).
+
+        2026-06-05 operator directive ("no trade-count limit"): the flood-guard
+        rate window is itself a per-day order-COUNT cap, so on this disabled-cap
+        path the caller no longer reserves it (the window slot is gated on
+        ``daily_order_cap_enabled``). When the per-day cap is disabled there is
+        therefore NO order-frequency bound at all — fractional Kelly, the
+        collateral ledger, and the per-event idempotency unique-index are the
+        sole remaining constraints.
         """
         existing = self.conn.execute(
             """

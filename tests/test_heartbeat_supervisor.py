@@ -873,8 +873,13 @@ def test_main_starts_venue_heartbeat_before_boot_http():
     main_body = source[source.index("def main():"):]
     heartbeat_start = main_body.index("_start_venue_heartbeat_loop_if_needed()")
 
-    assert heartbeat_start < main_body.index("_bankroll_current()")
-    assert heartbeat_start < main_body.index("_startup_wallet_check()")
+    # Efficiency #3 (warm-overlap): the boot wallet RPC moved from an inline
+    # _bankroll_current() call into the background warm thread spawned by
+    # _start_boot_wallet_warm(). That spawn is now the FIRST boot wallet HTTP —
+    # it must still come after the venue heartbeat (heartbeat-before-boot-http
+    # invariant unchanged; only the call site moved).
+    assert heartbeat_start < main_body.index("_start_boot_wallet_warm()")
+    assert heartbeat_start < main_body.index("_startup_wallet_check(")
 
 
 def test_venue_background_maintenance_is_throttled_between_heartbeat_ticks(monkeypatch):

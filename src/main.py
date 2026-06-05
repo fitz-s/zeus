@@ -14,14 +14,16 @@ Advisory file lock infrastructure (src.data.dual_run_lock) is retained in code
 """
 
 # Created: pre-Phase-0 (K2 scheduler wiring via 27bedbd; P9A run_mode observability via 7081634)
-# Last reused/audited: 2026-06-04
-# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
+# Last reused/audited: 2026-06-05
+# Authority basis: Phase 3 two-system independence — docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 3; docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md;
+#   MAJOR #1 antibody (2026-06-05) — assert_kelly_multiplier_within_correlated_ceiling boot guard (over-size door / iron rule 5)
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
 #                  + 2026-06-04 mainstream made display-only/unconstructable-as-decision (arm direction-gate boot guard + submit enforce branch DELETED)
 
 import functools
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -296,6 +298,62 @@ def assert_frozen_as_of_not_stale(
         )
 
 
+def assert_kelly_multiplier_within_correlated_ceiling(cfg: dict) -> None:
+    """Fail-closed guard: sizing.kelly_multiplier must not exceed
+    sizing.max_correlated_pct (the over-size door / iron rule 5 = ruin).
+
+    WHY (MAJOR #1 antibody, P1 sizing fix a281ba14a2/efe91afdb5): the corr
+    ceiling ``Σ corr-weighted stakes ≤ max_correlated_pct·B`` (the whole point
+    of FIX A in money_path_adapters.evaluate_kelly) holds ONLY when the Kelly
+    base cap ``kelly_multiplier`` is ≤ the corr ceiling ``max_correlated_pct``.
+    The sized stake is
+        s = (f*·m / f_cap_corr)·(f_cap_corr·B − committed),  f_cap_corr = max_correlated_pct
+    and ``f*·m ≤ kelly_multiplier``. So ``f*·m / f_cap_corr ≤ 1`` — and Σ stays
+    under the ceiling — ONLY while ``kelly_multiplier ≤ max_correlated_pct``.
+    These are TWO INDEPENDENT config knobs (sizing.kelly_multiplier vs
+    sizing.max_correlated_pct), equal at 0.25 today only by coincidence — the
+    SAME coincidence that masked the original bug. A legal operator value of
+    e.g. 0.5 silently breaches the ceiling (3 same-cycle same-city bets summed
+    to $51 > $42.50 at B=170 in the critic repro, a 20% over-size) even with the
+    INV-K3 single cap intact. ``_runtime_kelly_multiplier`` only rejects ≤ 0, so
+    0.5 is accepted at runtime — this guard closes the door at boot instead.
+
+    Raises RuntimeError("KELLY_MULT_EXCEEDS_CORR_CEILING: ...") when
+    kelly_multiplier > max_correlated_pct. No-op when either key is absent
+    (other config validation owns presence) or when within the ceiling.
+    """
+    sizing = cfg.get("sizing") or {}
+    raw_mult = sizing.get("kelly_multiplier")
+    raw_corr = sizing.get("max_correlated_pct")
+    if raw_mult is None or raw_corr is None:
+        # Presence is owned by Settings/config validation elsewhere; this guard
+        # only enforces the RELATIONSHIP between the two knobs when both exist.
+        return
+    kelly_mult = float(raw_mult)
+    max_corr = float(raw_corr)
+    # Fail-closed on non-finite inputs: ``float('nan') > x`` and ``x > float('nan')``
+    # are ALWAYS False, so a NaN (or an inf max_corr) would slip past the ``>``
+    # comparison below and silently re-open the over-size door. Reject non-finite
+    # values explicitly, consistent with the other fail-closed sizing inputs.
+    if not math.isfinite(kelly_mult) or not math.isfinite(max_corr):
+        raise RuntimeError(
+            f"KELLY_MULT_EXCEEDS_CORR_CEILING (NON_FINITE): non-finite sizing "
+            f"input — sizing.kelly_multiplier={kelly_mult}, "
+            f"sizing.max_correlated_pct={max_corr}. A NaN/inf knob bypasses the "
+            f"corr-ceiling comparison (the over-size door / iron rule 5 = ruin). "
+            f"Both must be finite."
+        )
+    if kelly_mult > max_corr:
+        raise RuntimeError(
+            f"KELLY_MULT_EXCEEDS_CORR_CEILING: sizing.kelly_multiplier="
+            f"{kelly_mult} must not exceed sizing.max_correlated_pct={max_corr} "
+            f"— would breach the correlated-capital ceiling "
+            f"(Σ corr-weighted stakes ≤ max_correlated_pct·B) = over-size = ruin "
+            f"(iron rule 5). Lower kelly_multiplier to ≤ {max_corr} or raise "
+            f"max_correlated_pct."
+        )
+
+
 # ---------------------------------------------------------------------------
 # W0-T3: _run_boot_guards / _validate_boot — safe pre-restart smoke
 # (2026-06-03)
@@ -310,6 +368,9 @@ def _run_boot_guards(raw_cfg: dict) -> list:
     Guards included (same set the real boot path runs, in the same order):
       1. assert_calibration_pin_shape_is_dict  — model_keys must be dict/absent
       2. assert_frozen_as_of_not_stale         — WARN>10d, FATAL>21d
+      3. assert_kelly_multiplier_within_correlated_ceiling
+                                               — kelly_multiplier ≤ max_correlated_pct
+                                                 (over-size door / iron rule 5)
 
     Read-only: no DB writes, no network calls, no exclusive locks acquired.
     """
@@ -334,6 +395,19 @@ def _run_boot_guards(raw_cfg: dict) -> list:
         results.append(("frozen_as_of_staleness", False, str(exc)))
     except Exception as exc:  # pragma: no cover
         results.append(("frozen_as_of_staleness", False, f"unexpected: {exc}"))
+
+    # Guard 3: kelly_multiplier ≤ max_correlated_pct (over-size door / iron rule 5)
+    try:
+        assert_kelly_multiplier_within_correlated_ceiling(raw_cfg)
+        results.append((
+            "kelly_mult_corr_ceiling",
+            True,
+            "kelly_multiplier ≤ max_correlated_pct (or absent) — corr ceiling intact",
+        ))
+    except RuntimeError as exc:
+        results.append(("kelly_mult_corr_ceiling", False, str(exc)))
+    except Exception as exc:  # pragma: no cover
+        results.append(("kelly_mult_corr_ceiling", False, f"unexpected: {exc}"))
 
     return results
 
@@ -3475,7 +3549,90 @@ def _startup_db_schema_ready_check() -> None:
     )
 
 
-def _startup_wallet_check(clob=None):
+class _BootWalletWarmHolder:
+    """Thread-safe-by-join handoff slot for the boot wallet warm thread.
+
+    The warm thread writes ``record`` exactly once (success → BankrollOfRecord,
+    swallowed failure → stays None). main() reads it ONLY after joining the
+    thread, so no lock is required — the join is the happens-before barrier.
+    """
+
+    __slots__ = ("record",)
+
+    def __init__(self):
+        self.record = None
+
+
+# Default join bound for the boot wallet warm thread. The on-chain wallet RPC
+# is 5-30s; this caps the worst-case wait so a wedged RPC can't hang boot past
+# the gate's own fail-closed budget. A timeout that leaves the thread alive is
+# treated as a cold cache (record stays None) → gate fail-closes — never a hang.
+_BOOT_WALLET_WARM_JOIN_TIMEOUT_SECONDS = 35.0
+
+
+def _start_boot_wallet_warm():
+    """Spawn a daemon thread that warms bankroll_provider.current() at boot.
+
+    Efficiency #3: the wallet RPC is network-bound while the schema-ready gate /
+    registry assert / f109 consolidator / freshness / boot-guards are DB-bound.
+    Starting the wallet warm on a background thread right after the venue
+    heartbeat lets those DB steps run CONCURRENTLY with the RPC; main() joins
+    this thread immediately before the (deterministic) wallet gate.
+
+    The warm fn swallows+logs ANY exception so a warm-thread failure NEVER
+    crashes boot — it just leaves a cold cache (holder.record stays None) and
+    the wallet gate does its own fail-closed handling. Returns (thread, holder);
+    read holder.record only AFTER _join_boot_wallet_warm(thread).
+    """
+    holder = _BootWalletWarmHolder()
+
+    def _warm():
+        try:
+            from src.runtime.bankroll_provider import current as _bankroll_current
+
+            holder.record = _bankroll_current()
+        except Exception as exc:  # noqa: BLE001 — must never crash boot
+            logger.warning(
+                "boot wallet warm thread failed (cold cache; wallet gate will "
+                "do its own fail-closed fetch): %s",
+                exc,
+            )
+
+    thread = threading.Thread(
+        target=_warm, name="boot-wallet-warm", daemon=True
+    )
+    thread.start()
+    return thread, holder
+
+
+def _join_boot_wallet_warm(
+    thread, timeout: float = _BOOT_WALLET_WARM_JOIN_TIMEOUT_SECONDS
+) -> None:
+    """Join the boot wallet warm thread so the wallet gate stays deterministic.
+
+    Bounded by ``timeout``: if the warm RPC wedges past it, the thread is left
+    running (daemon → dies with the process) and the holder record stays None,
+    so the wallet gate fail-closes rather than the boot hanging forever. A
+    None/missing thread is a no-op (warm never started → gate self-fetches).
+    """
+    if thread is None:
+        return
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        logger.warning(
+            "boot wallet warm thread did not finish within %.0fs; proceeding "
+            "with a cold cache — the wallet gate will fail-closed if the RPC "
+            "stays unreachable.",
+            timeout,
+        )
+
+
+# Sentinel: distinguishes "caller handed a warm record (possibly None)" from
+# "no warm record supplied — gate must self-fetch via current()".
+_WALLET_RECORD_UNSET = object()
+
+
+def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
     """P7: Fail-closed wallet gate. Live daemon refuses to start if wallet query fails.
 
     Accepts an optional clob for testing. In production, creates a live
@@ -3489,15 +3646,48 @@ def _startup_wallet_check(clob=None):
     `assert_buy_preflight` / `assert_sell_preflight` with
     `collateral_ledger_unconfigured` or `sqlite3.ProgrammingError`.
     """
-    if clob is None:
-        from src.data.polymarket_client import PolymarketClient
-        clob = PolymarketClient()
-    try:
-        balance = float(clob.get_balance())
-        logger.info("Startup wallet check: $%.2f pUSD available", balance)
-    except Exception as exc:
-        logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
-        sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+    if clob is not None:
+        # TEST-INJECTION PATH: an explicit clob was supplied. Use it directly
+        # and keep the same fail-closed semantics. Production never reaches here.
+        try:
+            balance = float(clob.get_balance())
+            logger.info("Startup wallet check: $%.2f pUSD available", balance)
+        except Exception as exc:
+            logger.critical("FAIL-CLOSED: wallet query failed at daemon start: %s", exc)
+            sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+    else:
+        # PRODUCTION PATH: route the fail-closed wallet-reachability gate through
+        # bankroll_provider.current() instead of constructing a SECOND
+        # PolymarketClient.
+        #
+        # Efficiency #3 (warm-overlap): when main() hands a ``bankroll_record``
+        # (the result the boot warm thread already fetched via current(), then
+        # joined), the gate CONSUMES it — warm + gate together issue exactly ONE
+        # current() acquisition. A handed None means the warm fetch failed or
+        # was never warmed → the gate fail-closes below (correct fail-safe).
+        #
+        # When no record is supplied (_WALLET_RECORD_UNSET — direct callers /
+        # tests / a boot path without the warm thread) the gate self-fetches via
+        # current(). Efficiency #1 still holds: Site A warmed the 30s cache, so
+        # current() here is a fresh CACHE HIT with no additional on-chain RPC; on
+        # a cold cache it does a real fetch and still fail-closes on None.
+        if bankroll_record is _WALLET_RECORD_UNSET:
+            from src.runtime.bankroll_provider import current as _bankroll_current
+
+            rec = _bankroll_current()
+        else:
+            rec = bankroll_record
+        if rec is None:
+            logger.critical(
+                "FAIL-CLOSED: wallet query failed at daemon start "
+                "(bankroll_provider returned None)"
+            )
+            sys.exit("FATAL: Cannot start — wallet unreachable. Fix credentials or network and restart.")
+        balance = rec.value_usd
+        logger.info(
+            "Startup wallet check: $%.2f pUSD available (source=%s cached=%s)",
+            balance, rec.source, rec.cached,
+        )
 
     # Install the process-wide collateral ledger singleton with a ledger-owned
     # persistent conn so downstream executor / riskguard preflight callers do
@@ -6115,17 +6305,16 @@ def main():
     # leave existing orders without heartbeats while slow checks complete.
     _start_venue_heartbeat_loop_if_needed()
 
-    # Capital truth: query on-chain wallet via bankroll_provider. Startup must
-    # never log retired config-literal capital as if it were wallet truth.
-    try:
-        from src.runtime.bankroll_provider import current as _bankroll_current
-        _record = _bankroll_current()
-        _capital_str = f"${_record.value_usd:.2f}" if _record else "<wallet_unreachable>"
-    except Exception as _exc:
-        _capital_str = f"<wallet_query_error: {_exc}>"
-    logger.info("Capital (on-chain): %s | Kelly: %.0f%%",
-                _capital_str,
-                settings["sizing"]["kelly_multiplier"] * 100)
+    # Efficiency #3 — boot wallet warm-overlap. The single on-chain wallet RPC
+    # (#1 collapsed two into one) is network-bound (5-30s, ~38/hr blips); the
+    # schema-ready gate / registry assert / f109 consolidator / freshness /
+    # boot-guards below are DB-bound. Warm the wallet on a daemon thread NOW so
+    # those DB steps run CONCURRENTLY with the RPC; we JOIN immediately before
+    # the wallet gate so the gate stays deterministic (warm cache, no race).
+    # MUST stay AFTER the venue heartbeat (heartbeat-before-boot-http invariant)
+    # and BEFORE the DB-bound boot work. A warm-thread failure is swallowed →
+    # cold cache → the wallet gate fail-closes (fail-safe; boot never hangs).
+    _wallet_warm_thread, _wallet_warm_holder = _start_boot_wallet_warm()
 
     # §4.2 DB schema-ready gate — fail-closed (Phase 3 enforcement).
     # Must run before the first world DB open/read so missing or uninitialized
@@ -6226,9 +6415,25 @@ def main():
     # _assert_live_safe_strategies_or_exit() (which hydrates _control_state).
     _boot_deployment_freshness_auto_resume()
 
+    # Efficiency #3 — JOIN the boot wallet warm thread NOW (the DB-bound boot
+    # work above ran concurrently with the wallet RPC). After the join the warm
+    # record is deterministic (present, or None if the warm failed/timed out),
+    # so the wallet gate sees a settled value with no race. One capital log,
+    # emitted once the value is known, right before the gate.
+    _join_boot_wallet_warm(_wallet_warm_thread)
+    _warm_rec = _wallet_warm_holder.record
+    _capital_str = (
+        f"${_warm_rec.value_usd:.2f}" if _warm_rec is not None else "<wallet_unreachable>"
+    )
+    logger.info("Capital (on-chain): %s | Kelly: %.0f%%",
+                _capital_str,
+                settings["sizing"]["kelly_multiplier"] * 100)
+
     # P7: Fail-closed wallet gate — must run before first cycle.
     # GATE SPLIT (§3.7): wallet failure is ALWAYS fatal, no operator override.
-    _startup_wallet_check()
+    # Consume the warm record (efficiency #3): warm + gate = exactly ONE
+    # current() acquisition. A None warm record → the gate fail-closes.
+    _startup_wallet_check(bankroll_record=_warm_rec)
     _start_user_channel_ingestor_if_enabled()
 
     # MF-1: durable self-healing capital spine — AT BOOT, before any new trading,
