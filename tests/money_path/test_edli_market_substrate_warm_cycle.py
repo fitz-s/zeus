@@ -48,6 +48,8 @@ These tests lock:
 from __future__ import annotations
 
 import inspect
+import json
+import sqlite3
 
 import src.main as main_module
 
@@ -141,6 +143,95 @@ def test_market_substrate_warm_cycle_failsoft_on_refresh_error(monkeypatch):
     main_module._edli_market_substrate_warm_cycle()
 
 
+def test_pending_family_refresh_order_prioritizes_new_target_dates():
+    """A stale target_date must not consume the bounded substrate-refresh budget
+    ahead of fresh families that can still emit a receipt."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT NOT NULL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            causal_snapshot_id TEXT,
+            payload_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            priority INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            payload_json TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(consumer_name, processing_status, updated_at);
+        """
+    )
+
+    def insert_event(event_id: str, city: str, target_date: str, available_at: str) -> None:
+        payload = {"city": city, "target_date": target_date, "metric": "high"}
+        conn.execute(
+            """
+            INSERT INTO opportunity_events (
+                event_id, event_type, entity_key, source, observed_at, available_at,
+                received_at, payload_hash, idempotency_key, priority, payload_json,
+                schema_version, created_at
+            ) VALUES (?, 'FORECAST_SNAPSHOT_READY', ?, 'test', ?, ?, ?, ?, ?, 50, ?, 1, ?)
+            """,
+            (
+                event_id,
+                event_id,
+                available_at,
+                available_at,
+                available_at,
+                event_id,
+                event_id,
+                json.dumps(payload),
+                available_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, updated_at
+            ) VALUES ('edli_reactor_v1', ?, 'pending', ?)
+            """,
+            (event_id, available_at),
+        )
+
+    insert_event("old-a", "Amsterdam", "2026-06-04", "2026-05-30T00:00:00+00:00")
+    insert_event("old-b", "Milan", "2026-06-04", "2026-05-30T00:00:01+00:00")
+    insert_event("fresh-a", "Seoul", "2026-06-06", "2026-06-05T00:00:00+00:00")
+    insert_event("fresh-b", "Tokyo", "2026-06-06", "2026-06-05T00:00:01+00:00")
+
+    capture = _CaptureConn(conn)
+    rows = main_module._pending_family_rows_for_refresh(
+        capture, consumer_name="edli_reactor_v1"
+    )
+    families = [(row[0], row[1], row[2]) for row in rows]
+
+    assert [family[1] for family in families[:2]] == ["2026-06-06", "2026-06-06"]
+    assert [family[1] for family in families[-2:]] == ["2026-06-04", "2026-06-04"]
+
+    plan = _explain_plan(conn, capture.sql, capture.params)
+    assert "USING INDEX idx_opportunity_event_processing_status" in plan
+    assert "SCAN p" not in plan
+
+
 class _FakeConn:
     """Minimal connection stub: supports the ATTACH/PRAGMA/close calls the warm job
     may make, and is a no-op for everything else."""
@@ -160,3 +251,22 @@ class _FakeConn:
 
     def close(self):
         pass
+
+
+class _CaptureConn:
+    def __init__(self, conn):
+        self._conn = conn
+        self.sql = ""
+        self.params = ()
+
+    def execute(self, sql, params=()):
+        self.sql = sql
+        self.params = params
+        return self._conn.execute(sql, params)
+
+
+def _explain_plan(conn, sql: str, params=()) -> str:
+    return "\n".join(
+        " ".join(str(part) for part in row)
+        for row in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+    )

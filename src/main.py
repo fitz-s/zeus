@@ -2674,6 +2674,31 @@ def _run_venue_heartbeat_loop(cadence_seconds: float) -> None:
         time.sleep(max(0.1, cadence_seconds - elapsed))
 
 
+def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
+    return world_conn.execute(
+        """
+        SELECT
+            json_extract(e.payload_json, '$.city')        AS city,
+            json_extract(e.payload_json, '$.target_date') AS target_date,
+            json_extract(e.payload_json, '$.metric')      AS metric
+        FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+        JOIN opportunity_events e ON e.event_id = p.event_id
+        WHERE p.consumer_name = ? AND p.processing_status = 'pending'
+        GROUP BY city, target_date, metric
+        -- Refresh the newest target date first. Old target-date rows can remain
+        -- pending after a market has disappeared from Gamma; if they consume the
+        -- per-cycle cap, fresh executable snapshots starve and no receipt is
+        -- emitted even though the reactor itself is healthy.
+        ORDER BY
+            MAX(json_extract(e.payload_json, '$.target_date')) DESC,
+            MAX(e.priority) DESC,
+            MAX(e.available_at) DESC,
+            MIN(e.event_id) ASC
+        """,
+        (consumer_name,),
+    ).fetchall()
+
+
 def _refresh_pending_family_snapshots(
     world_conn,
     forecasts_conn,
@@ -2708,23 +2733,9 @@ def _refresh_pending_family_snapshots(
 
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
     try:
-        pending_rows = world_conn.execute(
-            """
-            SELECT
-                json_extract(e.payload_json, '$.city')        AS city,
-                json_extract(e.payload_json, '$.target_date') AS target_date,
-                json_extract(e.payload_json, '$.metric')      AS metric
-            FROM opportunity_events e
-            JOIN opportunity_event_processing p ON p.event_id = e.event_id
-            WHERE p.consumer_name = ? AND p.processing_status = 'pending'
-            GROUP BY city, target_date, metric
-            -- Capture in the SAME order the reactor will process (priority DESC,
-            -- available_at ASC), so the highest-priority families the reactor picks
-            -- first are captured first even if a downstream capture budget truncates.
-            ORDER BY MAX(e.priority) DESC, MIN(e.available_at) ASC
-            """,
-            (consumer_name,),
-        ).fetchall()
+        pending_rows = _pending_family_rows_for_refresh(
+            world_conn, consumer_name=consumer_name
+        )
     except Exception as exc:
         logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
         return {"status": "error", "reason": str(exc)}
@@ -2762,6 +2773,10 @@ def _refresh_pending_family_snapshots(
     # 3-city-era value. 16 ≈ 16s of fetches inside a 60s cycle — a safe ~2x of the fresh universe
     # without overrun. The proper fix (decouple market-identity universe sizing from the 30s
     # price-freshness TTL — size off identity, enforce freshness only at submit) is the follow-up.
+    # 2026-06-05: prioritize newest target_date before applying the cap. Strictly
+    # stale pending rows can still exist in the processing ledger after Gamma no
+    # longer returns the market, and letting those rows spend the cap starves fresh
+    # family snapshots.
     _FAMILY_REFRESH_CAP = 16
     if len(families) > _FAMILY_REFRESH_CAP:
         families = families[:_FAMILY_REFRESH_CAP]
