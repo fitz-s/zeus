@@ -3111,6 +3111,62 @@ def _calibration_authority_payload_and_clock(
     return payload_out, EvidenceClock(source_time, persisted_time, persisted_time)
 
 
+# ── Market-disagreement guard (settlement-grounded, 2026-06-04) ──────────────
+# Default thresholds. Overridable via settings["edli_v1"] WITHOUT touching the
+# operator-owned config file (safe .get defaults): the guard is ACTIVE by default
+# (conservative posture — it only ever DEMOTES a contrarian bet, never creates one).
+#
+#   market_disagree_no_price_max  — a NO token cheaper than this means the market
+#     prices the bin as LIKELY to settle (YES expensive). Buying NO here is betting
+#     AGAINST a confident multi-center market. Default 0.15.
+#   market_disagree_qlcb_extreme  — the ONLY licence to override the market: an
+#     extremely low, independently-grounded q_lcb (the settlement-licensed lower
+#     bound says the bin truly will NOT settle). Default 0.05.
+_MARKET_DISAGREE_NO_PRICE_MAX = 0.15
+_MARKET_DISAGREE_QLCB_EXTREME = 0.05
+
+
+def _market_disagreement_demotes_buy_no(
+    *,
+    direction: str,
+    market_no_price: float | None,
+    q_lcb_5pct: float,
+    no_price_max: float = _MARKET_DISAGREE_NO_PRICE_MAX,
+    qlcb_extreme: float = _MARKET_DISAGREE_QLCB_EXTREME,
+) -> bool:
+    """Settlement-grounded market-disagreement antibody.
+
+    ROOT (settled outcomes, NOT shadow homework): the dominant capital bleed is
+    buy_no on CHEAP bins — the market prices YES>0.8 / NO<0.2 (confident the bin
+    settles there), the system buys NO on a miscalibrated overconfident q tail
+    (assigns ~0 mass to a bin the market+reality say is likely), and the bin
+    settles there. buy_no at NO-price<0.2 went 0/12 (-71%). The market is right;
+    the q tail is overconfident (Fitz #4 / iron-rule-5).
+
+    Structural principle (NOT the thin n=12 number): you cannot out-predict a
+    confident multi-center market without OVERWHELMING settlement-licensed
+    evidence. So a buy_no candidate on a bin the market prices as likely
+    (market_no_price <= no_price_max) is UNCONSTRUCTABLE as a tradeable proof
+    UNLESS q_lcb is itself extreme (q_lcb_5pct <= qlcb_extreme) — an independent
+    lower bound, not the point estimate, saying the bin truly won't settle.
+
+    Returns True iff the candidate must be DEMOTED (cheap-NO AND weak independent
+    evidence). The guard is a CONJUNCTION: it never touches buy_yes, never touches
+    a buy_no whose NO price is not cheap, and never touches a buy_no whose q_lcb
+    is genuinely extreme (legitimate high-conviction disagreement survives).
+    """
+    if direction != "buy_no":
+        return False
+    if market_no_price is None:
+        # No executable price → the proof is already non-tradeable upstream
+        # (missing_reason set); leave the demotion decision to that path.
+        return False
+    if market_no_price > no_price_max:
+        return False
+    # Cheap NO. Only an extreme, independently-grounded q_lcb licences the bet.
+    return q_lcb_5pct > qlcb_extreme
+
+
 def _generate_candidate_proofs(
     *,
     event: OpportunityEvent,
@@ -3207,8 +3263,46 @@ def _generate_candidate_proofs(
                 c_cost_95pct=c_cost_95pct,
                 p_fill_lcb=p_fill_lcb,
             )
+            # ── Market-disagreement antibody (settlement-grounded, 2026-06-04) ──
+            # Make the dominant capital-bleed pattern UNCONSTRUCTABLE: a buy_no
+            # candidate on a bin the market prices as LIKELY to settle (cheap NO,
+            # i.e. confident YES) cannot become tradeable unless its q_lcb is
+            # extreme (independent settlement-licensed evidence the bin truly will
+            # NOT settle). The thresholds are .get-overridable from edli_v1 WITHOUT
+            # touching the operator-owned config (active-by-default = conservative).
+            # This demotes (score→0) the contrarian bet that lost 0/12 (-71%); it
+            # never creates a trade (iron-rule-2) and never touches buy_yes or
+            # high-conviction disagreement (the q_lcb-extreme escape).
+            market_no_price = execution_price.value if execution_price is not None else None
+            try:
+                _md_cfg = settings["edli_v1"]
+                _md_no_max = float(_md_cfg.get("market_disagree_no_price_max", _MARKET_DISAGREE_NO_PRICE_MAX))
+                _md_qlcb = float(_md_cfg.get("market_disagree_qlcb_extreme", _MARKET_DISAGREE_QLCB_EXTREME))
+            except Exception:
+                _md_no_max = _MARKET_DISAGREE_NO_PRICE_MAX
+                _md_qlcb = _MARKET_DISAGREE_QLCB_EXTREME
+            _market_disagreement_demoted = _market_disagreement_demotes_buy_no(
+                direction=direction,
+                market_no_price=market_no_price,
+                q_lcb_5pct=q_lcb,
+                no_price_max=_md_no_max,
+                qlcb_extreme=_md_qlcb,
+            )
+            if _market_disagreement_demoted:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = (
+                        "MARKET_DISAGREEMENT_BUY_NO_DEMOTED:"
+                        f"no_price={market_no_price:.4f}<={_md_no_max:.4f} "
+                        f"q_lcb={q_lcb:.4f}>{_md_qlcb:.4f}"
+                    )
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
+            # A demoted contrarian buy_no must not enter the FDR family as a
+            # "passed" hypothesis — it is structurally non-tradeable, not merely
+            # low-scoring. Force prefilter False so it can never be selected.
+            if _market_disagreement_demoted:
+                passed_prefilter = False
             proofs.append(
                 _CandidateProof(
                     candidate=candidate,
