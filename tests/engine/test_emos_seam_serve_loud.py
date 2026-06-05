@@ -86,24 +86,32 @@ def _costs(bins, no_price=0.75, yes_price=0.25):
     return costs
 
 
-def _run_seam(*, monkeypatch, emos_serves: bool, city: str, mock_legacy_pcal: bool = False):
-    """Drive the REAL seam with the EMOS flag ON and a deterministic served/raw cell.
+def _run_seam(*, monkeypatch, emos_serves: bool, city: str, mock_legacy_pcal: bool = False,
+              emos_flag: bool = True):
+    """Drive the REAL seam with the EMOS flag (``emos_flag``) and a deterministic served/raw cell.
 
     Returns (payload, analysis). Always uses proper Bin objects (the live forecast shape),
     so this exercises the production call path — not the direct build_emos_q unit.
 
-    ``mock_legacy_pcal``: when the EMOS path is expected to FALL BACK to legacy (served=raw
-    or a forced EMOS failure), the legacy p_cal needs a calibration store. Tests that only
-    care about the EMOS engage/degrade *contract* (not the legacy Platt math) mock
-    _snapshot_p_cal to a normalized point vector so the family forms without a real cal DB —
-    mirroring how tests/engine/test_bias_grid_mutual_exclusion.py mocks the bias/grid hooks.
+    ``emos_flag``: the live edli_emos_sole_calibrator_enabled value. True (default) = the
+    one-calibrator regime is active (EMOS-served ∪ honest-raw, maze dead); False = legacy
+    (the bias/grid/Platt maze runs), used to pin flag-OFF == byte-identical legacy.
+
+    ``mock_legacy_pcal``: when the path is expected to call the LEGACY p_cal (flag-OFF maze
+    only), the legacy p_cal needs a calibration store. Tests that only care about the
+    engage/degrade *contract* (not the legacy Platt math) mock _snapshot_p_cal to a normalized
+    point vector so the family forms without a real cal DB — mirroring how
+    tests/engine/test_bias_grid_mutual_exclusion.py mocks the bias/grid hooks. Under the
+    one-calibrator regime (flag ON), an EMOS serve-fail degrades to honest-raw
+    (identity p_cal = p_raw) and does NOT enter the legacy maze, so mock_legacy_pcal is not
+    needed for flag-ON paths.
     """
     season = "JJA"  # target_date 2026-07-15 -> NH month-season JJA (matches the seam keying)
     served = "emos" if emos_serves else "raw"
     table = {"_meta": {"metric": "multi"},
              "cells": {f"{city}|{season}|high": {**_SYNTH_CELL, "served": served}}}
     monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
-    monkeypatch.setitem(settings["edli_v1"], "edli_emos_sole_calibrator_enabled", True)
+    monkeypatch.setitem(settings["edli_v1"], "edli_emos_sole_calibrator_enabled", emos_flag)
 
     if mock_legacy_pcal:
         def _fake_pcal(_cal, *, snapshot, family, bins, p_raw, payload, decision_time):
@@ -182,29 +190,64 @@ def test_emos_build_failure_is_loud_not_silent(monkeypatch, caplog):
     assert "NameError" in msg, "the log MUST carry the exception type for diagnosability"
     assert city in msg, "the log MUST carry the city/cell so the inert cell is identifiable"
 
-    # And the family still FORMS via the honest legacy path — LOUD degrade, never a hard crash.
-    assert payload.get("_edli_q_source") in {"platt", "bias_platt"}, (
-        "EMOS failure must degrade to the honest legacy calibrator (best-effort), not crash "
-        f"the family (got q_source={payload.get('_edli_q_source')!r})"
+    # And the family still FORMS — LOUD degrade, never a hard crash. Under the one-calibrator
+    # regime (flag ON) the degrade target is HONEST RAW (the universal contract: EMOS or
+    # honest-raw, NEVER the bias maze) — a serve-fail is treated exactly like a served=raw miss.
+    assert payload.get("_edli_q_source") == "raw_honest", (
+        "under the regime an EMOS serve-failure must degrade to honest raw (best-effort), not the "
+        f"bias maze and not a crash (got q_source={payload.get('_edli_q_source')!r})"
     )
     assert analysis is not None
 
 
 # ---------------------------------------------------------------------------
-# (3) HONEST FALLBACK — served=raw cell takes the legacy path with NO EMOS engagement,
-#     and (unlike a failure) emits no EMOS_SERVE_FAILED noise (served=raw is expected, quiet).
+# (3) UNIVERSAL HONEST-RAW — under the one-calibrator regime (flag ON) a served=raw cell
+#     trades the do-no-harm-VALIDATED honest raw N(xbar, S^2), NOT the bias maze. This is the
+#     universality fix (operator 2026-06-05): EMOS-served ∪ honest-raw, the maze dead for ALL
+#     cells. The gate (fit_emos_calibration) blessed raw as UN-biased N(xbar,S^2); routing a
+#     served=raw cell through _maybe_apply_edli_bias_correction trades a q the gate never
+#     validated and re-introduces the under-dispersion+bias the program exists to kill.
 # ---------------------------------------------------------------------------
-def test_served_raw_uses_legacy_quietly(monkeypatch, caplog):
+def test_served_raw_uses_honest_raw_not_maze(monkeypatch, caplog):
     city = _served_city_unit_c()
+    # Bias correction ON (the maze) — proves the regime BYPASSES it for a served=raw cell,
+    # i.e. honest-raw is not merely "bias happened to be off".
+    monkeypatch.setitem(settings["edli_v1"], "edli_bias_correction_enabled", True)
     with caplog.at_level(logging.WARNING):
         payload, analysis = _run_seam(
-            monkeypatch=monkeypatch, emos_serves=False, city=city, mock_legacy_pcal=True
+            monkeypatch=monkeypatch, emos_serves=False, city=city  # flag ON (regime active)
         )
-    assert payload.get("_edli_q_source") in {"platt", "bias_platt"}, (
-        "served=raw cell must fall back to the honest legacy calibrator"
+    assert payload.get("_edli_q_source") == "raw_honest", (
+        "under the one-calibrator regime a served=raw cell MUST trade the validated honest raw "
+        f"N(xbar,S^2), tagged q_source='raw_honest' (got {payload.get('_edli_q_source')!r}) — "
+        "NEVER the bias maze (platt/bias_platt)"
+    )
+    assert not payload.get("_edli_bias_corrected"), (
+        "honest-raw must carry NO bias shift (the do-no-harm baseline is UN-biased N(xbar,S^2))"
+    )
+    # identity p_cal: the validated raw point distribution carries no Platt/bias mutation.
+    assert np.allclose(np.asarray(analysis.p_cal, dtype=float),
+                       np.asarray(analysis.p_raw, dtype=float)), (
+        "honest-raw p_cal must be identity over p_raw (the gate validated N(xbar,S^2), no Platt)"
     )
     # served=raw is the documented, expected do-no-harm fallback — it is NOT a serve failure.
     assert not [r for r in caplog.records if "EMOS_SERVE_FAILED" in r.getMessage()], (
-        "served=raw is an expected quiet fallback (None from build_emos_q), NOT a serve "
-        "failure — it must not emit EMOS_SERVE_FAILED noise"
+        "served=raw is an expected quiet fallback (None from build_emos_q), NOT a serve failure"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (3b) FLAG-OFF == LEGACY — with the regime OFF, a served=raw cell runs the legacy maze
+#      path byte-identically (bias/grid/Platt), proving the universal change is fully gated
+#      and the OFF state is unchanged from before the fix.
+# ---------------------------------------------------------------------------
+def test_flag_off_served_raw_uses_legacy_maze(monkeypatch):
+    city = _served_city_unit_c()
+    payload, analysis = _run_seam(
+        monkeypatch=monkeypatch, emos_serves=False, city=city,
+        mock_legacy_pcal=True, emos_flag=False,  # regime OFF -> legacy maze
+    )
+    assert payload.get("_edli_q_source") in {"platt", "bias_platt"}, (
+        "flag-OFF: a served=raw cell must run the legacy maze calibrator (byte-identical to "
+        f"pre-universal behavior), got {payload.get('_edli_q_source')!r}"
     )
