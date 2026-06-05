@@ -1,5 +1,8 @@
-# Created: 2026-06-04
-# Last reused/audited: 2026-06-04
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Antibody — a NULL/empty condition_id sibling at the reactor family seam
+#   must fail LOUD (FamilyKeyingError), never silently shrink the MECE family.
+# Reuse: Re-run whenever the market_events->reactor family-binding seam or its
+#   condition_id keying changes.
 # Authority basis: Fitz Constraint #4 (data provenance / silent-keying-loss). Reactor
 #   family-binding seam: a market_events sibling whose condition_id is NULL must NOT be
 #   silently dropped from the MECE family — a silently-shrunk family either kills all

@@ -52,11 +52,26 @@ Three deliberate, adversarial design choices:
      system that is producing zero trades: a wrong-but-tight gate produces zero
      trades (the status quo), never a fabricated wrong-side trade (iron-rule-2).
 
-Coordination with the CANDIDATE_QUALITY tail-demotion (task note): this gate
-demotes the tails via the EV-per-dollar floor (a confident-favorite at cost
-0.92 has near-zero/negative after-cost EV-per-dollar on q_lcb), so it must NOT
-be stacked with a second independent tail penalty that double-counts the same
-demotion. Keep the tail demotion in exactly ONE place: here.
+Coordination with the two tail demotions (review 2026-06-05 — they target
+DIFFERENT failure modes; do NOT delete one assuming the other covers it):
+
+  1. THIS gate (edge_zone_admits) — the EV-PER-DOLLAR floor. Demotes the
+     low-information-density tail: a confident-favorite at cost 0.92 has
+     near-zero/negative after-cost EV-per-dollar on q_lcb. It is symmetric
+     across direction and keys purely on the candidate's OWN after-cost economics.
+     This is the ONE place the EV-per-dollar tail penalty lives — do NOT stack a
+     second independent EV-per-dollar penalty that double-counts the SAME demotion.
+
+  2. _market_disagreement_demotes_buy_no (src/engine/event_reactor_adapter.py) —
+     the MARKET-DISAGREEMENT antibody. Demotes a SPECIFIC, direction-asymmetric,
+     settlement-grounded loser: buy_no on a bin the MARKET prices as likely
+     (cheap NO) without an overwhelming NO-space q_lcb. It keys on the market's
+     confidence vs the candidate's NO-space lower bound, NOT on EV-per-dollar.
+
+These are orthogonal: a cheap-NO contrarian can clear the EV-per-dollar floor
+(its q_lcb-based EV-per-dollar may look fine) yet still be the structural loser
+the market-disagreement guard exists to kill, and vice versa. Both are active;
+neither subsumes the other.
 """
 
 from __future__ import annotations

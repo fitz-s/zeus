@@ -1,7 +1,13 @@
-# Created: 2026-06-04
-# Last reused or audited: 2026-06-04
+# Lifecycle: created=2026-06-04; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Antibody pinning the market-disagreement buy_no demotion conjunction —
+#   cheap-NO bins (confident market) with a NON-overwhelming NO-space q_lcb are
+#   UNCONSTRUCTABLE as tradeable proofs; high-conviction (high NO-space q_lcb)
+#   disagreement survives. Guards the live-money selection seam.
+# Reuse: Re-run whenever _market_disagreement_demotes_buy_no, its thresholds, or
+#   the buy_no q_lcb (p(NO)-space) semantics change.
 # Authority basis: Settlement-grounded loser audit (buy_no on cheap bins 0/12, -71%) +
-#   Fitz Constraint #4 (data provenance / overconfident q tail) / iron-rule-5 (overconfidence=ruin) /
+#   Fitz Constraint #4 (data provenance / overconfident q tail) + DIRECTION LAW
+#   (buy_no q_lcb is NO-probability space) / iron-rule-5 (overconfidence=ruin) /
 #   iron-rule-2 (never weaken a gate to manufacture trades — this gate only DEMOTES).
 """Antibody: a buy_no candidate on a bin the market prices as LIKELY is unconstructable.
 
@@ -18,13 +24,22 @@ direction stage. ``_market_disagreement_demotes_buy_no`` is the predicate; the
 reactor forces score→0 and prefilter False when it fires, so the proof can never
 be selected as the actionable candidate.
 
+q_lcb DIRECTION SEMANTICS (the 2026-06-05 review caught the original inversion):
+for direction="buy_no", ``q_lcb_5pct`` is the conservative lower bound on p(NO) =
+"the bin will NOT settle here" (market_analysis_family_scan bootstraps ci_lo from
+p_posterior_no = 1 - p_posterior). So "overwhelming evidence the bin won't settle"
+means q_lcb is HIGH (→1), and the escape from demotion is a HIGH q_lcb, not a low
+one. A wide / overconfident tail whose honest NO-space lower bound is NOT near 1
+is exactly the miscalibration we distrust against a confident market — it gets
+demoted.
+
 This is a CONJUNCTION guard, not a blanket ban:
   * It never touches buy_yes.
   * It never touches a buy_no whose NO price is NOT cheap (the market is not
     confident → legitimate disagreement is fine).
-  * It never touches a buy_no whose q_lcb is genuinely EXTREME — an independent,
-    settlement-licensed lower bound (not the point estimate) saying the bin truly
-    will not settle. High-conviction disagreement survives.
+  * It never touches a buy_no whose NO-space q_lcb is overwhelmingly high — an
+    independent, settlement-licensed lower bound (not the point estimate) saying
+    the bin truly will not settle. High-conviction disagreement survives.
 
 These tests assert the RELATIONSHIP across the cheap-NO / weak-evidence boundary,
 not a single function value — they fail the moment the demotion conjunction is
@@ -37,7 +52,7 @@ import pytest
 
 from src.engine.event_reactor_adapter import (
     _MARKET_DISAGREE_NO_PRICE_MAX,
-    _MARKET_DISAGREE_QLCB_EXTREME,
+    _MARKET_DISAGREE_QLCB_MIN_ESCAPE,
     _market_disagreement_demotes_buy_no,
 )
 
@@ -52,10 +67,10 @@ def _demoted(*, direction="buy_no", market_no_price, q_lcb_5pct):
 
 # ── The losing pattern is now unconstructable ────────────────────────────────
 
-
 def test_cheap_no_with_nonextreme_qlcb_is_demoted():
-    """The exact 0/12 loser: market prices NO at 0.10 (confident YES), q_lcb not
-    extreme → the contrarian buy_no MUST be demoted."""
+    """The exact 0/12 loser: market prices NO at 0.10 (confident YES), NO-space
+    q_lcb is NOT overwhelming (0.30 ≪ 0.95) → the contrarian buy_no MUST be
+    demoted. A weak NO-lower-bound cannot out-vote a confident market."""
     assert _demoted(market_no_price=0.10, q_lcb_5pct=0.30) is True
 
 
@@ -63,8 +78,12 @@ def test_cheap_no_just_under_threshold_is_demoted():
     assert _demoted(market_no_price=_MARKET_DISAGREE_NO_PRICE_MAX - 0.001, q_lcb_5pct=0.20) is True
 
 
-# ── Legitimate trades are NOT touched (no false demotions) ───────────────────
+def test_cheap_no_just_below_escape_is_demoted():
+    """Just under the overwhelming-evidence escape → still demoted."""
+    assert _demoted(market_no_price=0.08, q_lcb_5pct=_MARKET_DISAGREE_QLCB_MIN_ESCAPE - 0.01) is True
 
+
+# ── Legitimate trades are NOT touched (no false demotions) ───────────────────
 
 def test_buy_yes_is_never_touched():
     """The guard is direction-asymmetric: buying YES on a cheap-NO bin is buying
@@ -80,11 +99,13 @@ def test_non_cheap_no_is_not_demoted():
 
 
 def test_high_conviction_disagreement_survives():
-    """Cheap NO BUT extreme independently-grounded q_lcb → the lower bound itself
-    licenses the bet; high-conviction disagreement is NOT demoted (we do not
-    hard-exclude legitimate contrarian alpha)."""
-    assert _demoted(market_no_price=0.05, q_lcb_5pct=_MARKET_DISAGREE_QLCB_EXTREME) is False
-    assert _demoted(market_no_price=0.05, q_lcb_5pct=_MARKET_DISAGREE_QLCB_EXTREME - 0.01) is False
+    """Cheap NO BUT an overwhelmingly HIGH, independently-grounded NO-space q_lcb →
+    the conservative lower bound on p(NO) itself licenses the bet; high-conviction
+    disagreement is NOT demoted (we do not hard-exclude legitimate contrarian
+    alpha)."""
+    assert _demoted(market_no_price=0.05, q_lcb_5pct=_MARKET_DISAGREE_QLCB_MIN_ESCAPE) is False
+    assert _demoted(market_no_price=0.05, q_lcb_5pct=_MARKET_DISAGREE_QLCB_MIN_ESCAPE + 0.01) is False
+    assert _demoted(market_no_price=0.05, q_lcb_5pct=0.99) is False
 
 
 def test_missing_price_defers_to_upstream():
@@ -95,26 +116,35 @@ def test_missing_price_defers_to_upstream():
 
 # ── Relationship / boundary invariants (the durable part) ────────────────────
 
-
 @pytest.mark.parametrize("q_lcb", [0.06, 0.10, 0.30, 0.50, 0.90])
-def test_demotion_monotone_in_evidence_at_fixed_cheap_price(q_lcb):
-    """At a fixed CHEAP NO price, the bet is demoted for EVERY q_lcb above the
-    extreme threshold. The only escape is overwhelming independent evidence —
-    never a slightly-better point estimate. This is the overconfidence antibody:
-    a high q_lcb (the tail thinks the bin won't settle) is exactly the
-    miscalibration we distrust against a confident market."""
+def test_demotion_holds_below_escape_at_fixed_cheap_price(q_lcb):
+    """At a fixed CHEAP NO price, the bet is demoted for EVERY NO-space q_lcb below
+    the overwhelming-evidence escape (0.95). The only escape is overwhelming
+    independent evidence the bin won't settle (q_lcb→1) — never a merely-positive
+    NO-lower-bound. This is the overconfidence antibody: a NO-space q_lcb that is
+    NOT near 1 cannot license betting against a confident market."""
     assert _demoted(market_no_price=0.08, q_lcb_5pct=q_lcb) is True
 
 
+def test_escape_is_monotone_high_qlcb():
+    """The escape fires only at the high end of NO-space q_lcb: below 0.95 demoted,
+    at/above 0.95 allowed. Pins the inequality direction so a future edit cannot
+    silently re-invert it back to YES-space."""
+    assert _demoted(market_no_price=0.08, q_lcb_5pct=0.94) is True
+    assert _demoted(market_no_price=0.08, q_lcb_5pct=0.95) is False
+    assert _demoted(market_no_price=0.08, q_lcb_5pct=0.96) is False
+
+
 def test_the_escape_is_the_lower_bound_not_the_market():
-    """Cross-boundary relationship: holding evidence weak (q_lcb non-extreme), the
-    demotion flips OFF precisely when the market stops being confident — i.e. the
-    guard keys on the MARKET's confidence, while the escape keys on INDEPENDENT
-    evidence. The two conditions are orthogonal and both required."""
+    """Cross-boundary relationship: holding evidence weak (NO-space q_lcb non-
+    overwhelming), the demotion flips OFF precisely when the market stops being
+    confident — i.e. the guard keys on the MARKET's confidence, while the escape
+    keys on INDEPENDENT evidence (a high NO-space q_lcb). The two conditions are
+    orthogonal and both required."""
     weak_q = 0.30
     # Confident market + weak evidence → demoted.
     assert _demoted(market_no_price=0.10, q_lcb_5pct=weak_q) is True
     # Same weak evidence, market no longer confident → allowed.
     assert _demoted(market_no_price=0.50, q_lcb_5pct=weak_q) is False
     # Confident market again, but now overwhelming evidence → allowed.
-    assert _demoted(market_no_price=0.10, q_lcb_5pct=_MARKET_DISAGREE_QLCB_EXTREME) is False
+    assert _demoted(market_no_price=0.10, q_lcb_5pct=_MARKET_DISAGREE_QLCB_MIN_ESCAPE) is False
