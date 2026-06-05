@@ -13,13 +13,16 @@
 # Lifecycle: created=2026-05-28; last_reviewed=2026-05-29; last_reused=never
 # Reuse: Inspect hardcoded DB and output path constants; READ-ONLY on forecasts DB, writes only to file.
 import json
+import os
 import sqlite3
 import statistics
 import sys
 from collections import defaultdict
+from pathlib import Path
 
-DB = "/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-forecasts.db"
-OUT = "/Users/leofitz/.claude/jobs/866db2ea/pipeline_empirical_detail.txt"
+ROOT = Path(__file__).resolve().parents[1]
+DB = os.environ.get("ZEUS_FORECASTS_DB", str(ROOT / "state" / "zeus-forecasts.db"))
+OUT = os.environ.get("ZEUS_PIPELINE_EMPIRICAL_DETAIL_OUT", str(ROOT / "docs" / "operations" / "pipeline_empirical_detail.txt"))
 
 
 def mean_members(mj, unit):

@@ -1,5 +1,5 @@
 # Created: 2026-06-04
-# Last reused/audited: 2026-06-04
+# Last reused/audited: 2026-06-05
 # Authority basis: operator directive 2026-06-04 — prune superseded channel
 #                  events (BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT) from the active
 #                  working set. Companion to tests/events/test_archive_expired_sweep.py
@@ -231,6 +231,41 @@ def test_channel_sweep_idempotent():
 
     assert first == 4
     assert second == 0, "second pass must be a no-op (idempotent)"
+
+
+def test_batch_limited_sweep_preserves_keeper_outside_batch():
+    """The sweep may examine only a small oldest-row batch, but the keeper lookup
+    must still consider the full active stream for each token. Otherwise the
+    newest event outside the batch could be archived in a later pass or an older
+    in-batch row could be incorrectly kept forever."""
+    conn = _world_conn()
+    store = EventStore(conn)
+
+    events = []
+    for j in range(8):
+        event = _channel_event(
+            "BEST_BID_ASK_CHANGED",
+            "tok-batch",
+            "0xcbatch",
+            f"2026-06-04T{j:02d}:00:00+00:00",
+            seq=j,
+        )
+        store.insert_or_ignore(event)
+        events.append(event)
+
+    first = store.archive_superseded_channel_events(batch_limit=3)
+
+    assert first == 3
+    assert _status_of(conn, events[-1].event_id) == "pending", (
+        "latest keeper must be preserved even when it is outside the candidate batch"
+    )
+    for event in events[:3]:
+        assert _status_of(conn, event.event_id) == "expired"
+
+    second = store.archive_superseded_channel_events(batch_limit=3)
+
+    assert second == 3
+    assert _status_of(conn, events[-1].event_id) == "pending"
 
 
 def test_missing_token_id_kept_active_failclosed():

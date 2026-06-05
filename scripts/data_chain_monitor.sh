@@ -15,7 +15,9 @@
 #   - lifecycle_funnel.filled > 0
 # Emits a line ONLY on state change. Silent otherwise.
 
-cd /Users/leofitz/.openclaw/workspace-venus/zeus
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ZEUS_DIR="${ZEUS_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+cd "$ZEUS_DIR"
 STATE_FILE=/tmp/zeus_chain_state.txt
 touch "$STATE_FILE"
 

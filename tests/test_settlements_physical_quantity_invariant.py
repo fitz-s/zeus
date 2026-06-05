@@ -36,12 +36,10 @@ def _find_live_db() -> Path | None:
     """Locate zeus-world.db by checking candidate paths in priority order.
 
     The worktree may carry an empty placeholder at state/zeus-world.db (size=0).
-    Fall back to the canonical Zeus workspace path when the local copy is absent
-    or uninitialized (no settlements table).
+    Skip when the local copy is absent or uninitialized (no settlements table).
     """
     candidates = [
         PROJECT_ROOT / "state" / "zeus-world.db",
-        Path("/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db"),
     ]
     for path in candidates:
         if not path.exists() or path.stat().st_size == 0:

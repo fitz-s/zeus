@@ -15,21 +15,23 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import os
 import sqlite3
 import sys
 from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 
-ROOT = "/Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/ens-bias-hierarchical"
-spec_a = importlib.util.spec_from_file_location("aud", f"{ROOT}/scripts/audit_refit_proper_scores.py")
+ROOT = Path(os.environ.get("ZEUS_SD3_AUDIT_ROOT", Path(__file__).resolve().parents[1])).resolve()
+spec_a = importlib.util.spec_from_file_location("aud", ROOT / "scripts" / "audit_refit_proper_scores.py")
 aud = importlib.util.module_from_spec(spec_a); sys.modules["aud"] = aud; spec_a.loader.exec_module(aud)
 
-DB = "/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-forecasts.db"
+DB = os.environ.get("ZEUS_FORECASTS_DB", str(Path(__file__).resolve().parents[1] / "state" / "zeus-forecasts.db"))
 CITIES = ["Jeddah", "Shanghai", "Busan", "Jakarta", "San Francisco", "NYC",
           "Seoul", "Hong Kong", "Istanbul", "Paris", "Austin", "London"]
 METRIC = "high"
-OUT_CSV = "/Users/leofitz/.claude/jobs/866db2ea/score_12city_high.csv"
+OUT_CSV = os.environ.get("ZEUS_SD3_SCORE_OUT", "/Users/leofitz/.claude/jobs/866db2ea/score_12city_high.csv")
 
 
 def load_dists(conn, family):

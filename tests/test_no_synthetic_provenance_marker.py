@@ -25,7 +25,6 @@ import pytest
 
 
 CANDIDATE_DB_PATHS = (
-    Path("/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db"),
     Path(__file__).resolve().parents[1] / "state" / "zeus-world.db",
 )
 
@@ -136,6 +135,12 @@ def test_no_synthetic_provenance_metadata_in_observations(live_db_path: Path) ->
     """observations.provenance_metadata must not carry the synth backfill tag."""
     conn = sqlite3.connect(f"file:{live_db_path}?mode=ro", uri=True)
     try:
+        obs_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(observations)")
+        }
+        if "provenance_metadata" not in obs_cols:
+            pytest.skip("observations.provenance_metadata column not present in current schema")
         row = conn.execute(
             """
             SELECT COUNT(*)

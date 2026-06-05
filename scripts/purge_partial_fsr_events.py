@@ -13,7 +13,7 @@ Operator-authorized 2026-05-31. Drops the append-only triggers, deletes the 941
 unresolvable PARTIAL FSR events, restores triggers. Leaves all COMPLETE FSR events intact.
 
 Usage:
-    cd /Users/leofitz/.openclaw/workspace-venus/zeus
+    cd /Users/leofitz/zeus
     source .venv/bin/activate
     python scripts/purge_partial_fsr_events.py [--dry-run]
 """

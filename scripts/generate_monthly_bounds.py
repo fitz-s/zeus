@@ -21,6 +21,7 @@ Part of K1-B packet. See .omc/plans/k1-freeze.md sections 5, 6.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from collections import defaultdict
@@ -34,7 +35,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).parent.parent
-PRODUCTION_DB = Path("/Users/leofitz/.openclaw/workspace-venus/zeus/state/zeus-world.db")
+PRODUCTION_DB = Path(os.environ.get("ZEUS_WORLD_DB", PROJECT_ROOT / "state" / "zeus-world.db"))
 OUTPUT_PATH = PROJECT_ROOT / "config" / "city_monthly_bounds.json"
 
 # Insert project root on sys.path so src.config is importable even when run

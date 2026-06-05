@@ -68,6 +68,7 @@ from src.contracts.residual_key import (
 from src.contracts.residual_value import residual_celsius
 
 logger = logging.getLogger(__name__)
+ROOT = Path(__file__).resolve().parents[1]
 
 # Refuse canonical DBs as source (mirrors fit_full_transport_error_models guard): the ledger
 # must be built from an isolated copy / historical store, never the live truth DBs.
@@ -359,7 +360,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--source-db", required=True, type=Path)
     ap.add_argument("--cities-json", type=Path,
-                    default=Path("/Users/leofitz/.openclaw/workspace-venus/zeus/config/cities.json"))
+                    default=ROOT / "config" / "cities.json")
     ap.add_argument("--metric", choices=("high", "low"), default="high")
     ap.add_argument("--lead-max", type=float, default=48.0)
     ap.add_argument("--cities", default="", help="comma-separated subset; empty = all")

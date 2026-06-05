@@ -8,7 +8,9 @@
 #   - 30-minute heartbeat tick (one OK summary per half hour to confirm probe alive)
 # Stdout lines are events; the Monitor tool turns each into a notification.
 
-cd /Users/leofitz/.openclaw/workspace-venus/zeus
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ZEUS_DIR="${ZEUS_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}"
+cd "$ZEUS_DIR"
 
 LAST_STATE_FILE=/tmp/zeus_monitor_last_state.txt
 LAST_TICK_FILE=/tmp/zeus_monitor_last_tick.txt

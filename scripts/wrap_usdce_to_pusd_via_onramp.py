@@ -25,7 +25,9 @@ This script:
 Reuses Zeus Safe execTransaction infrastructure (src/venue/safe_exec.py).
 """
 import os, sys, time, requests, json
-sys.path.insert(0, "/Users/leofitz/.openclaw/workspace-venus/zeus/.claude/worktrees/auto-wrap-rebase")
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("ZEUS_MODE", "live")
 
 from eth_utils import keccak

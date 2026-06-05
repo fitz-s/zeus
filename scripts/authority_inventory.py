@@ -543,7 +543,7 @@ def collect_cohort7_rows(repo_root: Path, as_of: datetime) -> list[SurfaceRow]:
     ))
 
     # C7-C: OpenClaw workspace CLAUDE.md (fs surface; outside repo)
-    # Exclude ~/.openclaw/workspace-venus/zeus/.claude/CLAUDE.md — same as C7-A
+    # Exclude the repo-local .claude/CLAUDE.md — same as C7-A
     rows.extend(iter_fs_surfaces(
         paths=[Path.home() / ".openclaw" / "CLAUDE.md"],
         as_of=as_of,

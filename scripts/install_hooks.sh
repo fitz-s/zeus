@@ -34,7 +34,7 @@ REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 if [ ! -d "${REPO_ROOT}/.git" ]; then
     echo "[install_hooks] ERROR: ${REPO_ROOT} is not a git repository." >&2
     echo "[install_hooks]   This script must live inside the Zeus repo at" >&2
-    echo "[install_hooks]   /Users/leofitz/.openclaw/workspace-venus/zeus/scripts/install_hooks.sh" >&2
+    echo "[install_hooks]   ${SCRIPT_DIR}/install_hooks.sh" >&2
     echo "[install_hooks]   (or wherever the repo is checked out). If you cloned to a" >&2
     echo "[install_hooks]   different path, the script will still find the right root" >&2
     echo "[install_hooks]   automatically — but the .git directory must exist." >&2
