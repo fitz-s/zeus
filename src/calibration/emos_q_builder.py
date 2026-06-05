@@ -15,7 +15,12 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from src.calibration.emos import bin_probability_settlement, emos_predictive, emos_sigma_model
+from src.calibration.emos import (
+    bin_probability_settlement,
+    emos_predictive,
+    emos_sigma_model,
+    settlement_sigma_floor,
+)
 
 
 def _bin_bounds(b) -> tuple[Optional[float], Optional[float]]:
@@ -34,6 +39,7 @@ def build_emos_q(
     members_native: "np.ndarray",
     unit: str,
     bins: Sequence,
+    apply_settlement_floor: bool = False,
 ) -> Optional[tuple["np.ndarray", float, float]]:
     """Build the traded bin-probability vector from the EMOS calibrator alone.
 
@@ -74,6 +80,16 @@ def build_emos_q(
         return None  # served=raw / missing -> honest raw fallback (caller decides)
     mu_c, sigma_c = pred
 
+    # EMPIRICAL settlement σ-floor (loop-breaker, investigation 2026-06-05; iron rule 5). The EMOS
+    # σ-model is systemically under-dispersed (median σ_emos/σ_settled = 0.49) → q pins near 1.0 on
+    # plausible bins → expensive buy_no on the winner. Floor σ at k·σ_settled (DETRENDED trailing-window
+    # settlement std, °C). Flag-gated: OFF ⇒ byte-identical. max() only WIDENS σ → lower q_lcb → fewer
+    # overconfident bets; can NEVER tighten or create a wrong-side trade. σ_settled is °C, like sigma_c.
+    if apply_settlement_floor:
+        floor_c = settlement_sigma_floor(city, season, str(metric).lower())
+        if floor_c is not None:
+            sigma_c = max(sigma_c, float(floor_c))
+
     if u.startswith("F"):
         mu_native = mu_c * 1.8 + 32.0
         sigma_native = sigma_c * 1.8
@@ -103,6 +119,7 @@ def build_honest_raw_q(
     members_native: "np.ndarray",
     unit: str,
     bins: Sequence,
+    apply_settlement_floor: bool = False,
 ) -> Optional[tuple["np.ndarray", float, float]]:
     """Honest-raw q with a CALIBRATED DISPERSION FLOOR for served=raw / EMOS-miss cells.
 
@@ -130,6 +147,15 @@ def build_honest_raw_q(
     mu_c = float(np.mean(members_c))
     raw_sigma_c = float(np.std(members_c, ddof=1))
     sigma_c = max(raw_sigma_c, float(floor_c))
+    # EMPIRICAL settlement σ-floor (loop-breaker, investigation 2026-06-05; iron rule 5) — composes
+    # ON TOP OF the existing emos_σ_model floor: σ = max(raw_σ, emos_σ_model, k·σ_settled). The
+    # emos_σ_model floor is itself the EMOS σ-model, which the investigation proved is ALSO too tight;
+    # the EMPIRICAL settlement floor is the correct one. Flag-gated: OFF ⇒ byte-identical (existing
+    # emos_σ_model floor only). max() only WIDENS → lower q_lcb → fewer overconfident bets. σ_settled °C.
+    if apply_settlement_floor:
+        settled_floor_c = settlement_sigma_floor(city, season, str(metric).lower())
+        if settled_floor_c is not None:
+            sigma_c = max(sigma_c, float(settled_floor_c))
     if not (sigma_c > 0.0):
         return None
     if u.startswith("F"):
