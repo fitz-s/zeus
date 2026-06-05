@@ -2578,6 +2578,61 @@ def _edli_day0_mask_for_analysis(analysis: MarketAnalysis, payload: dict) -> np.
     return mask
 
 
+# Tolerance for "carries mass": a surviving bin holding strictly more than this
+# after renorm is treated as live. Renorm produces exact 0.0 on masked bins, so
+# any non-trivial residual on an impossible bin signals an inverted/incorrect mask.
+_DAY0_MASK_MASS_EPS = 1e-12
+
+
+def _assert_day0_mask_consistent_with_observation(
+    analysis: MarketAnalysis,
+    payload: dict,
+    probabilities: np.ndarray,
+) -> None:
+    """Fail-closed runtime gate over the POST-MASK day0 probability vector.
+
+    Re-derives the absorbing-boundary invariant INDEPENDENTLY of
+    ``_edli_day0_mask_for_analysis`` (so an inversion inside the masker does not
+    also corrupt this check) and raises ``DAY0_MASK_CONTRADICTS_OBSERVATION`` if any
+    bin still carrying mass contradicts the observed extreme:
+
+      HIGH — no bin entirely BELOW the observed high (finite high < rounded) may
+             carry mass (final high ≥ rounded, so such a bin is impossible).
+      LOW  — no bin entirely ABOVE the observed low (finite low > rounded) may carry
+             mass (final low ≤ rounded, so such a bin is impossible).
+
+    With no observation (missing/invalid rounded_value) the mask was all-ones and
+    this gate is a no-op. This turns a future masker inversion (the #98 wrong-side
+    day0 trade) into a runtime RuntimeError-class failure at the live seam, not a
+    silent wrong-side family that reaches FDR/Kelly/submit.
+    """
+    metric = str(payload.get("metric") or "").strip().lower()
+    try:
+        rounded = float(payload["rounded_value"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if metric not in {"high", "low"}:
+        return
+    probs = np.asarray(probabilities, dtype=float)
+    for idx, bin_obj in enumerate(analysis.bins):
+        if float(probs[idx]) <= _DAY0_MASK_MASS_EPS:
+            continue
+        low = None if bin_obj.low is None else float(bin_obj.low)
+        high = None if bin_obj.high is None else float(bin_obj.high)
+        if metric == "high" and high is not None and high < rounded:
+            raise ValueError(
+                "DAY0_MASK_CONTRADICTS_OBSERVATION:"
+                f"high bin idx={idx} high={high} carries mass {float(probs[idx]):.6g} "
+                f"but observed high={rounded} (final high >= observed; bin impossible)"
+            )
+        if metric == "low" and low is not None and low > rounded:
+            raise ValueError(
+                "DAY0_MASK_CONTRADICTS_OBSERVATION:"
+                f"low bin idx={idx} low={low} carries mass {float(probs[idx]):.6g} "
+                f"but observed low={rounded} (final low <= observed; bin impossible)"
+            )
+
+
 def _apply_edli_live_family_before_selection(
     *,
     candidate: MarketCandidate,
@@ -2613,6 +2668,11 @@ def _apply_edli_live_family_before_selection(
         total = float(probabilities.sum())
         if total > 0.0:
             probabilities = probabilities / total
+        # P3 fail-closed gate: independently re-verify that no surviving (mass>0)
+        # bin contradicts the observed extreme. A future masker inversion (#98
+        # wrong-side day0 trade) raises DAY0_MASK_CONTRADICTS_OBSERVATION here —
+        # at the live seam, BEFORE the family reaches FDR/Kelly/submit.
+        _assert_day0_mask_consistent_with_observation(analysis, payload, probabilities)
         factor = "day0_absorbing_boundary"
     else:
         return None
