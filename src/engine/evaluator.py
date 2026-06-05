@@ -2529,6 +2529,31 @@ def _edli_payload(context: dict) -> dict:
 
 
 def _edli_day0_mask_for_analysis(analysis: MarketAnalysis, payload: dict) -> np.ndarray:
+    """The SOLE day0 absorbing-boundary mask (the live seam producer).
+
+    Physical truth (bins are integer-settled; ``rounded`` is an integer settlement
+    value from settlement_semantics.round_single):
+
+      HIGH market — the daily high only RISES. Observed-high-so-far rounds to H ⇒
+        final high ≥ H ⇒ a bin is IMPOSSIBLE iff its entire range lies strictly
+        below H, i.e. it has a FINITE upper edge AND ``bin.high < H``. A bin with an
+        open-high edge (high is None) extends to +∞ and can NEVER be entirely below
+        H, so it is ALWAYS live. The bin containing H and all bins above stay live.
+
+      LOW market — the daily low only FALLS. Observed-low-so-far rounds to L ⇒
+        final low ≤ L ⇒ a bin is IMPOSSIBLE iff its entire range lies strictly
+        above L, i.e. it has a FINITE lower edge AND ``bin.low > L``. A bin with an
+        open-low edge (low is None) extends to −∞ and can NEVER be entirely above L,
+        so it is ALWAYS live. The bin containing L and all bins below stay live.
+
+    Returned mask is 0.0 for impossible bins, 1.0 otherwise. The caller multiplies
+    p_posterior by this mask and renormalizes (evaluator.py day0 seam). With no
+    observation (missing rounded_value) the mask is all-ones — it never fabricates a
+    constraint. The logic is written EXPLICITLY (no `1.0 if … else 1.0` tautology):
+    an inversion (HIGH/LOW transpose, `<`/`>` flip, finite/open mix-up) changes the
+    mask and trips the P0 direction tests + the P3 runtime correctness gate, so a
+    wrong-side day0 trade (#98) is unconstructable.
+    """
     metric = str(payload.get("metric") or "").strip().lower()
     try:
         rounded = float(payload["rounded_value"])
@@ -2539,14 +2564,16 @@ def _edli_day0_mask_for_analysis(analysis: MarketAnalysis, payload: dict) -> np.
         low = None if bin_obj.low is None else float(bin_obj.low)
         high = None if bin_obj.high is None else float(bin_obj.high)
         if metric == "high":
-            if high is None:
-                mask[idx] = 1.0 if low is not None and rounded >= low else 1.0
-            elif rounded > high:
+            # Impossible iff the whole bin is below the observed high: needs a
+            # finite top edge strictly below H. Open-high bins (high is None) are
+            # never below H and always survive.
+            if high is not None and high < rounded:
                 mask[idx] = 0.0
         elif metric == "low":
-            if low is None:
-                mask[idx] = 1.0 if high is not None and rounded <= high else 1.0
-            elif rounded < low:
+            # Impossible iff the whole bin is above the observed low: needs a
+            # finite bottom edge strictly above L. Open-low bins (low is None) are
+            # never above L and always survive.
+            if low is not None and low > rounded:
                 mask[idx] = 0.0
     return mask
 
