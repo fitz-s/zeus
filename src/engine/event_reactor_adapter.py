@@ -3116,14 +3116,24 @@ def _calibration_authority_payload_and_clock(
 # operator-owned config file (safe .get defaults): the guard is ACTIVE by default
 # (conservative posture — it only ever DEMOTES a contrarian bet, never creates one).
 #
+# q_lcb SEMANTICS (the seam the 2026-06-05 review caught — DIRECTION LAW / Fitz
+# #4): for direction="buy_no", q_lcb_5pct is the conservative lower bound of
+# p(NO) = "the bin will NOT settle here" (market_analysis_family_scan derives the
+# buy_no hypothesis from p_posterior_no = 1 - p_posterior and bootstraps ci_lo in
+# NO-space). So "OVERWHELMING settlement-licensed evidence the bin won't settle"
+# means q_lcb_5pct is HIGH (→1), not low. The original guard read the escape in
+# YES-space (low q_lcb), which inverted it: it demoted exactly the high-conviction
+# contrarian (high NO-lower-bound) and waved through the weakest one. Corrected
+# below to NO-space.
+#
 #   market_disagree_no_price_max  — a NO token cheaper than this means the market
 #     prices the bin as LIKELY to settle (YES expensive). Buying NO here is betting
 #     AGAINST a confident multi-center market. Default 0.15.
-#   market_disagree_qlcb_extreme  — the ONLY licence to override the market: an
-#     extremely low, independently-grounded q_lcb (the settlement-licensed lower
-#     bound says the bin truly will NOT settle). Default 0.05.
+#   market_disagree_qlcb_min_escape  — the ONLY licence to override the market: a
+#     HIGH, independently-grounded NO-space q_lcb (the settlement-licensed lower
+#     bound on p(NO) says the bin overwhelmingly will NOT settle). Default 0.95.
 _MARKET_DISAGREE_NO_PRICE_MAX = 0.15
-_MARKET_DISAGREE_QLCB_EXTREME = 0.05
+_MARKET_DISAGREE_QLCB_MIN_ESCAPE = 0.95
 
 
 def _market_disagreement_demotes_buy_no(
@@ -3132,7 +3142,7 @@ def _market_disagreement_demotes_buy_no(
     market_no_price: float | None,
     q_lcb_5pct: float,
     no_price_max: float = _MARKET_DISAGREE_NO_PRICE_MAX,
-    qlcb_extreme: float = _MARKET_DISAGREE_QLCB_EXTREME,
+    qlcb_min_escape: float = _MARKET_DISAGREE_QLCB_MIN_ESCAPE,
 ) -> bool:
     """Settlement-grounded market-disagreement antibody.
 
@@ -3147,13 +3157,18 @@ def _market_disagreement_demotes_buy_no(
     confident multi-center market without OVERWHELMING settlement-licensed
     evidence. So a buy_no candidate on a bin the market prices as likely
     (market_no_price <= no_price_max) is UNCONSTRUCTABLE as a tradeable proof
-    UNLESS q_lcb is itself extreme (q_lcb_5pct <= qlcb_extreme) — an independent
-    lower bound, not the point estimate, saying the bin truly won't settle.
+    UNLESS its NO-space lower bound is overwhelming — q_lcb_5pct >= qlcb_min_escape
+    (an independent conservative lower bound on p(NO), not the point estimate,
+    saying the bin truly won't settle). q_lcb_5pct here is in NO-probability space
+    for buy_no (see module note above), so the escape is a HIGH q_lcb, not a low
+    one — a wide/overconfident tail whose honest lower bound is NOT near 1 is
+    exactly the miscalibration we distrust against a confident market.
 
-    Returns True iff the candidate must be DEMOTED (cheap-NO AND weak independent
-    evidence). The guard is a CONJUNCTION: it never touches buy_yes, never touches
-    a buy_no whose NO price is not cheap, and never touches a buy_no whose q_lcb
-    is genuinely extreme (legitimate high-conviction disagreement survives).
+    Returns True iff the candidate must be DEMOTED (cheap-NO AND the NO-space lower
+    bound is NOT overwhelming). The guard is a CONJUNCTION: it never touches
+    buy_yes, never touches a buy_no whose NO price is not cheap, and never touches
+    a buy_no whose q_lcb is overwhelmingly high (legitimate, settlement-licensed
+    high-conviction disagreement survives).
     """
     if direction != "buy_no":
         return False
@@ -3163,8 +3178,9 @@ def _market_disagreement_demotes_buy_no(
         return False
     if market_no_price > no_price_max:
         return False
-    # Cheap NO. Only an extreme, independently-grounded q_lcb licences the bet.
-    return q_lcb_5pct > qlcb_extreme
+    # Cheap NO. Only an overwhelming, independently-grounded NO-space q_lcb
+    # licences the bet against a confident market.
+    return q_lcb_5pct < qlcb_min_escape
 
 
 def _generate_candidate_proofs(
@@ -3272,21 +3288,28 @@ def _generate_candidate_proofs(
             # touching the operator-owned config (active-by-default = conservative).
             # This demotes (score→0) the contrarian bet that lost 0/12 (-71%); it
             # never creates a trade (iron-rule-2) and never touches buy_yes or
-            # high-conviction disagreement (the q_lcb-extreme escape).
+            # high-conviction disagreement (the NO-space high-q_lcb escape).
             market_no_price = execution_price.value if execution_price is not None else None
             try:
                 _md_cfg = settings["edli_v1"]
                 _md_no_max = float(_md_cfg.get("market_disagree_no_price_max", _MARKET_DISAGREE_NO_PRICE_MAX))
-                _md_qlcb = float(_md_cfg.get("market_disagree_qlcb_extreme", _MARKET_DISAGREE_QLCB_EXTREME))
+                # New canonical key (NO-space, high q_lcb = overwhelming evidence);
+                # fall back to the legacy key name only if the new one is absent.
+                _md_qlcb = float(
+                    _md_cfg.get(
+                        "market_disagree_qlcb_min_escape",
+                        _md_cfg.get("market_disagree_qlcb_extreme", _MARKET_DISAGREE_QLCB_MIN_ESCAPE),
+                    )
+                )
             except Exception:
                 _md_no_max = _MARKET_DISAGREE_NO_PRICE_MAX
-                _md_qlcb = _MARKET_DISAGREE_QLCB_EXTREME
+                _md_qlcb = _MARKET_DISAGREE_QLCB_MIN_ESCAPE
             _market_disagreement_demoted = _market_disagreement_demotes_buy_no(
                 direction=direction,
                 market_no_price=market_no_price,
                 q_lcb_5pct=q_lcb,
                 no_price_max=_md_no_max,
-                qlcb_extreme=_md_qlcb,
+                qlcb_min_escape=_md_qlcb,
             )
             if _market_disagreement_demoted:
                 score = 0.0
@@ -3294,7 +3317,7 @@ def _generate_candidate_proofs(
                     missing_reason = (
                         "MARKET_DISAGREEMENT_BUY_NO_DEMOTED:"
                         f"no_price={market_no_price:.4f}<={_md_no_max:.4f} "
-                        f"q_lcb={q_lcb:.4f}>{_md_qlcb:.4f}"
+                        f"q_lcb={q_lcb:.4f}<{_md_qlcb:.4f}"
                     )
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))

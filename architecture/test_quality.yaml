@@ -61,6 +61,12 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "With mainstream_agreement_enforce_on_submit ON, an armed submit whose selected candidate has a failed/missing mainstream verdict must reject MAINSTREAM_AGREEMENT_REQUIRED before the executor (fail-closed); reference selector stays reference-only."
+  tests/money_path/test_mainstream_display_only_unconstructable.py:
+    category: core_law_antibody
+    protects: [MP-SCH-001, MP-ECO-001]
+    falsifying_proof:
+      type: negative_fixture
+      description: "Mainstream/forecast-bias agreement is display-only: the SAME armed submit closure run with mainstream_agreement_pass in {True, False, None} must reach the IDENTICAL downstream reason, and the enforce-on-submit branch + two-key arm boot guard must be ABSENT from source. Re-introducing any mainstream gate path (a MAINSTREAM_AGREEMENT_REQUIRED branch, or a value-dependent decision) fails — mainstream cannot alter direction/q/q_lcb/trade_score/selection/submit (DIRECTION LAW / Rule-4 antibody)."
   tests/money_path/test_edli_order_lifecycle.py:
     category: money_path
     protects: [MP-SCH-001, MP-SCH-002, MP-ECO-001]

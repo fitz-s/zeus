@@ -149,7 +149,11 @@ _BASELINE_PER_FILE: dict[str, int] = {
     # 2026-06-03: event_reactor_adapter is a new file with 9 sites. All
     # interpolations are schema/table refs from closed internal callers or
     # placeholder-strings sized from internal tuples (no user input).
-    "src/engine/event_reactor_adapter.py": 9,
+    # 2026-06-05: +1 site (9 → 10) from the family-keying antibody — a COUNT(*)
+    # over the same `_market_events_table_ref(conn)` closed internal identifier
+    # already used by the family-build SELECT directly below it; all bound values
+    # are parameterized (?). No user-controlled input.
+    "src/engine/event_reactor_adapter.py": 10,
     "src/engine/replay.py": 14,
     # 6 f-string SQL sites: all interpolate module-level table-name constants
     # (sv2_table, cp_v2_table, etc.) from ReplayContext — no user-controlled

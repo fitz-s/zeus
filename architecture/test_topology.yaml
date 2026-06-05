@@ -111,6 +111,9 @@ test_trust_policy:
     tests/events/test_continuous_redecision.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_emit.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/events/test_continuous_redecision_exit.py: {created: "2026-05-31", last_used: "2026-05-31"}
+    tests/events/test_edge_zone_admission_102.py: {created: "2026-06-04", last_used: "2026-06-05", note: "RT (#102): book-wide EV-per-dollar edge-zone admission — positive after-cost EV admitted / negative rejected regardless of arrival order; flag-gated last money-path step"}
+    tests/engine/test_market_disagreement_buy_no_guard.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody: cheap-NO buy_no with non-overwhelming NO-space q_lcb is unconstructable (settlement-grounded 0/12 loser); escape only on high NO-space q_lcb (DIRECTION LAW / Fitz #4)"}
+    tests/test_reactor_family_keying_antibody.py: {created: "2026-06-04", last_used: "2026-06-05", note: "Antibody (Fitz #4): NULL/empty condition_id sibling at the reactor family seam fails LOUD (FamilyKeyingError), never silently shrinks the MECE family"}
     tests/test_chain_shares_persist_synced.py: {created: "2026-05-31", last_used: "2026-05-31"}
     tests/test_position_current_trade_schema_migration.py: {created: "2026-06-03", last_used: "2026-06-03"}
     tests/engine/test_substrate_illiquid_bin_capture.py: {created: "2026-05-30", last_used: "2026-05-30"}
