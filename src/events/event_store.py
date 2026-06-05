@@ -365,44 +365,61 @@ class EventStore:
         # preserving it is what makes a small batch safe. Ties at MAX(available_at)
         # are all kept to avoid arbitrary archiving when the venue emits duplicate
         # timestamps for distinct payloads.
-        candidate_keys = {
-            (str(row[1]), str(row[2]))
-            for row in candidate_rows
-            if row[2] is not None
-        }
-        keeper_ids: set[str] = set()
-        for event_type, token_id in candidate_keys:
-            keeper_rows = self.conn.execute(
-                """
+        keeper_rows = self.conn.execute(
+            f"""
+            WITH candidate_rows AS (
+                SELECT e.event_id,
+                       e.event_type,
+                       json_extract(e.payload_json, '$.token_id') AS token_id,
+                       e.available_at
+                FROM opportunity_events e
+                JOIN opportunity_event_processing p
+                  ON p.event_id = e.event_id
+                 AND p.consumer_name = ?
+                WHERE e.event_type IN ({type_placeholders})
+                  AND p.processing_status IN ('pending', 'processing')
+                  AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
+                ORDER BY e.available_at ASC
+                LIMIT ?
+            ),
+            candidate_keys AS (
+                SELECT DISTINCT event_type, token_id
+                FROM candidate_rows
+            ),
+            keeper_max AS (
+                SELECT e2.event_type AS event_type,
+                       json_extract(e2.payload_json, '$.token_id') AS token_id,
+                       MAX(e2.available_at) AS max_available_at
+                FROM opportunity_events e2
+                JOIN opportunity_event_processing p2
+                  ON p2.event_id = e2.event_id
+                 AND p2.consumer_name = ?
+                JOIN candidate_keys k
+                  ON k.event_type = e2.event_type
+                 AND k.token_id = json_extract(e2.payload_json, '$.token_id')
+                WHERE p2.processing_status IN ('pending', 'processing')
+                GROUP BY e2.event_type, json_extract(e2.payload_json, '$.token_id')
+            )
                 SELECT e.event_id
                 FROM opportunity_events e
                 JOIN opportunity_event_processing p
                   ON p.event_id = e.event_id
                  AND p.consumer_name = ?
-                WHERE e.event_type = ?
-                  AND json_extract(e.payload_json, '$.token_id') = ?
-                  AND p.processing_status IN ('pending', 'processing')
-                  AND e.available_at = (
-                    SELECT MAX(e2.available_at)
-                    FROM opportunity_events e2
-                    JOIN opportunity_event_processing p2
-                      ON p2.event_id = e2.event_id
-                     AND p2.consumer_name = ?
-                    WHERE e2.event_type = ?
-                      AND json_extract(e2.payload_json, '$.token_id') = ?
-                      AND p2.processing_status IN ('pending', 'processing')
-                  )
-                """,
-                (
-                    self.consumer_name,
-                    event_type,
-                    token_id,
-                    self.consumer_name,
-                    event_type,
-                    token_id,
-                ),
-            ).fetchall()
-            keeper_ids.update(str(row[0]) for row in keeper_rows)
+                JOIN keeper_max k
+                  ON k.event_type = e.event_type
+                 AND k.token_id = json_extract(e.payload_json, '$.token_id')
+                 AND k.max_available_at = e.available_at
+                WHERE p.processing_status IN ('pending', 'processing')
+            """,
+            (
+                self.consumer_name,
+                *self._CHANNEL_EVENT_TYPES,
+                batch_limit,
+                self.consumer_name,
+                self.consumer_name,
+            ),
+        ).fetchall()
+        keeper_ids: set[str] = {str(row[0]) for row in keeper_rows}
 
         superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
 

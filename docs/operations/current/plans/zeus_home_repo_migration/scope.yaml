@@ -14,6 +14,8 @@ allowed_files:
 - scripts/pipeline_empirical_detail.py
 - scripts/audit_matched_date_proper_scores.py
 - scripts/build_ens_residual_evidence.py
+- scripts/arm_live_mode.sh
+- scripts/expire_auto_pause.sh
 forbidden_files:
 - state/zeus-world.db
 - state/zeus-world.db-*
@@ -21,12 +23,10 @@ forbidden_files:
 - state/zeus-forecasts.db-*
 - state/zeus_trades.db
 - state/zeus_trades.db-*
-- scripts/arm_live_mode.sh
-- scripts/expire_auto_pause.sh
 live_side_effects_allowed: false
 supersedes: null
 tests:
 - python3 -m py_compile scripts/live_health_probe.py scripts/run_redeem_reconcile_with_onchain_proof.py scripts/check_full_transport_ship_readiness.py scripts/generate_monthly_bounds.py scripts/pipeline_empirical_detail.py scripts/audit_matched_date_proper_scores.py scripts/build_ens_residual_evidence.py
-- bash -n scripts/live_health_monitor.sh scripts/data_chain_monitor.sh
+- bash -n scripts/live_health_monitor.sh scripts/data_chain_monitor.sh scripts/arm_live_mode.sh scripts/expire_auto_pause.sh
 - git diff --check
 closeout_required: true
