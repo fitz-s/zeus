@@ -1,5 +1,5 @@
 # Created: 2026-06-05
-# Last reused or audited: 2026-06-05
+# Last reused/audited: 2026-06-05
 # Authority basis: Efficiency #2 (boot double-build keychain re-shell) — operator
 #   directive "boot 时间过长 ... 找到效率最高的 daemon 运行方案以加快运行".
 #

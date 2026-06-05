@@ -1,6 +1,9 @@
 # Created: 2026-06-05
 # Last reused/audited: 2026-06-05
 # Authority basis: efficiency #3 boot wallet warm-overlap (background warm → join → gate)
+# Lifecycle: created=2026-06-05; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Relationship/concurrency antibody — boot warms bankroll_provider.current() on a background thread, joins it, then the wallet gate consumes the joined record (warm + gate = exactly ONE on-chain fetch; None → fail-closed).
+# Reuse: Re-run when _start_boot_wallet_warm / _join_boot_wallet_warm / _startup_wallet_check or the bankroll_provider warm-cache TTL changes.
 """Relationship test — boot wallet warm-overlap (concurrency invariant).
 
 Cross-module / concurrency invariant under test (efficiency #3, built on the

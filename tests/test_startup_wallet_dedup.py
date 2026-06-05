@@ -1,6 +1,9 @@
 # Created: 2026-06-05
 # Last reused/audited: 2026-06-05
 # Authority basis: efficiency #1 boot wallet-fetch dedupe
+# Lifecycle: created=2026-06-05; last_reviewed=2026-06-05; last_reused=2026-06-05
+# Purpose: Relationship antibody — the production (clob=None) wallet gate routes through bankroll_provider.current() and reuses Site A's warm 30s cache instead of issuing a SECOND on-chain RPC.
+# Reuse: Re-run when _startup_wallet_check's production path, the Site A "Capital (on-chain)" warm call, or bankroll_provider's cache TTL changes.
 """Relationship test — boot wallet-fetch dedupe (Site A warm → Site B free).
 
 Cross-module invariant under test:

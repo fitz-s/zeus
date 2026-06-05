@@ -1,5 +1,5 @@
 # Created: 2026-05-25
-# Last reused or audited: 2026-06-03
+# Last reused/audited: 2026-06-03
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment;
 #   2026-06-03 operator directive: remove artificial notional + per-day caps via explicit unbounded
 #   sentinel, fail-SAFE to capped on missing/malformed config.

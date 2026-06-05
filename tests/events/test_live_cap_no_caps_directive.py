@@ -1,5 +1,5 @@
 # Created: 2026-06-05
-# Last reused or audited: 2026-06-05
+# Last reused/audited: 2026-06-05
 # Authority basis: operator directive 2026-06-05 "no caps, no trade-count limits" (overrides the
 #   2026-06-03 directive that kept the flood-guard rate window active). The artificial $250 hard
 #   notional ceiling and the per-day rate-window order-COUNT cap are now FLAG-GATED: when their
