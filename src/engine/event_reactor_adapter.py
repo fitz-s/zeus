@@ -3888,8 +3888,15 @@ def _market_analysis_from_event_snapshot(
     # missing / flag-OFF / day0 -> the existing path below runs unchanged (byte-identical).
     _emos_q = None
     _emos_sampler = None
-    if (family.event_type != "DAY0_EXTREME_UPDATED"
-            and bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))):
+    # ONE-CALIBRATOR REGIME (#110 universal, operator 2026-06-05): when ON (non-day0), the cell
+    # is served by EXACTLY one of {EMOS predictive, do-no-harm-VALIDATED honest raw N(xbar,S^2)};
+    # the bias/grid/Platt maze is NEVER reached. served=raw / EMOS-miss / serve-fail therefore
+    # routes to honest raw (members UN-shifted, identity p_cal), not _maybe_apply_edli_bias_correction.
+    _emos_regime = (
+        family.event_type != "DAY0_EXTREME_UPDATED"
+        and bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))
+    )
+    if _emos_regime:
         # M1 (critic 2026-06-04): the EMOS branch must degrade to the honest path on ANY failure,
         # mirroring the flag-OFF try/except around _snapshot_lead_days — otherwise a lead-missing
         # snapshot fail-closes the whole family (coverage regression) when the flag is ON.
@@ -3937,6 +3944,25 @@ def _market_analysis_from_event_snapshot(
         representativeness_sigma = 0.0  # the EMOS sampler carries the predictive sigma
         payload["_edli_q_source"] = "emos"
         _emos_sampler = _make_emos_bootstrap_sampler(_emos_mu_native, _emos_sigma_native)
+    elif _emos_regime:
+        # HONEST RAW (universal, #110 / operator 2026-06-05): EMOS did not serve this non-day0
+        # cell — a do-no-harm served=raw cell, an EMOS-table miss, or a loud serve-fail. Under the
+        # one-calibrator regime the contract is "EMOS, or the do-no-harm-VALIDATED honest raw
+        # N(xbar,S^2), NEVER the bias maze". The fit (fit_emos_calibration) validated raw as the
+        # UN-biased ensemble N(xbar,S^2); applying _maybe_apply_edli_bias_correction here would
+        # trade a q the gate never blessed and re-introduce the under-dispersion+bias the program
+        # exists to kill. So: raw members un-shifted, identity p_cal (= the analytic over bins, no
+        # Platt), no representativeness widening (the dispersion already IS the honest analytic).
+        # members_already_corrected=True tells _snapshot_p_raw NOT to re-apply bias internally.
+        members = raw_members
+        _bias_corrected = False
+        representativeness_sigma = 0.0
+        payload["_edli_q_source"] = "raw_honest"
+        p_raw = _snapshot_p_raw(
+            snapshot, family=family, bins=bins, members=members, payload=payload,
+            members_already_corrected=True,
+        )
+        p_cal = np.asarray(p_raw, dtype=float)
     else:
         members, _bias_corrected = _maybe_apply_edli_bias_correction(
             raw_members, snapshot=snapshot, family=family, city=city, payload=payload
