@@ -981,6 +981,20 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract():
     assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
 
 
+def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
+    def _forbid_runtime_fit(*_args, **_kwargs):
+        raise AssertionError("receipt path must not call get_calibrator/runtime fit")
+
+    monkeypatch.setattr("src.calibration.manager.get_calibrator", _forbid_runtime_fit)
+
+    event = _bound_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_snapshot())
+
+    assert receipt.proof_accepted is True
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"] == "platt-world-1"
+
+
 def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
     event = _forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot())

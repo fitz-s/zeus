@@ -22,6 +22,21 @@ Inspection showed legacy/read-time `platt_models` rows have no
 cycle, making `fitted_at` later than the cycle `decision_time` and causing
 immediate retry loops that consumed the proof window before fresh candidates.
 
+After adding and backfilling `training_cutoff`, shadow live restarted on
+`4bfc857b8b3c12d6723fefcd3350fa58992be53c`, but post-restart receipts still did
+not advance. A SIGUSR1 live stack dump at 2026-06-05 11:41Z showed the active
+EDLI reactor thread blocked in:
+
+`event_reactor_adapter._calibration_authority_payload_and_clock ->
+CalibrationManager.get_calibrator -> CalibrationManager._fit_from_pairs ->
+Platt.fit`.
+
+That means the receipt authority seam still permits runtime calibration
+training in the scheduler. This is a liveness bug: a no-submit receipt should
+compile against already-persisted calibration authority or fail closed when that
+authority is missing. It must not train Platt models inside the live reactor
+proof window.
+
 ## Change
 
 - Add `platt_models.training_cutoff` to canonical schema and schema fingerprint.
@@ -30,6 +45,11 @@ immediate retry loops that consumed the proof window before fresh candidates.
   from `fitted_at`/`recorded_at` and preserve materialization as
   `model_materialized_at`.
 - Keep explicit future `training_cutoff` fail-closed.
+- In `event_reactor_adapter`, replace the receipt authority seam's
+  `get_calibrator()` call with a persisted-model lookup that cannot invoke
+  `_fit_from_pairs`. Missing persisted authority remains fail-closed.
+- Add regression coverage proving the no-submit receipt path does not call
+  `get_calibrator()` and therefore cannot perform runtime Platt fitting.
 
 ## Verification
 

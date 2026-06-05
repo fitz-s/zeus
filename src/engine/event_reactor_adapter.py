@@ -3082,7 +3082,6 @@ def _calibration_authority_payload_and_clock(
     if not source_id or not issue_time:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:forecast_provenance")
     from src.calibration.forecast_calibration_domain import derive_phase2_keys_from_ens_result
-    from src.calibration.manager import get_calibrator
     from src.data.forecast_source_registry import calibration_source_id_for_lookup
 
     cycle, raw_source_id, horizon_profile = derive_phase2_keys_from_ens_result(
@@ -3095,21 +3094,18 @@ def _calibration_authority_payload_and_clock(
     calibration_source_id = calibration_source_id_for_lookup(raw_source_id)
     if calibration_source_id is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:source_id")
-    cal, level = get_calibrator(
+    row, level, _model_data = _persisted_calibration_model_row_for_receipt(
         calibration_conn,
-        city,
-        str(family.target_date),
+        city=city,
+        target_date=str(family.target_date),
         temperature_metric=family.metric,
         cycle=cycle,
         source_id=calibration_source_id,
         horizon_profile=horizon_profile,
     )
-    if cal is None:
-        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:model")
-    model_key = getattr(cal, "_bucket_model_key", None)
-    row = _calibration_model_row(calibration_conn, model_key=model_key)
     if row is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:model_row")
+    model_key = row.get("model_key")
     training_cutoff_raw = row.get("training_cutoff") or _date_cutoff_from_calibration_row(row)
     training_cutoff_time = _parse_utc(training_cutoff_raw)
     if training_cutoff_time is None:
@@ -3143,6 +3139,82 @@ def _calibration_authority_payload_and_clock(
         training_cutoff_time,
         training_cutoff_time,
     )
+
+
+def _persisted_calibration_model_row_for_receipt(
+    conn: sqlite3.Connection,
+    *,
+    city,
+    target_date: str,
+    temperature_metric: str,
+    cycle: str | None,
+    source_id: str | None,
+    horizon_profile: str | None,
+) -> tuple[dict[str, Any] | None, int, dict[str, Any] | None]:
+    """Load calibration authority without fitting inside the live reactor.
+
+    ``get_calibrator()`` may train a Platt model from historical pair rows on a
+    cache miss. Receipt compilation is an authority read seam: it may use an
+    already-persisted model or fail closed, but it must not perform runtime
+    training while the scheduler is trying to emit liveness receipts.
+    """
+
+    if not _table_exists(conn, "platt_models"):
+        return None, 4, None
+    from src.calibration.manager import (
+        _candidate_data_versions_for_metric_source,
+        _low_live_min_decision_groups,
+        _resolve_pin_for_bucket,
+        maturity_level,
+        season_from_date,
+    )
+    from src.calibration.store import load_platt_model
+
+    season = season_from_date(target_date, lat=city.lat)
+    cluster = city.cluster
+    candidate_data_versions = _candidate_data_versions_for_metric_source(
+        temperature_metric, source_id
+    )
+    primary_frozen, primary_model_key = _resolve_pin_for_bucket(
+        temperature_metric, cluster, season, cycle
+    )
+    opendata_to_tigge_bridge = (
+        len(candidate_data_versions) > 1
+        and candidate_data_versions[0].startswith("ecmwf_opendata_")
+    )
+    selected_model_data: dict[str, Any] | None = None
+    for data_version in candidate_data_versions:
+        if opendata_to_tigge_bridge and data_version.startswith("tigge_"):
+            lookup_cycle, lookup_source_id, lookup_horizon = "00", "tigge_mars", "full"
+        else:
+            lookup_cycle, lookup_source_id, lookup_horizon = cycle, source_id, horizon_profile
+        model_data = load_platt_model(
+            conn,
+            temperature_metric=temperature_metric,
+            cluster=cluster,
+            season=season,
+            data_version=data_version,
+            frozen_as_of=primary_frozen,
+            model_key=primary_model_key,
+            cycle=lookup_cycle,
+            source_id=lookup_source_id,
+            horizon_profile=lookup_horizon,
+        )
+        if model_data is not None:
+            selected_model_data = model_data
+            break
+    if selected_model_data is None:
+        return None, 4, None
+    model_key = selected_model_data.get("model_key")
+    row = _calibration_model_row(conn, model_key=model_key)
+    if row is None:
+        return None, 4, None
+    if row.get("calibration_method") == "identity_full_transport_v1":
+        return row, 1, selected_model_data
+    n_samples = int(row.get("n_samples") or 0)
+    if temperature_metric == "low" and n_samples < _low_live_min_decision_groups():
+        return None, 4, None
+    return row, maturity_level(n_samples), selected_model_data
 
 
 def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
@@ -5607,7 +5679,7 @@ def _snapshot_p_cal(
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:forecast provenance missing")
 
     from src.calibration.forecast_calibration_domain import derive_phase2_keys_from_ens_result
-    from src.calibration.manager import get_calibrator
+    from src.calibration.manager import _model_data_to_calibrator
     from src.calibration.platt import calibrate_and_normalize
     from src.data.forecast_source_registry import calibration_source_id_for_lookup
 
@@ -5622,10 +5694,10 @@ def _snapshot_p_cal(
     if calibration_source_id is None:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:unsupported forecast source")
     try:
-        cal, _level = get_calibrator(
+        _row, _level, model_data = _persisted_calibration_model_row_for_receipt(
             calibration_conn,
-            city,
-            str(family.target_date),
+            city=city,
+            target_date=str(family.target_date),
             temperature_metric=family.metric,
             cycle=cycle,
             source_id=calibration_source_id,
@@ -5633,7 +5705,7 @@ def _snapshot_p_cal(
         )
     except (sqlite3.Error, ValueError) as exc:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:calibration store unavailable") from exc
-    if cal is None:
+    if model_data is None:
         # Identity-Platt fallback: no fitted Platt for this (city, season, metric) bucket.
         # Use normalized p_raw as p_cal (identity passthrough). This is the designed
         # fail-closed default per platt_oos_resolver.py §P0: identity is the live default;
@@ -5658,6 +5730,7 @@ def _snapshot_p_cal(
         if not _valid_probability_vector(arr, len(bins)) or total <= 0.0:
             raise ValueError("CALIBRATION_AUTHORITY_MISSING:identity fallback p_raw invalid")
         return arr / total
+    cal = _model_data_to_calibrator(model_data)
     p_cal = calibrate_and_normalize(
         np.asarray(p_raw, dtype=float),
         cal,
