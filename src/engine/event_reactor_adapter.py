@@ -1168,25 +1168,47 @@ def build_event_bound_no_submit_receipt(
                 "mainstream_fetched_at_utc": _mav.get("mainstream_fetched_at_utc"),
             }
         )
-    proof_bundle = _build_no_submit_proof_bundle_from_adapter_evidence(
-        event=event,
-        payload=payload,
-        decision_time=decision_time,
-        family=family,
-        family_topology_rows=family_topology_rows,
-        family_snapshot_rows=family_rows,
-        selected_snapshot_row=row,
-        trade_conn=trade_conn,
-        forecast_conn=source_conn,
-        calibration_conn=calibration_conn,
-        proof=proof,
-        raw_receipt=raw_receipt,
-        fdr=fdr,
-        kelly=kelly,
-        risk=risk,
-        bankroll_usd=bankroll_usd,
-        kelly_multiplier=kelly_multiplier,
-    )
+    try:
+        proof_bundle = _build_no_submit_proof_bundle_from_adapter_evidence(
+            event=event,
+            payload=payload,
+            decision_time=decision_time,
+            family=family,
+            family_topology_rows=family_topology_rows,
+            family_snapshot_rows=family_rows,
+            selected_snapshot_row=row,
+            trade_conn=trade_conn,
+            forecast_conn=source_conn,
+            calibration_conn=calibration_conn,
+            proof=proof,
+            raw_receipt=raw_receipt,
+            fdr=fdr,
+            kelly=kelly,
+            risk=risk,
+            bankroll_usd=bankroll_usd,
+            kelly_multiplier=kelly_multiplier,
+        )
+    except ValueError as exc:
+        missing_reason = str(exc)
+        if not missing_reason.startswith("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:"):
+            raise
+        missing_reason = missing_reason.replace(
+            "CALIBRATION_AUTHORITY_EVIDENCE_MISSING:",
+            "CALIBRATION_AUTHORITY_MISSING:",
+            1,
+        )
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=f"LIVE_INFERENCE_INPUTS_MISSING:{missing_reason}",
+            city=family.city,
+            target_date=family.target_date,
+            metric=family.metric,
+            family_id=family.family_id,
+            source_status="MATCH",
+            family_complete=True,
+        )
     return _event_submission_receipt_from_typed_receipt_payload(
         raw_receipt,
         event,
