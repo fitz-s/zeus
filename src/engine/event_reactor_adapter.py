@@ -1,5 +1,8 @@
-# Last reused or audited: 2026-06-04
-# Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
+# Last reused or audited: 2026-06-05
+# Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset;
+#   P1 ZERO-SUBMIT FIX B (2026-06-05, iron-rule-1, co-cause) — per-cycle in-flight reservation
+#   made rollback-aware (PortfolioReservationLedger): provisional reserve on Kelly+RiskGuard pass,
+#   reactor commits on emit / rolls back on downstream reject. Exposed via _submit.reservation_ledger.
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -58,6 +61,7 @@ from src.events.opportunity_event import OpportunityEvent
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.riskguard.risk_level import RiskLevel
 from src.sizing.sizing_context import SizingContext
+from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
 from src.config import runtime_cities_by_name, edge_n_bootstrap, settings
 from src.contracts.settlement_semantics import SettlementSemantics
@@ -273,9 +277,11 @@ def event_bound_no_submit_adapter_from_trade_conn(
     cycles / tests stay isolated. One adapter instance == one reactor cycle, so
     the accumulator is fresh per cycle by construction."""
 
-    # INV-K7 reservation accumulator: closure-held (test-isolation safe), reset
-    # implicitly per adapter instance (== per reactor cycle).
-    portfolio_reservation: list[tuple[str, float]] = []
+    # INV-K7 reservation ledger: closure-held (test-isolation safe), fresh per
+    # adapter instance (== per reactor cycle). FIX B (2026-06-05): rollback-aware
+    # ledger (not a bare list) so a candidate rejected downstream of Kelly is
+    # rolled back by the reactor before the next sequential event reads it.
+    portfolio_reservation = PortfolioReservationLedger()
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         return build_event_bound_no_submit_receipt(
@@ -291,6 +297,11 @@ def event_bound_no_submit_adapter_from_trade_conn(
             portfolio_reservation=portfolio_reservation,
         )
 
+    # Expose the per-cycle ledger so the reactor can commit/rollback provisional
+    # reservations in its post-submit phase (FIX B). The reactor reads this
+    # attribute off the injected submit callable; absent it falls back to the
+    # legacy append-only behavior (no commit/rollback).
+    _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
     return _submit
 
 
@@ -326,8 +337,10 @@ def event_bound_live_adapter_from_trade_conn(
     adapter instance (== per reactor cycle).
     """
 
-    # INV-K7 reservation accumulator: closure-held, fresh per reactor cycle.
-    portfolio_reservation: list[tuple[str, float]] = []
+    # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
+    # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
+    # rolled back by the reactor before the next sequential event reads it.
+    portfolio_reservation = PortfolioReservationLedger()
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         no_submit_receipt = build_event_bound_no_submit_receipt(
@@ -519,6 +532,9 @@ def event_bound_live_adapter_from_trade_conn(
             decision_proof_bundle=certificates,
         )
 
+    # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
+    # provisional reservations in its post-submit phase.
+    _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
     return _submit
 
 
@@ -612,18 +628,22 @@ def build_event_bound_no_submit_receipt(
     calibration_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
-    portfolio_reservation: "list[tuple[str, float]] | None" = None,
+    portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
     Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
     ``bankroll_usd_provider``) supplies the current PortfolioState snapshot so
     Kelly sizes against the bankroll NET of correlation-weighted committed
-    capital. ``portfolio_reservation`` is the closure-held per-cycle in-flight
-    accumulator (``[(city, usd), ...]``); the builder reads it as
-    ``extra_reserved`` for INV-K7 and APPENDS this event's accepted stake so the
-    next same-cycle event nets it. When either is None the sizing reduces
-    EXACTLY to pre-#107 single-Kelly (no regression for unwired callers/tests)."""
+    capital. ``portfolio_reservation`` is the per-cycle in-flight ledger
+    (``PortfolioReservationLedger``, iterable as ``(city, usd)``); the builder
+    reads it as ``extra_reserved`` for INV-K7 and PROVISIONALLY reserves this
+    event's stake (``reserve``) so the next same-cycle event nets it. FIX B
+    (2026-06-05): the reactor commits/rolls back that provisional reserve in its
+    post-submit phase, so a candidate rejected downstream of Kelly never inflates
+    later candidates. A plain ``list`` is still accepted (legacy append-only
+    behavior). When either provider/ledger is None the sizing reduces EXACTLY to
+    pre-#107 single-Kelly (no regression for unwired callers/tests)."""
 
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
@@ -1058,15 +1078,28 @@ def build_event_bound_no_submit_receipt(
     if not risk.passed:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="RISK_GUARD_BLOCKED")
     # Task #107 INV-K7 (same-cycle in-flight reservation): this bet has now
-    # passed Kelly + RiskGuard and is committed to emission as an accepted final
-    # intent. Reserve its stake in the closure-held per-cycle accumulator so the
+    # passed Kelly + RiskGuard. Reserve its stake in the per-cycle ledger so the
     # NEXT event in this reactor cycle nets it — a just-emitted EDLI entry is
     # PENDING_TRACKED without fill authority, so its effective_cost_basis_usd is
     # 0.0 and it is invisible to the portfolio snapshot until reconciled. Without
     # this, two same-cycle bets would both size against the full (un-netted)
     # budget and breach it intra-cycle.
+    #
+    # FIX B (P1 zero-submit co-cause, 2026-06-05): the reservation is now
+    # PROVISIONAL. Passing Kelly + RiskGuard is NOT emission — the receipt can
+    # still be REJECTED downstream at DECISION_CERTIFICATE / EXECUTOR_
+    # EXPRESSIBILITY in the reactor's post-submit phase. The reactor finalizes
+    # this provisional reserve (commit on emit / rollback on reject) BEFORE the
+    # next sequential event reads the ledger, so a rejected candidate never
+    # inflates corr_committed_usd / raw_committed_usd for later same-cycle
+    # candidates. (Plain lists supplied by legacy/test callers keep the old
+    # append-only behavior via the shim below.)
     if portfolio_reservation is not None:
-        portfolio_reservation.append((family.city, float(kelly.size_usd)))
+        _reserve = getattr(portfolio_reservation, "reserve", None)
+        if callable(_reserve):
+            _reserve(event.event_id, family.city, float(kelly.size_usd))
+        else:
+            portfolio_reservation.append((family.city, float(kelly.size_usd)))
     intent = EventBoundFinalIntent(
         final_intent_id=f"edli_intent:{event.event_id}:{selected_token_id}",
         event_id=event.event_id,
