@@ -4204,6 +4204,11 @@ def _edli_event_reactor_cycle() -> None:
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),
                 tiny_live_max_orders_per_window=int(edli_cfg.get("tiny_live_max_orders_per_window", 1)),
+                # Task #102 book-wide edge-zone admission. Absent key => default
+                # False => byte-identical legacy money-path (the operator owns
+                # config/settings.json; this reads it without writing it).
+                edge_zone_admission_enabled=bool(edli_cfg.get("edge_zone_admission_enabled", False)),
+                edge_zone_min_ev_per_dollar=float(edli_cfg.get("edge_zone_min_ev_per_dollar", 0.0)),
             ),
         )
         _rr = reactor.process_pending(decision_time=now, limit=proof_limit)
