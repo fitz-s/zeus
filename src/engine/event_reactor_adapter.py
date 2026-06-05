@@ -3972,8 +3972,8 @@ def _market_analysis_from_event_snapshot(
             _hr = None
             import logging
             logging.getLogger("zeus.emos_serve").warning(
-                "HONEST_RAW_FLOOR_FAILED cell=%s|%s|%s exc=%s: %s",
-                getattr(city, "name", family.city), _emos_season, family.metric,
+                "HONEST_RAW_FLOOR_FAILED cell=%s|%s|%s unit=%s exc=%s: %s",
+                getattr(city, "name", family.city), _emos_season, family.metric, unit,
                 type(_hr_exc).__name__, _hr_exc,
             )
         if _hr is not None:

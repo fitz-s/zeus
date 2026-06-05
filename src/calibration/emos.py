@@ -204,7 +204,7 @@ def emos_sigma_model(
     try:
         table = load_emos_table()
         cells = table.get("cells", {})
-        cell = cells.get(f"{city}|{season}|{str(metric).lower()}")
+        cell = cells.get(emos_cell_key(city, season, metric))
         if cell is None:
             return None
         params = cell.get("params")
