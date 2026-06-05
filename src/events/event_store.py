@@ -149,8 +149,12 @@ class EventStore:
               -- budget is spent on stale ones. NULL target_date (non-forecast
               -- events) sorts last within its tier (json_extract → NULL → last
               -- under DESC in SQLite, which orders NULLs first for ASC / last for
-              -- DESC). available_at DESC breaks ties freshest-first.
+              -- DESC). Within the same target, repay retry debt before brand-new
+              -- zero-attempt redecision events. Otherwise a bounded proof window can
+              -- be refilled every cycle by fresh zero-attempt rows and permanently
+              -- starve transient retries that are now past their causality delay.
               json_extract(e.payload_json, '$.target_date') DESC,
+              CASE WHEN p.attempt_count > 0 THEN 0 ELSE 1 END ASC,
               e.available_at DESC, e.received_at DESC, e.event_id ASC
             LIMIT ?
             """,

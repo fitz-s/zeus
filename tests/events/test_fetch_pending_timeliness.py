@@ -127,3 +127,39 @@ def test_freshest_target_returned_first():
     assert ids[0] == fresher.event_id, (
         f"freshest target_date (2026-06-07) must be returned first; got order {ids}"
     )
+
+
+def test_retry_debt_precedes_zero_attempt_redecision_with_same_target():
+    """T3: bounded EDLI proof windows must not be refilled forever by newly
+    emitted zero-attempt redecision rows while transient retries sit behind them.
+
+    This preserves freshest-target-first across different target dates, but for
+    the same target it lets a candidate whose prior attempt was blocked by a
+    transient causality delay get another decision once time advances.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    retry_debt = _event(
+        "2026-06-06", "snap-retry",
+        available_at="2026-06-05T00:00:00+00:00",
+        received_at="2026-06-05T00:01:00+00:00",
+    )
+    brand_new = _event(
+        "2026-06-06", "snap-new",
+        available_at="2026-06-05T00:00:00+00:00",
+        received_at="2026-06-05T11:03:00+00:00",
+    )
+    store.insert_or_ignore(retry_debt)
+    store.insert_or_ignore(brand_new)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET attempt_count = 6, updated_at = '2026-06-05T10:57:00+00:00'
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, retry_debt.event_id),
+    )
+
+    returned = store.fetch_pending(decision_time=_DECISION_TIME, limit=2)
+    ids = [e.event_id for e in returned]
+    assert ids == [retry_debt.event_id, brand_new.event_id]
