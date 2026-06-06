@@ -45,6 +45,7 @@ def build_final_intent_certificate_from_actionable(
     taker_fok_fak_live_enabled: bool = False,
     available_crossable_shares: float | None = None,
     sweep_expected_fill_price: str | None = None,
+    executable_market_context: Mapping[str, object] | None = None,
 ) -> DecisionCertificate:
     action = actionable_cert.payload
     # The governor-decided ``order_mode`` is the SOLE authority for the order-type
@@ -105,6 +106,7 @@ def build_final_intent_certificate_from_actionable(
     decision_source_context_payload = _decision_source_context_payload(
         decision_source_context,
         executable_snapshot_cert.payload,
+        executable_market_context,
     )
     # WALL #1 (2026-06-01): passive_maker_context is MAKER-ONLY. A taker FOK/FAK
     # crosses the JIT book at submit and never rests, so it carries no maker context.
@@ -120,7 +122,11 @@ def build_final_intent_certificate_from_actionable(
         passive_maker_context_payload = _context_payload(passive_maker_context, "passive_maker_context")
     payload = {
         "event_id": action["event_id"],
-        "market_event_id": executable_snapshot_cert.payload.get("event_id"),
+        "market_event_id": _market_context_value(
+            executable_market_context,
+            "event_id",
+            executable_snapshot_cert.payload.get("event_id"),
+        ),
         "actionable_certificate_hash": actionable_cert.certificate_hash,
         "final_intent_id": action["final_intent_id"],
         "family_id": action["family_id"],
@@ -638,11 +644,16 @@ def _context_payload(context, field_name: str) -> dict[str, object]:
 def _decision_source_context_payload(
     context,
     executable_snapshot_payload: Mapping[str, object],
+    executable_market_context: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     payload = _context_payload(context, "decision_source_context")
     if not str(payload.get("polymarket_end_anchor_source") or "").strip():
         explicit_end = (
-            executable_snapshot_payload.get("market_end_at")
+            _market_context_value(executable_market_context, "market_end_at")
+            or _market_context_value(executable_market_context, "market_close_at")
+            or _market_context_value(executable_market_context, "endDate")
+            or _market_context_value(executable_market_context, "end_date")
+            or executable_snapshot_payload.get("market_end_at")
             or executable_snapshot_payload.get("market_close_at")
             or executable_snapshot_payload.get("endDate")
             or executable_snapshot_payload.get("end_date")
@@ -651,6 +662,17 @@ def _decision_source_context_payload(
             "gamma_explicit" if str(explicit_end or "").strip() else "f1_12z_fallback"
         )
     return payload
+
+
+def _market_context_value(
+    executable_market_context: Mapping[str, object] | None,
+    field: str,
+    default: object = None,
+) -> object:
+    if not isinstance(executable_market_context, Mapping):
+        return default
+    value = executable_market_context.get(field)
+    return default if value in (None, "") else value
 
 
 def _required_text(payload: Mapping[str, object], field: str) -> str:

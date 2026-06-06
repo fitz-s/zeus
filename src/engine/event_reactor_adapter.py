@@ -1664,6 +1664,7 @@ def _build_live_execution_command_certificates(
                             str(_depth_sweep.average_price)
                             if _depth_sweep.average_price is not None else None
                         )
+        executable_market_context = _executable_market_context_from_snapshot(_snap_for_depth)
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -1696,6 +1697,7 @@ def _build_live_execution_command_certificates(
             taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
+            executable_market_context=executable_market_context,
         )
         if (
             taker_fok_fak_live_enabled
@@ -1723,10 +1725,11 @@ def _build_live_execution_command_certificates(
                 min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
                 best_bid=fresh_best_bid,
                 best_ask=fresh_best_ask,
-                taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
-                available_crossable_shares=available_crossable_shares,
-                sweep_expected_fill_price=sweep_expected_fill_price,
-            )
+                    taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
+                    available_crossable_shares=available_crossable_shares,
+                    sweep_expected_fill_price=sweep_expected_fill_price,
+                    executable_market_context=executable_market_context,
+                )
         already_locked_reason = _locked_live_opportunity_no_price_improvement_reason(
             live_cap_conn,
             condition_id=str(final_intent.payload["condition_id"]),
@@ -2549,6 +2552,19 @@ def _queue_depth_ahead_from_quote(quote_payload: Mapping[str, object]) -> str | 
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _executable_market_context_from_snapshot(snapshot) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    context: dict[str, object] = {}
+    for field in ("event_id", "event_slug", "market_end_at", "market_close_at"):
+        value = getattr(snapshot, field, None)
+        if hasattr(value, "isoformat"):
+            value = value.isoformat()
+        if value not in (None, ""):
+            context[field] = value
+    return context or None
 
 
 def _select_edli_order_mode(
