@@ -15,8 +15,8 @@ two-step SDK order submission shapes.
 
 from __future__ import annotations
 
-import hashlib
 import importlib.metadata
+import hashlib
 import json
 import logging
 import os
@@ -41,6 +41,8 @@ from src.observability.counters import increment as _cnt_inc
 from src.state.db import assert_no_world_mutex_held_for_io as _assert_no_world_mutex_held_for_io
 
 logger = logging.getLogger(__name__)
+
+_DERIVED_API_CREDS_CACHE: dict[tuple[str, int, str, int, str], Any] = {}
 
 DEFAULT_V2_HOST = "https://clob.polymarket.com"
 POLYMARKET_DATA_API_BASE = "https://data-api.polymarket.com"
@@ -303,7 +305,16 @@ class PolymarketV2Adapter:
         except Exception:  # noqa: BLE001 - non-fatal; library default retained
             pass
 
-        effective_api_creds = kwargs.get("api_creds") or _api_creds_from_runtime()
+        explicit_api_creds = kwargs.get("api_creds")
+        effective_api_creds = explicit_api_creds
+        if effective_api_creds is None:
+            effective_api_creds = _cached_derived_api_creds(
+                host=kwargs["host"],
+                chain_id=kwargs["chain_id"],
+                signer_key=kwargs.get("signer_key"),
+                signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
+                funder_address=kwargs.get("funder_address"),
+            )
 
         client = ClobClient(
             kwargs["host"],
@@ -313,17 +324,26 @@ class PolymarketV2Adapter:
             signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
             funder=kwargs.get("funder_address"),
         )
-        # CLOB v2 L2 endpoints (balance/order) require API creds. Prefer the
-        # current static CLOB creds already provisioned in the daemon environment;
-        # do not hit /auth/api-key on every client construction when those creds
-        # exist.  create_or_derive_api_key is only a last-resort fallback for
-        # machines without POLYMARKET_API_* creds.
-        if effective_api_creds is None:
+        # CLOB v2 L2 endpoints (balance/order/user-channel auth) require L2 API
+        # creds bound to the active signer. Static POLYMARKET_API_* copies can
+        # drift from that signer; derive first, cache per process, and use static
+        # creds only as a fail-open telemetry fallback when derivation itself is
+        # unavailable.
+        if explicit_api_creds is None and effective_api_creds is None:
             try:
-                client.set_api_creds(client.create_or_derive_api_key())
+                derived_api_creds = client.create_or_derive_api_key()
+                client.set_api_creds(derived_api_creds)
+                _store_derived_api_creds(
+                    host=kwargs["host"],
+                    chain_id=kwargs["chain_id"],
+                    signer_key=kwargs.get("signer_key"),
+                    signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
+                    funder_address=kwargs.get("funder_address"),
+                    api_creds=derived_api_creds,
+                )
                 logger.warning(
                     "VENUE_AUTH_FALLBACK_TRIGGERED: create_or_derive_api_key used "
-                    "(primary /auth/api-key creds absent); L2 calls proceeding via derived creds",
+                    "(no cached signer-bound L2 creds); L2 calls proceeding via derived creds",
                 )
             except Exception as exc:  # pragma: no cover - upstream SDK behaviour
                 runtime_api_creds = _api_creds_from_runtime()
@@ -2404,8 +2424,65 @@ def _sdk_version() -> str:
         return "uninstalled"
 
 
+def _derived_api_creds_cache_key(
+    *,
+    host: str,
+    chain_id: int,
+    signer_key: Any,
+    signature_type: int,
+    funder_address: Any,
+) -> tuple[str, int, str, int, str]:
+    signer_digest = hashlib.sha256(str(signer_key or "").encode()).hexdigest()
+    return (
+        str(host).rstrip("/"),
+        int(chain_id),
+        signer_digest,
+        _normalize_signature_type(signature_type),
+        str(funder_address or "").lower(),
+    )
+
+
+def _cached_derived_api_creds(
+    *,
+    host: str,
+    chain_id: int,
+    signer_key: Any,
+    signature_type: int,
+    funder_address: Any,
+) -> Any | None:
+    return _DERIVED_API_CREDS_CACHE.get(
+        _derived_api_creds_cache_key(
+            host=host,
+            chain_id=chain_id,
+            signer_key=signer_key,
+            signature_type=signature_type,
+            funder_address=funder_address,
+        )
+    )
+
+
+def _store_derived_api_creds(
+    *,
+    host: str,
+    chain_id: int,
+    signer_key: Any,
+    signature_type: int,
+    funder_address: Any,
+    api_creds: Any,
+) -> None:
+    _DERIVED_API_CREDS_CACHE[
+        _derived_api_creds_cache_key(
+            host=host,
+            chain_id=chain_id,
+            signer_key=signer_key,
+            signature_type=signature_type,
+            funder_address=funder_address,
+        )
+    ] = api_creds
+
+
 def _api_creds_from_runtime() -> Any | None:
-    return _api_creds_from_keychain() or _api_creds_from_env()
+    return _api_creds_from_env()
 
 
 def _api_creds_from_keychain() -> Any | None:
