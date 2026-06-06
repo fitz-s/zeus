@@ -2326,6 +2326,14 @@ def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypa
     assert loser_reason.startswith("EXECUTION_PRICE_BELOW_MIN_TICK:")
 
 
+def test_candidate_low_volume_preserves_zero_volume_usd():
+    from src.engine import event_reactor_adapter as adapter
+
+    assert adapter._candidate_low_volume_usd(
+        {"volume_usd": 0.0, "volume": 25.0, "total_volume": 50.0}
+    ) == 0.0
+
+
 def test_opportunity_book_selector_excludes_all_locked_executables(monkeypatch):
     from src.contracts.execution_price import ExecutionPrice
     from src.engine import event_reactor_adapter as adapter

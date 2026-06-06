@@ -3671,6 +3671,13 @@ def _candidate_evaluation_id(proof: _CandidateProof) -> str:
     )
 
 
+def _candidate_low_volume_usd(row: Mapping[str, object]) -> float | None:
+    for key in ("volume_usd", "volume", "total_volume"):
+        if key in row and row.get(key) not in (None, ""):
+            return _optional_float(row.get(key))
+    return None
+
+
 def _candidate_evaluation_from_proof(
     *,
     family_id: str,
@@ -3698,7 +3705,7 @@ def _candidate_evaluation_from_proof(
         native_quote_available=bool(proof.native_quote_available),
         missing_reason=proof.missing_reason,
         book_hash=_nonnull(row.get("book_hash") or row.get("executable_book_hash") or row.get("snapshot_hash")),
-        low_volume_usd=_optional_float(row.get("volume_usd") or row.get("volume") or row.get("total_volume")),
+        low_volume_usd=_candidate_low_volume_usd(row),
     )
 
 

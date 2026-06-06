@@ -4,6 +4,8 @@ from __future__ import annotations
 # Last reused/audited: 2026-06-06
 # Authority basis: Operator request — event-driven Opportunity Book selector must separate admission from selection and keep low-volume markets eligible.
 
+import pytest
+
 from src.events.candidate_evaluation import CandidateEvaluation
 
 
@@ -29,8 +31,8 @@ def test_candidate_evaluation_computes_robust_ev_per_dollar_and_expected_dollars
     )
 
     assert evaluation.admitted is True
-    assert evaluation.robust_ev_per_dollar == 0.01
-    assert evaluation.expected_robust_dollars == 0.1
+    assert evaluation.robust_ev_per_dollar == pytest.approx(0.01)
+    assert evaluation.expected_robust_dollars == pytest.approx(0.1)
 
 
 def test_candidate_evaluation_low_volume_is_not_an_admission_reject():
