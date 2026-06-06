@@ -995,6 +995,13 @@ def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
 def _assert_calibration_coverage_contract(edli_cfg: dict) -> None:
     """Antibody #90: loud per-city bias+Platt calibration-coverage guard.
 
+    This guard is for the legacy bias/Platt calibration path. When the EDLI
+    reactor is in the EMOS-sole regime, non-day0 decisions do not consume that
+    path: they serve EMOS, honest raw with calibrated sigma, or pure raw analytic
+    with ``members_already_corrected=True``. In that regime, candidate-level
+    EMOS/floor failures remain fail-closed at the q seam, but the legacy
+    bias/Platt boot detector must not block armed boot on unused substrates.
+
     For EVERY live runtime city × metric, assert the current-season bias row
     (VERIFIED edli_per_city_v1) AND a non-borrowed/non-identity-by-starvation
     Platt exist.  Any city that would silently fall to RAW bias / borrow a
@@ -1012,6 +1019,13 @@ def _assert_calibration_coverage_contract(edli_cfg: dict) -> None:
     in ARMED mode an unexpected error is re-raised (fail-closed) rather than
     masking a coverage check.
     """
+    if bool(edli_cfg.get("edli_emos_sole_calibrator_enabled", False)):
+        logger.info(
+            "CALIBRATION_COVERAGE_SKIPPED_EMOS_SOLE: legacy bias/Platt guard "
+            "not applicable while EDLI q source is EMOS/honest-raw sole calibrator"
+        )
+        return
+
     armed = bool(edli_cfg.get("real_order_submit_enabled", False))
     try:
         from src.observability.calibration_coverage_guard import (

@@ -577,6 +577,31 @@ def test_edli_live_canary_does_not_consume_promotion_arm_artifact(monkeypatch, t
     assert settings_copy["edli_v1"]["edli_arm_gate_artifact_required"] is True
 
 
+def test_emos_sole_canary_skips_legacy_bias_platt_boot_guard(monkeypatch, tmp_path):
+    import src.observability.calibration_coverage_guard as coverage_guard
+
+    def _legacy_guard_must_not_run(*args, **kwargs):
+        raise AssertionError("legacy bias/Platt coverage guard ran under EMOS-sole")
+
+    monkeypatch.setattr(
+        coverage_guard,
+        "assert_calibration_coverage",
+        _legacy_guard_must_not_run,
+    )
+
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _edli_live_canary_updates(
+            **_stage_evidence_updates(tmp_path),
+            edli_emos_sole_calibrator_enabled=True,
+        ),
+    )
+
+    assert scheduler.started is True
+    assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
+    assert settings_copy["edli_v1"]["edli_emos_sole_calibrator_enabled"] is True
+
+
 def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs(monkeypatch):
     import src.main as main
 
