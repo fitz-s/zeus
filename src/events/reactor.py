@@ -641,32 +641,42 @@ class OpportunityEventReactor:
         receipt = _submission_receipt(event, submit_result)
         if receipt is None or not _receipt_matches_event(event, receipt):
             reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"
-            if _is_transient_money_path_reason(reason):
-                # A stale JIT executable-price receipt can lack the final event-bound
-                # executor fields because the adapter fails before constructing the
-                # full intent/proof. Treat the freshness race as retryable before
-                # applying the terminal receipt-binding rejection.
-                return _EXECUTABLE_SNAPSHOT_RETRY
-            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", reason, result, receipt=receipt, decision_time=decision_time)
-            return
+            return self._reject_or_retry_post_submit(
+                event,
+                "EXECUTOR_EXPRESSIBILITY",
+                reason,
+                result,
+                receipt=receipt,
+                decision_time=decision_time,
+            )
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
-            if _is_transient_money_path_reason(proof_reason):
-                # Transient: the forecast source was re-ingested (source_available_at updated)
-                # after this cycle's decision moment, or the selected executable price expired
-                # between the pre-submit family identity gate and the adapter's JIT scoring.
-                # These are not terminal rejections: requeue and retry next cycle when the
-                # decision clock or fresh market snapshot has advanced (bounded by
-                # MAX_EXECUTABLE_SNAPSHOT_RETRIES -> dead-letter). See process_pending.
-                return _EXECUTABLE_SNAPSHOT_RETRY
-            self._reject_event(event, proof_stage, proof_reason, result, receipt=receipt, decision_time=decision_time)
-            return
+            return self._reject_or_retry_post_submit(
+                event,
+                proof_stage,
+                proof_reason,
+                result,
+                receipt=receipt,
+                decision_time=decision_time,
+            )
         if receipt.side_effect_status in LIVE_EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
-            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN", result, receipt=receipt, decision_time=decision_time)
-            return
+            return self._reject_or_retry_post_submit(
+                event,
+                "EXECUTOR_EXPRESSIBILITY",
+                receipt.reason or "EDLI_REAL_ORDER_SIDE_EFFECT_FORBIDDEN",
+                result,
+                receipt=receipt,
+                decision_time=decision_time,
+            )
         if receipt.side_effect_status not in {"NO_SUBMIT"} | EXECUTION_RECEIPT_TERMINAL_STATUSES and not self._config.real_order_submit_enabled:
-            self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", "EDLI_REAL_ORDER_SUBMIT_DISABLED", result, receipt=receipt, decision_time=decision_time)
-            return
+            return self._reject_or_retry_post_submit(
+                event,
+                "EXECUTOR_EXPRESSIBILITY",
+                receipt.reason or "EDLI_REAL_ORDER_SUBMIT_DISABLED",
+                result,
+                receipt=receipt,
+                decision_time=decision_time,
+            )
         if receipt.side_effect_status == "NO_SUBMIT":
             proof_bundle = receipt.decision_proof_bundle
             if proof_bundle is None:
@@ -682,8 +692,14 @@ class OpportunityEventReactor:
                     if compile_result.failures
                     else "NO_SUBMIT_PROOF_BUNDLE_REQUIRED"
                 )
-                self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt, decision_time=decision_time)
-                return
+                return self._reject_or_retry_post_submit(
+                    event,
+                    "DECISION_CERTIFICATE",
+                    reason,
+                    result,
+                    receipt=receipt,
+                    decision_time=decision_time,
+                )
             compile_result = self._decision_compiler.compile_no_submit(
                 event,
                 decision_time=decision_time,
@@ -707,19 +723,29 @@ class OpportunityEventReactor:
                 # available time and the proof verifies. Requeue (bounded by retry cap →
                 # dead-letter) instead of terminally dropping the positive-edge candidate.
                 # 129/174 of the DECISION_CERTIFICATE rejections are exactly this.
-                if detail and _is_transient_money_path_reason(detail):
-                    return _EXECUTABLE_SNAPSHOT_RETRY
                 reason = failure.reason_code if failure else "NO_SUBMIT_CERTIFICATE_REJECTED"
                 if detail:
                     reason = f"{reason}:{detail}"
-                self._reject_event(event, "DECISION_CERTIFICATE", reason, result, receipt=receipt, decision_time=decision_time)
-                return
+                return self._reject_or_retry_post_submit(
+                    event,
+                    "DECISION_CERTIFICATE",
+                    reason,
+                    result,
+                    receipt=receipt,
+                    decision_time=decision_time,
+                )
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
         elif receipt.side_effect_status in EXECUTION_RECEIPT_TERMINAL_STATUSES:
             certificates = _execution_receipt_certificate_bundle(receipt)
             if not certificates:
-                self._reject_event(event, "EXECUTION_RECEIPT", "EXECUTION_RECEIPT_CERTIFICATE_REQUIRED", result, receipt=receipt, decision_time=decision_time)
-                return
+                return self._reject_or_retry_post_submit(
+                    event,
+                    "EXECUTION_RECEIPT",
+                    receipt.reason or "EXECUTION_RECEIPT_CERTIFICATE_REQUIRED",
+                    result,
+                    receipt=receipt,
+                    decision_time=decision_time,
+                )
             self._decision_certificate_ledger.persist_all(certificates)
             if receipt.side_effect_status in DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES:
                 self._no_submit_receipt_ledger.insert_idempotent(
@@ -727,6 +753,26 @@ class OpportunityEventReactor:
                     decision_time=decision_time,
                 )
         result.proof_accepted += 1
+
+    def _reject_or_retry_post_submit(
+        self,
+        event: OpportunityEvent,
+        stage: str,
+        reason: str,
+        result: ReactorResult,
+        *,
+        receipt: EventSubmissionReceipt | None,
+        decision_time: datetime,
+    ) -> str | None:
+        if _is_transient_money_path_reason(reason):
+            # Transient: the forecast source was re-ingested after this cycle's
+            # decision moment, or the selected executable price expired between
+            # the pre-submit family identity gate and the adapter's JIT scoring.
+            # Requeue for the next cycle instead of terminally consuming the
+            # opportunity (bounded by MAX_EXECUTABLE_SNAPSHOT_RETRIES).
+            return _EXECUTABLE_SNAPSHOT_RETRY
+        self._reject_event(event, stage, reason, result, receipt=receipt, decision_time=decision_time)
+        return None
 
     def _reject_event(
         self,
