@@ -645,11 +645,13 @@ class OpportunityEventReactor:
             return
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
         if proof_stage is not None:
-            if proof_reason and "SOURCE_CAPTURED_AFTER_DECISION_TIME" in proof_reason:
+            if _is_transient_money_path_reason(proof_reason):
                 # Transient: the forecast source was re-ingested (source_available_at updated)
-                # after this cycle's decision moment. Not a terminal rejection — requeue and
-                # retry next cycle, when decision_time advances past the source's available time
-                # (bounded by MAX_EXECUTABLE_SNAPSHOT_RETRIES → dead-letter). See process_pending.
+                # after this cycle's decision moment, or the selected executable price expired
+                # between the pre-submit family identity gate and the adapter's JIT scoring.
+                # These are not terminal rejections: requeue and retry next cycle when the
+                # decision clock or fresh market snapshot has advanced (bounded by
+                # MAX_EXECUTABLE_SNAPSHOT_RETRIES -> dead-letter). See process_pending.
                 return _EXECUTABLE_SNAPSHOT_RETRY
             self._reject_event(event, proof_stage, proof_reason, result, receipt=receipt, decision_time=decision_time)
             return
@@ -699,7 +701,7 @@ class OpportunityEventReactor:
                 # available time and the proof verifies. Requeue (bounded by retry cap →
                 # dead-letter) instead of terminally dropping the positive-edge candidate.
                 # 129/174 of the DECISION_CERTIFICATE rejections are exactly this.
-                if detail and "after decision_time" in detail:
+                if detail and _is_transient_money_path_reason(detail):
                     return _EXECUTABLE_SNAPSHOT_RETRY
                 reason = failure.reason_code if failure else "NO_SUBMIT_CERTIFICATE_REJECTED"
                 if detail:
@@ -966,6 +968,15 @@ def _receipt_money_path_blocker(
         if not verdict.admits:
             return "TRADE_SCORE", verdict.reason or "EDGE_ZONE_BLOCKED"
     return None, ""
+
+
+def _is_transient_money_path_reason(reason: str | None) -> bool:
+    if not reason:
+        return False
+    return (
+        "SOURCE_CAPTURED_AFTER_DECISION_TIME" in reason
+        or "EXECUTABLE_SNAPSHOT_STALE" in reason
+    )
 
 
 def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:
