@@ -1610,8 +1610,6 @@ def create_execution_intent(
     # type system couldn't catch a caller that meant 0.02 bps (200x
     # tighter) instead of 0.02 fraction. Import hoisted to module top
     # per PEP 8.
-    max_slippage_bps = float(intent.max_slippage_bps)
-    max_slippage_direction = "zero" if max_slippage_bps == 0.0 else "adverse"
     return ExecutionIntent(
         direction=edge_direction,
         target_size_usd=size_usd,
@@ -1818,6 +1816,8 @@ def _legacy_entry_intent_from_final(
             f"intent={intent_event_id!r} snapshot={snapshot_event_id!r}"
         )
     execution_event_id = snapshot_event_id or intent_event_id
+    max_slippage_bps = float(intent.max_slippage_bps)
+    max_slippage_direction = "zero" if max_slippage_bps == 0.0 else "adverse"
     return ExecutionIntent(
         direction=Direction(intent.direction),
         target_size_usd=_final_intent_target_size_usd(intent, submitted_shares),
