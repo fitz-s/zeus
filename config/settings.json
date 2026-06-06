@@ -174,7 +174,7 @@
     "pin": {
       "cycle_stratified_pin_eligible_after": "2025-06-02",
       "_pin_eligibility_note": "TIGGE spec v3 \u00a73 Phase 0 #6 / critic v2 A2 BLOCKER: c12 IFS-ENS has NO data on disk for 2024-01-01..2024-06-01 (cloud ground truth \u00a74). Cycle-stratified Platt requires \u22651y rolling 12z corpus, so cycle-stratified pin eligibility floor = 2025-06-02. Frozen-as-of values older than this floor MUST resolve via pooled-cycle config (legacy single-cycle '00' bucket), not cycle-stratified buckets, until the c12 2024-H1 gap is recovered or the floor moves forward.",
-      "frozen_as_of": "2026-05-27T15:51:42Z",
+      "frozen_as_of": "2026-06-06T17:44:44Z",
       "model_keys": {},
       "_pin_note": "Zeus #64 ship-readiness C2: pinned at first ft_v1 HIGH promote. 137 HIGH ft_v1 cohorts on world.db platt_models_v2 (is_active=1). LOW pin TBD when LOW ships (Phase F follow-up)."
     }

@@ -74,6 +74,22 @@ def _qualified_calibration_read_table(conn: sqlite3.Connection, table_name: str)
     return table_name
 
 
+def _sqlite_timestamp_bound(value: Optional[str]) -> Optional[str]:
+    """Normalize ISO pins before lexicographic SQLite timestamp comparison."""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return raw
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed.isoformat(sep=" ", timespec="seconds")
+
+
 def _table_info(conn: sqlite3.Connection, table_ref: str) -> list[sqlite3.Row]:
     if table_ref.startswith("world."):
         table_name = table_ref.removeprefix("world.")
@@ -833,7 +849,7 @@ def load_platt_model(
         frozen_clause = ""
         if frozen_as_of is not None:
             frozen_clause = "AND recorded_at <= ?"
-            params.append(frozen_as_of)
+            params.append(_sqlite_timestamp_bound(frozen_as_of))
         row = conn.execute(
             f"""
             SELECT {_v2_select_cols}
@@ -857,7 +873,7 @@ def load_platt_model(
         frozen_clause = ""
         if frozen_as_of is not None:
             frozen_clause = "AND recorded_at <= ?"
-            params.append(frozen_as_of)
+            params.append(_sqlite_timestamp_bound(frozen_as_of))
         row = conn.execute(
             f"""
             SELECT {_v2_select_cols}
