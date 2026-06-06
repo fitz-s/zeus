@@ -790,10 +790,12 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_fallback_active"] is False
         assert details["portfolio_position_count"] == 1
         assert details["portfolio_capital_source"] == "dual_source_blended"
-        # Bankroll truth axis (P0-A): provider-sourced wallet; DEF A
-        # makes effective_bankroll == initial_bankroll (no PnL fold-in).
+        # Bankroll truth axis: provider-sourced wallet cash plus canonical
+        # open-position value, with no realized-PnL fold-in.
         assert details["initial_bankroll"] == pytest.approx(211.37)
-        assert details["effective_bankroll"] == pytest.approx(211.37)
+        assert details["account_equity_components"]["wallet_cash_usd"] == pytest.approx(211.37)
+        assert details["account_equity_components"]["open_position_equity_usd"] == pytest.approx(25.0)
+        assert details["effective_bankroll"] == pytest.approx(236.37)
         assert details["bankroll_truth_source"] == "polymarket_wallet"
         # Baselines come from PortfolioState's daily/weekly snapshots (still
         # provided by the legacy load_portfolio path).

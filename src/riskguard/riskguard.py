@@ -232,6 +232,115 @@ def _coerce_finite_float(value) -> float | None:
     return numeric
 
 
+def _position_value_usd(position: Position) -> float:
+    """Conservative account-equity value for an open position."""
+
+    shares = _coerce_finite_float(getattr(position, "shares", None)) or 0.0
+    if shares > 0:
+        for price_field in ("last_monitor_market_price", "entry_price_avg_fill", "entry_price"):
+            price = _coerce_finite_float(getattr(position, price_field, None))
+            if price is not None and price > 0:
+                return max(0.0, shares * price)
+
+    for value_field in ("filled_cost_basis_usd", "cost_basis_usd", "size_usd"):
+        value = _coerce_finite_float(getattr(position, value_field, None))
+        if value is not None and value > 0:
+            return value
+    return 0.0
+
+
+def _active_position_equity_usd(portfolio: PortfolioState) -> float:
+    total = 0.0
+    for position in getattr(portfolio, "positions", []) or []:
+        phase = str(getattr(position, "state", "") or "").lower()
+        exit_state = str(getattr(position, "exit_state", "") or "").lower()
+        if phase in {"settled", "voided", "quarantined", "admin_closed"}:
+            continue
+        if exit_state in {"settled", "voided", "admin_closed"}:
+            continue
+        total += _position_value_usd(position)
+    return round(total, 2)
+
+
+def _unprojected_entry_fill_equity_usd(conn: sqlite3.Connection) -> float:
+    """Value confirmed entry fills that have not reached position projections yet.
+
+    A live BUY converts cash into conditional tokens. Treating the cash drop as
+    realized loss trips RiskGuard after the first successful fill. Until the
+    position projection catches up, the venue-confirmed fill fact is the
+    conservative account-equity authority for that just-acquired asset.
+    """
+
+    try:
+        rows = conn.execute(
+            """
+            WITH latest_trade AS (
+              SELECT tf.*
+              FROM venue_trade_facts tf
+              JOIN (
+                SELECT command_id, MAX(local_sequence) AS max_sequence
+                FROM venue_trade_facts
+                GROUP BY command_id
+              ) latest
+                ON latest.command_id = tf.command_id
+               AND latest.max_sequence = tf.local_sequence
+            )
+            SELECT latest_trade.filled_size, latest_trade.fill_price
+            FROM latest_trade
+            JOIN venue_commands cmd
+              ON cmd.command_id = latest_trade.command_id
+            WHERE latest_trade.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+              AND UPPER(COALESCE(cmd.intent_kind, '')) = 'ENTRY'
+              AND UPPER(COALESCE(cmd.side, '')) = 'BUY'
+              AND cmd.state = 'FILLED'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM position_lots lot
+                WHERE lot.source_command_id = cmd.command_id
+                  AND lot.state IN ('OPTIMISTIC_EXPOSURE', 'CONFIRMED_EXPOSURE', 'EXIT_PENDING')
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM position_current pc
+                WHERE pc.order_id = cmd.venue_order_id
+                  AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+              )
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        logger.exception("RiskGuard failed to compute unprojected entry fill equity")
+        return 0.0
+
+    total = 0.0
+    for row in rows:
+        row_map = row if isinstance(row, dict) else {key: row[key] for key in row.keys()}
+        shares = _coerce_finite_float(row_map.get("filled_size")) or 0.0
+        price = _coerce_finite_float(row_map.get("fill_price")) or 0.0
+        if shares > 0 and price > 0:
+            total += shares * price
+    return round(total, 2)
+
+
+def _riskguard_account_equity(
+    conn: sqlite3.Connection,
+    *,
+    wallet_cash_usd: float,
+    portfolio: PortfolioState,
+) -> dict:
+    open_position_equity_usd = _active_position_equity_usd(portfolio)
+    unprojected_entry_fill_equity_usd = _unprojected_entry_fill_equity_usd(conn)
+    effective_equity_usd = round(
+        float(wallet_cash_usd) + open_position_equity_usd + unprojected_entry_fill_equity_usd,
+        2,
+    )
+    return {
+        "wallet_cash_usd": round(float(wallet_cash_usd), 2),
+        "open_position_equity_usd": open_position_equity_usd,
+        "unprojected_entry_fill_equity_usd": unprojected_entry_fill_equity_usd,
+        "effective_equity_usd": effective_equity_usd,
+    }
+
+
 def _risk_state_reference_from_row(row: sqlite3.Row) -> dict | None:
     try:
         details = json.loads(row["details_json"] or "{}")
@@ -255,13 +364,14 @@ def _risk_state_reference_from_row(row: sqlite3.Row) -> dict | None:
     if initial_bankroll is None or effective_bankroll is None:
         return None
 
-    # Definition A (followup_design.md §2.1): post-cutover effective_bankroll
-    # equals initial_bankroll (= wallet_balance_usd) — no PnL math added in.
     # `total_pnl` may still be present in details_json for analytics, but it is
-    # NOT the equity formula. Keep the legacy tolerance check on
-    # (initial_bankroll == effective_bankroll) so a malformed row is rejected.
+    # NOT the equity formula. Effective bankroll is account equity: wallet cash
+    # plus authoritative open-position value. Older rows had wallet-only equity
+    # and no component fields, so they remain internally consistent only when
+    # initial_bankroll == effective_bankroll.
     total_pnl = _coerce_finite_float(details.get("total_pnl")) or 0.0
-    if abs(initial_bankroll - effective_bankroll) > TRAILING_LOSS_ROW_TOLERANCE_USD:
+    components = details.get("account_equity_components")
+    if not isinstance(components, dict) and abs(initial_bankroll - effective_bankroll) > TRAILING_LOSS_ROW_TOLERANCE_USD:
         return None
     return {
         "row_id": int(row["id"]),
@@ -1081,14 +1191,17 @@ def tick() -> RiskLevel:
         if settlement_authority_missing_tables:
             realized_degraded = True
 
-        # P0-A correction (followup_design.md §2.1, §7 Definition A):
-        # current_equity = wallet_balance_usd ONLY. Do NOT add total_pnl — realized
-        # PnL is already in the on-chain wallet (cash-settled exits move balance);
-        # adding it again double-counts. Unrealized PnL is not live bankroll
-        # authority and is excluded from equity by definition. The retired path used
-        # config-literal capital plus total_pnl, which was a synthetic equity object.
-        # Now: wallet (real, no math).
-        current_total_value = round(current_bankroll_usd, 2)
+        # Account equity = wallet cash plus authoritative open-position value.
+        # Realized PnL is already in wallet cash and must not be added again.
+        # Open entry fills are different: a BUY converts cash into conditional
+        # tokens, and treating that conversion as loss false-REDs live after the
+        # first successful fill.
+        account_equity = _riskguard_account_equity(
+            zeus_conn,
+            wallet_cash_usd=current_bankroll_usd,
+            portfolio=portfolio,
+        )
+        current_total_value = account_equity["effective_equity_usd"]
         daily_loss_snapshot = _trailing_loss_snapshot(
             risk_conn,
             now=now,
@@ -1142,9 +1255,6 @@ def tick() -> RiskLevel:
                 "weekly_loss_source": weekly_loss_snapshot["source"],
                 "daily_loss_reference": daily_loss_snapshot["reference"],
                 "weekly_loss_reference": weekly_loss_snapshot["reference"],
-                # P0-A: this field is now the on-chain wallet snapshot used as
-                # equity base for trailing-loss math (architect memo §7), NOT the
-                # config-constant fiction the legacy field name implies.
                 "initial_bankroll": round(current_bankroll_usd, 2),
                 # Cutover-day guard (followup_design.md §6.2, §7 hazard #3):
                 # this provenance marker tells `_trailing_loss_reference` to skip
@@ -1169,6 +1279,7 @@ def tick() -> RiskLevel:
                 "unrealized_pnl": round(total_unrealized_pnl, 2),
                 "total_pnl": round(total_pnl, 2),
                 "effective_bankroll": round(current_total_value, 2),
+                "account_equity_components": account_equity,
                 "portfolio_truth_source": portfolio_truth["source"],
                 "portfolio_loader_status": portfolio_truth["loader_status"],
                 "portfolio_fallback_active": portfolio_truth["fallback_active"],
@@ -1346,7 +1457,11 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             return RiskLevel.DATA_DEGRADED
 
         current_bankroll_usd = float(bankroll_of_record.value_usd)
-        current_equity = current_bankroll_usd
+        current_equity = _riskguard_account_equity(
+            zeus_conn,
+            wallet_cash_usd=current_bankroll_usd,
+            portfolio=portfolio,
+        )["effective_equity_usd"]
         initial_bankroll = current_bankroll_usd
 
         daily_loss_snapshot = _trailing_loss_snapshot(

@@ -8,7 +8,8 @@
 Locks six invariants surfaced by the 2026-05-01 architect + followup memos:
 
 1. ``riskguard.tick`` consumes ``bankroll_provider.current().value_usd`` as the
-   trailing-loss equity base, not the removed config-cap fossil and not the
+   cash authority and builds trailing-loss equity from cash plus authoritative
+   open-position value, not the removed config-cap fossil and not the
    ``PortfolioState.bankroll`` field.
 2. When the wallet is unreachable and no fresh cache exists, tick fails closed
    at ``RiskLevel.DATA_DEGRADED`` with status ``bankroll_provider_unavailable``.
@@ -19,9 +20,10 @@ Locks six invariants surfaced by the 2026-05-01 architect + followup memos:
    times pct.
    A real $15 daily loss must NOT trigger a false-positive RED that sweeps
    live positions.
-5. Definition A (followup §2.1, §7 hazard #1): ``effective_bankroll`` MUST equal
-   ``wallet_balance_usd``. Adding ``total_pnl`` would double-count realized PnL
-   (already in the wallet via cash settlement).
+5. Definition A (followup §2.1, §7 hazard #1): ``effective_bankroll`` MUST NOT
+   add ``total_pnl``. Realized PnL is already in the wallet via cash settlement;
+   unrealized open-entry assets are represented only through canonical position
+   value or confirmed venue fill facts.
 6. Cutover guard (followup §6.2, §7 hazard #3): ``_trailing_loss_reference``
    MUST skip historical rows that lack ``bankroll_truth_source ==
    "polymarket_wallet"``. Without this, day-1 post-cutover compares different
@@ -293,6 +295,66 @@ def test_no_double_counting_pnl(monkeypatch, tmp_path):
     # Confirm the legacy double-counting path is NOT in effect.
     legacy_double_counted = round(199.40 + 5.0, 2)
     assert details["effective_bankroll"] != pytest.approx(legacy_double_counted)
+
+
+def test_open_entry_fill_cash_conversion_is_not_daily_loss(monkeypatch, tmp_path):
+    """A confirmed BUY fill converts cash into tokens; it is not realized loss."""
+
+    zeus_db = tmp_path / "zeus.db"
+    risk_db = tmp_path / "risk_state.db"
+    _bootstrap_canonical_zeus_db(zeus_db)
+    _seed_post_cutover_reference(risk_db, age=timedelta(hours=25), wallet_value_usd=199.40)
+
+    conn = get_connection(zeus_db)
+    now = _now()
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+          command_id, snapshot_id, envelope_id, position_id, decision_id,
+          idempotency_key, intent_kind, market_id, token_id, side, size, price,
+          venue_order_id, state, last_event_id, created_at, updated_at,
+          review_required_reason
+        ) VALUES (
+          'cmd-live-fill', 'snap-1', 'env-1', 'pos-1', 'decision-1',
+          'idem-1', 'ENTRY', 'market-1', 'token-1', 'BUY', 24.68, 0.75,
+          'order-1', 'FILLED', NULL, ?, ?, NULL
+        )
+        """,
+        (now, now),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_trade_facts (
+          trade_id, venue_order_id, command_id, state, filled_size, fill_price,
+          fee_paid_micro, tx_hash, block_number, confirmation_count, source,
+          observed_at, venue_timestamp, local_sequence, raw_payload_hash,
+          raw_payload_json
+        ) VALUES (
+          'trade-1', 'order-1', 'cmd-live-fill', 'CONFIRMED', '24.68', '0.75',
+          NULL, 'tx-1', NULL, 0, 'WS_USER', ?, ?, 1, 'hash-1', '{}'
+        )
+        """,
+        (now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    _patch_tick_environment(monkeypatch, zeus_db=zeus_db, risk_db=risk_db)
+    monkeypatch.setattr(
+        bankroll_provider,
+        "current",
+        lambda **_kwargs: _bor(180.89),
+    )
+
+    riskguard_module.tick()
+    details = _read_latest_details(risk_db)
+
+    assert details["bankroll_truth"]["value_usd"] == pytest.approx(180.89)
+    assert details["account_equity_components"]["wallet_cash_usd"] == pytest.approx(180.89)
+    assert details["account_equity_components"]["unprojected_entry_fill_equity_usd"] == pytest.approx(18.51)
+    assert details["effective_bankroll"] == pytest.approx(199.40)
+    assert details["daily_loss"] == pytest.approx(0.0)
+    assert details["daily_loss_level"] == RiskLevel.GREEN.value
 
 
 def test_trailing_loss_skips_pre_cutover_reference_rows(monkeypatch, tmp_path):
