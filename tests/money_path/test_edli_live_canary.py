@@ -1406,8 +1406,10 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     )
 
     witness = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
+    witness_again = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
     assert witness.book_hash == "book-hash-1"
+    assert witness_again.book_hash == "book-hash-1"
     assert witness.book_authority_id == "execution_feasibility_evidence"
     assert witness.heartbeat_authority_id == "heartbeat_supervisor"
     assert witness.user_ws_authority_id == "ws_gap_guard"

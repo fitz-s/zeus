@@ -5061,6 +5061,23 @@ def _edli_pre_submit_authority_provider_from_world_conn(
 
     max_quote_age_ms = int(edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000)
     balance_check_enabled = bool(edli_cfg.get("pre_submit_balance_allowance_check_enabled", True))
+    venue_summary_cache: dict[str, object] | None = None
+    collateral_payload_cache: dict[str, object] | None = None
+
+    def _cached_venue_summary(checked_at: datetime) -> dict[str, object]:
+        nonlocal venue_summary_cache
+        if venue_summary_cache is None:
+            venue_summary_cache = _edli_venue_connectivity_authority_summary(checked_at)
+        return venue_summary_cache
+
+    def _cached_collateral_payload() -> dict[str, object]:
+        nonlocal collateral_payload_cache
+        if collateral_payload_cache is None:
+            from src.data.polymarket_client import PolymarketClient
+
+            with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+                collateral_payload_cache = dict(clob._ensure_v2_adapter().get_collateral_payload())
+        return collateral_payload_cache
 
     def _provider(final_intent, _executable_snapshot, decision_time):
         checked_at = decision_time.astimezone(timezone.utc)
@@ -5107,11 +5124,12 @@ def _edli_pre_submit_authority_provider_from_world_conn(
 
         heartbeat_summary = _edli_heartbeat_authority_summary()
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)
-        venue_summary = _edli_venue_connectivity_authority_summary(checked_at)
+        venue_summary = _cached_venue_summary(checked_at)
         balance_status, balance_authority_id = _edli_balance_allowance_status(
             final_intent,
             checked_at,
             enabled=balance_check_enabled,
+            collateral_payload=_cached_collateral_payload(),
         )
 
         return PreSubmitAuthorityWitness(
@@ -5192,7 +5210,13 @@ def _edli_venue_connectivity_authority_summary(checked_at: datetime) -> dict[str
     }
 
 
-def _edli_balance_allowance_status(final_intent, checked_at: datetime, *, enabled: bool) -> tuple[str, str]:
+def _edli_balance_allowance_status(
+    final_intent,
+    checked_at: datetime,
+    *,
+    enabled: bool,
+    collateral_payload: dict[str, object] | None = None,
+) -> tuple[str, str]:
     if not enabled:
         raise ValueError("PRE_SUBMIT_ALLOWANCE_CHECK_DISABLED")
     from src.data.polymarket_client import PolymarketClient
@@ -5202,8 +5226,11 @@ def _edli_balance_allowance_status(final_intent, checked_at: datetime, *, enable
     token_id = str(intent.get("token_id") or "")
     size = float(intent.get("size") or 0.0)
     notional = float(intent.get("notional_usd") or 0.0)
-    with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
-        collateral = clob._ensure_v2_adapter().get_collateral_payload()
+    if collateral_payload is None:
+        with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+            collateral = clob._ensure_v2_adapter().get_collateral_payload()
+    else:
+        collateral = collateral_payload
     if side == "BUY":
         balance_micro = int(collateral.get("pusd_balance_micro") or 0)
         allowance_micro = int(collateral.get("pusd_allowance_micro") or 0)
