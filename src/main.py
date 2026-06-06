@@ -2823,17 +2823,17 @@ def _refresh_pending_family_snapshots(
     # ORDER BY priority DESC, available_at ASC), so the highest-priority families are
     # captured first; the remainder are picked up on subsequent cycles. The reactor's
     # own proof_limit still bounds decisions; this bounds the venue-I/O per cycle.
-    # 2026-06-04: with the coverage-fairness emit now covering all ~49 cities, this cap is the
-    # second throttle on the simultaneously-tradeable set (each family = 1 serial JIT /book
-    # fetch). 50 overran the 60s reactor cycle ("max running instances reached"); 8 was the old
-    # 3-city-era value. 16 ≈ 16s of fetches inside a 60s cycle — a safe ~2x of the fresh universe
-    # without overrun. The proper fix (decouple market-identity universe sizing from the 30s
-    # price-freshness TTL — size off identity, enforce freshness only at submit) is the follow-up.
+    # 2026-06-06: executable prices expire after 30s. The decoupled warmer must
+    # complete and commit before the reactor's next decision timestamp, not merely
+    # "eventually" refresh. Live evidence showed 16 families routinely hit the 25s
+    # time-box and committed after the reactor read, recreating
+    # EXECUTABLE_SNAPSHOT_STALE. Keep the per-tick venue-I/O slice small enough to
+    # finish inside the TTL; deferred families are retried on the next warm tick.
     # 2026-06-05: prioritize newest target_date before applying the cap. Strictly
     # stale pending rows can still exist in the processing ledger after Gamma no
     # longer returns the market, and letting those rows spend the cap starves fresh
     # family snapshots.
-    _FAMILY_REFRESH_CAP = 16
+    _FAMILY_REFRESH_CAP = 8
     if len(families) > _FAMILY_REFRESH_CAP:
         families = families[:_FAMILY_REFRESH_CAP]
 
@@ -2936,7 +2936,7 @@ def _refresh_pending_family_snapshots(
             # cycle never reaches FSR-emit + process_pending -> 0 receipts. Bound the
             # refresh phase to a deadline that ALWAYS leaves budget for the downstream
             # emit+process; uncaptured families are picked up next cycle (priority-ordered).
-            _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "25.0")))
+            _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "15.0")))
             _refresh_deadline = time.monotonic() + _refresh_budget_s
             _refreshed_n = 0
             for fam_city, fam_date, fam_metric in gamma_refresh_families:
