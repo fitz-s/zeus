@@ -372,6 +372,50 @@ def test_book_snapshot_events_also_swept():
     assert _pending_count(conn) == 1
 
 
+def test_channel_cache_events_can_be_ignored_after_ingestion():
+    """Latest channel cache rows are not submit-reactor inputs.
+
+    They already hydrate quote cache / feasibility evidence at ingest time; after
+    that, keeping them pending only burns reactor budget on deterministic
+    NO_DIRECT_STALE_TRADE rejects.
+    """
+    conn = _world_conn()
+    store = EventStore(conn)
+    events = [
+        _channel_event("BEST_BID_ASK_CHANGED", "tok-ignore-1", "0xignore", "2026-06-04T00:00:00+00:00"),
+        _channel_event("BOOK_SNAPSHOT", "tok-ignore-2", "0xignore", "2026-06-04T00:01:00+00:00"),
+    ]
+    for event in events:
+        store.insert_or_ignore(event)
+
+    ignored = store.ignore_channel_cache_events(batch_limit=10)
+
+    assert ignored == 2
+    assert {_status_of(conn, event.event_id) for event in events} == {"ignored"}
+
+
+def test_ignore_channel_cache_events_keeps_missing_token_fail_closed():
+    """Rows without a token id are not silently ignored."""
+    conn = _world_conn()
+    store = EventStore(conn)
+    event = make_opportunity_event(
+        event_type="BOOK_SNAPSHOT",
+        entity_key="missing-token",
+        source="market_channel",
+        observed_at="2026-06-04T00:00:00+00:00",
+        available_at="2026-06-04T00:00:00+00:00",
+        received_at="2026-06-04T00:00:00+00:00",
+        payload={"condition_id": "0xmissing", "event_type": "BOOK_SNAPSHOT"},
+        priority=0,
+    )
+    store.insert_or_ignore(event)
+
+    ignored = store.ignore_channel_cache_events(batch_limit=10)
+
+    assert ignored == 0
+    assert _status_of(conn, event.event_id) == "pending"
+
+
 def test_tied_latest_available_at_rows_are_all_kept():
     """When distinct payloads share the max available_at, all max-timestamp rows stay active."""
     conn = _world_conn()

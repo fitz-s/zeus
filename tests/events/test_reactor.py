@@ -32,6 +32,13 @@ def _store() -> tuple[sqlite3.Connection, EventStore]:
     return conn, EventStore(conn)
 
 
+def _processing_status(conn: sqlite3.Connection, event_id: str) -> str:
+    return conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()[0]
+
+
 def _day0_event(key_suffix: str = "a"):
     payload = Day0ExtremeUpdatedPayload(
         city="Chicago",
@@ -229,13 +236,18 @@ def test_event_cannot_bypass_source_truth():
     assert submitted == []
 
 
-def test_market_channel_event_no_direct_stale_trade():
+def test_market_channel_event_not_direct_reactor_input():
     _conn, store = _store()
-    store.insert_or_ignore(_market_event())
+    event = _market_event()
+    store.insert_or_ignore(event)
     reactor, rejected, submitted = _reactor(store)
     result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
-    assert result.rejection_reasons == ["MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE"]
+    assert result.rejection_reasons == []
+    assert result.processed == 0
+    assert result.rejected == 0
+    assert rejected == []
     assert submitted == []
+    assert _processing_status(_conn, event.event_id) == "pending"
 
 
 def _retry_reactor(store, snapshot_present: dict):
@@ -1515,8 +1527,8 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
     thread.join(timeout=5.0)
 
     assert writer_errors == []
-    assert result.processed == len(forecast_events) + 1
-    assert result.rejected == 1
+    assert result.processed == len(forecast_events)
+    assert result.rejected == 0
     rows = conn.execute(
         """
         SELECT event_id, processing_status
@@ -1525,7 +1537,9 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
         """.format(",".join("?" for _ in [*forecast_events, book_event])),
         tuple(event.event_id for event in [*forecast_events, book_event]),
     ).fetchall()
-    assert {row["processing_status"] for row in rows} == {"processed"}
+    statuses = {row["event_id"]: row["processing_status"] for row in rows}
+    assert {statuses[event.event_id] for event in forecast_events} == {"processed"}
+    assert statuses[book_event.event_id] == "pending"
     for event in forecast_events:
         cert_count = conn.execute(
             """
@@ -1546,7 +1560,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
         "SELECT COUNT(*) FROM no_trade_regret_events WHERE event_id = ?",
         (book_event.event_id,),
     ).fetchone()[0]
-    assert regret_count == 1
+    assert regret_count == 0
     future_pending = conn.execute(
         """
         SELECT COUNT(*)
@@ -1554,7 +1568,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
         WHERE processing_status = 'pending'
         """
     ).fetchone()[0]
-    assert future_pending == 1
+    assert future_pending == 2
 
 
 def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_letter():
@@ -1569,9 +1583,9 @@ def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_l
 
     result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc), limit=10)
 
-    assert result.processed == 3
+    assert result.processed == 2
     assert result.proof_accepted == 1
-    assert result.rejected == 2
+    assert result.rejected == 1
     rows = conn.execute(
         """
         SELECT event_id, processing_status
@@ -1580,11 +1594,14 @@ def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_l
         """,
         (accepted.event_id, source_rejected.event_id, market_rejected.event_id),
     ).fetchall()
-    assert {row[1] for row in rows} == {"processed"}
+    statuses = {row[0]: row[1] for row in rows}
+    assert statuses[accepted.event_id] == "processed"
+    assert statuses[source_rejected.event_id] == "processed"
+    assert statuses[market_rejected.event_id] == "pending"
     expected = {
         accepted.event_id: {"verified_no_submit": 1, "execution_receipt": 0, "compile_failure": 0, "regret": 0, "dead_letter": 0},
         source_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
-        market_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
+        market_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 0, "regret": 0, "dead_letter": 0},
     }
     for event_id, expected_surfaces in expected.items():
         assert _terminal_surfaces(conn, event_id) == expected_surfaces
@@ -1827,7 +1844,7 @@ def test_day0_source_mismatch_blocks_before_trade_score_path():
     assert submitted == []
 
 
-def test_reactor_rejections_write_no_trade_regret_events():
+def test_reactor_does_not_write_regret_for_channel_cache_events():
     conn, store = _store()
     store.insert_or_ignore(_market_event())
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -1845,7 +1862,7 @@ def test_reactor_rejections_write_no_trade_regret_events():
 
     reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
-    assert conn.execute("SELECT rejection_reason FROM no_trade_regret_events").fetchone()[0] == "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE"
+    assert conn.execute("SELECT COUNT(*) FROM no_trade_regret_events").fetchone()[0] == 0
 
 
 def test_reactor_exception_dead_letters_event():

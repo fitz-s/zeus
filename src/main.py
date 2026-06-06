@@ -5365,6 +5365,23 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "(non-fatal): %r",
             _ch_sweep_exc,
         )
+    try:
+        _ch_ignored = store.ignore_channel_cache_events(batch_limit=batch_limit)
+        if _ch_ignored:
+            logger.info(
+                "EDLI reactor: ignored %d channel cache events "
+                "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) after "
+                "quote-cache/feasibility ingestion; excluded from submit reactor "
+                "working set (batch_limit=%d)",
+                _ch_ignored,
+                batch_limit,
+            )
+    except Exception as _ch_ignore_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: ignore_channel_cache_events sweep failed "
+            "(non-fatal): %r",
+            _ch_ignore_exc,
+        )
 
     try:
         _fsr_archived = store.archive_superseded_forecast_snapshot_events(
