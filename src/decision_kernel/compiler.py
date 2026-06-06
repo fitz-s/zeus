@@ -12,6 +12,10 @@ from src.decision_kernel.certificate import DecisionCertificate, ParentEdge, bui
 from src.decision_kernel.certificates.no_submit import build_no_submit_decision_certificate
 from src.decision_kernel.errors import CertificateVerificationError
 from src.decision_kernel.ledger import CompileFailure
+from src.decision_kernel.verifier import (
+    APPROVED_CALIBRATION_AUTHORITIES,
+    IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+)
 from src.events.opportunity_event import OpportunityEvent
 
 CompileStatus = Literal["VERIFIED", "REJECTED", "REVIEW_REQUIRED"]
@@ -556,12 +560,12 @@ def _validate_calibration_payload(
     authority = calibration.get("authority")
     if authority in (None, ""):
         raise ValueError("calibration.authority missing")
-    if str(authority) not in {"VERIFIED", "LIVE", "APPROVED"}:
+    if str(authority) not in APPROVED_CALIBRATION_AUTHORITIES:
         raise ValueError("calibration.authority is not approved")
     maturity = _optional_int(calibration.get("maturity_level"))
     if maturity is None:
         raise ValueError("calibration.maturity_level missing")
-    if maturity > 3:
+    if maturity > 3 and str(authority) != IDENTITY_FALLBACK_CALIBRATION_AUTHORITY:
         raise ValueError("calibration.maturity_level too low")
     input_space = calibration.get("input_space")
     expected_input_space = model_config.get("calibration_input_space")

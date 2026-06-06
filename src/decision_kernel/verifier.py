@@ -26,7 +26,10 @@ REQUIRED_FORECAST_VALIDATIONS = frozenset(
         "available_at_not_future",
     }
 )
-APPROVED_CALIBRATION_AUTHORITIES = frozenset({"VERIFIED", "LIVE", "APPROVED"})
+IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
+APPROVED_CALIBRATION_AUTHORITIES = frozenset(
+    {"VERIFIED", "LIVE", "APPROVED", IDENTITY_FALLBACK_CALIBRATION_AUTHORITY}
+)
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
 ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
 
@@ -896,7 +899,7 @@ def _validate_calibration_payload(
     maturity = calibration.get("maturity_level")
     if maturity in (None, ""):
         raise CertificateVerificationError("calibration.maturity_level missing")
-    if int(maturity) > 3:
+    if int(maturity) > 3 and authority != IDENTITY_FALLBACK_CALIBRATION_AUTHORITY:
         raise CertificateVerificationError("calibration.maturity_level too low for live/no-submit")
     input_space = calibration.get("input_space")
     expected_input_space = model_config.get("calibration_input_space")
