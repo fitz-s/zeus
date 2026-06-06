@@ -551,12 +551,12 @@ class ForecastSnapshotReadyTrigger:
                     limit,
                 ),
             )
-        # WAVE-1 W1-T1 intake phase filter (gated by
-        # edli_v1.edli_intake_phase_filter_enabled, default OFF). When ON, a
-        # forecast_only family whose target local day has begun or whose market
-        # has closed (NOT MarketPhase.PRE_SETTLEMENT_DAY) is skipped HERE so it
-        # never consumes the reactor's bounded decision-proof budget — 76.3% of
-        # candidates die at EVENT_BOUND_MARKET_PHASE_CLOSED in the reactor today.
+        # WAVE-1 W1-T1 intake phase filter. For one-shot catch-up this remains
+        # gated by edli_v1.edli_intake_phase_filter_enabled (default OFF). For
+        # continuous re-decision (source is per-cycle) it is mandatory: same-day
+        # forecast_only families have already entered SETTLEMENT_DAY and must not
+        # be re-emitted every minute to consume the bounded decision-proof budget.
+        # The reactor's EVENT_BOUND_MARKET_PHASE_CLOSED backstop stays authoritative.
         # market_phase_admits is the SAME predicate the reactor applies as a
         # fail-closed backstop (they cannot diverge). The forecast-DB rows carry
         # no market start/end timing, so the empty market_row falls back to the
@@ -564,7 +564,7 @@ class ForecastSnapshotReadyTrigger:
         # path. FAIL-OPEN on the flag being absent/OFF; the reactor backstop
         # remains the authority either way.
         _intake_phase_filter_on = bool(
-            _intake_phase_filter_enabled()
+            source is not None or _intake_phase_filter_enabled()
         )
         pending_skip = already_pending_keys or set()
         results: list[EventWriteResult] = []

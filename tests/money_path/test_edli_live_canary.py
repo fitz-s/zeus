@@ -512,6 +512,54 @@ def test_selector_skips_locked_candidate_and_keeps_flowing_to_next_executable():
     assert selected is next_best
 
 
+def test_selector_skips_below_min_tick_candidate_and_keeps_flowing():
+    from src.engine import event_reactor_adapter as adapter
+
+    below_tick_best = _fake_candidate_proof(
+        condition_id="condition-too-cheap",
+        token_id="token-too-cheap",
+        direction="buy_no",
+        limit_price=0.004,
+        trade_score=0.90,
+        q_lcb_5pct=0.95,
+        min_tick_size=0.01,
+    )
+    next_tradeable = _fake_candidate_proof(
+        condition_id="condition-next",
+        token_id="token-next",
+        direction="buy_yes",
+        limit_price=0.45,
+        trade_score=0.20,
+        q_lcb_5pct=0.60,
+        min_tick_size=0.01,
+    )
+
+    selected = adapter._selected_candidate_proof(
+        {},
+        (below_tick_best, next_tradeable),
+    )
+
+    assert selected is next_tradeable
+
+
+def test_candidate_below_min_tick_has_explicit_untradeable_reason():
+    from src.engine import event_reactor_adapter as adapter
+
+    below_tick = _fake_candidate_proof(
+        condition_id="condition-too-cheap",
+        token_id="token-too-cheap",
+        direction="buy_no",
+        limit_price=0.004,
+        trade_score=0.90,
+        q_lcb_5pct=0.95,
+        min_tick_size=0.01,
+    )
+
+    reason = adapter._candidate_limit_price_untradeable_reason(below_tick)
+
+    assert reason == "EXECUTION_PRICE_BELOW_MIN_TICK:limit_price=0.004:min_tick_size=0.01"
+
+
 def test_selector_does_not_fall_back_to_locked_candidate_when_all_executable_locked():
     from src.engine import event_reactor_adapter as adapter
 
@@ -1661,12 +1709,14 @@ def _fake_candidate_proof(
     limit_price,
     trade_score,
     q_lcb_5pct,
+    min_tick_size=0.01,
 ):
     return SimpleNamespace(
         candidate=SimpleNamespace(condition_id=condition_id),
         token_id=token_id,
         direction=direction,
         execution_price=SimpleNamespace(value=limit_price),
+        row={"min_tick_size": min_tick_size},
         trade_score=trade_score,
         q_lcb_5pct=q_lcb_5pct,
     )

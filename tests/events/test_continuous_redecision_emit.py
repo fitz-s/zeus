@@ -77,9 +77,10 @@ def _trigger(fc, world):
     )
 
 
-def _scan(trig, fc, *, source=None, already_pending_keys=None):
+def _scan(trig, fc, *, source=None, already_pending_keys=None, decision_time=None):
+    decision_time = decision_time or _decision_time()
     return trig.scan_committed_snapshots(
-        forecasts_conn=fc, decision_time=_decision_time(), received_at="2026-05-24T04:17:00+00:00",
+        forecasts_conn=fc, decision_time=decision_time, received_at="2026-05-24T04:17:00+00:00",
         source=source, already_pending_keys=already_pending_keys,
     )
 
@@ -114,5 +115,26 @@ def test_already_pending_key_is_skipped():
     world = sqlite3.connect(":memory:"); init_schema(world)
     trig = _trigger(fc, world)
     res = _scan(trig, fc, source="edli_redecision:cycleX", already_pending_keys={ENTITY_KEY})
+    assert res == []
+    assert world.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+
+
+def test_continuous_redecision_does_not_reemit_settlement_day_forecast_only():
+    """Per-cycle redecision must not refill the queue with forecast_only markets
+    whose target local day has already begun. Those candidates are guaranteed to
+    fail the reactor phase backstop and otherwise burn the bounded proof budget.
+    """
+    fc = _seed_forecasts()
+    world = sqlite3.connect(":memory:"); init_schema(world)
+    trig = _trigger(fc, world)
+    settlement_day = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
+
+    res = _scan(
+        trig,
+        fc,
+        source="edli_redecision:cycle-settlement-day",
+        decision_time=settlement_day,
+    )
+
     assert res == []
     assert world.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0

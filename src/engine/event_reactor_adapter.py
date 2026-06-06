@@ -854,6 +854,32 @@ def build_event_bound_no_submit_receipt(
             source_status="MATCH",
             family_complete=True,
         )
+    untradeable_limit_reason = _candidate_limit_price_untradeable_reason(proof)
+    if untradeable_limit_reason is not None:
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=untradeable_limit_reason,
+            city=family.city,
+            target_date=family.target_date,
+            metric=family.metric,
+            condition_id=str(candidate.condition_id or ""),
+            token_id=selected_token_id,
+            executable_snapshot_id=proof.executable_snapshot_id,
+            family_id=family.family_id,
+            bin_label=candidate.bin.label,
+            direction=direction,
+            q_live=proof.q_posterior,
+            q_lcb_5pct=proof.q_lcb_5pct,
+            c_fee_adjusted=execution_price.value,
+            c_cost_95pct=proof.c_cost_95pct,
+            p_fill_lcb=proof.p_fill_lcb,
+            trade_score=proof.trade_score,
+            native_quote_available=True,
+            source_status="MATCH",
+            family_complete=True,
+        )
     trade_score = proof.trade_score
     if trade_score <= 0.0:
         return EventSubmissionReceipt(
@@ -1488,6 +1514,11 @@ def _build_live_execution_command_certificates(
                     _limit_price_d = Decimal(str(
                         round(_math.floor(float(_limit_price_d) / float(_tick_size_d) + 1e-9) * float(_tick_size_d), 10)
                     ))
+                if _limit_price_d <= 0:
+                    raise ValueError(
+                        "EXECUTION_PRICE_BELOW_MIN_TICK:"
+                        f"limit_price={_limit_price_d}:min_tick_size={_tick_size_d}"
+                    )
                 _reserved_notional = Decimal(str(
                     _action_payload.get("live_cap_reserved_notional_usd")
                     or _action_payload.get("kelly_size_usd")
@@ -3637,6 +3668,13 @@ def _selected_candidate_proof(
     # pick always reaches the receipt with its verdict annotated. The only reason
     # these are no_submit is shadow/arm=False, not the mainstream gate.)
     executable = [proof for proof in proofs if proof.execution_price is not None]
+    tradeable_limit = [
+        proof
+        for proof in executable
+        if _candidate_limit_price_untradeable_reason(proof) is None
+    ]
+    if tradeable_limit:
+        executable = tradeable_limit
     if locked_opportunity_conn is not None:
         unlocked = [
             proof
@@ -3671,6 +3709,40 @@ def _locked_candidate_no_price_improvement_reason(
         side="SELL" if str(getattr(proof, "direction", "") or "").startswith("sell_") else "BUY",
         limit_price=limit_price,
     )
+
+
+def _candidate_limit_price_untradeable_reason(proof: _CandidateProof) -> str | None:
+    execution_price = getattr(proof, "execution_price", None)
+    limit_price = _optional_float(getattr(execution_price, "value", None))
+    if limit_price is None:
+        return "EXECUTION_PRICE_MISSING"
+    min_tick = _candidate_min_tick_size(proof)
+    if min_tick is None:
+        min_tick = 0.01
+    if min_tick <= 0.0:
+        return f"EXECUTION_PRICE_MIN_TICK_INVALID:{min_tick!r}"
+    if limit_price < min_tick - 1e-12:
+        return (
+            "EXECUTION_PRICE_BELOW_MIN_TICK:"
+            f"limit_price={limit_price:.12g}:min_tick_size={min_tick:.12g}"
+        )
+    return None
+
+
+def _candidate_min_tick_size(proof: _CandidateProof) -> float | None:
+    row = getattr(proof, "row", None)
+    if row is None:
+        return None
+    getter = getattr(row, "get", None)
+    for key in ("min_tick_size", "tick_size"):
+        try:
+            raw = getter(key) if callable(getter) else row[key]
+        except Exception:
+            raw = None
+        value = _optional_float(raw)
+        if value is not None:
+            return value
+    return None
 
 
 def _live_yes_probabilities(
