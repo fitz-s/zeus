@@ -457,6 +457,108 @@ def test_locked_live_opportunity_suppresses_redecision_without_price_improvement
     assert materially_better is None
 
 
+def test_selector_skips_locked_candidate_and_keeps_flowing_to_next_executable():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-locked-best",
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload={
+            "event_id": "event-locked",
+            "final_intent_id": "intent-locked",
+            "condition_id": "condition-locked",
+            "token_id": "token-locked",
+            "direction": "buy_no",
+            "limit_price": 0.40,
+        },
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-locked-best",
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-locked",
+            "final_intent_id": "intent-locked",
+            "execution_command_id": "command-locked",
+        },
+    )
+    locked_best = _fake_candidate_proof(
+        condition_id="condition-locked",
+        token_id="token-locked",
+        direction="buy_no",
+        limit_price=0.70,
+        trade_score=0.50,
+        q_lcb_5pct=0.80,
+    )
+    next_best = _fake_candidate_proof(
+        condition_id="condition-next",
+        token_id="token-next",
+        direction="buy_yes",
+        limit_price=0.45,
+        trade_score=0.20,
+        q_lcb_5pct=0.60,
+    )
+
+    selected = adapter._selected_candidate_proof(
+        {},
+        (locked_best, next_best),
+        locked_opportunity_conn=conn,
+    )
+
+    assert selected is next_best
+
+
+def test_selector_does_not_fall_back_to_locked_candidate_when_all_executable_locked():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-locked-only",
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload={
+            "event_id": "event-locked",
+            "final_intent_id": "intent-locked",
+            "condition_id": "condition-locked",
+            "token_id": "token-locked",
+            "direction": "buy_no",
+            "limit_price": 0.40,
+        },
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-locked-only",
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-locked",
+            "final_intent_id": "intent-locked",
+            "execution_command_id": "command-locked",
+        },
+    )
+    locked = _fake_candidate_proof(
+        condition_id="condition-locked",
+        token_id="token-locked",
+        direction="buy_no",
+        limit_price=0.70,
+        trade_score=0.50,
+        q_lcb_5pct=0.80,
+    )
+
+    selected = adapter._selected_candidate_proof(
+        {},
+        (locked,),
+        locked_opportunity_conn=conn,
+    )
+
+    assert selected is None
+
+
 def test_submit_disabled_redecision_returns_no_submit_for_locked_same_price(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.riskguard.risk_level import RiskLevel
@@ -1548,6 +1650,25 @@ def _insert_live_order_event(
             occurred_at,
             occurred_at,
         ),
+    )
+
+
+def _fake_candidate_proof(
+    *,
+    condition_id,
+    token_id,
+    direction,
+    limit_price,
+    trade_score,
+    q_lcb_5pct,
+):
+    return SimpleNamespace(
+        candidate=SimpleNamespace(condition_id=condition_id),
+        token_id=token_id,
+        direction=direction,
+        execution_price=SimpleNamespace(value=limit_price),
+        trade_score=trade_score,
+        q_lcb_5pct=q_lcb_5pct,
     )
 
 

@@ -299,6 +299,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
             bankroll_usd_provider=bankroll_usd_provider,
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
+            locked_opportunity_conn=live_cap_conn or trade_conn,
         )
 
     # Expose the per-cycle ledger so the reactor can commit/rollback provisional
@@ -358,6 +359,7 @@ def event_bound_live_adapter_from_trade_conn(
             bankroll_usd_provider=bankroll_usd_provider,
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
+            locked_opportunity_conn=live_cap_conn or trade_conn,
         )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
@@ -640,6 +642,7 @@ def build_event_bound_no_submit_receipt(
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -781,7 +784,11 @@ def build_event_bound_no_submit_receipt(
             source_status="MATCH",
             family_complete=True,
         )
-    proof = _selected_candidate_proof(payload, proofs)
+    proof = _selected_candidate_proof(
+        payload,
+        proofs,
+        locked_opportunity_conn=locked_opportunity_conn,
+    )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
         # persist the best-scoring family's mainstream verdict on the MISSING receipt so
@@ -3604,7 +3611,12 @@ def _generate_candidate_proofs(
     return tuple(proofs)
 
 
-def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_CandidateProof, ...]) -> _CandidateProof | None:
+def _selected_candidate_proof(
+    payload: dict[str, object],
+    proofs: tuple[_CandidateProof, ...],
+    *,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
+) -> _CandidateProof | None:
     requested_token = _nonnull(payload.get("token_id"))
     requested_condition = _nonnull(payload.get("condition_id"))
     if requested_token:
@@ -3625,9 +3637,40 @@ def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_Candida
     # pick always reaches the receipt with its verdict annotated. The only reason
     # these are no_submit is shadow/arm=False, not the mainstream gate.)
     executable = [proof for proof in proofs if proof.execution_price is not None]
+    if locked_opportunity_conn is not None:
+        unlocked = [
+            proof
+            for proof in executable
+            if _locked_candidate_no_price_improvement_reason(
+                locked_opportunity_conn,
+                proof,
+            )
+            is None
+        ]
+        if unlocked:
+            executable = unlocked
+        elif executable:
+            non_executable = [proof for proof in proofs if proof.execution_price is None]
+            return max(non_executable, key=lambda proof: proof.q_lcb_5pct, default=None)
     if not executable:
         return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
     return max(executable, key=lambda proof: (proof.trade_score, proof.q_lcb_5pct))
+
+
+def _locked_candidate_no_price_improvement_reason(
+    live_cap_conn: sqlite3.Connection | None,
+    proof: _CandidateProof,
+) -> str | None:
+    execution_price = getattr(proof, "execution_price", None)
+    limit_price = _optional_float(getattr(execution_price, "value", None))
+    return _locked_live_opportunity_no_price_improvement_reason(
+        live_cap_conn,
+        condition_id=str(getattr(getattr(proof, "candidate", None), "condition_id", "") or ""),
+        token_id=str(getattr(proof, "token_id", "") or ""),
+        direction=str(getattr(proof, "direction", "") or ""),
+        side="SELL" if str(getattr(proof, "direction", "") or "").startswith("sell_") else "BUY",
+        limit_price=limit_price,
+    )
 
 
 def _live_yes_probabilities(
