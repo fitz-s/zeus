@@ -768,6 +768,7 @@ def _edli_live_canary_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
+        "durable_submit_outbox_enabled": True,
         # 2026-06-04: the arm direction-gate boot guard is DELETED (mainstream is
         # display-only). These keys are now INERT (no boot guard reads them); retained
         # here only to keep this canary config explicit. They do not affect boot.
@@ -789,6 +790,7 @@ def _edli_live_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
+        "durable_submit_outbox_enabled": True,
         "edli_live_operator_authorized": True,
         "edli_live_promotion_artifact_required": True,
         "edli_live_min_canary_count": 1,
