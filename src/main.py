@@ -4937,7 +4937,7 @@ def _edli_prune_batch_limit(config: dict) -> int:
 
 
 def _edli_prune_interval_seconds(config: dict) -> float:
-    raw = config.get("reactor_prune_interval_seconds", 600)
+    raw = config.get("reactor_prune_interval_seconds", 60)
     try:
         value = float(raw)
     except (TypeError, ValueError):
