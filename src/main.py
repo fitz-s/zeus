@@ -1857,6 +1857,7 @@ def _write_heartbeat() -> None:
 _venue_heartbeat_supervisor = None
 _venue_heartbeat_adapter = None
 _venue_heartbeat_thread = None
+_edli_reactor_active_lock = threading.Lock()
 _venue_background_maintenance_lock = threading.Lock()
 _last_venue_background_maintenance_attempt_at = None
 VENUE_BACKGROUND_MAINTENANCE_SECONDS = 30.0
@@ -1871,6 +1872,10 @@ def _venue_heartbeat_mode() -> str:
 
 def _external_venue_heartbeat_enabled() -> bool:
     return _venue_heartbeat_mode() == "external"
+
+
+def _edli_reactor_active() -> bool:
+    return _edli_reactor_active_lock.locked()
 
 
 def _configure_external_venue_heartbeat_supervisor_if_needed() -> None:
@@ -1957,7 +1962,7 @@ def _run_ws_gap_reconcile_if_required(
 
     if adapter is None:
         return {"status": "adapter_unavailable"}
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return {"status": "deferred_cycle_running"}
     if ws_guard is None:
         from src.control import ws_gap_guard as ws_guard
@@ -2022,7 +2027,7 @@ def _refresh_reconcile_findings_if_required(
 
     if adapter is None:
         return {"status": "adapter_unavailable"}
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return {"status": "deferred_cycle_running"}
     owns_connection = conn_factory is None
     conn = None
@@ -2072,7 +2077,7 @@ def _refresh_reconcile_findings_if_required(
 def _run_venue_background_maintenance_once(adapter=None) -> dict:
     """Run venue read-side maintenance outside the heartbeat critical path."""
 
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return {"status": "deferred_cycle_running"}
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -2088,7 +2093,7 @@ def _run_venue_background_maintenance_once(adapter=None) -> dict:
 def _start_collateral_background_refresh_async(adapter=None) -> str:
     """Refresh collateral on an independent lane from slower venue maintenance."""
 
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return "deferred_cycle_running"
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -2112,7 +2117,7 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     """Start slow venue maintenance without delaying the next heartbeat tick."""
 
     global _last_venue_background_maintenance_attempt_at
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return "deferred_cycle_running"
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -4095,6 +4100,9 @@ def _edli_event_reactor_cycle() -> None:
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
+    if _edli_reactor_active():
+        logger.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
+        return
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
@@ -4144,6 +4152,11 @@ def _edli_event_reactor_cycle() -> None:
             )
     except Exception as _bk_exc:  # noqa: BLE001
         logger.warning("EDLI reactor: bankroll cache warm failed (non-fatal): %r", _bk_exc)
+    if not _edli_reactor_active_lock.acquire(blocking=False):
+        logger.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
+        forecasts_conn.close()
+        conn.close()
+        return
     try:
         from src.state.db import world_write_mutex as _world_write_mutex
 
@@ -4419,8 +4432,12 @@ def _edli_event_reactor_cycle() -> None:
             trade_conn.close()
         except NameError:
             pass
-        forecasts_conn.close()
+        try:
+            forecasts_conn.close()
+        except NameError:
+            pass
         conn.close()
+        _edli_reactor_active_lock.release()
 
 
 @_scheduler_job("edli_bankroll_warm")

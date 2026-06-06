@@ -27,7 +27,7 @@ import contextlib
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -710,6 +710,11 @@ class OpportunityEventReactor:
                 self._reject_event(event, "EXECUTION_RECEIPT", "EXECUTION_RECEIPT_CERTIFICATE_REQUIRED", result, receipt=receipt, decision_time=decision_time)
                 return
             self._decision_certificate_ledger.persist_all(certificates)
+            if receipt.side_effect_status in DRY_EXECUTION_RECEIPT_TERMINAL_STATUSES:
+                self._no_submit_receipt_ledger.insert_idempotent(
+                    dataclass_replace(receipt, side_effect_status="NO_SUBMIT"),
+                    decision_time=decision_time,
+                )
         result.proof_accepted += 1
 
     def _reject_event(
