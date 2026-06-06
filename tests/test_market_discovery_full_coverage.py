@@ -1038,6 +1038,20 @@ def test_tiny_prefetch_window_skips_batch_books_and_captures(monkeypatch):
     assert summary["attempted"] > 0
     assert capture_calls
     assert summary["prefetched_orderbook_count"] == 0
+    assert summary["snapshot_capture_reserve_seconds"] == pytest.approx(BUDGET_SECONDS - 0.05)
+
+
+def test_default_snapshot_capture_reserve_keeps_prefetch_from_starving_capture(monkeypatch):
+    """The default pending-family path must reserve a real capture phase.
+
+    Live-shadow showed the old 6s default let /books prefetch consume most of a
+    warm tick and left CLOB capture writing only a handful of snapshots.
+    """
+
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", raising=False)
+
+    summary_budget = 15.0
+    assert ms._snapshot_capture_reserve_seconds_from_env(summary_budget) == pytest.approx(12.0)
 
 
 def test_unlimited_pending_refresh_completes_family_before_next_city():

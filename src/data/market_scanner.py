@@ -3468,7 +3468,7 @@ def _snapshot_budget_seconds_from_env(budget_seconds: float | None = None) -> fl
 
 
 def _snapshot_capture_reserve_seconds_from_env(total_budget_seconds: float) -> float:
-    reserve = _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", 6.0)
+    reserve = _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", 12.0)
     return min(reserve, max(0.05, float(total_budget_seconds) - 0.05))
 
 
