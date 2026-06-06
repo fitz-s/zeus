@@ -558,7 +558,16 @@ class PolymarketUserChannelIngestor:
     async def _heartbeat_loop(self, ws: Any) -> None:
         while self._running:
             await asyncio.sleep(PING_INTERVAL_SECONDS)
-            await ws.send("PING")
+            ping = getattr(ws, "ping", None)
+            if callable(ping):
+                pong_waiter = ping()
+                if hasattr(pong_waiter, "__await__"):
+                    pong_waiter = await pong_waiter
+                if hasattr(pong_waiter, "__await__"):
+                    await pong_waiter
+                self._record_transport_keepalive()
+            else:
+                await ws.send("PING")
 
     async def handle_raw_message(self, raw: str | bytes | dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(raw, bytes):
@@ -609,6 +618,28 @@ class PolymarketUserChannelIngestor:
                 "no unresolved local venue commands, position lots, or M5 findings exist"
             )
         return status
+
+    def _record_transport_keepalive(self, *, observed_at: datetime | None = None) -> WSStatus:
+        """Refresh liveness from a protocol pong after auth was already proven.
+
+        A websocket protocol pong proves the TCP/WebSocket transport is alive,
+        but not that the CLOB user subscription was accepted.  Therefore it may
+        only keep an already-unlatched AUTHED/SUBSCRIBED guard fresh; it must not
+        clear boot ``not_configured`` or a real gap that requires M5 reconcile.
+        """
+
+        current = ws_gap_guard.status()
+        if (
+            current.subscription_state not in {"AUTHED", "SUBSCRIBED"}
+            or current.m5_reconcile_required
+            or current.is_stale(now=observed_at)
+        ):
+            return current
+        return ws_gap_guard.record_message(
+            observed_at=observed_at,
+            subscription_state=current.subscription_state,
+            stale_after_seconds=self.stale_after_seconds,
+        )
 
     def _local_side_effect_surface_empty(self) -> bool:
         conn = self.conn_factory()
