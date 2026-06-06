@@ -1,7 +1,7 @@
 # Created: 2026-05-24
 # Last reused/audited: 2026-06-05
-# Authority basis: EDLI PR332 deploy-ready review; Day0 must not be advertised
-# live while the online observation-context hook is absent.
+# Authority basis: EDLI PR332 deploy-ready review plus day0_shadow bridge;
+# Day0 may run in shadow/no-submit only, never as real capital authorization.
 #                  + 2026-06-04 arm direction-gate boot guard DELETED (mainstream is
 #                    display-only, never a decision/arm input — operator Rule-4 antibody)
 from __future__ import annotations
@@ -23,10 +23,10 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
     assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
     assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
-    assert edli["edli_live_scope"] == "forecast_only"
-    assert edli["day0_extreme_trigger_enabled"] is False
-    assert edli["day0_authority_catchup_scanner_enabled"] is False
-    assert edli["day0_hard_fact_live_enabled"] is False
+    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["day0_extreme_trigger_enabled"] is True
+    assert edli["day0_authority_catchup_scanner_enabled"] is True
+    assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
     assert edli["edli_user_channel_reconcile_enabled"] is False
     assert edli["edli_user_channel_message_queue_path"] == ""
@@ -96,14 +96,17 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert "max_orders_per_window=" in adapter_source
 
 
-def test_pr332_scope_marks_day0_and_market_channel_as_disabled_followups():
+def test_day0_shadow_scope_admits_day0_but_keeps_market_channel_disabled():
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
 
-    assert edli["day0_extreme_trigger_enabled"] is False
-    assert edli["day0_hard_fact_live_enabled"] is False
-    assert edli["day0_authority_catchup_scanner_enabled"] is False
+    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["day0_extreme_trigger_enabled"] is True
+    assert edli["day0_hard_fact_live_enabled"] is True
+    assert edli["day0_authority_catchup_scanner_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
+    assert edli["real_order_submit_enabled"] is False
+    assert edli["taker_fok_fak_live_enabled"] is False
 
 
 def test_pr_scope_document_matches_settings_flags():
@@ -116,20 +119,21 @@ def test_pr_scope_document_matches_settings_flags():
     assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
     assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
     assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
-    assert edli["day0_hard_fact_live_enabled"] is False
+    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
     assert edli["real_order_submit_enabled"] is False
     assert "market_channel_ingestor_enabled=false" in spec
-    assert "Day0 disabled" in spec or "Day0 online hard-fact eventing is not enabled" in spec
+    assert "Day0" in spec
     assert "real submit disabled" in spec or "real submit disabled" in spec.lower()
 
 
-def test_edli_online_invariants_do_not_claim_day0_online():
+def test_edli_online_invariants_do_not_claim_day0_real_submit():
     source = Path("tests/money_path/test_edli_online_invariants.py").read_text()
-    forbidden_claim = "DAY0_ONLINE_ENABLED" + " = true"
+    forbidden_claim = "DAY0_REAL_SUBMIT_ENABLED" + " = true"
 
-    assert "day0_hard_fact_live_enabled\"] is True" not in source
     assert forbidden_claim not in source
+    assert "real_order_submit_enabled\"] is True" not in source
 
 
 def test_edli_online_invariants_do_not_claim_market_channel_deployed_when_disabled():

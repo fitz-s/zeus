@@ -18,10 +18,9 @@ def test_live_canary_runtime_stays_in_shadow_no_submit_until_operator_unshadow()
 
     The reactor runs in shadow (edli_shadow_no_submit): it forms decisions/candidates with NO
     venue submission so the p_raw-vs-online bias test (#24) can run on real flow. The
-    load-bearing money guard is ``real_order_submit_enabled is False`` plus both write-side
-    triggers (day0, market-channel) staying off — these must hold until the operator's
-    irreversible unshadow. Supersedes the prior fully-disabled canary, which predated the
-    deliberate shadow launch.
+    load-bearing money guard is ``real_order_submit_enabled is False`` plus venue write-side
+    triggers staying off — these must hold until the operator's irreversible unshadow.
+    Supersedes the prior fully-disabled canary, which predated the deliberate shadow launch.
     """
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
@@ -34,9 +33,12 @@ def test_live_canary_runtime_stays_in_shadow_no_submit_until_operator_unshadow()
     assert edli["enabled"] is True
     assert edli["event_writer_enabled"] is True
     assert edli["forecast_snapshot_trigger_enabled"] is True
-    # Write-side venue triggers stay OFF in shadow.
-    assert edli["day0_extreme_trigger_enabled"] is False
+    # Day0 is local observation eventing; venue write-side triggers stay OFF in shadow.
+    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["day0_extreme_trigger_enabled"] is True
+    assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
+    assert edli["taker_fok_fak_live_enabled"] is False
     assert "live_canary_enabled" not in edli
 
 

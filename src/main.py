@@ -4878,27 +4878,27 @@ def _edli_emit_day0_extreme_events(
     received_at: str,
     limit: int,
 ) -> int:
-    """Emit EDLI Day0 extreme events from durable observation authority rows.
-
-    This is an operator catch-up/evidence scanner only. The no-submit EDLI
-    reactor does not enable it by default because
-    settlement_day_observation_authority is an observability table written by
-    the existing cycle runtime, not the online source hook.
-    """
+    """Emit EDLI Day0 extreme events from live observation truth surfaces."""
 
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
 
     trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
-    return len(
-        trigger.scan_authority_rows(
-            observation_conn=trade_conn,
-            settlement_semantics=_edli_day0_settlement_semantics,
-            decision_time=decision_time,
-            received_at=received_at,
-            limit=limit,
-        )
+    authority_results = trigger.scan_authority_rows(
+        observation_conn=trade_conn,
+        settlement_semantics=_edli_day0_settlement_semantics,
+        decision_time=decision_time,
+        received_at=received_at,
+        limit=limit,
     )
+    observation_results = trigger.scan_observation_instants_rows(
+        observation_conn=trade_conn,
+        settlement_semantics=_edli_day0_settlement_semantics,
+        decision_time=decision_time,
+        received_at=received_at,
+        limit=limit,
+    )
+    return len(authority_results) + len(observation_results)
 
 
 def _edli_day0_settlement_semantics(observation: dict):
