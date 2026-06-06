@@ -465,11 +465,19 @@ def _buy_order_notional_micro(intent: ExecutionIntent, shares: float) -> int:
     return int(notional.to_integral_value(rounding=ROUND_CEILING))
 
 
-def _assert_collateral_allows_buy(intent: ExecutionIntent, *, spend_micro: int | None = None) -> dict:
+def _assert_collateral_allows_buy(
+    intent: ExecutionIntent,
+    *,
+    spend_micro: int | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
     """Fail before command persistence or SDK contact when pUSD is insufficient."""
-    from src.state.collateral_ledger import assert_buy_preflight
+    from src.state.collateral_ledger import CollateralLedger, assert_buy_preflight
 
-    assert_buy_preflight(intent, spend_micro=spend_micro)
+    if conn is not None:
+        CollateralLedger(conn).buy_preflight(intent, spend_micro=spend_micro)
+    else:
+        assert_buy_preflight(intent, spend_micro=spend_micro)
     return _capability_component("collateral_ledger", collateral="pUSD", spend_micro=spend_micro or 0)
 
 
@@ -3291,7 +3299,11 @@ def _live_order(
             )
 
         try:
-            collateral_component = _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
+            collateral_component = _assert_collateral_allows_buy(
+                intent,
+                spend_micro=required_pusd_micro,
+                conn=conn,
+            )
             pre_submit_envelope = _build_pre_submit_envelope(
                 conn,
                 command_id=command_id,
