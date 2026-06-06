@@ -2658,7 +2658,7 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     global _venue_heartbeat_thread
     if _external_venue_heartbeat_enabled():
         _configure_external_venue_heartbeat_supervisor_if_needed()
-        if _cycle_lock.locked():
+        if _cycle_lock.locked() or _edli_reactor_active():
             return
         adapter = _ensure_venue_read_side_adapter()
         _start_collateral_background_refresh_async(adapter)
@@ -3056,6 +3056,9 @@ def _refresh_pending_family_snapshots(
 def _market_discovery_cycle() -> None:
     """Refresh executable market substrate outside decision-cycle critical path."""
 
+    if _edli_reactor_active():
+        logger.info("market_discovery deferred: EDLI reactor active")
+        return
     acquired = _market_discovery_lock.acquire(blocking=False)
     if not acquired:
         logger.warning("market_discovery skipped: previous market_discovery still running")
@@ -4118,7 +4121,14 @@ def _edli_event_reactor_cycle() -> None:
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
-    conn = get_world_connection()
+    if not _edli_reactor_active_lock.acquire(blocking=False):
+        logger.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
+        return
+    try:
+        conn = get_world_connection()
+    except Exception:
+        _edli_reactor_active_lock.release()
+        raise
     # K1: the calibration authority is split — platt_models lives in the world DB (this conn's
     # main) while calibration_pairs lives in the forecasts DB. get_calibrator reads BOTH, so the
     # calibration_conn must have forecasts attached for the unqualified calibration_pairs read to
@@ -4130,7 +4140,12 @@ def _edli_event_reactor_cycle() -> None:
             conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
     except Exception as _attach_exc:  # noqa: BLE001 - non-fatal; calibration will fail-closed if unresolved
         logger.warning("EDLI reactor: ATTACH forecasts to calibration conn failed (non-fatal): %r", _attach_exc)
-    forecasts_conn = get_forecasts_connection_read_only()
+    try:
+        forecasts_conn = get_forecasts_connection_read_only()
+    except Exception:
+        conn.close()
+        _edli_reactor_active_lock.release()
+        raise
     # Warm the in-process bankroll-of-record cache once per cycle so the per-event no-submit
     # Kelly proof can read bankroll_provider.cached() (it must NOT live-fetch per decision).
     # The on-chain wallet is the only bankroll truth; this is a cycle-level refresh, not a
@@ -4152,11 +4167,6 @@ def _edli_event_reactor_cycle() -> None:
             )
     except Exception as _bk_exc:  # noqa: BLE001
         logger.warning("EDLI reactor: bankroll cache warm failed (non-fatal): %r", _bk_exc)
-    if not _edli_reactor_active_lock.acquire(blocking=False):
-        logger.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
-        forecasts_conn.close()
-        conn.close()
-        return
     try:
         from src.state.db import world_write_mutex as _world_write_mutex
 
@@ -4520,6 +4530,9 @@ def _edli_market_substrate_warm_cycle() -> None:
 
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled"):
+        return
+    if _edli_reactor_active():
+        logger.info("EDLI market-substrate warm deferred: reactor active")
         return
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
 
@@ -6670,7 +6683,7 @@ def main():
             "interval",
             minutes=1,
             id="edli_event_reactor",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 5.0),
             max_instances=1,
             coalesce=True,
             executor="reactor",
@@ -6705,7 +6718,7 @@ def main():
             "interval",
             seconds=90,
             id="edli_market_substrate_warm",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 25.0),
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 65.0),
             max_instances=1,
             coalesce=True,
         )
@@ -6725,7 +6738,7 @@ def main():
             "interval",
             seconds=90,
             id="edli_mainstream_warm",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 28.0),
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 70.0),
             max_instances=1,
             coalesce=True,
         )
@@ -6778,7 +6791,7 @@ def main():
                 "interval",
                 minutes=5,
                 id="market_discovery",
-                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 35.0),
+                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
                 max_instances=1,
                 coalesce=True,
             )

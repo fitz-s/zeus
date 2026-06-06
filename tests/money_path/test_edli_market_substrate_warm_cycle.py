@@ -93,6 +93,13 @@ def test_pending_family_refresh_does_not_call_global_weather_discovery():
     assert "find_weather_markets_or_raise" not in src
 
 
+def test_market_discovery_defers_while_reactor_active():
+    src = inspect.getsource(main_module._market_discovery_cycle)
+
+    assert "_edli_reactor_active()" in src
+    assert "market_discovery deferred" in src
+
+
 def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     """GREEN-after-fix: a dedicated warm job exists and, when EDLI is enabled, invokes
     the family-snapshot refresh exactly once per tick."""
@@ -119,6 +126,25 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
 
     main_module._edli_market_substrate_warm_cycle()
     assert calls == [1], "warm job must invoke the family-snapshot refresh exactly once"
+
+
+def test_market_substrate_warm_cycle_defers_while_reactor_active(monkeypatch):
+    """The warm job is venue-I/O; it must not compete with an in-flight reactor drain."""
+    calls: list[int] = []
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(1),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    assert main_module._edli_reactor_active_lock.acquire(blocking=False)
+    try:
+        main_module._edli_market_substrate_warm_cycle()
+    finally:
+        main_module._edli_reactor_active_lock.release()
+
+    assert calls == []
 
 
 def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):

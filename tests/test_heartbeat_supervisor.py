@@ -980,6 +980,45 @@ def test_external_heartbeat_defers_background_db_work_while_cycle_runs(monkeypat
     assert calls == ["configure_supervisor"]
 
 
+def test_external_heartbeat_defers_background_db_work_while_edli_reactor_runs(monkeypatch):
+    from src import main
+
+    calls = []
+
+    class Adapter:
+        pass
+
+    def _ensure_adapter():
+        calls.append("ensure_adapter")
+        return Adapter()
+
+    monkeypatch.setattr(main, "_external_venue_heartbeat_enabled", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_configure_external_venue_heartbeat_supervisor_if_needed",
+        lambda: calls.append("configure_supervisor"),
+    )
+    monkeypatch.setattr(main, "_ensure_venue_read_side_adapter", _ensure_adapter)
+    monkeypatch.setattr(
+        main,
+        "_start_collateral_background_refresh_async",
+        lambda adapter: calls.append("collateral_background"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_start_venue_background_maintenance_async",
+        lambda adapter: calls.append("venue_background"),
+    )
+
+    assert main._edli_reactor_active_lock.acquire(blocking=False)
+    try:
+        main._start_venue_heartbeat_loop_if_needed()
+    finally:
+        main._edli_reactor_active_lock.release()
+
+    assert calls == ["configure_supervisor"]
+
+
 def test_venue_background_maintenance_defers_while_cycle_runs(monkeypatch):
     from src import main
 
