@@ -1878,6 +1878,36 @@ def _edli_reactor_active() -> bool:
     return _edli_reactor_active_lock.locked()
 
 
+def _edli_reactor_pending_backlog_exists(*, conn_factory=None) -> bool:
+    """Return True when EDLI has pending opportunity events that should drain first."""
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
+        return False
+    owns_connection = conn_factory is None
+    conn = None
+    try:
+        from src.state.db import get_world_connection
+
+        conn = (conn_factory or get_world_connection)()
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM opportunity_event_processing
+             WHERE consumer_name = 'edli_reactor_v1'
+               AND processing_status = 'pending'
+             LIMIT 1
+            """
+        ).fetchone()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001 - fail-open; heartbeat must stay alive.
+        logger.warning("EDLI pending backlog check failed open: %r", exc)
+        return False
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()
+
+
 def _configure_external_venue_heartbeat_supervisor_if_needed() -> None:
     from src.control.heartbeat_supervisor import (
         ExternalHeartbeatSupervisor,
@@ -2129,6 +2159,9 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
         < VENUE_BACKGROUND_MAINTENANCE_SECONDS
     ):
         return "throttled"
+    if _edli_reactor_pending_backlog_exists():
+        _last_venue_background_maintenance_attempt_at = now
+        return "deferred_edli_pending_backlog"
     if not _venue_background_maintenance_lock.acquire(blocking=False):
         return "already_running"
     _last_venue_background_maintenance_attempt_at = now
