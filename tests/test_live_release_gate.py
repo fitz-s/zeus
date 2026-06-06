@@ -190,6 +190,7 @@ def _settings_for_stage(stage: str, **overrides: object) -> dict[str, object]:
         "edli_user_channel_reconcile_enabled": stage in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"},
         "real_order_submit_enabled": stage in {"edli_live_canary", "edli_live"},
         "live_canary_enabled": stage in {"edli_live_canary", "edli_live"},
+        "taker_fok_fak_live_enabled": stage in {"edli_live_canary", "edli_live"},
         "durable_submit_outbox_enabled": stage in {"edli_live_canary", "edli_live"},
         "edli_live_operator_authorized": stage == "edli_live",
     }
@@ -408,6 +409,23 @@ def test_release_gate_stage_settings_reject_live_submit_disabled(tmp_path: Path)
     assert report.status == FAIL
     assert report.scaleout_allowed is False
     assert any(result.name == "stage_settings" and "real_order_submit_enabled=false" in result.detail for result in report.results)
+
+
+def test_release_gate_stage_settings_reject_live_taker_disabled(tmp_path: Path) -> None:
+    args = _make_gate_args(
+        tmp_path,
+        settings_payload=_settings_for_stage("edli_live_canary", taker_fok_fak_live_enabled=False),
+    )
+    args.stage = "edli_live_canary"
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL
+    assert report.submit_allowed is False
+    assert any(
+        result.name == "stage_settings" and "taker_fok_fak_live_enabled=false" in result.detail
+        for result in report.results
+    )
 
 
 def test_release_gate_stage_settings_accept_matching_canary_config(tmp_path: Path) -> None:
