@@ -459,7 +459,8 @@ def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
                 "edli_stage_readiness",
                 PASS if ok else FAIL,
                 f"status={report.status}:submit_allowed={report.submit_allowed}:reasons={list(report.reasons)}",
-            )
+            ),
+            _check_edli_arm_gate_artifact(args),
         ]
     if stage == "edli_submit_disabled_bridge":
         ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and not report.submit_allowed
@@ -477,8 +478,29 @@ def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
             f"status={report.status}:scaleout_allowed={report.scaleout_allowed}:reasons={list(report.reasons)}",
         )
     ]
+    results.append(_check_edli_arm_gate_artifact(args))
     results.append(_check_edli_promotion_artifact(args))
     return results
+
+
+def _check_edli_arm_gate_artifact(args: argparse.Namespace) -> GateResult:
+    path = getattr(args, "arm_artifact_json", None)
+    if not path:
+        return GateResult("edli_arm_gate_artifact", FAIL, "missing_arm_artifact_path")
+    if not path.exists():
+        return GateResult("edli_arm_gate_artifact", FAIL, f"missing:{path}")
+    from src.events.live_profit_audit import verify_edli_arm_gate_artifact
+
+    try:
+        artifact = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        return GateResult("edli_arm_gate_artifact", FAIL, f"invalid_json:{exc}")
+    verified = verify_edli_arm_gate_artifact(artifact, head_sha=str(args.expected_sha or ""))
+    return GateResult(
+        "edli_arm_gate_artifact",
+        PASS if verified.ok else FAIL,
+        verified.reason,
+    )
 
 
 def _check_edli_promotion_artifact(args: argparse.Namespace) -> GateResult:
@@ -714,6 +736,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--paper-proof-json", type=Path, default=ROOT / "state" / "paper_money_path_proof.json")
     parser.add_argument("--settings-json", type=Path)
     parser.add_argument("--canary-artifact-json", type=Path)
+    parser.add_argument("--arm-artifact-json", type=Path, default=ROOT / "state" / "edli_arm_gate_artifact.json")
     parser.add_argument("--promotion-artifact-json", type=Path)
     parser.add_argument("--edli-live-min-canary-count", type=int, default=1)
     parser.add_argument("--edli-live-max-unresolved-unknowns", type=int, default=0)
