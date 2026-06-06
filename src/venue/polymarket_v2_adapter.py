@@ -20,6 +20,7 @@ import importlib.metadata
 import json
 import logging
 import os
+import sys
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -302,7 +303,7 @@ class PolymarketV2Adapter:
         except Exception:  # noqa: BLE001 - non-fatal; library default retained
             pass
 
-        effective_api_creds = kwargs.get("api_creds") or _api_creds_from_env()
+        effective_api_creds = kwargs.get("api_creds") or _api_creds_from_runtime()
 
         client = ClobClient(
             kwargs["host"],
@@ -325,17 +326,17 @@ class PolymarketV2Adapter:
                     "(primary /auth/api-key creds absent); L2 calls proceeding via derived creds",
                 )
             except Exception as exc:  # pragma: no cover - upstream SDK behaviour
-                env_api_creds = _api_creds_from_env()
-                if env_api_creds is None:
+                runtime_api_creds = _api_creds_from_runtime()
+                if runtime_api_creds is None:
                     logger.warning(
                         "create_or_derive_api_key failed; L2-authenticated calls will "
                         "fail until creds are provided: %s", exc,
                     )
                 else:
-                    client.set_api_creds(env_api_creds)
+                    client.set_api_creds(runtime_api_creds)
                     logger.warning(
                         "VENUE_AUTH_STATIC_FALLBACK_TRIGGERED: create_or_derive_api_key "
-                        "failed; using POLYMARKET_API_* creds and deferring validity "
+                        "failed; using runtime CLOB creds and deferring validity "
                         "to the next L2-authenticated preflight: %s",
                         exc,
                     )
@@ -2403,18 +2404,46 @@ def _sdk_version() -> str:
         return "uninstalled"
 
 
+def _api_creds_from_runtime() -> Any | None:
+    return _api_creds_from_keychain() or _api_creds_from_env()
+
+
+def _api_creds_from_keychain() -> Any | None:
+    try:
+        read_keychain = _import_keychain_reader()
+        api_key = read_keychain("openclaw-polymarket-api-key")
+        api_secret = read_keychain("openclaw-polymarket-api-secret")
+        api_passphrase = read_keychain("openclaw-polymarket-api-passphrase")
+    except Exception:
+        return None
+    return _api_creds_from_values(api_key, api_secret, api_passphrase)
+
+
+def _import_keychain_reader() -> Callable[[str], str]:
+    openclaw_root = str(Path.home() / ".openclaw")
+    if openclaw_root not in sys.path:
+        sys.path.insert(0, openclaw_root)
+    from bin.keychain_resolver import read_keychain  # type: ignore[import-not-found]
+
+    return read_keychain
+
+
 def _api_creds_from_env() -> Any | None:
     api_key = os.environ.get("POLYMARKET_API_KEY")
     api_secret = os.environ.get("POLYMARKET_API_SECRET")
     api_passphrase = os.environ.get("POLYMARKET_API_PASSPHRASE")
+    return _api_creds_from_values(api_key, api_secret, api_passphrase)
+
+
+def _api_creds_from_values(api_key: Any, api_secret: Any, api_passphrase: Any) -> Any | None:
     if not (api_key and api_secret and api_passphrase):
         return None
     from py_clob_client_v2.clob_types import ApiCreds
 
     return ApiCreds(
-        api_key=api_key,
-        api_secret=api_secret,
-        api_passphrase=api_passphrase,
+        api_key=str(api_key),
+        api_secret=str(api_secret),
+        api_passphrase=str(api_passphrase),
     )
 
 

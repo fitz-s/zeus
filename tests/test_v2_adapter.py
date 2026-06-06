@@ -264,6 +264,7 @@ def _adapter(tmp_path: Path, fake_client=None):
 
 def test_default_client_factory_prefers_env_creds_over_derivation(monkeypatch):
     ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
+    import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
     FakeAuthClient.instances = []
@@ -276,6 +277,7 @@ def test_default_client_factory_prefers_env_creds_over_derivation(monkeypatch):
     monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
     monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
     monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: None)
 
     adapter = PolymarketV2Adapter(
         host="https://clob.polymarket.com",
@@ -292,8 +294,40 @@ def test_default_client_factory_prefers_env_creds_over_derivation(monkeypatch):
     assert client.calls == []
 
 
+def test_default_client_factory_prefers_keychain_creds_over_env(monkeypatch):
+    ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    keychain_creds = ApiCreds(
+        api_key="keychain-key",
+        api_secret="keychain-secret",
+        api_passphrase="keychain-passphrase",
+    )
+    FakeAuthClient.instances = []
+    FakeAuthClient.derive_error = AssertionError("derive should not be called when keychain creds exist")
+    FakeAuthClient.derive_response = None
+    monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
+    monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: keychain_creds)
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        q1_egress_evidence_path=None,
+    )
+
+    client = adapter._sdk_client()
+
+    assert client.creds is keychain_creds
+    assert client.calls == []
+
+
 def test_default_client_factory_derives_only_when_env_creds_absent(monkeypatch):
     ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
+    import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
     FakeAuthClient.instances = []
@@ -306,6 +340,7 @@ def test_default_client_factory_derives_only_when_env_creds_absent(monkeypatch):
     monkeypatch.delenv("POLYMARKET_API_KEY", raising=False)
     monkeypatch.delenv("POLYMARKET_API_SECRET", raising=False)
     monkeypatch.delenv("POLYMARKET_API_PASSPHRASE", raising=False)
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: None)
 
     adapter = PolymarketV2Adapter(
         host="https://clob.polymarket.com",
