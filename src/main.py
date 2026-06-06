@@ -4927,16 +4927,54 @@ def _edli_pending_entity_keys(world_conn) -> set[str]:
     return {str(r[0]) for r in rows}
 
 
+_EDLI_LAST_PRUNE_MONOTONIC: float | None = None
+
+
+def _edli_prune_batch_limit(config: dict) -> int:
+    return _edli_bounded_positive_int(
+        config,
+        "reactor_prune_batch_limit",
+        default=500,
+        maximum=5_000,
+    )
+
+
+def _edli_prune_interval_seconds(config: dict) -> float:
+    raw = config.get("reactor_prune_interval_seconds", 180)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 180.0
+    return max(0.0, value)
+
+
 def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     """Prune stale/superseded rows before snapshotting the redecision skip set."""
 
+    global _EDLI_LAST_PRUNE_MONOTONIC
+    edli_cfg = _settings_section("edli_v1", {})
+    interval_s = _edli_prune_interval_seconds(edli_cfg)
+    now_mono = time.monotonic()
+    if (
+        interval_s > 0
+        and _EDLI_LAST_PRUNE_MONOTONIC is not None
+        and now_mono - _EDLI_LAST_PRUNE_MONOTONIC < interval_s
+    ):
+        return
+    _EDLI_LAST_PRUNE_MONOTONIC = now_mono
+    batch_limit = _edli_prune_batch_limit(edli_cfg)
+
     try:
-        _archived = store.archive_expired_candidates(decision_time=decision_time.isoformat())
+        _archived = store.archive_expired_candidates(
+            decision_time=decision_time.isoformat(),
+            batch_limit=batch_limit,
+        )
         if _archived:
             logger.info(
                 "EDLI reactor: archived %d expired (target-local-day-ended) "
-                "candidates → 'expired' (excluded from future scans)",
+                "candidates → 'expired' (excluded from future scans; batch_limit=%d)",
                 _archived,
+                batch_limit,
             )
     except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
         logger.warning(
@@ -4946,13 +4984,14 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
     try:
-        _ch_archived = store.archive_superseded_channel_events()
+        _ch_archived = store.archive_superseded_channel_events(batch_limit=batch_limit)
         if _ch_archived:
             logger.info(
                 "EDLI reactor: archived %d superseded channel events "
                 "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) → "
-                "'expired'; pending channel-event scan reduced",
+                "'expired'; pending channel-event scan reduced (batch_limit=%d)",
                 _ch_archived,
+                batch_limit,
             )
     except Exception as _ch_sweep_exc:  # noqa: BLE001 — fail-soft
         logger.warning(
@@ -4962,12 +5001,16 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
     try:
-        _fsr_archived = store.archive_superseded_forecast_snapshot_events()
+        _fsr_archived = store.archive_superseded_forecast_snapshot_events(
+            batch_limit=batch_limit,
+        )
         if _fsr_archived:
             logger.info(
                 "EDLI reactor: archived %d superseded forecast-snapshot redecision "
-                "events → 'expired'; newest active event per entity_key retained",
+                "events → 'expired'; newest active event per entity_key retained "
+                "(batch_limit=%d)",
                 _fsr_archived,
+                batch_limit,
             )
     except Exception as _fsr_sweep_exc:  # noqa: BLE001 — fail-soft
         logger.warning(
