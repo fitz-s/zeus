@@ -2100,6 +2100,42 @@ def test_price_stale_selected_snapshot_blocks_shadow_receipt_before_scoring():
     assert receipt.reason.startswith("EXECUTABLE_SNAPSHOT_STALE:")
 
 
+def test_capital_efficiency_blocks_high_price_micro_edge_without_volume_gate():
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _capital_efficiency_untradeable_reason
+
+    reason = _capital_efficiency_untradeable_reason(
+        execution_price=ExecutionPrice(
+            0.98196,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        trade_score=0.00553868962634317,
+        min_roi=0.02,
+    )
+
+    assert reason is not None
+    assert reason.startswith("CAPITAL_EFFICIENCY_ROI_BELOW_MIN:")
+    assert "robust_roi=0.005640" in reason
+
+
+def test_capital_efficiency_allows_strong_after_cost_roi_new_market():
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _capital_efficiency_untradeable_reason
+
+    assert _capital_efficiency_untradeable_reason(
+        execution_price=ExecutionPrice(
+            0.75924,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        trade_score=0.0537892625895399,
+        min_roi=0.02,
+    ) is None
+
+
 def test_coverage_expired_between_event_available_and_decision_blocks_receipt(monkeypatch):
     from types import SimpleNamespace
 

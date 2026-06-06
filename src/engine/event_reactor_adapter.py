@@ -3548,6 +3548,7 @@ def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
 #     bound on p(NO) says the bin overwhelmingly will NOT settle). Default 0.95.
 _MARKET_DISAGREE_NO_PRICE_MAX = 0.15
 _MARKET_DISAGREE_QLCB_MIN_ESCAPE = 0.95
+_MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.02
 
 
 def _market_disagreement_demotes_buy_no(
@@ -3595,6 +3596,34 @@ def _market_disagreement_demotes_buy_no(
     # Cheap NO. Only an overwhelming, independently-grounded NO-space q_lcb
     # licences the bet against a confident market.
     return q_lcb_5pct < qlcb_min_escape
+
+
+def _capital_efficiency_untradeable_reason(
+    *,
+    execution_price: ExecutionPrice | None,
+    trade_score: float,
+    min_roi: float | None = None,
+) -> str | None:
+    if execution_price is None:
+        return None
+    price = _optional_float(execution_price.value)
+    if price is None or price <= 0.0:
+        return "CAPITAL_EFFICIENCY_PRICE_INVALID"
+    threshold = (
+        float(settings["edli_v1"].get("min_robust_capital_efficiency_roi", _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI))
+        if min_roi is None
+        else float(min_roi)
+    )
+    if threshold <= 0.0:
+        return None
+    robust_roi = float(trade_score) / price
+    if robust_roi < threshold:
+        return (
+            "CAPITAL_EFFICIENCY_ROI_BELOW_MIN:"
+            f"robust_roi={robust_roi:.6f}:min_roi={threshold:.6f}:"
+            f"trade_score={float(trade_score):.6f}:execution_price={price:.6f}"
+        )
+    return None
 
 
 def _generate_candidate_proofs(
@@ -3737,12 +3766,20 @@ def _generate_candidate_proofs(
                         f"no_price={market_no_price:.4f}<={_md_no_max:.4f} "
                         f"q_lcb={q_lcb:.4f}<{_md_qlcb:.4f}"
                     )
+            capital_efficiency_reason = _capital_efficiency_untradeable_reason(
+                execution_price=execution_price,
+                trade_score=score,
+            )
+            if capital_efficiency_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = capital_efficiency_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A demoted contrarian buy_no must not enter the FDR family as a
             # "passed" hypothesis — it is structurally non-tradeable, not merely
             # low-scoring. Force prefilter False so it can never be selected.
-            if _market_disagreement_demoted:
+            if _market_disagreement_demoted or capital_efficiency_reason is not None:
                 passed_prefilter = False
             proofs.append(
                 _CandidateProof(
