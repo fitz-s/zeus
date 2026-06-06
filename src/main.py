@@ -2128,6 +2128,8 @@ def _start_collateral_background_refresh_async(adapter=None) -> str:
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
         return "adapter_unavailable"
+    if _edli_reactor_pending_backlog_exists():
+        return "deferred_edli_pending_backlog"
     if _collateral_background_refresh_lock.locked():
         return "already_running"
 

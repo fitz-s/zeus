@@ -929,6 +929,23 @@ def test_venue_background_maintenance_defers_when_edli_pending_backlog_exists(mo
     assert calls == []
 
 
+def test_collateral_background_refresh_defers_when_edli_pending_backlog_exists(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_refresh_global_collateral_snapshot_if_due",
+        lambda active_adapter: calls.append(active_adapter),
+    )
+
+    assert main._start_collateral_background_refresh_async(adapter) == "deferred_edli_pending_backlog"
+    assert calls == []
+
+
 def test_collateral_background_refresh_is_not_blocked_by_slow_venue_maintenance(monkeypatch):
     from src import main
 
