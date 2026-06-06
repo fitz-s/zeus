@@ -4326,6 +4326,11 @@ def _edli_event_reactor_cycle() -> None:
             logger.error(
                 "EDLI reactor: real submit disabled this cycle because portfolio_state_unavailable"
             )
+        # The FSR/redecision emit phase intentionally uses the cycle-start timestamp for
+        # event identity. Decision certificates are built later, after DB-backed substrate
+        # and portfolio reads; use the actual processing timestamp so fresh executable/book
+        # parent certificates are never later than the decision they support.
+        process_pending_decision_time = datetime.now(timezone.utc)
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -4360,7 +4365,7 @@ def _edli_event_reactor_cycle() -> None:
                     execution_command_cert=execution_command_cert,
                     conn=trade_conn,
                     snapshot_conn=trade_conn,
-                    decision_time=now,
+                    decision_time=process_pending_decision_time,
                 ),
             )
             if live_submit_effective
@@ -4399,7 +4404,7 @@ def _edli_event_reactor_cycle() -> None:
                 edge_zone_min_ev_per_dollar=float(edli_cfg.get("edge_zone_min_ev_per_dollar", 0.0)),
             ),
         )
-        _rr = reactor.process_pending(decision_time=now, limit=proof_limit)
+        _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
         logger.info(
             "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d reasons=%r",
             _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered, _rr.rejection_reasons[:8],

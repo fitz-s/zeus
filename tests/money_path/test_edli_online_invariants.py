@@ -162,7 +162,10 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert 'edli_cfg.get("live_canary_enabled", False)' in source
     assert "forecast_snapshot_emit_limit" in source
     assert "no_submit_proof_limit" in source
-    assert "reactor.process_pending(decision_time=now, limit=proof_limit)" in source
+    assert "process_pending_decision_time = datetime.now(timezone.utc)" in source
+    assert "reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)" in source
+    assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in source
+    assert "decision_time=process_pending_decision_time" in source
     assert "_edli_positive_int_or_unbounded" in source
     assert "user_channel_or_reconcile_only" in source
     edli_start = source.index("def _edli_event_reactor_cycle")
