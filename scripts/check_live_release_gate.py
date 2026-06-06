@@ -572,6 +572,8 @@ def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
             errors.append("real_order_submit_enabled=false")
         if not bool(edli_cfg.get("live_canary_enabled", False)):
             errors.append("live_canary_enabled=false")
+        if not bool(edli_cfg.get("durable_submit_outbox_enabled", False)):
+            errors.append("durable_submit_outbox_enabled=false")
     if stage == "edli_live" and not bool(edli_cfg.get("edli_live_operator_authorized", False)):
         errors.append("edli_live_operator_authorized=false")
     if errors:

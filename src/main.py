@@ -1082,6 +1082,7 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
                 "edli_user_channel_reconcile_enabled",
                 "real_order_submit_enabled",
                 "live_canary_enabled",
+                "durable_submit_outbox_enabled",
             ),
         )
     if mode == "edli_live":
