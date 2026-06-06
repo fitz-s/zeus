@@ -2777,6 +2777,7 @@ def _refresh_pending_family_snapshots(
     """
 
     from src.data.market_scanner import (
+        reconstruct_weather_market_from_static_topology,
         refresh_executable_market_substrate_snapshots,
     )
     from src.data.polymarket_client import PolymarketClient
@@ -2841,7 +2842,10 @@ def _refresh_pending_family_snapshots(
     #         Families with ANY stale/missing bin still proceed to Gamma fetch.
     fresh_skipped = 0
     no_topology = 0
-    families_needing_refresh: list[tuple[str, str, str]] = []
+    gamma_refresh_families: list[tuple[str, str, str]] = []
+    cached_topology_markets: list[dict] = []
+    cached_topology_families = 0
+    cached_topology_incomplete = 0
 
     write_conn = get_trade_connection(write_class="live")
     try:
@@ -2856,7 +2860,7 @@ def _refresh_pending_family_snapshots(
                     city, target_date, metric,
                 )
                 # Still include: Gamma may discover bins not yet in topology.
-                families_needing_refresh.append((city, target_date, metric))
+                gamma_refresh_families.append((city, target_date, metric))
                 continue
 
             any_stale = False
@@ -2877,21 +2881,32 @@ def _refresh_pending_family_snapshots(
                     break
 
             if any_stale:
-                families_needing_refresh.append((city, target_date, metric))
+                reconstructed = reconstruct_weather_market_from_static_topology(
+                    write_conn,
+                    topology_rows=topology_rows,
+                    now_utc=now_utc,
+                )
+                if reconstructed is not None:
+                    cached_topology_markets.append(reconstructed)
+                    cached_topology_families += 1
+                else:
+                    cached_topology_incomplete += 1
+                    gamma_refresh_families.append((city, target_date, metric))
             else:
                 fresh_skipped += 1
 
-        if not families_needing_refresh:
+        if not gamma_refresh_families and not cached_topology_markets:
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
-                "families=%d fresh_skipped=%d no_topology=%d",
-                len(families), fresh_skipped, no_topology,
+                "families=%d fresh_skipped=%d no_topology=%d cached_topology_incomplete=%d",
+                len(families), fresh_skipped, no_topology, cached_topology_incomplete,
             )
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
                 "fresh_skipped": fresh_skipped,
                 "no_topology": no_topology,
+                "cached_topology_incomplete": cached_topology_incomplete,
             }
 
         # Step 3: Targeted Gamma slug fetch — one request per pending family.
@@ -2924,12 +2939,12 @@ def _refresh_pending_family_snapshots(
             _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "25.0")))
             _refresh_deadline = time.monotonic() + _refresh_budget_s
             _refreshed_n = 0
-            for fam_city, fam_date, fam_metric in families_needing_refresh:
+            for fam_city, fam_date, fam_metric in gamma_refresh_families:
                 if time.monotonic() > _refresh_deadline:
                     logger.info(
                         "refresh_pending_family_snapshots: time-box %.0fs hit after %d/%d "
                         "families; deferring rest to next cycle (leaves budget for emit+process)",
-                        _refresh_budget_s, _refreshed_n, len(families_needing_refresh),
+                        _refresh_budget_s, _refreshed_n, len(gamma_refresh_families),
                     )
                     break
                 _refreshed_n += 1
@@ -2994,8 +3009,10 @@ def _refresh_pending_family_snapshots(
             )
             logger.info(
                 "refresh_pending_family_snapshots: slug fetch complete "
-                "families_needing_refresh=%d raw_events=%d discovered_events=%d",
-                len(families_needing_refresh), len(raw_events_collected), len(discovered_events),
+                "gamma_refresh_families=%d cached_topology_families=%d "
+                "raw_events=%d discovered_events=%d",
+                len(gamma_refresh_families), cached_topology_families,
+                len(raw_events_collected), len(discovered_events),
             )
         except Exception as exc:
             logger.warning(
@@ -3016,7 +3033,8 @@ def _refresh_pending_family_snapshots(
         # Filter to ONLY the pending families (bounded CLOB calls, no universe sweep).
         markets: list[dict] = []
         skipped_not_found = 0
-        for city, target_date, metric in families_needing_refresh:
+        markets.extend(cached_topology_markets)
+        for city, target_date, metric in gamma_refresh_families:
             key = (city.lower(), target_date, metric)
             ev = gamma_by_family.get(key)
             if ev is None:
@@ -3032,12 +3050,14 @@ def _refresh_pending_family_snapshots(
         if not markets:
             logger.warning(
                 "refresh_pending_family_snapshots: no Gamma events matched pending families; "
-                "families_needing_refresh=%d skipped_not_found=%d",
-                len(families_needing_refresh), skipped_not_found,
+                "gamma_refresh_families=%d cached_topology_families=%d skipped_not_found=%d",
+                len(gamma_refresh_families), cached_topology_families, skipped_not_found,
             )
             return {
                 "status": "no_refreshable_markets",
-                "families_needing_refresh": len(families_needing_refresh),
+                "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
+                "gamma_refresh_families": len(gamma_refresh_families),
+                "cached_topology_families": cached_topology_families,
                 "skipped_not_found": skipped_not_found,
             }
 
@@ -3077,7 +3097,10 @@ def _refresh_pending_family_snapshots(
     result = {
         "status": "refreshed",
         "families_checked": len(families),
-        "families_needing_refresh": len(families_needing_refresh),
+        "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
+        "gamma_refresh_families": len(gamma_refresh_families),
+        "cached_topology_families": cached_topology_families,
+        "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
         "fresh_skipped": fresh_skipped,
         "markets_submitted": len(markets),
