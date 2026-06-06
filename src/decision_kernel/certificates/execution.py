@@ -120,6 +120,7 @@ def build_final_intent_certificate_from_actionable(
         passive_maker_context_payload = _context_payload(passive_maker_context, "passive_maker_context")
     payload = {
         "event_id": action["event_id"],
+        "market_event_id": executable_snapshot_cert.payload.get("event_id"),
         "actionable_certificate_hash": actionable_cert.certificate_hash,
         "final_intent_id": action["final_intent_id"],
         "family_id": action["family_id"],
