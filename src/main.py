@@ -4589,9 +4589,6 @@ def _edli_market_substrate_warm_cycle() -> None:
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled"):
         return
-    if _edli_reactor_active():
-        logger.info("EDLI market-substrate warm deferred: reactor active")
-        return
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
 
     conn = get_world_connection()

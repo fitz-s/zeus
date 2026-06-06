@@ -129,13 +129,19 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     assert calls == [1], "warm job must invoke the family-snapshot refresh exactly once"
 
 
-def test_market_substrate_warm_cycle_defers_while_reactor_active(monkeypatch):
-    """The warm job is venue-I/O; it must not compete with an in-flight reactor drain."""
+def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
+    """The warm job owns an independent cadence; reactor-active must not starve price refresh."""
     calls: list[int] = []
     monkeypatch.setattr(
         main_module,
         "_refresh_pending_family_snapshots",
         lambda *a, **k: calls.append(1),
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        main_module, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
     )
     _enable_edli_cfg(monkeypatch, enabled=True)
 
@@ -145,7 +151,7 @@ def test_market_substrate_warm_cycle_defers_while_reactor_active(monkeypatch):
     finally:
         main_module._edli_reactor_active_lock.release()
 
-    assert calls == []
+    assert calls == [1]
 
 
 def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
