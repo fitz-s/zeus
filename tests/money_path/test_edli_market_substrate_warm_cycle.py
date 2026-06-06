@@ -53,6 +53,8 @@ import re
 import sqlite3
 from types import SimpleNamespace
 
+import pytest
+
 import src.main as main_module
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 
@@ -105,6 +107,28 @@ def test_pending_family_refresh_default_budget_stays_inside_price_ttl():
 
     assert match is not None
     assert float(match.group(1)) < FRESHNESS_WINDOW_DEFAULT.total_seconds()
+
+
+def test_pending_family_refresh_has_no_fixed_family_cap():
+    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+
+    assert "_FAMILY_REFRESH_CAP" not in src
+    assert "families[:" not in src
+
+
+def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):
+    """Late topology selection must not pass a 0.1s fake progress slice to CLOB."""
+
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 100.0)
+
+    assert main_module._snapshot_capture_budget_for_refresh(
+        refresh_deadline=90.0,
+        snapshot_reserve_s=12.0,
+    ) == pytest.approx(12.0)
+    assert main_module._snapshot_capture_budget_for_refresh(
+        refresh_deadline=125.0,
+        snapshot_reserve_s=12.0,
+    ) == pytest.approx(25.0)
 
 
 def test_market_discovery_defers_while_reactor_active():
@@ -294,6 +318,396 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
     assert "SCAN p" not in plan
 
 
+def test_pending_family_refresh_does_not_truncate_to_fixed_family_cap(monkeypatch):
+    """The pending-family warmer must progress by wall-clock budget, not by a hard
+    family-count slice. A fixed 8-family cap lets a small prefix monopolise the
+    price freshness window while hundreds of live weather families stay pending."""
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT NOT NULL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            causal_snapshot_id TEXT,
+            payload_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            priority INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            payload_json TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(consumer_name, processing_status, updated_at);
+        """
+    )
+    for idx in range(12):
+        city = f"City {idx:02d}"
+        event_id = f"event-{idx:02d}"
+        available_at = f"2026-06-06T00:00:{idx:02d}+00:00"
+        payload = {"city": city, "target_date": "2026-06-07", "metric": "high"}
+        conn.execute(
+            """
+            INSERT INTO opportunity_events (
+                event_id, event_type, entity_key, source, observed_at, available_at,
+                received_at, payload_hash, idempotency_key, priority, payload_json,
+                schema_version, created_at
+            ) VALUES (?, 'FORECAST_SNAPSHOT_READY', ?, 'test', ?, ?, ?, ?, ?, 50, ?, 1, ?)
+            """,
+            (
+                event_id,
+                event_id,
+                available_at,
+                available_at,
+                available_at,
+                event_id,
+                event_id,
+                json.dumps(payload),
+                available_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, updated_at
+            ) VALUES ('edli_reactor_v1', ?, 'pending', ?)
+            """,
+            (event_id, available_at),
+        )
+
+    write_conn = _FakeConn()
+
+    import src.data.market_scanner as scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.engine.event_reactor_adapter as adapter
+    import src.state.db as state_db
+
+    def _topology_rows(_forecasts_conn, payload):
+        city = payload["city"]
+        return [
+            {
+                "market_slug": f"highest-temperature-in-{city.lower().replace(' ', '-')}-on-june-7-2026",
+                "condition_id": f"cond-{city}",
+                "token_id": f"yes-{city}",
+                "no_token_id": f"no-{city}",
+                "range_label": "24C",
+            }
+        ]
+
+    def _reconstruct(_conn, *, topology_rows, **_kwargs):
+        row = topology_rows[0]
+        return {
+            "slug": row["market_slug"],
+            "city": SimpleNamespace(name=row["city"]),
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "outcomes": [
+                {
+                    "condition_id": row["condition_id"],
+                    "market_id": row["condition_id"],
+                    "token_id": row["token_id"],
+                    "no_token_id": row["no_token_id"],
+                    "question_id": f"q-{row['condition_id']}",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(adapter, "_event_family_market_topology_rows", _topology_rows)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: write_conn)
+    monkeypatch.setattr(scanner, "reconstruct_weather_market_from_static_topology", _reconstruct)
+    monkeypatch.setattr(scanner, "_gamma_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Gamma should not be called")))
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+
+    submitted: list[list[dict]] = []
+    refresh_kwargs: list[dict] = []
+
+    def _refresh(_conn, *, markets, **kwargs):
+        submitted.append(markets)
+        refresh_kwargs.append(kwargs)
+        return {"attempted": len(markets), "inserted": len(markets)}
+
+    monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    result = main_module._refresh_pending_family_snapshots(conn, _FakeConn())
+
+    assert result["status"] == "refreshed"
+    assert result["families_checked"] == 12
+    assert result["cached_topology_families"] == 12
+    assert len(submitted) == 1
+    assert len(submitted[0]) == 12
+    assert refresh_kwargs[0]["max_outcomes"] == 0
+    assert refresh_kwargs[0]["budget_seconds"] <= 15.0
+
+
+def test_pending_family_refresh_timeboxes_topology_before_capture_reserve(monkeypatch):
+    """Topology/cache work must stop expanding scope before it consumes CLOB reserve."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT NOT NULL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            causal_snapshot_id TEXT,
+            payload_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            priority INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            payload_json TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(consumer_name, processing_status, updated_at);
+        """
+    )
+    for idx in range(12):
+        city = f"City {idx:02d}"
+        event_id = f"event-{idx:02d}"
+        available_at = f"2026-06-06T00:00:{idx:02d}+00:00"
+        payload = {"city": city, "target_date": "2026-06-07", "metric": "high"}
+        conn.execute(
+            """
+            INSERT INTO opportunity_events (
+                event_id, event_type, entity_key, source, observed_at, available_at,
+                received_at, payload_hash, idempotency_key, priority, payload_json,
+                schema_version, created_at
+            ) VALUES (?, 'FORECAST_SNAPSHOT_READY', ?, 'test', ?, ?, ?, ?, ?, 50, ?, 1, ?)
+            """,
+            (
+                event_id,
+                event_id,
+                available_at,
+                available_at,
+                available_at,
+                event_id,
+                event_id,
+                json.dumps(payload),
+                available_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, updated_at
+            ) VALUES ('edli_reactor_v1', ?, 'pending', ?)
+            """,
+            (event_id, available_at),
+        )
+
+    fake_now = 0.0
+
+    def _monotonic() -> float:
+        return fake_now
+
+    import src.data.market_scanner as scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.engine.event_reactor_adapter as adapter
+    import src.state.db as state_db
+
+    def _topology_rows(_forecasts_conn, payload):
+        nonlocal fake_now
+        fake_now += 1.25
+        city = payload["city"]
+        return [
+            {
+                "market_slug": f"highest-temperature-in-{city.lower().replace(' ', '-')}-on-june-7-2026",
+                "condition_id": f"cond-{city}",
+                "token_id": f"yes-{city}",
+                "no_token_id": f"no-{city}",
+                "range_label": "24C",
+            }
+        ]
+
+    def _reconstruct(_conn, *, topology_rows, **_kwargs):
+        row = topology_rows[0]
+        return {
+            "slug": row["market_slug"],
+            "city": SimpleNamespace(name=row["city"]),
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "outcomes": [
+                {
+                    "condition_id": row["condition_id"],
+                    "market_id": row["condition_id"],
+                    "token_id": row["token_id"],
+                    "no_token_id": row["no_token_id"],
+                    "question_id": f"q-{row['condition_id']}",
+                }
+            ],
+        }
+
+    monkeypatch.setenv("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "15.0")
+    monkeypatch.delenv("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", raising=False)
+    monkeypatch.setattr(main_module.time, "monotonic", _monotonic)
+    monkeypatch.setattr(adapter, "_event_family_market_topology_rows", _topology_rows)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **_k: _FakeConn())
+    monkeypatch.setattr(scanner, "reconstruct_weather_market_from_static_topology", _reconstruct)
+    monkeypatch.setattr(scanner, "_gamma_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Gamma should not be called")))
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+
+    submitted: list[list[dict]] = []
+    refresh_kwargs: list[dict] = []
+
+    def _refresh(_conn, *, markets, **kwargs):
+        submitted.append(markets)
+        refresh_kwargs.append(kwargs)
+        return {"attempted": len(markets), "inserted": len(markets)}
+
+    monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    result = main_module._refresh_pending_family_snapshots(conn, _FakeConn())
+
+    assert result["status"] == "refreshed"
+    assert result["topology_budget_exhausted"] == 1
+    assert result["topology_deferred_families"] > 0
+    assert 1 <= len(submitted[0]) < 12
+    assert refresh_kwargs[0]["budget_seconds"] == pytest.approx(12.0)
+
+
+def test_condition_buy_sides_fresh_requires_yes_and_no_selected_tokens():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, yes_token_id, no_token_id,
+            selected_outcome_token_id, captured_at, freshness_deadline
+        ) VALUES ('snap-yes', 'cond-1', 'yes-1', 'no-1', 'yes-1',
+                  '2026-06-06T00:00:00+00:00', '2026-06-06T00:01:00+00:00')
+        """
+    )
+
+    assert not main_module._condition_buy_sides_fresh(
+        conn,
+        "cond-1",
+        "2026-06-06T00:00:30+00:00",
+    )
+
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, condition_id, yes_token_id, no_token_id,
+            selected_outcome_token_id, captured_at, freshness_deadline
+        ) VALUES ('snap-no', 'cond-1', 'yes-1', 'no-1', 'no-1',
+                  '2026-06-06T00:00:01+00:00', '2026-06-06T00:01:00+00:00')
+        """
+    )
+
+    assert main_module._condition_buy_sides_fresh(
+        conn,
+        "cond-1",
+        "2026-06-06T00:00:30+00:00",
+    )
+
+
+def test_prune_fresh_market_outcomes_keeps_refresh_moving_past_completed_conditions():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT,
+            condition_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
+            captured_at TEXT,
+            freshness_deadline TEXT
+        )
+        """
+    )
+    for snapshot_id, selected in (("snap-yes", "yes-fresh"), ("snap-no", "no-fresh")):
+        conn.execute(
+            """
+            INSERT INTO executable_market_snapshots (
+                snapshot_id, condition_id, yes_token_id, no_token_id,
+                selected_outcome_token_id, captured_at, freshness_deadline
+            ) VALUES (?, 'cond-fresh', 'yes-fresh', 'no-fresh', ?,
+                      '2026-06-06T00:00:00+00:00', '2026-06-06T00:01:00+00:00')
+            """,
+            (snapshot_id, selected),
+        )
+
+    market = {
+        "slug": "highest-temperature-in-test-on-june-7-2026",
+        "condition_ids": ["cond-fresh", "cond-stale"],
+        "outcomes": [
+            {
+                "condition_id": "cond-fresh",
+                "market_id": "cond-fresh",
+                "token_id": "yes-fresh",
+                "no_token_id": "no-fresh",
+            },
+            {
+                "condition_id": "cond-stale",
+                "market_id": "cond-stale",
+                "token_id": "yes-stale",
+                "no_token_id": "no-stale",
+            },
+        ],
+    }
+
+    pruned, fresh_skipped, stale_submitted = (
+        main_module._prune_fresh_market_outcomes_for_snapshot_refresh(
+            conn,
+            [market],
+            fresh_at_iso="2026-06-06T00:00:30+00:00",
+        )
+    )
+
+    assert fresh_skipped == 1
+    assert stale_submitted == 1
+    assert len(pruned) == 1
+    assert [outcome["condition_id"] for outcome in pruned[0]["outcomes"]] == ["cond-stale"]
+    assert pruned[0]["condition_ids"] == ["cond-stale"]
+
+
 def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeypatch):
     world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
     forecasts_conn = _FakeConn()
@@ -354,7 +768,10 @@ def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeyp
     assert result["status"] == "refreshed"
     assert result["gamma_refresh_families"] == 0
     assert result["cached_topology_families"] == 1
-    assert submitted == [[cached_market]]
+    assert len(submitted) == 1
+    assert submitted[0][0]["slug"] == cached_market["slug"]
+    assert submitted[0][0]["outcomes"] == cached_market["outcomes"]
+    assert submitted[0][0].get("condition_ids") in (None, ["cond-1"])
 
 
 def test_pending_family_refresh_falls_back_to_gamma_when_static_topology_incomplete(monkeypatch):
@@ -427,7 +844,10 @@ def test_pending_family_refresh_falls_back_to_gamma_when_static_topology_incompl
     assert result["gamma_refresh_families"] == 1
     assert result["cached_topology_incomplete"] == 1
     assert gamma_calls == [{"slug": "highest-temperature-in-hong-kong-on-june-7-2026"}]
-    assert submitted == [[gamma_event]]
+    assert len(submitted) == 1
+    assert submitted[0][0]["slug"] == gamma_event["slug"]
+    assert submitted[0][0]["outcomes"] == gamma_event["outcomes"]
+    assert submitted[0][0].get("condition_ids") in (None, ["cond-1"])
 
 
 def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):

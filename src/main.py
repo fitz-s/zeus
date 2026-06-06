@@ -2848,6 +2848,24 @@ def _gamma_lookup_deadline_for_snapshot_refresh(
     return min(base_deadline, (refresh_deadline - refresh_budget_s) + cached_slice_s)
 
 
+def _snapshot_capture_budget_for_refresh(
+    *,
+    refresh_deadline: float,
+    snapshot_reserve_s: float,
+) -> float:
+    """Return the CLOB capture slice for pending-family snapshot refresh.
+
+    The warm job has two qualitatively different phases: cheap topology/cache
+    selection and price capture.  Live evidence showed the selection phase can
+    consume the full nominal refresh budget; passing the leftover 0.1s to CLOB
+    creates one-row "progress" while every pending family remains effectively
+    blocked.  The reserve is therefore a phase budget, not a leftover hint.
+    """
+
+    remaining_s = refresh_deadline - time.monotonic()
+    return max(snapshot_reserve_s, remaining_s)
+
+
 def _refresh_pending_family_snapshots(
     world_conn,
     forecasts_conn,
@@ -2907,7 +2925,7 @@ def _refresh_pending_family_snapshots(
     )
     refresh_deadline = time.monotonic() + refresh_budget_s
     snapshot_reserve_s = min(
-        max(1.0, float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "6.0"))),
+        max(1.0, float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0"))),
         max(0.1, refresh_budget_s - 0.1),
     )
     gamma_deadline = refresh_deadline - snapshot_reserve_s
@@ -2936,10 +2954,25 @@ def _refresh_pending_family_snapshots(
     cached_topology_markets: list[dict] = []
     cached_topology_families = 0
     cached_topology_incomplete = 0
+    topology_budget_exhausted = False
+    topology_deferred_families = 0
 
     write_conn = get_trade_connection(write_class="live")
     try:
-        for city, target_date, metric in families:
+        for index, (city, target_date, metric) in enumerate(families):
+            if time.monotonic() >= gamma_deadline and (
+                cached_topology_markets or gamma_refresh_families
+            ):
+                topology_budget_exhausted = True
+                topology_deferred_families = len(families) - index
+                logger.info(
+                    "refresh_pending_family_snapshots: topology time-box hit after %d/%d "
+                    "families; reserving %.1fs for CLOB capture",
+                    index,
+                    len(families),
+                    snapshot_reserve_s,
+                )
+                break
             payload = {"city": city, "target_date": target_date, "metric": metric}
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
@@ -3190,7 +3223,10 @@ def _refresh_pending_family_snapshots(
                 "stale_condition_submitted": stale_condition_submitted,
             }
 
-        snapshot_budget_s = max(0.1, refresh_deadline - time.monotonic())
+        snapshot_budget_s = _snapshot_capture_budget_for_refresh(
+            refresh_deadline=refresh_deadline,
+            snapshot_reserve_s=snapshot_reserve_s,
+        )
         with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
             summary = refresh_executable_market_substrate_snapshots(
                 write_conn,
@@ -3218,6 +3254,8 @@ def _refresh_pending_family_snapshots(
         "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
         "fresh_skipped": fresh_skipped,
+        "topology_budget_exhausted": int(topology_budget_exhausted),
+        "topology_deferred_families": topology_deferred_families,
         "markets_submitted": len(markets_for_refresh),
         "fresh_condition_skipped": fresh_condition_skipped,
         "stale_condition_submitted": stale_condition_submitted,
