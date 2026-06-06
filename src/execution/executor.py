@@ -473,6 +473,28 @@ def _assert_collateral_allows_buy(intent: ExecutionIntent, *, spend_micro: int |
     return _capability_component("collateral_ledger", collateral="pUSD", spend_micro=spend_micro or 0)
 
 
+def _refresh_entry_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
+    """Refresh collateral truth synchronously on the submit path before preflight."""
+    from src.data.polymarket_client import PolymarketClient
+    from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
+
+    try:
+        client = PolymarketClient()
+        adapter = client._ensure_v2_adapter()
+        snapshot = CollateralLedger(conn).refresh(adapter)
+    except CollateralInsufficient:
+        raise
+    except Exception as exc:
+        raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
+    if snapshot.authority_tier == "DEGRADED":
+        raise CollateralInsufficient("collateral_snapshot_degraded: refreshed_before_submit")
+    return _capability_component(
+        "collateral_snapshot_refresh",
+        authority_tier=snapshot.authority_tier,
+        captured_at=snapshot.captured_at.isoformat(),
+    )
+
+
 def _assert_collateral_allows_sell(token_id: str, shares: float) -> dict:
     """Fail before command persistence or SDK contact when CTF inventory is insufficient."""
     from src.state.collateral_ledger import assert_sell_preflight
@@ -3139,7 +3161,6 @@ def _live_order(
             )
         heartbeat_component = _assert_heartbeat_allows_submit(effective_order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
-        collateral_component = _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
 
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
@@ -3257,6 +3278,20 @@ def _live_order(
             )
 
         try:
+            collateral_refresh_component = _refresh_entry_collateral_snapshot_for_submit(conn)
+        except CollateralInsufficient as exc:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_collateral_refresh_failed: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+            )
+
+        try:
+            collateral_component = _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
             pre_submit_envelope = _build_pre_submit_envelope(
                 conn,
                 command_id=command_id,
@@ -3326,6 +3361,7 @@ def _live_order(
                             ),
                             heartbeat_component,
                             ws_gap_component,
+                            collateral_refresh_component,
                             collateral_component,
                             decision_source_component,
                             corrected_identity_component,

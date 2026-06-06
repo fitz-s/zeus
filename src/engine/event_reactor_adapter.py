@@ -1526,7 +1526,10 @@ def _build_live_execution_command_certificates(
         # executable_snapshot payload default, which is correct for the MAKER path.
         _snap_for_depth = None
         if str(order_mode).strip().upper() == "TAKER" and trade_conn is not None:
-            from src.contracts.execution_intent import simulate_clob_sweep
+            from src.contracts.execution_intent import (
+                quantize_submit_shares_for_venue_at_most,
+                simulate_clob_sweep,
+            )
             _snap_id_for_depth = str(
                 executable_snapshot.payload.get("identity")
                 or executable_snapshot.payload.get("selected_snapshot_id")
@@ -1622,48 +1625,46 @@ def _build_live_execution_command_certificates(
                     limit_price=_limit_price_d,
                 )
                 if _depth_sweep.filled_shares > 0:
-                    available_crossable_shares = float(_depth_sweep.filled_shares)
-                    # SEV-1.1 fix (2026-06-01): the cert builder caps size to
-                    # available_crossable_shares.  The executor guard re-sweeps on
-                    # the CAPPED submitted_shares and asserts exact VWAP equality.
-                    # If we store the VWAP from the uncapped _desired_shares sweep,
-                    # the two VWAPs diverge on any multi-level book where desired >
-                    # crossable → parity rejection on first armed TAKER order.
-                    # Fix: re-sweep on the capped size to get the VWAP that the
-                    # executor will actually see.  The cert builder's
-                    #   size = min(desired_shares, available_crossable_shares)
-                    # is mirrored here as min(_desired_shares_f, available_crossable_shares).
-                    # Single-source principle: ONE sweep result drives both the cert
-                    # fill price and the executor guard re-sweep (same snap, same
-                    # size, same limit → bitwise identical VWAP Decimal).
-                    _capped_shares_f = min(
-                        _desired_shares_f,
-                        available_crossable_shares,
+                    # SEV-1.2 fix (2026-06-06): the submitted share amount itself
+                    # must already obey the venue's immediate-BUY amount grids before
+                    # the final intent certificate is built.  The earlier Wall-B fix
+                    # mirrored the cert builder's size cap, but left many-decimal BUY
+                    # sizes such as 36.304447843137254 in SubmitPlanBuilt; the
+                    # executor correctly rejected them before contacting the SDK.
+                    #
+                    # Mirror the final builder's exact size law here, then sweep on
+                    # the largest venue-legal size that does not exceed the target or
+                    # available depth. If no venue-legal size can fully fill, fail
+                    # closed rather than submitting a deterministic reject.
+                    _raw_capped_shares = min(_desired_shares, _depth_sweep.filled_shares)
+                    _venue_quantized_shares = quantize_submit_shares_for_venue_at_most(
+                        _direction_for_depth,
+                        _raw_capped_shares,
+                        final_limit_price=_limit_price_d,
+                        order_type="FOK",
                     )
-                    _capped_shares = Decimal(str(_capped_shares_f))
-                    if _capped_shares < _desired_shares:
-                        # Capped by depth — re-sweep on the capped size so the
-                        # stored VWAP matches what the executor guard will compute.
-                        _capped_sweep = simulate_clob_sweep(
-                            snapshot=_snap_for_depth,
-                            direction=_direction_for_depth,
-                            requested_size_kind="shares",
-                            requested_size_value=_capped_shares,
-                            limit_price=_limit_price_d,
+                    _venue_quantized_sweep = simulate_clob_sweep(
+                        snapshot=_snap_for_depth,
+                        direction=_direction_for_depth,
+                        requested_size_kind="shares",
+                        requested_size_value=_venue_quantized_shares,
+                        limit_price=_limit_price_d,
+                    )
+                    if not _venue_quantized_sweep.fully_filled:
+                        raise ValueError(
+                            "DEPTH_BELOW_VENUE_QUANTIZED_SIZE:"
+                            f"filled_shares={_venue_quantized_sweep.filled_shares}:"
+                            f"venue_quantized_shares={_venue_quantized_shares}:"
+                            f"depth_status={_venue_quantized_sweep.depth_status}"
                         )
-                        sweep_expected_fill_price = (
-                            str(_capped_sweep.average_price)
-                            if _capped_sweep.average_price is not None else None
-                        )
-                    else:
-                        # Not capped — original sweep VWAP is already correct.
-                        # Bug B fix: store exact Decimal string, not float, so the
-                        # cert payload round-trips via _decimal(str) without losing
-                        # precision.
-                        sweep_expected_fill_price = (
-                            str(_depth_sweep.average_price)
-                            if _depth_sweep.average_price is not None else None
-                        )
+                    available_crossable_shares = float(_venue_quantized_shares)
+                    # Single-source principle: the final intent size, the stored
+                    # expected fill price, and the executor guard re-sweep are all
+                    # driven by the same snapshot, limit, and venue-legal size.
+                    sweep_expected_fill_price = (
+                        str(_venue_quantized_sweep.average_price)
+                        if _venue_quantized_sweep.average_price is not None else None
+                    )
         executable_market_context = _executable_market_context_from_snapshot(_snap_for_depth)
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,

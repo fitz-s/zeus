@@ -304,6 +304,41 @@ def quantize_submit_shares_for_venue(
     )
 
 
+def quantize_submit_shares_for_venue_at_most(
+    direction: ExecutionDirection,
+    shares: Decimal,
+    *,
+    final_limit_price: Decimal,
+    order_type: OrderType | str,
+) -> Decimal:
+    """Return the largest venue-legal share amount not greater than ``shares``."""
+
+    if shares <= Decimal("0"):
+        raise ValueError("submitted_shares must be positive")
+    if not (
+        str(direction).startswith("buy_")
+        and str(order_type or "").strip().upper() in {"FOK", "FAK"}
+    ):
+        return _quantize_submit_shares(direction, shares)
+    quantum = Decimal("0.01")
+    quantized = (shares / quantum).to_integral_value(rounding=ROUND_FLOOR) * quantum
+    while quantized > Decimal("0"):
+        if (
+            venue_submit_amount_precision_error(
+                direction=direction,
+                final_limit_price=final_limit_price,
+                submitted_shares=quantized,
+                order_type=order_type,
+            )
+            is None
+        ):
+            return quantized
+        quantized -= quantum
+    raise ValueError(
+        "unable to quantize immediate BUY shares to venue amount precision within bounds"
+    )
+
+
 def _submitted_shares_from_cost_basis(
     cost_basis: "ExecutableCostBasis",
     *,
