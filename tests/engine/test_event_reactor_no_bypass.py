@@ -2083,14 +2083,8 @@ def test_executable_snapshot_freshness_uses_reactor_decision_time():
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_price_stale_family_passes_entry_freshness_deferred_to_submission():
-    """A price-stale-but-fully-captured family must NOT be rejected at entry with
-    EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING (operator law 2026-05-30: market identity persists;
-    price-freshness is a submission concern). The receipt proceeds past the snapshot-identity
-    gate; price-freshness on the traded selected bin is enforced by assert_snapshot_executable
-    at submission, never here. (Receipt still does not submit — it stops downstream on the
-    EDLI kernel, not on price-staleness.)
-    """
+def test_price_stale_selected_snapshot_blocks_shadow_receipt_before_scoring():
+    """Market identity persists, but shadow will-trade cannot score stale selected-bin price."""
     event = _bound_forecast_event()
     # captured_at before freshness_deadline (invariant: deadline >= captured);
     # freshness_deadline is before decision_time (08:12) — simulates price-stale snapshot.
@@ -2102,8 +2096,8 @@ def test_price_stale_family_passes_entry_freshness_deferred_to_submission():
     receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
 
     assert receipt.submitted is False
-    # Identity gate passed: the rejection is NOT the entry price-staleness block.
-    assert receipt.reason != "EVENT_BOUND_EXECUTABLE_SNAPSHOT_MISSING"
+    assert receipt.reason is not None
+    assert receipt.reason.startswith("EXECUTABLE_SNAPSHOT_STALE:")
 
 
 def test_coverage_expired_between_event_available_and_decision_blocks_receipt(monkeypatch):

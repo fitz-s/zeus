@@ -714,6 +714,14 @@ def build_event_bound_no_submit_receipt(
     row = _selected_snapshot_row_for_event(family_rows, payload)
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
+    selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
+    if selected_stale_reason is not None:
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=selected_stale_reason,
+        )
     decision = EventBoundDecisionEngine().evaluate(
         EventBoundDecisionRequest(
             event=event,
@@ -3670,14 +3678,18 @@ def _generate_candidate_proofs(
             elif row is None:
                 missing_reason = "missing executable snapshot row"
             else:
-                try:
-                    execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
-                        row,
-                        selected_token_id=token_id,
-                        direction=direction,
-                    )
-                except ValueError as exc:
-                    missing_reason = str(exc)
+                stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
+                if stale_reason is not None:
+                    missing_reason = stale_reason
+                else:
+                    try:
+                        execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
+                            row,
+                            selected_token_id=token_id,
+                            direction=direction,
+                        )
+                    except ValueError as exc:
+                        missing_reason = str(exc)
             score = _robust_trade_score_from_generated_inputs(
                 q_posterior=q_value,
                 q_lcb_5pct=q_lcb,
@@ -6357,6 +6369,23 @@ def _snapshot_rows_by_condition(rows: list[dict[str, Any]]) -> dict[str, dict[st
         if condition_id and condition_id not in out:
             out[condition_id] = row
     return out
+
+
+def _snapshot_price_stale_reason(row: dict[str, Any], *, decision_time: datetime) -> str | None:
+    deadline_raw = row.get("freshness_deadline")
+    if deadline_raw in {None, ""}:
+        return "EXECUTABLE_SNAPSHOT_STALE:freshness_deadline_missing"
+    try:
+        deadline = _parse_utc(str(deadline_raw))
+    except Exception:
+        return "EXECUTABLE_SNAPSHOT_STALE:freshness_deadline_invalid"
+    checked_at = decision_time.astimezone(UTC)
+    if deadline < checked_at:
+        return (
+            "EXECUTABLE_SNAPSHOT_STALE:"
+            f"freshness_deadline={deadline.isoformat()}:decision_time={checked_at.isoformat()}"
+        )
+    return None
 
 
 def _latest_snapshot_rows_for_event_family(
