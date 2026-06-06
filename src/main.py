@@ -597,13 +597,18 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
 
 
 def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
-    """PR-2 (A) / F1 Option C: bind the live/canary ARM to settlement-grounded evidence.
+    """PR-2 (A) / F1 Option C: bind full live ARM to settlement-grounded evidence.
 
-    Whenever the daemon is about to arm (real_order_submit_enabled — true for BOTH
-    edli_live_canary AND edli_live), it MUST find a state/edli_arm_gate_artifact.json
-    proving — on THIS commit (commit_sha == booted HEAD) — a positive
-    capital-weighted after-cost settlement EV with coverage licensed. The artifact
-    is produced by scripts/measure_arm_gate_settlement.py (PR-1). Here we ENFORCE it.
+    Whenever the daemon is about to promote to full ``edli_live``, it MUST find a
+    state/edli_arm_gate_artifact.json proving — on THIS commit (commit_sha ==
+    booted HEAD) — a positive capital-weighted after-cost settlement EV with
+    coverage licensed. The artifact is produced by
+    scripts/measure_arm_gate_settlement.py (PR-1). Here we ENFORCE it.
+
+    ``edli_live_canary`` deliberately does not consume this artifact: the first
+    tiny-cap real fill is the qualifying event that creates promotion evidence.
+    Canary is guarded by stage readiness, user/exchange reconciliation, tiny live
+    caps, and submit-chain certainty instead of a circular promotion proof.
 
     ANTIBODY: flipping ``real_order_submit_enabled=true`` without that artifact is now a
     BOOT FAILURE (RuntimeError ``EDLI_LIVE_PROMOTION_ARM_GATE_*``), not a silent runtime
@@ -1067,13 +1072,11 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
         )
     if mode == "edli_live":
         _assert_edli_live_promotion_artifact(edli_cfg)
-    if mode in {"edli_live_canary", "edli_live"}:
-        # PR-2 (A) / F1 Option C: ANY armed mode (canary OR live —
-        # real_order_submit_enabled is required for both) must ALSO carry the
-        # settlement-grounded ARM evidence artifact bound to THIS commit. Missing
-        # / SHA-mismatch / ev<=0 / not-coverage-licensed -> boot RuntimeError.
-        # Ordered AFTER the (edli_live-only) promotion-artifact gate so the
-        # promotion gate's specific reason still surfaces first for edli_live.
+    if mode == "edli_live":
+        # PR-2 (A) / F1 Option C: full live promotion must carry the
+        # settlement-grounded ARM evidence artifact bound to THIS commit. Canary
+        # intentionally does not: it is the tiny-cap qualifying-event lane that
+        # produces promotion evidence rather than consuming it.
         _assert_edli_arm_gate_artifact(edli_cfg)
         # OPERATOR LAW (2026-06-04): the former two-key arm direction-gate guard is
         # DELETED — mainstream is observational/display-only and is NEVER a decision/arm
