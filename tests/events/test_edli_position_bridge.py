@@ -122,6 +122,7 @@ def _seed_confirmed_buy_no_aggregate(
         "target_date": "2026-06-02",
         "bin_label": "30-32",
         "metric": "high",
+        "unit": "C",
         "market_id": CONDITION_ID,
         "q_live": 0.55,
         "executable_snapshot_id": "exec-snap-1",
@@ -191,6 +192,21 @@ def test_green_bridge_materializes_one_correct_position(conn):
     assert abs(row["cost_basis_usd"] - (16.75 * 0.42)) < 1e-6
     assert row["fill_authority"] == "venue_confirmed_full"
     assert row["order_status"] == "filled"
+    fact = conn.execute(
+        """
+        SELECT position_id, order_role, strategy_key, fill_price, shares, terminal_exec_status
+        FROM execution_fact
+        WHERE intent_id = ?
+        """,
+        (FINAL_INTENT_ID,),
+    ).fetchone()
+    assert fact is not None
+    assert fact["position_id"] == row["position_id"]
+    assert fact["order_role"] == "entry"
+    assert fact["strategy_key"] == "settlement_capture"
+    assert fact["fill_price"] == pytest.approx(0.42)
+    assert fact["shares"] == pytest.approx(16.75)
+    assert fact["terminal_exec_status"] == "filled"
 
     # One canonical entry-event chain exists.
     ev = conn.execute(
@@ -206,7 +222,7 @@ def test_green_bridge_buy_yes_places_token_on_token_id(conn):
         "event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "condition_id": CONDITION_ID,
         "token_id": ELECTED_YES_TOKEN, "side": "BUY", "direction": "buy_yes",
         "native_token_side": "YES", "outcome_label": "YES", "city": "Tokyo",
-        "target_date": "2026-06-02", "bin_label": "28-30", "metric": "high", "q_live": 0.6,
+        "target_date": "2026-06-02", "bin_label": "28-30", "metric": "high", "unit": "C", "q_live": 0.6,
     }
     _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit)
     _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=2, event_type="ExecutionCommandCreated",
@@ -663,6 +679,7 @@ def test_two_distinct_fills_create_two_distinct_position_current_rows(conn):
             "target_date": "2026-06-02",
             "bin_label": "30-32",
             "metric": "high",
+            "unit": "C",
             "market_id": cond,
             "q_live": 0.55,
             "executable_snapshot_id": f"snap-{aggregate_id}",

@@ -536,6 +536,9 @@ def _verify_final_intent_payload(
         "executable_snapshot_id",
     ):
         _require_equal(f"final_intent.{field}", payload.get(field), f"actionable.{field}", actionable.get(field))
+    for field in ("city", "target_date", "metric", "temperature_metric", "bin_label", "outcome_label", "unit"):
+        if actionable.get(field) not in (None, "") or payload.get(field) not in (None, ""):
+            _require_equal(f"final_intent.{field}", payload.get(field), f"actionable.{field}", actionable.get(field))
     limit_price = _finite_float(payload.get("limit_price"), "final intent limit_price")
     size = _finite_float(payload.get("size"), "final intent size")
     notional = _finite_float(payload.get("notional_usd"), "final intent notional_usd")

@@ -1197,6 +1197,7 @@ def build_event_bound_no_submit_receipt(
             "target_date": family.target_date,
             "metric": family.metric,
             "bin_label": candidate.bin.label,
+            "unit": getattr(candidate.bin, "unit", None),
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
             "q_live": proof.q_posterior,
             "q_lcb_5pct": proof.q_lcb_5pct,
@@ -1351,6 +1352,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
         opportunity_book=raw_receipt.get("opportunity_book"),
+        unit=raw_receipt.get("unit"),
     )
 
 
@@ -1445,7 +1447,7 @@ def _build_live_execution_command_certificates(
     )
     try:
         actionable = build_actionable_trade_certificate(
-            payload=_actionable_payload_from_receipt(receipt, live_cap),
+            payload=_actionable_payload_from_receipt(receipt, live_cap, event=event),
             parent_certificates=base_certs + (live_cap,),
             decision_time=decision_time,
         )
@@ -1880,8 +1882,13 @@ def _build_live_execution_command_certificates(
 def _actionable_payload_from_receipt(
     receipt: EventSubmissionReceipt,
     live_cap_cert: DecisionCertificate,
+    *,
+    event: OpportunityEvent | None = None,
 ) -> dict[str, object]:
     reserved_notional = float(live_cap_cert.payload["reserved_notional_usd"])
+    city = receipt.city or _event_identity_value(event, "city")
+    target_date = receipt.target_date or _event_identity_value(event, "target_date")
+    metric = receipt.metric or _event_identity_value(event, "metric") or _event_identity_value(event, "temperature_metric")
     return {
         "event_id": receipt.event_id,
         "event_type": "FORECAST_SNAPSHOT_READY",
@@ -1910,8 +1917,24 @@ def _actionable_payload_from_receipt(
         "neg_risk": receipt.neg_risk,
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
         "native_quote_available": receipt.native_quote_available,
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+        "temperature_metric": metric,
+        "bin_label": receipt.bin_label,
+        "outcome_label": receipt.outcome_label,
+        "unit": receipt.unit,
         "submitted": False,
     }
+
+
+def _event_identity_value(event: OpportunityEvent | None, key: str) -> object | None:
+    if event is None:
+        return None
+    payload = getattr(event, "payload", None)
+    if isinstance(payload, dict):
+        return payload.get(key)
+    return getattr(payload, key, None)
 
 
 def _live_order_aggregate_id(event_id: str, final_intent_id: str) -> str:
@@ -2042,6 +2065,13 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "token_id": payload["token_id"],
         "side": payload["side"],
         "direction": payload["direction"],
+        "city": payload.get("city"),
+        "target_date": payload.get("target_date"),
+        "metric": payload.get("metric") or payload.get("temperature_metric"),
+        "temperature_metric": payload.get("temperature_metric") or payload.get("metric"),
+        "bin_label": payload.get("bin_label"),
+        "outcome_label": payload.get("outcome_label"),
+        "unit": payload.get("unit"),
         "order_type": payload["order_type"],
         "time_in_force": payload["time_in_force"],
         "post_only": payload["post_only"],

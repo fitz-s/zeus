@@ -297,17 +297,45 @@ def _resolve_identity(events: list[tuple[str, dict[str, Any]]]) -> dict[str, Any
             raise EdliPositionBridgeError(
                 "EDLI_BRIDGE_DIRECTION_UNRESOLVED: cannot determine buy_yes/buy_no for fill"
             )
+    city = str(pre_submit.get("city") or "").strip()
+    target_date = str(pre_submit.get("target_date") or "").strip()
+    bin_label = str(pre_submit.get("bin_label") or "").strip()
+    metric = str(pre_submit.get("metric") or pre_submit.get("temperature_metric") or "").strip().lower()
+    unit = str(pre_submit.get("unit") or pre_submit.get("temperature_unit") or "").strip().upper()
+    missing_identity = [
+        name
+        for name, value in (
+            ("city", city),
+            ("target_date", target_date),
+            ("bin_label", bin_label),
+            ("metric", metric),
+            ("unit", unit),
+        )
+        if not value
+    ]
+    if missing_identity:
+        raise EdliPositionBridgeError(
+            "EDLI_BRIDGE_MARKET_IDENTITY_MISSING: "
+            + ",".join(missing_identity)
+            + " required before materializing position_current"
+        )
+    if metric not in {"high", "low"}:
+        raise EdliPositionBridgeError(f"EDLI_BRIDGE_METRIC_INVALID: {metric!r}")
+    if unit not in {"C", "F"}:
+        raise EdliPositionBridgeError(f"EDLI_BRIDGE_UNIT_INVALID: {unit!r}")
+
     return {
         "condition_id": condition_id,
         "token_id": token_id,
         "direction": direction,
         "outcome_label": str(pre_submit.get("outcome_label") or ("NO" if direction == "buy_no" else "YES")),
-        "city": str(pre_submit.get("city") or ""),
-        "target_date": str(pre_submit.get("target_date") or ""),
-        "bin_label": str(pre_submit.get("bin_label") or ""),
-        "metric": str(pre_submit.get("metric") or "high"),
+        "city": city,
+        "target_date": target_date,
+        "bin_label": bin_label,
+        "metric": metric,
+        "unit": unit,
         "market_id": str(pre_submit.get("market_id") or condition_id),
-        "cluster": str(pre_submit.get("cluster") or pre_submit.get("city") or ""),
+        "cluster": str(pre_submit.get("cluster") or city),
         "p_posterior": _float_or_none(pre_submit.get("q_live")) or 0.0,
         "decision_snapshot_id": str(pre_submit.get("executable_snapshot_id") or pre_submit.get("snapshot_id") or ""),
         "final_intent_id": str(pre_submit.get("final_intent_id") or ""),
@@ -341,7 +369,7 @@ def _build_bridge_position(
     direction = identity["direction"]
     elected_token = identity["token_id"]
     cost_basis = filled_size * avg_fill_price
-    temperature_metric = "low" if str(identity.get("metric") or "").lower() in {"low", "min"} else "high"
+    temperature_metric = str(identity["metric"])
 
     pos = Position(
         trade_id=position_id,
@@ -351,7 +379,7 @@ def _build_bridge_position(
         target_date=identity["target_date"],
         bin_label=identity["bin_label"],
         direction=direction,
-        unit="F",
+        unit=str(identity["unit"]),
         temperature_metric=temperature_metric,
         env=env,
         size_usd=cost_basis,
@@ -454,6 +482,7 @@ def materialize_position_current_from_edli_fill(
         build_entry_canonical_write,
         build_position_current_projection,
     )
+    from src.state.db import log_execution_fact
     from src.state.ledger import append_many_and_project, upsert_position_current
 
     position_id = pos.trade_id
@@ -479,6 +508,24 @@ def materialize_position_current_from_edli_fill(
         projection["phase"] = ACTIVE
         upsert_position_current(conn, projection)
         created = False
+
+    log_execution_fact(
+        conn,
+        intent_id=identity["final_intent_id"] or identity["execution_command_id"] or aggregate_id,
+        position_id=position_id,
+        order_role="entry",
+        decision_id=identity["final_intent_id"] or None,
+        command_id=identity["execution_command_id"] or None,
+        strategy_key="settlement_capture",
+        posted_at=filled_at,
+        filled_at=filled_at,
+        submitted_price=avg_fill_price,
+        fill_price=avg_fill_price,
+        shares=filled_size,
+        fill_quality=1.0,
+        venue_status="CONFIRMED",
+        terminal_exec_status="filled",
+    )
 
     return {
         "position_id": position_id,

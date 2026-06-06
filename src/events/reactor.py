@@ -150,6 +150,7 @@ class EventSubmissionReceipt:
     # Shadow-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
     opportunity_book: dict[str, Any] | None = None
+    unit: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:

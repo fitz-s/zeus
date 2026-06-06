@@ -806,8 +806,22 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
     assert final_intent.payload["post_only"] is False
     assert final_intent.payload["time_in_force"] in {"FOK", "FAK"}
     assert final_intent.payload["limit_price"] == pytest.approx(0.40)
+    assert final_intent.payload["city"] == "Chicago"
+    assert final_intent.payload["target_date"] == "2026-05-24"
+    assert final_intent.payload["metric"] == "high"
+    assert final_intent.payload["temperature_metric"] == "high"
+    assert final_intent.payload["bin_label"] == "80-82"
+    assert final_intent.payload["outcome_label"] == "YES"
+    assert final_intent.payload["unit"] == "F"
     assert pre_submit.payload["would_cross_book"] is True
     assert pre_submit.payload["post_only"] is False
+    assert pre_submit.payload["city"] == "Chicago"
+    assert pre_submit.payload["target_date"] == "2026-05-24"
+    assert pre_submit.payload["metric"] == "high"
+    assert pre_submit.payload["temperature_metric"] == "high"
+    assert pre_submit.payload["bin_label"] == "80-82"
+    assert pre_submit.payload["outcome_label"] == "YES"
+    assert pre_submit.payload["unit"] == "F"
 
 
 def test_live_command_reuses_single_pre_submit_authority_witness():
@@ -1619,6 +1633,12 @@ def _accepted_receipt(event):
         family_id="family-1",
         candidate_id="candidate-1",
         direction="buy_yes",
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        bin_label="80-82",
+        outcome_label="YES",
+        unit="F",
         q_live=0.7,
         q_lcb_5pct=0.6,
         c_fee_adjusted=0.4,
