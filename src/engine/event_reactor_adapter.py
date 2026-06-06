@@ -800,17 +800,12 @@ def build_event_bound_no_submit_receipt(
         proofs,
         locked_opportunity_conn=locked_opportunity_conn,
     )
-    opportunity_book = (
-        _opportunity_book_from_proofs(
-            event_id=event.event_id,
-            family_id=family.family_id,
-            proofs=proofs,
-            selected_proof=proof,
-            locked_opportunity_conn=locked_opportunity_conn,
-        )
-        if _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SHADOW")
-        or _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SELECTOR")
-        else None
+    opportunity_book = _opportunity_book_from_proofs(
+        event_id=event.event_id,
+        family_id=family.family_id,
+        proofs=proofs,
+        selected_proof=proof,
+        locked_opportunity_conn=locked_opportunity_conn,
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
