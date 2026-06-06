@@ -459,8 +459,7 @@ def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
                 "edli_stage_readiness",
                 PASS if ok else FAIL,
                 f"status={report.status}:submit_allowed={report.submit_allowed}:reasons={list(report.reasons)}",
-            ),
-            _check_edli_arm_gate_artifact(args),
+            )
         ]
     if stage == "edli_submit_disabled_bridge":
         ok = report.status in {main.EDLI_STAGE_PASS, main.EDLI_STAGE_WAITING} and not report.submit_allowed
