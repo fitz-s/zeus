@@ -643,7 +643,7 @@ class PolymarketUserChannelIngestor:
             and current.gap_reason == "not_configured"
             and current.m5_reconcile_required
             and 0 <= clean_boot_age_seconds <= current.stale_after_seconds
-            and self._local_side_effect_surface_empty()
+            and self._clean_boot_side_effect_surface_empty()
         ):
             ws_gap_guard.record_message(
                 observed_at=now,
@@ -665,6 +665,44 @@ class PolymarketUserChannelIngestor:
             subscription_state=current.subscription_state,
             stale_after_seconds=self.stale_after_seconds,
         )
+
+    def _clean_boot_side_effect_surface_empty(self) -> bool:
+        """Return whether a boot-only WS latch can clear without M5 replay.
+
+        ``not_configured`` means this process has not yet had a user-channel
+        subscription that could have missed a message.  Historical or current
+        exposure lots are known portfolio state, not evidence of a missed WS
+        side effect.  In-flight venue commands and unresolved reconcile findings
+        still block clean-boot clearing because they can represent hidden order
+        or fill transitions.
+        """
+
+        conn = self.conn_factory()
+        try:
+            command_placeholders = ",".join("?" for _ in UNRESOLVED_COMMAND_STATES)
+            checks: tuple[tuple[str, tuple[Any, ...]], ...] = (
+                (
+                    f"SELECT COUNT(*) FROM venue_commands WHERE state IN ({command_placeholders})",
+                    UNRESOLVED_COMMAND_STATES,
+                ),
+                (
+                    "SELECT COUNT(*) FROM exchange_reconcile_findings WHERE resolved_at IS NULL",
+                    (),
+                ),
+            )
+            return all(
+                int(conn.execute(sql, params).fetchone()[0] or 0) == 0
+                for sql, params in checks
+            )
+        except Exception as exc:
+            logger.warning(
+                "M3 user-channel clean-boot proof unavailable; preserving M5 latch: %s",
+                exc,
+            )
+            return False
+        finally:
+            if self.own_connection:
+                conn.close()
 
     def _local_side_effect_surface_empty(self) -> bool:
         conn = self.conn_factory()
