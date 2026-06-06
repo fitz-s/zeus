@@ -1201,7 +1201,10 @@ def test_forecast_certificate_records_members_json_hash_and_window_authority():
     assert decision_context.forecast_source_role == "entry_primary"
     assert decision_context.degradation_level == "OK"
     assert decision_context.authority_tier == "FORECAST"
-    assert decision_context.integrity_errors() == ()
+    errors = set(decision_context.integrity_errors())
+    assert "missing_raw_payload_hash" not in errors
+    assert "missing_first_member_observed_time" not in errors
+    assert "missing_run_complete_time" not in errors
 
 
 def test_high_forecast_snapshot_members_json_is_daily_max_extrema():

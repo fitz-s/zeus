@@ -102,7 +102,10 @@ def build_final_intent_certificate_from_actionable(
     )
     executable_snapshot_hash = _required_text(executable_snapshot_cert.payload, "executable_snapshot_hash")
     cost_basis_hash = _required_text(cost_model_cert.payload, "cost_basis_hash")
-    decision_source_context_payload = _context_payload(decision_source_context, "decision_source_context")
+    decision_source_context_payload = _decision_source_context_payload(
+        decision_source_context,
+        executable_snapshot_cert.payload,
+    )
     # WALL #1 (2026-06-01): passive_maker_context is MAKER-ONLY. A taker FOK/FAK
     # crosses the JIT book at submit and never rests, so it carries no maker context.
     # Requiring it for taker was the design coupling that produced the dominant live
@@ -628,6 +631,24 @@ def _context_payload(context, field_name: str) -> dict[str, object]:
         raise ValueError(f"{field_name} required")
     if not payload:
         raise ValueError(f"{field_name} required")
+    return payload
+
+
+def _decision_source_context_payload(
+    context,
+    executable_snapshot_payload: Mapping[str, object],
+) -> dict[str, object]:
+    payload = _context_payload(context, "decision_source_context")
+    if not str(payload.get("polymarket_end_anchor_source") or "").strip():
+        explicit_end = (
+            executable_snapshot_payload.get("market_end_at")
+            or executable_snapshot_payload.get("market_close_at")
+            or executable_snapshot_payload.get("endDate")
+            or executable_snapshot_payload.get("end_date")
+        )
+        payload["polymarket_end_anchor_source"] = (
+            "gamma_explicit" if str(explicit_end or "").strip() else "f1_12z_fallback"
+        )
     return payload
 
 
