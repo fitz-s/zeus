@@ -18,7 +18,7 @@ import math
 import os
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Optional
@@ -1879,6 +1879,83 @@ def _legacy_entry_intent_from_final(
     )
 
 
+def _recapture_fresh_entry_snapshot_if_needed(
+    legacy_intent: ExecutionIntent,
+    final_intent: FinalExecutionIntent,
+    *,
+    conn: sqlite3.Connection | None,
+    submitted_shares: float,
+) -> ExecutionIntent:
+    """Refresh a stale executable snapshot without changing final-intent economics."""
+
+    from src.contracts.executable_market_snapshot import is_fresh
+    from src.state.snapshot_repo import get_snapshot
+
+    if conn is None:
+        return legacy_intent
+    snapshot = get_snapshot(conn, legacy_intent.executable_snapshot_id)
+    if snapshot is None or is_fresh(snapshot, datetime.now(timezone.utc)):
+        return legacy_intent
+    if os.environ.get("ZEUS_REPRICE_RECAPTURE_DISABLED"):
+        return legacy_intent
+    from types import SimpleNamespace
+    from src.data.market_scanner import capture_executable_market_snapshot
+    from src.data.polymarket_client import PolymarketClient
+    from src.engine.cycle_runtime import _market_dict_from_snapshot
+
+    decision = SimpleNamespace(
+        tokens={
+            "token_id": snapshot.yes_token_id,
+            "no_token_id": snapshot.no_token_id,
+            "market_id": snapshot.condition_id,
+        },
+        edge=SimpleNamespace(direction=final_intent.direction),
+    )
+    captured_at = datetime.now(timezone.utc)
+    with PolymarketClient() as clob:
+        fields = capture_executable_market_snapshot(
+            conn,
+            market=_market_dict_from_snapshot(snapshot),
+            decision=decision,
+            clob=clob,
+            captured_at=captured_at,
+            scan_authority="VERIFIED",
+            execution_side="BUY",
+        )
+    fresh_id = str(fields.get("executable_snapshot_id") or "")
+    fresh = get_snapshot(conn, fresh_id) if fresh_id else None
+    if fresh is None or not is_fresh(fresh, captured_at):
+        return legacy_intent
+    if fresh.selected_outcome_token_id != final_intent.selected_token_id:
+        raise ValueError("recaptured executable snapshot selected token mismatch")
+    if fresh.min_tick_size != final_intent.tick_size:
+        raise ValueError("recaptured executable snapshot tick_size mismatch")
+    if fresh.min_order_size != final_intent.min_order_size:
+        raise ValueError("recaptured executable snapshot min_order_size mismatch")
+    if fresh.neg_risk != final_intent.neg_risk:
+        raise ValueError("recaptured executable snapshot neg_risk mismatch")
+    sweep = simulate_clob_sweep(
+        snapshot=fresh,
+        direction=final_intent.direction,
+        requested_size_kind="shares",
+        requested_size_value=Decimal(str(submitted_shares)),
+        limit_price=final_intent.final_limit_price,
+    )
+    if sweep.depth_status != "PASS" or sweep.average_price != final_intent.expected_fill_price_before_fee:
+        raise ValueError(
+            "recaptured executable snapshot changed final-intent economics: "
+            f"depth_status={sweep.depth_status} average_price={sweep.average_price}"
+        )
+    return replace(
+        legacy_intent,
+        executable_snapshot_id=fresh.snapshot_id,
+        executable_snapshot_hash=fresh.executable_snapshot_hash,
+        executable_snapshot_min_tick_size=fresh.min_tick_size,
+        executable_snapshot_min_order_size=fresh.min_order_size,
+        executable_snapshot_neg_risk=fresh.neg_risk,
+    )
+
+
 @capability("live_venue_submit", lease=True)
 @protects("INV-21", "INV-04")
 def execute_final_intent(
@@ -1923,6 +2000,12 @@ def execute_final_intent(
             intent,
             market_id=market_id,
             event_id=event_id,
+            submitted_shares=submitted_shares,
+        )
+        legacy_intent = _recapture_fresh_entry_snapshot_if_needed(
+            legacy_intent,
+            intent,
+            conn=snapshot_conn if snapshot_conn is not None else conn,
             submitted_shares=submitted_shares,
         )
     except _PreVenueSubmitError:
