@@ -53,7 +53,7 @@ the gate pure makes its invariant unit-testable as a cross-module relationship.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Sequence
 
 from src.contracts.settlement_semantics import round_wmo_half_up_value

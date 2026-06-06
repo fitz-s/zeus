@@ -23,11 +23,11 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from types import SimpleNamespace
 from typing import Any
 
-from src.config import get_mode, state_path
+from src.config import state_path
 from src.contracts.decision_evidence import DecisionEvidence, EvidenceAsymmetryError
 from src.contracts.effective_kelly_context import EffectiveKellyContext
 from src.contracts.execution_intent import DecisionSourceContext
-from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
+from src.engine.time_context import lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     enter_day0_window_runtime_state,
@@ -5008,7 +5008,7 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
                 for trace_decision in decisions:
                     _record_probability_trace(candidate, trace_decision)
                 try:
-                    from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
+                    from src.engine.time_context import lead_hours_to_date_start
                     first = decisions[0]
                     edges_payload = [
                         {

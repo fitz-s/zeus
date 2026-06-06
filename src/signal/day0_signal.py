@@ -10,7 +10,7 @@ import numpy as np
 from src.config import day0_n_mc
 from typing import Callable
 
-from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
+from src.contracts.settlement_semantics import apply_settlement_rounding
 from src.signal.forecast_uncertainty import (
     day0_backbone_context,
     day0_backbone_high,

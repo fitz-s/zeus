@@ -20,7 +20,6 @@ DT#5 / INV-21 (Phase 10E strict enforcement):
 
 import logging
 
-import numpy as np
 
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.provenance_registry import require_provenance

@@ -25,7 +25,7 @@ Live mode: MANDATORY every cycle before any trading.
 
 import logging
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from src.contracts.position_truth import CHAIN_ONLY_REVIEW_WINDOW_HOURS, ChainOnlyFact
@@ -33,7 +33,6 @@ from src.contracts.semantic_types import LifecycleState
 from src.state.chain_state import ChainSnapshotCompleteness, classify_chain_state
 from src.state.lifecycle_manager import (
     LifecyclePhase,
-    enter_chain_quarantined_runtime_state,
     phase_for_runtime_position,
     rescue_pending_runtime_state,
 )
@@ -41,7 +40,6 @@ from src.state.portfolio import (
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
     FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
     INACTIVE_RUNTIME_STATES,
-    QUARANTINE_SENTINEL,
     Position,
     PortfolioState,
     void_position,

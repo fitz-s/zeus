@@ -35,7 +35,7 @@ from src.signal.day0_low_nowcast_signal import Day0LowNowcastSignal
 from src.types.metric_identity import MetricIdentity
 
 if TYPE_CHECKING:
-    from src.types import Day0TemporalContext, SolarDay
+    from src.types import Day0TemporalContext
 
 _LOW_ALLOWED_CAUSALITY = frozenset({"OK", "N/A_CAUSAL_DAY_ALREADY_STARTED"})
 

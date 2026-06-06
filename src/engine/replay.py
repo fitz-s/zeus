@@ -953,7 +953,6 @@ class ReplayContext:
 
         Returns np.nan if no data to explicitly convey historical omission.
         """
-        import math
         return float('nan')
 
     def get_settlement(

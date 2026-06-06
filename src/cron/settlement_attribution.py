@@ -47,7 +47,6 @@ import argparse
 import json
 import logging
 import sqlite3
-import sys
 from datetime import datetime, timezone
 from typing import Optional
 

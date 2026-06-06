@@ -41,7 +41,6 @@ from typing import Optional
 from src.execution.command_bus import (
     CommandState,
     CommandEventType,
-    IN_FLIGHT_STATES,
     VenueCommand,
 )
 from src.state.venue_command_repo import (

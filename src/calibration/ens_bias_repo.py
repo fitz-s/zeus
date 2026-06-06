@@ -354,7 +354,7 @@ def load_bucket_residuals(
     anti-leakage seam — NOT a settlement-known-time cutoff. For rigorous historical
     rebuilds, prefer a settled_at/fact-known-time cutoff once that column is available.
     """
-    from src.calibration.lead_bucket import LEAD_BUCKET_BOUNDS, lead_bucket as _lb  # noqa: PLC0415
+    from src.calibration.lead_bucket import LEAD_BUCKET_BOUNDS  # noqa: PLC0415
 
     where = ["e.city = ?", "e.dataset_id = ?", "e.temperature_metric = ?"]
     params: list[object] = [city, data_version, metric]

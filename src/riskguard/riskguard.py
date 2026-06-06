@@ -23,9 +23,8 @@ import sqlite3
 import sys
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from src.config import settings, STATE_DIR, get_mode
+from src.config import settings, get_mode
 from src.riskguard.discord_alerts import alert_halt, alert_resume, alert_warning
 from src.riskguard.metrics import (
     brier_score,

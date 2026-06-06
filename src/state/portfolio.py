@@ -37,7 +37,6 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from src.config import (
-    STATE_DIR,
     exit_correlation_crowding_rate,
     exit_daily_hurdle_rate,
     exit_fee_rate,
@@ -64,7 +63,6 @@ from src.strategy.correlation import get_correlation
 from src.state.lifecycle_manager import (
     TERMINAL_STATES as _TERMINAL_POSITION_STATES,
     enter_admin_closed_runtime_state,
-    enter_chain_quarantined_runtime_state,
     enter_economically_closed_runtime_state,
     enter_settled_runtime_state,
     enter_voided_runtime_state,

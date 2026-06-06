@@ -23,7 +23,7 @@ pinned — two of those differing is two different payout truths.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 
 # Dimensions that define the random variable. Order is the message order.
 _TARGET_DIMENSIONS: tuple[str, ...] = (

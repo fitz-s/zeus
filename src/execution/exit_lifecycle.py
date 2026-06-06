@@ -15,7 +15,6 @@ CycleRunner does not contain exit business logic.
 
 import hashlib
 import logging
-import copy
 import json
 import math
 import os
@@ -35,8 +34,6 @@ from src.execution.executor import OrderResult, create_exit_order_intent, execut
 from src.state.lifecycle_manager import (
     LifecyclePhase,
     enter_pending_exit_runtime_state,
-    fold_lifecycle_phase,
-    phase_for_runtime_position,
     release_pending_exit_runtime_state,
 )
 from src.state.portfolio import (

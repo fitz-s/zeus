@@ -9,7 +9,6 @@ import logging
 from datetime import date
 
 import numpy as np
-from scipy.stats import chi2
 
 logger = logging.getLogger(__name__)
 

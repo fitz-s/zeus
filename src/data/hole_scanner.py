@@ -41,7 +41,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -51,10 +51,8 @@ from src.config import City, cities as ALL_CITIES, cities_by_name
 from src.data.forecast_source_registry import forecast_table_source_ids
 from src.state.data_coverage import (
     CoverageReason,
-    CoverageStatus,
     DataTable,
     count_by_status,
-    coverage_summary,
     find_pending_fills,
     record_legitimate_gap,
     record_missing,

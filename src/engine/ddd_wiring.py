@@ -26,7 +26,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 

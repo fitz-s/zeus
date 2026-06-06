@@ -63,7 +63,6 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
 
@@ -75,7 +74,6 @@ import httpx
 from src.contracts.season import season_from_date
 from src.config import cities_by_name
 from src.data.daily_observation_writer import (
-    insert_or_update_current_observation,
     write_daily_observation_with_revision,
 )
 from src.data.ingestion_guard import IngestionGuard, IngestionRejected

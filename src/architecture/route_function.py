@@ -13,7 +13,7 @@ Replaces nothing yet (shadow mode only). Sunset: 2027-05-06.
 from __future__ import annotations
 
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import yaml
 

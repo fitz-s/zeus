@@ -196,4 +196,3 @@ def load_contracts_from_yaml(yaml_path: str | Path) -> list[RealityContract]:
 # (bottom-of-module import is circular-safe: RealityContract is fully defined above)
 # ---------------------------------------------------------------------------
 
-from src.contracts.reality_verifier import RealityContractVerifier  # noqa: E402

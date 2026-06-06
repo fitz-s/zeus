@@ -44,8 +44,6 @@ from src.contracts.execution_price import (
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
 from src.state.db import (
-    get_connection,
-    get_trade_connection_with_world,
     get_trade_connection_with_world_required,
 )
 
@@ -2069,8 +2067,8 @@ def execute_exit_order(
     from src.architecture.gate_runtime import check as _gate_runtime_check
     _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
-    from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
-    from src.state.venue_command_repo import append_order_fact, insert_command, append_event, get_command
+    from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand
+    from src.state.venue_command_repo import append_order_fact, insert_command, append_event
     from src.contracts.executable_market_snapshot import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 

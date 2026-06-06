@@ -49,7 +49,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import List, Optional, Sequence
+from typing import List, Optional
 
 from src.calibration.bounds import calibrated_bounds
 from src.contracts.no_trade_reason import NoTradeReason

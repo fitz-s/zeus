@@ -40,7 +40,6 @@ import logging
 import secrets
 import sqlite3
 import uuid
-from typing import Iterable
 
 logger = logging.getLogger(__name__)
 

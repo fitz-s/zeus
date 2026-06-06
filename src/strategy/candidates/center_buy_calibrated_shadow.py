@@ -38,7 +38,6 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
 
 from src.calibration.bounds import calibrated_bounds
 from src.contracts.no_trade_reason import NoTradeReason

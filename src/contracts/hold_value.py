@@ -13,7 +13,7 @@ See: docs/zeus_FINAL_spec.md §P9.3 D6
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
 
 from src.contracts.execution_price import polymarket_fee

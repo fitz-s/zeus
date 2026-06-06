@@ -52,7 +52,6 @@ from src.types.temperature import CelsiusBox, FahrenheitBox
 
 if TYPE_CHECKING:
     from src.types import Day0TemporalContext
-    from src.types.solar import DaylightPhase
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from src.architecture.decorators import capability, protects
-from src.calibration.forecast_calibration_domain import ForecastCalibrationDomain
 from src.config import (
     EntryForecastCalibrationPolicyId,
     EntryForecastConfig,

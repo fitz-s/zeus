@@ -20,7 +20,6 @@ from src.calibration.platt import (
     ExtendedPlattCalibrator,
     IdentityCalibrator,
     IDENTITY_CALIBRATION_METHOD,
-    calibrate_and_normalize,
 )
 from src.calibration.store import (
     get_pairs_for_bucket,

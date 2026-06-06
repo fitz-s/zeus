@@ -42,7 +42,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from src.config import STATE_DIR, state_path
+from src.config import state_path
 
 logger = logging.getLogger(__name__)
 

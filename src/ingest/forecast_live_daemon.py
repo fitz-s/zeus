@@ -847,7 +847,6 @@ def forecast_live_job_specs(
 # spec->job_defs derivation is shared across both ingest daemons (one implementation, see
 # src.data.scheduler_adapter) so the trigger-param stripping can never diverge between them.
 from src.data.scheduler_adapter import (  # noqa: E402
-    REGISTRY_OWNED_KWARGS as _REGISTRY_OWNED_KWARGS,
     job_defs_from_specs as _job_defs_from_specs,
 )
 

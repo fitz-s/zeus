@@ -14,7 +14,6 @@ All numeric fields from API are STRINGS — always float() before use.
 import json
 import logging
 import os
-import subprocess
 import sys
 import warnings
 from datetime import datetime, timezone

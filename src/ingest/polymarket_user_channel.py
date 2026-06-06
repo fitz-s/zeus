@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from src.control import ws_gap_guard
 from src.execution.command_bus import CommandState, IN_FLIGHT_STATES

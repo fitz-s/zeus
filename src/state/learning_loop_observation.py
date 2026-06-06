@@ -111,11 +111,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from src.calibration.retrain_trigger import (
-    RetrainStatus,
     list_recent_retrain_versions,
     status as retrain_status,
 )

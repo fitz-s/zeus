@@ -47,7 +47,6 @@ shadow runs as a separate verifier).
 
 from __future__ import annotations
 
-import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone

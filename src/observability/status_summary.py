@@ -9,7 +9,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from src.config import get_mode, settings, state_path
+from src.config import get_mode, state_path
 from src.control.control_plane import (
     get_entries_pause_reason,
     get_entries_pause_source,

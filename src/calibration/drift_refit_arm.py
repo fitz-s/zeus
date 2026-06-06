@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from src.calibration.drift_detector import DriftReport, compute_drift
+from src.calibration.drift_detector import compute_drift
 from src.types.metric_identity import HIGH_LOCALDAY_MAX, MetricIdentity
 
 logger = logging.getLogger(__name__)

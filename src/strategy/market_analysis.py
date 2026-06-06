@@ -24,7 +24,7 @@ from src.calibration.platt import (
 from src.config import edge_n_bootstrap
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
-from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
+from src.contracts.settlement_semantics import apply_settlement_rounding
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
     analysis_mean_context,

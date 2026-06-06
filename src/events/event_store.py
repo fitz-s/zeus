@@ -10,7 +10,6 @@ import json
 import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable
 
 from src.events.opportunity_event import OpportunityEvent
 

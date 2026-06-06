@@ -22,7 +22,7 @@ Promotion gate fires only when CI_lower > breakeven + cost_of_capital.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 

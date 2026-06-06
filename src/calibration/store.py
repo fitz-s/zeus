@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
-import numpy as np
 
 from src.architecture.decorators import capability, protects
 from src.state.schema_introspection import has_columns
