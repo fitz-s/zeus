@@ -863,7 +863,7 @@ def _receipt(event, conn: sqlite3.Connection, **kwargs):
     forecast_conn = kwargs.pop("forecast_conn", conn)
     topology_conn = kwargs.pop("topology_conn", forecast_conn)
     calibration_conn = kwargs.pop("calibration_conn", kwargs.pop("world_conn", conn))
-    decision_time = kwargs.pop("decision_time", datetime.fromisoformat(event.received_at))
+    decision_time = kwargs.pop("decision_time", DECISION_TIME)
     return build_event_bound_no_submit_receipt(
         event,
         trade_conn=conn,
@@ -997,7 +997,7 @@ def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
 
 def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
     event = _forecast_event()
-    receipt = _receipt(event, _trade_conn_with_snapshot())
+    receipt = _receipt(event, _trade_conn_with_snapshot(), decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
     assert receipt.token_id == "yes-1"
@@ -1091,6 +1091,32 @@ def test_topology_clock_missing_blocks_certificate():
 
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
         _receipt(event, conn, decision_time=DECISION_TIME)
+
+
+def test_latest_snapshot_rows_exclude_future_captured_rows_without_freshness_gate():
+    from src.engine.event_reactor_adapter import _latest_snapshot_rows_for_event_family
+
+    conn = _trade_conn_with_snapshot()
+    cols = [str(row[1]) for row in conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()]
+    seed = dict(conn.execute("SELECT * FROM executable_market_snapshots WHERE condition_id = 'condition-1'").fetchone())
+    seed["snapshot_id"] = "future-snapshot"
+    seed["captured_at"] = "2026-05-24T08:13:00+00:00"
+    seed["freshness_deadline"] = "2026-05-24T08:20:00+00:00"
+    conn.execute(
+        f"INSERT INTO executable_market_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+        [seed[col] for col in cols],
+    )
+
+    rows = _latest_snapshot_rows_for_event_family(
+        conn,
+        _forecast_event(),
+        condition_ids=("condition-1",),
+        fresh_at=DECISION_TIME,
+        require_fresh=False,
+    )
+
+    assert rows
+    assert "future-snapshot" not in {str(row.get("snapshot_id")) for row in rows}
 
 
 def test_adapter_source_truth_status_comes_from_forecast_authority():
@@ -1486,7 +1512,7 @@ def test_missing_market_topology_range_blocks_no_submit_receipt():
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE market_events SET range_low = NULL, range_high = NULL")
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
     assert receipt.reason == "EVENT_BOUND_MARKET_TOPOLOGY_INVALID:market topology bin range missing"
@@ -1547,7 +1573,7 @@ def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists(
         ) VALUES (
             'snapshot-exec-1-yes-v2', 'condition-1', 'yes-1', 'no-1', 'yes-1', 'YES',
             '0.40', '0.39', :depth, '0.01', '5', '{"fee_rate_fraction":0.0}', 0,
-            '2026-05-26T00:00:00+00:00', '2026-05-25T09:00:00+00:00', 1, 0,
+            '2026-05-26T00:00:00+00:00', '2026-05-24T08:12:30+00:00', 1, 0,
             'gamma-mkt-1', 'event-1', 'chicago-temperature-high', 'q-1',
             1, 1,
             NULL, NULL, NULL, NULL,
@@ -1561,7 +1587,7 @@ def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists(
     )
     conn.commit()
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 13, tzinfo=timezone.utc))
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
@@ -1610,7 +1636,7 @@ def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
     conn.execute("DROP TABLE selection_hypothesis_fact")
     conn.execute("DROP TABLE selection_family_fact")
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
     assert receipt.q_live is not None
@@ -1840,7 +1866,7 @@ def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_e
     conn = _trade_conn_with_snapshot()
     conn.execute("UPDATE ensemble_snapshots SET p_cal_available_at = '2026-05-24T08:11:00+00:00'")
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
     assert receipt.side_effect_status == "NO_SUBMIT"
@@ -1860,7 +1886,7 @@ def test_adapter_surfaces_reader_block_after_event_emit(monkeypatch):
         lambda *_args, **_kwargs: SimpleNamespace(ok=False, bundle=None, reason_code="READINESS_BLOCKED"),
     )
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
     assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READINESS_BLOCKED" in receipt.reason
@@ -1922,6 +1948,31 @@ def test_adapter_computes_on_reader_elected_snapshot_not_causal_pin(monkeypatch)
     assert str(row["snapshot_id"]) == "2"
 
 
+def test_forecast_authority_resolver_prefers_attached_forecasts():
+    from src.engine.event_reactor_adapter import _authority_table_ref
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
+    conn.execute("CREATE TABLE forecasts.ensemble_snapshots (snapshot_id TEXT PRIMARY KEY)")
+
+    assert _authority_table_ref(conn, "ensemble_snapshots") == "forecasts.ensemble_snapshots"
+
+
+def test_snapshot_lead_days_falls_back_to_source_available_and_local_day_start():
+    from src.engine.event_reactor_adapter import _snapshot_lead_days
+
+    lead_days = _snapshot_lead_days(
+        snapshot={
+            "source_available_at": "2026-06-05T12:00:00+00:00",
+            "local_day_start_utc": "2026-06-06T22:00:00+00:00",
+        },
+        family=SimpleNamespace(target_date="2026-06-07"),
+        payload={},
+    )
+
+    assert lead_days == pytest.approx(34.0 / 24.0)
+
+
 def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
     from types import SimpleNamespace
 
@@ -1936,7 +1987,7 @@ def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
         lambda *_args, **_kwargs: SimpleNamespace(ok=False, bundle=None, reason_code="READER_TEST_BLOCK"),
     )
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
     assert "FORECAST_READER_LIVE_ELIGIBILITY_BLOCKED:READER_TEST_BLOCK" in receipt.reason
@@ -2067,7 +2118,7 @@ def test_top_ask_without_depth_does_not_create_fillable_quote():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(selected_ask="0.40", depth_json="{}")
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
@@ -2087,7 +2138,7 @@ def test_real_snapshot_depth_at_best_ask_authorizes_selected_token_cost():
         """
     )
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
     assert receipt.c_fee_adjusted == 0.40
@@ -2169,10 +2220,10 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
 
 def test_forecast_receipt_rejects_source_snapshot_available_after_decision_time():
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _trade_conn_with_snapshot(captured_at="2026-05-24T08:10:00+00:00")
     conn.execute("UPDATE ensemble_snapshots SET available_at = '2026-05-24T08:12:00+00:00'")
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=datetime.fromisoformat(event.received_at))
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:causal forecast snapshot missing")
@@ -2207,7 +2258,7 @@ def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old
     conn.execute("DROP TABLE selection_hypothesis_fact")
     conn.execute("DROP TABLE selection_family_fact")
 
-    receipt = _receipt(event, conn)
+    receipt = _receipt(event, conn, decision_time=datetime.fromisoformat(event.received_at))
 
     assert receipt.proof_accepted is True
     assert receipt.condition_id == "condition-2"

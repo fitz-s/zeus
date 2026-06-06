@@ -6123,14 +6123,25 @@ def _snapshot_lead_days(*, snapshot: dict[str, Any], family, payload: dict[str, 
     lead_hours = _optional_float(snapshot.get("lead_hours") or payload.get("lead_hours"))
     if lead_hours is not None and lead_hours >= 0.0:
         return lead_hours / 24.0
-    issue = _parse_utc(snapshot.get("issue_time") or snapshot.get("source_cycle_time") or payload.get("cycle"))
+    issue = _parse_utc(
+        snapshot.get("issue_time")
+        or snapshot.get("source_cycle_time")
+        or snapshot.get("source_available_at")
+        or snapshot.get("available_at")
+        or payload.get("cycle")
+        or payload.get("source_cycle_time")
+        or payload.get("source_available_at")
+        or payload.get("available_at")
+    )
     try:
         target_day = date.fromisoformat(str(family.target_date))
     except ValueError as exc:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:target date invalid") from exc
     if issue is None:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:lead_days missing")
-    target_start = datetime.combine(target_day, time.min, tzinfo=UTC)
+    target_start = _parse_utc(snapshot.get("local_day_start_utc") or payload.get("local_day_start_utc"))
+    if target_start is None:
+        target_start = datetime.combine(target_day, time.min, tzinfo=UTC)
     return max(0.0, (target_start - issue).total_seconds() / 86400.0)
 
 
@@ -6316,6 +6327,13 @@ def _table_ref_columns(conn: sqlite3.Connection, table_ref: str) -> set[str]:
 def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | None:
     try:
         attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "forecasts" in attached:
+            exists = conn.execute(
+                "SELECT 1 FROM forecasts.sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            if exists is not None:
+                return f"forecasts.{table_name}"
         if "world" in attached:
             exists = conn.execute(
                 "SELECT 1 FROM world.sqlite_master WHERE type='table' AND name=?",
@@ -6370,6 +6388,10 @@ def _latest_snapshot_rows_for_event_family(
     if require_fresh:
         predicates.append("freshness_deadline >= ?")
         params.append((fresh_at or datetime.now(UTC)).isoformat())
+    if fresh_at is not None and "captured_at" in columns:
+        checked_at = fresh_at.astimezone(UTC) if fresh_at.tzinfo is not None and fresh_at.utcoffset() is not None else fresh_at
+        predicates.append("captured_at <= ?")
+        params.append(checked_at.isoformat())
     placeholders = ",".join("?" for _ in clean_condition_ids)
     predicates.append(f"condition_id IN ({placeholders})")
     params.extend(clean_condition_ids)
