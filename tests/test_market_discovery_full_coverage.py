@@ -1054,6 +1054,94 @@ def test_default_snapshot_capture_reserve_keeps_prefetch_from_starving_capture(m
     assert ms._snapshot_capture_reserve_seconds_from_env(summary_budget) == pytest.approx(12.0)
 
 
+def test_illiquid_identity_capture_skips_fee_rate_http():
+    """No-ask identity rows are non-executable and must not spend fee-rate HTTP."""
+
+    condition_id = "0x" + "1" * 64
+    yes_token = "0x" + "2" * 64
+    no_token = "0x" + "3" * 64
+    market = {
+        "event_id": "evt-illiquid",
+        "slug": "highest-temperature-in-chicago-on-june-7-2026",
+        "city": ms.cities_by_name.get("Chicago", "Chicago"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "market_id": condition_id,
+                "question_id": condition_id,
+                "token_id": yes_token,
+                "no_token_id": no_token,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "conditionId": condition_id,
+                    "questionID": condition_id,
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": [yes_token, no_token],
+                },
+            }
+        ],
+    }
+    decision = SimpleNamespace(
+        tokens={"token_id": yes_token, "no_token_id": no_token, "market_id": condition_id},
+        edge=SimpleNamespace(direction="buy_yes"),
+    )
+
+    class IlliquidClob:
+        def get_clob_market_info(self, _condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": yes_token}, {"token_id": no_token}],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
+
+        def get_orderbook_snapshot(self, _token_id: str) -> dict:
+            return {
+                "asset_id": yes_token,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.01", "size": "1"}],
+                "asks": [],
+            }
+
+        def get_fee_rate_details(self, _token_id: str) -> dict:
+            raise AssertionError("illiquid identity capture must not fetch fee-rate")
+
+    captured = []
+    with (
+        patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
+        patch("src.data.market_scanner._write_book_hash_transition"),
+    ):
+        ms.capture_executable_market_snapshot(
+            _make_in_memory_trade_db(),
+            market=market,
+            decision=decision,
+            clob=IlliquidClob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            tolerate_missing_book=True,
+        )
+
+    assert len(captured) == 1
+    assert captured[0].tradeability_status.executable_allowed is False
+    assert captured[0].tradeability_status.reason == "clob_no_ask_illiquid"
+    assert captured[0].fee_details["source"] == "not_applicable_illiquid_identity"
+    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.0)
+
+
 def test_unlimited_pending_refresh_completes_family_before_next_city():
     """max_outcomes=0 is the pending-family path; it must complete families.
 

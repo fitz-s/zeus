@@ -2733,7 +2733,6 @@ def capture_executable_market_snapshot(
         raw_orderbook = _normalize_prefetched_orderbook(prefetched_orderbook, selected_token)
     else:
         raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
-    fee_details = _fetch_fee_details(clob, selected_token)
     _assert_clob_identity(
         raw_clob_market=raw_clob_market,
         raw_orderbook=raw_orderbook,
@@ -2801,6 +2800,13 @@ def capture_executable_market_snapshot(
             executable_allowed=False,
             reason="clob_no_ask_illiquid",
         )
+        fee_details = canonicalize_fee_details(
+            {"feesEnabled": False},
+            source="not_applicable_illiquid_identity",
+            token_id=selected_token,
+        )
+    else:
+        fee_details = _fetch_fee_details(clob, selected_token)
 
     # Validate the caller's boundary timestamp, but do not use it as the
     # executable snapshot's authority time.  The fresh orderbook authority is
