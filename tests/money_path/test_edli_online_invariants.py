@@ -148,6 +148,12 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "day0_authority_catchup_scanner_enabled" in source
     assert "event_bound_no_submit_adapter_from_trade_conn" in source
     assert "event_bound_live_adapter_from_trade_conn" in source
+    assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
+    assert 'real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False' in source
+    assert "taker_fok_fak_effective" in source
+    assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source
+    assert "real submit disabled this cycle because portfolio_state_unavailable" in source
+    assert "if real_submit_effective and _portfolio_state_provider is None" in source
     assert "submit_existing_cycle_for_event" not in source
     assert 'edli_cfg.get("real_order_submit_enabled", False)' in source
     assert "real_order_submit_enabled=real_order_submit_enabled" in source
@@ -432,7 +438,7 @@ def test_arm_direction_gate_boot_guard_is_deleted():
     )
 
 
-def test_live_canary_requires_stage_evidence_file_paths(monkeypatch):
+def test_live_canary_requires_stage_evidence_file_paths(monkeypatch, tmp_path):
     # Post-PR #367: stage paths are configured in settings.json, so
     # _require_stage_file_paths (config-key check) no longer raises.
     # evaluate_edli_stage_readiness (disk-existence check) raises instead:
@@ -444,7 +450,11 @@ def test_live_canary_requires_stage_evidence_file_paths(monkeypatch):
     with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_READINESS_FAIL"):
         _run_main_with_fake_scheduler(
             monkeypatch,
-            _edli_live_canary_updates(),
+            _edli_live_canary_updates(
+                edli_stage_loaded_sha_file=str(tmp_path / "missing-loaded-sha.json"),
+                edli_stage_source_health_json=str(tmp_path / "missing-source-health.json"),
+                edli_stage_status_json=str(tmp_path / "missing-status-summary.json"),
+            ),
         )
 
 
@@ -710,6 +720,7 @@ def _arm_gate_artifact_updates(tmp_path, **overrides):
         "commit_sha": "abc123",
         "measurement_cmd_hash": "f" * 64,
         "capital_weighted_ev": 0.012,
+        "production_n": 40,
         "gate_pass_n": 40,
         "per_city_n": {"shanghai": 6, "singapore": 7},
         "ev_sigma": 2.1,

@@ -71,6 +71,7 @@ def test_emit_job_writes_artifact_consumer_accepts_sha_at_head(tmp_path, monkeyp
     artifact = json.loads(artifact_path.read_text())
 
     head = _running_head_sha()
+    assert artifact["production_n"] == artifact["gate_pass_n"]
     # The job's job: re-stamp commit_sha to the running HEAD so the SHA check passes.
     assert str(artifact.get("commit_sha")).strip() == head, (
         "emit job did not stamp commit_sha to the running HEAD — the stale-SHA "
@@ -107,6 +108,7 @@ def test_emit_job_on_denied_data_stays_blocking_consumer_rejects(tmp_path, monke
 
     main._arm_gate_emit_cycle()
     artifact = json.loads(artifact_path.read_text())
+    assert artifact["production_n"] == artifact["gate_pass_n"]
 
     # Honest DENIED state: ev<=0 OR coverage not licensed → consumer rejects.
     verified = verify_edli_arm_gate_artifact(artifact, head_sha=_running_head_sha())

@@ -328,7 +328,7 @@ def event_bound_live_adapter_from_trade_conn(
 
     This first full-live increment deliberately stops before executor submit
     when real submit is disabled. It creates the durable proof shape that a
-    later live-canary cut can submit through the existing executor seam.
+    later live-canary authorization can submit through the existing executor seam.
 
     Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
     ``bankroll_usd_provider``) lets Kelly size against the bankroll NET of
@@ -1682,8 +1682,8 @@ def _build_live_execution_command_certificates(
         # _build_live_cap_certificate_from_ledger above; it MUST honour the same
         # explicit cap-disable sentinel, else an uncapped Kelly size would be
         # rejected here as "exceeds". Fail-safe: missing/malformed sentinel keeps
-        # the cap enabled (cap_explicitly_disabled returns True only for literal
-        # false). max_orders_per_window (flood-guard) is untouched.
+        # the configured limit enabled (cap_explicitly_disabled returns True only
+        # for literal false).
         _edli_cfg = settings["edli_v1"]
         reserve_result = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
@@ -1704,6 +1704,10 @@ def _build_live_execution_command_certificates(
         )
         if reserve_result.usage_id != str(live_cap.payload["usage_id"]):
             raise ValueError("live cap reservation drift for provisional certificate")
+        if float(reserve_result.reserved_notional_usd) != float(live_cap.payload["reserved_notional_usd"]):
+            raise ValueError("LIVE_CAP_RESERVED_NOTIONAL_DRIFT")
+        if float(reserve_result.max_notional_usd) != float(live_cap.payload["max_notional_usd"]):
+            raise ValueError("LIVE_CAP_MAX_NOTIONAL_DRIFT")
     except Exception:
         raise
     return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
@@ -1891,14 +1895,13 @@ def _build_live_cap_certificate_from_ledger(
 ) -> DecisionCertificate:
     if live_cap_conn is None:
         raise ValueError("LIVE_CAP_LEDGER_CONNECTION_REQUIRED")
-    from src.events.live_cap import LiveCapLedger, cap_explicitly_disabled
+    from src.events.live_cap import LiveCapLedger, cap_explicitly_disabled, normalize_live_cap_request
 
     # 2026-06-03 operator directive: the artificial $5 notional + 1/day caps may
     # be EXPLICITLY disabled (config sentinel == literal false) so fractional
     # Kelly is the sole notional-sizing constraint. FAIL-SAFE: a missing or
-    # malformed sentinel leaves the cap ENABLED (cap_explicitly_disabled returns
-    # True only for the literal Python False). The flood-guard rate window and
-    # the collateral check are untouched by these flags.
+    # malformed sentinel leaves the configured limit ENABLED
+    # (cap_explicitly_disabled returns True only for the literal Python False).
     _edli_cfg = settings["edli_v1"]
     notional_cap_enabled = not cap_explicitly_disabled(
         _edli_cfg.get("tiny_live_notional_cap_enabled")
@@ -1906,12 +1909,10 @@ def _build_live_cap_certificate_from_ledger(
     daily_order_cap_enabled = not cap_explicitly_disabled(
         _edli_cfg.get("tiny_live_daily_order_cap_enabled")
     )
-    from src.events.live_cap import HARD_NOTIONAL_CEILING_USD
-
     price = _float_or_default(receipt.c_fee_adjusted, 0.01)
     kelly_usd = float(receipt.kelly_size_usd or 0.0)
     if notional_cap_enabled:
-        # Cap ON: clamp Kelly to the ceiling exactly as before.
+        # Configured limit ON: bound Kelly by max_notional_usd exactly as before.
         min_order_notional = min(max_notional_usd, max(price, 0.01))
         requested_notional = max(min(kelly_usd, max_notional_usd), min_order_notional)
     else:
@@ -1920,17 +1921,14 @@ def _build_live_cap_certificate_from_ledger(
         # against a sub-tick request; nothing above it is clamped.
         min_order_notional = max(price, 0.01)
         requested_notional = max(kelly_usd, min_order_notional)
-    # PR-2 (C) N3: the HARD notional ceiling is INDEPENDENT of the cap flag —
-    # clamp here too so the recorded ceiling and the persisted request stay
-    # self-consistent. LiveCapLedger.reserve re-applies the same clamp (the
-    # load-bearing antibody); this keeps the adapter-side view aligned.
-    requested_notional = min(float(requested_notional), float(HARD_NOTIONAL_CEILING_USD))
-    usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
-    # Self-consistent recorded ceiling: the actual size when uncapped, else the
-    # configured cap (mirrors LiveCapLedger.reserve's recorded_max_notional_usd).
-    recorded_max_notional_usd = (
-        float(max_notional_usd) if notional_cap_enabled else float(requested_notional)
+    normalized = normalize_live_cap_request(
+        requested_notional_usd=float(requested_notional),
+        max_notional_usd=float(max_notional_usd),
+        notional_cap_enabled=notional_cap_enabled,
     )
+    requested_notional = normalized.requested_notional_usd
+    usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
+    recorded_max_notional_usd = normalized.recorded_max_notional_usd
     if persist:
         reservation = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
@@ -4091,6 +4089,9 @@ def _market_analysis_from_event_snapshot(
                 getattr(city, "name", family.city), _emos_season, family.metric, unit,
                 type(_emos_exc).__name__, _emos_exc,
             )
+            from src.calibration.emos import SettlementSigmaFloorError
+            if isinstance(_emos_exc, SettlementSigmaFloorError):
+                raise
     if _emos_q is not None:
         _q_vec, _emos_mu_native, _emos_sigma_native = _emos_q
         p_raw = np.asarray(_q_vec, dtype=float)
@@ -4136,6 +4137,9 @@ def _market_analysis_from_event_snapshot(
                 getattr(city, "name", family.city), _emos_season, family.metric, unit,
                 type(_hr_exc).__name__, _hr_exc,
             )
+            from src.calibration.emos import SettlementSigmaFloorError
+            if isinstance(_hr_exc, SettlementSigmaFloorError):
+                raise
         if _hr is not None:
             _hrq, _hr_mu, _hr_sigma = _hr
             p_raw = np.asarray(_hrq, dtype=float)

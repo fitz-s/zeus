@@ -3,7 +3,12 @@
 - Created: 2026-06-01
 - Authority basis: operator directive — integrate ALL session opus findings + the final deep reasoning + the unknown/to-explore directions into one spec.
 - Status: SHADOW (daemon PID 81578, HEAD 6fcd05a69f, `real_order_submit_enabled=false`, bias correction OFF). Zero capital. Arm = operator's separate irreversible gate, untouched.
-- This is the canonical resume document. Sub-docs cited per finding are preserved in `docs/operations/`.
+- Historical scope: this document predates the 2026-06-05 EDLI no-cap directive.
+  Any mention below of `$5`, `$185`, canary notional caps, or canary order-count
+  caps is historical and is superseded by
+  `docs/operations/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md`.
+- This is the canonical 2026-06-01 resume document for the dropped-context seam.
+  It is not current authority for EDLI live-cap/no-cap sizing law.
 
 ---
 
@@ -80,7 +85,8 @@ The EDLI **event-driven reactor** re-implemented only the **admission spine** of
 - Strategy-family policy needs for EDLI (4 families) — does forecast_only map to one family or several with distinct Kelly/risk?
 - DDD/oracle integration in the reactor — what halts/down-sizes on a coverage outage?
 - #24 settled-truth rolling gate per city — the only valid bias/calibration adjudication (NOT online forecast, which shares the cold bias).
-- Post-canary exposure ceiling (max-exposure/posture/cluster layer) once the $5/$185 per-order cap is lifted.
+- Post-canary exposure governance belongs to max-exposure/posture/cluster layers;
+  it is not a replacement for a hidden EDLI per-order notional cap.
 - Belief-cache invalidation mechanism on config change (verify it self-heals at 12Z or needs explicit flush).
 - Whether the q_5pct CI artifact fully resolves with bias-OFF + calibrator-threaded, or a residual raw-vs-calibrated split remains.
 

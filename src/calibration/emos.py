@@ -48,6 +48,10 @@ _sigma_floor_cache: dict | None = None
 _sigma_floor_lock = threading.Lock()
 
 
+class SettlementSigmaFloorError(RuntimeError):
+    """Raised when the settlement sigma floor is required but cannot be proven valid."""
+
+
 def load_emos_table() -> dict:
     """Return the cached EMOS calibration table dict.
 
@@ -77,68 +81,129 @@ def load_emos_table() -> dict:
     return _emos_table_cache
 
 
-def load_sigma_floor_table() -> dict:
+def load_sigma_floor_table(*, required: bool = False) -> dict:
     """Return the cached EMPIRICAL settlement σ-floor table dict.
 
     Loaded once per process from state/settlement_sigma_floor.json (cached + thread-safe,
     mirroring load_emos_table). Structure:
         {"_meta": {"created":..., "method":..., "k_default": float},
          "cells": {"City|SEASON|metric": {"sigma_floor_c": float, "n": int, "window": str}}}
-    All values °C. Returns an empty dict if the file is missing or malformed (fail-soft:
-    callers get None from settlement_sigma_floor and keep their model σ — no floor, no crash).
+    All values °C. Legacy callers use ``required=False`` and get an empty dict if the file is
+    missing or malformed (fail-soft: callers get None from settlement_sigma_floor and keep their
+    model σ — no floor, no crash). EDLI flag-on callers use ``required=True``: missing or malformed
+    artifacts raise SettlementSigmaFloorError so the live candidate cannot silently bypass the floor.
     """
     global _sigma_floor_cache
-    if _sigma_floor_cache is not None:
+    if _sigma_floor_cache is not None and (not required or _sigma_floor_cache):
         return _sigma_floor_cache
     with _sigma_floor_lock:
-        if _sigma_floor_cache is not None:
+        if _sigma_floor_cache is not None and (not required or _sigma_floor_cache):
             return _sigma_floor_cache
         try:
             raw = _SIGMA_FLOOR_PATH.read_text(encoding="utf-8")
             data = json.loads(raw)
             if not isinstance(data, dict):
+                if required:
+                    raise SettlementSigmaFloorError(
+                        "SETTLEMENT_SIGMA_FLOOR_MALFORMED_ARTIFACT:not_dict"
+                    )
                 logger.warning("settlement_sigma_floor.json is not a dict — treating as empty")
                 data = {}
             _sigma_floor_cache = data
         except FileNotFoundError:
+            if required:
+                raise SettlementSigmaFloorError(
+                    f"SETTLEMENT_SIGMA_FLOOR_MISSING_ARTIFACT:{_SIGMA_FLOOR_PATH}"
+                )
             logger.debug("state/settlement_sigma_floor.json not found; settlement σ-floor disabled")
             _sigma_floor_cache = {}
-        except Exception as exc:  # noqa: BLE001 — fail-soft: no floor rather than crash the q seam
+        except SettlementSigmaFloorError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — fail-soft unless the EDLI floor flag requires it
+            if required:
+                raise SettlementSigmaFloorError(
+                    f"SETTLEMENT_SIGMA_FLOOR_MALFORMED_ARTIFACT:{type(exc).__name__}: {exc}"
+                ) from exc
             logger.warning("Failed to load settlement_sigma_floor.json: %s", exc)
             _sigma_floor_cache = {}
     return _sigma_floor_cache
 
 
-def settlement_sigma_floor(city: str, season: str, metric: str) -> Optional[float]:
+def settlement_sigma_floor(
+    city: str,
+    season: str,
+    metric: str,
+    *,
+    required: bool = False,
+) -> Optional[float]:
     """The EMPIRICAL settlement σ-floor (°C) for a (city, season, metric) cell, or None if absent.
 
     Returns ``k_default · sigma_floor_c`` where ``sigma_floor_c`` is the DETRENDED trailing-window
     settlement std for the cell and ``k_default`` (default 0.8) is read from the table's ``_meta``.
-    None when the cell is missing from the table — the caller then keeps its model/EMOS σ (no floor).
+    Legacy callers use ``required=False``: None when the cell is missing from the table, so the
+    caller keeps its model/EMOS σ (no floor). EDLI flag-on callers use ``required=True``: missing
+    artifact, malformed artifact/cell, missing cell, or non-positive effective floor raises
+    SettlementSigmaFloorError, making the candidate fail-closed instead of silently bypassing floor.
 
     The floor is applied UNIVERSALLY at the q seam as ``σ_eff = max(model_σ, this)``: conservative by
     construction (max() only WIDENS σ → lower q_lcb → fewer overconfident bets; it can NEVER tighten
     or create a wrong-side trade). This is the loop-breaker for the q=1.000 EMOS under-dispersion
     (iron rule 5: overconfidence = ruin). Metric is lowercased to match the cell key (no crossing).
 
-    Cached + thread-safe like the EMOS table. Fail-soft: any malformed cell -> None.
+    Cached + thread-safe like the EMOS table. Fail-soft only when ``required`` is false.
     """
     try:
-        table = load_sigma_floor_table()
+        table = load_sigma_floor_table(required=required)
         cells = table.get("cells", {})
-        cell = cells.get(emos_cell_key(city, season, metric))
+        if not isinstance(cells, dict):
+            if required:
+                raise SettlementSigmaFloorError("SETTLEMENT_SIGMA_FLOOR_MALFORMED_ARTIFACT:cells")
+            return None
+        key = emos_cell_key(city, season, metric)
+        cell = cells.get(key)
         if cell is None:
+            if required:
+                raise SettlementSigmaFloorError(f"SETTLEMENT_SIGMA_FLOOR_MISSING_CELL:{key}")
+            return None
+        if not isinstance(cell, dict):
+            if required:
+                raise SettlementSigmaFloorError(f"SETTLEMENT_SIGMA_FLOOR_MALFORMED_CELL:{key}")
             return None
         floor_c = cell.get("sigma_floor_c")
         if floor_c is None:
+            if required:
+                raise SettlementSigmaFloorError(
+                    f"SETTLEMENT_SIGMA_FLOOR_MALFORMED_CELL:missing_sigma_floor_c:{key}"
+                )
             return None
-        floor_c = float(floor_c)
+        try:
+            floor_c = float(floor_c)
+            k = float(table.get("_meta", {}).get("k_default", 0.8))
+        except Exception as exc:  # noqa: BLE001 — malformed scalar value
+            if required:
+                raise SettlementSigmaFloorError(
+                    f"SETTLEMENT_SIGMA_FLOOR_MALFORMED_CELL:{key}: {exc}"
+                ) from exc
+            return None
         if not (floor_c > 0.0):
+            if required:
+                raise SettlementSigmaFloorError(
+                    f"SETTLEMENT_SIGMA_FLOOR_NON_POSITIVE:{key}:sigma_floor_c={floor_c}"
+                )
             return None
-        k = float(table.get("_meta", {}).get("k_default", 0.8))
         out = k * floor_c
+        if required and not (out > 0.0):
+            raise SettlementSigmaFloorError(
+                f"SETTLEMENT_SIGMA_FLOOR_NON_POSITIVE:{key}:effective_floor={out}"
+            )
         return out if out > 0.0 else None
+    except SettlementSigmaFloorError:
+        raise
     except Exception as exc:  # noqa: BLE001 — fail-soft: no floor rather than crash the q seam
+        if required:
+            raise SettlementSigmaFloorError(
+                f"SETTLEMENT_SIGMA_FLOOR_MALFORMED_ARTIFACT:{type(exc).__name__}: {exc}"
+            ) from exc
         logger.warning("settlement_sigma_floor(%r, %r, %r) error: %s", city, season, metric, exc)
         return None
 

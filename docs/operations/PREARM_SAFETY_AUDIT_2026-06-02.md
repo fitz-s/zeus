@@ -7,6 +7,14 @@ Authority basis: PRE-ARM safety triage; tasks #96 / #97 / #99; branch edli-corre
 Mode: READ-ONLY audit. Daemon SHADOW, arm OFF, real_order_submit_enabled=False.
 ```
 
+> Supersession note, 2026-06-05: the #99 cap/flood-guard discussion below is
+> historical. Current EDLI no-cap authority is
+> `docs/operations/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md`.
+> When `tiny_live_notional_cap_enabled=false`, there is no EDLI notional cap.
+> When `tiny_live_daily_order_cap_enabled=false`, there is no hidden EDLI
+> order-count cap, including the rate-window table. Do not use this older audit
+> to reintroduce a non-configurable notional ceiling or date-keyed count cap.
+
 ## Executive summary (decision-grade)
 
 1. **#97 is NOT 14 failures — it is 5.** Live-run on branch HEAD (`ZEUS_DISABLE_WRITER_LOCK_ANTIBODY=1`, an

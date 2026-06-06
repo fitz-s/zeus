@@ -731,6 +731,28 @@ entries:
   contains_volatile_metrics: true
   current_tense_allowed: false
   refresh_source: n/a
+- path: docs/operations/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md
+  doc_class: report
+  default_read: false
+  direct_reference_allowed: true
+  current_role: EDLI no-cap regression evidence and current no-cap law summary for PR #397
+  canonical_replaced_by: []
+  next_action: retain_as_evidence
+  lifecycle_state: active
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: report_evidence
+  freshness_class: packet_bound
+  supersedes:
+  - docs/operations/PREARM_SAFETY_AUDIT_2026-06-02.md
+  - docs/operations/EDLI_LIVE_VS_DESIGN_MASTER_SPEC_2026-06-01.md
+  - docs/operations/BEST_ORDER_SELECTION_ROOT_2026-06-01.md
+  - docs/operations/DROPPED_CONTEXT_SEAM_LEDGER_2026-06-01.md
+  superseded_by: []
+  may_live_in_reference: false
+  contains_volatile_metrics: true
+  current_tense_allowed: true
+  refresh_source: packet_audit
 - path: docs/operations/task_*/
   doc_class: operations
   default_read: false

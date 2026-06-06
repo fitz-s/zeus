@@ -3,7 +3,7 @@
 # Authority basis: STRUCTURAL_FIX_PLAN_2026-06-03 §P0.3 (D2 — ARM artifact
 #   producer/consumer gap; H3) + line 104: live boot REQUIRES
 #   state/edli_arm_gate_artifact.json with {schema, commit_sha,
-#   measurement_cmd_hash, capital_weighted_ev>0, gate_pass_n, per_city_n,
+#   measurement_cmd_hash, capital_weighted_ev>0, production_n, per_city_n,
 #   ev_sigma, date_coverage, coverage_licensed:true}; missing / SHA-mismatch /
 #   ev<=0 / coverage_licensed:false → RuntimeError at boot.
 #
@@ -19,7 +19,7 @@
 #         path is provably FUNCTIONAL, just correctly gated;
 #     (c) the producer NEVER manufactures an ARM_ELIGIBLE artifact on DENIED data.
 #
-#   ANTI-FABRICATION: the consumer contract below is the SAME 9-field rule PR-2's
+#   ANTI-FABRICATION: the consumer contract below is the SAME field rule PR-2's
 #   boot gate enforces (STRUCTURAL_FIX_PLAN line 104). If PR-2 lands a real
 #   validator module, repoint _consumer_accepts at it; the assertions are the
 #   contract, not the implementation.
@@ -90,8 +90,9 @@ def test_denied_cohort_emits_blocking_artifact(tmp_path):
     verdict = _denied_verdict()
     artifact = build_arm_artifact(verdict, [], argv=[], coverage_licensed=False)
 
-    # All 9 required fields are present (a missing key would be a producer bug).
+    # All required fields are present (a missing key would be a producer bug).
     assert ARM_ARTIFACT_REQUIRED_FIELDS <= set(artifact)
+    assert artifact["production_n"] == artifact["gate_pass_n"]
 
     # The honest DENIED signals:
     assert artifact["capital_weighted_ev"] <= 0.0
@@ -133,6 +134,7 @@ def test_handbuilt_all_pass_artifact_is_accepted():
         "commit_sha": running_sha,
         "measurement_cmd_hash": "f" * 64,
         "capital_weighted_ev": 0.12,        # > 0 → makes money once sized
+        "production_n": 40,
         "gate_pass_n": 40,
         "per_city_n": {"Tokyo": 8, "Seoul": 8, "Paris": 8, "NYC": 8, "Warsaw": 8},
         "ev_sigma": 2.7,
@@ -151,6 +153,7 @@ def test_all_pass_rejected_on_sha_mismatch():
         "commit_sha": "a" * 40,
         "measurement_cmd_hash": "f" * 64,
         "capital_weighted_ev": 0.12,
+        "production_n": 40,
         "gate_pass_n": 40,
         "per_city_n": {"Tokyo": 8},
         "ev_sigma": 2.7,
@@ -170,6 +173,7 @@ def test_all_pass_rejected_when_field_missing():
         "commit_sha": "c" * 40,
         "measurement_cmd_hash": "f" * 64,
         "capital_weighted_ev": 0.12,
+        "production_n": 40,
         "gate_pass_n": 40,
         "per_city_n": {"Tokyo": 8},
         "ev_sigma": 2.7,
@@ -191,6 +195,24 @@ def test_build_artifact_has_exactly_required_fields():
         f"producer field-set drift: extra={set(artifact)-ARM_ARTIFACT_REQUIRED_FIELDS} "
         f"missing={ARM_ARTIFACT_REQUIRED_FIELDS-set(artifact)}"
     )
+
+
+def test_build_artifact_exposes_production_n_with_deprecated_alias():
+    """The ARM verdict now measures the production cohort. Keep the old field
+    only as a compatibility alias so operator/reviewer surfaces do not mistake
+    the count for the diagnostic gate-PASS subset."""
+    verdict = CapitalWeightedArmVerdict(
+        equal_row_win_rate=0.6,
+        equal_row_ev_sigma=2.2,
+        capital_weighted_roi=0.04,
+        capital_weighted_ev_sigma=2.4,
+        per_city_cw_roi={"Tokyo": 0.04},
+        n=17,
+        per_city_n={"Tokyo": 17},
+    )
+    artifact = build_arm_artifact(verdict, [], argv=[])
+    assert artifact["production_n"] == 17
+    assert artifact["gate_pass_n"] == artifact["production_n"]
 
 
 def test_measurement_cmd_hash_is_argset_sensitive():

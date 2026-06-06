@@ -86,7 +86,7 @@ def build_emos_q(
     # settlement std, °C). Flag-gated: OFF ⇒ byte-identical. max() only WIDENS σ → lower q_lcb → fewer
     # overconfident bets; can NEVER tighten or create a wrong-side trade. σ_settled is °C, like sigma_c.
     if apply_settlement_floor:
-        floor_c = settlement_sigma_floor(city, season, str(metric).lower())
+        floor_c = settlement_sigma_floor(city, season, str(metric).lower(), required=True)
         if floor_c is not None:
             sigma_c = max(sigma_c, float(floor_c))
 
@@ -153,7 +153,7 @@ def build_honest_raw_q(
     # the EMPIRICAL settlement floor is the correct one. Flag-gated: OFF ⇒ byte-identical (existing
     # emos_σ_model floor only). max() only WIDENS → lower q_lcb → fewer overconfident bets. σ_settled °C.
     if apply_settlement_floor:
-        settled_floor_c = settlement_sigma_floor(city, season, str(metric).lower())
+        settled_floor_c = settlement_sigma_floor(city, season, str(metric).lower(), required=True)
         if settled_floor_c is not None:
             sigma_c = max(sigma_c, float(settled_floor_c))
     if not (sigma_c > 0.0):

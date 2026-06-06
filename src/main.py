@@ -609,7 +609,7 @@ def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
     Fail-closed: ``edli_arm_gate_artifact_required`` defaults to True; a missing flag
     still requires the artifact. Only the explicit literal False — set by an operator
     who is knowingly de-binding — relaxes it, and even then the existing
-    promotion-artifact gate and the live-cap hard ceiling remain in force.
+    promotion-artifact gate and live-cap ledger consistency checks remain in force.
     """
     if not bool(edli_cfg.get("edli_arm_gate_artifact_required", True)):
         return
@@ -4322,7 +4322,10 @@ def _edli_event_reactor_cycle() -> None:
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
+        submit_disabled_effective_mode = reactor_mode == "live_no_submit"
         live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
+        real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False
+        taker_fok_fak_effective = bool(edli_cfg.get("taker_fok_fak_live_enabled", False)) or not real_submit_effective
         # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
         # built so the live submit path's select_global_order_type does not raise
         # AllocationDenied("allocator_not_configured"). The legacy discover cycle wires this
@@ -4331,7 +4334,7 @@ def _edli_event_reactor_cycle() -> None:
         # FAIL-CLOSED: if the refresh cannot source a trustworthy drawdown (wallet unreachable
         # / baseline undefined / exception), degrade THIS cycle to the no-submit adapter rather
         # than submit live with an unconfigured-but-proceeding allocator.
-        live_submit_effective = live_bridge_mode
+        live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
         if live_bridge_mode:
             _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(conn)
             if not _alloc_refresh.get("configured"):
@@ -4347,19 +4350,24 @@ def _edli_event_reactor_cycle() -> None:
         # the bankroll NET of correlation-weighted committed capital. The
         # provider closure hands the SAME cached snapshot to every event this
         # cycle (cycle-level read, not per-decision — mirrors the bankroll warm).
-        # FAIL-SOFT: if load_portfolio raises, the provider stays None and Kelly
-        # sizing falls back to pre-#107 single-Kelly (no crash, no over-size vs
-        # the old behaviour). The in-flight reservation accumulator (INV-K7) is
-        # closure-held inside the adapter factory, fresh per cycle.
+        # Shadow remains observational when the portfolio snapshot is unavailable.
+        # Real-submit is different: never let the live path fall back to pre-#107
+        # single-asset Kelly sizing, because that ignores open/pending/correlated
+        # exposure.
         _portfolio_state_provider = None
         try:
             _portfolio_snapshot = load_portfolio()
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
-        except Exception as _portfolio_exc:  # noqa: BLE001 — fail-soft to single-Kelly
+        except Exception as _portfolio_exc:  # noqa: BLE001 — mode-sensitive fail-closed below
             logger.warning(
-                "EDLI reactor: portfolio snapshot load failed (non-fatal); Kelly "
-                "sizing falls back to single-asset (full-bankroll) this cycle: %r",
+                "EDLI reactor: portfolio snapshot load failed; shadow may observe "
+                "with single-asset sizing, but real-submit will fail closed: %r",
                 _portfolio_exc,
+            )
+        if real_submit_effective and _portfolio_state_provider is None:
+            live_submit_effective = False
+            logger.error(
+                "EDLI reactor: real submit disabled this cycle because portfolio_state_unavailable"
             )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
@@ -4369,9 +4377,12 @@ def _edli_event_reactor_cycle() -> None:
                 calibration_conn=conn,
                 get_current_level=get_current_level,
                 portfolio_state_provider=_portfolio_state_provider,
-                real_order_submit_enabled=real_order_submit_enabled if reactor_mode == "live" else False,
+                real_order_submit_enabled=real_submit_effective,
                 live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
-                taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
+                # In submit-disabled modes this is simulation authority only:
+                # build the would-trade taker certificate, but never call venue submit.
+                # Real submit/canary still requires the explicit config flag.
+                taker_fok_fak_live_enabled=taker_fok_fak_effective,
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,

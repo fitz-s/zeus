@@ -784,13 +784,16 @@ from src.events.live_profit_audit import (  # noqa: E402 — after sys.path inje
     ARM_GATE_ARTIFACT_SCHEMA as ARM_ARTIFACT_SCHEMA,
 )
 
-# The 9 fields PR-2's D2 boot gate requires. Kept here as the explicit contract
+# Fields PR-2's D2 boot gate requires. Kept here as the explicit contract
 # the producer fills — a missing key is a producer bug caught by the H3 test.
 ARM_ARTIFACT_REQUIRED_FIELDS = frozenset({
     "schema",
     "commit_sha",
     "measurement_cmd_hash",
     "capital_weighted_ev",
+    "production_n",
+    # Deprecated compatibility alias for older readers. The measured cohort is
+    # production/all_rows, not the diagnostic mainstream gate-PASS subset.
     "gate_pass_n",
     "per_city_n",
     "ev_sigma",
@@ -872,6 +875,8 @@ def build_arm_artifact(
         "measurement_cmd_hash": _measurement_cmd_hash(argv),
         # capital_weighted_ev = size-weighted ROI; the consumer rejects on <=0.
         "capital_weighted_ev": cw_verdict.capital_weighted_roi,
+        "production_n": cw_verdict.n,
+        # Deprecated alias retained for consumers that still read the old name.
         "gate_pass_n": cw_verdict.n,
         "per_city_n": dict(cw_verdict.per_city_n),
         "ev_sigma": cw_verdict.capital_weighted_ev_sigma,
@@ -1048,7 +1053,8 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"  measurement_cmd_hash = {artifact['measurement_cmd_hash'][:16]}…")
         print(f"  capital_weighted_ev  = {artifact['capital_weighted_ev']:.6f}")
         print(f"  ev_sigma             = {artifact['ev_sigma']:.4f}")
-        print(f"  gate_pass_n          = {artifact['gate_pass_n']}")
+        print(f"  production_n         = {artifact['production_n']}")
+        print(f"  gate_pass_n          = {artifact['gate_pass_n']} (deprecated alias)")
         print(f"  per_city_n           = {artifact['per_city_n']}")
         print(f"  date_coverage        = {artifact['date_coverage']['n_pairs']} (city,date) pairs")
         print(f"  coverage_licensed    = {artifact['coverage_licensed']}")

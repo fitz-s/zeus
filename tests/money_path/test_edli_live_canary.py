@@ -269,6 +269,46 @@ def test_live_cap_certificate_is_backed_by_usage_row():
     assert row["final_intent_id"] == "intent-1"
 
 
+def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypatch):
+    from copy import deepcopy
+
+    from src.engine import event_reactor_adapter as adapter
+    from src.events.reactor import EventSubmissionReceipt
+
+    settings_copy = deepcopy(adapter.settings)
+    settings_copy["edli_v1"]["tiny_live_notional_cap_enabled"] = False
+    settings_copy["edli_v1"]["tiny_live_daily_order_cap_enabled"] = False
+    monkeypatch.setattr(adapter, "settings", settings_copy)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        c_fee_adjusted=0.4,
+        kelly_size_usd=800.0,
+        final_intent_id="intent-uncapped",
+    )
+    kwargs = dict(
+        event=event,
+        receipt=receipt,
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        max_notional_usd=5.0,
+        live_cap_conn=conn,
+    )
+
+    provisional = adapter._build_live_cap_certificate_from_ledger(**kwargs, persist=False)
+    durable = adapter._build_live_cap_certificate_from_ledger(**kwargs, persist=True)
+
+    assert provisional.payload["reserved_notional_usd"] == 800.0
+    assert durable.payload["reserved_notional_usd"] == 800.0
+    assert durable.payload["reserved_notional_usd"] == provisional.payload["reserved_notional_usd"]
+    assert durable.payload["max_notional_usd"] == provisional.payload["max_notional_usd"] == 800.0
+
+
 def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.riskguard.risk_level import RiskLevel

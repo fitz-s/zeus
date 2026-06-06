@@ -131,3 +131,45 @@ def test_settlement_sigma_floor_cached_loads_once(monkeypatch, tmp_path):
     p.unlink()
     second = emos_mod.settlement_sigma_floor("C", "JJA", "high")
     assert second == pytest.approx(0.8 * 3.0), "loader must cache; second call must not re-read disk"
+
+
+def test_settlement_sigma_floor_required_missing_artifact_raises(monkeypatch, tmp_path):
+    importlib.reload(emos_mod)
+    missing = tmp_path / "missing-settlement_sigma_floor.json"
+    monkeypatch.setattr(emos_mod, "_SIGMA_FLOOR_PATH", missing, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None, raising=False)
+
+    assert emos_mod.settlement_sigma_floor("C", "JJA", "high") is None
+    with pytest.raises(emos_mod.SettlementSigmaFloorError, match="MISSING_ARTIFACT"):
+        emos_mod.settlement_sigma_floor("C", "JJA", "high", required=True)
+
+
+def test_settlement_sigma_floor_required_malformed_artifact_raises(monkeypatch, tmp_path):
+    importlib.reload(emos_mod)
+    p = tmp_path / "settlement_sigma_floor.json"
+    p.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setattr(emos_mod, "_SIGMA_FLOOR_PATH", p, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None, raising=False)
+
+    assert emos_mod.settlement_sigma_floor("C", "JJA", "high") is None
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None, raising=False)
+    with pytest.raises(emos_mod.SettlementSigmaFloorError, match="MALFORMED_ARTIFACT"):
+        emos_mod.settlement_sigma_floor("C", "JJA", "high", required=True)
+
+
+def test_settlement_sigma_floor_required_missing_cell_raises(floor_table):
+    assert emos_mod.settlement_sigma_floor("Tel Aviv", "JJA", "low") is None
+    with pytest.raises(emos_mod.SettlementSigmaFloorError, match="MISSING_CELL:Tel Aviv\\|JJA\\|low"):
+        emos_mod.settlement_sigma_floor("Tel Aviv", "JJA", "low", required=True)
+
+
+def test_settlement_sigma_floor_required_non_positive_floor_raises(monkeypatch):
+    table = {
+        "_meta": {"k_default": 0.8},
+        "cells": {"X|JJA|high": {"sigma_floor_c": 0.0, "n": 20, "window": "w"}},
+    }
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", table, raising=False)
+
+    assert emos_mod.settlement_sigma_floor("X", "JJA", "high") is None
+    with pytest.raises(emos_mod.SettlementSigmaFloorError, match="NON_POSITIVE"):
+        emos_mod.settlement_sigma_floor("X", "JJA", "high", required=True)

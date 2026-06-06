@@ -10,25 +10,10 @@ from datetime import datetime, timezone
 from src.decision_kernel.canonicalization import stable_hash
 from src.state.schema.edli_live_cap_usage_schema import ensure_table
 
-# BUG #99 antibody: conservative canary default for the order-emission RATE
-# limit. This is INDEPENDENT of the notional cap and of max_orders_per_day. When
-# a caller omits max_orders_per_window we fail closed to a single order per
-# window so that raising the notional cap can never silently uncap order
-# frequency. The operator sets the live value via config (the daemon passes it
-# through); the default here only governs absence.
+# Conservative default for the explicit order-count path. It is only used when
+# daily_order_cap_enabled is true; the no-cap path bypasses day and window slots.
 DEFAULT_MAX_ORDERS_PER_WINDOW = 1
-
-# PR-2 (C) N3 antibody: a HARD per-order notional ceiling that holds even when
-# tiny_live_notional_cap_enabled is false. #380 removed BOTH the notional cap and
-# the daily cap in a single commit, leaving fractional Kelly as the sole notional
-# bound — one bad edit away from an unbounded order. This ceiling is a SEPARATE
-# rail: the soft cap flag may TUNE max_notional_usd, but it can NEVER remove this
-# ceiling. reserve() clamps every request down to it UNCONDITIONALLY (cap on or
-# off), so a single-commit dual-cap removal still cannot uncap notional. It is a
-# runaway backstop (a Kelly bug emitting thousands), set well above any legitimate
-# canary/early-live order — not a routine sizing constraint.
-HARD_NOTIONAL_CEILING_USD = 250.0
-
+DEFAULT_RATE_WINDOW_SECONDS = 60
 
 def cap_explicitly_disabled(value: object) -> bool:
     """Return True ONLY when ``value`` is the explicit-disable sentinel.
@@ -49,6 +34,32 @@ def cap_explicitly_disabled(value: object) -> bool:
     Disabling a live risk-sizing limit must be unambiguous.
     """
     return value is False
+
+
+@dataclass(frozen=True)
+class LiveCapRequest:
+    requested_notional_usd: float
+    recorded_max_notional_usd: float
+
+
+def normalize_live_cap_request(
+    *,
+    requested_notional_usd: float,
+    max_notional_usd: float,
+    notional_cap_enabled: bool = True,
+) -> LiveCapRequest:
+    """Normalize live-cap notional before any certificate or ledger row exists."""
+    requested = float(requested_notional_usd)
+    max_notional = float(max_notional_usd)
+    if requested <= 0:
+        raise LiveCapError("requested_notional_usd must be positive")
+    if notional_cap_enabled and requested > max_notional:
+        raise LiveCapError("requested_notional_usd exceeds max_notional_usd")
+    recorded_max = max_notional if notional_cap_enabled else requested
+    return LiveCapRequest(
+        requested_notional_usd=float(requested),
+        recorded_max_notional_usd=float(recorded_max),
+    )
 
 
 @dataclass(frozen=True)
@@ -105,34 +116,13 @@ class LiveCapLedger:
         final_intent_id: str | None = None,
         execution_command_id: str | None = None,
     ) -> LiveCapReservation:
-        # 2026-06-03 operator directive: the artificial notional + per-day caps
-        # may be EXPLICITLY disabled so fractional-Kelly sizing is the sole
-        # notional constraint (alongside collateral + the flood-guard rate
-        # window, both of which remain active). FAIL-SAFE: these flags default
-        # to True; a caller that omits them (e.g. a malformed config that lost
-        # the disable sentinel) gets the tight cap, never unbounded.
-        if requested_notional_usd <= 0:
-            raise LiveCapError("requested_notional_usd must be positive")
-        # 2026-06-05 operator directive ("no caps, no trade-count limits"): the $250 hard ceiling is
-        # a HARDCODED arbitrary number, not the real safety gate. The real bounds — fractional Kelly
-        # (the forward-settlement risk allowance, iron rule 5) and the COLLATERAL ledger (you cannot
-        # reserve more PUSD than the wallet holds) — are preserved and remain the sole notional
-        # constraint. So the ceiling is now FLAG-GATED: it clamps ONLY when the notional cap is
-        # enabled. Disabled (the operator's config) ⇒ no arbitrary clamp; Kelly + collateral bound
-        # the size by your ACTUAL money rather than a fixed sentinel. Clamp (not reject) when on.
-        if notional_cap_enabled and requested_notional_usd > HARD_NOTIONAL_CEILING_USD:
-            requested_notional_usd = float(HARD_NOTIONAL_CEILING_USD)
-        if notional_cap_enabled and requested_notional_usd > max_notional_usd:
-            raise LiveCapError("requested_notional_usd exceeds max_notional_usd")
-        # When the notional cap is disabled the persisted row must stay
-        # self-consistent (reserved <= max, schema CHECK max >= 0): record the
-        # actual requested notional as the row's max so it documents the
-        # uncapped size rather than a stale ceiling.
-        recorded_max_notional_usd = (
-            float(max_notional_usd)
-            if notional_cap_enabled
-            else float(requested_notional_usd)
+        normalized = normalize_live_cap_request(
+            requested_notional_usd=float(requested_notional_usd),
+            max_notional_usd=float(max_notional_usd),
+            notional_cap_enabled=bool(notional_cap_enabled),
         )
+        requested_notional_usd = normalized.requested_notional_usd
+        recorded_max_notional_usd = normalized.recorded_max_notional_usd
         if max_orders_per_day <= 0:
             raise LiveCapError("max_orders_per_day must be positive")
         if max_orders_per_window <= 0:
@@ -161,11 +151,10 @@ class LiveCapLedger:
             return reservation
         cap_date = decision_text[:10]
         # Per-day cap: when EXPLICITLY disabled the day-slot pool is bypassed so
-        # an unbounded number of orders may be placed per day (Kelly + collateral
-        # + flood-guard remain the only constraints). The day-slot table's unique
-        # (event_id, cap_scope) index still provides per-event idempotency — that
-        # is not a cap, so it is preserved. When enabled (the default) the bounded
-        # slot pool caps per-day exactly as before.
+        # an unbounded number of orders may be placed per day. The day-slot
+        # table's unique (event_id, cap_scope) index still provides per-event
+        # idempotency — that is not a cap, so it is preserved. When enabled (the
+        # default) the bounded slot pool caps per-day exactly as before.
         if daily_order_cap_enabled:
             slot = self._reserve_day_slot(
                 usage_id=usage_id,
@@ -183,20 +172,17 @@ class LiveCapLedger:
                 cap_date=cap_date,
                 created_at=created_at,
             )
-        # 2026-06-05 operator directive ("no trade-count limit"): the #99 flood-guard rate window is
-        # a per-day order-COUNT cap (window_key = the calendar date, max_orders_per_window) — with
-        # max_orders_per_window=1 it is effectively a hidden 1-order/day cap even when the explicit
-        # daily cap is "disabled". The operator now forbids ANY trade-count limit, overriding the
-        # prior (2026-06-03) directive that kept the flood window active. So the window slot is
-        # reserved ONLY when the daily order cap is ENABLED; disabled ⇒ no order-count cap at all
-        # (Kelly + collateral + the per-event idempotency unique-index remain the only constraints).
+        # Count-cap switch: when the explicit daily cap is disabled, there must
+        # be no hidden order-count cap. When enabled, the flood guard is a real
+        # fixed 60s window, not the old calendar-date key that acted like a
+        # second daily cap.
         if daily_order_cap_enabled:
             try:
                 self._reserve_window_slot(
                     usage_id=usage_id,
                     event_id=event_id,
                     cap_scope=cap_scope,
-                    window_key=cap_date,
+                    window_key=_rate_window_key(decision_time),
                     max_orders_per_window=max_orders_per_window,
                     created_at=created_at,
                 )
@@ -340,7 +326,7 @@ class LiveCapLedger:
         cap_date: str,
         created_at: str,
     ) -> int:
-        """Reserve a day slot with NO per-day ceiling (2026-06-03 directive).
+        """Reserve a day slot with NO per-day count limit (2026-06-03 directive).
 
         Used only when the per-day cap is EXPLICITLY disabled. Unlike
         ``_reserve_day_slot`` there is no ``max_orders_per_day`` bound: a fresh
@@ -348,13 +334,8 @@ class LiveCapLedger:
         found, so the pool grows without limit. The unique (event_id, cap_scope)
         index is still honoured for per-event idempotency (NOT a cap).
 
-        2026-06-05 operator directive ("no trade-count limit"): the flood-guard
-        rate window is itself a per-day order-COUNT cap, so on this disabled-cap
-        path the caller no longer reserves it (the window slot is gated on
-        ``daily_order_cap_enabled``). When the per-day cap is disabled there is
-        therefore NO order-frequency bound at all — fractional Kelly, the
-        collateral ledger, and the per-event idempotency unique-index are the
-        sole remaining constraints.
+        The flood-guard rate window is also bypassed by the caller on this path.
+        That keeps ``daily_order_cap_enabled=False`` free of hidden count caps.
         """
         existing = self.conn.execute(
             """
@@ -450,3 +431,11 @@ def _dt(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _rate_window_key(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    epoch_seconds = int(value.astimezone(timezone.utc).timestamp())
+    window_start = epoch_seconds - (epoch_seconds % DEFAULT_RATE_WINDOW_SECONDS)
+    return f"{DEFAULT_RATE_WINDOW_SECONDS}s:{window_start}"
