@@ -391,9 +391,14 @@ def _verify_execution_command_payload(
         raise CertificateVerificationError("execution command size must be positive")
     if size < min_order_size:
         raise CertificateVerificationError("execution command size below min_order_size")
-    max_notional = _finite_float(live_cap.get("max_notional_usd"), "live cap max_notional_usd")
-    if size * limit_price > max_notional:
-        raise CertificateVerificationError("execution command size exceeds live cap notional")
+    notional_cap_enabled = (
+        live_cap.get("notional_cap_enabled", actionable.get("live_cap_notional_cap_enabled", True)) is not False
+        and actionable.get("live_cap_notional_cap_enabled", True) is not False
+    )
+    if notional_cap_enabled:
+        max_notional = _finite_float(live_cap.get("max_notional_usd"), "live cap max_notional_usd")
+        if size * limit_price > max_notional:
+            raise CertificateVerificationError("execution command size exceeds live cap notional")
     if limit_price <= 0.0 or limit_price >= 1.0:
         raise CertificateVerificationError("execution command limit_price must be in (0, 1)")
     if tick_size <= 0.0:

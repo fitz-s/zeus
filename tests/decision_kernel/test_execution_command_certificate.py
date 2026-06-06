@@ -107,6 +107,23 @@ def test_execution_command_rejects_size_below_min_order():
         verify_execution_command(command, parents)
 
 
+def test_execution_command_reserved_notional_ceiling_applies_when_cap_enabled():
+    parents, command = execution_graph(command_payload={"size": 20.0, "limit_price": 0.40})
+
+    with pytest.raises(CertificateVerificationError, match="exceeds live cap notional"):
+        verify_execution_command(command, parents)
+
+
+def test_execution_command_reserved_notional_not_ceiling_when_cap_disabled():
+    parents, command = execution_graph(
+        actionable_payload={"live_cap_notional_cap_enabled": False},
+        live_cap_payload={"notional_cap_enabled": False},
+        command_payload={"size": 20.0, "limit_price": 0.40},
+    )
+
+    verify_execution_command(command, parents)
+
+
 def test_execution_command_rejects_tick_misaligned_price():
     parents, command = execution_graph(command_payload={"limit_price": 0.333, "tick_size": 0.01})
 
@@ -485,8 +502,19 @@ def test_ledger_rejects_execution_command_with_generic_verifier_only_path():
         DecisionCertificateLedger(_conn()).insert_idempotent(command)
 
 
-def execution_graph(*, mode: str = "LIVE", command_payload: dict | None = None, drop_parent: str | None = None):
-    actionable = _cert(claims.ACTIONABLE_TRADE, "actionable:event-1", _actionable_payload())
+def execution_graph(
+    *,
+    mode: str = "LIVE",
+    actionable_payload: dict | None = None,
+    live_cap_payload: dict | None = None,
+    command_payload: dict | None = None,
+    drop_parent: str | None = None,
+):
+    actionable = _cert(
+        claims.ACTIONABLE_TRADE,
+        "actionable:event-1",
+        {**_actionable_payload(), **(actionable_payload or {})},
+    )
     final_intent = _cert(
         claims.FINAL_INTENT,
         "final-intent:intent-1",
@@ -496,7 +524,13 @@ def execution_graph(*, mode: str = "LIVE", command_payload: dict | None = None, 
     live_cap = _cert(
         claims.LIVE_CAP,
         "live-cap:cap-1",
-        {"usage_id": "cap-1", "event_id": "event-1", "reservation_status": "RESERVED", "max_notional_usd": 5.0},
+        {
+            "usage_id": "cap-1",
+            "event_id": "event-1",
+            "reservation_status": "RESERVED",
+            "max_notional_usd": 5.0,
+            **(live_cap_payload or {}),
+        },
     )
     payload = {**_command_payload(actionable), **(command_payload or {})}
     pre_submit = _pre_submit_cert(final_intent, live_cap, payload)
