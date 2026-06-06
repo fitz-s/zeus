@@ -6265,6 +6265,9 @@ def _edli_user_channel_reconcile_cycle() -> None:
                 payload=fact.get("payload") if isinstance(fact.get("payload"), dict) else None,
             )
             reconcile_count += 1
+        from src.events.edli_trade_fact_bridge import append_confirmed_trade_facts_to_edli
+
+        reconcile_count += append_confirmed_trade_facts_to_edli(conn, now=now)
         conn.commit()
     finally:
         conn.close()
