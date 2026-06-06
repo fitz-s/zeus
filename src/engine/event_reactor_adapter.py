@@ -1524,16 +1524,51 @@ def _build_live_execution_command_certificates(
                     executable_snapshot.payload.get("min_tick_size") or "0.01"
                 ))
                 _reservation = Decimal(str(_action_payload.get("c_fee_adjusted") or "0"))
-                _ask_for_limit = (
-                    Decimal(str(best_ask)) if best_ask is not None else _reservation
-                )
-                _limit_price_d = min(_ask_for_limit, _reservation)
-                # Tick-align limit price (floor) using the canonical tick_size
+                _direction_for_depth = str(_action_payload.get("direction") or "buy_no")
+                if _direction_for_depth.startswith("buy_"):
+                    _fresh_touch = Decimal(str(fresh_best_ask))
+                    # A BUY taker must cross the fresh ask.  If the ask is now above
+                    # the reservation, this candidate is no longer executable and
+                    # must be rejected so the reactor can continue to the next market.
+                    if _fresh_touch > _reservation:
+                        raise ValueError(
+                            "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:"
+                            f"best_ask={_fresh_touch}:reservation={_reservation}"
+                        )
+                    _limit_price_d = _fresh_touch
+                    _rounding_mode = "up"
+                else:
+                    _fresh_touch = Decimal(str(fresh_best_bid))
+                    if _fresh_touch < _reservation:
+                        raise ValueError(
+                            "TAKER_SELL_TOUCH_BELOW_RESERVATION:"
+                            f"best_bid={_fresh_touch}:reservation={_reservation}"
+                        )
+                    _limit_price_d = _fresh_touch
+                    _rounding_mode = "down"
+                # Tick-align the marketable touch using the canonical tick_size:
+                # BUY rounds up to keep crossing; SELL rounds down to keep crossing.
                 import math as _math
                 if _tick_size_d > 0:
+                    _ratio = float(_limit_price_d) / float(_tick_size_d)
+                    _round_fn = _math.ceil if _rounding_mode == "up" else _math.floor
+                    _epsilon = -1e-9 if _rounding_mode == "up" else 1e-9
                     _limit_price_d = Decimal(str(
-                        round(_math.floor(float(_limit_price_d) / float(_tick_size_d) + 1e-9) * float(_tick_size_d), 10)
+                        round(_round_fn(_ratio + _epsilon) * float(_tick_size_d), 10)
                     ))
+                    if _direction_for_depth.startswith("buy_") and _limit_price_d > _reservation:
+                        raise ValueError(
+                            "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:"
+                            f"marketable_limit={_limit_price_d}:reservation={_reservation}"
+                        )
+                    if (
+                        not _direction_for_depth.startswith("buy_")
+                        and _limit_price_d < _reservation
+                    ):
+                        raise ValueError(
+                            "TAKER_SELL_TOUCH_BELOW_RESERVATION:"
+                            f"marketable_limit={_limit_price_d}:reservation={_reservation}"
+                        )
                 if _limit_price_d <= 0:
                     raise ValueError(
                         "EXECUTION_PRICE_BELOW_MIN_TICK:"
@@ -1560,7 +1595,7 @@ def _build_live_execution_command_certificates(
                 _desired_shares = Decimal(str(_desired_shares_f))
                 _depth_sweep = simulate_clob_sweep(
                     snapshot=_snap_for_depth,
-                    direction=str(_action_payload.get("direction") or "buy_no"),
+                    direction=_direction_for_depth,
                     requested_size_kind="shares",
                     requested_size_value=_desired_shares,
                     limit_price=_limit_price_d,
@@ -1590,7 +1625,7 @@ def _build_live_execution_command_certificates(
                         # stored VWAP matches what the executor guard will compute.
                         _capped_sweep = simulate_clob_sweep(
                             snapshot=_snap_for_depth,
-                            direction=str(_action_payload.get("direction") or "buy_no"),
+                            direction=_direction_for_depth,
                             requested_size_kind="shares",
                             requested_size_value=_capped_shares,
                             limit_price=_limit_price_d,
@@ -1635,8 +1670,8 @@ def _build_live_execution_command_certificates(
             # provenance fault, not a 0.01 market.
             tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _required_bound_tick_size(_snap_for_depth, executable_snapshot.payload),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
-            best_bid=best_bid,
-            best_ask=best_ask,
+            best_bid=fresh_best_bid if str(order_mode).strip().upper() == "TAKER" else best_bid,
+            best_ask=fresh_best_ask if str(order_mode).strip().upper() == "TAKER" else best_ask,
             taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,

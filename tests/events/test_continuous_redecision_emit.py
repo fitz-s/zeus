@@ -202,6 +202,34 @@ def test_prune_working_set_expires_stale_fsr_before_skip_snapshot():
     assert status == "expired"
 
 
+def test_redecision_skip_set_ignores_pending_channel_events():
+    """Channel-cache events must not make forecast families look already pending."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    channel = make_opportunity_event(
+        event_type="BOOK_SNAPSHOT",
+        entity_key="0xcondition|token-1|BOOK_SNAPSHOT",
+        source="market_channel",
+        observed_at="2026-06-05T00:00:00+00:00",
+        available_at="2026-06-05T00:00:00+00:00",
+        received_at="2026-06-05T00:00:00+00:00",
+        causal_snapshot_id="book-1",
+        payload={
+            "condition_id": "0xcondition",
+            "token_id": "token-1",
+            "best_bid": 0.39,
+            "best_ask": 0.40,
+        },
+        priority=0,
+    )
+    store.insert_or_ignore(channel)
+
+    assert main._edli_pending_entity_keys(world) == set()
+
+
 def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
     """The reactor cycle must prune the working set before taking the redecision skip snapshot."""
 

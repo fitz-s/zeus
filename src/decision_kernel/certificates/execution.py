@@ -518,26 +518,44 @@ def _branch_limit_price(
     tick_size: float,
     passive_maker_context,
 ) -> float:
-    """Branch-correct, reservation-capped limit price.
+    """Branch-correct, reservation-gated limit price.
 
-    RESERVATION-CAP INVARIANT: no order, maker or taker, is ever priced worse
-    than ``reservation`` (= c_fee_adjusted). This is the structural anti-anti-
-    alpha guard — a cross can never be -EV.
+    RESERVATION INVARIANT: no order, maker or taker, is ever priced worse than
+    ``reservation`` (= c_fee_adjusted). For taker orders the live touch is not a
+    price cap; it is the executable price. If that touch is worse than the
+    reservation, the candidate is not currently executable and must be skipped
+    instead of emitting a non-crossing FOK/FAK.
 
-    BUY:  taker -> min(best_ask, reservation); maker -> min(best_bid+tick, reservation)
-    SELL: taker -> max(best_bid, reservation); maker -> max(best_ask-tick, reservation)
+    BUY:  taker -> best_ask iff best_ask <= reservation; maker -> min(best_bid+tick, reservation)
+    SELL: taker -> best_bid iff best_bid >= reservation; maker -> max(best_ask-tick, reservation)
 
-    When bid/ask are unavailable, the price falls back to ``reservation`` (the
-    pre-change behavior — rest at the reservation), which is always within cap.
+    Taker orders require a fresh touch; falling back to reservation produces a
+    non-marketable immediate order and creates false "will trade" evidence.
     """
     bid = _coerce_price(best_bid, passive_maker_context, "best_bid")
     ask = _coerce_price(best_ask, passive_maker_context, "best_ask")
     if order_mode == "TAKER":
         if side == "BUY":
-            far = ask if ask is not None else reservation
-            return _tick_round_down(min(far, reservation), tick_size)
-        near = bid if bid is not None else reservation
-        return _tick_round_up(max(near, reservation), tick_size)
+            if ask is None:
+                raise ValueError("TAKER_BUY_BEST_ASK_REQUIRED")
+            marketable = _tick_round_up(ask, tick_size)
+            if marketable > reservation + 1e-9:
+                raise ValueError(
+                    "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:"
+                    f"best_ask={ask:.6g}:marketable_limit={marketable:.6g}:"
+                    f"reservation={reservation:.6g}"
+                )
+            return marketable
+        if bid is None:
+            raise ValueError("TAKER_SELL_BEST_BID_REQUIRED")
+        marketable = _tick_round_down(bid, tick_size)
+        if marketable < reservation - 1e-9:
+            raise ValueError(
+                "TAKER_SELL_TOUCH_BELOW_RESERVATION:"
+                f"best_bid={bid:.6g}:marketable_limit={marketable:.6g}:"
+                f"reservation={reservation:.6g}"
+            )
+        return marketable
     # maker: improve the touch by one tick, capped by reservation
     if side == "BUY":
         improved = (bid + tick_size) if bid is not None else reservation

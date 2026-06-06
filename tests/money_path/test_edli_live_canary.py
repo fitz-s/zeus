@@ -801,6 +801,7 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
     assert final_intent.payload["order_mode"] == "TAKER"
     assert final_intent.payload["post_only"] is False
     assert final_intent.payload["time_in_force"] in {"FOK", "FAK"}
+    assert final_intent.payload["limit_price"] == pytest.approx(0.40)
     assert pre_submit.payload["would_cross_book"] is True
     assert pre_submit.payload["post_only"] is False
 
@@ -1920,7 +1921,7 @@ def _pre_submit_authority_witness(
     *,
     decision_time: datetime | None = None,
     current_best_bid: float = 0.39,
-    current_best_ask: float = 0.41,
+    current_best_ask: float = 0.40,
     tick_size: float = 0.01,
     min_order_size: float = 1.0,
     heartbeat_status: str = "OK",

@@ -4794,7 +4794,8 @@ def _edli_pending_entity_keys(world_conn) -> set[str]:
             JOIN opportunity_event_processing p ON p.event_id = e.event_id
             WHERE p.consumer_name = 'edli_reactor_v1'
               AND p.processing_status IN ('pending', 'processing', 'claimed')
-            """
+              AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+        """
         ).fetchall()
     except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
         return set()

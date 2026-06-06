@@ -208,9 +208,8 @@ class TestFOKSizeToDepthGREEN:
 
     def test_green_reservation_cap_preserved(self):
         """
-        Reservation cap: limit ≤ c_fee_adjusted.
-        buy_no: limit = min(best_ask, reservation). If best_ask=0.80, reservation=0.81:
-        limit = 0.80 ≤ 0.81 (reservation cap preserved).
+        Reservation gate: a BUY taker may cross only when best_ask <= c_fee_adjusted.
+        If best_ask=0.80 and reservation=0.81, the executable limit is 0.80.
         """
         best_ask = Decimal("0.80")
         c_fee_adjusted = Decimal("0.81")
