@@ -2023,27 +2023,41 @@ def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
 
 
 def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
-    from types import SimpleNamespace
-
     from src.data import executable_forecast_reader
+    from src.data.executable_forecast_reader import (
+        ExecutableForecastBundle,
+        ExecutableForecastBundleResult,
+        ExecutableForecastEvidence,
+        ExecutableForecastSnapshot,
+    )
 
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     decision_time = datetime(2026, 5, 24, 8, 17, tzinfo=timezone.utc)
     captured = []
-    evidence = SimpleNamespace(
+    evidence = ExecutableForecastEvidence(
         forecast_source_id="ecmwf_open_data",
         forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
         source_transport="ensemble_snapshots_db_reader",
-        source_cycle_time="2026-05-24T00:00:00+00:00",
-        source_issue_time="2026-05-24T00:00:00+00:00",
         source_run_id="run-1",
+        release_calendar_key="ecmwf_open_data",
         coverage_id="coverage-1",
         producer_readiness_id="producer_readiness:coverage-1",
         entry_readiness_id=None,
+        source_cycle_time="2026-05-24T00:00:00+00:00",
+        source_issue_time="2026-05-24T00:00:00+00:00",
+        source_release_time="2026-05-24T07:00:00+00:00",
+        source_available_at="2026-05-24T08:10:00+00:00",
+        fetch_started_at="2026-05-24T07:10:00+00:00",
+        fetch_finished_at="2026-05-24T08:05:00+00:00",
+        captured_at="2026-05-24T08:10:00+00:00",
         input_snapshot_ids=(1,),
         raw_payload_hash="hash-raw",
         manifest_hash="hash-manifest",
+        target_local_date="2026-05-25",
+        target_window_start_utc="2026-05-25T05:00:00+00:00",
+        target_window_end_utc="2026-05-26T05:00:00+00:00",
+        city_timezone="America/Chicago",
         required_steps=(0, 3, 6),
         observed_steps=(0, 3, 6),
         expected_members=51,
@@ -2062,20 +2076,41 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
             "authority_verified",
             "available_at_not_future",
         ),
+    )
+    snapshot = ExecutableForecastSnapshot(
+        snapshot_id=1,
+        city="Chicago",
+        target_local_date=datetime(2026, 5, 25, tzinfo=timezone.utc).date(),
+        temperature_metric="high",
+        data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        members=tuple(float(60 + (index % 10)) for index in range(51)),
+        source_id="ecmwf_open_data",
+        source_transport="ensemble_snapshots_db_reader",
+        source_run_id="run-1",
+        release_calendar_key="ecmwf_open_data",
+        source_cycle_time="2026-05-24T00:00:00+00:00",
+        source_release_time="2026-05-24T07:00:00+00:00",
         source_available_at="2026-05-24T08:10:00+00:00",
-        fetch_started_at="2026-05-24T07:10:00+00:00",
-        fetch_finished_at="2026-05-24T08:05:00+00:00",
-        captured_at="2026-05-24T08:10:00+00:00",
+        issue_time="2026-05-24T00:00:00+00:00",
+        valid_time="2026-05-25",
+        available_at="2026-05-24T08:10:00+00:00",
+        fetch_time="2026-05-24T08:10:00+00:00",
+        manifest_hash="hash-manifest",
+        members_unit="degF",
+        local_day_start_utc="2026-05-25T05:00:00+00:00",
+        step_horizon_hours=32.0,
+        first_member_observed_time="2026-05-24T07:10:00+00:00",
+        run_complete_time="2026-05-24T08:05:00+00:00",
+        raw_orderbook_hash_transition_delta_ms=50,
     )
 
     monkeypatch.setattr(
         executable_forecast_reader,
         "read_executable_forecast",
         lambda *_args, **kwargs: captured.append(kwargs["decision_time"])
-        or SimpleNamespace(
-            ok=True,
+        or ExecutableForecastBundleResult(
             status="LIVE_ELIGIBLE",
-            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="1"), evidence=evidence),
+            bundle=ExecutableForecastBundle(snapshot=snapshot, evidence=evidence),
             reason_code="OK",
         ),
     )

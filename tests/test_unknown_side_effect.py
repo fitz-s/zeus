@@ -24,6 +24,7 @@ NOW = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
 def conn(monkeypatch):
     """In-memory trades DB with live-money gates neutralized for unit tests."""
     from src.state.db import init_schema
+    from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
@@ -35,6 +36,31 @@ def conn(monkeypatch):
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+
+    def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
+        CollateralLedger(conn).set_snapshot(
+            CollateralSnapshot(
+                pusd_balance_micro=1_000_000_000,
+                pusd_allowance_micro=1_000_000_000,
+                usdc_e_legacy_balance_micro=0,
+                ctf_token_balances={},
+                ctf_token_allowances={},
+                reserved_pusd_for_buys_micro=0,
+                reserved_tokens_for_sells={},
+                captured_at=datetime.now(timezone.utc),
+                authority_tier="CHAIN",
+                raw_balance_payload_hash="test-collateral",
+            )
+        )
+        return {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "allowed",
+            "authority_tier": "CHAIN",
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    monkeypatch.setattr("src.execution.executor._refresh_entry_collateral_snapshot_for_submit", _seed_submit_collateral)
     yield c
     c.close()
 
