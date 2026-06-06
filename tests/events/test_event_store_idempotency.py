@@ -13,11 +13,17 @@ from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_oppo
 from src.state.db import init_schema
 
 
-def _payload(snapshot_id: str = "snap-1") -> ForecastSnapshotReadyPayload:
+def _payload(
+    snapshot_id: str = "snap-1",
+    *,
+    city: str = "Chicago",
+    target_date: str = "2026-05-24",
+    metric: str = "high",
+) -> ForecastSnapshotReadyPayload:
     return ForecastSnapshotReadyPayload(
-        city="Chicago",
-        target_date="2026-05-24",
-        metric="high",
+        city=city,
+        target_date=target_date,
+        metric=metric,
         source_id="ecmwf-open-data",
         source_run_id="run-1",
         cycle="00",
@@ -61,9 +67,17 @@ def _fsr_entity_event(
     available_at: str,
     received_at: str,
     *,
+    city: str = "Chicago",
+    target_date: str = "2026-05-24",
+    metric: str = "high",
     source_run_completeness_status: str = "COMPLETE",
 ):
-    payload = _payload(snapshot_id)
+    payload = _payload(
+        snapshot_id,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+    )
     if source_run_completeness_status != "COMPLETE":
         payload = dataclasses.replace(
             payload,
@@ -172,7 +186,7 @@ def test_pending_fetch_excludes_future_received_at():
     assert [event.causal_snapshot_id for event in ordered] == ["snap-ready"]
 
 
-def test_archive_superseded_forecast_snapshot_events_keeps_latest_per_entity_key():
+def test_archive_superseded_forecast_snapshot_events_keeps_latest_per_family():
     conn = _world_conn()
     store = EventStore(conn)
     entity_key = "Chicago|2026-05-24|high|source-run-1"
@@ -187,6 +201,7 @@ def test_archive_superseded_forecast_snapshot_events_keeps_latest_per_entity_key
         "snap-other",
         "2026-05-24T04:00:00+00:00",
         "2026-05-24T04:01:00+00:00",
+        city="Denver",
     )
     for event in (older, newer, other):
         store.insert_or_ignore(event)
@@ -202,6 +217,36 @@ def test_archive_superseded_forecast_snapshot_events_keeps_latest_per_entity_key
     assert rows[older.event_id] == "expired"
     assert rows[newer.event_id] == "pending"
     assert rows[other.event_id] == "pending"
+
+
+def test_archive_superseded_forecast_snapshot_events_crosses_source_runs():
+    conn = _world_conn()
+    store = EventStore(conn)
+    older = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-1",
+        "snap-run-1",
+        "2026-05-24T04:00:00+00:00",
+        "2026-05-24T04:01:00+00:00",
+    )
+    newer = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-2",
+        "snap-run-2",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+    )
+    for event in (older, newer):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_superseded_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = dict(
+        conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    )
+    assert rows[older.event_id] == "expired"
+    assert rows[newer.event_id] == "pending"
 
 
 def test_archive_superseded_forecast_snapshot_events_keeps_complete_over_newer_partial():

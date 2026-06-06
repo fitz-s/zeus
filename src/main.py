@@ -4931,7 +4931,7 @@ def _edli_prune_batch_limit(config: dict) -> int:
     return _edli_bounded_positive_int(
         config,
         "reactor_prune_batch_limit",
-        default=100,
+        default=5_000,
         maximum=5_000,
     )
 
@@ -5004,7 +5004,7 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         if _fsr_archived:
             logger.info(
                 "EDLI reactor: archived %d superseded forecast-snapshot redecision "
-                "events → 'expired'; newest active event per entity_key retained "
+                "events → 'expired'; newest active event per forecast family retained "
                 "(batch_limit=%d)",
                 _fsr_archived,
                 batch_limit,
