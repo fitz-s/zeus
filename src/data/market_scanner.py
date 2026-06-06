@@ -2604,6 +2604,7 @@ def capture_executable_market_snapshot(
     execution_side: str = "BUY",
     prefetched_orderbook: dict | None = None,
     clob_market_info_cache: dict[str, dict] | None = None,
+    fee_details_cache: dict[str, dict[str, Any]] | None = None,
     tolerate_missing_book: bool = False,
 ) -> dict[str, str | bool]:
     """Capture and persist an executable market snapshot.
@@ -2821,7 +2822,15 @@ def capture_executable_market_snapshot(
             token_id=selected_token,
         )
     else:
-        fee_details = _fetch_fee_details(clob, selected_token)
+        if tolerate_missing_book and fee_details_cache is not None:
+            fee_details = _fetch_family_cached_fee_details(
+                clob,
+                selected_token,
+                cache_key=_substrate_fee_cache_key(market, condition_id),
+                fee_details_cache=fee_details_cache,
+            )
+        else:
+            fee_details = _fetch_fee_details(clob, selected_token)
 
     # Validate the caller's boundary timestamp, but do not use it as the
     # executable snapshot's authority time.  The fresh orderbook authority is
@@ -3945,14 +3954,16 @@ def refresh_executable_market_substrate_snapshots(
     # EDGE_INSUFFICIENT).  Per-bin staleness must NOT abort the event: a token
     # missing from the batch map simply falls back / skips that one outcome
     # (operator directive: "market event constant, bin event should not block
-    # freshness").  market_info + fee_details stay fresh per-outcome (see
-    # capture_executable_market_snapshot).
+    # freshness").  market_info is synthetic for background substrate identity;
+    # fee_details are fetched once per family and reused only inside this
+    # substrate refresh.  Order/submit capture keeps fresh CLOB authority.
     prefetched_books = _prefetch_selected_orderbooks(
         clob,
         selected_candidates,
         deadline=prefetch_deadline,
     )
     clob_market_info_cache: dict[str, dict] = {}
+    fee_details_cache: dict[str, dict[str, Any]] = {}
     for index, (_recency, _priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
         selected_candidates
     ):
@@ -3991,6 +4002,7 @@ def refresh_executable_market_substrate_snapshots(
                 execution_side="BUY",
                 prefetched_orderbook=prefetched_book,
                 clob_market_info_cache=clob_market_info_cache,
+                fee_details_cache=fee_details_cache,
                 # Substrate enumeration: capture IDENTITY for every active MECE
                 # bin including illiquid (no-ask) tail bins so the FDR full-family
                 # proof can be assembled.  Illiquid bins are persisted non-tradeable.
@@ -4106,6 +4118,37 @@ def _fetch_clob_market_info(clob: Any, condition_id: str) -> dict:
     return dict(raw)
 
 
+def _synthetic_clob_market_info_for_substrate_identity(
+    *,
+    condition_id: str,
+    yes_token: str,
+    no_token: str,
+    accepting_orders: bool | None,
+    enable_orderbook: bool | None,
+    raw_orderbook: dict,
+) -> dict[str, Any]:
+    """Build substrate-only CLOB identity facts without /markets HTTP.
+
+    This is only used by ``tolerate_missing_book=True`` background substrate
+    refresh.  It does not change order/submit capture, which still fetches CLOB
+    market authority and revalidates before any real venue command.
+    """
+
+    return {
+        "condition_id": condition_id,
+        "tokens": [{"token_id": yes_token, "outcome": "YES"}, {"token_id": no_token, "outcome": "NO"}],
+        "archived": False,
+        "enable_order_book": bool(enable_orderbook is not False),
+        "accepting_orders": bool(accepting_orders is not False),
+        "tick_size": _first_field(raw_orderbook, "tick_size", "min_tick_size", "minimum_tick_size", "minTickSize")
+        or "0.01",
+        "min_order_size": _first_field(raw_orderbook, "min_order_size", "minimum_order_size", "minOrderSize")
+        or "1",
+        "neg_risk": _first_field(raw_orderbook, "neg_risk", "negRisk", "negative_risk"),
+        "authority": "synthetic_substrate_identity",
+    }
+
+
 def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:
     getter = getattr(clob, "get_orderbook_snapshot", None)
     if not callable(getter):
@@ -4132,37 +4175,6 @@ def _normalize_prefetched_orderbook(book: Any, token_id: str) -> dict:
             f"prefetched orderbook for {token_id} is empty or non-object"
         )
     return dict(book)
-
-
-def _synthetic_clob_market_info_for_substrate_identity(
-    *,
-    condition_id: str,
-    yes_token: str,
-    no_token: str,
-    accepting_orders: bool | None,
-    enable_orderbook: bool | None,
-    raw_orderbook: dict,
-) -> dict[str, Any]:
-    """Build substrate-only CLOB identity facts without /markets HTTP.
-
-    This is only used by ``tolerate_missing_book=True`` background substrate
-    refresh. It does not change order/submit capture, which still fetches CLOB
-    market authority and revalidates before any real venue command.
-    """
-
-    return {
-        "condition_id": condition_id,
-        "tokens": [{"token_id": yes_token, "outcome": "YES"}, {"token_id": no_token, "outcome": "NO"}],
-        "archived": False,
-        "enable_order_book": bool(enable_orderbook is not False),
-        "accepting_orders": bool(accepting_orders is not False),
-        "tick_size": _first_field(raw_orderbook, "tick_size", "min_tick_size", "minimum_tick_size", "minTickSize")
-        or "0.01",
-        "min_order_size": _first_field(raw_orderbook, "min_order_size", "minimum_order_size", "minOrderSize")
-        or "1",
-        "neg_risk": _first_field(raw_orderbook, "neg_risk", "negRisk", "negative_risk"),
-        "authority": "synthetic_substrate_identity",
-    }
 
 
 def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
@@ -4192,6 +4204,45 @@ def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
         raise ExecutableSnapshotCaptureError("CLOB fee-rate response is not numeric") from exc
     except Exception as exc:
         raise ExecutableSnapshotCaptureError(f"CLOB fee-rate fetch failed: {exc}") from exc
+
+
+def _substrate_fee_cache_key(market: dict[str, Any], condition_id: str) -> str:
+    parts = (
+        str(market.get("event_id") or "").strip(),
+        str(market.get("slug") or market.get("event_slug") or "").strip(),
+        str(market.get("target_date") or "").strip(),
+        str(market.get("temperature_metric") or "").strip(),
+    )
+    key = "|".join(part for part in parts if part)
+    return key or str(condition_id or "").strip()
+
+
+def _fee_details_for_cached_token(cached: dict[str, Any], token_id: str) -> dict[str, Any]:
+    return canonicalize_fee_details(
+        {
+            "fee_rate_fraction": cached["fee_rate_fraction"],
+            "fee_rate_bps": cached["fee_rate_bps"],
+        },
+        source="clob_fee_rate_family_cache",
+        token_id=token_id,
+    )
+
+
+def _fetch_family_cached_fee_details(
+    clob: Any,
+    token_id: str,
+    *,
+    cache_key: str,
+    fee_details_cache: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if cache_key in fee_details_cache:
+        return _fee_details_for_cached_token(fee_details_cache[cache_key], token_id)
+    details = _fetch_fee_details(clob, token_id)
+    fee_details_cache[cache_key] = {
+        "fee_rate_fraction": details["fee_rate_fraction"],
+        "fee_rate_bps": details["fee_rate_bps"],
+    }
+    return details
 
 
 def _assert_clob_identity(

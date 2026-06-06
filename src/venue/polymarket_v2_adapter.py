@@ -302,21 +302,22 @@ class PolymarketV2Adapter:
         except Exception:  # noqa: BLE001 - non-fatal; library default retained
             pass
 
+        effective_api_creds = kwargs.get("api_creds") or _api_creds_from_env()
+
         client = ClobClient(
             kwargs["host"],
             kwargs["chain_id"],
             key=kwargs.get("signer_key"),
-            creds=kwargs.get("api_creds"),
+            creds=effective_api_creds,
             signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
             funder=kwargs.get("funder_address"),
         )
-        # CLOB v2 L2 endpoints (balance/order) require API creds. The canonical
-        # SDK path is `set_api_creds(create_or_derive_api_key())` — this derives
-        # them deterministically from the L1 signer rather than relying on a
-        # separately-stored copy that can drift out of sync. We only derive when
-        # no static creds were provided so callers (eg. tests) can still inject
-        # specific credentials.
-        if not kwargs.get("api_creds"):
+        # CLOB v2 L2 endpoints (balance/order) require API creds. Prefer the
+        # current static CLOB creds already provisioned in the daemon environment;
+        # do not hit /auth/api-key on every client construction when those creds
+        # exist.  create_or_derive_api_key is only a last-resort fallback for
+        # machines without POLYMARKET_API_* creds.
+        if effective_api_creds is None:
             try:
                 client.set_api_creds(client.create_or_derive_api_key())
                 logger.warning(
