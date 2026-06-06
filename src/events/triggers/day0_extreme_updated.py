@@ -186,29 +186,65 @@ class Day0ExtremeUpdatedTrigger:
         table = _qualified_observation_instants_table(observation_conn)
         if table is None:
             return []
+        columns = _table_columns(observation_conn, table)
+        required_columns = {
+            "city",
+            "target_date",
+            "source",
+            "timezone_name",
+            "utc_timestamp",
+            "imported_at",
+            "running_max",
+            "running_min",
+            "temp_unit",
+            "station_id",
+            "authority",
+            "training_allowed",
+            "causality_status",
+            "source_role",
+            "provenance_json",
+        }
+        if not required_columns.issubset(columns):
+            return []
         decision_iso = decision_time.astimezone(UTC).isoformat()
         rows = _dict_rows(
             observation_conn,
             f"""
-            WITH ranked AS (
+            WITH eligible AS (
                 SELECT
-                    *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY city, target_date
-                        ORDER BY imported_at DESC, utc_timestamp DESC, id DESC
-                    ) AS rn
+                    city,
+                    target_date,
+                    source,
+                    timezone_name,
+                    temp_unit,
+                    station_id,
+                    MAX(utc_timestamp) AS observation_time,
+                    MAX(imported_at) AS observation_available_at,
+                    MAX(running_max) AS high_so_far,
+                    MIN(running_min) AS low_so_far,
+                    COUNT(*) AS observation_count,
+                    MIN(authority) AS authority,
+                    MIN(training_allowed) AS training_allowed,
+                    MIN(causality_status) AS causality_status,
+                    MIN(source_role) AS source_role
                 FROM {table}
                 WHERE target_date IS NOT NULL
                   AND target_date >= date(?)
                   AND utc_timestamp <= ?
                   AND imported_at <= ?
                   AND (running_max IS NOT NULL OR running_min IS NOT NULL)
-                  AND authority = 'VERIFIED'
+                  AND authority IN ('VERIFIED', 'ICAO_STATION_NATIVE')
+                  AND COALESCE(training_allowed, 0) = 1
+                  AND COALESCE(causality_status, '') = 'OK'
+                  AND COALESCE(source_role, '') = 'historical_hourly'
+                  AND COALESCE(provenance_json, '') NOT IN ('', '{{}}')
+                  AND COALESCE(station_id, '') != ''
+                  AND COALESCE(source, '') != ''
+                GROUP BY city, target_date, source, timezone_name, temp_unit, station_id
             )
             SELECT *
-            FROM ranked
-            WHERE rn = 1
-            ORDER BY imported_at DESC, utc_timestamp DESC
+            FROM eligible
+            ORDER BY observation_available_at DESC, observation_time DESC
             LIMIT ?
             """,
             (decision_iso, decision_iso, decision_iso, max(1, int(limit))),
@@ -275,9 +311,13 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
     city = str(row.get("city") or "")
     target_date = str(row.get("target_date") or "")
     station_id = str(row.get("station_id") or "").strip().upper()
-    observation_time = str(row.get("utc_timestamp") or "")
-    available_at = str(row.get("imported_at") or observation_time)
-    raw_value = row.get("running_max") if metric == "high" else row.get("running_min")
+    observation_time = str(row.get("observation_time") or row.get("utc_timestamp") or "")
+    available_at = str(row.get("observation_available_at") or row.get("imported_at") or observation_time)
+    high_so_far = row.get("high_so_far")
+    high_so_far = row.get("running_max") if high_so_far is None else high_so_far
+    low_so_far = row.get("low_so_far")
+    low_so_far = row.get("running_min") if low_so_far is None else low_so_far
+    raw_value = high_so_far if metric == "high" else low_so_far
     if not city or not target_date or not station_id or raw_value is None:
         raise ValueError("observation_instants row missing required Day0 fields")
     local_date_status, dst_status = _observation_local_date_status(
@@ -287,13 +327,25 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
     )
     unit = str(row.get("temp_unit") or "").upper()
     verified = str(row.get("authority") or "").upper() == "VERIFIED"
+    trusted_native = str(row.get("authority") or "").upper() == "ICAO_STATION_NATIVE"
     source = str(row.get("source") or "")
     source_match = "MATCH" if source else "MISMATCH"
     station_match = "MATCH" if station_id else "MISMATCH"
     rounding_status = "MATCH" if unit else "MISMATCH"
+    source_role = str(row.get("source_role") or "")
+    training_allowed = int(row.get("training_allowed") or 0) == 1
+    causality_ok = str(row.get("causality_status") or "") == "OK"
     source_authorized = (
         "AUTHORIZED"
-        if verified and source_match == "MATCH" and station_match == "MATCH" and rounding_status == "MATCH"
+        if (
+            (verified or trusted_native)
+            and source_role == "historical_hourly"
+            and training_allowed
+            and causality_ok
+            and source_match == "MATCH"
+            and station_match == "MATCH"
+            and rounding_status == "MATCH"
+        )
         else "UNAUTHORIZED"
     )
     live_authority = (
@@ -314,8 +366,8 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
         "observation_time": observation_time,
         "observation_available_at": available_at,
         "raw_value": float(raw_value),
-        "high_so_far": float(raw_value),
-        "low_so_far": row.get("running_min"),
+        "high_so_far": float(high_so_far) if high_so_far is not None else None,
+        "low_so_far": float(low_so_far) if low_so_far is not None else None,
         "source_match_status": source_match,
         "local_date_status": local_date_status,
         "station_match_status": station_match,
@@ -327,7 +379,10 @@ def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: 
         "settlement_unit": unit,
         "settlement_precision": 1.0,
         "rounding_rule": "wmo_half_up",
-        "observation_context_id": f"observation_instants:{row.get('id')}",
+        "observation_context_id": str(
+            row.get("observation_context_id")
+            or f"observation_instants:{city}:{target_date}:{source}:{station_id}:{available_at}"
+        ),
     }
 
 
@@ -478,6 +533,17 @@ def _qualified_observation_instants_table(conn: sqlite3.Connection) -> str | Non
         if exists is not None:
             return table
     return None
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    pragma_name = table_name
+    if "." in table_name:
+        schema, bare_table = table_name.split(".", 1)
+        pragma_name = f"{schema}.table_info({bare_table})"
+        rows = conn.execute(f"PRAGMA {pragma_name}").fetchall()
+    else:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {str(row[1]) for row in rows}
 
 
 def _dict_rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:

@@ -355,15 +355,17 @@ def test_day0_scanner_limit_prioritizes_newest_rows_not_old_duplicates():
 def test_scan_observation_instants_rows_emits_live_authority_day0_event():
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
-    conn.execute(
-        """
+    insert_sql = """
         INSERT INTO observation_instants (
             city, target_date, source, timezone_name, local_hour, local_timestamp,
             utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
             is_missing_local_hour, time_basis, temp_current, running_max, running_min,
-            temp_unit, station_id, observation_count, imported_at, authority
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+    conn.execute(
+        insert_sql,
         (
             "Paris",
             "2026-06-06",
@@ -385,14 +387,49 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
             1,
             "2026-06-06T04:15:00+00:00",
             "VERIFIED",
+            "v1.wu-native",
+            '{"source_url":"redacted","station_id":"LFPB"}',
+            1,
+            "OK",
+            "historical_hourly",
+        ),
+    )
+    conn.execute(
+        insert_sql,
+        (
+            "Paris",
+            "2026-06-06",
+            "wu_icao_history",
+            "Europe/Paris",
+            7.0,
+            "2026-06-06T07:00:00+02:00",
+            "2026-06-06T05:00:00+00:00",
+            120,
+            1,
+            0,
+            0,
+            "observed",
+            13.0,
+            13.0,
+            11.0,
+            "C",
+            "LFPB",
+            1,
+            "2026-06-06T05:15:00+00:00",
+            "VERIFIED",
+            "v1.wu-native",
+            '{"source_url":"redacted","station_id":"LFPB"}',
+            1,
+            "OK",
+            "historical_hourly",
         ),
     )
 
     results = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_observation_instants_rows(
         observation_conn=conn,
         settlement_semantics=FakeSettlementSemantics(14),
-        decision_time=datetime(2026, 6, 6, 4, 20, tzinfo=timezone.utc),
-        received_at="2026-06-06T04:20:00+00:00",
+        decision_time=datetime(2026, 6, 6, 5, 20, tzinfo=timezone.utc),
+        received_at="2026-06-06T05:20:00+00:00",
     )
 
     assert len(results) == 2
@@ -401,9 +438,70 @@ def test_scan_observation_instants_rows_emits_live_authority_day0_event():
         '"metric":"high"' if '"metric":"high"' in payload else '"metric":"low"'
         for payload in payloads
     }
+    high_payload = next(payload for payload in payloads if '"metric":"high"' in payload)
+    low_payload = next(payload for payload in payloads if '"metric":"low"' in payload)
+    assert '"raw_value":14.0' in high_payload
+    assert '"high_so_far":14.0' in high_payload
+    assert '"low_so_far":11.0' in high_payload
+    assert '"raw_value":11.0' in low_payload
+    assert '"high_so_far":14.0' in low_payload
+    assert '"low_so_far":11.0' in low_payload
     assert all('"event_type":"DAY0_EXTREME_UPDATED"' not in payload for payload in payloads)
     assert all('"live_authority_status":"LIVE_AUTHORITY"' in payload for payload in payloads)
     assert all('"source_authorized_status":"AUTHORIZED"' in payload for payload in payloads)
+
+
+def test_scan_observation_instants_rows_skips_fallback_evidence_rows():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO observation_instants (
+            city, target_date, source, timezone_name, local_hour, local_timestamp,
+            utc_timestamp, utc_offset_minutes, dst_active, is_ambiguous_local_hour,
+            is_missing_local_hour, time_basis, temp_current, running_max, running_min,
+            temp_unit, station_id, observation_count, imported_at, authority,
+            data_version, provenance_json, training_allowed, causality_status, source_role
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Hong Kong",
+            "2026-06-06",
+            "hko_hourly_accumulator",
+            "Asia/Hong_Kong",
+            12.0,
+            "2026-06-06T12:00:00+08:00",
+            "2026-06-06T04:00:00+00:00",
+            480,
+            0,
+            0,
+            0,
+            "observed",
+            30.0,
+            30.0,
+            28.0,
+            "C",
+            "HKO",
+            1,
+            "2026-06-06T04:15:00+00:00",
+            "ICAO_STATION_NATIVE",
+            "v1.hko-native",
+            '{"source_url":"redacted","station_id":"HKO"}',
+            0,
+            "REQUIRES_SOURCE_REAUDIT",
+            "fallback_evidence",
+        ),
+    )
+
+    results = Day0ExtremeUpdatedTrigger(EventWriter(conn)).scan_observation_instants_rows(
+        observation_conn=conn,
+        settlement_semantics=FakeSettlementSemantics(30),
+        decision_time=datetime(2026, 6, 6, 4, 20, tzinfo=timezone.utc),
+        received_at="2026-06-06T04:20:00+00:00",
+    )
+
+    assert results == []
+    assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
 
 
 def test_authority_row_missing_temperature_is_not_observation():
