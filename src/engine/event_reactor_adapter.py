@@ -1880,6 +1880,7 @@ def _actionable_payload_from_receipt(
         "risk_decision_id": receipt.risk_decision_id,
         "live_cap_usage_id": live_cap_cert.payload["usage_id"],
         "live_cap_reserved_notional_usd": reserved_notional,
+        "live_cap_notional_cap_enabled": bool(live_cap_cert.payload.get("notional_cap_enabled", True)),
         "final_intent_id": receipt.final_intent_id,
         "neg_risk": receipt.neg_risk,
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
@@ -2180,6 +2181,7 @@ def _build_live_cap_certificate_from_ledger(
             order_count=1,
             reservation_status="RESERVED",
             final_intent_id=receipt.final_intent_id,
+            notional_cap_enabled=notional_cap_enabled,
         )
     payload = reservation.certificate_payload()
     return build_certificate(

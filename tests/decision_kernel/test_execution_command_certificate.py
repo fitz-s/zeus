@@ -176,6 +176,47 @@ def test_final_intent_rejects_venue_order_id_before_submit():
         verify_final_intent(final_intent, parents)
 
 
+def test_final_intent_reserved_notional_ceiling_applies_when_cap_enabled():
+    actionable = _cert(
+        claims.ACTIONABLE_TRADE,
+        "actionable:event-1",
+        {
+            **_actionable_payload(),
+            "live_cap_reserved_notional_usd": 3.0,
+            "live_cap_notional_cap_enabled": True,
+        },
+    )
+    final_intent = _cert(
+        claims.FINAL_INTENT,
+        "final-intent:intent-1",
+        {**_final_intent_payload(actionable), "notional_usd": 4.0},
+        parents=(actionable,),
+    )
+
+    with pytest.raises(CertificateVerificationError, match="exceeds live cap reserved notional"):
+        verify_final_intent(final_intent, (actionable,))
+
+
+def test_final_intent_reserved_notional_not_ceiling_when_cap_disabled():
+    actionable = _cert(
+        claims.ACTIONABLE_TRADE,
+        "actionable:event-1",
+        {
+            **_actionable_payload(),
+            "live_cap_reserved_notional_usd": 3.0,
+            "live_cap_notional_cap_enabled": False,
+        },
+    )
+    final_intent = _cert(
+        claims.FINAL_INTENT,
+        "final-intent:intent-1",
+        {**_final_intent_payload(actionable), "notional_usd": 4.0},
+        parents=(actionable,),
+    )
+
+    verify_final_intent(final_intent, (actionable,))
+
+
 def test_executor_expressibility_requires_final_intent_parent():
     parents, expressibility = executor_expressibility_graph(drop_parent=claims.FINAL_INTENT)
 

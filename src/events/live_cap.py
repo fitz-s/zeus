@@ -75,6 +75,7 @@ class LiveCapReservation:
     reservation_status: str
     final_intent_id: str | None = None
     execution_command_id: str | None = None
+    notional_cap_enabled: bool = True
 
     def certificate_payload(self) -> dict:
         return {
@@ -85,6 +86,7 @@ class LiveCapReservation:
             "max_notional_usd": self.max_notional_usd,
             "max_orders_per_day": self.max_orders_per_day,
             "reserved_notional_usd": self.reserved_notional_usd,
+            "notional_cap_enabled": self.notional_cap_enabled,
             "order_count": self.order_count,
             "reservation_status": self.reservation_status,
             "final_intent_id": self.final_intent_id,
@@ -220,7 +222,20 @@ class LiveCapLedger:
             with contextlib.suppress(Exception):
                 self.conn.execute("DELETE FROM edli_live_cap_rate_window WHERE usage_id = ?", (usage_id,))
             raise
-        return self.get(usage_id)
+        return LiveCapReservation(
+            usage_id=usage_id,
+            event_id=event_id,
+            decision_time=decision_time,
+            cap_scope=cap_scope,
+            max_notional_usd=recorded_max_notional_usd,
+            max_orders_per_day=int(max_orders_per_day),
+            reserved_notional_usd=float(requested_notional_usd),
+            order_count=int(slot),
+            reservation_status="RESERVED",
+            final_intent_id=final_intent_id,
+            execution_command_id=execution_command_id,
+            notional_cap_enabled=bool(notional_cap_enabled),
+        )
 
     def release(self, usage_id: str, reason: str | None = None) -> None:
         del reason

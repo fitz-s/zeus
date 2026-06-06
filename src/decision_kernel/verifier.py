@@ -541,7 +541,12 @@ def _verify_final_intent_payload(
     if notional <= 0:
         raise CertificateVerificationError("final intent notional_usd must be positive")
     reserved_notional = actionable.get("live_cap_reserved_notional_usd")
-    if reserved_notional is not None and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd"):
+    notional_cap_enabled = actionable.get("live_cap_notional_cap_enabled", True) is not False
+    if (
+        notional_cap_enabled
+        and reserved_notional is not None
+        and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd")
+    ):
         raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
     _assert_order_type_tuple_coherent(payload, surface="final intent")
     if payload.get("source") != "existing_final_intent_builder":

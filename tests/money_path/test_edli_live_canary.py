@@ -307,6 +307,8 @@ def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypat
     assert durable.payload["reserved_notional_usd"] == 800.0
     assert durable.payload["reserved_notional_usd"] == provisional.payload["reserved_notional_usd"]
     assert durable.payload["max_notional_usd"] == provisional.payload["max_notional_usd"] == 800.0
+    assert provisional.payload["notional_cap_enabled"] is False
+    assert durable.payload["notional_cap_enabled"] is False
 
 
 def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
