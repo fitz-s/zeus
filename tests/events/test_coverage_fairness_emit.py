@@ -118,6 +118,90 @@ def _insert_city(conn: sqlite3.Connection, city: str, snap_id: int) -> None:
     )
 
 
+def _insert_city_run(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    snap_id: int,
+    run_id: str,
+    issue_time: str,
+    available_at: str,
+    computed_at: str,
+) -> None:
+    """Insert one run for a city family while allowing multiple historical runs."""
+    city_id = _make_city_id(city)
+    cov_id = f"cov-{city_id}-{snap_id}"
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO source_run (
+            source_run_id, source_id, track, release_calendar_key, ingest_mode, origin_mode,
+            source_cycle_time, source_issue_time, source_available_at, captured_at,
+            target_local_date, city_id, city_timezone, temperature_metric, dataset_id,
+            expected_members, observed_members, expected_steps_json, observed_steps_json,
+            completeness_status, status
+        ) VALUES (
+            ?, 'ecmwf-open-data', 'ens', ?, 'SCHEDULED_LIVE', 'SCHEDULED_LIVE',
+            ?, ?, ?, ?, '2026-06-04',
+            ?, 'America/Chicago', 'high', 'v1',
+            51, 51, '[0,3,6]', '[0,3,6]', 'COMPLETE', 'SUCCESS'
+        )
+        """,
+        (run_id, issue_time, issue_time, issue_time, available_at, computed_at, city_id),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO source_run_coverage (
+            coverage_id, source_run_id, source_id, source_transport, release_calendar_key, track,
+            city_id, city, city_timezone, target_local_date, temperature_metric, physical_quantity,
+            observation_field, data_version, expected_members, observed_members, expected_steps_json,
+            observed_steps_json, snapshot_ids_json, target_window_start_utc, target_window_end_utc,
+            completeness_status, readiness_status, computed_at, expires_at
+        ) VALUES (
+            ?, ?, 'ecmwf-open-data', 'ensemble_snapshots_db_reader', ?, 'ens',
+            ?, ?, 'America/Chicago', '2026-06-04', 'high', 'temperature',
+            'high_temp', 'v1', 51, 51, '[0,3,6]', '[0,3,6]', ?,
+            '2026-06-04T05:00:00+00:00', '2026-06-05T05:00:00+00:00',
+            'COMPLETE', 'LIVE_ELIGIBLE', ?, '2026-06-05T04:00:00+00:00'
+        )
+        """,
+        (cov_id, run_id, issue_time, city_id, city, f"[{snap_id}]", computed_at),
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric, physical_quantity, observation_field,
+            issue_time, valid_time, available_at, fetch_time, lead_hours, members_json,
+            model_version, dataset_id, source_id, source_transport, source_run_id,
+            release_calendar_key, source_cycle_time, source_release_time, source_available_at,
+            authority, causality_status, boundary_ambiguous, contributes_to_target_extrema,
+            forecast_window_attribution_status, local_day_start_utc, step_horizon_hours,
+            members_unit, raw_orderbook_hash_transition_delta_ms
+        ) VALUES (
+            ?, ?, '2026-06-04', 'high', 'temperature', 'high_temp',
+            ?, '2026-06-04T06:00:00+00:00',
+            ?, ?, 6, ?,
+            'ecmwf', 'v1', 'ecmwf-open-data', 'ensemble_snapshots_db_reader', ?,
+            ?, ?, ?, ?,
+            'VERIFIED', 'OK', 0, 1,
+            'FULLY_INSIDE_TARGET_LOCAL_DAY', '2026-06-04T05:00:00+00:00', 6, 'C', 0
+        )
+        """,
+        (
+            snap_id,
+            city,
+            issue_time,
+            available_at,
+            computed_at,
+            _MEMBERS_JSON,
+            run_id,
+            issue_time,
+            issue_time,
+            issue_time,
+            available_at,
+        ),
+    )
+
+
 def _build_forecasts_conn(cities: list[str]) -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -377,3 +461,55 @@ def test_select_rows_freshest_handles_null_issue_time_via_snapshot_id_fallback()
     a = _frow(None, 2, "run-a"); b = _frow(None, 9, "run-b")
     out = CoverageFairnessRequest(limit=20, cycle_index=0).select_rows([a, b])
     assert len(out) == 1 and out[0]["source_run_id"] == "run-b"
+
+
+def test_scan_unbounded_fairness_still_emits_one_freshest_run_per_family(monkeypatch: Any) -> None:
+    """No-cap redecision must not re-enqueue every historical source_run.
+
+    Live regression 2026-06-06: ``redecision_max_per_cycle=false`` mapped to
+    ``limit=None``. The fairness branch fetched all rows but skipped
+    CoverageFairnessRequest, so one city family emitted every retained historical
+    run in the same cycle. That rebuilt pending backlog faster than the reactor
+    could drain it. Unbounded means all families, not all source_run duplicates.
+    """
+
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+    _insert_city_run(
+        forecasts_conn,
+        city="Chicago",
+        snap_id=101,
+        run_id="run-stale",
+        issue_time="2026-06-03T00:00:00+00:00",
+        available_at="2026-06-03T04:00:00+00:00",
+        computed_at="2026-06-03T04:01:00+00:00",
+    )
+    _insert_city_run(
+        forecasts_conn,
+        city="Chicago",
+        snap_id=102,
+        run_id="run-fresh",
+        issue_time="2026-06-03T12:00:00+00:00",
+        available_at="2026-06-03T16:00:00+00:00",
+        computed_at="2026-06-03T16:01:00+00:00",
+    )
+    world_conn = _build_world_conn()
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
+        lambda: True,
+    )
+
+    results = _trigger(world_conn).scan_committed_snapshots(
+        forecasts_conn=forecasts_conn,
+        decision_time=datetime(2026, 6, 3, 17, 0, tzinfo=UTC),
+        received_at="2026-06-03T17:00:00+00:00",
+        limit=None,
+        source="cycle-123",
+    )
+
+    rows = world_conn.execute("SELECT payload_json FROM opportunity_events").fetchall()
+    payloads = [__import__("json").loads(r[0]) for r in rows]
+    assert len(results) == 1
+    assert len(payloads) == 1
+    assert payloads[0]["source_run_id"] == "run-fresh"

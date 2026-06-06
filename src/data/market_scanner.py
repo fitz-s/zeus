@@ -2690,6 +2690,24 @@ def capture_executable_market_snapshot(
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
 
+    # Decision (2026-05-27, FT-64): order/submit capture still reads fresh
+    # CLOB /markets authority.  Background substrate enumeration is different:
+    # it is an identity/family-proof producer and the submit path revalidates
+    # executable candidates before any order.  For that tolerate_missing_book
+    # path, use Gamma/topology identity plus the fresh CLOB orderbook instead of
+    # spending one serial /markets HTTP per condition.
+    use_synthetic_clob_market = tolerate_missing_book and _bool_env(
+        "ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO",
+        True,
+    )
+
+    if not use_synthetic_clob_market and clob_market_info_cache is not None and condition_id in clob_market_info_cache:
+        raw_clob_market = clob_market_info_cache[condition_id]
+    elif not use_synthetic_clob_market:
+        raw_clob_market = _fetch_clob_market_info(clob, condition_id)
+        if clob_market_info_cache is not None:
+            clob_market_info_cache[condition_id] = raw_clob_market
+
     # Orderbook leg: use the event-batched book when the refresh loop prefetched
     # it (one POST /books for all bins), else fall back to the per-token GET /book.
     # The prefetched book is byte-identical to the fetched one (same /books vs
@@ -2701,16 +2719,6 @@ def capture_executable_market_snapshot(
     else:
         raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
 
-    # Decision (2026-05-27, FT-64): order/submit capture still reads fresh
-    # CLOB /markets authority.  Background substrate enumeration is different:
-    # it is an identity/family-proof producer and the submit path revalidates
-    # executable candidates before any order.  For that tolerate_missing_book
-    # path, use Gamma/topology identity plus the fresh CLOB orderbook already
-    # fetched above instead of spending one serial /markets HTTP per condition.
-    use_synthetic_clob_market = tolerate_missing_book and _bool_env(
-        "ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO",
-        True,
-    )
     if use_synthetic_clob_market:
         raw_clob_market = _synthetic_clob_market_info_for_substrate_identity(
             condition_id=condition_id,
@@ -2720,12 +2728,6 @@ def capture_executable_market_snapshot(
             enable_orderbook=enable_orderbook,
             raw_orderbook=raw_orderbook,
         )
-    elif clob_market_info_cache is not None and condition_id in clob_market_info_cache:
-        raw_clob_market = clob_market_info_cache[condition_id]
-    else:
-        raw_clob_market = _fetch_clob_market_info(clob, condition_id)
-        if clob_market_info_cache is not None:
-            clob_market_info_cache[condition_id] = raw_clob_market
     # Fill enable_orderbook from CLOB when Gamma omitted it (slug-discovered
     # markets) or for the persisted-reconstruction path.  CLOB is authoritative.
     clob_orderbook = _boolish_market_field(
@@ -2822,13 +2824,8 @@ def capture_executable_market_snapshot(
             token_id=selected_token,
         )
     else:
-        if tolerate_missing_book and fee_details_cache is not None:
-            fee_details = _fetch_family_cached_fee_details(
-                clob,
-                selected_token,
-                cache_key=_substrate_fee_cache_key(market, condition_id),
-                fee_details_cache=fee_details_cache,
-            )
+        if tolerate_missing_book:
+            fee_details = _default_substrate_fee_details(selected_token)
         else:
             fee_details = _fetch_fee_details(clob, selected_token)
 
@@ -4208,6 +4205,30 @@ def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
         raise ExecutableSnapshotCaptureError("CLOB fee-rate response is not numeric") from exc
     except Exception as exc:
         raise ExecutableSnapshotCaptureError(f"CLOB fee-rate fetch failed: {exc}") from exc
+
+
+def _default_substrate_fee_details(token_id: str) -> dict[str, Any]:
+    """Use the local weather fee contract for background substrate identity.
+
+    The pending-family substrate refresh is a cache producer, not the submit
+    boundary. Real order/JIT capture still queries the venue fee endpoint before
+    submitting. Using the conservative weather contract here removes hundreds of
+    duplicate /fee-rate calls from every global refresh without underpricing the
+    live entry gate.
+    """
+
+    from src.engine.evaluator import _default_weather_fee_rate
+
+    rate = float(_default_weather_fee_rate())
+    return canonicalize_fee_details(
+        {
+            "fee_rate_fraction": rate,
+            "authority": "local_weather_fee_contract",
+            "submit_boundary_revalidates_fee": True,
+        },
+        source="weather_fee_contract_substrate_identity",
+        token_id=token_id,
+    )
 
 
 def _substrate_fee_cache_key(market: dict[str, Any], condition_id: str) -> str:

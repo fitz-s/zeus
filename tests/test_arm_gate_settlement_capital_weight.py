@@ -20,6 +20,7 @@ from scripts.measure_arm_gate_settlement import (
     CapitalWeightedArmVerdict,
     _compute_capital_weighted_verdict,
     _capital_weighted_arm_decision,
+    _current_regime_rows,
 )
 
 
@@ -128,3 +129,23 @@ def test_empty_rows_denies_not_crashes():
     eligible, reason = _capital_weighted_arm_decision(verdict)
     assert eligible is False
     assert "INSUFFICIENT" in reason
+
+
+def test_current_regime_filter_excludes_legacy_unproven_receipts():
+    """Old receipts without q_source are diagnostic only.
+
+    They must not be mixed into the current EMOS/honest-raw production ARM
+    verdict; otherwise a prior calibration era can grant or deny real-submit
+    authorization for the current probability mechanism.
+    """
+    rows = [
+        {"city": "Tokyo", "q_source": None, "win": False, "price": 0.50, "kelly_size_usd": 100.0},
+        {"city": "Paris", "q_source": "", "win": False, "price": 0.50, "kelly_size_usd": 100.0},
+        {"city": "Seoul", "q_source": "bias_platt", "win": False, "price": 0.50, "kelly_size_usd": 100.0},
+        {"city": "London", "q_source": "emos", "win": True, "price": 0.50, "kelly_size_usd": 1.0},
+        {"city": "NYC", "q_source": "raw_honest", "win": True, "price": 0.50, "kelly_size_usd": 1.0},
+    ]
+
+    current = _current_regime_rows(rows)
+
+    assert [r["city"] for r in current] == ["London", "NYC"]

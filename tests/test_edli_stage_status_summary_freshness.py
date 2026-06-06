@@ -83,3 +83,27 @@ def test_generated_at_tracks_timestamp_in_lockstep(tmp_path, monkeypatch):
             "generated_at must equal timestamp on a fresh pulse; divergence would "
             "let the gate read a different freshness instant than legacy consumers"
         )
+
+
+def test_cycle_pulse_preserves_edli_business_candidate_counters(tmp_path, monkeypatch):
+    """Chain-sync pulse must not erase the EDLI business-plane candidate proof."""
+    target = _redirect_status_path(tmp_path, monkeypatch)
+
+    write_cycle_pulse(
+        {
+            "mode": "edli_event_reactor",
+            "candidates": 7,
+            "final_intents_built": 1,
+            "submit_attempts": 1,
+            "venue_acks": 0,
+            "deterministic_rejections": {"real_order_submit_disabled": 1},
+        }
+    )
+    write_cycle_pulse({"monitors": 1, "exits": 0, "chain_sync": {"synced": 1}})
+
+    payload = json.loads(target.read_text())
+    cycle = payload["cycle"]
+    assert cycle["candidates"] == 7
+    assert cycle["final_intents_built"] == 1
+    assert cycle["deterministic_rejections"]["real_order_submit_disabled"] == 1
+    assert cycle["chain_sync"]["synced"] == 1

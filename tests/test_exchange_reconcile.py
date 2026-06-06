@@ -2771,6 +2771,69 @@ def test_settled_redeem_pending_token_holding_is_expected_wallet_balance(conn):
     }
 
 
+def test_terminal_position_current_token_holding_is_expected_wallet_balance(conn):
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    token = "terminal-position-current-token"
+    seed_command(
+        conn,
+        command_id="cmd-terminal-position-current",
+        venue_order_id="ord-terminal-position-current",
+        position_id="pos-terminal-position-current",
+        token_id=token,
+        state="FILLED",
+        size=12.5,
+        price=0.11,
+    )
+    seed_position_baseline(
+        conn,
+        position_id="pos-terminal-position-current",
+        order_id="ord-terminal-position-current",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               chain_state = 'synced',
+               token_id = ?,
+               condition_id = 'condition-m5',
+               market_id = 'condition-m5',
+               direction = 'buy_yes',
+               shares = 12.5,
+               order_id = 'ord-terminal-position-current',
+               updated_at = ?
+         WHERE position_id = 'pos-terminal-position-current'
+        """,
+        (token, NOW.isoformat()),
+    )
+    observed = NOW + timedelta(minutes=10)
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "terminal_position_current_probe"},
+        recorded_at=observed - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="12.5")]),
+        conn,
+        context="ws_gap",
+        observed_at=observed,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_closed_position_token_holding",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
 def test_redeem_confirmed_settled_token_still_at_exchange_is_position_drift(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import faulthandler
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2861,8 +2862,25 @@ def _snapshot_capture_budget_for_refresh(
     blocked.  The reserve is therefore a phase budget, not a leftover hint.
     """
 
+    min_prefetch_window_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", "0.75")),
+    )
+    target_prefetch_window_s = max(
+        min_prefetch_window_s,
+        float(os.environ.get("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_TARGET_WINDOW_SECONDS", "2.0")),
+    )
+    # refresh_executable_market_substrate_snapshots internally reserves
+    # snapshot_reserve_s for the capture loop and admits /books only before that
+    # reserve starts. Passing exactly snapshot_reserve_s double-reserves the
+    # same phase and makes the batch prefetch deadline effectively immediate.
+    # The admission threshold is not enough as a budget: real scheduler/function
+    # overhead can burn milliseconds between budget construction and prefetch,
+    # making a nominal 0.750s window measure as "below 0.750s" and collapse back
+    # to serial /book reads. Keep prefetch as its own small phase budget.
+    min_budget_s = snapshot_reserve_s + target_prefetch_window_s
     remaining_s = refresh_deadline - time.monotonic()
-    return max(snapshot_reserve_s, remaining_s)
+    return max(min_budget_s, remaining_s)
 
 
 def _refresh_pending_family_snapshots(
@@ -3314,6 +3332,7 @@ def _market_discovery_cycle() -> None:
         logger.info("market_discovery deferred: EDLI reactor active")
         return
     edli_cfg = _settings_section("edli_v1", {})
+    pending_count = 0
     defer_when_pending = str(
         os.environ.get("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     ).strip().lower() not in {"0", "false", "no", "off"}
@@ -3346,6 +3365,24 @@ def _market_discovery_cycle() -> None:
     if not acquired:
         logger.warning("market_discovery skipped: previous market_discovery still running")
         return
+    if pending_count > 0 and defer_when_pending and edli_cfg.get("enabled"):
+        try:
+            from src.data.market_scanner import find_weather_markets_or_raise
+
+            events = find_weather_markets_or_raise(
+                min_hours_to_resolution=0.0,
+                include_slug_pattern=True,
+            )
+            logger.info(
+                "market_discovery: topology-only refresh for %d weather events while "
+                "%d EDLI pending events keep executable substrate priority",
+                len(events),
+                pending_count,
+            )
+            _market_discovery_last_completed_monotonic = time.monotonic()
+            return
+        finally:
+            _market_discovery_lock.release()
     substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
     if not substrate_acquired:
         _market_discovery_lock.release()
@@ -4609,9 +4646,9 @@ def _edli_event_reactor_cycle() -> None:
         # / baseline undefined / exception), degrade THIS cycle to the no-submit adapter rather
         # than submit live with an unconfigured-but-proceeding allocator.
         live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
-        if live_bridge_mode:
-            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(conn)
-            if not _alloc_refresh.get("configured"):
+        if live_submit_effective:
+            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
+            if live_bridge_mode and not _alloc_refresh.get("configured"):
                 live_submit_effective = False
                 logger.error(
                     "EDLI reactor: live-bridge allocator refresh did not configure "
@@ -4722,6 +4759,42 @@ def _edli_event_reactor_cycle() -> None:
             ),
         )
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
+        _rejection_counts = dict(Counter(_rr.rejection_reasons))
+        _edli_candidates = int(_rr.proof_accepted + _rr.rejected + _rr.retried + _rr.dead_lettered)
+        try:
+            from src.observability.status_summary import write_cycle_pulse
+
+            write_cycle_pulse(
+                {
+                    "mode": "edli_event_reactor",
+                    "started_at": process_pending_decision_time.isoformat(),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "candidates": _edli_candidates,
+                    "candidates_evaluated": _edli_candidates,
+                    "processed": int(_rr.processed),
+                    "proof_accepted": int(_rr.proof_accepted),
+                    "final_intents_built": int(_rr.proof_accepted),
+                    "submit_attempts": int(_rr.proof_accepted),
+                    "venue_acks": 0,
+                    "no_trades": int(_rr.rejected + _rr.retried + _rr.dead_lettered),
+                    "rejected": int(_rr.rejected),
+                    "retried": int(_rr.retried),
+                    "dead_lettered": int(_rr.dead_lettered),
+                    "rejection_reason_counts": _rejection_counts,
+                    "top_no_trade_reasons": _rejection_counts,
+                    "deterministic_rejections": (
+                        {"real_order_submit_disabled": int(_rr.proof_accepted)}
+                        if submit_disabled_effective_mode and _rr.proof_accepted > 0
+                        else {}
+                    ),
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "EDLI reactor: status pulse failed (non-fatal): %s",
+                exc,
+                exc_info=True,
+            )
         logger.info(
             "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d reasons=%r",
             _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered, _rr.rejection_reasons[:8],

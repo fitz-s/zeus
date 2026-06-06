@@ -94,6 +94,11 @@ _REDEEM_PENDING_WALLET_HOLDING_STATES = frozenset(
         "REDEEM_OPERATOR_REQUIRED",
     }
 )
+_CLOSED_POSITION_WALLET_HOLDING_PHASES = frozenset({"settled", "admin_closed", "voided"})
+_CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES = frozenset({"synced", "exit_pending_missing"})
+_REDEEM_TERMINAL_WALLET_CONTRADICTION_STATES = frozenset(
+    {"REDEEM_CONFIRMED", "REDEEM_FAILED", "REDEEM_REVIEW_REQUIRED"}
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS exchange_reconcile_findings (
@@ -1152,14 +1157,20 @@ def _record_position_drift_findings(
         states=_OPTIMISTIC_POSITION_FACT_STATES,
     )
     settlement_holdings = _settlement_command_token_holdings_by_token(conn)
-    tokens = sorted(set(exchange) | set(confirmed_journal) | set(settlement_holdings))
+    closed_position_holdings = _closed_position_token_holdings_by_token(conn)
+    tokens = sorted(
+        set(exchange) | set(confirmed_journal) | set(settlement_holdings) | set(closed_position_holdings)
+    )
     findings: list[ReconcileFinding] = []
     for token in tokens:
         exchange_size = exchange.get(token, Decimal("0"))
         confirmed_size = confirmed_journal.get(token, Decimal("0"))
         optimistic_size = optimistic_journal.get(token, Decimal("0"))
         settlement_size = settlement_holdings.get(token, Decimal("0"))
-        expected_wallet_size = confirmed_size + settlement_size
+        closed_position_size = (
+            Decimal("0") if settlement_size > Decimal("0") else closed_position_holdings.get(token, Decimal("0"))
+        )
+        expected_wallet_size = confirmed_size + settlement_size + closed_position_size
         if _position_size_matches(exchange_size, confirmed_size):
             _resolve_open_position_drift_findings(
                 conn,
@@ -1176,6 +1187,17 @@ def _record_position_drift_findings(
                 conn,
                 token,
                 resolution="position_drift_settlement_command_token_holding",
+                resolved_at=observed_at,
+            )
+            continue
+        if closed_position_size > Decimal("0") and _position_size_matches(
+            exchange_size,
+            expected_wallet_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_closed_position_token_holding",
                 resolved_at=observed_at,
             )
             continue
@@ -1233,13 +1255,15 @@ def _record_position_drift_findings(
                     "confirmed_journal_size": str(confirmed_size),
                     "optimistic_journal_size": str(optimistic_size),
                     "settlement_command_token_size": str(settlement_size),
+                    "closed_position_token_size": str(closed_position_size),
                     "expected_wallet_size": str(expected_wallet_size),
                     "journal_evidence_class": "confirmed_trade_facts",
                     "settlement_evidence_class": "unconfirmed_redeem_settlement_commands",
+                    "closed_position_evidence_class": "terminal_position_current_chain_holdings",
                     "optimistic_evidence_class": "matched_or_mined_trade_facts",
                     "reason": (
                         "exchange_position_differs_from_expected_wallet_facts"
-                        if settlement_size > Decimal("0")
+                        if settlement_size > Decimal("0") or closed_position_size > Decimal("0")
                         else "exchange_position_differs_from_confirmed_trade_facts"
                     ),
                 },
@@ -1384,12 +1408,16 @@ def _resolve_position_drift_tokens_from_current_truth(
         states=_OPTIMISTIC_POSITION_FACT_STATES,
     )
     settlement_holdings = _settlement_command_token_holdings_by_token(conn)
+    closed_position_holdings = _closed_position_token_holdings_by_token(conn)
     for token in sorted(str(item) for item in token_ids):
         exchange_size = exchange.get(token, Decimal("0"))
         confirmed_size = confirmed_journal.get(token, Decimal("0"))
         optimistic_size = optimistic_journal.get(token, Decimal("0"))
         settlement_size = settlement_holdings.get(token, Decimal("0"))
-        expected_wallet_size = confirmed_size + settlement_size
+        closed_position_size = (
+            Decimal("0") if settlement_size > Decimal("0") else closed_position_holdings.get(token, Decimal("0"))
+        )
+        expected_wallet_size = confirmed_size + settlement_size + closed_position_size
         if _position_size_matches(exchange_size, confirmed_size):
             _resolve_open_position_drift_findings(
                 conn,
@@ -1406,6 +1434,17 @@ def _resolve_position_drift_tokens_from_current_truth(
                 conn,
                 token,
                 resolution="position_drift_settlement_command_token_holding",
+                resolved_at=observed_at,
+            )
+            continue
+        if closed_position_size > Decimal("0") and _position_size_matches(
+            exchange_size,
+            expected_wallet_size,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_closed_position_token_holding",
                 resolved_at=observed_at,
             )
             continue
@@ -2988,6 +3027,77 @@ def _settlement_command_token_holdings_by_token(conn: sqlite3.Connection) -> dic
             if amount is None:
                 continue
             out[token_id] = out.get(token_id, Decimal("0")) + amount
+    return out
+
+
+def _settlement_command_terminal_tokens(conn: sqlite3.Connection) -> frozenset[str]:
+    if not _table_exists(conn, "settlement_commands"):
+        return frozenset()
+    terminal_states = tuple(sorted(_REDEEM_TERMINAL_WALLET_CONTRADICTION_STATES))
+    state_placeholders = ", ".join("?" for _ in terminal_states)
+    rows = conn.execute(
+        f"""
+        SELECT token_amounts_json
+          FROM settlement_commands
+         WHERE state IN ({state_placeholders})
+           AND TRIM(COALESCE(token_amounts_json, '')) != ''
+        """,
+        terminal_states,
+    ).fetchall()
+    tokens: set[str] = set()
+    for row in rows:
+        payload = _json_mapping(row["token_amounts_json"])
+        for token, raw_amount in payload.items():
+            token_id = str(token).strip()
+            if not token_id:
+                continue
+            amount = _positive_decimal_or_none(raw_amount)
+            if amount is None:
+                continue
+            tokens.add(token_id)
+    return frozenset(tokens)
+
+
+def _closed_position_token_holdings_by_token(conn: sqlite3.Connection) -> dict[str, Decimal]:
+    """Expected wallet CTF holdings from terminal local positions still on-chain.
+
+    Some historical positions have already left active exposure (`settled`,
+    `admin_closed`, or recovery `voided`) while the chain/wallet surface still
+    reports their CTF token balance. They are not active trade exposure, but they
+    are legitimate expected wallet holdings until a redeem command is created and
+    confirmed. Terminal redeem commands are excluded so a claimed/rejected redeem
+    cannot mask real exchange drift.
+    """
+
+    if not _table_exists(conn, "position_current"):
+        return {}
+    terminal_redeem_tokens = _settlement_command_terminal_tokens(conn)
+    phase_placeholders = ", ".join("?" for _ in _CLOSED_POSITION_WALLET_HOLDING_PHASES)
+    chain_placeholders = ", ".join("?" for _ in _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES)
+    rows = conn.execute(
+        f"""
+        SELECT token_id, no_token_id, direction, shares
+          FROM position_current
+         WHERE phase IN ({phase_placeholders})
+           AND chain_state IN ({chain_placeholders})
+           AND COALESCE(shares, 0) > 0
+        """,
+        (
+            *tuple(sorted(_CLOSED_POSITION_WALLET_HOLDING_PHASES)),
+            *tuple(sorted(_CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES)),
+        ),
+    ).fetchall()
+    out: dict[str, Decimal] = {}
+    for row in rows:
+        direction = str(row["direction"] or "").strip().lower()
+        token = row["no_token_id"] if direction == "buy_no" else row["token_id"]
+        token_id = str(token or "").strip()
+        if not token_id or token_id in terminal_redeem_tokens:
+            continue
+        amount = _positive_decimal_or_none(row["shares"])
+        if amount is None:
+            continue
+        out[token_id] = out.get(token_id, Decimal("0")) + amount
     return out
 
 

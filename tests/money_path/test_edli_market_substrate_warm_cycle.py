@@ -117,18 +117,25 @@ def test_pending_family_refresh_has_no_fixed_family_cap():
 
 
 def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):
-    """Late topology selection must not pass a 0.1s fake progress slice to CLOB."""
+    """Late topology selection must leave both /books prefetch and capture time."""
 
     monkeypatch.setattr(main_module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", "0.75")
 
     assert main_module._snapshot_capture_budget_for_refresh(
         refresh_deadline=90.0,
         snapshot_reserve_s=12.0,
-    ) == pytest.approx(12.0)
+    ) == pytest.approx(14.0)
     assert main_module._snapshot_capture_budget_for_refresh(
         refresh_deadline=125.0,
         snapshot_reserve_s=12.0,
     ) == pytest.approx(25.0)
+
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_TARGET_WINDOW_SECONDS", "3.5")
+    assert main_module._snapshot_capture_budget_for_refresh(
+        refresh_deadline=90.0,
+        snapshot_reserve_s=12.0,
+    ) == pytest.approx(15.5)
 
 
 def test_market_discovery_defers_while_reactor_active():
@@ -596,7 +603,7 @@ def test_pending_family_refresh_timeboxes_topology_before_capture_reserve(monkey
     assert result["topology_budget_exhausted"] == 1
     assert result["topology_deferred_families"] > 0
     assert 1 <= len(submitted[0]) < 12
-    assert refresh_kwargs[0]["budget_seconds"] == pytest.approx(12.0)
+    assert refresh_kwargs[0]["budget_seconds"] == pytest.approx(14.0)
 
 
 def test_condition_buy_sides_fresh_requires_yes_and_no_selected_tokens():

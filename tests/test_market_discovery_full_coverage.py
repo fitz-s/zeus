@@ -696,8 +696,8 @@ def test_market_discovery_defers_while_edli_pending_backlog(monkeypatch):
     main_mod._market_discovery_cycle()
 
 
-def test_market_discovery_fairness_allows_periodic_scan_with_pending(monkeypatch):
-    """Pending backlog should not permanently starve universe discovery."""
+def test_market_discovery_with_pending_runs_topology_only_not_substrate_capture(monkeypatch):
+    """Pending backlog may refresh market topology but must not steal substrate capture."""
     import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
@@ -716,21 +716,15 @@ def test_market_discovery_fairness_allows_periodic_scan_with_pending(monkeypatch
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
-        lambda conn, *, markets, clob, captured_at, scan_authority: {
-            "attempted": 0, "inserted": 0, "skipped": 0, "failed": 0,
-            "truncated": 0, "budget_exhausted": 0,
-        },
+        lambda *args, **kwargs: pytest.fail(
+            "pending EDLI backlog must not let market_discovery steal executable substrate capture"
+        ),
     )
-    mock_conn = MagicMock()
-    with (
-        patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls,
-        patch("src.state.db.get_trade_connection", return_value=mock_conn),
-    ):
-        mock_clob_cls.return_value.__enter__ = lambda s: MagicMock()
-        mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
+    with patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls:
         main_mod._market_discovery_cycle()
 
     assert calls
+    assert mock_clob_cls.call_count == 0
 
 
 def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
@@ -1257,7 +1251,7 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
             }
 
         def get_fee_rate_details(self, _token_id: str) -> dict:
-            return {"fee_rate_fraction": "0.02"}
+            raise AssertionError("substrate identity capture must not fetch /fee-rate")
 
     captured = []
     with (
@@ -1276,11 +1270,14 @@ def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
 
     assert len(captured) == 1
     assert captured[0].tradeability_status.executable_allowed is True
-    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.02)
+    assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
+    assert captured[0].fee_details["authority"] == "local_weather_fee_contract"
+    assert captured[0].fee_details["submit_boundary_revalidates_fee"] is True
+    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
 
 
-def test_substrate_identity_capture_reuses_family_fee_details(monkeypatch):
-    """Background substrate refresh should not fetch fee rate once per token."""
+def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
+    """Background substrate refresh should not fetch fee rate for every token."""
 
     monkeypatch.delenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", raising=False)
     condition_id = "0x" + "7" * 64
@@ -1336,7 +1333,7 @@ def test_substrate_identity_capture_reuses_family_fee_details(monkeypatch):
 
         def get_fee_rate_details(self, token_id: str) -> dict:
             self.fee_tokens.append(token_id)
-            return {"fee_rate_fraction": "0.10"}
+            raise AssertionError("substrate identity capture must not fetch /fee-rate")
 
     captured = []
     clob = FamilyFeeClob()
@@ -1360,12 +1357,12 @@ def test_substrate_identity_capture_reuses_family_fee_details(monkeypatch):
                 tolerate_missing_book=True,
             )
 
-    assert clob.fee_tokens == [yes_token]
+    assert clob.fee_tokens == []
     assert len(captured) == 2
-    assert captured[0].fee_details["source"] == "clob_fee_rate"
-    assert captured[1].fee_details["source"] == "clob_fee_rate_family_cache"
+    assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
+    assert captured[1].fee_details["source"] == "weather_fee_contract_substrate_identity"
     assert captured[1].fee_details["token_id"] == no_token
-    assert captured[1].fee_details["fee_rate_fraction"] == pytest.approx(0.10)
+    assert captured[1].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
 
 
 def test_unlimited_pending_refresh_completes_family_before_next_city():

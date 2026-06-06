@@ -539,9 +539,14 @@ class ForecastSnapshotReadyTrigger:
                     _decision_iso,
                 ),
             )
-            if limit is not None:
+            if rows:
+                # ``limit=None`` means no cap on the number of city families, not
+                # "emit every historical source_run for each family."  Fairness owns
+                # the one-row-per-(city,target,metric) contract in both capped and
+                # unbounded modes.
                 rows = CoverageFairnessRequest(
-                    limit=max(1, int(limit)), cycle_index=_cycle_index
+                    limit=max(1, len(rows) if limit is None else int(limit)),
+                    cycle_index=0 if limit is None else _cycle_index,
                 ).select_rows(rows)
         else:
             if limit is None:
