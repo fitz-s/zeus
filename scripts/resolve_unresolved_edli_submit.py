@@ -13,12 +13,10 @@
 # edli_live_canary boot readiness gate (EDLI_STAGE_UNRESOLVED_SUBMIT_UNKNOWN +
 # EDLI_STAGE_LIVE_CAP_RESERVED) and crash-loops the daemon.
 #
-# The stuck aggregate's order PROVABLY never reached the venue: its profit-audit
-# rows carry venue_order_id=None and reject_reason
-# "EXECUTOR_SUBMIT_UNKNOWN:...DEPTH_INSUFFICIENT" — a PRE-VENUE depth-validation
-# failure (executor.py:1773, raised in execute_final_intent BEFORE _live_order
-# touches the venue). The correct terminal state is therefore a venue_reconcile
-# Reconciled (no fill, never placed) + LIVE_CAP RELEASED.
+# This script is ONLY for aggregates that provably never reached the venue. A
+# post-submit unknown with venue_call_started=true must be reconciled from
+# authenticated venue/user-channel reads; venue_order_id=NULL alone is not enough
+# evidence.
 #
 # This script uses the system's OWN forward-only event-sourcing mechanism — it
 # APPENDS a Reconciled event then a CapTransitioned(RELEASED) event and calls
@@ -46,6 +44,20 @@ from src.events.live_cap import LiveCapLedger
 RESOLUTION_REASON = "PRE_VENUE_DEPTH_INSUFFICIENT_NEVER_SUBMITTED"
 
 
+def _submit_unknown_venue_call_started(conn, aggregate_id: str) -> bool:
+    row = conn.execute(
+        """
+        SELECT payload_json FROM edli_live_order_events
+        WHERE aggregate_id = ? AND event_type = 'SubmitUnknown'
+        ORDER BY event_sequence DESC LIMIT 1
+        """,
+        (aggregate_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    return bool(json.loads(row["payload_json"]).get("venue_call_started"))
+
+
 def _stuck_aggregates(conn) -> list[str]:
     """Aggregates whose projection is pending_reconcile AND whose order never
     reached the venue (venue_order_id IS NULL across the whole event chain)."""
@@ -60,6 +72,10 @@ def _stuck_aggregates(conn) -> list[str]:
     for r in rows:
         agg = r["aggregate_id"]
         # Confirm the order never obtained a venue_order_id (pre-venue rejection).
+        # This is necessary but not sufficient: post-submit unknowns may also lack
+        # a venue_order_id when the SDK raised after the venue call was started.
+        if _submit_unknown_venue_call_started(conn, agg):
+            continue
         ack = conn.execute(
             """
             SELECT 1 FROM edli_live_order_events
