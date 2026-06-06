@@ -723,6 +723,16 @@ class TestRiskGuardSettlementSource:
             cost_basis_usd=20.0,
             last_monitor_market_price=2.5,
         )
+        _insert_position_current(
+            conn,
+            position_id="db-pos-settled",
+            strategy_key="center_buy",
+            phase="settled",
+            size_usd=1000.0,
+            shares=1000.0,
+            cost_basis_usd=1000.0,
+            last_monitor_market_price=1.0,
+        )
         conn.commit()
         conn.close()
 
@@ -788,7 +798,7 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_truth_source"] == "position_current"
         assert details["portfolio_loader_status"] == "ok"
         assert details["portfolio_fallback_active"] is False
-        assert details["portfolio_position_count"] == 1
+        assert details["portfolio_position_count"] == 2
         assert details["portfolio_capital_source"] == "dual_source_blended"
         # Bankroll truth axis: provider-sourced wallet cash plus canonical
         # open-position value, with no realized-PnL fold-in.

@@ -249,16 +249,67 @@ def _position_value_usd(position: Position) -> float:
     return 0.0
 
 
-def _active_position_equity_usd(portfolio: PortfolioState) -> float:
+def _active_position_equity_usd(conn: sqlite3.Connection, portfolio: PortfolioState) -> float:
+    value_columns = (
+        "shares",
+        "last_monitor_market_price",
+        "entry_price",
+        "chain_avg_price",
+        "filled_cost_basis_usd",
+        "cost_basis_usd",
+        "size_usd",
+        "chain_cost_basis_usd",
+    )
+    try:
+        available = {
+            str(row["name"] if hasattr(row, "keys") else row[1])
+            for row in conn.execute("PRAGMA table_info(position_current)").fetchall()
+        }
+        selected = [column for column in value_columns if column in available]
+        if not selected:
+            return 0.0
+        rows = conn.execute(
+            f"""
+            SELECT {', '.join(selected)}
+            FROM position_current
+            WHERE phase IN ('active', 'day0_window', 'pending_exit')
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        logger.exception("RiskGuard failed to compute active position equity from position_current")
+        total = 0.0
+        for position in getattr(portfolio, "positions", []) or []:
+            phase = str(getattr(position, "state", "") or "").lower()
+            exit_state = str(getattr(position, "exit_state", "") or "").lower()
+            if phase in {"settled", "voided", "quarantined", "admin_closed"}:
+                continue
+            if exit_state in {"settled", "voided", "admin_closed"}:
+                continue
+            total += _position_value_usd(position)
+        return round(total, 2)
+
     total = 0.0
-    for position in getattr(portfolio, "positions", []) or []:
-        phase = str(getattr(position, "state", "") or "").lower()
-        exit_state = str(getattr(position, "exit_state", "") or "").lower()
-        if phase in {"settled", "voided", "quarantined", "admin_closed"}:
-            continue
-        if exit_state in {"settled", "voided", "admin_closed"}:
-            continue
-        total += _position_value_usd(position)
+    for row in rows:
+        row_map = row if isinstance(row, dict) else {key: row[key] for key in row.keys()}
+        shares = _coerce_finite_float(row_map.get("shares")) or 0.0
+        if shares > 0:
+            for price_field in ("last_monitor_market_price", "entry_price", "chain_avg_price"):
+                price = _coerce_finite_float(row_map.get(price_field))
+                if price is not None and price > 0:
+                    total += shares * price
+                    break
+            else:
+                for value_field in ("filled_cost_basis_usd", "cost_basis_usd", "size_usd", "chain_cost_basis_usd"):
+                    value = _coerce_finite_float(row_map.get(value_field))
+                    if value is not None and value > 0:
+                        total += value
+                        break
+        else:
+            for value_field in ("filled_cost_basis_usd", "cost_basis_usd", "size_usd", "chain_cost_basis_usd"):
+                value = _coerce_finite_float(row_map.get(value_field))
+                if value is not None and value > 0:
+                    total += value
+                    break
     return round(total, 2)
 
 
@@ -327,7 +378,7 @@ def _riskguard_account_equity(
     wallet_cash_usd: float,
     portfolio: PortfolioState,
 ) -> dict:
-    open_position_equity_usd = _active_position_equity_usd(portfolio)
+    open_position_equity_usd = _active_position_equity_usd(conn, portfolio)
     unprojected_entry_fill_equity_usd = _unprojected_entry_fill_equity_usd(conn)
     effective_equity_usd = round(
         float(wallet_cash_usd) + open_position_equity_usd + unprojected_entry_fill_equity_usd,
