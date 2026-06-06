@@ -397,6 +397,109 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert projection["current_state"] == "CAP_TRANSITIONED"
 
 
+def test_locked_live_opportunity_suppresses_redecision_without_price_improvement():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "condition_id": "condition-1",
+            "token_id": "token-no-1",
+            "direction": "buy_no",
+            "limit_price": 0.70,
+        },
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+        },
+    )
+
+    unchanged = adapter._locked_live_opportunity_no_price_improvement_reason(
+        conn,
+        condition_id="condition-1",
+        token_id="token-no-1",
+        direction="buy_no",
+        side="BUY",
+        limit_price=0.70,
+    )
+    one_tick_better = adapter._locked_live_opportunity_no_price_improvement_reason(
+        conn,
+        condition_id="condition-1",
+        token_id="token-no-1",
+        direction="buy_no",
+        side="BUY",
+        limit_price=0.69,
+    )
+    materially_better = adapter._locked_live_opportunity_no_price_improvement_reason(
+        conn,
+        condition_id="condition-1",
+        token_id="token-no-1",
+        direction="buy_no",
+        side="BUY",
+        limit_price=0.68,
+    )
+
+    assert unchanged is not None
+    assert one_tick_better is not None
+    assert materially_better is None
+
+
+def test_submit_disabled_redecision_returns_no_submit_for_locked_same_price(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event_1 = _forecast_event()
+    event_2 = replace(event_1, event_id="event-2", entity_key="Chicago|2026-05-24|high|live-canary-test-redecision")
+
+    def _accepted_for_event(event, *_args, **kwargs):
+        decision_time = kwargs["decision_time"]
+        accepted = _accepted_receipt(event)
+        return replace(
+            accepted,
+            decision_proof_bundle=build_test_no_submit_proof_bundle(
+                event,
+                accepted,
+                decision_time=decision_time,
+            ),
+        )
+
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", _accepted_for_event)
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=False,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+        taker_fok_fak_live_enabled=True,
+    )
+
+    first = submit(event_1, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    event_count_after_first = _table_count(conn, "edli_live_order_events")
+    second = submit(event_2, datetime(2026, 5, 24, 18, 11, tzinfo=timezone.utc))
+
+    assert first.side_effect_status == "SUBMIT_DISABLED"
+    assert event_count_after_first == 6
+    assert second.side_effect_status == "NO_SUBMIT"
+    assert second.reason.startswith("EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT")
+    assert _table_count(conn, "edli_live_order_events") == event_count_after_first
+
+
 def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.events.live_cap import LiveCapLedger
@@ -1399,6 +1502,53 @@ def _table_count(conn, table_name):
     if row is None:
         return 0
     return conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+
+
+def _insert_live_order_event(
+    conn,
+    *,
+    aggregate_id,
+    sequence,
+    event_type,
+    payload,
+    occurred_at="2026-05-24T18:10:00+00:00",
+):
+    from src.decision_kernel.canonicalization import canonical_json, stable_hash
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    ensure_tables(conn)
+    payload_json = canonical_json(payload)
+    payload_hash = stable_hash(payload)
+    event_hash = stable_hash(
+        {
+            "aggregate_id": aggregate_id,
+            "event_sequence": sequence,
+            "event_type": event_type,
+            "payload_hash": payload_hash,
+            "occurred_at": occurred_at,
+        }
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "edli_live_order_event:" + event_hash[:32],
+            aggregate_id,
+            sequence,
+            event_type,
+            event_hash,
+            payload_json,
+            payload_hash,
+            "engine_adapter",
+            occurred_at,
+            occurred_at,
+        ),
+    )
 
 
 def _receipt_status(receipt):

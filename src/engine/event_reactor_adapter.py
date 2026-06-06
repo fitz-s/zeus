@@ -139,6 +139,10 @@ class PreSubmitAuthorityWitness:
     max_quote_age_ms: int = 1000
 
 
+class _LiveOpportunityAlreadyLocked(RuntimeError):
+    """Raised when continuous redecision rediscovers an already-locked opportunity."""
+
+
 def build_event_reactor(
     store: EventStore,
     *,
@@ -481,6 +485,13 @@ def event_bound_live_adapter_from_trade_conn(
                 side_effect_status = "SUBMIT_DISABLED"
                 submitted = False
                 reason = "real_order_submit_disabled"
+        except _LiveOpportunityAlreadyLocked as exc:
+            return dataclass_replace(
+                no_submit_receipt,
+                side_effect_status="NO_SUBMIT",
+                reason=str(exc),
+                proof_accepted=True,
+            )
         except Exception as exc:
             return EventSubmissionReceipt(
                 False,
@@ -1572,6 +1583,16 @@ def _build_live_execution_command_certificates(
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
         )
+        already_locked_reason = _locked_live_opportunity_no_price_improvement_reason(
+            live_cap_conn,
+            condition_id=str(final_intent.payload["condition_id"]),
+            token_id=str(final_intent.payload["token_id"]),
+            direction=str(final_intent.payload["direction"]),
+            side=str(final_intent.payload.get("side") or "BUY"),
+            limit_price=_optional_float(final_intent.payload.get("limit_price")),
+        )
+        if already_locked_reason is not None:
+            raise _LiveOpportunityAlreadyLocked(already_locked_reason)
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
         aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
         aggregate_id = _live_order_aggregate_id(event.event_id, str(final_intent.payload["final_intent_id"]))
@@ -1762,6 +1783,87 @@ def _execution_command_id_from_final_intent(
     return (
         f"edli_exec_cmd:{action['event_id']}:{intent['final_intent_id']}:"
         f"{intent['token_id']}:{intent['direction']}"
+    )
+
+
+def _locked_live_opportunity_no_price_improvement_reason(
+    live_cap_conn: sqlite3.Connection | None,
+    *,
+    condition_id: str,
+    token_id: str,
+    direction: str,
+    side: str,
+    limit_price: float | None,
+    improve_delta: float = 0.02,
+) -> str | None:
+    """Return a suppression reason when a locked opportunity has not repriced better.
+
+    Continuous redecision may keep scanning fresh forecast events, but once the
+    money path has locked a specific condition/token/direction into an execution
+    command, identical later cycles must not emit another will-trade chain.  A
+    later cycle is allowed only when the final limit price materially improves.
+    For BUY directions that means a lower limit; for SELL directions, a higher
+    limit.
+    """
+
+    if live_cap_conn is None or not condition_id or not token_id or not direction:
+        return None
+    LiveOrderAggregateLedger(live_cap_conn)
+    rows = live_cap_conn.execute(
+        """
+        SELECT
+            json_extract(plan.payload_json, '$.limit_price') AS prior_limit_price,
+            plan.aggregate_id,
+            plan.occurred_at
+        FROM edli_live_order_events AS plan
+        WHERE plan.event_type = 'SubmitPlanBuilt'
+          AND json_extract(plan.payload_json, '$.condition_id') = ?
+          AND json_extract(plan.payload_json, '$.token_id') = ?
+          AND json_extract(plan.payload_json, '$.direction') = ?
+          AND EXISTS (
+              SELECT 1
+              FROM edli_live_order_events AS command
+              WHERE command.aggregate_id = plan.aggregate_id
+                AND command.event_type = 'ExecutionCommandCreated'
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM edli_live_order_events AS rejected
+              WHERE rejected.aggregate_id = plan.aggregate_id
+                AND rejected.event_type = 'SubmitRejected'
+          )
+        ORDER BY plan.occurred_at DESC
+        LIMIT 64
+        """,
+        (condition_id, token_id, direction),
+    ).fetchall()
+    prior_prices = [
+        price
+        for price in (_optional_float(row[0]) for row in rows)
+        if price is not None
+    ]
+    if not prior_prices:
+        return None
+    side_upper = str(side or "").strip().upper()
+    if limit_price is None:
+        return (
+            "EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT:"
+            f"condition_id={condition_id}:token_id={token_id}:direction={direction}"
+        )
+    if side_upper == "SELL":
+        prior_best = max(prior_prices)
+        if limit_price >= prior_best + improve_delta - 1e-9:
+            return None
+        comparison = f"prior_best_limit={prior_best:.6g}:current_limit={limit_price:.6g}:required_delta={improve_delta:.6g}"
+    else:
+        prior_best = min(prior_prices)
+        if limit_price <= prior_best - improve_delta + 1e-9:
+            return None
+        comparison = f"prior_best_limit={prior_best:.6g}:current_limit={limit_price:.6g}:required_delta={improve_delta:.6g}"
+    return (
+        "EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT:"
+        f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
+        f"{comparison}"
     )
 
 
