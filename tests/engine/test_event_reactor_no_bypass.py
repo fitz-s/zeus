@@ -1973,6 +1973,21 @@ def test_snapshot_lead_days_falls_back_to_source_available_and_local_day_start()
     assert lead_days == pytest.approx(34.0 / 24.0)
 
 
+def test_snapshot_lead_days_falls_back_to_day0_observation_time():
+    from src.engine.event_reactor_adapter import _snapshot_lead_days
+
+    lead_days = _snapshot_lead_days(
+        snapshot={},
+        family=SimpleNamespace(target_date="2026-06-06"),
+        payload={
+            "observation_time": "2026-06-06T04:00:00+00:00",
+            "observation_available_at": "2026-06-06T05:15:17.901309+00:00",
+        },
+    )
+
+    assert lead_days == 0.0
+
+
 def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
     from types import SimpleNamespace
 

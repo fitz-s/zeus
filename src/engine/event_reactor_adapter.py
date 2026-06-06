@@ -6132,6 +6132,8 @@ def _snapshot_lead_days(*, snapshot: dict[str, Any], family, payload: dict[str, 
         or payload.get("source_cycle_time")
         or payload.get("source_available_at")
         or payload.get("available_at")
+        or payload.get("observation_time")
+        or payload.get("observation_available_at")
     )
     try:
         target_day = date.fromisoformat(str(family.target_date))
