@@ -2252,9 +2252,6 @@ def _set_edli_redecision_boot_token(token: str) -> None:
 USER_CHANNEL_REQUIRED_ENV_VARS = (
     "ZEUS_USER_CHANNEL_WS_ENABLED",
     "POLYMARKET_USER_WS_CONDITION_IDS",
-    "POLYMARKET_API_KEY",
-    "POLYMARKET_API_SECRET",
-    "POLYMARKET_API_PASSPHRASE",
 )
 
 
@@ -2413,8 +2410,10 @@ def _start_user_channel_ingestor_if_enabled() -> None:
 
     Disabled by default so M3 adds no live WebSocket side effect until an
     operator explicitly enables `ZEUS_USER_CHANNEL_WS_ENABLED=1` and supplies
-    condition IDs plus L2 API credentials. If enabled but misconfigured, the
-    WS guard records an auth/config gap so new submits fail closed.
+    condition IDs or enables condition auto-derive. L2 API credentials come
+    from the Polymarket adapter's signer-bound SDK client, not static env. If
+    enabled but misconfigured, the WS guard records an auth/config gap so new
+    submits fail closed.
 
     Live-blockers 2026-05-01: when the WS is NOT enabled (or required env
     vars are missing) we now emit a single CLEAR WARNING line listing every
