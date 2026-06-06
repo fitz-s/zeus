@@ -1581,6 +1581,13 @@ def _positive_float_env(name: str, default: float) -> float:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _slug_pattern_max_requests_from_env(max_requests: int | None = None) -> int:
     if max_requests is not None:
         return max(1, int(max_requests))
@@ -2682,19 +2689,37 @@ def capture_executable_market_snapshot(
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
 
-    # Decision (2026-05-27, FT-64): market_info stays a FRESH per-outcome CLOB
-    # read — it is NOT sourced from Gamma and NOT cached.  The fail-closed
-    # tradability guard (_build_executable_tradeability_status) reads
-    # `archived` / `enable_order_book` ONLY from raw_clob_market, and the
-    # invariant test `test_clob_archived_blocks_even_when_gamma_accepts` proves
-    # CLOB must block even when Gamma reports acceptingOrders=True &
-    # enableOrderBook=True.  Gamma's payload carries `archived`, but the system
-    # deliberately treats CLOB /markets as the settlement-authority source and
-    # Gamma as a lagging discovery surface — collapsing them is the data-
-    # provenance failure the reverted TTL cache hit.  Only the ORDERBOOK leg is
-    # batched (see prefetched_orderbook below); the proper full fix that also
-    # removes this per-outcome read is the WS market channel (follow-up).
-    if clob_market_info_cache is not None and condition_id in clob_market_info_cache:
+    # Orderbook leg: use the event-batched book when the refresh loop prefetched
+    # it (one POST /books for all bins), else fall back to the per-token GET /book.
+    # The prefetched book is byte-identical to the fetched one (same /books vs
+    # /book response shape), so the snapshot hash / depth jsonb are unchanged —
+    # this path is purely additive and back-compatible when prefetched_orderbook
+    # is None.  The same shape validation as the per-token path is applied.
+    if prefetched_orderbook is not None:
+        raw_orderbook = _normalize_prefetched_orderbook(prefetched_orderbook, selected_token)
+    else:
+        raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
+
+    # Decision (2026-05-27, FT-64): order/submit capture still reads fresh
+    # CLOB /markets authority.  Background substrate enumeration is different:
+    # it is an identity/family-proof producer and the submit path revalidates
+    # executable candidates before any order.  For that tolerate_missing_book
+    # path, use Gamma/topology identity plus the fresh CLOB orderbook already
+    # fetched above instead of spending one serial /markets HTTP per condition.
+    use_synthetic_clob_market = tolerate_missing_book and _bool_env(
+        "ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO",
+        True,
+    )
+    if use_synthetic_clob_market:
+        raw_clob_market = _synthetic_clob_market_info_for_substrate_identity(
+            condition_id=condition_id,
+            yes_token=yes_token,
+            no_token=no_token,
+            accepting_orders=accepting_orders,
+            enable_orderbook=enable_orderbook,
+            raw_orderbook=raw_orderbook,
+        )
+    elif clob_market_info_cache is not None and condition_id in clob_market_info_cache:
         raw_clob_market = clob_market_info_cache[condition_id]
     else:
         raw_clob_market = _fetch_clob_market_info(clob, condition_id)
@@ -2723,16 +2748,6 @@ def capture_executable_market_snapshot(
             )
         if accepting_orders is not True or enable_orderbook is not True:
             raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
-    # Orderbook leg: use the event-batched book when the refresh loop prefetched
-    # it (one POST /books for all bins), else fall back to the per-token GET /book.
-    # The prefetched book is byte-identical to the fetched one (same /books vs
-    # /book response shape), so the snapshot hash / depth jsonb are unchanged —
-    # this path is purely additive and back-compatible when prefetched_orderbook
-    # is None.  The same shape validation as the per-token path is applied.
-    if prefetched_orderbook is not None:
-        raw_orderbook = _normalize_prefetched_orderbook(prefetched_orderbook, selected_token)
-    else:
-        raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
     _assert_clob_identity(
         raw_clob_market=raw_clob_market,
         raw_orderbook=raw_orderbook,
@@ -4117,6 +4132,37 @@ def _normalize_prefetched_orderbook(book: Any, token_id: str) -> dict:
             f"prefetched orderbook for {token_id} is empty or non-object"
         )
     return dict(book)
+
+
+def _synthetic_clob_market_info_for_substrate_identity(
+    *,
+    condition_id: str,
+    yes_token: str,
+    no_token: str,
+    accepting_orders: bool | None,
+    enable_orderbook: bool | None,
+    raw_orderbook: dict,
+) -> dict[str, Any]:
+    """Build substrate-only CLOB identity facts without /markets HTTP.
+
+    This is only used by ``tolerate_missing_book=True`` background substrate
+    refresh. It does not change order/submit capture, which still fetches CLOB
+    market authority and revalidates before any real venue command.
+    """
+
+    return {
+        "condition_id": condition_id,
+        "tokens": [{"token_id": yes_token, "outcome": "YES"}, {"token_id": no_token, "outcome": "NO"}],
+        "archived": False,
+        "enable_order_book": bool(enable_orderbook is not False),
+        "accepting_orders": bool(accepting_orders is not False),
+        "tick_size": _first_field(raw_orderbook, "tick_size", "min_tick_size", "minimum_tick_size", "minTickSize")
+        or "0.01",
+        "min_order_size": _first_field(raw_orderbook, "min_order_size", "minimum_order_size", "minOrderSize")
+        or "1",
+        "neg_risk": _first_field(raw_orderbook, "neg_risk", "negRisk", "negative_risk"),
+        "authority": "synthetic_substrate_identity",
+    }
 
 
 def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
