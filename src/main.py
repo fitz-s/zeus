@@ -6062,6 +6062,17 @@ def _edli_durable_fill_bridge_scan(conn, *, now=None, limit: int = 500) -> int:
     return bridged
 
 
+def _edli_user_channel_reconcile_runtime_enabled(edli_cfg: dict) -> bool:
+    if not edli_cfg.get("enabled"):
+        return False
+    if bool(edli_cfg.get("edli_user_channel_reconcile_enabled", False)):
+        return True
+    return (
+        _live_execution_mode(edli_cfg) == "edli_shadow_no_submit"
+        and _truthy_env("ZEUS_USER_CHANNEL_WS_ENABLED")
+    )
+
+
 @_scheduler_job("edli_user_channel_reconcile")
 def _edli_user_channel_reconcile_cycle() -> None:
     """EDLI user-channel/reconcile service boundary.
@@ -6072,7 +6083,7 @@ def _edli_user_channel_reconcile_cycle() -> None:
     """
 
     edli_cfg = _settings_section("edli_v1", {})
-    if not edli_cfg.get("enabled") or not edli_cfg.get("edli_user_channel_reconcile_enabled", False):
+    if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
         return
     max_messages = int(edli_cfg.get("edli_user_channel_reconcile_max_messages", 50))
     pending_limit = int(edli_cfg.get("edli_user_channel_reconcile_pending_limit", 50))
@@ -6290,9 +6301,7 @@ def _edli_boot_fill_bridge_recovery() -> None:
     """
     try:
         edli_cfg = _settings_section("edli_v1", {})
-        if not edli_cfg.get("enabled") or not edli_cfg.get(
-            "edli_user_channel_reconcile_enabled", False
-        ):
+        if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
             return
         now = datetime.now(timezone.utc)
         from src.state.db import get_trade_connection_with_world_required
@@ -7232,7 +7241,7 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and edli_cfg.get("edli_user_channel_reconcile_enabled"):
+    if live_execution_mode in EDLI_EVENT_DRIVEN_MODES and _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
         scheduler.add_job(
             _edli_user_channel_reconcile_cycle,
             "interval",
