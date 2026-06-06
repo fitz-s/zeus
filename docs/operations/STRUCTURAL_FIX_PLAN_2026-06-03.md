@@ -16,6 +16,12 @@
 #       grade_receipt (value-vs-bin) does NOT fit there, so that path was left as-is
 #       (matches the plan's own N4 scope correction).
 #   These corrections are recorded so the next session does not re-derive them.
+# SUPERCESSION NOTE (operator directive, 2026-06-05):
+#   The N3 non-configurable notional-limit premise is superseded. Current law is
+#   explicit no-cap: when tiny_live_notional_cap_enabled is literal false, there
+#   is no configured notional cap and no non-configurable notional limit. When
+#   tiny_live_daily_order_cap_enabled is literal false,
+#   there is no hidden order-count cap, including the rate-window slot table.
 
 ---
 
@@ -32,7 +38,7 @@
 | N2-hunter: "attribution dead because driver table empty" | **CONFIRMED — supersedes B5's slug story** | `decision_events`=**0 rows**, `regret_decompositions`=**0 rows**; live path writes `edli_no_submit_receipts`=60623. The slug join is a red herring; the LEFT side is empty. Fixing slug yields zero. |
 | K2-design: "all 71 model_bias_ens rows VERIFIED, JJA-fresh" | **INCOMPLETE** | Table holds **150 rows: 71 VERIFIED + 79 NULL-authority**. The reader gates on `weight_live>0 and eff not None`, NOT on `authority='VERIFIED'`. Unverified rows are live-readable → data-provenance-law violation (#122). |
 | N1-hunter: "double bias penalty on same row" | **CONFIRMED** | Both `edli_bias_correction_enabled` AND `bias_decay_kelly_haircut_enabled` = `true`. **20/71 VERIFIED rows have |effective_bias_c|>2.0** → same bias number both shifts p_raw (claims corrected) AND halves Kelly (claims untrustworthy). Contradictory. |
-| F1: submit branch enforces mainstream / notional cap | **CONFIRMED GAP** | Submit branch `event_reactor_adapter.py:372` has NO `mainstream_agreement_pass` check (sites 742/1088/1185 are receipt annotation only). Notional clamp only at `:1814 if notional_cap_enabled:` — flag is `false` → with `real_order_submit_enabled=true`, full Kelly ships with no ceiling. |
+| F1: submit branch enforces mainstream / configured notional limit | **CONFIRMED GAP — NOT A HARD-LIMIT REQUIREMENT** | Submit branch `event_reactor_adapter.py:372` has NO `mainstream_agreement_pass` check (sites 742/1088/1185 are receipt annotation only). The notional limit is explicitly disabled when `tiny_live_notional_cap_enabled=false`; do not reintroduce a non-configurable hard notional limit from this old premise. |
 
 ---
 
@@ -62,7 +68,7 @@ PHASE 0  MEASUREMENT SPINE (no live-q risk; everything gates on this)
 PHASE 1  SAFETY / SEMANTIC (independent of q; land early, parallel)
   P1.1  F2     find_weather_markets_or_raise + AST boot guard
   P1.2  F1     rename gate→reference + enforce_on_submit + rename scaleout flag
-  P1.3  N3     hard notional ceiling independent of cap-enabled flags
+  P1.3  N3     SUPERSEDED: no non-configurable hard notional limit
   P1.4  B2a    persist alpha_gap COLUMN (read-only; NO gate yet)
 
 PHASE 2  LIVE-Q FIXES (live_q_risk; SHADOW-only flags; GATED on Phase 0 re-measure)
@@ -101,7 +107,7 @@ PHASE 3  VALIDATION → ARM
 - **Live-q risk:** none.
 
 ### P0.3 — D2 ARM-artifact boot binding (F1 Option C — promoted to MANDATORY) *(PR-2)*
-- **Antibody:** live boot must additionally require `state/edli_arm_gate_artifact.json` with `{commit_sha, measurement_cmd_hash, capital_weighted_ev>0, gate_pass_n, per_city_n, ev_sigma, date_coverage, coverage_licensed:true}`. Missing/SHA-mismatch/ev≤0 → `RuntimeError` at boot.
+- **Antibody:** live boot must additionally require `state/edli_arm_gate_artifact.json` with `{commit_sha, measurement_cmd_hash, capital_weighted_ev>0, production_n, per_city_n, ev_sigma, date_coverage, coverage_licensed:true}`. `gate_pass_n` is a deprecated compatibility alias for older artifacts; the measured count is the production cohort, not the diagnostic gate-PASS subset. Missing/SHA-mismatch/ev≤0 → `RuntimeError` at boot.
 
 #### ARM CRITERIA — two-key operation (direction-gate antibody, 2026-06-03)
 - **ARM is a two-key operation:** `real_order_submit_enabled=true` AND `mainstream_agreement_enforce_on_submit=true` must be set together. The antibody `_assert_edli_arm_requires_direction_gate` (`src/main.py`, invoked in the `edli_live_canary`/`edli_live` armed-mode branch of `_assert_live_execution_mode_contract`, alongside `_assert_edli_arm_gate_artifact`) now makes flipping ONLY the submit flag a BOOT FAILURE (`RuntimeError EDLI_LIVE_REQUIRES_MAINSTREAM_AGREEMENT_ENFORCEMENT`).
@@ -117,8 +123,10 @@ PHASE 3  VALIDATION → ARM
 ### P1.2 — F1 naming + enforce *(PR-2)*
 - **Antibody:** rename `mainstream_agreement_gate_enabled → mainstream_agreement_reference_enabled`; rename `edli_live_scaleout_enabled → edli_live_operator_authorized`; add `mainstream_agreement_enforce_on_submit` (default false, fail-closed on missing verdict when true) checked at submit branch before `executor_submit`.
 
-### P1.3 — N3 hard notional ceiling *(PR-2)*
-- **Antibody:** a notional ceiling enforced **independent of `tiny_live_notional_cap_enabled`** — the cap-enabled flag may tune the value but cannot remove the ceiling. `#380` removed BOTH notional + daily-order caps in one commit; a hard floor-independent-of-flag prevents single-commit dual-rail removal.
+### P1.3 — N3 hard notional limit *(SUPERSEDED by 2026-06-05 operator directive)*
+- **Superseded:** do not implement a notional limit independent of `tiny_live_notional_cap_enabled`.
+- **Current antibody:** both provisional certificate construction and durable ledger reservation must call the same normalization helper. With `tiny_live_notional_cap_enabled=false`, requested Kelly notional passes through unchanged above the positive-notional sanity floor. With the flag enabled or malformed/missing, the configured `max_notional_usd` limit remains fail-closed.
+- **Current count law:** with `tiny_live_daily_order_cap_enabled=false`, day slots and rate-window slots are both bypassed as count caps. With the flag enabled or malformed/missing, daily and fixed-window count limits remain fail-closed.
 
 ### P1.4 / P2.4 — B2 alpha_gap (split per R2) *(PR-4 / PR-7)*
 - **P1.4 column (safe now):** persist `alpha_gap = q_live − c_fee_adjusted` REAL on `edli_no_submit_receipts`. q_live is already direction-adjusted, so the formula is direction-agnostic.
@@ -144,7 +152,7 @@ PHASE 3  VALIDATION → ARM
 
 - **N1 double bias penalty** → P2.1 (XOR gate). HIGH, live today on 20 buckets.
 - **N2 dead learning loop** (`decision_events`=0) → P0.4. MEDIUM-HIGH. *(fixed in PR-1)*
-- **N3 dual-cap single-commit removal** → P1.3 + D2. HIGH at arm.
+- **N3 dual-cap single-commit removal** → superseded by explicit no-cap law; P1.3 now requires shared normalization and drift checks, not a non-configurable hard limit.
 - **N4 ceiling-grading defect scoped** → measurement path only (live venue-grounded path safe); P0.1. *(fixed in PR-1)*
 - **N5 identity-Platt forced by correction flag** → K2/K3 coupling in P2.1/P2.3.
 - **#122 NULL-authority rows live-readable** → P2.1 provenance gate.
@@ -163,7 +171,7 @@ PHASE 3  VALIDATION → ARM
 | PR | Bundle | Why coherent | LOC est |
 |---|---|---|---|
 | **PR-1 (spine)** | P0.1+P0.2+P0.4 — grade_receipt + ARM script + attribution repoint | One truth function + its two consumers | ~600 |
-| **PR-2 (arm-binding)** | P0.3 + F1 rename/enforce (P1.2) + N3 ceiling (P1.3) | All touch the arming boundary | ~450 |
+| **PR-2 (arm-binding)** | P0.3 + F1 rename/enforce (P1.2) + N3 no-cap normalization (P1.3) | All touch the arming boundary | ~450 |
 | **PR-3 (persistence)** | P1.1 F2 helper + AST guard | Fully independent, lowest risk | ~300 |
 | **PR-4 (alpha-gap column)** | P1.4 column + backfill (NO gate) | Read-only plumbing | ~250 |
 | **PR-5 (bias-treatment)** | P2.1 D3/K2 — XOR + provenance + SE + writer fix | One bias decision; SHADOW flags | ~550 |

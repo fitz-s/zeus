@@ -40,6 +40,7 @@ expected to close out.  Keep them under their existing names.
 | `ZEUS_DOC_GAP_INVENTORY_2026-05-24.md` | active | Codebase doc-gap audit (2026-05-24): README, AGENTS.md, reference docs surveyed for stale/missing citations. Basis for PR #338 fixes. |
 | `ENS_NEWCITY_DATA_PARITY_AUDIT_2026-05-24.md` | active | ENS new-city data parity audit (Jinan/Zhengzhou vs. 52 established cities): per-city artifact coverage on live trade-decision path. |
 | `STRUCTURAL_FIX_PLAN_2026-06-03.md` | active | Zeus no-edge structural-fix program (D1-D7, 7-PR DAG). Synthesis of 9 designs + 2 plan-critiques + hidden-error hunt; settlement-grounded after-cost edge. PR-1 (spine: grade_receipt + capital-weighted ARM + attribution repoint) is the keystone consumed by everything else. GOAL#36. |
+| `LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md` | active | EDLI no-cap regression evidence: current no-cap law, stale authority sources removed, verification targets, and shadow will-trade receipt guardrails. PR #397. |
 
 ## Task directories — closeout status
 

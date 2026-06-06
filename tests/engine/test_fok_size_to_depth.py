@@ -208,9 +208,8 @@ class TestFOKSizeToDepthGREEN:
 
     def test_green_reservation_cap_preserved(self):
         """
-        Reservation cap: limit ≤ c_fee_adjusted.
-        buy_no: limit = min(best_ask, reservation). If best_ask=0.80, reservation=0.81:
-        limit = 0.80 ≤ 0.81 (reservation cap preserved).
+        Reservation gate: a BUY taker may cross only when best_ask <= c_fee_adjusted.
+        If best_ask=0.80 and reservation=0.81, the executable limit is 0.80.
         """
         best_ask = Decimal("0.80")
         c_fee_adjusted = Decimal("0.81")
@@ -398,3 +397,78 @@ class TestFOKSizeToDepthCertBuilder:
         assert abs(float(efp) - 0.80) < 0.001, (
             f"expected_fill_price_before_fee={efp!r} should be ~0.80 (sweep VWAP)"
         )
+        assert payload["max_slippage_bps"] == pytest.approx(0.0)
+        from src.engine.event_bound_final_intent import validate_final_intent_cert_for_existing_executor
+
+        assert validate_final_intent_cert_for_existing_executor(cert)
+
+    def test_cert_builder_declares_taker_vwap_slippage_budget(self):
+        from datetime import datetime, timezone
+        from src.decision_kernel.certificates.execution import (
+            build_final_intent_certificate_from_actionable,
+        )
+        from src.decision_kernel.certificate import build_certificate
+        from src.decision_kernel import claims
+        from src.engine.event_bound_final_intent import validate_final_intent_cert_for_existing_executor
+
+        now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        def _stub_cert(cert_type, payload):
+            return build_certificate(
+                certificate_type=cert_type,
+                semantic_key=f"test:{cert_type}:slippage",
+                claim_type=cert_type,
+                mode="LIVE",
+                decision_time=now,
+                payload=payload,
+                authority_id="test",
+                authority_version="v1",
+                algorithm_id="test",
+                algorithm_version="v1",
+            )
+
+        actionable = _stub_cert(claims.ACTIONABLE_TRADE, {
+            "event_id": "evt-002",
+            "final_intent_id": "intent-002",
+            "family_id": "fam-002",
+            "candidate_id": "cand-002",
+            "condition_id": "cond-002",
+            "token_id": "no-002",
+            "direction": "buy_no",
+            "c_fee_adjusted": 0.82,
+            "kelly_size_usd": 5.0,
+            "live_cap_reserved_notional_usd": 5.0,
+            "live_cap_usage_id": "usage-002",
+            "executable_snapshot_id": "snap-002",
+            "neg_risk": False,
+        })
+        exec_snap = _stub_cert(claims.EXECUTABLE_SNAPSHOT, {
+            "executable_snapshot_hash": "a" * 64,
+        })
+        quote_feas = _stub_cert(claims.QUOTE_FEASIBILITY, {})
+        cost_model = _stub_cert(claims.COST_MODEL, {"cost_basis_hash": "b" * 64})
+        forecast_auth = _stub_cert(claims.FORECAST_AUTHORITY, {})
+
+        cert = build_final_intent_certificate_from_actionable(
+            actionable_cert=actionable,
+            executable_snapshot_cert=exec_snap,
+            quote_feasibility_cert=quote_feas,
+            cost_model_cert=cost_model,
+            forecast_authority_cert=forecast_auth,
+            decision_source_context={"source_id": "test"},
+            passive_maker_context=None,
+            decision_time=now,
+            order_mode="TAKER",
+            tick_size=0.01,
+            min_order_size=1.0,
+            best_bid=0.70,
+            best_ask=0.82,
+            taker_fok_fak_live_enabled=True,
+            available_crossable_shares=5.5,
+            sweep_expected_fill_price="0.80",
+        )
+
+        assert cert.payload["limit_price"] == pytest.approx(0.82)
+        assert cert.payload["expected_fill_price_before_fee"] == "0.80"
+        assert cert.payload["max_slippage_bps"] == pytest.approx(250.0)
+        assert validate_final_intent_cert_for_existing_executor(cert)

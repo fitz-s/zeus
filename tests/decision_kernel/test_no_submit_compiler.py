@@ -922,6 +922,52 @@ def test_no_submit_rejects_calibration_missing_authority():
     assert "calibration.authority" in (result.failures[0].reason_detail or "")
 
 
+def test_no_submit_accepts_identity_fallback_platt_bucket_authority():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    identity_calibration = replace(
+        bundle.calibration,
+        payload={
+            **bundle.calibration.payload,
+            "authority": "IDENTITY_FALLBACK_NO_PLATT_BUCKET",
+            "calibrator_model_key": "identity_fallback_no_platt_bucket_v1:high:cluster:2026-05-25:00:ecmwf_opendata:full",
+            "model_hash": "identity-fallback-hash",
+            "maturity_level": 4,
+            "n_samples": 0,
+        },
+    )
+    identity_belief = replace(
+        bundle.belief,
+        payload={
+            **bundle.belief.payload,
+            "calibrator_model_key": identity_calibration.payload["calibrator_model_key"],
+            "calibrator_model_hash": identity_calibration.payload["model_hash"],
+        },
+    )
+    identity_model_config = replace(
+        bundle.model_config,
+        payload={
+            **bundle.model_config.payload,
+            "calibrator_model_key": identity_calibration.payload["calibrator_model_key"],
+            "calibrator_model_hash": identity_calibration.payload["model_hash"],
+        },
+    )
+
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=replace(
+            bundle,
+            calibration=identity_calibration,
+            belief=identity_belief,
+            model_config=identity_model_config,
+        ),
+    )
+
+    assert result.status == "VERIFIED", (result.failures[0].reason_detail if result.failures else None)
+
+
 def test_no_submit_rejects_low_maturity_calibrator():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)

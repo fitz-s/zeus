@@ -1,5 +1,12 @@
 # BEST ORDER SELECTION — ROOT CAUSE + CORRECT DESIGN (2026-06-01)
 
+> Historical note, 2026-06-05: this investigation predates the EDLI no-cap
+> directive. Any canary `$5`/notional-cap language in this file is historical
+> and is superseded by
+> `docs/operations/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md`.
+> Current no-cap law: when `tiny_live_notional_cap_enabled=false`, no configured
+> or non-configurable EDLI notional cap may clamp Kelly notional.
+
 ```
 Created: 2026-06-01
 Last reused or audited: 2026-06-01
@@ -207,9 +214,10 @@ Two secondary observations relevant to live arming:
   NO this is fine (it crosses the spread to buy at ask); the 5¢ figure is the *min-order-notional*
   floor (`:1524 min_order_notional = min(max_notional, max(price,0.01))`), not a price cap — it
   does not mis-handle an 89¢ order. **Not the blocker.** (Flag: worth a dedicated test that an
-  89¢ taker-FOK sizes correctly under the $5 tiny-live notional cap — `:1524-1525` clamps notional
-  to `tiny_live_max_notional_usd`, so a $44 Kelly is capped to $5 in canary; that is intended for
-  canary but means Shanghai would submit at $5, not $44 — acceptable for canary, must lift post-canary.)
+  89¢ taker-FOK sizes correctly under the historical configured $5 limit —
+  superseded by the 2026-06-05 no-cap directive. Under current no-cap law,
+  `tiny_live_notional_cap_enabled=false` means a $44 Kelly request is not clamped
+  by `tiny_live_max_notional_usd`.)
 - `edli_live_min_realized_edge_bps = 0` → not gating.
 
 ---

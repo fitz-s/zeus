@@ -234,11 +234,20 @@ def test_governor_taker_accepted_by_all_three_layers_and_submittable():
     verify_executor_expressibility(expressibility, (final_intent, executable, live_cap))
 
 
-def test_taker_price_is_marketable_capped_by_reservation():
-    """Taker BUY limit = min(best_ask, c_fee_adjusted); best_ask < reservation here."""
+def test_taker_price_is_marketable_when_touch_inside_reservation():
+    """Taker BUY limit crosses best_ask when best_ask <= c_fee_adjusted."""
     _, _, final_intent = _taker_chain(order_mode="TAKER")
     # best_ask=0.45 < reservation c_fee_adjusted=0.50 -> price at best_ask
     assert final_intent.payload["limit_price"] == pytest.approx(0.45)
+
+
+def test_taker_buy_rejects_non_crossing_reservation_limit():
+    """A BUY FOK below the ask is not a will-trade; reject instead of emitting it."""
+    with pytest.raises(ValueError, match="TAKER_BUY_TOUCH_EXCEEDS_RESERVATION"):
+        _taker_chain(
+            order_mode="TAKER",
+            actionable_overrides={"c_fee_adjusted": 0.44},
+        )
 
 
 # --------------------------------------------------------------------------
@@ -318,17 +327,15 @@ def test_maker_still_requires_passive_maker_context_at_verifier():
 
 
 # --------------------------------------------------------------------------
-# RESERVATION-CAP INVARIANT (structural anti-anti-alpha guard)
+# RESERVATION-GATE INVARIANT (structural anti-anti-alpha guard)
 # --------------------------------------------------------------------------
-def test_taker_never_prices_worse_than_reservation():
-    """If best_ask is ABOVE reservation, the cross is capped at reservation."""
-    # best_ask 0.55 > reservation 0.50 -> limit must clamp to 0.50, never 0.55.
-    _, _, final_intent = _taker_chain(
-        order_mode="TAKER",
-        quote_overrides={"best_ask": 0.55, "best_bid": 0.40, "native_execution_price": 0.55},
-    )
-    assert final_intent.payload["limit_price"] <= 0.50 + 1e-9
-    assert final_intent.payload["limit_price"] == pytest.approx(0.50)
+def test_taker_rejects_when_touch_is_worse_than_reservation():
+    """If best_ask is above reservation, a BUY FOK would not cross at reservation."""
+    with pytest.raises(ValueError, match="TAKER_BUY_TOUCH_EXCEEDS_RESERVATION"):
+        _taker_chain(
+            order_mode="TAKER",
+            quote_overrides={"best_ask": 0.55, "best_bid": 0.40, "native_execution_price": 0.55},
+        )
 
 
 # --------------------------------------------------------------------------

@@ -129,6 +129,14 @@ state/zeus-world.db.pre-p*-*
 /raw/*
 !/raw/AGENTS.md
 !/raw/README.md
+/51 source data/raw/
+/51 source data/tmp/
+/51 source data/.DS_Store
+/51 source data/docs/.DS_Store
+/51 source data/scripts/.DS_Store
+/51 source data/scripts/__pycache__/
+/51 source data/scripts/.omc/
+/51 source data/scripts/*.bak*
 raw/**/*.jsonl
 raw/**/*.csv
 raw/**/*.tsv

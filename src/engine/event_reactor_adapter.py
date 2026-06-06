@@ -139,6 +139,10 @@ class PreSubmitAuthorityWitness:
     max_quote_age_ms: int = 1000
 
 
+class _LiveOpportunityAlreadyLocked(RuntimeError):
+    """Raised when continuous redecision rediscovers an already-locked opportunity."""
+
+
 def build_event_reactor(
     store: EventStore,
     *,
@@ -295,6 +299,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
             bankroll_usd_provider=bankroll_usd_provider,
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
+            locked_opportunity_conn=live_cap_conn or trade_conn,
         )
 
     # Expose the per-cycle ledger so the reactor can commit/rollback provisional
@@ -328,7 +333,7 @@ def event_bound_live_adapter_from_trade_conn(
 
     This first full-live increment deliberately stops before executor submit
     when real submit is disabled. It creates the durable proof shape that a
-    later live-canary cut can submit through the existing executor seam.
+    later live-canary authorization can submit through the existing executor seam.
 
     Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
     ``bankroll_usd_provider``) lets Kelly size against the bankroll NET of
@@ -354,6 +359,7 @@ def event_bound_live_adapter_from_trade_conn(
             bankroll_usd_provider=bankroll_usd_provider,
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
+            locked_opportunity_conn=live_cap_conn or trade_conn,
         )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
@@ -481,6 +487,13 @@ def event_bound_live_adapter_from_trade_conn(
                 side_effect_status = "SUBMIT_DISABLED"
                 submitted = False
                 reason = "real_order_submit_disabled"
+        except _LiveOpportunityAlreadyLocked as exc:
+            return dataclass_replace(
+                no_submit_receipt,
+                side_effect_status="NO_SUBMIT",
+                reason=str(exc),
+                proof_accepted=True,
+            )
         except Exception as exc:
             return EventSubmissionReceipt(
                 False,
@@ -629,6 +642,7 @@ def build_event_bound_no_submit_receipt(
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -700,6 +714,14 @@ def build_event_bound_no_submit_receipt(
     row = _selected_snapshot_row_for_event(family_rows, payload)
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
+    selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
+    if selected_stale_reason is not None:
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=selected_stale_reason,
+        )
     decision = EventBoundDecisionEngine().evaluate(
         EventBoundDecisionRequest(
             event=event,
@@ -770,7 +792,11 @@ def build_event_bound_no_submit_receipt(
             source_status="MATCH",
             family_complete=True,
         )
-    proof = _selected_candidate_proof(payload, proofs)
+    proof = _selected_candidate_proof(
+        payload,
+        proofs,
+        locked_opportunity_conn=locked_opportunity_conn,
+    )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
         # persist the best-scoring family's mainstream verdict on the MISSING receipt so
@@ -833,6 +859,32 @@ def build_event_bound_no_submit_receipt(
             p_fill_lcb=proof.p_fill_lcb,
             trade_score=proof.trade_score,
             native_quote_available=False,
+            source_status="MATCH",
+            family_complete=True,
+        )
+    untradeable_limit_reason = _candidate_limit_price_untradeable_reason(proof)
+    if untradeable_limit_reason is not None:
+        return EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            reason=untradeable_limit_reason,
+            city=family.city,
+            target_date=family.target_date,
+            metric=family.metric,
+            condition_id=str(candidate.condition_id or ""),
+            token_id=selected_token_id,
+            executable_snapshot_id=proof.executable_snapshot_id,
+            family_id=family.family_id,
+            bin_label=candidate.bin.label,
+            direction=direction,
+            q_live=proof.q_posterior,
+            q_lcb_5pct=proof.q_lcb_5pct,
+            c_fee_adjusted=execution_price.value,
+            c_cost_95pct=proof.c_cost_95pct,
+            p_fill_lcb=proof.p_fill_lcb,
+            trade_score=proof.trade_score,
+            native_quote_available=True,
             source_status="MATCH",
             family_complete=True,
         )
@@ -1388,6 +1440,26 @@ def _build_live_execution_command_certificates(
         quote_feasibility = _required_cert(base_certs, claims.QUOTE_FEASIBILITY)
         cost_model = _required_cert(base_certs, claims.COST_MODEL)
         quote_payload = quote_feasibility.payload
+        from types import SimpleNamespace
+
+        side = "BUY" if str(actionable.payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
+        provisional_final_intent = SimpleNamespace(
+            payload={
+                "token_id": actionable.payload["token_id"],
+                "side": side,
+                "tick_size": float(_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01)),
+                "min_order_size": float(_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0)),
+                "neg_risk": bool(actionable.payload.get("neg_risk", False)),
+            }
+        )
+        authority_witness = _require_pre_submit_authority_witness(
+            pre_submit_authority_provider,
+            provisional_final_intent,
+            executable_snapshot,
+            decision_time,
+        )
+        fresh_best_bid = float(authority_witness.current_best_bid)
+        fresh_best_ask = float(authority_witness.current_best_ask)
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
         order_mode = _select_edli_order_mode(
@@ -1460,16 +1532,56 @@ def _build_live_execution_command_certificates(
                     executable_snapshot.payload.get("min_tick_size") or "0.01"
                 ))
                 _reservation = Decimal(str(_action_payload.get("c_fee_adjusted") or "0"))
-                _ask_for_limit = (
-                    Decimal(str(best_ask)) if best_ask is not None else _reservation
-                )
-                _limit_price_d = min(_ask_for_limit, _reservation)
-                # Tick-align limit price (floor) using the canonical tick_size
+                _direction_for_depth = str(_action_payload.get("direction") or "buy_no")
+                if _direction_for_depth.startswith("buy_"):
+                    _fresh_touch = Decimal(str(fresh_best_ask))
+                    # A BUY taker must cross the fresh ask.  If the ask is now above
+                    # the reservation, this candidate is no longer executable and
+                    # must be rejected so the reactor can continue to the next market.
+                    if _fresh_touch > _reservation:
+                        raise ValueError(
+                            "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:"
+                            f"best_ask={_fresh_touch}:reservation={_reservation}"
+                        )
+                    _limit_price_d = _fresh_touch
+                    _rounding_mode = "up"
+                else:
+                    _fresh_touch = Decimal(str(fresh_best_bid))
+                    if _fresh_touch < _reservation:
+                        raise ValueError(
+                            "TAKER_SELL_TOUCH_BELOW_RESERVATION:"
+                            f"best_bid={_fresh_touch}:reservation={_reservation}"
+                        )
+                    _limit_price_d = _fresh_touch
+                    _rounding_mode = "down"
+                # Tick-align the marketable touch using the canonical tick_size:
+                # BUY rounds up to keep crossing; SELL rounds down to keep crossing.
                 import math as _math
                 if _tick_size_d > 0:
+                    _ratio = float(_limit_price_d) / float(_tick_size_d)
+                    _round_fn = _math.ceil if _rounding_mode == "up" else _math.floor
+                    _epsilon = -1e-9 if _rounding_mode == "up" else 1e-9
                     _limit_price_d = Decimal(str(
-                        round(_math.floor(float(_limit_price_d) / float(_tick_size_d) + 1e-9) * float(_tick_size_d), 10)
+                        round(_round_fn(_ratio + _epsilon) * float(_tick_size_d), 10)
                     ))
+                    if _direction_for_depth.startswith("buy_") and _limit_price_d > _reservation:
+                        raise ValueError(
+                            "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:"
+                            f"marketable_limit={_limit_price_d}:reservation={_reservation}"
+                        )
+                    if (
+                        not _direction_for_depth.startswith("buy_")
+                        and _limit_price_d < _reservation
+                    ):
+                        raise ValueError(
+                            "TAKER_SELL_TOUCH_BELOW_RESERVATION:"
+                            f"marketable_limit={_limit_price_d}:reservation={_reservation}"
+                        )
+                if _limit_price_d <= 0:
+                    raise ValueError(
+                        "EXECUTION_PRICE_BELOW_MIN_TICK:"
+                        f"limit_price={_limit_price_d}:min_tick_size={_tick_size_d}"
+                    )
                 _reserved_notional = Decimal(str(
                     _action_payload.get("live_cap_reserved_notional_usd")
                     or _action_payload.get("kelly_size_usd")
@@ -1491,7 +1603,7 @@ def _build_live_execution_command_certificates(
                 _desired_shares = Decimal(str(_desired_shares_f))
                 _depth_sweep = simulate_clob_sweep(
                     snapshot=_snap_for_depth,
-                    direction=str(_action_payload.get("direction") or "buy_no"),
+                    direction=_direction_for_depth,
                     requested_size_kind="shares",
                     requested_size_value=_desired_shares,
                     limit_price=_limit_price_d,
@@ -1521,7 +1633,7 @@ def _build_live_execution_command_certificates(
                         # stored VWAP matches what the executor guard will compute.
                         _capped_sweep = simulate_clob_sweep(
                             snapshot=_snap_for_depth,
-                            direction=str(_action_payload.get("direction") or "buy_no"),
+                            direction=_direction_for_depth,
                             requested_size_kind="shares",
                             requested_size_value=_capped_shares,
                             limit_price=_limit_price_d,
@@ -1566,12 +1678,52 @@ def _build_live_execution_command_certificates(
             # provenance fault, not a 0.01 market.
             tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _required_bound_tick_size(_snap_for_depth, executable_snapshot.payload),
             min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
-            best_bid=best_bid,
-            best_ask=best_ask,
+            best_bid=fresh_best_bid if str(order_mode).strip().upper() == "TAKER" else best_bid,
+            best_ask=fresh_best_ask if str(order_mode).strip().upper() == "TAKER" else best_ask,
             taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
         )
+        if (
+            taker_fok_fak_live_enabled
+            and final_intent.payload.get("post_only") is True
+            and _ev_boundary_favors_cross(
+                actionable_payload=actionable.payload,
+                quote_payload=quote_payload,
+                best_bid=fresh_best_bid,
+                best_ask=fresh_best_ask,
+                reservation=_optional_float(actionable.payload.get("c_fee_adjusted")),
+                side=str(actionable.payload.get("side") or "BUY"),
+            )
+        ):
+            final_intent = build_final_intent_certificate_from_actionable(
+                actionable_cert=actionable,
+                executable_snapshot_cert=executable_snapshot,
+                quote_feasibility_cert=quote_feasibility,
+                cost_model_cert=cost_model,
+                forecast_authority_cert=forecast_authority,
+                decision_source_context=forecast_authority.payload,
+                passive_maker_context=None,
+                decision_time=decision_time,
+                order_mode="TAKER",
+                tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _required_bound_tick_size(_snap_for_depth, executable_snapshot.payload),
+                min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
+                best_bid=fresh_best_bid,
+                best_ask=fresh_best_ask,
+                taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
+                available_crossable_shares=available_crossable_shares,
+                sweep_expected_fill_price=sweep_expected_fill_price,
+            )
+        already_locked_reason = _locked_live_opportunity_no_price_improvement_reason(
+            live_cap_conn,
+            condition_id=str(final_intent.payload["condition_id"]),
+            token_id=str(final_intent.payload["token_id"]),
+            direction=str(final_intent.payload["direction"]),
+            side=str(final_intent.payload.get("side") or "BUY"),
+            limit_price=_optional_float(final_intent.payload.get("limit_price")),
+        )
+        if already_locked_reason is not None:
+            raise _LiveOpportunityAlreadyLocked(already_locked_reason)
         executor_native_intent_hash = validate_final_intent_cert_for_existing_executor(final_intent)
         aggregate_ledger = LiveOrderAggregateLedger(live_cap_conn)
         aggregate_id = _live_order_aggregate_id(event.event_id, str(final_intent.payload["final_intent_id"]))
@@ -1613,12 +1765,7 @@ def _build_live_execution_command_certificates(
                 final_intent=final_intent,
                 executable_snapshot=executable_snapshot,
                 decision_time=decision_time,
-                authority_witness=_require_pre_submit_authority_witness(
-                    pre_submit_authority_provider,
-                    final_intent,
-                    executable_snapshot,
-                    decision_time,
-                ),
+                authority_witness=authority_witness,
             ),
             occurred_at=decision_time,
             source_authority="engine_adapter",
@@ -1682,8 +1829,8 @@ def _build_live_execution_command_certificates(
         # _build_live_cap_certificate_from_ledger above; it MUST honour the same
         # explicit cap-disable sentinel, else an uncapped Kelly size would be
         # rejected here as "exceeds". Fail-safe: missing/malformed sentinel keeps
-        # the cap enabled (cap_explicitly_disabled returns True only for literal
-        # false). max_orders_per_window (flood-guard) is untouched.
+        # the configured limit enabled (cap_explicitly_disabled returns True only
+        # for literal false).
         _edli_cfg = settings["edli_v1"]
         reserve_result = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
@@ -1704,6 +1851,10 @@ def _build_live_execution_command_certificates(
         )
         if reserve_result.usage_id != str(live_cap.payload["usage_id"]):
             raise ValueError("live cap reservation drift for provisional certificate")
+        if float(reserve_result.reserved_notional_usd) != float(live_cap.payload["reserved_notional_usd"]):
+            raise ValueError("LIVE_CAP_RESERVED_NOTIONAL_DRIFT")
+        if float(reserve_result.max_notional_usd) != float(live_cap.payload["max_notional_usd"]):
+            raise ValueError("LIVE_CAP_MAX_NOTIONAL_DRIFT")
     except Exception:
         raise
     return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
@@ -1737,6 +1888,7 @@ def _actionable_payload_from_receipt(
         "risk_decision_id": receipt.risk_decision_id,
         "live_cap_usage_id": live_cap_cert.payload["usage_id"],
         "live_cap_reserved_notional_usd": reserved_notional,
+        "live_cap_notional_cap_enabled": bool(live_cap_cert.payload.get("notional_cap_enabled", True)),
         "final_intent_id": receipt.final_intent_id,
         "neg_risk": receipt.neg_risk,
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
@@ -1758,6 +1910,87 @@ def _execution_command_id_from_final_intent(
     return (
         f"edli_exec_cmd:{action['event_id']}:{intent['final_intent_id']}:"
         f"{intent['token_id']}:{intent['direction']}"
+    )
+
+
+def _locked_live_opportunity_no_price_improvement_reason(
+    live_cap_conn: sqlite3.Connection | None,
+    *,
+    condition_id: str,
+    token_id: str,
+    direction: str,
+    side: str,
+    limit_price: float | None,
+    improve_delta: float = 0.02,
+) -> str | None:
+    """Return a suppression reason when a locked opportunity has not repriced better.
+
+    Continuous redecision may keep scanning fresh forecast events, but once the
+    money path has locked a specific condition/token/direction into an execution
+    command, identical later cycles must not emit another will-trade chain.  A
+    later cycle is allowed only when the final limit price materially improves.
+    For BUY directions that means a lower limit; for SELL directions, a higher
+    limit.
+    """
+
+    if live_cap_conn is None or not condition_id or not token_id or not direction:
+        return None
+    LiveOrderAggregateLedger(live_cap_conn)
+    rows = live_cap_conn.execute(
+        """
+        SELECT
+            json_extract(plan.payload_json, '$.limit_price') AS prior_limit_price,
+            plan.aggregate_id,
+            plan.occurred_at
+        FROM edli_live_order_events AS plan
+        WHERE plan.event_type = 'SubmitPlanBuilt'
+          AND json_extract(plan.payload_json, '$.condition_id') = ?
+          AND json_extract(plan.payload_json, '$.token_id') = ?
+          AND json_extract(plan.payload_json, '$.direction') = ?
+          AND EXISTS (
+              SELECT 1
+              FROM edli_live_order_events AS command
+              WHERE command.aggregate_id = plan.aggregate_id
+                AND command.event_type = 'ExecutionCommandCreated'
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM edli_live_order_events AS rejected
+              WHERE rejected.aggregate_id = plan.aggregate_id
+                AND rejected.event_type = 'SubmitRejected'
+          )
+        ORDER BY plan.occurred_at DESC
+        LIMIT 64
+        """,
+        (condition_id, token_id, direction),
+    ).fetchall()
+    prior_prices = [
+        price
+        for price in (_optional_float(row[0]) for row in rows)
+        if price is not None
+    ]
+    if not prior_prices:
+        return None
+    side_upper = str(side or "").strip().upper()
+    if limit_price is None:
+        return (
+            "EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT:"
+            f"condition_id={condition_id}:token_id={token_id}:direction={direction}"
+        )
+    if side_upper == "SELL":
+        prior_best = max(prior_prices)
+        if limit_price >= prior_best + improve_delta - 1e-9:
+            return None
+        comparison = f"prior_best_limit={prior_best:.6g}:current_limit={limit_price:.6g}:required_delta={improve_delta:.6g}"
+    else:
+        prior_best = min(prior_prices)
+        if limit_price <= prior_best - improve_delta + 1e-9:
+            return None
+        comparison = f"prior_best_limit={prior_best:.6g}:current_limit={limit_price:.6g}:required_delta={improve_delta:.6g}"
+    return (
+        "EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT:"
+        f"condition_id={condition_id}:token_id={token_id}:direction={direction}:"
+        f"{comparison}"
     )
 
 
@@ -1891,14 +2124,13 @@ def _build_live_cap_certificate_from_ledger(
 ) -> DecisionCertificate:
     if live_cap_conn is None:
         raise ValueError("LIVE_CAP_LEDGER_CONNECTION_REQUIRED")
-    from src.events.live_cap import LiveCapLedger, cap_explicitly_disabled
+    from src.events.live_cap import LiveCapLedger, cap_explicitly_disabled, normalize_live_cap_request
 
     # 2026-06-03 operator directive: the artificial $5 notional + 1/day caps may
     # be EXPLICITLY disabled (config sentinel == literal false) so fractional
     # Kelly is the sole notional-sizing constraint. FAIL-SAFE: a missing or
-    # malformed sentinel leaves the cap ENABLED (cap_explicitly_disabled returns
-    # True only for the literal Python False). The flood-guard rate window and
-    # the collateral check are untouched by these flags.
+    # malformed sentinel leaves the configured limit ENABLED
+    # (cap_explicitly_disabled returns True only for the literal Python False).
     _edli_cfg = settings["edli_v1"]
     notional_cap_enabled = not cap_explicitly_disabled(
         _edli_cfg.get("tiny_live_notional_cap_enabled")
@@ -1906,12 +2138,10 @@ def _build_live_cap_certificate_from_ledger(
     daily_order_cap_enabled = not cap_explicitly_disabled(
         _edli_cfg.get("tiny_live_daily_order_cap_enabled")
     )
-    from src.events.live_cap import HARD_NOTIONAL_CEILING_USD
-
     price = _float_or_default(receipt.c_fee_adjusted, 0.01)
     kelly_usd = float(receipt.kelly_size_usd or 0.0)
     if notional_cap_enabled:
-        # Cap ON: clamp Kelly to the ceiling exactly as before.
+        # Configured limit ON: bound Kelly by max_notional_usd exactly as before.
         min_order_notional = min(max_notional_usd, max(price, 0.01))
         requested_notional = max(min(kelly_usd, max_notional_usd), min_order_notional)
     else:
@@ -1920,17 +2150,14 @@ def _build_live_cap_certificate_from_ledger(
         # against a sub-tick request; nothing above it is clamped.
         min_order_notional = max(price, 0.01)
         requested_notional = max(kelly_usd, min_order_notional)
-    # PR-2 (C) N3: the HARD notional ceiling is INDEPENDENT of the cap flag —
-    # clamp here too so the recorded ceiling and the persisted request stay
-    # self-consistent. LiveCapLedger.reserve re-applies the same clamp (the
-    # load-bearing antibody); this keeps the adapter-side view aligned.
-    requested_notional = min(float(requested_notional), float(HARD_NOTIONAL_CEILING_USD))
-    usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
-    # Self-consistent recorded ceiling: the actual size when uncapped, else the
-    # configured cap (mirrors LiveCapLedger.reserve's recorded_max_notional_usd).
-    recorded_max_notional_usd = (
-        float(max_notional_usd) if notional_cap_enabled else float(requested_notional)
+    normalized = normalize_live_cap_request(
+        requested_notional_usd=float(requested_notional),
+        max_notional_usd=float(max_notional_usd),
+        notional_cap_enabled=notional_cap_enabled,
     )
+    requested_notional = normalized.requested_notional_usd
+    usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
+    recorded_max_notional_usd = normalized.recorded_max_notional_usd
     if persist:
         reservation = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
@@ -1962,6 +2189,7 @@ def _build_live_cap_certificate_from_ledger(
             order_count=1,
             reservation_status="RESERVED",
             final_intent_id=receipt.final_intent_id,
+            notional_cap_enabled=notional_cap_enabled,
         )
     payload = reservation.certificate_payload()
     return build_certificate(
@@ -3116,6 +3344,8 @@ def _calibration_authority_payload_and_clock(
     calibration_source_id = calibration_source_id_for_lookup(raw_source_id)
     if calibration_source_id is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:source_id")
+    if not _table_exists(calibration_conn, "platt_models"):
+        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:store")
     row, level, _model_data = _persisted_calibration_model_row_for_receipt(
         calibration_conn,
         city=city,
@@ -3126,7 +3356,44 @@ def _calibration_authority_payload_and_clock(
         horizon_profile=horizon_profile,
     )
     if row is None:
-        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:model_row")
+        model_key = (
+            "identity_fallback_no_platt_bucket_v1:"
+            f"{family.metric}:{city.cluster}:{str(family.target_date)}:"
+            f"{cycle}:{calibration_source_id}:{horizon_profile}"
+        )
+        training_cutoff_raw = decision_time.astimezone(UTC).isoformat()
+        payload_out = {
+            "identity": model_key,
+            "calibrator_model_key": model_key,
+            "calibrator_version": model_key,
+            "calibration_source_id": calibration_source_id,
+            "raw_source_id": raw_source_id,
+            "source_cycle": cycle,
+            "horizon_profile": horizon_profile,
+            "training_cutoff": training_cutoff_raw,
+            "model_available_at": training_cutoff_raw,
+            "model_materialized_at": training_cutoff_raw,
+            "model_hash": _hash_jsonish(
+                {
+                    "model_key": model_key,
+                    "calibration_method": "identity_missing_platt_bucket_v1",
+                    "cluster": city.cluster,
+                    "temperature_metric": family.metric,
+                    "source_id": calibration_source_id,
+                    "cycle": cycle,
+                    "horizon_profile": horizon_profile,
+                }
+            ),
+            "maturity_level": 4,
+            "n_samples": 0,
+            "input_space": "width_normalized_density",
+            "authority": "IDENTITY_FALLBACK_NO_PLATT_BUCKET",
+        }
+        return payload_out, EvidenceClock(
+            decision_time,
+            decision_time,
+            decision_time,
+        )
     model_key = row.get("model_key")
     training_cutoff_raw = row.get("training_cutoff") or _date_cutoff_from_calibration_row(row)
     training_cutoff_time = _parse_utc(training_cutoff_raw)
@@ -3281,6 +3548,7 @@ def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
 #     bound on p(NO) says the bin overwhelmingly will NOT settle). Default 0.95.
 _MARKET_DISAGREE_NO_PRICE_MAX = 0.15
 _MARKET_DISAGREE_QLCB_MIN_ESCAPE = 0.95
+_MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.02
 
 
 def _market_disagreement_demotes_buy_no(
@@ -3328,6 +3596,34 @@ def _market_disagreement_demotes_buy_no(
     # Cheap NO. Only an overwhelming, independently-grounded NO-space q_lcb
     # licences the bet against a confident market.
     return q_lcb_5pct < qlcb_min_escape
+
+
+def _capital_efficiency_untradeable_reason(
+    *,
+    execution_price: ExecutionPrice | None,
+    trade_score: float,
+    min_roi: float | None = None,
+) -> str | None:
+    if execution_price is None:
+        return None
+    price = _optional_float(execution_price.value)
+    if price is None or price <= 0.0:
+        return "CAPITAL_EFFICIENCY_PRICE_INVALID"
+    threshold = (
+        float(settings["edli_v1"].get("min_robust_capital_efficiency_roi", _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI))
+        if min_roi is None
+        else float(min_roi)
+    )
+    if threshold <= 0.0:
+        return None
+    robust_roi = float(trade_score) / price
+    if robust_roi < threshold:
+        return (
+            "CAPITAL_EFFICIENCY_ROI_BELOW_MIN:"
+            f"robust_roi={robust_roi:.6f}:min_roi={threshold:.6f}:"
+            f"trade_score={float(trade_score):.6f}:execution_price={price:.6f}"
+        )
+    return None
 
 
 def _generate_candidate_proofs(
@@ -3411,14 +3707,18 @@ def _generate_candidate_proofs(
             elif row is None:
                 missing_reason = "missing executable snapshot row"
             else:
-                try:
-                    execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
-                        row,
-                        selected_token_id=token_id,
-                        direction=direction,
-                    )
-                except ValueError as exc:
-                    missing_reason = str(exc)
+                stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
+                if stale_reason is not None:
+                    missing_reason = stale_reason
+                else:
+                    try:
+                        execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
+                            row,
+                            selected_token_id=token_id,
+                            direction=direction,
+                        )
+                    except ValueError as exc:
+                        missing_reason = str(exc)
             score = _robust_trade_score_from_generated_inputs(
                 q_posterior=q_value,
                 q_lcb_5pct=q_lcb,
@@ -3466,12 +3766,20 @@ def _generate_candidate_proofs(
                         f"no_price={market_no_price:.4f}<={_md_no_max:.4f} "
                         f"q_lcb={q_lcb:.4f}<{_md_qlcb:.4f}"
                     )
+            capital_efficiency_reason = _capital_efficiency_untradeable_reason(
+                execution_price=execution_price,
+                trade_score=score,
+            )
+            if capital_efficiency_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = capital_efficiency_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A demoted contrarian buy_no must not enter the FDR family as a
             # "passed" hypothesis — it is structurally non-tradeable, not merely
             # low-scoring. Force prefilter False so it can never be selected.
-            if _market_disagreement_demoted:
+            if _market_disagreement_demoted or capital_efficiency_reason is not None:
                 passed_prefilter = False
             proofs.append(
                 _CandidateProof(
@@ -3504,7 +3812,12 @@ def _generate_candidate_proofs(
     return tuple(proofs)
 
 
-def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_CandidateProof, ...]) -> _CandidateProof | None:
+def _selected_candidate_proof(
+    payload: dict[str, object],
+    proofs: tuple[_CandidateProof, ...],
+    *,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
+) -> _CandidateProof | None:
     requested_token = _nonnull(payload.get("token_id"))
     requested_condition = _nonnull(payload.get("condition_id"))
     if requested_token:
@@ -3525,9 +3838,81 @@ def _selected_candidate_proof(payload: dict[str, object], proofs: tuple[_Candida
     # pick always reaches the receipt with its verdict annotated. The only reason
     # these are no_submit is shadow/arm=False, not the mainstream gate.)
     executable = [proof for proof in proofs if proof.execution_price is not None]
+    tradeable_limit = [
+        proof
+        for proof in executable
+        if _candidate_limit_price_untradeable_reason(proof) is None
+    ]
+    if tradeable_limit:
+        executable = tradeable_limit
+    if locked_opportunity_conn is not None:
+        unlocked = [
+            proof
+            for proof in executable
+            if _locked_candidate_no_price_improvement_reason(
+                locked_opportunity_conn,
+                proof,
+            )
+            is None
+        ]
+        if unlocked:
+            executable = unlocked
+        elif executable:
+            non_executable = [proof for proof in proofs if proof.execution_price is None]
+            return max(non_executable, key=lambda proof: proof.q_lcb_5pct, default=None)
     if not executable:
         return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
     return max(executable, key=lambda proof: (proof.trade_score, proof.q_lcb_5pct))
+
+
+def _locked_candidate_no_price_improvement_reason(
+    live_cap_conn: sqlite3.Connection | None,
+    proof: _CandidateProof,
+) -> str | None:
+    execution_price = getattr(proof, "execution_price", None)
+    limit_price = _optional_float(getattr(execution_price, "value", None))
+    return _locked_live_opportunity_no_price_improvement_reason(
+        live_cap_conn,
+        condition_id=str(getattr(getattr(proof, "candidate", None), "condition_id", "") or ""),
+        token_id=str(getattr(proof, "token_id", "") or ""),
+        direction=str(getattr(proof, "direction", "") or ""),
+        side="SELL" if str(getattr(proof, "direction", "") or "").startswith("sell_") else "BUY",
+        limit_price=limit_price,
+    )
+
+
+def _candidate_limit_price_untradeable_reason(proof: _CandidateProof) -> str | None:
+    execution_price = getattr(proof, "execution_price", None)
+    limit_price = _optional_float(getattr(execution_price, "value", None))
+    if limit_price is None:
+        return "EXECUTION_PRICE_MISSING"
+    min_tick = _candidate_min_tick_size(proof)
+    if min_tick is None:
+        min_tick = 0.01
+    if min_tick <= 0.0:
+        return f"EXECUTION_PRICE_MIN_TICK_INVALID:{min_tick!r}"
+    if limit_price < min_tick - 1e-12:
+        return (
+            "EXECUTION_PRICE_BELOW_MIN_TICK:"
+            f"limit_price={limit_price:.12g}:min_tick_size={min_tick:.12g}"
+        )
+    return None
+
+
+def _candidate_min_tick_size(proof: _CandidateProof) -> float | None:
+    row = getattr(proof, "row", None)
+    if row is None:
+        return None
+    getter = getattr(row, "get", None)
+    for key in ("min_tick_size", "tick_size"):
+        try:
+            raw = getter(key) if callable(getter) else row[key]
+        except Exception:
+            raw = None
+        value = _optional_float(raw)
+        if value is not None:
+            return value
+    return None
 
 
 def _live_yes_probabilities(
@@ -4091,6 +4476,9 @@ def _market_analysis_from_event_snapshot(
                 getattr(city, "name", family.city), _emos_season, family.metric, unit,
                 type(_emos_exc).__name__, _emos_exc,
             )
+            from src.calibration.emos import SettlementSigmaFloorError
+            if isinstance(_emos_exc, SettlementSigmaFloorError):
+                raise
     if _emos_q is not None:
         _q_vec, _emos_mu_native, _emos_sigma_native = _emos_q
         p_raw = np.asarray(_q_vec, dtype=float)
@@ -4136,6 +4524,9 @@ def _market_analysis_from_event_snapshot(
                 getattr(city, "name", family.city), _emos_season, family.metric, unit,
                 type(_hr_exc).__name__, _hr_exc,
             )
+            from src.calibration.emos import SettlementSigmaFloorError
+            if isinstance(_hr_exc, SettlementSigmaFloorError):
+                raise
         if _hr is not None:
             _hrq, _hr_mu, _hr_sigma = _hr
             p_raw = np.asarray(_hrq, dtype=float)
@@ -5781,14 +6172,27 @@ def _snapshot_lead_days(*, snapshot: dict[str, Any], family, payload: dict[str, 
     lead_hours = _optional_float(snapshot.get("lead_hours") or payload.get("lead_hours"))
     if lead_hours is not None and lead_hours >= 0.0:
         return lead_hours / 24.0
-    issue = _parse_utc(snapshot.get("issue_time") or snapshot.get("source_cycle_time") or payload.get("cycle"))
+    issue = _parse_utc(
+        snapshot.get("issue_time")
+        or snapshot.get("source_cycle_time")
+        or snapshot.get("source_available_at")
+        or snapshot.get("available_at")
+        or payload.get("cycle")
+        or payload.get("source_cycle_time")
+        or payload.get("source_available_at")
+        or payload.get("available_at")
+        or payload.get("observation_time")
+        or payload.get("observation_available_at")
+    )
     try:
         target_day = date.fromisoformat(str(family.target_date))
     except ValueError as exc:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:target date invalid") from exc
     if issue is None:
         raise ValueError("CALIBRATION_AUTHORITY_MISSING:lead_days missing")
-    target_start = datetime.combine(target_day, time.min, tzinfo=UTC)
+    target_start = _parse_utc(snapshot.get("local_day_start_utc") or payload.get("local_day_start_utc"))
+    if target_start is None:
+        target_start = datetime.combine(target_day, time.min, tzinfo=UTC)
     return max(0.0, (target_start - issue).total_seconds() / 86400.0)
 
 
@@ -5974,6 +6378,13 @@ def _table_ref_columns(conn: sqlite3.Connection, table_ref: str) -> set[str]:
 def _authority_table_ref(conn: sqlite3.Connection, table_name: str) -> str | None:
     try:
         attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+        if "forecasts" in attached:
+            exists = conn.execute(
+                "SELECT 1 FROM forecasts.sqlite_master WHERE type='table' AND name=?",
+                (table_name,),
+            ).fetchone()
+            if exists is not None:
+                return f"forecasts.{table_name}"
         if "world" in attached:
             exists = conn.execute(
                 "SELECT 1 FROM world.sqlite_master WHERE type='table' AND name=?",
@@ -5995,6 +6406,23 @@ def _snapshot_rows_by_condition(rows: list[dict[str, Any]]) -> dict[str, dict[st
         if condition_id and condition_id not in out:
             out[condition_id] = row
     return out
+
+
+def _snapshot_price_stale_reason(row: dict[str, Any], *, decision_time: datetime) -> str | None:
+    deadline_raw = row.get("freshness_deadline")
+    if deadline_raw in {None, ""}:
+        return "EXECUTABLE_SNAPSHOT_STALE:freshness_deadline_missing"
+    try:
+        deadline = _parse_utc(str(deadline_raw))
+    except Exception:
+        return "EXECUTABLE_SNAPSHOT_STALE:freshness_deadline_invalid"
+    checked_at = decision_time.astimezone(UTC)
+    if deadline < checked_at:
+        return (
+            "EXECUTABLE_SNAPSHOT_STALE:"
+            f"freshness_deadline={deadline.isoformat()}:decision_time={checked_at.isoformat()}"
+        )
+    return None
 
 
 def _latest_snapshot_rows_for_event_family(
@@ -6028,6 +6456,10 @@ def _latest_snapshot_rows_for_event_family(
     if require_fresh:
         predicates.append("freshness_deadline >= ?")
         params.append((fresh_at or datetime.now(UTC)).isoformat())
+    if fresh_at is not None and "captured_at" in columns:
+        checked_at = fresh_at.astimezone(UTC) if fresh_at.tzinfo is not None and fresh_at.utcoffset() is not None else fresh_at
+        predicates.append("captured_at <= ?")
+        params.append(checked_at.isoformat())
     placeholders = ",".join("?" for _ in clean_condition_ids)
     predicates.append(f"condition_id IN ({placeholders})")
     params.extend(clean_condition_ids)

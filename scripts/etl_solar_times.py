@@ -26,9 +26,12 @@ from src.state.db import get_world_connection as get_connection, init_schema
 
 logger = logging.getLogger(__name__)
 
-SOLAR_JSONL = Path(
-    "/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/solar/"
-    "city_solar_times_20240101_20260331.jsonl"
+SOLAR_JSONL = (
+    PROJECT_ROOT
+    / "51 source data"
+    / "raw"
+    / "solar"
+    / "city_solar_times_20240101_20260331.jsonl"
 )
 
 _REQUIRED_FIELDS = (

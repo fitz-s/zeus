@@ -9,6 +9,12 @@
 # Mode: READ-ONLY enumeration. No edits / git / DB writes. Every seam grep-verified at HEAD.
 ```
 
+> Historical note, 2026-06-05: this seam ledger predates the EDLI no-cap
+> directive. Its discussion of flat per-order clamps describes the 2026-06-01
+> runtime state only. Current no-cap authority is
+> `docs/operations/LIVE_CAP_NO_CAP_REGRESSION_EVIDENCE_2026-06-05.md`.
+> Do not use this file to revive a hidden EDLI notional cap.
+
 ## The K=1 structural decision (Fitz #1/#2)
 
 The EDLI reactor (`src/engine/event_reactor_adapter.py`) reaches the SAME shared engines the

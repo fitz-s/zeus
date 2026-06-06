@@ -359,7 +359,10 @@ def build_forecast_snapshot_ready_event(
         source_id=str(source_run.get("source_id") or coverage.get("source_id")),
         source_run_id=str(source_run.get("source_run_id") or coverage.get("source_run_id")),
         cycle=str(source_run.get("source_cycle_time") or ""),
-        track=str(source_run.get("track") or coverage.get("track") or ""),
+        track=_serving_track_label(
+            track=str(source_run.get("track") or coverage.get("track") or ""),
+            data_version=str(coverage.get("data_version") or snapshot.get("data_version") or ""),
+        ),
         snapshot_id=str(snapshot.get("snapshot_id")),
         snapshot_hash=str(snapshot.get("snapshot_hash") or snapshot.get("manifest_hash") or ""),
         captured_at=str(source_run.get("captured_at") or snapshot.get("fetch_time") or received_at),
@@ -439,7 +442,7 @@ class ForecastSnapshotReadyTrigger:
         forecasts_conn: sqlite3.Connection,
         decision_time: datetime,
         received_at: str,
-        limit: int = 100,
+        limit: int | None = 100,
         source: str | None = None,
         already_pending_keys: set[str] | None = None,
     ) -> list[EventWriteResult]:
@@ -536,27 +539,39 @@ class ForecastSnapshotReadyTrigger:
                     _decision_iso,
                 ),
             )
-            rows = CoverageFairnessRequest(
-                limit=limit, cycle_index=_cycle_index
-            ).select_rows(rows)
+            if limit is not None:
+                rows = CoverageFairnessRequest(
+                    limit=max(1, int(limit)), cycle_index=_cycle_index
+                ).select_rows(rows)
         else:
-            # Legacy path: SQL LIMIT keeps behaviour byte-identical to pre-B4.
-            rows = _dict_rows(
-                forecasts_conn,
-                _select_sql_base + "\n            LIMIT ?",
-                (
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
-                    limit,
-                ),
-            )
-        # WAVE-1 W1-T1 intake phase filter (gated by
-        # edli_v1.edli_intake_phase_filter_enabled, default OFF). When ON, a
-        # forecast_only family whose target local day has begun or whose market
-        # has closed (NOT MarketPhase.PRE_SETTLEMENT_DAY) is skipped HERE so it
-        # never consumes the reactor's bounded decision-proof budget — 76.3% of
-        # candidates die at EVENT_BOUND_MARKET_PHASE_CLOSED in the reactor today.
+            if limit is None:
+                rows = _dict_rows(
+                    forecasts_conn,
+                    _select_sql_base,
+                    (
+                        _decision_iso,
+                        _decision_iso,
+                        _decision_iso,
+                    ),
+                )
+            else:
+                # Legacy path: SQL LIMIT keeps behaviour byte-identical to pre-B4.
+                rows = _dict_rows(
+                    forecasts_conn,
+                    _select_sql_base + "\n            LIMIT ?",
+                    (
+                        _decision_iso,
+                        _decision_iso,
+                        _decision_iso,
+                        max(1, int(limit)),
+                    ),
+                )
+        # WAVE-1 W1-T1 intake phase filter. For one-shot catch-up this remains
+        # gated by edli_v1.edli_intake_phase_filter_enabled (default OFF). For
+        # continuous re-decision (source is per-cycle) it is mandatory: same-day
+        # forecast_only families have already entered SETTLEMENT_DAY and must not
+        # be re-emitted every minute to consume the bounded decision-proof budget.
+        # The reactor's EVENT_BOUND_MARKET_PHASE_CLOSED backstop stays authoritative.
         # market_phase_admits is the SAME predicate the reactor applies as a
         # fail-closed backstop (they cannot diverge). The forecast-DB rows carry
         # no market start/end timing, so the empty market_row falls back to the
@@ -564,7 +579,7 @@ class ForecastSnapshotReadyTrigger:
         # path. FAIL-OPEN on the flag being absent/OFF; the reactor backstop
         # remains the authority either way.
         _intake_phase_filter_on = bool(
-            _intake_phase_filter_enabled()
+            source is not None or _intake_phase_filter_enabled()
         )
         pending_skip = already_pending_keys or set()
         results: list[EventWriteResult] = []
@@ -716,6 +731,22 @@ def _required_expected_steps(*, source_run: dict[str, Any], coverage: dict[str, 
         if window_start <= valid_at <= window_end:
             required_steps.append(int(step))
     return required_steps
+
+
+def _serving_track_label(*, track: str, data_version: str) -> str:
+    """Return the live-serving product label carried in FSR payloads.
+
+    OpenData source_run IDs still contain legacy mx2t6/mn2t6 track names, while
+    the actual written data_version is the post-cutover mx2t3/mn2t3 product.
+    Keep source_run_id unchanged for DB provenance, but expose the canonical
+    t3 serving track in trading receipts/events.
+    """
+
+    if data_version == "ecmwf_opendata_mx2t3_local_calendar_day_max":
+        return "mx2t3_high_full_horizon" if track.endswith("_full_horizon") else "mx2t3_high"
+    if data_version == "ecmwf_opendata_mn2t3_local_calendar_day_min":
+        return "mn2t3_low_full_horizon" if track.endswith("_full_horizon") else "mn2t3_low"
+    return track
 
 
 def _parse_utc(value: Any, field_name: str) -> datetime:

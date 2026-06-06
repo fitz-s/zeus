@@ -38,7 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _default_cache_root() -> Path:
     candidates = (
-        REPO_ROOT.parent / "51 source data" / "raw",
+        REPO_ROOT / "51 source data" / "raw",
         REPO_ROOT.parent.parent / "workspace-venus" / "51 source data" / "raw",
         Path("/Users/leofitz/.openclaw/workspace-venus/51 source data/raw"),
     )

@@ -609,7 +609,7 @@ def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
     Fail-closed: ``edli_arm_gate_artifact_required`` defaults to True; a missing flag
     still requires the artifact. Only the explicit literal False — set by an operator
     who is knowingly de-binding — relaxes it, and even then the existing
-    promotion-artifact gate and the live-cap hard ceiling remain in force.
+    promotion-artifact gate and live-cap ledger consistency checks remain in force.
     """
     if not bool(edli_cfg.get("edli_arm_gate_artifact_required", True)):
         return
@@ -1857,6 +1857,7 @@ def _write_heartbeat() -> None:
 _venue_heartbeat_supervisor = None
 _venue_heartbeat_adapter = None
 _venue_heartbeat_thread = None
+_edli_reactor_active_lock = threading.Lock()
 _venue_background_maintenance_lock = threading.Lock()
 _last_venue_background_maintenance_attempt_at = None
 VENUE_BACKGROUND_MAINTENANCE_SECONDS = 30.0
@@ -1871,6 +1872,40 @@ def _venue_heartbeat_mode() -> str:
 
 def _external_venue_heartbeat_enabled() -> bool:
     return _venue_heartbeat_mode() == "external"
+
+
+def _edli_reactor_active() -> bool:
+    return _edli_reactor_active_lock.locked()
+
+
+def _edli_reactor_pending_backlog_exists(*, conn_factory=None) -> bool:
+    """Return True when EDLI has pending opportunity events that should drain first."""
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
+        return False
+    owns_connection = conn_factory is None
+    conn = None
+    try:
+        from src.state.db import get_world_connection
+
+        conn = (conn_factory or get_world_connection)()
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM opportunity_event_processing
+             WHERE consumer_name = 'edli_reactor_v1'
+               AND processing_status = 'pending'
+             LIMIT 1
+            """
+        ).fetchone()
+        return row is not None
+    except Exception as exc:  # noqa: BLE001 - fail-open; heartbeat must stay alive.
+        logger.warning("EDLI pending backlog check failed open: %r", exc)
+        return False
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()
 
 
 def _configure_external_venue_heartbeat_supervisor_if_needed() -> None:
@@ -1957,7 +1992,7 @@ def _run_ws_gap_reconcile_if_required(
 
     if adapter is None:
         return {"status": "adapter_unavailable"}
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return {"status": "deferred_cycle_running"}
     if ws_guard is None:
         from src.control import ws_gap_guard as ws_guard
@@ -2022,7 +2057,7 @@ def _refresh_reconcile_findings_if_required(
 
     if adapter is None:
         return {"status": "adapter_unavailable"}
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return {"status": "deferred_cycle_running"}
     owns_connection = conn_factory is None
     conn = None
@@ -2072,7 +2107,7 @@ def _refresh_reconcile_findings_if_required(
 def _run_venue_background_maintenance_once(adapter=None) -> dict:
     """Run venue read-side maintenance outside the heartbeat critical path."""
 
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return {"status": "deferred_cycle_running"}
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -2088,11 +2123,13 @@ def _run_venue_background_maintenance_once(adapter=None) -> dict:
 def _start_collateral_background_refresh_async(adapter=None) -> str:
     """Refresh collateral on an independent lane from slower venue maintenance."""
 
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return "deferred_cycle_running"
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
         return "adapter_unavailable"
+    if _edli_reactor_pending_backlog_exists():
+        return "deferred_edli_pending_backlog"
     if _collateral_background_refresh_lock.locked():
         return "already_running"
 
@@ -2112,7 +2149,7 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     """Start slow venue maintenance without delaying the next heartbeat tick."""
 
     global _last_venue_background_maintenance_attempt_at
-    if _cycle_lock.locked():
+    if _cycle_lock.locked() or _edli_reactor_active():
         return "deferred_cycle_running"
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -2124,6 +2161,9 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
         < VENUE_BACKGROUND_MAINTENANCE_SECONDS
     ):
         return "throttled"
+    if _edli_reactor_pending_backlog_exists():
+        _last_venue_background_maintenance_attempt_at = now
+        return "deferred_edli_pending_backlog"
     if not _venue_background_maintenance_lock.acquire(blocking=False):
         return "already_running"
     _last_venue_background_maintenance_attempt_at = now
@@ -2653,7 +2693,7 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     global _venue_heartbeat_thread
     if _external_venue_heartbeat_enabled():
         _configure_external_venue_heartbeat_supervisor_if_needed()
-        if _cycle_lock.locked():
+        if _cycle_lock.locked() or _edli_reactor_active():
             return
         adapter = _ensure_venue_read_side_adapter()
         _start_collateral_background_refresh_async(adapter)
@@ -2737,6 +2777,7 @@ def _refresh_pending_family_snapshots(
     """
 
     from src.data.market_scanner import (
+        reconstruct_weather_market_from_static_topology,
         refresh_executable_market_substrate_snapshots,
     )
     from src.data.polymarket_client import PolymarketClient
@@ -2801,7 +2842,10 @@ def _refresh_pending_family_snapshots(
     #         Families with ANY stale/missing bin still proceed to Gamma fetch.
     fresh_skipped = 0
     no_topology = 0
-    families_needing_refresh: list[tuple[str, str, str]] = []
+    gamma_refresh_families: list[tuple[str, str, str]] = []
+    cached_topology_markets: list[dict] = []
+    cached_topology_families = 0
+    cached_topology_incomplete = 0
 
     write_conn = get_trade_connection(write_class="live")
     try:
@@ -2816,7 +2860,7 @@ def _refresh_pending_family_snapshots(
                     city, target_date, metric,
                 )
                 # Still include: Gamma may discover bins not yet in topology.
-                families_needing_refresh.append((city, target_date, metric))
+                gamma_refresh_families.append((city, target_date, metric))
                 continue
 
             any_stale = False
@@ -2837,21 +2881,32 @@ def _refresh_pending_family_snapshots(
                     break
 
             if any_stale:
-                families_needing_refresh.append((city, target_date, metric))
+                reconstructed = reconstruct_weather_market_from_static_topology(
+                    write_conn,
+                    topology_rows=topology_rows,
+                    now_utc=now_utc,
+                )
+                if reconstructed is not None:
+                    cached_topology_markets.append(reconstructed)
+                    cached_topology_families += 1
+                else:
+                    cached_topology_incomplete += 1
+                    gamma_refresh_families.append((city, target_date, metric))
             else:
                 fresh_skipped += 1
 
-        if not families_needing_refresh:
+        if not gamma_refresh_families and not cached_topology_markets:
             logger.info(
                 "refresh_pending_family_snapshots: all families fresh, skipped. "
-                "families=%d fresh_skipped=%d no_topology=%d",
-                len(families), fresh_skipped, no_topology,
+                "families=%d fresh_skipped=%d no_topology=%d cached_topology_incomplete=%d",
+                len(families), fresh_skipped, no_topology, cached_topology_incomplete,
             )
             return {
                 "status": "all_fresh",
                 "families_checked": len(families),
                 "fresh_skipped": fresh_skipped,
                 "no_topology": no_topology,
+                "cached_topology_incomplete": cached_topology_incomplete,
             }
 
         # Step 3: Targeted Gamma slug fetch — one request per pending family.
@@ -2884,12 +2939,12 @@ def _refresh_pending_family_snapshots(
             _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "25.0")))
             _refresh_deadline = time.monotonic() + _refresh_budget_s
             _refreshed_n = 0
-            for fam_city, fam_date, fam_metric in families_needing_refresh:
+            for fam_city, fam_date, fam_metric in gamma_refresh_families:
                 if time.monotonic() > _refresh_deadline:
                     logger.info(
                         "refresh_pending_family_snapshots: time-box %.0fs hit after %d/%d "
                         "families; deferring rest to next cycle (leaves budget for emit+process)",
-                        _refresh_budget_s, _refreshed_n, len(families_needing_refresh),
+                        _refresh_budget_s, _refreshed_n, len(gamma_refresh_families),
                     )
                     break
                 _refreshed_n += 1
@@ -2940,18 +2995,24 @@ def _refresh_pending_family_snapshots(
                     )
                     continue
 
-            # #35: the per-family /events?slug= fetch above omits enableOrderBook on
-            # child markets → substrate capture refused ("required boolean fact missing").
-            # find_weather_markets uses the fully-enriched _get_active_events path that
-            # the liquid-bin capture already relies on. Use it as the discovery source so
-            # every bin (incl never-seen illiquid MECE tails) captures; the downstream
-            # gamma_by_family filter scopes CLOB capture to the pending families.
-            from src.data.market_scanner import find_weather_markets_or_raise as _fwm
-            discovered_events = _fwm(min_hours_to_resolution=0.0)
+            # 2026-06-06 throughput repair: keep this refresh truly scoped to pending
+            # families. The old fallback called the global weather discovery scanner,
+            # which performs a tag/slug sweep and routinely exhausts its
+            # request budget before the warm job completes. Current Gamma slug payloads
+            # include the required child fields (conditionId, acceptingOrders,
+            # enableOrderBook, clobTokenIds), so the exact per-family slug responses are
+            # sufficient for parsing, topology persistence, and CLOB snapshot capture.
+            discovered_events = _parse_and_persist_weather_events(
+                raw_events_collected,
+                min_hours_to_resolution=0.0,
+                now=now_utc,
+            )
             logger.info(
                 "refresh_pending_family_snapshots: slug fetch complete "
-                "families_needing_refresh=%d raw_events=%d discovered_events=%d",
-                len(families_needing_refresh), len(raw_events_collected), len(discovered_events),
+                "gamma_refresh_families=%d cached_topology_families=%d "
+                "raw_events=%d discovered_events=%d",
+                len(gamma_refresh_families), cached_topology_families,
+                len(raw_events_collected), len(discovered_events),
             )
         except Exception as exc:
             logger.warning(
@@ -2972,7 +3033,8 @@ def _refresh_pending_family_snapshots(
         # Filter to ONLY the pending families (bounded CLOB calls, no universe sweep).
         markets: list[dict] = []
         skipped_not_found = 0
-        for city, target_date, metric in families_needing_refresh:
+        markets.extend(cached_topology_markets)
+        for city, target_date, metric in gamma_refresh_families:
             key = (city.lower(), target_date, metric)
             ev = gamma_by_family.get(key)
             if ev is None:
@@ -2988,12 +3050,14 @@ def _refresh_pending_family_snapshots(
         if not markets:
             logger.warning(
                 "refresh_pending_family_snapshots: no Gamma events matched pending families; "
-                "families_needing_refresh=%d skipped_not_found=%d",
-                len(families_needing_refresh), skipped_not_found,
+                "gamma_refresh_families=%d cached_topology_families=%d skipped_not_found=%d",
+                len(gamma_refresh_families), cached_topology_families, skipped_not_found,
             )
             return {
                 "status": "no_refreshable_markets",
-                "families_needing_refresh": len(families_needing_refresh),
+                "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
+                "gamma_refresh_families": len(gamma_refresh_families),
+                "cached_topology_families": cached_topology_families,
                 "skipped_not_found": skipped_not_found,
             }
 
@@ -3033,7 +3097,10 @@ def _refresh_pending_family_snapshots(
     result = {
         "status": "refreshed",
         "families_checked": len(families),
-        "families_needing_refresh": len(families_needing_refresh),
+        "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
+        "gamma_refresh_families": len(gamma_refresh_families),
+        "cached_topology_families": cached_topology_families,
+        "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
         "fresh_skipped": fresh_skipped,
         "markets_submitted": len(markets),
@@ -3047,6 +3114,9 @@ def _refresh_pending_family_snapshots(
 def _market_discovery_cycle() -> None:
     """Refresh executable market substrate outside decision-cycle critical path."""
 
+    if _edli_reactor_active():
+        logger.info("market_discovery deferred: EDLI reactor active")
+        return
     acquired = _market_discovery_lock.acquire(blocking=False)
     if not acquired:
         logger.warning("market_discovery skipped: previous market_discovery still running")
@@ -4091,6 +4161,9 @@ def _edli_event_reactor_cycle() -> None:
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
+    if _edli_reactor_active():
+        logger.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
+        return
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
@@ -4106,7 +4179,14 @@ def _edli_event_reactor_cycle() -> None:
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
-    conn = get_world_connection()
+    if not _edli_reactor_active_lock.acquire(blocking=False):
+        logger.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
+        return
+    try:
+        conn = get_world_connection()
+    except Exception:
+        _edli_reactor_active_lock.release()
+        raise
     # K1: the calibration authority is split — platt_models lives in the world DB (this conn's
     # main) while calibration_pairs lives in the forecasts DB. get_calibrator reads BOTH, so the
     # calibration_conn must have forecasts attached for the unqualified calibration_pairs read to
@@ -4118,7 +4198,12 @@ def _edli_event_reactor_cycle() -> None:
             conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
     except Exception as _attach_exc:  # noqa: BLE001 - non-fatal; calibration will fail-closed if unresolved
         logger.warning("EDLI reactor: ATTACH forecasts to calibration conn failed (non-fatal): %r", _attach_exc)
-    forecasts_conn = get_forecasts_connection_read_only()
+    try:
+        forecasts_conn = get_forecasts_connection_read_only()
+    except Exception:
+        conn.close()
+        _edli_reactor_active_lock.release()
+        raise
     # Warm the in-process bankroll-of-record cache once per cycle so the per-event no-submit
     # Kelly proof can read bankroll_provider.cached() (it must NOT live-fetch per decision).
     # The on-chain wallet is the only bankroll truth; this is a cycle-level refresh, not a
@@ -4145,13 +4230,18 @@ def _edli_event_reactor_cycle() -> None:
 
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
-        forecast_emit_limit = _edli_bounded_positive_int(edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50)
+        forecast_emit_limit = _edli_positive_int_or_unbounded(
+            edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50
+        )
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
-        proof_limit = _edli_bounded_positive_int(edli_cfg, "no_submit_proof_limit", default=10, maximum=50)
+        proof_limit = _edli_positive_int_or_unbounded(
+            edli_cfg, "no_submit_proof_limit", default=10, maximum=50
+        )
+        store = EventStore(conn)
         # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
-        # emit+commit unit under the process-global world-DB write mutex so it
+        # prune+emit+commit unit under the process-global world-DB write mutex so it
         # never holds the WAL write lock concurrently with the ingestor (no HTTP
         # is done inside this block — the emit reads forecasts/trade DBs and
         # writes world — so the mutex stays short and never spans a venue fetch).
@@ -4159,6 +4249,7 @@ def _edli_event_reactor_cycle() -> None:
         _emit_mutex = _world_write_mutex()
         _emit_mutex.acquire()
         try:
+            _edli_prune_pending_working_set(store, decision_time=now)
             if edli_cfg.get("forecast_snapshot_trigger_enabled"):
                 # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
                 # opportunity_events to the WAL world DB shared with the market-channel
@@ -4209,7 +4300,9 @@ def _edli_event_reactor_cycle() -> None:
             # already_pending skip + cap bound the queue. Non-fatal: never breaks the reactor cycle.
             if bool(edli_cfg.get("redecision_continuous_enabled", False)):
                 try:
-                    _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
+                    _rd_cap = _edli_positive_int_or_unbounded(
+                        edli_cfg, "redecision_max_per_cycle", default=50, maximum=200
+                    )
                     # B4 (Phase-2): a monotonic `cycle-N` source so the coverage-fairness
                     # round-robin (int(source.split('-')[-1])) advances its window each cycle
                     # and reaches all cities within ceil(N/limit) cycles. Still distinct per
@@ -4226,8 +4319,8 @@ def _edli_event_reactor_cycle() -> None:
                         already_pending_keys=_rd_pending,
                     )
                     logger.info(
-                        "edli_redecision: enqueued=%d cap=%d skipped_pending=%d",
-                        _rd_n, _rd_cap, len(_rd_pending),
+                        "edli_redecision: enqueued=%d cap=%s skipped_pending=%d",
+                        _rd_n, "unbounded" if _rd_cap is None else str(_rd_cap), len(_rd_pending),
                     )
                 except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
                     logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
@@ -4267,62 +4360,14 @@ def _edli_event_reactor_cycle() -> None:
         # semantics are UNCHANGED: a family not yet captured by the warm job still
         # requeues via the reactor's existing EXECUTABLE_SNAPSHOT_RETRY path (fail-closed).
         trade_conn = get_trade_connection_with_world_required(write_class=None)
-        store = EventStore(conn)
-
-        # ARCHIVE SWEEP (operator directive 2026-06-04): before the reactor scans,
-        # prune candidates whose target LOCAL day has ENDED in their OWN city tz
-        # (Oceania-frontier anchored, never raw UTC) to terminal 'expired' status so
-        # the active scan (fetch_pending + warm-cache family queries) stops re-reading
-        # ~1.7M already-settled rows every cycle. Marks the MUTABLE processing row
-        # only — the append-only event log (provenance) is untouched. batch_limit
-        # bounds the one-time backlog drain so a giant first sweep does not blow the
-        # 60s cycle budget; subsequent cycles see a steady trickle. Fail-soft: a
-        # sweep error must never crash a decision cycle (the read floor in
-        # fetch_pending still independently drops strictly-past rows from this cycle).
-        try:
-            _archived = store.archive_expired_candidates(decision_time=now.isoformat())
-            if _archived:
-                logger.info(
-                    "EDLI reactor: archived %d expired (target-local-day-ended) "
-                    "candidates → 'expired' (excluded from future scans)",
-                    _archived,
-                )
-        except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
-            logger.warning(
-                "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
-                "fetch_pending read floor still drops strictly-past rows): %r",
-                _sweep_exc,
-            )
-
-        # CHANNEL EVENT SWEEP (operator directive 2026-06-04 companion): prune
-        # superseded BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT / NEW_MARKET_DISCOVERED
-        # pending rows. For each (event_type, token_id) group only the LATEST
-        # available_at survives; all older ones are superseded state and marked
-        # 'expired'. The 1.7M pending channel-event backlog (1743 distinct tokens
-        # × ~990 ticks each) is the main fetch_pending JOIN cost; this sweep
-        # reduces it to ~1 row per token. batch_limit bounds the per-cycle work so
-        # the backlog drains across cycles rather than in one giant transaction.
-        # Fail-soft: a sweep error must never crash a decision cycle.
-        try:
-            _ch_archived = store.archive_superseded_channel_events()
-            if _ch_archived:
-                logger.info(
-                    "EDLI reactor: archived %d superseded channel events "
-                    "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) → "
-                    "'expired'; pending channel-event scan reduced",
-                    _ch_archived,
-                )
-        except Exception as _ch_sweep_exc:  # noqa: BLE001 — fail-soft
-            logger.warning(
-                "EDLI reactor: archive_superseded_channel_events sweep failed "
-                "(non-fatal): %r",
-                _ch_sweep_exc,
-            )
 
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
+        submit_disabled_effective_mode = reactor_mode == "live_no_submit"
         live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
+        real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False
+        taker_fok_fak_effective = bool(edli_cfg.get("taker_fok_fak_live_enabled", False)) or not real_submit_effective
         # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
         # built so the live submit path's select_global_order_type does not raise
         # AllocationDenied("allocator_not_configured"). The legacy discover cycle wires this
@@ -4331,7 +4376,7 @@ def _edli_event_reactor_cycle() -> None:
         # FAIL-CLOSED: if the refresh cannot source a trustworthy drawdown (wallet unreachable
         # / baseline undefined / exception), degrade THIS cycle to the no-submit adapter rather
         # than submit live with an unconfigured-but-proceeding allocator.
-        live_submit_effective = live_bridge_mode
+        live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
         if live_bridge_mode:
             _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(conn)
             if not _alloc_refresh.get("configured"):
@@ -4347,20 +4392,30 @@ def _edli_event_reactor_cycle() -> None:
         # the bankroll NET of correlation-weighted committed capital. The
         # provider closure hands the SAME cached snapshot to every event this
         # cycle (cycle-level read, not per-decision — mirrors the bankroll warm).
-        # FAIL-SOFT: if load_portfolio raises, the provider stays None and Kelly
-        # sizing falls back to pre-#107 single-Kelly (no crash, no over-size vs
-        # the old behaviour). The in-flight reservation accumulator (INV-K7) is
-        # closure-held inside the adapter factory, fresh per cycle.
+        # Shadow remains observational when the portfolio snapshot is unavailable.
+        # Real-submit is different: never let the live path fall back to pre-#107
+        # single-asset Kelly sizing, because that ignores open/pending/correlated
+        # exposure.
         _portfolio_state_provider = None
         try:
             _portfolio_snapshot = load_portfolio()
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
-        except Exception as _portfolio_exc:  # noqa: BLE001 — fail-soft to single-Kelly
+        except Exception as _portfolio_exc:  # noqa: BLE001 — mode-sensitive fail-closed below
             logger.warning(
-                "EDLI reactor: portfolio snapshot load failed (non-fatal); Kelly "
-                "sizing falls back to single-asset (full-bankroll) this cycle: %r",
+                "EDLI reactor: portfolio snapshot load failed; shadow may observe "
+                "with single-asset sizing, but real-submit will fail closed: %r",
                 _portfolio_exc,
             )
+        if real_submit_effective and _portfolio_state_provider is None:
+            live_submit_effective = False
+            logger.error(
+                "EDLI reactor: real submit disabled this cycle because portfolio_state_unavailable"
+            )
+        # The FSR/redecision emit phase intentionally uses the cycle-start timestamp for
+        # event identity. Decision certificates are built later, after DB-backed substrate
+        # and portfolio reads; use the actual processing timestamp so fresh executable/book
+        # parent certificates are never later than the decision they support.
+        process_pending_decision_time = datetime.now(timezone.utc)
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -4369,9 +4424,12 @@ def _edli_event_reactor_cycle() -> None:
                 calibration_conn=conn,
                 get_current_level=get_current_level,
                 portfolio_state_provider=_portfolio_state_provider,
-                real_order_submit_enabled=real_order_submit_enabled if reactor_mode == "live" else False,
+                real_order_submit_enabled=real_submit_effective,
                 live_canary_enabled=bool(edli_cfg.get("live_canary_enabled", False)),
-                taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
+                # In submit-disabled modes this is simulation authority only:
+                # build the would-trade taker certificate, but never call venue submit.
+                # Real submit/canary still requires the explicit config flag.
+                taker_fok_fak_live_enabled=taker_fok_fak_effective,
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
@@ -4392,7 +4450,7 @@ def _edli_event_reactor_cycle() -> None:
                     execution_command_cert=execution_command_cert,
                     conn=trade_conn,
                     snapshot_conn=trade_conn,
-                    decision_time=now,
+                    decision_time=process_pending_decision_time,
                 ),
             )
             if live_submit_effective
@@ -4431,7 +4489,7 @@ def _edli_event_reactor_cycle() -> None:
                 edge_zone_min_ev_per_dollar=float(edli_cfg.get("edge_zone_min_ev_per_dollar", 0.0)),
             ),
         )
-        _rr = reactor.process_pending(decision_time=now, limit=proof_limit)
+        _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
         logger.info(
             "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d reasons=%r",
             _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered, _rr.rejection_reasons[:8],
@@ -4442,8 +4500,12 @@ def _edli_event_reactor_cycle() -> None:
             trade_conn.close()
         except NameError:
             pass
-        forecasts_conn.close()
+        try:
+            forecasts_conn.close()
+        except NameError:
+            pass
         conn.close()
+        _edli_reactor_active_lock.release()
 
 
 @_scheduler_job("edli_bankroll_warm")
@@ -4773,12 +4835,34 @@ def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum:
     return max(1, min(maximum, value))
 
 
+def _edli_positive_int_or_unbounded(
+    config: dict, key: str, *, default: int, maximum: int
+) -> int | None:
+    raw = config.get(key, default)
+    if raw is False:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in {
+        "false",
+        "none",
+        "no_cap",
+        "uncapped",
+        "unbounded",
+        "unlimited",
+    }:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(maximum, value))
+
+
 def _edli_emit_forecast_snapshot_events(
     world_conn,
     *,
     decision_time: datetime,
     received_at: str,
-    limit: int,
+    limit: int | None,
     source: str | None = None,
     already_pending_keys: set[str] | None = None,
 ) -> int:
@@ -4832,11 +4916,105 @@ def _edli_pending_entity_keys(world_conn) -> set[str]:
             JOIN opportunity_event_processing p ON p.event_id = e.event_id
             WHERE p.consumer_name = 'edli_reactor_v1'
               AND p.processing_status IN ('pending', 'processing', 'claimed')
-            """
+              AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+        """
         ).fetchall()
     except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
         return set()
     return {str(r[0]) for r in rows}
+
+
+_EDLI_LAST_PRUNE_MONOTONIC: float | None = None
+
+
+def _edli_prune_batch_limit(config: dict) -> int:
+    return _edli_bounded_positive_int(
+        config,
+        "reactor_prune_batch_limit",
+        default=100,
+        maximum=5_000,
+    )
+
+
+def _edli_prune_interval_seconds(config: dict) -> float:
+    raw = config.get("reactor_prune_interval_seconds", 600)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 180.0
+    return max(0.0, value)
+
+
+def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
+    """Prune stale/superseded rows before snapshotting the redecision skip set."""
+
+    global _EDLI_LAST_PRUNE_MONOTONIC
+    edli_cfg = _settings_section("edli_v1", {})
+    interval_s = _edli_prune_interval_seconds(edli_cfg)
+    now_mono = time.monotonic()
+    if (
+        interval_s > 0
+        and _EDLI_LAST_PRUNE_MONOTONIC is not None
+        and now_mono - _EDLI_LAST_PRUNE_MONOTONIC < interval_s
+    ):
+        return
+    _EDLI_LAST_PRUNE_MONOTONIC = now_mono
+    batch_limit = _edli_prune_batch_limit(edli_cfg)
+
+    try:
+        _archived = store.archive_expired_candidates(
+            decision_time=decision_time.isoformat(),
+            batch_limit=batch_limit,
+        )
+        if _archived:
+            logger.info(
+                "EDLI reactor: archived %d expired (target-local-day-ended) "
+                "candidates → 'expired' (excluded from future scans; batch_limit=%d)",
+                _archived,
+                batch_limit,
+            )
+    except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
+        logger.warning(
+            "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
+            "fetch_pending read floor still drops strictly-past rows): %r",
+            _sweep_exc,
+        )
+
+    try:
+        _ch_archived = store.archive_superseded_channel_events(batch_limit=batch_limit)
+        if _ch_archived:
+            logger.info(
+                "EDLI reactor: archived %d superseded channel events "
+                "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) → "
+                "'expired'; pending channel-event scan reduced (batch_limit=%d)",
+                _ch_archived,
+                batch_limit,
+            )
+    except Exception as _ch_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_superseded_channel_events sweep failed "
+            "(non-fatal): %r",
+            _ch_sweep_exc,
+        )
+
+    try:
+        _fsr_archived = store.archive_superseded_forecast_snapshot_events(
+            batch_limit=batch_limit,
+        )
+        if _fsr_archived:
+            logger.info(
+                "EDLI reactor: archived %d superseded forecast-snapshot redecision "
+                "events → 'expired'; newest active event per entity_key retained "
+                "(batch_limit=%d)",
+                _fsr_archived,
+                batch_limit,
+            )
+    except Exception as _fsr_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_superseded_forecast_snapshot_events sweep failed "
+            "(non-fatal): %r",
+            _fsr_sweep_exc,
+        )
 
 
 def _edli_emit_day0_extreme_events(
@@ -4847,27 +5025,27 @@ def _edli_emit_day0_extreme_events(
     received_at: str,
     limit: int,
 ) -> int:
-    """Emit EDLI Day0 extreme events from durable observation authority rows.
-
-    This is an operator catch-up/evidence scanner only. The no-submit EDLI
-    reactor does not enable it by default because
-    settlement_day_observation_authority is an observability table written by
-    the existing cycle runtime, not the online source hook.
-    """
+    """Emit EDLI Day0 extreme events from live observation truth surfaces."""
 
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
 
     trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
-    return len(
-        trigger.scan_authority_rows(
-            observation_conn=trade_conn,
-            settlement_semantics=_edli_day0_settlement_semantics,
-            decision_time=decision_time,
-            received_at=received_at,
-            limit=limit,
-        )
+    authority_results = trigger.scan_authority_rows(
+        observation_conn=trade_conn,
+        settlement_semantics=_edli_day0_settlement_semantics,
+        decision_time=decision_time,
+        received_at=received_at,
+        limit=limit,
     )
+    observation_results = trigger.scan_observation_instants_rows(
+        observation_conn=trade_conn,
+        settlement_semantics=_edli_day0_settlement_semantics,
+        decision_time=decision_time,
+        received_at=received_at,
+        limit=limit,
+    )
+    return len(authority_results) + len(observation_results)
 
 
 def _edli_day0_settlement_semantics(observation: dict):
@@ -4955,6 +5133,21 @@ def _edli_canary_force_taker_provider(world_conn, edli_cfg):
     return _provider
 
 
+def _edli_pre_submit_clob_timeout_seconds() -> float:
+    raw = os.environ.get("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS")
+    if raw in (None, ""):
+        return 3.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
+        return 3.0
+    if value <= 0:
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
+        return 3.0
+    return value
+
+
 def _edli_pre_submit_jit_book_quote_provider():
     """Build the just-in-time single-token ``/book`` fetcher for the pre-submit
     authority (GATE #84). Returns a ``token_id -> dict`` callable that pulls the
@@ -4969,7 +5162,7 @@ def _edli_pre_submit_jit_book_quote_provider():
     def _fetch(token_id: str) -> dict:
         from src.data.polymarket_client import PolymarketClient
 
-        with PolymarketClient() as clob:
+        with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
             return clob.get_orderbook_snapshot(token_id)
 
     return _fetch
@@ -5049,6 +5242,23 @@ def _edli_pre_submit_authority_provider_from_world_conn(
 
     max_quote_age_ms = int(edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000)
     balance_check_enabled = bool(edli_cfg.get("pre_submit_balance_allowance_check_enabled", True))
+    venue_summary_cache: dict[str, object] | None = None
+    collateral_payload_cache: dict[str, object] | None = None
+
+    def _cached_venue_summary(checked_at: datetime) -> dict[str, object]:
+        nonlocal venue_summary_cache
+        if venue_summary_cache is None:
+            venue_summary_cache = _edli_venue_connectivity_authority_summary(checked_at)
+        return venue_summary_cache
+
+    def _cached_collateral_payload() -> dict[str, object]:
+        nonlocal collateral_payload_cache
+        if collateral_payload_cache is None:
+            from src.data.polymarket_client import PolymarketClient
+
+            with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+                collateral_payload_cache = dict(clob._ensure_v2_adapter().get_collateral_payload())
+        return collateral_payload_cache
 
     def _provider(final_intent, _executable_snapshot, decision_time):
         checked_at = decision_time.astimezone(timezone.utc)
@@ -5095,11 +5305,12 @@ def _edli_pre_submit_authority_provider_from_world_conn(
 
         heartbeat_summary = _edli_heartbeat_authority_summary()
         user_ws_summary = _edli_user_ws_authority_summary(checked_at)
-        venue_summary = _edli_venue_connectivity_authority_summary(checked_at)
+        venue_summary = _cached_venue_summary(checked_at)
         balance_status, balance_authority_id = _edli_balance_allowance_status(
             final_intent,
             checked_at,
             enabled=balance_check_enabled,
+            collateral_payload=_cached_collateral_payload(),
         )
 
         return PreSubmitAuthorityWitness(
@@ -5171,7 +5382,7 @@ def _edli_user_ws_authority_summary(checked_at: datetime) -> dict[str, object]:
 def _edli_venue_connectivity_authority_summary(checked_at: datetime) -> dict[str, object]:
     from src.data.polymarket_client import PolymarketClient
 
-    with PolymarketClient() as clob:
+    with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
         clob.v2_preflight()
     return {
         "authority_id": "polymarket_v2_preflight",
@@ -5180,7 +5391,13 @@ def _edli_venue_connectivity_authority_summary(checked_at: datetime) -> dict[str
     }
 
 
-def _edli_balance_allowance_status(final_intent, checked_at: datetime, *, enabled: bool) -> tuple[str, str]:
+def _edli_balance_allowance_status(
+    final_intent,
+    checked_at: datetime,
+    *,
+    enabled: bool,
+    collateral_payload: dict[str, object] | None = None,
+) -> tuple[str, str]:
     if not enabled:
         raise ValueError("PRE_SUBMIT_ALLOWANCE_CHECK_DISABLED")
     from src.data.polymarket_client import PolymarketClient
@@ -5190,8 +5407,11 @@ def _edli_balance_allowance_status(final_intent, checked_at: datetime, *, enable
     token_id = str(intent.get("token_id") or "")
     size = float(intent.get("size") or 0.0)
     notional = float(intent.get("notional_usd") or 0.0)
-    with PolymarketClient() as clob:
-        collateral = clob._ensure_v2_adapter().get_collateral_payload()
+    if collateral_payload is None:
+        with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
+            collateral = clob._ensure_v2_adapter().get_collateral_payload()
+    else:
+        collateral = collateral_payload
     if side == "BUY":
         balance_micro = int(collateral.get("pusd_balance_micro") or 0)
         allowance_micro = int(collateral.get("pusd_allowance_micro") or 0)
@@ -6561,7 +6781,7 @@ def main():
             "interval",
             minutes=1,
             id="edli_event_reactor",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 5.0),
             max_instances=1,
             coalesce=True,
             executor="reactor",
@@ -6596,7 +6816,7 @@ def main():
             "interval",
             seconds=90,
             id="edli_market_substrate_warm",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 25.0),
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 65.0),
             max_instances=1,
             coalesce=True,
         )
@@ -6616,7 +6836,7 @@ def main():
             "interval",
             seconds=90,
             id="edli_mainstream_warm",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 28.0),
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 70.0),
             max_instances=1,
             coalesce=True,
         )
@@ -6669,7 +6889,7 @@ def main():
                 "interval",
                 minutes=5,
                 id="market_discovery",
-                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 35.0),
+                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 90.0),
                 max_instances=1,
                 coalesce=True,
             )

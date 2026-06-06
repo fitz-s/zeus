@@ -124,7 +124,7 @@ _ARM_GATE_REQUIRED_FIELDS = (
     "commit_sha",
     "measurement_cmd_hash",
     "capital_weighted_ev",
-    "gate_pass_n",
+    "production_n",
     "per_city_n",
     "ev_sigma",
     "date_coverage",
@@ -159,6 +159,10 @@ def verify_edli_arm_gate_artifact(
 
     for field in _ARM_GATE_REQUIRED_FIELDS:
         if field not in artifact:
+            # production_n is the current operator-facing name. gate_pass_n is
+            # accepted only as a deprecated alias for already-emitted artifacts.
+            if field == "production_n" and "gate_pass_n" in artifact:
+                continue
             return ArmGateVerification(
                 False, f"EDLI_LIVE_PROMOTION_ARM_GATE_ARTIFACT_FIELD_MISSING:{field}"
             )

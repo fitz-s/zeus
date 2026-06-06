@@ -283,10 +283,12 @@ state_machines:
       - ZEUS_LIVE_FAMILY_EXECUTABLE_FALLBACK_CANDIDATES
       - ZEUS_ALLOW_LEGACY_EXECUTION_INTENT
       - ZEUS_LEGACY_EXECUTION_INTENT_SCOPE
+      - ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS
     invariant_tests:
       - tests/test_inv_family_exclusive_sizing.py
       - tests/test_inv_family_exclusive_cross_module_integration.py
       - tests/test_executor.py
+      - tests/money_path/test_edli_live_canary.py
   business_plane_health:
     owner: src/control/live_health.py
     description: >
@@ -463,6 +465,7 @@ state_machines:
       - EXPECTED_STEPS_UNKNOWN
       - NO_SUBMIT
       - NO_SUBMIT_CERTIFICATE_REJECTED
+      - IDENTITY_FALLBACK_NO_PLATT_BUCKET
       - ACTIONABLE_NOT_SUBMITTED
       - INTENT_BUILT
       - SUBMIT_PLAN_BUILT

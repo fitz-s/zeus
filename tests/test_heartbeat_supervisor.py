@@ -910,6 +910,42 @@ def test_venue_background_maintenance_is_throttled_between_heartbeat_ticks(monke
     assert calls == [adapter]
 
 
+def test_venue_background_maintenance_defers_when_edli_pending_backlog_exists(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_run_venue_background_maintenance_once",
+        lambda active_adapter: calls.append(active_adapter),
+    )
+    main._last_venue_background_maintenance_attempt_at = None
+
+    assert main._start_venue_background_maintenance_async(adapter) == "deferred_edli_pending_backlog"
+    assert main._start_venue_background_maintenance_async(adapter) == "throttled"
+    assert calls == []
+
+
+def test_collateral_background_refresh_defers_when_edli_pending_backlog_exists(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_refresh_global_collateral_snapshot_if_due",
+        lambda active_adapter: calls.append(active_adapter),
+    )
+
+    assert main._start_collateral_background_refresh_async(adapter) == "deferred_edli_pending_backlog"
+    assert calls == []
+
+
 def test_collateral_background_refresh_is_not_blocked_by_slow_venue_maintenance(monkeypatch):
     from src import main
 
@@ -976,6 +1012,45 @@ def test_external_heartbeat_defers_background_db_work_while_cycle_runs(monkeypat
         main._start_venue_heartbeat_loop_if_needed()
     finally:
         main._cycle_lock.release()
+
+    assert calls == ["configure_supervisor"]
+
+
+def test_external_heartbeat_defers_background_db_work_while_edli_reactor_runs(monkeypatch):
+    from src import main
+
+    calls = []
+
+    class Adapter:
+        pass
+
+    def _ensure_adapter():
+        calls.append("ensure_adapter")
+        return Adapter()
+
+    monkeypatch.setattr(main, "_external_venue_heartbeat_enabled", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_configure_external_venue_heartbeat_supervisor_if_needed",
+        lambda: calls.append("configure_supervisor"),
+    )
+    monkeypatch.setattr(main, "_ensure_venue_read_side_adapter", _ensure_adapter)
+    monkeypatch.setattr(
+        main,
+        "_start_collateral_background_refresh_async",
+        lambda adapter: calls.append("collateral_background"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_start_venue_background_maintenance_async",
+        lambda adapter: calls.append("venue_background"),
+    )
+
+    assert main._edli_reactor_active_lock.acquire(blocking=False)
+    try:
+        main._start_venue_heartbeat_loop_if_needed()
+    finally:
+        main._edli_reactor_active_lock.release()
 
     assert calls == ["configure_supervisor"]
 

@@ -89,6 +89,17 @@ def build_final_intent_certificate_from_actionable(
                 f"{available_crossable_shares:.4f} < min_order_size={min_order_size:.4f}"
             )
     notional = size * limit_price
+    expected_fill_price = float(
+        sweep_expected_fill_price
+        if sweep_expected_fill_price is not None
+        else limit_price
+    )
+    max_slippage_bps = _declared_max_slippage_bps(
+        direction=str(action["direction"]),
+        order_mode=order_spec.mode,
+        limit_price=limit_price,
+        expected_fill_price=expected_fill_price,
+    )
     executable_snapshot_hash = _required_text(executable_snapshot_cert.payload, "executable_snapshot_hash")
     cost_basis_hash = _required_text(cost_model_cert.payload, "cost_basis_hash")
     decision_source_context_payload = _context_payload(decision_source_context, "decision_source_context")
@@ -130,6 +141,7 @@ def build_final_intent_certificate_from_actionable(
         "expected_fill_price_before_fee": sweep_expected_fill_price if sweep_expected_fill_price is not None else limit_price,
         "size": size,
         "notional_usd": notional,
+        "max_slippage_bps": max_slippage_bps,
         "executable_snapshot_id": action["executable_snapshot_id"],
         "execution_price_type": "ExecutionPrice",
         "fee_deducted": True,
@@ -155,6 +167,30 @@ def build_final_intent_certificate_from_actionable(
         decision_time,
         (actionable_cert, executable_snapshot_cert, quote_feasibility_cert, cost_model_cert, forecast_authority_cert),
     )
+
+
+def _declared_max_slippage_bps(
+    *,
+    direction: str,
+    order_mode: str,
+    limit_price: float,
+    expected_fill_price: float,
+) -> float:
+    if str(order_mode).strip().upper() != "TAKER":
+        return 0.0
+    expected = Decimal(str(expected_fill_price))
+    limit = Decimal(str(limit_price))
+    if expected <= 0:
+        return 0.0
+    if direction.startswith("buy_"):
+        adverse = limit - expected
+    elif direction.startswith("sell_"):
+        adverse = expected - limit
+    else:
+        return 0.0
+    if adverse <= 0:
+        return 0.0
+    return float(adverse / expected * Decimal("10000"))
 
 
 def build_executor_expressibility_certificate(
@@ -482,26 +518,44 @@ def _branch_limit_price(
     tick_size: float,
     passive_maker_context,
 ) -> float:
-    """Branch-correct, reservation-capped limit price.
+    """Branch-correct, reservation-gated limit price.
 
-    RESERVATION-CAP INVARIANT: no order, maker or taker, is ever priced worse
-    than ``reservation`` (= c_fee_adjusted). This is the structural anti-anti-
-    alpha guard — a cross can never be -EV.
+    RESERVATION INVARIANT: no order, maker or taker, is ever priced worse than
+    ``reservation`` (= c_fee_adjusted). For taker orders the live touch is not a
+    price cap; it is the executable price. If that touch is worse than the
+    reservation, the candidate is not currently executable and must be skipped
+    instead of emitting a non-crossing FOK/FAK.
 
-    BUY:  taker -> min(best_ask, reservation); maker -> min(best_bid+tick, reservation)
-    SELL: taker -> max(best_bid, reservation); maker -> max(best_ask-tick, reservation)
+    BUY:  taker -> best_ask iff best_ask <= reservation; maker -> min(best_bid+tick, reservation)
+    SELL: taker -> best_bid iff best_bid >= reservation; maker -> max(best_ask-tick, reservation)
 
-    When bid/ask are unavailable, the price falls back to ``reservation`` (the
-    pre-change behavior — rest at the reservation), which is always within cap.
+    Taker orders require a fresh touch; falling back to reservation produces a
+    non-marketable immediate order and creates false "will trade" evidence.
     """
     bid = _coerce_price(best_bid, passive_maker_context, "best_bid")
     ask = _coerce_price(best_ask, passive_maker_context, "best_ask")
     if order_mode == "TAKER":
         if side == "BUY":
-            far = ask if ask is not None else reservation
-            return _tick_round_down(min(far, reservation), tick_size)
-        near = bid if bid is not None else reservation
-        return _tick_round_up(max(near, reservation), tick_size)
+            if ask is None:
+                raise ValueError("TAKER_BUY_BEST_ASK_REQUIRED")
+            marketable = _tick_round_up(ask, tick_size)
+            if marketable > reservation + 1e-9:
+                raise ValueError(
+                    "TAKER_BUY_TOUCH_EXCEEDS_RESERVATION:"
+                    f"best_ask={ask:.6g}:marketable_limit={marketable:.6g}:"
+                    f"reservation={reservation:.6g}"
+                )
+            return marketable
+        if bid is None:
+            raise ValueError("TAKER_SELL_BEST_BID_REQUIRED")
+        marketable = _tick_round_down(bid, tick_size)
+        if marketable < reservation - 1e-9:
+            raise ValueError(
+                "TAKER_SELL_TOUCH_BELOW_RESERVATION:"
+                f"best_bid={bid:.6g}:marketable_limit={marketable:.6g}:"
+                f"reservation={reservation:.6g}"
+            )
+        return marketable
     # maker: improve the touch by one tick, capped by reservation
     if side == "BUY":
         improved = (bid + tick_size) if bid is not None else reservation

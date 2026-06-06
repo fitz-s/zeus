@@ -9,7 +9,9 @@ import hashlib
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+from src.decision_kernel import claims
 from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
 from src.events.event_store import EventStore
 from src.events.opportunity_event import (
@@ -939,6 +941,74 @@ def test_successful_no_submit_receipt_is_persisted_before_processed():
         (event.event_id,),
     ).fetchone()[0]
     assert status == "processed"
+
+
+def test_submit_disabled_live_receipt_bridges_to_no_submit_receipt_table():
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+
+    def _submit(event, _decision_time):
+        payload = json.loads(event.payload_json)
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            condition_id="condition-1",
+            token_id="yes-1",
+            executable_snapshot_id="snapshot-exec-1",
+            family_id="family-1",
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="family-1",
+            fdr_hypothesis_count=2,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=1.0,
+            kelly_cost_basis_id="cost-1",
+            kelly_decision_id="kelly-1",
+            risk_decision_id="risk-1",
+            final_intent_id="intent-1",
+            side_effect_status="SUBMIT_DISABLED",
+            reason="real_order_submit_disabled",
+            decision_proof_bundle=(
+                SimpleNamespace(certificate_type=claims.EXECUTION_RECEIPT),
+            ),
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _event, _stage, _reason: None,
+        config=ReactorConfig(reactor_mode="live_no_submit", real_order_submit_enabled=False),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    reactor._decision_certificate_ledger.persist_all = lambda _certs: None  # type: ignore[method-assign]
+
+    result = reactor.process_pending(decision_time=decision_time)
+
+    assert result.proof_accepted == 1
+    row = conn.execute(
+        """
+        SELECT side_effect_status, receipt_json
+        FROM edli_no_submit_receipts
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "NO_SUBMIT"
+    assert '"side_effect_status":"NO_SUBMIT"' in row[1]
+    assert '"reason":"real_order_submit_disabled"' in row[1]
 
 
 def test_no_submit_projection_rows_require_verified_decision_certificate():

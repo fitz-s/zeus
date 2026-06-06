@@ -164,6 +164,109 @@ class Day0ExtremeUpdatedTrigger:
                 )
         return results
 
+    def scan_observation_instants_rows(
+        self,
+        *,
+        observation_conn: sqlite3.Connection,
+        settlement_semantics: Any,
+        decision_time: datetime,
+        received_at: str,
+        limit: int = 100,
+    ) -> list[EventWriteResult]:
+        """Emit Day0 events from canonical live observation_instants rows.
+
+        EDLI day0 shadow needs the current observation stream. The older
+        settlement_day_observation_authority catch-up table is written only by
+        the legacy cycle path and can be stale or empty while live observation
+        ingestion is healthy. This scanner reads the canonical world
+        observation_instants surface (or an attached ``world`` DB) and emits the
+        latest high/low observations per city/date.
+        """
+
+        table = _qualified_observation_instants_table(observation_conn)
+        if table is None:
+            return []
+        columns = _table_columns(observation_conn, table)
+        required_columns = {
+            "city",
+            "target_date",
+            "source",
+            "timezone_name",
+            "utc_timestamp",
+            "imported_at",
+            "running_max",
+            "running_min",
+            "temp_unit",
+            "station_id",
+            "authority",
+            "training_allowed",
+            "causality_status",
+            "source_role",
+            "provenance_json",
+        }
+        if not required_columns.issubset(columns):
+            return []
+        decision_iso = decision_time.astimezone(UTC).isoformat()
+        rows = _dict_rows(
+            observation_conn,
+            f"""
+            WITH eligible AS (
+                SELECT
+                    city,
+                    target_date,
+                    source,
+                    timezone_name,
+                    temp_unit,
+                    station_id,
+                    MAX(utc_timestamp) AS observation_time,
+                    MAX(imported_at) AS observation_available_at,
+                    MAX(running_max) AS high_so_far,
+                    MIN(running_min) AS low_so_far,
+                    COUNT(*) AS observation_count,
+                    MIN(authority) AS authority,
+                    MIN(training_allowed) AS training_allowed,
+                    MIN(causality_status) AS causality_status,
+                    MIN(source_role) AS source_role
+                FROM {table}
+                WHERE target_date IS NOT NULL
+                  AND target_date >= date(?)
+                  AND utc_timestamp <= ?
+                  AND imported_at <= ?
+                  AND (running_max IS NOT NULL OR running_min IS NOT NULL)
+                  AND authority IN ('VERIFIED', 'ICAO_STATION_NATIVE')
+                  AND COALESCE(training_allowed, 0) = 1
+                  AND COALESCE(causality_status, '') = 'OK'
+                  AND COALESCE(source_role, '') = 'historical_hourly'
+                  AND COALESCE(provenance_json, '') NOT IN ('', '{{}}')
+                  AND COALESCE(station_id, '') != ''
+                  AND COALESCE(source, '') != ''
+                GROUP BY city, target_date, source, timezone_name, temp_unit, station_id
+            )
+            SELECT *
+            FROM eligible
+            ORDER BY observation_available_at DESC, observation_time DESC
+            LIMIT ?
+            """,
+            (decision_iso, decision_iso, decision_iso, max(1, int(limit))),
+        )
+        results: list[EventWriteResult] = []
+        for row in reversed(rows):
+            for metric in ("high", "low"):
+                try:
+                    observation = observation_instant_row_to_day0_observation(row, metric=metric)
+                except ValueError:
+                    continue
+                semantics = settlement_semantics(observation) if callable(settlement_semantics) else settlement_semantics
+                results.append(
+                    self.emit_from_observation(
+                        observation=observation,
+                        settlement_semantics=semantics,
+                        decision_time=decision_time,
+                        received_at=received_at,
+                    )
+                )
+        return results
+
 
 def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:
     payload = _json_dict(row.get("payload_json"))
@@ -197,6 +300,89 @@ def authority_row_to_observation(row: dict[str, Any]) -> dict[str, Any]:
         "settlement_precision": payload.get("settlement_precision") or payload.get("precision"),
         "rounding_rule": payload.get("rounding_rule"),
         "observation_context_id": str(row.get("authority_id") or ""),
+    }
+
+
+def observation_instant_row_to_day0_observation(row: dict[str, Any], *, metric: str = "high") -> dict[str, Any]:
+    """Convert a canonical observation_instants row into a live Day0 observation."""
+
+    if metric not in {"high", "low"}:
+        raise ValueError(f"unsupported Day0 observation metric: {metric}")
+    city = str(row.get("city") or "")
+    target_date = str(row.get("target_date") or "")
+    station_id = str(row.get("station_id") or "").strip().upper()
+    observation_time = str(row.get("observation_time") or row.get("utc_timestamp") or "")
+    available_at = str(row.get("observation_available_at") or row.get("imported_at") or observation_time)
+    high_so_far = row.get("high_so_far")
+    high_so_far = row.get("running_max") if high_so_far is None else high_so_far
+    low_so_far = row.get("low_so_far")
+    low_so_far = row.get("running_min") if low_so_far is None else low_so_far
+    raw_value = high_so_far if metric == "high" else low_so_far
+    if not city or not target_date or not station_id or raw_value is None:
+        raise ValueError("observation_instants row missing required Day0 fields")
+    local_date_status, dst_status = _observation_local_date_status(
+        observation_time=observation_time,
+        city_timezone=str(row.get("timezone_name") or ""),
+        target_date=target_date,
+    )
+    unit = str(row.get("temp_unit") or "").upper()
+    verified = str(row.get("authority") or "").upper() == "VERIFIED"
+    trusted_native = str(row.get("authority") or "").upper() == "ICAO_STATION_NATIVE"
+    source = str(row.get("source") or "")
+    source_match = "MATCH" if source else "MISMATCH"
+    station_match = "MATCH" if station_id else "MISMATCH"
+    rounding_status = "MATCH" if unit else "MISMATCH"
+    source_role = str(row.get("source_role") or "")
+    training_allowed = int(row.get("training_allowed") or 0) == 1
+    causality_ok = str(row.get("causality_status") or "") == "OK"
+    source_authorized = (
+        "AUTHORIZED"
+        if (
+            (verified or trusted_native)
+            and source_role == "historical_hourly"
+            and training_allowed
+            and causality_ok
+            and source_match == "MATCH"
+            and station_match == "MATCH"
+            and rounding_status == "MATCH"
+        )
+        else "UNAUTHORIZED"
+    )
+    live_authority = (
+        "LIVE_AUTHORITY"
+        if (
+            source_authorized == "AUTHORIZED"
+            and local_date_status == "MATCH"
+            and dst_status == "UNAMBIGUOUS"
+        )
+        else "NON_LIVE_AUTHORITY"
+    )
+    return {
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+        "settlement_source": source,
+        "station_id": station_id,
+        "observation_time": observation_time,
+        "observation_available_at": available_at,
+        "raw_value": float(raw_value),
+        "high_so_far": float(high_so_far) if high_so_far is not None else None,
+        "low_so_far": float(low_so_far) if low_so_far is not None else None,
+        "source_match_status": source_match,
+        "local_date_status": local_date_status,
+        "station_match_status": station_match,
+        "dst_status": dst_status,
+        "metric_match_status": "MATCH",
+        "rounding_status": rounding_status,
+        "source_authorized_status": source_authorized,
+        "live_authority_status": live_authority,
+        "settlement_unit": unit,
+        "settlement_precision": 1.0,
+        "rounding_rule": "wmo_half_up",
+        "observation_context_id": str(
+            row.get("observation_context_id")
+            or f"observation_instants:{city}:{target_date}:{source}:{station_id}:{available_at}"
+        ),
     }
 
 
@@ -334,6 +520,30 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
         ).fetchone()
         is not None
     )
+
+
+def _qualified_observation_instants_table(conn: sqlite3.Connection) -> str | None:
+    for schema, table in (("world", "world.observation_instants"), ("main", "observation_instants")):
+        try:
+            exists = conn.execute(
+                f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name='observation_instants'"
+            ).fetchone()
+        except sqlite3.Error:
+            exists = None
+        if exists is not None:
+            return table
+    return None
+
+
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    pragma_name = table_name
+    if "." in table_name:
+        schema, bare_table = table_name.split(".", 1)
+        pragma_name = f"{schema}.table_info({bare_table})"
+        rows = conn.execute(f"PRAGMA {pragma_name}").fetchall()
+    else:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {str(row[1]) for row in rows}
 
 
 def _dict_rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:

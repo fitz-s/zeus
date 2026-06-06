@@ -35,6 +35,7 @@ def _good_artifact(**overrides) -> dict:
         "commit_sha": HEAD,
         "measurement_cmd_hash": "deadbeef" * 8,
         "capital_weighted_ev": 0.012,
+        "production_n": 40,
         "gate_pass_n": 40,
         "per_city_n": {"shanghai": 6, "singapore": 7},
         "ev_sigma": 2.1,
@@ -48,6 +49,22 @@ def _good_artifact(**overrides) -> dict:
 def test_good_artifact_verifies_ok():
     v = verify_edli_arm_gate_artifact(_good_artifact(), head_sha=HEAD)
     assert v.ok is True, v.reason
+
+
+def test_legacy_gate_pass_n_alias_still_verifies_ok():
+    art = _good_artifact()
+    del art["production_n"]
+    v = verify_edli_arm_gate_artifact(art, head_sha=HEAD)
+    assert v.ok is True, v.reason
+
+
+def test_missing_production_n_and_legacy_alias_denies():
+    art = _good_artifact()
+    del art["production_n"]
+    del art["gate_pass_n"]
+    v = verify_edli_arm_gate_artifact(art, head_sha=HEAD)
+    assert v.ok is False
+    assert "FIELD_MISSING:production_n" in v.reason
 
 
 def test_missing_artifact_is_none_denies():
@@ -83,12 +100,13 @@ def test_wrong_schema_denies():
 
 
 def test_missing_required_field_denies():
-    # Each load-bearing field, dropped one at a time, must fail closed.
+    # Each load-bearing field without a compatibility alias, dropped one at a
+    # time, must fail closed. production_n is covered separately because
+    # gate_pass_n remains a deprecated alias for legacy artifacts.
     for field in (
         "commit_sha",
         "measurement_cmd_hash",
         "capital_weighted_ev",
-        "gate_pass_n",
         "per_city_n",
         "ev_sigma",
         "date_coverage",

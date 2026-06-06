@@ -50,6 +50,7 @@ from __future__ import annotations
 import inspect
 import json
 import sqlite3
+from types import SimpleNamespace
 
 import src.main as main_module
 
@@ -81,6 +82,25 @@ def test_reactor_cycle_does_not_refresh_inline():
     )
 
 
+def test_pending_family_refresh_does_not_call_global_weather_discovery():
+    """Pending-family substrate refresh must stay scoped to exact pending family slugs.
+
+    A global find_weather_markets_or_raise scan is too slow for the warm cadence and
+    has a separate discovery budget; putting it in this path makes the substrate
+    warmer overrun and starves the reactor of fresh receipt flow.
+    """
+    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+
+    assert "find_weather_markets_or_raise" not in src
+
+
+def test_market_discovery_defers_while_reactor_active():
+    src = inspect.getsource(main_module._market_discovery_cycle)
+
+    assert "_edli_reactor_active()" in src
+    assert "market_discovery deferred" in src
+
+
 def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     """GREEN-after-fix: a dedicated warm job exists and, when EDLI is enabled, invokes
     the family-snapshot refresh exactly once per tick."""
@@ -107,6 +127,31 @@ def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
 
     main_module._edli_market_substrate_warm_cycle()
     assert calls == [1], "warm job must invoke the family-snapshot refresh exactly once"
+
+
+def test_market_substrate_warm_cycle_runs_while_reactor_active(monkeypatch):
+    """The warm job owns an independent cadence; reactor-active must not starve price refresh."""
+    calls: list[int] = []
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(1),
+    )
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        main_module, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+    assert main_module._edli_reactor_active_lock.acquire(blocking=False)
+    try:
+        main_module._edli_market_substrate_warm_cycle()
+    finally:
+        main_module._edli_reactor_active_lock.release()
+
+    assert calls == [1]
 
 
 def test_market_substrate_warm_cycle_noop_when_edli_disabled(monkeypatch):
@@ -236,6 +281,142 @@ def test_pending_family_refresh_order_prioritizes_new_target_dates():
     assert "SCAN p" not in plan
 
 
+def test_pending_family_refresh_uses_static_topology_cache_without_gamma(monkeypatch):
+    world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    topology_rows = [
+        {
+            "market_slug": "highest-temperature-in-hong-kong-on-june-7-2026",
+            "city": "Hong Kong",
+            "target_date": "2026-06-07",
+            "temperature_metric": "high",
+            "condition_id": "cond-1",
+            "token_id": "yes-1",
+            "range_label": "31C",
+        }
+    ]
+    cached_market = {
+        "slug": "highest-temperature-in-hong-kong-on-june-7-2026",
+        "city": SimpleNamespace(name="Hong Kong"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "cond-1",
+                "market_id": "cond-1",
+                "token_id": "yes-1",
+                "no_token_id": "no-1",
+                "question_id": "q-1",
+            }
+        ],
+    }
+
+    import src.data.market_scanner as scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.engine.event_reactor_adapter as adapter
+    import src.state.db as state_db
+
+    monkeypatch.setattr(adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(
+        scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *a, **k: cached_market,
+    )
+    monkeypatch.setattr(scanner, "_gamma_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("Gamma should not be called")))
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [])
+
+    submitted: list[list[dict]] = []
+
+    def _refresh(_conn, *, markets, **_kwargs):
+        submitted.append(markets)
+        return {"attempted": 2, "inserted": 2}
+
+    monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    result = main_module._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+
+    assert result["status"] == "refreshed"
+    assert result["gamma_refresh_families"] == 0
+    assert result["cached_topology_families"] == 1
+    assert submitted == [[cached_market]]
+
+
+def test_pending_family_refresh_falls_back_to_gamma_when_static_topology_incomplete(monkeypatch):
+    world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    topology_rows = [
+        {
+            "market_slug": "highest-temperature-in-hong-kong-on-june-7-2026",
+            "city": "Hong Kong",
+            "target_date": "2026-06-07",
+            "temperature_metric": "high",
+            "condition_id": "cond-1",
+            "token_id": "yes-1",
+            "range_label": "31C",
+        }
+    ]
+    gamma_event = {
+        "slug": "highest-temperature-in-hong-kong-on-june-7-2026",
+        "city": SimpleNamespace(name="Hong Kong"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "cond-1",
+                "market_id": "cond-1",
+                "token_id": "yes-1",
+                "no_token_id": "no-1",
+                "question_id": "q-1",
+            }
+        ],
+    }
+
+    import src.data.market_scanner as scanner
+    import src.data.polymarket_client as polymarket_client
+    import src.engine.event_reactor_adapter as adapter
+    import src.state.db as state_db
+
+    monkeypatch.setattr(adapter, "_event_family_market_topology_rows", lambda *a, **k: topology_rows)
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(scanner, "reconstruct_weather_market_from_static_topology", lambda *a, **k: None)
+
+    gamma_calls: list[dict] = []
+
+    class _GammaResponse:
+        status_code = 200
+
+        def json(self):
+            return [{"id": "gamma-1"}]
+
+    def _gamma_get(*_args, **kwargs):
+        gamma_calls.append(kwargs.get("params") or {})
+        return _GammaResponse()
+
+    monkeypatch.setattr(scanner, "_gamma_get", _gamma_get)
+    monkeypatch.setattr(scanner, "_parse_and_persist_weather_events", lambda *a, **k: [gamma_event])
+
+    submitted: list[list[dict]] = []
+
+    def _refresh(_conn, *, markets, **_kwargs):
+        submitted.append(markets)
+        return {"attempted": 2, "inserted": 2}
+
+    monkeypatch.setattr(scanner, "refresh_executable_market_substrate_snapshots", _refresh)
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    result = main_module._refresh_pending_family_snapshots(world_conn, forecasts_conn)
+
+    assert result["status"] == "refreshed"
+    assert result["gamma_refresh_families"] == 1
+    assert result["cached_topology_incomplete"] == 1
+    assert gamma_calls == [{"slug": "highest-temperature-in-hong-kong-on-june-7-2026"}]
+    assert submitted == [[gamma_event]]
+
+
 def test_mainstream_warm_cycle_uses_bounded_fresh_family_window(monkeypatch):
     monkeypatch.setattr(
         main_module,
@@ -297,6 +478,17 @@ class _FakeConn:
         pass
 
 
+class _FakePolymarketClient:
+    def __init__(self, *a, **k):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 class _CaptureConn:
     def __init__(self, conn):
         self._conn = conn
@@ -314,3 +506,62 @@ def _explain_plan(conn, sql: str, params=()) -> str:
         " ".join(str(part) for part in row)
         for row in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
     )
+
+
+def _pending_family_conn(event_id: str, city: str, target_date: str, metric: str):
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT NOT NULL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            entity_key TEXT NOT NULL,
+            source TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            available_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            causal_snapshot_id TEXT,
+            payload_hash TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            priority INTEGER NOT NULL DEFAULT 0,
+            expires_at TEXT,
+            payload_json TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(consumer_name, processing_status, updated_at);
+        """
+    )
+    payload = {"city": city, "target_date": target_date, "metric": metric}
+    now = "2026-06-06T00:00:00+00:00"
+    conn.execute(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, payload_hash, idempotency_key, priority, payload_json,
+            schema_version, created_at
+        ) VALUES (?, 'FORECAST_SNAPSHOT_READY', ?, 'test', ?, ?, ?, ?, ?, 50, ?, 1, ?)
+        """,
+        (event_id, event_id, now, now, now, event_id, event_id, json.dumps(payload), now),
+    )
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'pending', ?)
+        """,
+        (event_id, now),
+    )
+    return conn

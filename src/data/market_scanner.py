@@ -3289,6 +3289,156 @@ def read_persisted_weather_markets(
     )
 
 
+def reconstruct_weather_market_from_static_topology(
+    snapshot_conn,
+    *,
+    topology_rows: list[dict[str, Any]],
+    now_utc: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Build a substrate-refresh market from persisted topology plus token snapshots.
+
+    ``market_events`` is the durable weather-market family identity: slug, city,
+    date, metric, bin labels, and condition ids do not need a fresh Gamma fetch
+    every time prices expire.  It does not, however, carry the full YES/NO token
+    map.  The token/question/timing facts are reconstructed from the latest
+    executable snapshots for the same condition ids; if any family sibling lacks
+    that executable identity, return ``None`` so callers can do a bounded Gamma
+    slug refresh instead of silently shrinking the MECE family.
+    """
+
+    rows = [dict(row) for row in topology_rows or [] if str(dict(row).get("condition_id") or "").strip()]
+    if not rows:
+        return None
+
+    condition_ids = tuple(str(row.get("condition_id") or "").strip() for row in rows)
+    placeholders = ",".join("?" for _ in condition_ids)
+    try:
+        snapshot_rows = snapshot_conn.execute(
+            f"""
+            SELECT *
+              FROM executable_market_snapshots
+             WHERE condition_id IN ({placeholders})
+             ORDER BY captured_at DESC
+            """,
+            condition_ids,
+        ).fetchall()
+    except Exception:
+        return None
+
+    latest_seen: datetime | None = None
+    latest_by_condition: dict[str, dict[str, dict[str, Any]]] = {}
+    for snapshot_row in snapshot_rows:
+        data = dict(snapshot_row)
+        captured_at = _parse_snapshot_time(data.get("captured_at"))
+        if captured_at is None:
+            continue
+        latest_seen = captured_at if latest_seen is None else max(latest_seen, captured_at)
+        condition_id = str(data.get("condition_id") or "").strip()
+        side = _snapshot_outcome_side(data)
+        if not condition_id or side is None:
+            continue
+        by_side = latest_by_condition.setdefault(condition_id, {})
+        current = by_side.get(side)
+        current_at = _parse_snapshot_time(current.get("captured_at")) if current else None
+        if current is None or current_at is None or captured_at > current_at:
+            by_side[side] = data
+
+    first = rows[0]
+    slug = str(first.get("market_slug") or "")
+    city_name = str(first.get("city") or "")
+    target_date = str(first.get("target_date") or "")
+    metric = str(first.get("temperature_metric") or "")
+    if not (slug and city_name and target_date and metric):
+        return None
+
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+
+    event: dict[str, Any] = {
+        "event_id": slug,
+        "slug": slug,
+        "title": slug.replace("-", " "),
+        "city": _city_from_name(city_name),
+        "target_date": target_date,
+        "temperature_metric": metric,
+        "hours_since_open": 24.0,
+        "hours_to_resolution": None,
+        "market_start_at": None,
+        "market_end_at": None,
+        "market_close_at": None,
+        "sports_start_at": None,
+        "outcomes": [],
+        "condition_ids": [],
+        "support_topology": {
+            "topology_status": "complete",
+            "support_child_count": len(rows),
+            "executable_child_count": 0,
+        },
+        "source_contract": {"status": "MATCH", "source": "market_events_static_topology"},
+    }
+
+    for row in rows:
+        condition_id = str(row.get("condition_id") or "").strip()
+        snapshots_by_side = latest_by_condition.get(condition_id, {})
+        yes_snapshot = snapshots_by_side.get("YES")
+        no_snapshot = snapshots_by_side.get("NO")
+        timing_snapshot = _latest_snapshot(yes_snapshot, no_snapshot)
+        if timing_snapshot is None:
+            return None
+        token_snapshot = yes_snapshot or no_snapshot or timing_snapshot
+        yes_token = str(token_snapshot.get("yes_token_id") or row.get("token_id") or "")
+        no_token = str(token_snapshot.get("no_token_id") or "")
+        question_id = str(token_snapshot.get("question_id") or "")
+        if not (yes_token and no_token and question_id):
+            return None
+
+        _update_event_timing_from_snapshot(event, timing_snapshot, now=now)
+        outcome = {
+            "title": str(row.get("range_label") or row.get("outcome") or condition_id),
+            "range_low": row.get("range_low"),
+            "range_high": row.get("range_high"),
+            "market_id": condition_id,
+            "condition_id": condition_id,
+            "token_id": yes_token,
+            "no_token_id": no_token,
+            "question_id": question_id,
+            "gamma_market_id": str(token_snapshot.get("gamma_market_id") or condition_id),
+            "price": None,
+            "no_price": None,
+            "market_start_at": timing_snapshot.get("market_start_at"),
+            "market_end_at": timing_snapshot.get("market_end_at"),
+            "market_close_at": timing_snapshot.get("market_close_at"),
+            "sports_start_at": timing_snapshot.get("sports_start_at"),
+            "executable": True,
+            "gamma_market_raw": {
+                "id": token_snapshot.get("gamma_market_id") or condition_id,
+                "active": bool(token_snapshot.get("active")),
+                "closed": bool(token_snapshot.get("closed")),
+                "enable_orderbook": bool(token_snapshot.get("enable_orderbook")),
+                "acceptingOrders": bool(token_snapshot.get("accepting_orders")),
+                "tradability_authority": "persisted_snapshot_reconstruction",
+            },
+            "token_map_raw": _json_object(token_snapshot.get("token_map_json"))
+            or {"YES": yes_token, "NO": no_token},
+            "raw_gamma_payload_hash": str(token_snapshot.get("raw_gamma_payload_hash") or ""),
+        }
+        event["outcomes"].append(outcome)
+        event["condition_ids"].append(condition_id)
+
+    if len(event["outcomes"]) != len(rows):
+        return None
+    hours_to_resolution = event.get("hours_to_resolution")
+    if hours_to_resolution is None or hours_to_resolution <= 0:
+        return None
+    event["condition_ids"] = _dedupe_condition_ids(event["condition_ids"])
+    event["support_topology"]["executable_child_count"] = len(event["condition_ids"])
+    event["fetched_at_utc"] = latest_seen.isoformat() if latest_seen is not None else None
+    return event
+
+
 def _snapshot_max_outcomes_from_env(max_outcomes: int | None) -> int:
     # UNLIMITED sentinel (2026-06-04): max_outcomes=0 means "no per-city cap —
     # capture EVERY family bin". refresh_pending_family_snapshots passes this so a

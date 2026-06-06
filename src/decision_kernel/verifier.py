@@ -26,7 +26,10 @@ REQUIRED_FORECAST_VALIDATIONS = frozenset(
         "available_at_not_future",
     }
 )
-APPROVED_CALIBRATION_AUTHORITIES = frozenset({"VERIFIED", "LIVE", "APPROVED"})
+IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
+APPROVED_CALIBRATION_AUTHORITIES = frozenset(
+    {"VERIFIED", "LIVE", "APPROVED", IDENTITY_FALLBACK_CALIBRATION_AUTHORITY}
+)
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
 ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
 
@@ -388,9 +391,14 @@ def _verify_execution_command_payload(
         raise CertificateVerificationError("execution command size must be positive")
     if size < min_order_size:
         raise CertificateVerificationError("execution command size below min_order_size")
-    max_notional = _finite_float(live_cap.get("max_notional_usd"), "live cap max_notional_usd")
-    if size * limit_price > max_notional:
-        raise CertificateVerificationError("execution command size exceeds live cap notional")
+    notional_cap_enabled = (
+        live_cap.get("notional_cap_enabled", actionable.get("live_cap_notional_cap_enabled", True)) is not False
+        and actionable.get("live_cap_notional_cap_enabled", True) is not False
+    )
+    if notional_cap_enabled:
+        max_notional = _finite_float(live_cap.get("max_notional_usd"), "live cap max_notional_usd")
+        if size * limit_price > max_notional:
+            raise CertificateVerificationError("execution command size exceeds live cap notional")
     if limit_price <= 0.0 or limit_price >= 1.0:
         raise CertificateVerificationError("execution command limit_price must be in (0, 1)")
     if tick_size <= 0.0:
@@ -538,7 +546,12 @@ def _verify_final_intent_payload(
     if notional <= 0:
         raise CertificateVerificationError("final intent notional_usd must be positive")
     reserved_notional = actionable.get("live_cap_reserved_notional_usd")
-    if reserved_notional is not None and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd"):
+    notional_cap_enabled = actionable.get("live_cap_notional_cap_enabled", True) is not False
+    if (
+        notional_cap_enabled
+        and reserved_notional is not None
+        and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd")
+    ):
         raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
     _assert_order_type_tuple_coherent(payload, surface="final intent")
     if payload.get("source") != "existing_final_intent_builder":
@@ -896,7 +909,7 @@ def _validate_calibration_payload(
     maturity = calibration.get("maturity_level")
     if maturity in (None, ""):
         raise CertificateVerificationError("calibration.maturity_level missing")
-    if int(maturity) > 3:
+    if int(maturity) > 3 and authority != IDENTITY_FALLBACK_CALIBRATION_AUTHORITY:
         raise CertificateVerificationError("calibration.maturity_level too low for live/no-submit")
     input_space = calibration.get("input_space")
     expected_input_space = model_config.get("calibration_input_space")

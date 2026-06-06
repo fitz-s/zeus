@@ -288,6 +288,45 @@ def test_settlement_floor_on_widens_sigma_emos(monkeypatch):
     assert on[2] > off[2], "floor only WIDENS, never tightens"
 
 
+def test_settlement_floor_on_requires_floor_cell_emos(monkeypatch):
+    # Reviewer-facing contract: missing floor cells are legacy fail-soft only while the
+    # settlement-floor flag is OFF. With apply_settlement_floor=True, the same miss is hard.
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    table = {"_meta": {"metric": "multi"},
+             "cells": {"TelAviv|JJA|high": {"params": [0.0, 1.0, -0.4, 0.5, 0.0],
+                                             "n": 99, "served": "emos"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", {"_meta": {"k_default": 0.8}, "cells": {}}, raising=False)
+    kw = dict(city="TelAviv", season="JJA", metric="high", lead_days=3.0,
+              members_native=np.array([26.6, 27.0, 27.4, 27.0], dtype=float),
+              unit="C", bins=[(None, 30.0), (31.0, None)])
+
+    assert mod.build_emos_q(apply_settlement_floor=False, **kw) is not None
+    with pytest.raises(emos_mod.SettlementSigmaFloorError, match="MISSING_CELL"):
+        mod.build_emos_q(apply_settlement_floor=True, **kw)
+
+
+def test_settlement_floor_on_requires_positive_floor_honest_raw(monkeypatch):
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    table = {"_meta": {}, "cells": {"RawCity|JJA|high": {"params": [0.0, 1.0, -0.4, 0.5, 0.0],
+                                                         "n": 99, "served": "raw"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    monkeypatch.setattr(
+        emos_mod,
+        "_sigma_floor_cache",
+        {"_meta": {"k_default": 0.8},
+         "cells": {"RawCity|JJA|high": {"sigma_floor_c": -1.0, "n": 30, "window": "45d"}}},
+        raising=False,
+    )
+    kw = dict(city="RawCity", season="JJA", metric="high", lead_days=5.0,
+              members_native=np.array([22.0, 22.3, 22.6, 22.9], dtype=float),
+              unit="C", bins=[(None, 21.0), (22.0, None)])
+
+    assert mod.build_honest_raw_q(apply_settlement_floor=False, **kw) is not None
+    with pytest.raises(emos_mod.SettlementSigmaFloorError, match="NON_POSITIVE"):
+        mod.build_honest_raw_q(apply_settlement_floor=True, **kw)
+
+
 def test_settlement_floor_defangs_telaviv_degenerate_q(monkeypatch):
     # Tel Aviv reproduction: model σ≈0.81 (matches investigation ≈0.83), σ_settled≈2.9, μ≈27.
     # The "33°C or higher" open-high far bin: floor-OFF gets LITERALLY ZERO probability mass

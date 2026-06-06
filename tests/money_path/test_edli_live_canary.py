@@ -18,10 +18,9 @@ def test_live_canary_runtime_stays_in_shadow_no_submit_until_operator_unshadow()
 
     The reactor runs in shadow (edli_shadow_no_submit): it forms decisions/candidates with NO
     venue submission so the p_raw-vs-online bias test (#24) can run on real flow. The
-    load-bearing money guard is ``real_order_submit_enabled is False`` plus both write-side
-    triggers (day0, market-channel) staying off — these must hold until the operator's
-    irreversible unshadow. Supersedes the prior fully-disabled canary, which predated the
-    deliberate shadow launch.
+    load-bearing money guard is ``real_order_submit_enabled is False`` plus venue write-side
+    triggers staying off — these must hold until the operator's irreversible unshadow.
+    Supersedes the prior fully-disabled canary, which predated the deliberate shadow launch.
     """
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
@@ -34,9 +33,12 @@ def test_live_canary_runtime_stays_in_shadow_no_submit_until_operator_unshadow()
     assert edli["enabled"] is True
     assert edli["event_writer_enabled"] is True
     assert edli["forecast_snapshot_trigger_enabled"] is True
-    # Write-side venue triggers stay OFF in shadow.
-    assert edli["day0_extreme_trigger_enabled"] is False
+    # Day0 is local observation eventing; venue write-side triggers stay OFF in shadow.
+    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["day0_extreme_trigger_enabled"] is True
+    assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
+    assert edli["taker_fok_fak_live_enabled"] is False
     assert "live_canary_enabled" not in edli
 
 
@@ -269,6 +271,48 @@ def test_live_cap_certificate_is_backed_by_usage_row():
     assert row["final_intent_id"] == "intent-1"
 
 
+def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypatch):
+    from copy import deepcopy
+
+    from src.engine import event_reactor_adapter as adapter
+    from src.events.reactor import EventSubmissionReceipt
+
+    settings_copy = deepcopy(adapter.settings)
+    settings_copy["edli_v1"]["tiny_live_notional_cap_enabled"] = False
+    settings_copy["edli_v1"]["tiny_live_daily_order_cap_enabled"] = False
+    monkeypatch.setattr(adapter, "settings", settings_copy)
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        proof_accepted=True,
+        event_id=event.event_id,
+        causal_snapshot_id=event.causal_snapshot_id,
+        c_fee_adjusted=0.4,
+        kelly_size_usd=800.0,
+        final_intent_id="intent-uncapped",
+    )
+    kwargs = dict(
+        event=event,
+        receipt=receipt,
+        decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
+        max_notional_usd=5.0,
+        live_cap_conn=conn,
+    )
+
+    provisional = adapter._build_live_cap_certificate_from_ledger(**kwargs, persist=False)
+    durable = adapter._build_live_cap_certificate_from_ledger(**kwargs, persist=True)
+
+    assert provisional.payload["reserved_notional_usd"] == 800.0
+    assert durable.payload["reserved_notional_usd"] == 800.0
+    assert durable.payload["reserved_notional_usd"] == provisional.payload["reserved_notional_usd"]
+    assert durable.payload["max_notional_usd"] == provisional.payload["max_notional_usd"] == 800.0
+    assert provisional.payload["notional_cap_enabled"] is False
+    assert durable.payload["notional_cap_enabled"] is False
+
+
 def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
     from src.engine import event_reactor_adapter as adapter
     from src.riskguard.risk_level import RiskLevel
@@ -355,6 +399,259 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
     assert command.payload["aggregate_execution_command_event_hash"] == events[4]["event_hash"]
     assert transition.payload["aggregate_cap_transition_event_hash"] == events[5]["event_hash"]
     assert projection["current_state"] == "CAP_TRANSITIONED"
+
+
+def test_locked_live_opportunity_suppresses_redecision_without_price_improvement():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "condition_id": "condition-1",
+            "token_id": "token-no-1",
+            "direction": "buy_no",
+            "limit_price": 0.70,
+        },
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-1",
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": "command-1",
+        },
+    )
+
+    unchanged = adapter._locked_live_opportunity_no_price_improvement_reason(
+        conn,
+        condition_id="condition-1",
+        token_id="token-no-1",
+        direction="buy_no",
+        side="BUY",
+        limit_price=0.70,
+    )
+    one_tick_better = adapter._locked_live_opportunity_no_price_improvement_reason(
+        conn,
+        condition_id="condition-1",
+        token_id="token-no-1",
+        direction="buy_no",
+        side="BUY",
+        limit_price=0.69,
+    )
+    materially_better = adapter._locked_live_opportunity_no_price_improvement_reason(
+        conn,
+        condition_id="condition-1",
+        token_id="token-no-1",
+        direction="buy_no",
+        side="BUY",
+        limit_price=0.68,
+    )
+
+    assert unchanged is not None
+    assert one_tick_better is not None
+    assert materially_better is None
+
+
+def test_selector_skips_locked_candidate_and_keeps_flowing_to_next_executable():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-locked-best",
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload={
+            "event_id": "event-locked",
+            "final_intent_id": "intent-locked",
+            "condition_id": "condition-locked",
+            "token_id": "token-locked",
+            "direction": "buy_no",
+            "limit_price": 0.40,
+        },
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-locked-best",
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-locked",
+            "final_intent_id": "intent-locked",
+            "execution_command_id": "command-locked",
+        },
+    )
+    locked_best = _fake_candidate_proof(
+        condition_id="condition-locked",
+        token_id="token-locked",
+        direction="buy_no",
+        limit_price=0.70,
+        trade_score=0.50,
+        q_lcb_5pct=0.80,
+    )
+    next_best = _fake_candidate_proof(
+        condition_id="condition-next",
+        token_id="token-next",
+        direction="buy_yes",
+        limit_price=0.45,
+        trade_score=0.20,
+        q_lcb_5pct=0.60,
+    )
+
+    selected = adapter._selected_candidate_proof(
+        {},
+        (locked_best, next_best),
+        locked_opportunity_conn=conn,
+    )
+
+    assert selected is next_best
+
+
+def test_selector_skips_below_min_tick_candidate_and_keeps_flowing():
+    from src.engine import event_reactor_adapter as adapter
+
+    below_tick_best = _fake_candidate_proof(
+        condition_id="condition-too-cheap",
+        token_id="token-too-cheap",
+        direction="buy_no",
+        limit_price=0.004,
+        trade_score=0.90,
+        q_lcb_5pct=0.95,
+        min_tick_size=0.01,
+    )
+    next_tradeable = _fake_candidate_proof(
+        condition_id="condition-next",
+        token_id="token-next",
+        direction="buy_yes",
+        limit_price=0.45,
+        trade_score=0.20,
+        q_lcb_5pct=0.60,
+        min_tick_size=0.01,
+    )
+
+    selected = adapter._selected_candidate_proof(
+        {},
+        (below_tick_best, next_tradeable),
+    )
+
+    assert selected is next_tradeable
+
+
+def test_candidate_below_min_tick_has_explicit_untradeable_reason():
+    from src.engine import event_reactor_adapter as adapter
+
+    below_tick = _fake_candidate_proof(
+        condition_id="condition-too-cheap",
+        token_id="token-too-cheap",
+        direction="buy_no",
+        limit_price=0.004,
+        trade_score=0.90,
+        q_lcb_5pct=0.95,
+        min_tick_size=0.01,
+    )
+
+    reason = adapter._candidate_limit_price_untradeable_reason(below_tick)
+
+    assert reason == "EXECUTION_PRICE_BELOW_MIN_TICK:limit_price=0.004:min_tick_size=0.01"
+
+
+def test_selector_does_not_fall_back_to_locked_candidate_when_all_executable_locked():
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-locked-only",
+        sequence=1,
+        event_type="SubmitPlanBuilt",
+        payload={
+            "event_id": "event-locked",
+            "final_intent_id": "intent-locked",
+            "condition_id": "condition-locked",
+            "token_id": "token-locked",
+            "direction": "buy_no",
+            "limit_price": 0.40,
+        },
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="aggregate-locked-only",
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={
+            "event_id": "event-locked",
+            "final_intent_id": "intent-locked",
+            "execution_command_id": "command-locked",
+        },
+    )
+    locked = _fake_candidate_proof(
+        condition_id="condition-locked",
+        token_id="token-locked",
+        direction="buy_no",
+        limit_price=0.70,
+        trade_score=0.50,
+        q_lcb_5pct=0.80,
+    )
+
+    selected = adapter._selected_candidate_proof(
+        {},
+        (locked,),
+        locked_opportunity_conn=conn,
+    )
+
+    assert selected is None
+
+
+def test_submit_disabled_redecision_returns_no_submit_for_locked_same_price(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event_1 = _forecast_event()
+    event_2 = replace(event_1, event_id="event-2", entity_key="Chicago|2026-05-24|high|live-canary-test-redecision")
+
+    def _accepted_for_event(event, *_args, **kwargs):
+        decision_time = kwargs["decision_time"]
+        accepted = _accepted_receipt(event)
+        return replace(
+            accepted,
+            decision_proof_bundle=build_test_no_submit_proof_bundle(
+                event,
+                accepted,
+                decision_time=decision_time,
+            ),
+        )
+
+    monkeypatch.setattr(adapter, "build_event_bound_no_submit_receipt", _accepted_for_event)
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        conn,
+        live_cap_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=False,
+        pre_submit_authority_provider=_pre_submit_authority_provider,
+        taker_fok_fak_live_enabled=True,
+    )
+
+    first = submit(event_1, datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    event_count_after_first = _table_count(conn, "edli_live_order_events")
+    second = submit(event_2, datetime(2026, 5, 24, 18, 11, tzinfo=timezone.utc))
+
+    assert first.side_effect_status == "SUBMIT_DISABLED"
+    assert event_count_after_first == 6
+    assert second.side_effect_status == "NO_SUBMIT"
+    assert second.reason.startswith("EDLI_LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT")
+    assert _table_count(conn, "edli_live_order_events") == event_count_after_first
 
 
 def test_live_build_failure_rolls_back_partial_live_order_aggregate(monkeypatch):
@@ -458,6 +755,94 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
             live_cap_conn=conn,
             pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(current_best_ask=0.39),
         )
+
+
+def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(
+        _accepted_receipt(event),
+        trade_score=0.015,
+        p_fill_lcb=0.10,
+    )
+    proof_bundle = build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time)
+    proof_bundle = replace(
+        proof_bundle,
+        quote_feasibility=replace(
+            proof_bundle.quote_feasibility,
+            payload={
+                **proof_bundle.quote_feasibility.payload,
+                "best_bid": 0.38,
+                "best_ask": 0.42,
+                "book_hash": "stale-book-hash",
+            },
+        ),
+    )
+    accepted = replace(accepted, decision_proof_bundle=proof_bundle)
+
+    certs = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        tiny_live_max_notional_usd=5.0,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
+            current_best_bid=0.39,
+            current_best_ask=0.40,
+        ),
+        taker_fok_fak_live_enabled=True,
+    )
+
+    final_intent = next(c for c in certs if getattr(c, "certificate_type", None) == claims.FINAL_INTENT)
+    pre_submit = next(c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION)
+
+    assert final_intent.payload["order_mode"] == "TAKER"
+    assert final_intent.payload["post_only"] is False
+    assert final_intent.payload["time_in_force"] in {"FOK", "FAK"}
+    assert final_intent.payload["limit_price"] == pytest.approx(0.40)
+    assert pre_submit.payload["would_cross_book"] is True
+    assert pre_submit.payload["post_only"] is False
+
+
+def test_live_command_reuses_single_pre_submit_authority_witness():
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+    calls = []
+
+    def _provider(final_intent, _executable_snapshot, _decision_time):
+        calls.append(final_intent.payload["token_id"])
+        return _pre_submit_authority_witness(current_best_bid=0.39, current_best_ask=0.40)
+
+    certs = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        tiny_live_max_notional_usd=5.0,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=_provider,
+        taker_fok_fak_live_enabled=True,
+    )
+
+    pre_submit = next(c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION)
+    assert calls == ["yes-1"]
+    assert pre_submit.payload["book_hash"] == "book-hash-1"
 
 
 def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
@@ -979,8 +1364,13 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     )
     monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "2.5")
+    clob_timeouts = []
 
     class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            clob_timeouts.append(public_http_timeout)
+
         def __enter__(self):
             return self
 
@@ -1021,13 +1411,44 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     )
 
     witness = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
+    witness_again = provider(final_intent, object(), datetime(2026, 5, 25, 12, tzinfo=timezone.utc))
 
     assert witness.book_hash == "book-hash-1"
+    assert witness_again.book_hash == "book-hash-1"
     assert witness.book_authority_id == "execution_feasibility_evidence"
     assert witness.heartbeat_authority_id == "heartbeat_supervisor"
     assert witness.user_ws_authority_id == "ws_gap_guard"
     assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
     assert witness.balance_allowance_status == "OK"
+    assert clob_timeouts == [2.5, 2.5]
+
+
+def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):
+    import src.data.polymarket_client as polymarket_client
+    import src.main as main
+
+    captured = {}
+
+    class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            captured["public_http_timeout"] = public_http_timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get_orderbook_snapshot(self, token_id):
+            return {"hash": "book-hash", "bids": [{"price": "0.40"}], "asks": [{"price": "0.42"}]}
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "2.5")
+
+    provider = main._edli_pre_submit_jit_book_quote_provider()
+
+    assert provider("yes-1")["hash"] == "book-hash"
+    assert captured["public_http_timeout"] == 2.5
 
 
 def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(monkeypatch):
@@ -1061,6 +1482,9 @@ def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(mo
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
 
     class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            self.public_http_timeout = public_http_timeout
+
         def __enter__(self):
             return self
 
@@ -1135,6 +1559,9 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
 
     class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            self.public_http_timeout = public_http_timeout
+
         def __enter__(self):
             return self
 
@@ -1361,6 +1788,74 @@ def _table_count(conn, table_name):
     return conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
 
 
+def _insert_live_order_event(
+    conn,
+    *,
+    aggregate_id,
+    sequence,
+    event_type,
+    payload,
+    occurred_at="2026-05-24T18:10:00+00:00",
+):
+    from src.decision_kernel.canonicalization import canonical_json, stable_hash
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    ensure_tables(conn)
+    payload_json = canonical_json(payload)
+    payload_hash = stable_hash(payload)
+    event_hash = stable_hash(
+        {
+            "aggregate_id": aggregate_id,
+            "event_sequence": sequence,
+            "event_type": event_type,
+            "payload_hash": payload_hash,
+            "occurred_at": occurred_at,
+        }
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            "edli_live_order_event:" + event_hash[:32],
+            aggregate_id,
+            sequence,
+            event_type,
+            event_hash,
+            payload_json,
+            payload_hash,
+            "engine_adapter",
+            occurred_at,
+            occurred_at,
+        ),
+    )
+
+
+def _fake_candidate_proof(
+    *,
+    condition_id,
+    token_id,
+    direction,
+    limit_price,
+    trade_score,
+    q_lcb_5pct,
+    min_tick_size=0.01,
+):
+    return SimpleNamespace(
+        candidate=SimpleNamespace(condition_id=condition_id),
+        token_id=token_id,
+        direction=direction,
+        execution_price=SimpleNamespace(value=limit_price),
+        row={"min_tick_size": min_tick_size},
+        trade_score=trade_score,
+        q_lcb_5pct=q_lcb_5pct,
+    )
+
+
 def _receipt_status(receipt):
     return _receipt_cert(receipt).payload["status"]
 
@@ -1430,7 +1925,7 @@ def _pre_submit_authority_witness(
     *,
     decision_time: datetime | None = None,
     current_best_bid: float = 0.39,
-    current_best_ask: float = 0.41,
+    current_best_ask: float = 0.40,
     tick_size: float = 0.01,
     min_order_size: float = 1.0,
     heartbeat_status: str = "OK",
@@ -1540,6 +2035,9 @@ def _gate84_patch_authority_guards(monkeypatch):
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
 
     class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            self.public_http_timeout = public_http_timeout
+
         def __enter__(self):
             return self
 

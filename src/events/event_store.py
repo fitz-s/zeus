@@ -130,19 +130,23 @@ class EventStore:
               AND e.received_at <= ?
               AND (e.expires_at IS NULL OR e.expires_at > ?)
             ORDER BY
-              -- Tier 0: COMPLETE FORECAST_SNAPSHOT_READY — direct receipt candidates, highest urgency.
-              -- Tier 1: Other decision-trigger events (PARTIAL FSR, DAY0_EXTREME_UPDATED) — still
-              --         actionable or cheaply dead-letterable; must not be starved by market-channel.
-              -- Tier 2: Market-channel cache-hydration events (BEST_BID_ASK_CHANGED, BOOK_SNAPSHOT,
+              -- Tier 0: DAY0_EXTREME_UPDATED hard facts — realized observations are the freshest
+              --         actionable alpha source and must not sit behind forecast redecision backlog.
+              -- Tier 1: COMPLETE FORECAST_SNAPSHOT_READY — direct receipt candidates.
+              -- Tier 2: Other decision-trigger events (PARTIAL FSR) — still actionable or cheaply
+              --         dead-letterable; must not be starved by market-channel.
+              -- Tier 3: Market-channel cache-hydration events (BEST_BID_ASK_CHANGED, BOOK_SNAPSHOT,
               --         NEW_MARKET_DISCOVERED) — they get rejected NO_DIRECT_STALE_TRADE immediately
               --         but can accumulate to 300k+; without explicit demotion they starve all FSR.
               CASE
+                WHEN e.event_type = 'DAY0_EXTREME_UPDATED'
+                THEN 0
                 WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'
                  AND json_extract(e.payload_json, '$.source_run_completeness_status') = 'COMPLETE'
-                THEN 0
+                THEN 1
                 WHEN e.event_type IN ('BEST_BID_ASK_CHANGED', 'BOOK_SNAPSHOT', 'NEW_MARKET_DISCOVERED')
-                THEN 2
-                ELSE 1
+                THEN 3
+                ELSE 2
               END ASC,
               e.priority DESC,
               -- FRESHEST-TARGET-FIRST: reach fresh candidates before the per-cycle
@@ -422,6 +426,93 @@ class EventStore:
         # below SQLite's SQLITE_MAX_VARIABLE_NUMBER (999 default) while reducing
         # round-trips by ~200×.  Semantics are identical: only pending/processing
         # rows transition to expired.
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(superseded_ids), _CHUNK):
+            chunk = superseded_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'expired',
+                       processed_at = ?,
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(superseded_ids)
+
+    def archive_superseded_forecast_snapshot_events(
+        self, *, batch_limit: int = 5_000
+    ) -> int:
+        """Sweep superseded FSR redecision rows to terminal ``'expired'`` status.
+
+        Continuous redecision intentionally emits fresh FSR-equivalent events for the
+        same ``entity_key`` across cycles. Only the newest active row for that key can
+        be useful; older pending/processing rows force the reactor to re-evaluate stale
+        forecast snapshots and can keep the queue focused on the same small family set.
+
+        The immutable ``opportunity_events`` row remains append-only. This method only
+        expires mutable ``opportunity_event_processing`` rows, preserving provenance
+        while reducing the active working set.
+        """
+
+        self._require_world_event_tables()
+
+        candidate_rows = self.conn.execute(
+            """
+            SELECT e.event_id, e.entity_key
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type = 'FORECAST_SNAPSHOT_READY'
+               AND e.entity_key IS NOT NULL
+             ORDER BY e.available_at ASC, e.received_at ASC, e.event_id ASC
+             LIMIT ?
+            """,
+            (self.consumer_name, batch_limit),
+        ).fetchall()
+        if not candidate_rows:
+            return 0
+
+        candidate_keys = {str(row[1]) for row in candidate_rows if row[1] is not None}
+        keeper_ids: set[str] = set()
+        for entity_key in candidate_keys:
+            keeper_row = self.conn.execute(
+                """
+                SELECT e.event_id
+                  FROM opportunity_events e
+                  JOIN opportunity_event_processing p
+                    ON p.event_id = e.event_id
+                   AND p.consumer_name = ?
+                 WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
+                   AND e.entity_key = ?
+                   AND p.processing_status IN ('pending', 'processing')
+                 ORDER BY
+                   CASE
+                     WHEN json_extract(e.payload_json, '$.source_run_completeness_status') = 'COMPLETE'
+                     THEN 0
+                     ELSE 1
+                   END ASC,
+                   e.available_at DESC,
+                   e.received_at DESC,
+                   e.event_id DESC
+                 LIMIT 1
+                """,
+                (self.consumer_name, entity_key),
+            ).fetchone()
+            if keeper_row is not None:
+                keeper_ids.add(str(keeper_row[0]))
+
+        superseded_ids = [str(row[0]) for row in candidate_rows if str(row[0]) not in keeper_ids]
+        if not superseded_ids:
+            return 0
+
         now = _utc_now()
         _CHUNK = 500
         for chunk_start in range(0, len(superseded_ids), _CHUNK):

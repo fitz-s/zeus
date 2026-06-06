@@ -1,7 +1,7 @@
 # Created: 2026-05-24
 # Last reused/audited: 2026-06-05
-# Authority basis: EDLI PR332 deploy-ready review; Day0 must not be advertised
-# live while the online observation-context hook is absent.
+# Authority basis: EDLI PR332 deploy-ready review plus day0_shadow bridge;
+# Day0 may run in shadow/no-submit only, never as real capital authorization.
 #                  + 2026-06-04 arm direction-gate boot guard DELETED (mainstream is
 #                    display-only, never a decision/arm input — operator Rule-4 antibody)
 from __future__ import annotations
@@ -23,10 +23,10 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
     assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
     assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
-    assert edli["edli_live_scope"] == "forecast_only"
-    assert edli["day0_extreme_trigger_enabled"] is False
-    assert edli["day0_authority_catchup_scanner_enabled"] is False
-    assert edli["day0_hard_fact_live_enabled"] is False
+    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["day0_extreme_trigger_enabled"] is True
+    assert edli["day0_authority_catchup_scanner_enabled"] is True
+    assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
     assert edli["edli_user_channel_reconcile_enabled"] is False
     assert edli["edli_user_channel_message_queue_path"] == ""
@@ -38,9 +38,11 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["market_channel_quote_cache_enabled"] is True
     assert edli["no_trade_regret_enabled"] is True
     assert edli["reports_enabled"] is True
-    assert edli["forecast_snapshot_emit_limit"] <= 20
+    assert edli["forecast_snapshot_emit_limit"] is False
+    assert edli["coverage_fairness_emit_enabled"] is True
     assert edli["day0_catchup_emit_limit"] <= 20
-    assert edli["no_submit_proof_limit"] <= 50
+    assert edli["no_submit_proof_limit"] is False
+    assert edli["redecision_max_per_cycle"] is False
     assert edli["market_channel_refresh_max_actions_per_window"] <= 5
     assert edli["market_channel_refresh_window_seconds"] >= 1
     assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
@@ -94,14 +96,17 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert "max_orders_per_window=" in adapter_source
 
 
-def test_pr332_scope_marks_day0_and_market_channel_as_disabled_followups():
+def test_day0_shadow_scope_admits_day0_but_keeps_market_channel_disabled():
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
 
-    assert edli["day0_extreme_trigger_enabled"] is False
-    assert edli["day0_hard_fact_live_enabled"] is False
-    assert edli["day0_authority_catchup_scanner_enabled"] is False
+    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["day0_extreme_trigger_enabled"] is True
+    assert edli["day0_hard_fact_live_enabled"] is True
+    assert edli["day0_authority_catchup_scanner_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
+    assert edli["real_order_submit_enabled"] is False
+    assert edli["taker_fok_fak_live_enabled"] is False
 
 
 def test_pr_scope_document_matches_settings_flags():
@@ -114,20 +119,21 @@ def test_pr_scope_document_matches_settings_flags():
     assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
     assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
     assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
-    assert edli["day0_hard_fact_live_enabled"] is False
+    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
     assert edli["real_order_submit_enabled"] is False
     assert "market_channel_ingestor_enabled=false" in spec
-    assert "Day0 disabled" in spec or "Day0 online hard-fact eventing is not enabled" in spec
+    assert "Day0" in spec
     assert "real submit disabled" in spec or "real submit disabled" in spec.lower()
 
 
-def test_edli_online_invariants_do_not_claim_day0_online():
+def test_edli_online_invariants_do_not_claim_day0_real_submit():
     source = Path("tests/money_path/test_edli_online_invariants.py").read_text()
-    forbidden_claim = "DAY0_ONLINE_ENABLED" + " = true"
+    forbidden_claim = "DAY0_REAL_SUBMIT_ENABLED" + " = true"
 
-    assert "day0_hard_fact_live_enabled\"] is True" not in source
     assert forbidden_claim not in source
+    assert "real_order_submit_enabled\"] is True" not in source
 
 
 def test_edli_online_invariants_do_not_claim_market_channel_deployed_when_disabled():
@@ -148,13 +154,23 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "day0_authority_catchup_scanner_enabled" in source
     assert "event_bound_no_submit_adapter_from_trade_conn" in source
     assert "event_bound_live_adapter_from_trade_conn" in source
+    assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
+    assert 'real_submit_effective = real_order_submit_enabled if reactor_mode == "live" else False' in source
+    assert "taker_fok_fak_effective" in source
+    assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source
+    assert "real submit disabled this cycle because portfolio_state_unavailable" in source
+    assert "if real_submit_effective and _portfolio_state_provider is None" in source
     assert "submit_existing_cycle_for_event" not in source
     assert 'edli_cfg.get("real_order_submit_enabled", False)' in source
     assert "real_order_submit_enabled=real_order_submit_enabled" in source
     assert 'edli_cfg.get("live_canary_enabled", False)' in source
     assert "forecast_snapshot_emit_limit" in source
     assert "no_submit_proof_limit" in source
-    assert "reactor.process_pending(decision_time=now, limit=proof_limit)" in source
+    assert "process_pending_decision_time = datetime.now(timezone.utc)" in source
+    assert "reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)" in source
+    assert "reactor.process_pending(decision_time=now, limit=proof_limit)" not in source
+    assert "decision_time=process_pending_decision_time" in source
+    assert "_edli_positive_int_or_unbounded" in source
     assert "user_channel_or_reconcile_only" in source
     edli_start = source.index("def _edli_event_reactor_cycle")
     edli_end = source.index("@_scheduler_job", edli_start + 1)
@@ -432,7 +448,7 @@ def test_arm_direction_gate_boot_guard_is_deleted():
     )
 
 
-def test_live_canary_requires_stage_evidence_file_paths(monkeypatch):
+def test_live_canary_requires_stage_evidence_file_paths(monkeypatch, tmp_path):
     # Post-PR #367: stage paths are configured in settings.json, so
     # _require_stage_file_paths (config-key check) no longer raises.
     # evaluate_edli_stage_readiness (disk-existence check) raises instead:
@@ -444,7 +460,11 @@ def test_live_canary_requires_stage_evidence_file_paths(monkeypatch):
     with pytest.raises(RuntimeError, match="EDLI_LIVE_CANARY_READINESS_FAIL"):
         _run_main_with_fake_scheduler(
             monkeypatch,
-            _edli_live_canary_updates(),
+            _edli_live_canary_updates(
+                edli_stage_loaded_sha_file=str(tmp_path / "missing-loaded-sha.json"),
+                edli_stage_source_health_json=str(tmp_path / "missing-source-health.json"),
+                edli_stage_status_json=str(tmp_path / "missing-status-summary.json"),
+            ),
         )
 
 
@@ -710,6 +730,7 @@ def _arm_gate_artifact_updates(tmp_path, **overrides):
         "commit_sha": "abc123",
         "measurement_cmd_hash": "f" * 64,
         "capital_weighted_ev": 0.012,
+        "production_n": 40,
         "gate_pass_n": 40,
         "per_city_n": {"shanghai": 6, "singapore": 7},
         "ev_sigma": 2.1,
