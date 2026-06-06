@@ -1758,6 +1758,23 @@ def test_missing_calibration_authority_blocks_receipt():
     assert receipt.reason.startswith("LIVE_INFERENCE_INPUTS_MISSING:CALIBRATION_AUTHORITY_MISSING")
 
 
+def test_missing_platt_bucket_uses_identity_fallback_authority():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    conn.execute("UPDATE ensemble_snapshots SET p_cal_json = NULL")
+    calibration_conn = _calibration_conn_with_platt_model()
+    calibration_conn.execute("DELETE FROM platt_models")
+
+    receipt = _receipt(event, conn, calibration_conn=calibration_conn)
+
+    assert receipt.proof_accepted is True
+    assert receipt.reason == "event_bound_final_intent_no_submit"
+    calibration = receipt.decision_proof_bundle.calibration.payload
+    assert calibration["authority"] == "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
+    assert calibration["calibrator_model_key"].startswith("identity_fallback_no_platt_bucket_v1:")
+    assert receipt.decision_proof_bundle.belief.payload["calibrator_model_key"] == calibration["calibrator_model_key"]
+
+
 def test_receipt_uses_world_calibration_authority_not_forecast_conn():
     event = _bound_forecast_event()
     trade_conn = _trade_conn_with_snapshot()

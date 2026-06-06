@@ -3304,6 +3304,8 @@ def _calibration_authority_payload_and_clock(
     calibration_source_id = calibration_source_id_for_lookup(raw_source_id)
     if calibration_source_id is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:source_id")
+    if not _table_exists(calibration_conn, "platt_models"):
+        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:store")
     row, level, _model_data = _persisted_calibration_model_row_for_receipt(
         calibration_conn,
         city=city,
@@ -3314,7 +3316,44 @@ def _calibration_authority_payload_and_clock(
         horizon_profile=horizon_profile,
     )
     if row is None:
-        raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:model_row")
+        model_key = (
+            "identity_fallback_no_platt_bucket_v1:"
+            f"{family.metric}:{city.cluster}:{str(family.target_date)}:"
+            f"{cycle}:{calibration_source_id}:{horizon_profile}"
+        )
+        training_cutoff_raw = decision_time.astimezone(UTC).isoformat()
+        payload_out = {
+            "identity": model_key,
+            "calibrator_model_key": model_key,
+            "calibrator_version": model_key,
+            "calibration_source_id": calibration_source_id,
+            "raw_source_id": raw_source_id,
+            "source_cycle": cycle,
+            "horizon_profile": horizon_profile,
+            "training_cutoff": training_cutoff_raw,
+            "model_available_at": training_cutoff_raw,
+            "model_materialized_at": training_cutoff_raw,
+            "model_hash": _hash_jsonish(
+                {
+                    "model_key": model_key,
+                    "calibration_method": "identity_missing_platt_bucket_v1",
+                    "cluster": city.cluster,
+                    "temperature_metric": family.metric,
+                    "source_id": calibration_source_id,
+                    "cycle": cycle,
+                    "horizon_profile": horizon_profile,
+                }
+            ),
+            "maturity_level": 4,
+            "n_samples": 0,
+            "input_space": "width_normalized_density",
+            "authority": "IDENTITY_FALLBACK_NO_PLATT_BUCKET",
+        }
+        return payload_out, EvidenceClock(
+            decision_time,
+            decision_time,
+            decision_time,
+        )
     model_key = row.get("model_key")
     training_cutoff_raw = row.get("training_cutoff") or _date_cutoff_from_calibration_row(row)
     training_cutoff_time = _parse_utc(training_cutoff_raw)
