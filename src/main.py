@@ -5183,7 +5183,7 @@ def _edli_user_ws_authority_summary(checked_at: datetime) -> dict[str, object]:
 def _edli_venue_connectivity_authority_summary(checked_at: datetime) -> dict[str, object]:
     from src.data.polymarket_client import PolymarketClient
 
-    with PolymarketClient() as clob:
+    with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
         clob.v2_preflight()
     return {
         "authority_id": "polymarket_v2_preflight",
@@ -5202,7 +5202,7 @@ def _edli_balance_allowance_status(final_intent, checked_at: datetime, *, enable
     token_id = str(intent.get("token_id") or "")
     size = float(intent.get("size") or 0.0)
     notional = float(intent.get("notional_usd") or 0.0)
-    with PolymarketClient() as clob:
+    with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
         collateral = clob._ensure_v2_adapter().get_collateral_payload()
     if side == "BUY":
         balance_micro = int(collateral.get("pusd_balance_micro") or 0)

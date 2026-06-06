@@ -1359,8 +1359,13 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     )
     monkeypatch.setattr(heartbeat_supervisor, "summary", lambda: {"entry": {"allow_submit": True}})
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
+    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "2.5")
+    clob_timeouts = []
 
     class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            clob_timeouts.append(public_http_timeout)
+
         def __enter__(self):
             return self
 
@@ -1408,6 +1413,7 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     assert witness.user_ws_authority_id == "ws_gap_guard"
     assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
     assert witness.balance_allowance_status == "OK"
+    assert clob_timeouts == [2.5, 2.5]
 
 
 def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):
@@ -1469,6 +1475,9 @@ def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(mo
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
 
     class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            self.public_http_timeout = public_http_timeout
+
         def __enter__(self):
             return self
 
@@ -1543,6 +1552,9 @@ def test_main_pre_submit_authority_provider_blocks_venue_connectivity_failure(mo
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
 
     class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            self.public_http_timeout = public_http_timeout
+
         def __enter__(self):
             return self
 
@@ -2016,6 +2028,9 @@ def _gate84_patch_authority_guards(monkeypatch):
     monkeypatch.setattr(ws_gap_guard, "summary", lambda *, now=None: {"entry": {"allow_submit": True}})
 
     class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            self.public_http_timeout = public_http_timeout
+
         def __enter__(self):
             return self
 
