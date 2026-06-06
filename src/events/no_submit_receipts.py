@@ -222,6 +222,8 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # persist it so the serving calibrator is recoverable from the blob forever.
     if payload.get("q_source") is None:
         payload.pop("q_source", None)
+    if payload.get("opportunity_book") is None:
+        payload.pop("opportunity_book", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

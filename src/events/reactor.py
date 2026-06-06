@@ -147,6 +147,9 @@ class EventSubmissionReceipt:
     # ONLY when set (omit-when-None for hash stability) so 06-05+ settlement can
     # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
     q_source: str | None = None
+    # Shadow-only Opportunity Book selector evidence. Omitted from receipt_json
+    # when None so pre-book receipts keep byte-identical hashes.
+    opportunity_book: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
