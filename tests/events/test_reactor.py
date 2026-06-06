@@ -406,6 +406,59 @@ def test_stale_executable_snapshot_receipt_is_retryable_not_consumed():
     assert status == "pending"
 
 
+def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
+    """Stale JIT price failures may return before the adapter can build a bound final intent."""
+    payload = json.loads(_forecast_event().payload_json)
+
+    def _submit(event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id="stale-exec-failed-before-bound-proof",
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=True,
+            reason=(
+                "EXECUTABLE_SNAPSHOT_STALE:"
+                "freshness_deadline=2026-05-24T18:09:59+00:00:"
+                "decision_time=2026-05-24T18:10:00+00:00"
+            ),
+        )
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.processed == 0
+    assert result.rejected == 0
+    assert result.retried == 1
+    assert _terminal_surfaces(conn, event.event_id) == {
+        "verified_no_submit": 0,
+        "execution_receipt": 0,
+        "compile_failure": 0,
+        "regret": 0,
+        "dead_letter": 0,
+    }
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status == "pending"
+
+
 def test_processed_event_terminal_surface_includes_execution_receipt_certificate():
     from src.decision_kernel.certificates.execution import (
         build_execution_command_certificate_from_final_intent,

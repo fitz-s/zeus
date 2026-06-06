@@ -641,6 +641,12 @@ class OpportunityEventReactor:
         receipt = _submission_receipt(event, submit_result)
         if receipt is None or not _receipt_matches_event(event, receipt):
             reason = receipt.reason if receipt is not None and receipt.reason else "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND"
+            if _is_transient_money_path_reason(reason):
+                # A stale JIT executable-price receipt can lack the final event-bound
+                # executor fields because the adapter fails before constructing the
+                # full intent/proof. Treat the freshness race as retryable before
+                # applying the terminal receipt-binding rejection.
+                return _EXECUTABLE_SNAPSHOT_RETRY
             self._reject_event(event, "EXECUTOR_EXPRESSIBILITY", reason, result, receipt=receipt, decision_time=decision_time)
             return
         proof_stage, proof_reason = _receipt_money_path_blocker(receipt, self._config)
