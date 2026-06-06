@@ -418,6 +418,55 @@ def test_stale_executable_snapshot_receipt_is_retryable_not_consumed():
     assert status == "pending"
 
 
+def test_sqlite_lock_during_live_certificate_build_is_retryable_not_consumed():
+    """SQLite writer contention during live certificate construction is transient.
+
+    The event must stay pending for the next cycle; non-lock certificate failures
+    remain terminal through the existing rejection path.
+    """
+    payload = json.loads(_forecast_event().payload_json)
+
+    def _submit(event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=False,
+            reason="EDLI_LIVE_CERTIFICATE_BUILD_FAILED:database is locked",
+        )
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.processed == 0
+    assert result.rejected == 0
+    assert result.retried == 1
+    assert _terminal_surfaces(conn, event.event_id) == {
+        "verified_no_submit": 0,
+        "execution_receipt": 0,
+        "compile_failure": 0,
+        "regret": 0,
+        "dead_letter": 0,
+    }
+    assert _processing_status(conn, event.event_id) == "pending"
+
+
 def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
     """Stale JIT price failures may return before the adapter can build a bound final intent."""
     payload = json.loads(_forecast_event().payload_json)

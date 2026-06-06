@@ -1026,9 +1026,18 @@ def _receipt_money_path_blocker(
 def _is_transient_money_path_reason(reason: str | None) -> bool:
     if not reason:
         return False
+    reason_lower = reason.lower()
     return (
         "SOURCE_CAPTURED_AFTER_DECISION_TIME" in reason
         or "EXECUTABLE_SNAPSHOT_STALE" in reason
+        or (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:" in reason
+            and (
+                "database is locked" in reason_lower
+                or "database table is locked" in reason_lower
+                or "database is busy" in reason_lower
+            )
+        )
     )
 
 

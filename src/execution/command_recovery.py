@@ -496,6 +496,23 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    row = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _edli_live_order_events_ref(conn: sqlite3.Connection) -> str | None:
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached and _attached_table_exists(conn, "world", "edli_live_order_events"):
+        return "world.edli_live_order_events"
+    if _table_exists(conn, "edli_live_order_events"):
+        return "edli_live_order_events"
+    return None
+
+
 def _json_dict(raw: object) -> dict:
     if raw in (None, ""):
         return {}
@@ -1859,6 +1876,236 @@ def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection) -> dict:
             conn.execute("RELEASE SAVEPOINT sp_live_entry_projection_repair")
             logger.error(
                 "recovery: live entry projection repair failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def _canonical_payload_hash(payload: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _edli_confirmed_legacy_command_candidates(conn: sqlite3.Connection) -> list[dict]:
+    """Find legacy venue_commands stranded before terminalization despite EDLI fill proof."""
+
+    events_ref = _edli_live_order_events_ref(conn)
+    if events_ref is None or not _table_exists(conn, "venue_commands"):
+        return []
+    sql = f"""
+        WITH ack AS (
+            SELECT json_extract(payload_json, '$.execution_command_id') AS execution_command_id,
+                   json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                   json_extract(payload_json, '$.venue_order_id') AS venue_order_id,
+                   json_extract(payload_json, '$.recovered_trade_id') AS recovered_trade_id,
+                   json_extract(payload_json, '$.transaction_hash') AS ack_transaction_hash,
+                   occurred_at AS acked_at,
+                   payload_json AS ack_payload_json,
+                   rowid AS ack_rowid
+              FROM {events_ref}
+             WHERE event_type = 'VenueSubmitAcknowledged'
+        ),
+        trade AS (
+            SELECT json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                   json_extract(payload_json, '$.venue_order_id') AS venue_order_id,
+                   json_extract(payload_json, '$.trade_id') AS trade_id,
+                   json_extract(payload_json, '$.trade_status') AS trade_status,
+                   json_extract(payload_json, '$.filled_size') AS filled_size,
+                   json_extract(payload_json, '$.fill_price') AS fill_price,
+                   json_extract(payload_json, '$.avg_fill_price') AS avg_fill_price,
+                   json_extract(payload_json, '$.fees') AS fees,
+                   json_extract(payload_json, '$.transaction_hash') AS trade_transaction_hash,
+                   occurred_at AS filled_at,
+                   payload_json AS trade_payload_json,
+                   rowid AS trade_rowid
+              FROM {events_ref}
+             WHERE event_type = 'UserTradeObserved'
+               AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+        ),
+        ranked AS (
+            SELECT cmd.command_id,
+                   cmd.state AS command_state,
+                   cmd.venue_order_id AS command_venue_order_id,
+                   cmd.size AS command_size,
+                   cmd.price AS command_price,
+                   ack.execution_command_id,
+                   ack.final_intent_id,
+                   ack.venue_order_id AS ack_venue_order_id,
+                   ack.recovered_trade_id,
+                   ack.ack_transaction_hash,
+                   ack.acked_at,
+                   ack.ack_payload_json,
+                   trade.venue_order_id AS trade_venue_order_id,
+                   trade.trade_id,
+                   trade.trade_status,
+                   trade.filled_size,
+                   trade.fill_price,
+                   trade.avg_fill_price,
+                   trade.fees,
+                   trade.trade_transaction_hash,
+                   trade.filled_at,
+                   trade.trade_payload_json,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY cmd.command_id
+                       ORDER BY trade.trade_rowid DESC, ack.ack_rowid DESC
+                   ) AS rn
+              FROM venue_commands cmd
+              JOIN ack
+                ON ack.execution_command_id = cmd.decision_id
+              JOIN trade
+                ON trade.final_intent_id = ack.final_intent_id
+               AND trade.venue_order_id = ack.venue_order_id
+             WHERE cmd.intent_kind = 'ENTRY'
+               AND cmd.side = 'BUY'
+               AND cmd.state IN ('SUBMITTING', 'UNKNOWN', 'SUBMIT_UNKNOWN_SIDE_EFFECT', 'ACKED', 'POST_ACKED', 'REVIEW_REQUIRED')
+               AND COALESCE(ack.venue_order_id, '') != ''
+               AND COALESCE(trade.trade_id, '') != ''
+               AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(trade.fill_price, trade.avg_fill_price, '0') AS REAL) > 0
+               AND (COALESCE(cmd.venue_order_id, '') = '' OR cmd.venue_order_id = ack.venue_order_id)
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM venue_trade_facts fact
+                    WHERE fact.command_id = cmd.command_id
+                      AND fact.trade_id = trade.trade_id
+               )
+        )
+        SELECT *
+          FROM ranked
+         WHERE rn = 1
+         ORDER BY filled_at, command_id
+    """
+    return [_dict_row(row) for row in conn.execute(sql).fetchall()]
+
+
+def _append_edli_confirmed_legacy_command_repair(
+    conn: sqlite3.Connection,
+    *,
+    candidate: dict,
+) -> None:
+    command_id = str(candidate.get("command_id") or "")
+    venue_order_id = str(candidate.get("ack_venue_order_id") or candidate.get("trade_venue_order_id") or "")
+    trade_id = str(candidate.get("trade_id") or candidate.get("recovered_trade_id") or "")
+    filled_size = str(candidate.get("filled_size") or "")
+    fill_price = str(candidate.get("fill_price") or candidate.get("avg_fill_price") or "")
+    acked_at = str(candidate.get("acked_at") or candidate.get("filled_at") or _now_iso())
+    filled_at = str(candidate.get("filled_at") or acked_at)
+    if not command_id or not venue_order_id or not trade_id or not filled_size or not fill_price:
+        raise ValueError("EDLI confirmed command repair requires command/order/trade/fill identity")
+
+    ack_payload = {
+        "venue_order_id": venue_order_id,
+        "venue_status": "MATCHED",
+        "source": "edli_live_order_reconcile",
+        "edli_execution_command_id": candidate.get("execution_command_id"),
+        "edli_final_intent_id": candidate.get("final_intent_id"),
+        "recovered_trade_id": trade_id,
+        "recovered_from": "edli_confirmed_fill",
+    }
+    current_state = str(candidate.get("command_state") or "")
+    if current_state in {
+        CommandState.SUBMITTING.value,
+        CommandState.UNKNOWN.value,
+        CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+        CommandState.POST_ACKED.value,
+    }:
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.SUBMIT_ACKED.value,
+            occurred_at=acked_at,
+            payload=ack_payload,
+        )
+
+    order_payload = {
+        "source": "edli_live_order_reconcile",
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "ack_payload": _json_dict(candidate.get("ack_payload_json")),
+        "trade_payload": _json_dict(candidate.get("trade_payload_json")),
+    }
+    append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size=filled_size,
+        source="REST",
+        observed_at=filled_at,
+        venue_timestamp=filled_at,
+        raw_payload_hash=_canonical_payload_hash(order_payload),
+        raw_payload_json=order_payload,
+    )
+    trade_payload = {
+        "source": "edli_live_order_reconcile",
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "trade_status": candidate.get("trade_status"),
+        "filled_size": filled_size,
+        "fill_price": fill_price,
+        "edli_final_intent_id": candidate.get("final_intent_id"),
+        "raw": _json_dict(candidate.get("trade_payload_json")),
+    }
+    append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=filled_size,
+        fill_price=fill_price,
+        source="REST",
+        observed_at=filled_at,
+        venue_timestamp=filled_at,
+        raw_payload_hash=_canonical_payload_hash(trade_payload),
+        raw_payload_json=trade_payload,
+        fee_paid_micro=None,
+        tx_hash=str(candidate.get("trade_transaction_hash") or candidate.get("ack_transaction_hash") or "") or None,
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.FILL_CONFIRMED.value,
+        occurred_at=filled_at,
+        payload={
+            "venue_order_id": venue_order_id,
+            "venue_status": "CONFIRMED",
+            "trade_id": trade_id,
+            "filled_size": filled_size,
+            "fill_price": fill_price,
+            "source": "edli_live_order_reconcile",
+            "edli_final_intent_id": candidate.get("final_intent_id"),
+        },
+    )
+
+
+def reconcile_edli_confirmed_legacy_command_repairs(conn: sqlite3.Connection) -> dict:
+    """Terminalize legacy command rows when EDLI aggregate already has confirmed fill proof."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _edli_confirmed_legacy_command_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        conn.execute("SAVEPOINT edli_confirmed_command_repair")
+        try:
+            _append_edli_confirmed_legacy_command_repair(conn, candidate=candidate)
+            verified = conn.execute(
+                "SELECT state, venue_order_id FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            if verified is None or str(verified["state"] or "") != CommandState.FILLED.value:
+                raise RuntimeError("EDLI confirmed command repair did not terminalize command")
+            conn.execute("RELEASE SAVEPOINT edli_confirmed_command_repair")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT edli_confirmed_command_repair")
+            conn.execute("RELEASE SAVEPOINT edli_confirmed_command_repair")
+            logger.error(
+                "recovery: EDLI confirmed command repair failed for command %s: %s",
                 command_id,
                 exc,
             )
@@ -4957,6 +5204,12 @@ def reconcile_unresolved_commands(
     started_at = _now_iso()
 
     try:
+        edli_confirmed_command_summary = reconcile_edli_confirmed_legacy_command_repairs(conn)
+        summary["edli_confirmed_legacy_command_repair"] = edli_confirmed_command_summary
+        summary["advanced"] += edli_confirmed_command_summary["advanced"]
+        summary["stayed"] += edli_confirmed_command_summary["stayed"]
+        summary["errors"] += edli_confirmed_command_summary["errors"]
+
         rows = find_unresolved_commands(conn)
         summary["scanned"] = len(rows)
 
