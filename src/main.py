@@ -4869,6 +4869,21 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             _ch_sweep_exc,
         )
 
+    try:
+        _fsr_archived = store.archive_superseded_forecast_snapshot_events()
+        if _fsr_archived:
+            logger.info(
+                "EDLI reactor: archived %d superseded forecast-snapshot redecision "
+                "events → 'expired'; newest active event per entity_key retained",
+                _fsr_archived,
+            )
+    except Exception as _fsr_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_superseded_forecast_snapshot_events sweep failed "
+            "(non-fatal): %r",
+            _fsr_sweep_exc,
+        )
+
 
 def _edli_emit_day0_extreme_events(
     world_conn,

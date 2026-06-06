@@ -359,7 +359,10 @@ def build_forecast_snapshot_ready_event(
         source_id=str(source_run.get("source_id") or coverage.get("source_id")),
         source_run_id=str(source_run.get("source_run_id") or coverage.get("source_run_id")),
         cycle=str(source_run.get("source_cycle_time") or ""),
-        track=str(source_run.get("track") or coverage.get("track") or ""),
+        track=_serving_track_label(
+            track=str(source_run.get("track") or coverage.get("track") or ""),
+            data_version=str(coverage.get("data_version") or snapshot.get("data_version") or ""),
+        ),
         snapshot_id=str(snapshot.get("snapshot_id")),
         snapshot_hash=str(snapshot.get("snapshot_hash") or snapshot.get("manifest_hash") or ""),
         captured_at=str(source_run.get("captured_at") or snapshot.get("fetch_time") or received_at),
@@ -728,6 +731,22 @@ def _required_expected_steps(*, source_run: dict[str, Any], coverage: dict[str, 
         if window_start <= valid_at <= window_end:
             required_steps.append(int(step))
     return required_steps
+
+
+def _serving_track_label(*, track: str, data_version: str) -> str:
+    """Return the live-serving product label carried in FSR payloads.
+
+    OpenData source_run IDs still contain legacy mx2t6/mn2t6 track names, while
+    the actual written data_version is the post-cutover mx2t3/mn2t3 product.
+    Keep source_run_id unchanged for DB provenance, but expose the canonical
+    t3 serving track in trading receipts/events.
+    """
+
+    if data_version == "ecmwf_opendata_mx2t3_local_calendar_day_max":
+        return "mx2t3_high_full_horizon" if track.endswith("_full_horizon") else "mx2t3_high"
+    if data_version == "ecmwf_opendata_mn2t3_local_calendar_day_min":
+        return "mn2t3_low_full_horizon" if track.endswith("_full_horizon") else "mn2t3_low"
+    return track
 
 
 def _parse_utc(value: Any, field_name: str) -> datetime:

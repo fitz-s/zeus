@@ -54,6 +54,20 @@ def _event(snapshot_id: str, priority: int, available_at: str, received_at: str)
     )
 
 
+def _fsr_entity_event(entity_key: str, snapshot_id: str, available_at: str, received_at: str):
+    return make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=entity_key,
+        source="cycle",
+        observed_at=available_at,
+        available_at=available_at,
+        received_at=received_at,
+        causal_snapshot_id=snapshot_id,
+        payload=_payload(snapshot_id),
+        priority=50,
+    )
+
+
 def _world_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -140,6 +154,74 @@ def test_pending_fetch_excludes_future_received_at():
     store.insert_or_ignore(ready)
     ordered = store.fetch_pending(decision_time="2026-05-24T05:00:00+00:00")
     assert [event.causal_snapshot_id for event in ordered] == ["snap-ready"]
+
+
+def test_archive_superseded_forecast_snapshot_events_keeps_latest_per_entity_key():
+    conn = _world_conn()
+    store = EventStore(conn)
+    entity_key = "Chicago|2026-05-24|high|source-run-1"
+    older = _fsr_entity_event(
+        entity_key, "snap-old", "2026-05-24T04:00:00+00:00", "2026-05-24T04:01:00+00:00"
+    )
+    newer = _fsr_entity_event(
+        entity_key, "snap-new", "2026-05-24T04:10:00+00:00", "2026-05-24T04:11:00+00:00"
+    )
+    other = _fsr_entity_event(
+        "Denver|2026-05-24|high|source-run-1",
+        "snap-other",
+        "2026-05-24T04:00:00+00:00",
+        "2026-05-24T04:01:00+00:00",
+    )
+    for event in (older, newer, other):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_superseded_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = dict(
+        conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    )
+    assert rows[older.event_id] == "expired"
+    assert rows[newer.event_id] == "pending"
+    assert rows[other.event_id] == "pending"
+
+
+def test_fetch_pending_prioritizes_day0_hard_fact_over_complete_forecast_backlog():
+    from src.events.opportunity_event import Day0ExtremeUpdatedPayload
+
+    conn = _world_conn()
+    store = EventStore(conn)
+    fsr = _event("snap-ready", 50, "2026-05-24T04:05:00+00:00", "2026-05-24T04:06:00+00:00")
+    day0 = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED",
+        entity_key="Chicago|2026-05-24|high|82",
+        source="day0",
+        observed_at="2026-05-24T04:10:00+00:00",
+        available_at="2026-05-24T04:10:00+00:00",
+        received_at="2026-05-24T04:10:00+00:00",
+        causal_snapshot_id=None,
+        payload=Day0ExtremeUpdatedPayload(
+            city="Chicago",
+            target_date="2026-05-24",
+            metric="high",
+            settlement_source="wu_icao_history",
+            station_id="KORD",
+            observation_time="2026-05-24T04:00:00+00:00",
+            observation_available_at="2026-05-24T04:10:00+00:00",
+            raw_value=82.0,
+            rounded_value=82,
+            high_so_far=82.0,
+        ),
+        priority=20,
+    )
+    store.insert_or_ignore(fsr)
+    store.insert_or_ignore(day0)
+
+    ordered = store.fetch_pending(decision_time="2026-05-24T05:00:00+00:00", limit=2)
+
+    assert [event.event_type for event in ordered] == ["DAY0_EXTREME_UPDATED", "FORECAST_SNAPSHOT_READY"]
 
 
 def test_stale_processing_claim_is_reclaimed_after_lease():

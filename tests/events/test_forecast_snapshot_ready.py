@@ -105,6 +105,41 @@ def test_complete_snapshot_emits_once():
     assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 1
 
 
+def test_opendata_t3_data_version_normalizes_legacy_track_label():
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+    source_run = _source_run()
+    source_run["source_id"] = "ecmwf_open_data"
+    source_run["source_run_id"] = "ecmwf_open_data:mx2t6_high:2026-06-05T12Z"
+    source_run["track"] = "mx2t6_high_full_horizon"
+    coverage = _coverage()
+    coverage["source_id"] = "ecmwf_open_data"
+    coverage["source_run_id"] = source_run["source_run_id"]
+    coverage["track"] = "mx2t6_high_full_horizon"
+    coverage["data_version"] = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+    snapshot = _snapshot()
+    snapshot["source_run_id"] = source_run["source_run_id"]
+    snapshot["data_version"] = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+
+    trigger.emit_from_rows(
+        source_run=source_run,
+        coverage=coverage,
+        snapshot=snapshot,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+    )
+
+    import json as _json
+
+    payload = _json.loads(conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
+    assert payload["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-06-05T12Z"
+    assert payload["track"] == "mx2t3_high_full_horizon"
+
+
 def test_rerun_idempotent_same_source_run_snapshot_hash():
     event_a = build_forecast_snapshot_ready_event(
         source_run=_source_run(),
