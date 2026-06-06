@@ -2136,6 +2136,274 @@ def test_capital_efficiency_allows_strong_after_cost_roi_new_market():
     ) is None
 
 
+def test_capital_efficiency_has_no_default_hidden_roi_gate(monkeypatch):
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _capital_efficiency_untradeable_reason
+
+    monkeypatch.delenv("ZEUS_ROBUST_ROI_EXPERIMENTAL_GATE", raising=False)
+
+    assert _capital_efficiency_untradeable_reason(
+        execution_price=ExecutionPrice(
+            0.98196,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        trade_score=0.00553868962634317,
+    ) is None
+
+
+def test_selection_prefers_best_robust_roi_not_largest_absolute_score(monkeypatch):
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
+
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+
+    expensive_micro_edge = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="expensive"),
+        token_id="expensive-token",
+        direction="buy_no",
+        row={"condition_id": "expensive"},
+        executable_snapshot_id="expensive-snapshot",
+        execution_price=ExecutionPrice(
+            0.98,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.999,
+        q_lcb_5pct=0.99,
+        c_cost_95pct=0.981,
+        p_fill_lcb=0.90,
+        trade_score=0.030,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+    cheaper_better_trade = replace(
+        expensive_micro_edge,
+        candidate=SimpleNamespace(condition_id="cheap"),
+        token_id="cheap-token",
+        row={"condition_id": "cheap"},
+        executable_snapshot_id="cheap-snapshot",
+        execution_price=ExecutionPrice(
+            0.20,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.25,
+        q_lcb_5pct=0.22,
+        c_cost_95pct=0.21,
+        trade_score=0.020,
+    )
+
+    selected = _selected_candidate_proof({}, (expensive_micro_edge, cheaper_better_trade))
+
+    assert selected is cheaper_better_trade
+
+
+def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypatch):
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
+
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+
+    requested_token = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="expensive"),
+        token_id="requested-token",
+        direction="buy_no",
+        row={"condition_id": "expensive"},
+        executable_snapshot_id="expensive-snapshot",
+        execution_price=ExecutionPrice(
+            0.99,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.999,
+        q_lcb_5pct=0.99,
+        c_cost_95pct=0.991,
+        p_fill_lcb=0.90,
+        trade_score=0.010,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+    sibling = replace(
+        requested_token,
+        candidate=SimpleNamespace(condition_id="sibling"),
+        token_id="sibling-token",
+        row={"condition_id": "sibling"},
+        executable_snapshot_id="sibling-snapshot",
+        execution_price=ExecutionPrice(
+            0.20,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.40,
+        q_lcb_5pct=0.35,
+        c_cost_95pct=0.21,
+        trade_score=0.008,
+    )
+
+    selected = _selected_candidate_proof(
+        {"token_id": "requested-token", "condition_id": "expensive"},
+        (requested_token, sibling),
+    )
+
+    assert selected is sibling
+
+
+def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypatch):
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import (
+        _CandidateProof,
+        _opportunity_book_from_proofs,
+        _selected_candidate_proof,
+    )
+
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+
+    high_score_below_tick = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="below-tick"),
+        token_id="below-tick-token",
+        direction="buy_yes",
+        row={"condition_id": "below-tick", "min_tick_size": "0.05"},
+        executable_snapshot_id="below-tick-snapshot",
+        execution_price=ExecutionPrice(
+            0.01,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.90,
+        q_lcb_5pct=0.85,
+        c_cost_95pct=0.011,
+        p_fill_lcb=0.90,
+        trade_score=0.50,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+    admitted = replace(
+        high_score_below_tick,
+        candidate=SimpleNamespace(condition_id="admitted"),
+        token_id="admitted-token",
+        row={"condition_id": "admitted", "min_tick_size": "0.01"},
+        executable_snapshot_id="admitted-snapshot",
+        execution_price=ExecutionPrice(
+            0.20,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.50,
+        q_lcb_5pct=0.45,
+        c_cost_95pct=0.21,
+        trade_score=0.02,
+    )
+
+    selected = _selected_candidate_proof({}, (high_score_below_tick, admitted))
+    book = _opportunity_book_from_proofs(
+        event_id="event-1",
+        family_id="family-1",
+        proofs=(high_score_below_tick, admitted),
+        selected_proof=selected,
+    ).to_receipt_dict()
+
+    assert selected is admitted
+    assert book["selected_candidate_id"] == book["actual_receipt_selected_candidate_id"]
+    assert book["proposed_selected_candidate_id"] == book["actual_receipt_selected_candidate_id"]
+    loser_reason = next(iter(book["loser_reasons"].values()))
+    assert loser_reason.startswith("EXECUTION_PRICE_BELOW_MIN_TICK:")
+
+
+def test_candidate_low_volume_preserves_zero_volume_usd():
+    from src.engine import event_reactor_adapter as adapter
+
+    assert adapter._candidate_low_volume_usd(
+        {"volume_usd": 0.0, "volume": 25.0, "total_volume": 50.0}
+    ) == 0.0
+
+
+def test_opportunity_book_selector_excludes_all_locked_executables(monkeypatch):
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine import event_reactor_adapter as adapter
+
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+    monkeypatch.setattr(
+        adapter,
+        "_locked_candidate_no_price_improvement_reason",
+        lambda _conn, proof: "LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT"
+        if proof.execution_price is not None
+        else None,
+    )
+
+    locked = adapter._CandidateProof(
+        candidate=SimpleNamespace(condition_id="locked"),
+        token_id="locked-token",
+        direction="buy_no",
+        row={"condition_id": "locked"},
+        executable_snapshot_id="locked-snapshot",
+        execution_price=ExecutionPrice(
+            0.20,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.80,
+        q_lcb_5pct=0.75,
+        c_cost_95pct=0.21,
+        p_fill_lcb=0.90,
+        trade_score=0.50,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+    non_executable_fallback = replace(
+        locked,
+        candidate=SimpleNamespace(condition_id="fallback"),
+        token_id="fallback-token",
+        row=None,
+        executable_snapshot_id=None,
+        execution_price=None,
+        q_posterior=0.70,
+        q_lcb_5pct=0.90,
+        c_cost_95pct=None,
+        trade_score=0.0,
+        passed_prefilter=False,
+        native_quote_available=False,
+        missing_reason="missing executable snapshot row",
+    )
+
+    selected = adapter._selected_candidate_proof(
+        {},
+        (locked, non_executable_fallback),
+        locked_opportunity_conn=sqlite3.connect(":memory:"),
+    )
+    book = adapter._opportunity_book_from_proofs(
+        event_id="event-1",
+        family_id="family-1",
+        proofs=(locked, non_executable_fallback),
+        selected_proof=selected,
+        locked_opportunity_conn=sqlite3.connect(":memory:"),
+    ).to_receipt_dict()
+
+    assert selected is non_executable_fallback
+    assert book["proposed_selected_candidate_id"] is None
+    assert "LOCKED_OPPORTUNITY_NO_PRICE_IMPROVEMENT" in book["loser_reasons"].values()
+
+
 def test_coverage_expired_between_event_available_and_decision_blocks_receipt(monkeypatch):
     from types import SimpleNamespace
 

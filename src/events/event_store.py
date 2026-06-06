@@ -153,13 +153,14 @@ class EventStore:
               -- budget is spent on stale ones. NULL target_date (non-forecast
               -- events) sorts last within its tier (json_extract → NULL → last
               -- under DESC in SQLite, which orders NULLs first for ASC / last for
-              -- DESC). Within the same target, repay retry debt before brand-new
-              -- zero-attempt redecision events. Otherwise a bounded proof window can
-              -- be refilled every cycle by fresh zero-attempt rows and permanently
-              -- starve transient retries that are now past their causality delay.
+              -- DESC). Within the same target, newest events must also win before
+              -- retry debt: executable prices expire after 30s, so a retry-first
+              -- order can spend the whole proof window on stale old rows while the
+              -- just-refreshed redecision rows expire before evaluation.
               json_extract(e.payload_json, '$.target_date') DESC,
+              e.available_at DESC, e.received_at DESC,
               CASE WHEN p.attempt_count > 0 THEN 0 ELSE 1 END ASC,
-              e.available_at DESC, e.received_at DESC, e.event_id ASC
+              e.event_id ASC
             LIMIT ?
             """,
             (
@@ -451,9 +452,11 @@ class EventStore:
         """Sweep superseded FSR redecision rows to terminal ``'expired'`` status.
 
         Continuous redecision intentionally emits fresh FSR-equivalent events for the
-        same ``entity_key`` across cycles. Only the newest active row for that key can
-        be useful; older pending/processing rows force the reactor to re-evaluate stale
-        forecast snapshots and can keep the queue focused on the same small family set.
+        same weather family across cycles. Only the newest active row for a
+        ``(city, target_date, metric)`` family can be useful; older pending/processing
+        rows force the reactor to re-evaluate stale source runs and can keep the queue
+        focused on old forecast snapshots. ``entity_key`` includes the source run, so
+        using it as the supersession key leaves previous runs active forever.
 
         The immutable ``opportunity_events`` row remains append-only. This method only
         expires mutable ``opportunity_event_processing`` rows, preserving provenance
@@ -464,7 +467,12 @@ class EventStore:
 
         candidate_rows = self.conn.execute(
             """
-            SELECT e.event_id, e.entity_key
+            SELECT
+                e.event_id,
+                e.entity_key,
+                json_extract(e.payload_json, '$.city') AS city,
+                json_extract(e.payload_json, '$.target_date') AS target_date,
+                json_extract(e.payload_json, '$.metric') AS metric
               FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
               JOIN opportunity_events e
                 ON e.event_id = p.event_id
@@ -480,18 +488,42 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        candidate_keys = {str(row[1]) for row in candidate_rows if row[1] is not None}
+        _FsrPruneKey = tuple[str, str, str, str] | tuple[str, str]
+
+        def _prune_key(row: sqlite3.Row | tuple) -> _FsrPruneKey:
+            city = str(row[2] or "").strip()
+            target_date = str(row[3] or "").strip()
+            metric = str(row[4] or "").strip()
+            if city and target_date and metric:
+                return ("family", city, target_date, metric)
+            return ("entity", str(row[1] or ""))
+
+        candidate_keys = {
+            key for row in candidate_rows if (key := _prune_key(row))[-1]
+        }
         keeper_ids: set[str] = set()
-        for entity_key in candidate_keys:
+        for prune_key in candidate_keys:
+            if prune_key[0] == "family":
+                _, city, target_date, metric = prune_key
+                key_predicate = (
+                    "json_extract(e.payload_json, '$.city') = ? "
+                    "AND json_extract(e.payload_json, '$.target_date') = ? "
+                    "AND json_extract(e.payload_json, '$.metric') = ?"
+                )
+                key_params = (city, target_date, metric)
+            else:
+                _, entity_key = prune_key
+                key_predicate = "e.entity_key = ?"
+                key_params = (entity_key,)
             keeper_row = self.conn.execute(
-                """
+                f"""
                 SELECT e.event_id
                   FROM opportunity_events e
                   JOIN opportunity_event_processing p
                     ON p.event_id = e.event_id
                    AND p.consumer_name = ?
                  WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
-                   AND e.entity_key = ?
+                   AND {key_predicate}
                    AND p.processing_status IN ('pending', 'processing')
                  ORDER BY
                    CASE
@@ -504,7 +536,7 @@ class EventStore:
                    e.event_id DESC
                  LIMIT 1
                 """,
-                (self.consumer_name, entity_key),
+                (self.consumer_name, *key_params),
             ).fetchone()
             if keeper_row is not None:
                 keeper_ids.add(str(keeper_row[0]))

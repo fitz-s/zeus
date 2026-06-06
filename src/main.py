@@ -2823,17 +2823,17 @@ def _refresh_pending_family_snapshots(
     # ORDER BY priority DESC, available_at ASC), so the highest-priority families are
     # captured first; the remainder are picked up on subsequent cycles. The reactor's
     # own proof_limit still bounds decisions; this bounds the venue-I/O per cycle.
-    # 2026-06-04: with the coverage-fairness emit now covering all ~49 cities, this cap is the
-    # second throttle on the simultaneously-tradeable set (each family = 1 serial JIT /book
-    # fetch). 50 overran the 60s reactor cycle ("max running instances reached"); 8 was the old
-    # 3-city-era value. 16 ≈ 16s of fetches inside a 60s cycle — a safe ~2x of the fresh universe
-    # without overrun. The proper fix (decouple market-identity universe sizing from the 30s
-    # price-freshness TTL — size off identity, enforce freshness only at submit) is the follow-up.
+    # 2026-06-06: executable prices expire after 30s. The decoupled warmer must
+    # complete and commit before the reactor's next decision timestamp, not merely
+    # "eventually" refresh. Live evidence showed 16 families routinely hit the 25s
+    # time-box and committed after the reactor read, recreating
+    # EXECUTABLE_SNAPSHOT_STALE. Keep the per-tick venue-I/O slice small enough to
+    # finish inside the TTL; deferred families are retried on the next warm tick.
     # 2026-06-05: prioritize newest target_date before applying the cap. Strictly
     # stale pending rows can still exist in the processing ledger after Gamma no
     # longer returns the market, and letting those rows spend the cap starves fresh
     # family snapshots.
-    _FAMILY_REFRESH_CAP = 16
+    _FAMILY_REFRESH_CAP = 8
     if len(families) > _FAMILY_REFRESH_CAP:
         families = families[:_FAMILY_REFRESH_CAP]
 
@@ -2936,7 +2936,7 @@ def _refresh_pending_family_snapshots(
             # cycle never reaches FSR-emit + process_pending -> 0 receipts. Bound the
             # refresh phase to a deadline that ALWAYS leaves budget for the downstream
             # emit+process; uncaptured families are picked up next cycle (priority-ordered).
-            _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "25.0")))
+            _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "15.0")))
             _refresh_deadline = time.monotonic() + _refresh_budget_s
             _refreshed_n = 0
             for fam_city, fam_date, fam_metric in gamma_refresh_families:
@@ -4931,13 +4931,13 @@ def _edli_prune_batch_limit(config: dict) -> int:
     return _edli_bounded_positive_int(
         config,
         "reactor_prune_batch_limit",
-        default=100,
+        default=5_000,
         maximum=5_000,
     )
 
 
 def _edli_prune_interval_seconds(config: dict) -> float:
-    raw = config.get("reactor_prune_interval_seconds", 600)
+    raw = config.get("reactor_prune_interval_seconds", 60)
     try:
         value = float(raw)
     except (TypeError, ValueError):
@@ -5004,7 +5004,7 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         if _fsr_archived:
             logger.info(
                 "EDLI reactor: archived %d superseded forecast-snapshot redecision "
-                "events → 'expired'; newest active event per entity_key retained "
+                "events → 'expired'; newest active event per forecast family retained "
                 "(batch_limit=%d)",
                 _fsr_archived,
                 batch_limit,
@@ -6801,22 +6801,19 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        # THROUGHPUT STRUCTURAL FIX (2026-06-01): dedicated executable-snapshot substrate
-        # warmer, DECOUPLED from the reactor decision cycle. The refresh
-        # (_refresh_pending_family_snapshots) does a ~76s-cold universe Gamma scan +
-        # per-token CLOB capture; running it inline in _edli_event_reactor_cycle blew the
-        # reactor's 1-min interval (overlapping triggers coalesced/skipped → 0 completed
-        # cycles → 0 trades). On its own cadence the reactor reads already-captured
-        # snapshots (DB-only) and reaches submit in seconds. Runs on a longer interval than
-        # the reactor (the universe scan is TTL-cached 300s; ~90s keeps pending families
-        # fresh without re-scanning every reactor tick). max_instances=1/coalesce so a slow
-        # warm never stacks. Data-only (no orders); fail-soft.
+        # THROUGHPUT + FRESHNESS STRUCTURAL FIX: dedicated executable-snapshot substrate
+        # warmer, DECOUPLED from the reactor decision cycle. It must run inside the
+        # 30s executable-price freshness window and start before the first reactor tick;
+        # otherwise the reactor reads valid-but-expired price rows and every candidate
+        # rejects as EXECUTABLE_SNAPSHOT_STALE. The refresh is scoped to pending families
+        # (not a global weather scan) and max_instances=1/coalesce prevents stacked venue
+        # I/O. Data-only (no orders); fail-soft.
         scheduler.add_job(
             _edli_market_substrate_warm_cycle,
             "interval",
-            seconds=90,
+            seconds=20,
             id="edli_market_substrate_warm",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 65.0),
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 1.0),
             max_instances=1,
             coalesce=True,
         )

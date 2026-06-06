@@ -13,6 +13,7 @@ side-effect boundary.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timezone
@@ -53,10 +54,12 @@ from src.engine.event_bound_final_intent import (
 )
 from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
 from src.events.candidate_binding import MarketTopologyCandidate
+from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore
 from src.events.live_order_aggregate import LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
+from src.events.opportunity_book import OpportunityBook, build_family_opportunity_book
 from src.events.opportunity_event import OpportunityEvent
 from src.events.reactor import EventSubmissionReceipt, OpportunityEventReactor, ReactorConfig
 from src.riskguard.risk_level import RiskLevel
@@ -797,6 +800,13 @@ def build_event_bound_no_submit_receipt(
         proofs,
         locked_opportunity_conn=locked_opportunity_conn,
     )
+    opportunity_book = _opportunity_book_from_proofs(
+        event_id=event.event_id,
+        family_id=family.family_id,
+        proofs=proofs,
+        selected_proof=proof,
+        locked_opportunity_conn=locked_opportunity_conn,
+    )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
         # persist the best-scoring family's mainstream verdict on the MISSING receipt so
@@ -1205,6 +1215,8 @@ def build_event_bound_no_submit_receipt(
             "family_complete": True,
         }
     )
+    if opportunity_book is not None:
+        raw_receipt["opportunity_book"] = opportunity_book.to_receipt_dict()
     # Mainstream-agreement gate fields (#135). Added when the verdict is available on the
     # selected proof; absent otherwise (gate OFF or evaluation error — receipt stays clean).
     if proof.mainstream_agreement is not None:
@@ -1338,6 +1350,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_source=raw_receipt.get("mainstream_source"),
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
+        opportunity_book=raw_receipt.get("opportunity_book"),
     )
 
 
@@ -3551,6 +3564,10 @@ _MARKET_DISAGREE_QLCB_MIN_ESCAPE = 0.95
 _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.02
 
 
+def _env_flag_enabled(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _market_disagreement_demotes_buy_no(
     *,
     direction: str,
@@ -3609,10 +3626,12 @@ def _capital_efficiency_untradeable_reason(
     price = _optional_float(execution_price.value)
     if price is None or price <= 0.0:
         return "CAPITAL_EFFICIENCY_PRICE_INVALID"
+    if min_roi is None and not _env_flag_enabled("ZEUS_ROBUST_ROI_EXPERIMENTAL_GATE"):
+        return None
     threshold = (
-        float(settings["edli_v1"].get("min_robust_capital_efficiency_roi", _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI))
-        if min_roi is None
-        else float(min_roi)
+        float(min_roi)
+        if min_roi is not None
+        else float(settings["edli_v1"].get("min_robust_capital_efficiency_roi", _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI))
     )
     if threshold <= 0.0:
         return None
@@ -3624,6 +3643,168 @@ def _capital_efficiency_untradeable_reason(
             f"trade_score={float(trade_score):.6f}:execution_price={price:.6f}"
         )
     return None
+
+
+def _candidate_robust_roi(proof: _CandidateProof) -> float:
+    execution_price = getattr(proof, "execution_price", None)
+    if execution_price is None:
+        return 0.0
+    price = _optional_float(execution_price.value)
+    if price is None or price <= 0.0:
+        return 0.0
+    return float(getattr(proof, "trade_score", 0.0) or 0.0) / price
+
+
+def _candidate_evaluation_id(proof: _CandidateProof) -> str:
+    condition_id = str(getattr(proof.candidate, "condition_id", "") or "")
+    return stable_hash(
+        {
+            "condition_id": condition_id,
+            "token_id": proof.token_id,
+            "direction": proof.direction,
+        }
+    )
+
+
+def _candidate_low_volume_usd(row: Mapping[str, object]) -> float | None:
+    for key in ("volume_usd", "volume", "total_volume"):
+        if key in row and row.get(key) not in (None, ""):
+            return _optional_float(row.get(key))
+    return None
+
+
+def _candidate_evaluation_from_proof(
+    *,
+    family_id: str,
+    proof: _CandidateProof,
+) -> CandidateEvaluation:
+    execution_price = _optional_float(getattr(getattr(proof, "execution_price", None), "value", None))
+    row = proof.row or {}
+    candidate = proof.candidate
+    bin_obj = getattr(candidate, "bin", None)
+    return CandidateEvaluation(
+        candidate_id=_candidate_evaluation_id(proof),
+        family_id=family_id,
+        condition_id=str(getattr(candidate, "condition_id", "") or ""),
+        token_id=str(proof.token_id or ""),
+        direction=str(proof.direction or ""),
+        bin_label=getattr(bin_obj, "label", None),
+        execution_price=execution_price,
+        q_posterior=float(proof.q_posterior),
+        q_lcb_5pct=float(proof.q_lcb_5pct),
+        c_cost_95pct=_optional_float(proof.c_cost_95pct),
+        p_fill_lcb=float(proof.p_fill_lcb),
+        trade_score=float(proof.trade_score),
+        p_value=float(proof.p_value),
+        passed_prefilter=bool(proof.passed_prefilter),
+        native_quote_available=bool(proof.native_quote_available),
+        missing_reason=proof.missing_reason,
+        book_hash=_nonnull(row.get("book_hash") or row.get("executable_book_hash") or row.get("snapshot_hash")),
+        low_volume_usd=_candidate_low_volume_usd(row),
+    )
+
+
+def _opportunity_book_from_proofs(
+    *,
+    event_id: str,
+    family_id: str,
+    proofs: tuple[_CandidateProof, ...],
+    selected_proof: _CandidateProof | None = None,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
+) -> OpportunityBook:
+    evaluations = tuple(
+        _candidate_evaluation_from_proof(family_id=family_id, proof=proof)
+        for proof in _proofs_for_opportunity_book(
+            proofs=proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+        )
+    )
+    return build_family_opportunity_book(
+        family_id=family_id,
+        evaluations=evaluations,
+        event_id=event_id,
+        cache_summary={
+            "belief_cache": "source_run_bound",
+            "price_cache": "snapshot_rows_refreshed_for_family",
+            "selector_shadow": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SHADOW"),
+            "selector_enabled": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SELECTOR"),
+            "actual_receipt_selected_candidate_id": (
+                _candidate_evaluation_id(selected_proof)
+                if selected_proof is not None
+                else None
+            ),
+        },
+    )
+
+
+def _proofs_for_opportunity_book(
+    *,
+    proofs: tuple[_CandidateProof, ...],
+    locked_opportunity_conn: sqlite3.Connection | None = None,
+) -> tuple[_CandidateProof, ...]:
+    excluded_by_id: dict[str, str] = {}
+    executable = [proof for proof in proofs if proof.execution_price is not None]
+    tradeable_limit = [
+        proof
+        for proof in executable
+        if _candidate_limit_price_untradeable_reason(proof) is None
+    ]
+    scoped = executable
+    if tradeable_limit:
+        scoped_ids = {_candidate_evaluation_id(proof) for proof in tradeable_limit}
+        for proof in executable:
+            proof_id = _candidate_evaluation_id(proof)
+            if proof_id not in scoped_ids:
+                reason = _candidate_limit_price_untradeable_reason(proof)
+                if reason is not None:
+                    excluded_by_id[proof_id] = reason
+        scoped = tradeable_limit
+    if locked_opportunity_conn is not None:
+        unlocked = [
+            proof
+            for proof in scoped
+            if _locked_candidate_no_price_improvement_reason(
+                locked_opportunity_conn,
+                proof,
+            )
+            is None
+        ]
+        if unlocked:
+            unlocked_ids = {_candidate_evaluation_id(proof) for proof in unlocked}
+            for proof in scoped:
+                proof_id = _candidate_evaluation_id(proof)
+                if proof_id not in unlocked_ids:
+                    reason = _locked_candidate_no_price_improvement_reason(
+                        locked_opportunity_conn,
+                        proof,
+                    )
+                    if reason is not None:
+                        excluded_by_id[proof_id] = reason
+        elif scoped:
+            for proof in scoped:
+                reason = _locked_candidate_no_price_improvement_reason(
+                    locked_opportunity_conn,
+                    proof,
+                )
+                if reason is not None:
+                    excluded_by_id[_candidate_evaluation_id(proof)] = reason
+    if not excluded_by_id:
+        return proofs
+    annotated: list[_CandidateProof] = []
+    for proof in proofs:
+        reason = excluded_by_id.get(_candidate_evaluation_id(proof))
+        if reason is None:
+            annotated.append(proof)
+            continue
+        annotated.append(
+            dataclass_replace(
+                proof,
+                missing_reason=reason,
+                passed_prefilter=False,
+                trade_score=0.0,
+            )
+        )
+    return tuple(annotated)
 
 
 def _generate_candidate_proofs(
@@ -3818,9 +3999,10 @@ def _selected_candidate_proof(
     *,
     locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> _CandidateProof | None:
+    selector_enabled = _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SELECTOR")
     requested_token = _nonnull(payload.get("token_id"))
     requested_condition = _nonnull(payload.get("condition_id"))
-    if requested_token:
+    if requested_token and not selector_enabled:
         for proof in proofs:
             if proof.token_id != requested_token:
                 continue
@@ -3862,7 +4044,31 @@ def _selected_candidate_proof(
             return max(non_executable, key=lambda proof: proof.q_lcb_5pct, default=None)
     if not executable:
         return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
-    return max(executable, key=lambda proof: (proof.trade_score, proof.q_lcb_5pct))
+    if selector_enabled:
+        family_id = str(payload.get("family_id") or payload.get("event_id") or "family")
+        evaluations_by_id = {
+            _candidate_evaluation_id(proof): proof
+            for proof in executable
+        }
+        book = build_family_opportunity_book(
+            family_id=family_id,
+            evaluations=tuple(
+                _candidate_evaluation_from_proof(family_id=family_id, proof=proof)
+                for proof in executable
+            ),
+            event_id=str(payload.get("event_id") or "event"),
+        )
+        if book.selected_candidate_id is not None:
+            selected = evaluations_by_id.get(book.selected_candidate_id)
+            if selected is not None:
+                return selected
+    return max(
+        executable,
+        key=lambda proof: (
+            proof.trade_score,
+            proof.q_lcb_5pct,
+        ),
+    )
 
 
 def _locked_candidate_no_price_improvement_reason(

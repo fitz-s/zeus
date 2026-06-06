@@ -270,6 +270,41 @@ def test_pr332_scoped_daemon_restart_smoke_registers_event_driven_no_legacy_cron
     assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
 
 
+def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl(monkeypatch, tmp_path):
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
+    scheduler, _settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        {
+            "enabled": True,
+            "live_execution_mode": "edli_shadow_no_submit",
+            "reactor_mode": "live_no_submit",
+            "event_writer_enabled": True,
+            "forecast_snapshot_trigger_enabled": True,
+            "day0_extreme_trigger_enabled": False,
+            "day0_hard_fact_live_enabled": False,
+            "market_channel_ingestor_enabled": False,
+            "edli_user_channel_reconcile_enabled": False,
+            "real_order_submit_enabled": False,
+            "taker_fok_fak_live_enabled": False,
+            **_stage_evidence_updates(tmp_path),
+        },
+    )
+
+    jobs = {job.id: job for job in scheduler.jobs}
+    reactor = jobs["edli_event_reactor"]
+    warmer = jobs["edli_market_substrate_warm"]
+
+    assert warmer.kwargs["seconds"] < FRESHNESS_WINDOW_DEFAULT.total_seconds(), (
+        "executable snapshots expire after 30s; the substrate warmer cadence must "
+        "stay inside that TTL or the reactor reads stale price rows."
+    )
+    assert warmer.kwargs["next_run_time"] < reactor.kwargs["next_run_time"], (
+        "the first substrate warm must run before the first reactor process_pending "
+        "cycle so cold starts do not begin with EXECUTABLE_SNAPSHOT_STALE."
+    )
+
+
 def test_live_execution_mode_rejects_legacy_cron_with_edli_runtime_enabled(monkeypatch):
     with pytest.raises(RuntimeError, match="LEGACY_CRON_REQUIRES_REACTOR_MODE_DISABLED"):
         _run_main_with_fake_scheduler(

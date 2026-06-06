@@ -49,10 +49,12 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import sqlite3
 from types import SimpleNamespace
 
 import src.main as main_module
+from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 
 
 def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
@@ -92,6 +94,17 @@ def test_pending_family_refresh_does_not_call_global_weather_discovery():
     src = inspect.getsource(main_module._refresh_pending_family_snapshots)
 
     assert "find_weather_markets_or_raise" not in src
+
+
+def test_pending_family_refresh_default_budget_stays_inside_price_ttl():
+    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+    match = re.search(
+        r'ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "([0-9.]+)"',
+        src,
+    )
+
+    assert match is not None
+    assert float(match.group(1)) < FRESHNESS_WINDOW_DEFAULT.total_seconds()
 
 
 def test_market_discovery_defers_while_reactor_active():
