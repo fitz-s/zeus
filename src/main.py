@@ -2940,14 +2940,18 @@ def _refresh_pending_family_snapshots(
                     )
                     continue
 
-            # #35: the per-family /events?slug= fetch above omits enableOrderBook on
-            # child markets → substrate capture refused ("required boolean fact missing").
-            # find_weather_markets uses the fully-enriched _get_active_events path that
-            # the liquid-bin capture already relies on. Use it as the discovery source so
-            # every bin (incl never-seen illiquid MECE tails) captures; the downstream
-            # gamma_by_family filter scopes CLOB capture to the pending families.
-            from src.data.market_scanner import find_weather_markets_or_raise as _fwm
-            discovered_events = _fwm(min_hours_to_resolution=0.0)
+            # 2026-06-06 throughput repair: keep this refresh truly scoped to pending
+            # families. The old fallback called the global weather discovery scanner,
+            # which performs a tag/slug sweep and routinely exhausts its
+            # request budget before the warm job completes. Current Gamma slug payloads
+            # include the required child fields (conditionId, acceptingOrders,
+            # enableOrderBook, clobTokenIds), so the exact per-family slug responses are
+            # sufficient for parsing, topology persistence, and CLOB snapshot capture.
+            discovered_events = _parse_and_persist_weather_events(
+                raw_events_collected,
+                min_hours_to_resolution=0.0,
+                now=now_utc,
+            )
             logger.info(
                 "refresh_pending_family_snapshots: slug fetch complete "
                 "families_needing_refresh=%d raw_events=%d discovered_events=%d",

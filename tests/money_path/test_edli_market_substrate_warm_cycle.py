@@ -81,6 +81,18 @@ def test_reactor_cycle_does_not_refresh_inline():
     )
 
 
+def test_pending_family_refresh_does_not_call_global_weather_discovery():
+    """Pending-family substrate refresh must stay scoped to exact pending family slugs.
+
+    A global find_weather_markets_or_raise scan is too slow for the warm cadence and
+    has a separate discovery budget; putting it in this path makes the substrate
+    warmer overrun and starves the reactor of fresh receipt flow.
+    """
+    src = inspect.getsource(main_module._refresh_pending_family_snapshots)
+
+    assert "find_weather_markets_or_raise" not in src
+
+
 def test_market_substrate_warm_cycle_exists_and_refreshes_once(monkeypatch):
     """GREEN-after-fix: a dedicated warm job exists and, when EDLI is enabled, invokes
     the family-snapshot refresh exactly once per tick."""
