@@ -186,6 +186,43 @@ def test_pending_fetch_excludes_future_received_at():
     assert [event.causal_snapshot_id for event in ordered] == ["snap-ready"]
 
 
+def test_fetch_pending_prioritizes_fresh_fsr_before_retry_debt_same_target():
+    conn = _world_conn()
+    store = EventStore(conn)
+    old_retry = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-old",
+        "snap-old-retry",
+        "2026-05-24T04:00:00+00:00",
+        "2026-05-24T04:01:00+00:00",
+    )
+    fresh_redecision = _fsr_entity_event(
+        "Chicago|2026-05-24|high|source-run-new",
+        "snap-fresh-redecision",
+        "2026-05-24T04:20:00+00:00",
+        "2026-05-24T04:21:00+00:00",
+    )
+    store.insert_or_ignore(old_retry)
+    store.insert_or_ignore(fresh_redecision)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET attempt_count = 3
+         WHERE event_id = ?
+        """,
+        (old_retry.event_id,),
+    )
+
+    ordered = store.fetch_pending(
+        decision_time="2026-05-24T05:00:00+00:00",
+        limit=2,
+    )
+
+    assert [event.event_id for event in ordered] == [
+        fresh_redecision.event_id,
+        old_retry.event_id,
+    ]
+
+
 def test_archive_superseded_forecast_snapshot_events_keeps_latest_per_family():
     conn = _world_conn()
     store = EventStore(conn)
