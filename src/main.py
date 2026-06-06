@@ -1930,6 +1930,18 @@ def _edli_reactor_pending_backlog_exists(*, conn_factory=None) -> bool:
             conn.close()
 
 
+def _ws_gap_m5_reconcile_required() -> bool:
+    """Return True when venue maintenance is required to clear the WS submit latch."""
+
+    try:
+        from src.control.ws_gap_guard import summary as _ws_gap_summary
+
+        return bool(_ws_gap_summary().get("m5_reconcile_required", False))
+    except Exception as exc:  # noqa: BLE001 - heartbeat maintenance must stay alive.
+        logger.warning("WS gap M5 requirement check failed closed: %r", exc)
+        return False
+
+
 def _configure_external_venue_heartbeat_supervisor_if_needed() -> None:
     from src.control.heartbeat_supervisor import (
         ExternalHeartbeatSupervisor,
@@ -2183,7 +2195,7 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
         < VENUE_BACKGROUND_MAINTENANCE_SECONDS
     ):
         return "throttled"
-    if _edli_reactor_pending_backlog_exists():
+    if _edli_reactor_pending_backlog_exists() and not _ws_gap_m5_reconcile_required():
         _last_venue_background_maintenance_attempt_at = now
         return "deferred_edli_pending_backlog"
     if not _venue_background_maintenance_lock.acquire(blocking=False):
