@@ -624,11 +624,36 @@ class PolymarketUserChannelIngestor:
 
         A websocket protocol pong proves the TCP/WebSocket transport is alive,
         but not that the CLOB user subscription was accepted.  Therefore it may
-        only keep an already-unlatched AUTHED/SUBSCRIBED guard fresh; it must not
-        clear boot ``not_configured`` or a real gap that requires M5 reconcile.
+        keep an already-unlatched AUTHED/SUBSCRIBED guard fresh.  It may also
+        clear the clean-boot ``not_configured`` latch after the heartbeat delay:
+        by then an asynchronous auth-failure frame would have had a chance to
+        arrive, and there is no missed-order risk when the local side-effect
+        surface is empty.  Genuine mid-run gaps still require explicit M5
+        reconcile evidence.
         """
 
         current = ws_gap_guard.status()
+        now = observed_at or datetime.now(timezone.utc)
+        updated_at = current.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        clean_boot_age_seconds = (now - updated_at.astimezone(timezone.utc)).total_seconds()
+        if (
+            current.subscription_state == "DISCONNECTED"
+            and current.gap_reason == "not_configured"
+            and current.m5_reconcile_required
+            and 0 <= clean_boot_age_seconds <= current.stale_after_seconds
+            and self._local_side_effect_surface_empty()
+        ):
+            ws_gap_guard.record_message(
+                observed_at=now,
+                subscription_state="AUTHED",
+                stale_after_seconds=self.stale_after_seconds,
+            )
+            return ws_gap_guard.clear_after_no_local_side_effects(
+                observed_at=now,
+                stale_after_seconds=self.stale_after_seconds,
+            )
         if (
             current.subscription_state not in {"AUTHED", "SUBSCRIBED"}
             or current.m5_reconcile_required

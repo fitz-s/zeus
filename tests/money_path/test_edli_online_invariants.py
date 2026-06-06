@@ -305,6 +305,33 @@ def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl(monkeyp
     )
 
 
+def test_shadow_no_submit_with_user_ws_registers_reconcile_job(monkeypatch, tmp_path):
+    monkeypatch.setenv("ZEUS_USER_CHANNEL_WS_ENABLED", "1")
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        {
+            "enabled": True,
+            "live_execution_mode": "edli_shadow_no_submit",
+            "reactor_mode": "live_no_submit",
+            "event_writer_enabled": True,
+            "forecast_snapshot_trigger_enabled": True,
+            "day0_extreme_trigger_enabled": False,
+            "day0_hard_fact_live_enabled": False,
+            "market_channel_ingestor_enabled": False,
+            "edli_user_channel_reconcile_enabled": False,
+            "real_order_submit_enabled": False,
+            "taker_fok_fak_live_enabled": False,
+            **_stage_evidence_updates(tmp_path),
+        },
+    )
+
+    job_ids = {job.id for job in scheduler.jobs}
+    assert "edli_user_channel_reconcile" in job_ids
+    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_shadow_no_submit"
+    assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
+    assert settings_copy["edli_v1"]["edli_user_channel_reconcile_enabled"] is False
+
+
 def test_live_execution_mode_rejects_legacy_cron_with_edli_runtime_enabled(monkeypatch):
     with pytest.raises(RuntimeError, match="LEGACY_CRON_REQUIRES_REACTOR_MODE_DISABLED"):
         _run_main_with_fake_scheduler(

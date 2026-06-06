@@ -1672,7 +1672,7 @@ def test_transport_keepalive_refreshes_only_already_unlatched_subscription(conn)
     assert status.last_message_at == NOW
 
 
-def test_transport_keepalive_does_not_clear_boot_or_stale_gap(conn):
+def test_transport_keepalive_clears_clean_boot_when_local_surface_empty(conn):
     ws_gap_guard.configure_status(
         ws_gap_guard.WSGapStatus(
             connected=False,
@@ -1683,6 +1683,28 @@ def test_transport_keepalive_does_not_clear_boot_or_stale_gap(conn):
             updated_at=NOW - timedelta(seconds=10),
         )
     )
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+
+    status = _ingestor(conn)._record_transport_keepalive(observed_at=NOW)
+
+    assert status.subscription_state == "AUTHED"
+    assert status.m5_reconcile_required is False
+    assert status.gap_reason == "message_received_no_local_side_effects"
+
+
+def test_transport_keepalive_does_not_clear_stale_gap(conn):
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="DISCONNECTED",
+            gap_reason="not_configured",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(minutes=2),
+            stale_after_seconds=30,
+        )
+    )
+
     assert _ingestor(conn)._record_transport_keepalive(observed_at=NOW).m5_reconcile_required is True
 
     ws_gap_guard.configure_status(
