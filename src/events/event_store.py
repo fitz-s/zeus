@@ -487,20 +487,23 @@ class EventStore:
         if not candidate_rows:
             return 0
 
-        def _family_key(row: sqlite3.Row | tuple) -> str:
+        _FsrPruneKey = tuple[str, str, str, str] | tuple[str, str]
+
+        def _prune_key(row: sqlite3.Row | tuple) -> _FsrPruneKey:
             city = str(row[2] or "").strip()
             target_date = str(row[3] or "").strip()
             metric = str(row[4] or "").strip()
             if city and target_date and metric:
-                return f"{city}|{target_date}|{metric}"
-            return str(row[1] or "")
+                return ("family", city, target_date, metric)
+            return ("entity", str(row[1] or ""))
 
-        candidate_keys = {_family_key(row) for row in candidate_rows if _family_key(row)}
+        candidate_keys = {
+            key for row in candidate_rows if (key := _prune_key(row))[-1]
+        }
         keeper_ids: set[str] = set()
-        for family_key in candidate_keys:
-            key_parts = family_key.split("|", 2)
-            if len(key_parts) == 3:
-                city, target_date, metric = key_parts
+        for prune_key in candidate_keys:
+            if prune_key[0] == "family":
+                _, city, target_date, metric = prune_key
                 key_predicate = (
                     "json_extract(e.payload_json, '$.city') = ? "
                     "AND json_extract(e.payload_json, '$.target_date') = ? "
@@ -508,8 +511,9 @@ class EventStore:
                 )
                 key_params = (city, target_date, metric)
             else:
+                _, entity_key = prune_key
                 key_predicate = "e.entity_key = ?"
-                key_params = (family_key,)
+                key_params = (entity_key,)
             keeper_row = self.conn.execute(
                 f"""
                 SELECT e.event_id

@@ -249,6 +249,39 @@ def test_archive_superseded_forecast_snapshot_events_crosses_source_runs():
     assert rows[newer.event_id] == "pending"
 
 
+def test_archive_superseded_forecast_snapshot_events_fallback_keeps_entity_keeper():
+    conn = _world_conn()
+    store = EventStore(conn)
+    entity_key = "Chicago|2026-05-24|high|source-run-1"
+    older = _fsr_entity_event(
+        entity_key,
+        "snap-missing-family-old",
+        "2026-05-24T04:00:00+00:00",
+        "2026-05-24T04:01:00+00:00",
+        city="",
+    )
+    newer = _fsr_entity_event(
+        entity_key,
+        "snap-missing-family-new",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        city="",
+    )
+    for event in (older, newer):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_superseded_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = dict(
+        conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    )
+    assert rows[older.event_id] == "expired"
+    assert rows[newer.event_id] == "pending"
+
+
 def test_archive_superseded_forecast_snapshot_events_keeps_complete_over_newer_partial():
     conn = _world_conn()
     store = EventStore(conn)
