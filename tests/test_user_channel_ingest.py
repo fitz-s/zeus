@@ -1692,6 +1692,29 @@ def test_transport_keepalive_clears_clean_boot_when_local_surface_empty(conn):
     assert status.gap_reason == "message_received_no_local_side_effects"
 
 
+def test_transport_keepalive_uses_connection_start_for_slow_boot_clean_latch(conn):
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="DISCONNECTED",
+            gap_reason="not_configured",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(minutes=5),
+            stale_after_seconds=30,
+        )
+    )
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    ingestor = _ingestor(conn)
+    ingestor._connection_started_at = NOW - timedelta(seconds=10)
+
+    status = ingestor._record_transport_keepalive(observed_at=NOW)
+
+    assert status.subscription_state == "AUTHED"
+    assert status.m5_reconcile_required is False
+    assert status.gap_reason == "message_received_no_local_side_effects"
+
+
 def test_transport_keepalive_clears_clean_boot_with_known_exposure_history(conn):
     conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
     confirmed_trade_fact_id = _seed_lot_trade_fact(

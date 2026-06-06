@@ -476,6 +476,7 @@ class PolymarketUserChannelIngestor:
         self.own_connection = own_connection
         self._running = False
         self._heartbeat_task: asyncio.Task | None = None
+        self._connection_started_at: datetime | None = None
 
     @staticmethod
     def _auth_from_args(api_key: str | None, secret: str | None, passphrase: str | None) -> WSAuth:
@@ -517,6 +518,7 @@ class PolymarketUserChannelIngestor:
         connect = self.websocket_connect or _default_websocket_connect
         try:
             async with connect(self.endpoint) as ws:
+                self._connection_started_at = _utcnow()
                 await ws.send(json.dumps(self.subscription_message()))
                 # Codex P1 follow-up to PR #37: do NOT call
                 # _record_subscribed_message() here. ws.send() is outbound
@@ -637,7 +639,10 @@ class PolymarketUserChannelIngestor:
         updated_at = current.updated_at
         if updated_at.tzinfo is None:
             updated_at = updated_at.replace(tzinfo=timezone.utc)
-        clean_boot_age_seconds = (now - updated_at.astimezone(timezone.utc)).total_seconds()
+        clean_boot_reference = self._connection_started_at or updated_at
+        if clean_boot_reference.tzinfo is None:
+            clean_boot_reference = clean_boot_reference.replace(tzinfo=timezone.utc)
+        clean_boot_age_seconds = (now - clean_boot_reference.astimezone(timezone.utc)).total_seconds()
         if (
             current.subscription_state == "DISCONNECTED"
             and current.gap_reason == "not_configured"
