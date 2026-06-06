@@ -38,9 +38,11 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["market_channel_quote_cache_enabled"] is True
     assert edli["no_trade_regret_enabled"] is True
     assert edli["reports_enabled"] is True
-    assert edli["forecast_snapshot_emit_limit"] <= 20
+    assert edli["forecast_snapshot_emit_limit"] is False
+    assert edli["coverage_fairness_emit_enabled"] is True
     assert edli["day0_catchup_emit_limit"] <= 20
-    assert edli["no_submit_proof_limit"] <= 50
+    assert edli["no_submit_proof_limit"] is False
+    assert edli["redecision_max_per_cycle"] is False
     assert edli["market_channel_refresh_max_actions_per_window"] <= 5
     assert edli["market_channel_refresh_window_seconds"] >= 1
     assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
@@ -161,6 +163,7 @@ def test_edli_reactor_job_wired_behind_live_execution_mode_gate():
     assert "forecast_snapshot_emit_limit" in source
     assert "no_submit_proof_limit" in source
     assert "reactor.process_pending(decision_time=now, limit=proof_limit)" in source
+    assert "_edli_positive_int_or_unbounded" in source
     assert "user_channel_or_reconcile_only" in source
     edli_start = source.index("def _edli_event_reactor_cycle")
     edli_end = source.index("@_scheduler_job", edli_start + 1)

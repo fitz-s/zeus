@@ -186,6 +186,10 @@ def test_emit_covers_all_market_cities(monkeypatch: Any) -> None:
         "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
         lambda: True,
     )
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready.market_phase_admits",
+        lambda **_kwargs: True,
+    )
 
     forecasts_conn = _build_forecasts_conn(cities)
     world_conn = _build_world_conn()
@@ -230,6 +234,10 @@ def test_no_city_starved_beyond_two_cycles(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         "src.events.triggers.forecast_snapshot_ready._coverage_fairness_emit_enabled",
         lambda: True,
+    )
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready.market_phase_admits",
+        lambda **_kwargs: True,
     )
 
     forecasts_conn = _build_forecasts_conn(cities)

@@ -238,11 +238,8 @@ class OpportunityEventReactor:
         self._decision_certificate_ledger.ensure_schema()
         self._live_cap_ledger = LiveCapLedger(store.conn)
 
-    def process_pending(self, *, decision_time: datetime, limit: int = 100) -> ReactorResult:
+    def process_pending(self, *, decision_time: datetime, limit: int | None = 100) -> ReactorResult:
         result = ReactorResult()
-        # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
-        # taken under the world-DB write mutex.
-        events = self._store.fetch_pending(decision_time=decision_time.astimezone(UTC).isoformat(), limit=limit)
         # E1 (STEP 8): per-cycle wall-clock budget. A cycle must not run unbounded;
         # once the budget is exceeded, stop after the current event and leave the
         # rest PENDING (not consumed, not dropped) for the next cycle. This caps a
@@ -251,9 +248,28 @@ class OpportunityEventReactor:
         # Default 45s; override via ZEUS_REACTOR_CYCLE_BUDGET_SECONDS.
         budget = _cycle_budget_seconds()
         cycle_start = time.monotonic()
-        for event in events:
-            self._process_event_unit(event, decision_time=decision_time, result=result)
-            if budget is not None and (time.monotonic() - cycle_start) >= budget:
+        batch_limit = 250 if limit is None else max(1, int(limit))
+        remaining = None if limit is None else batch_limit
+        while remaining is None or remaining > 0:
+            # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
+            # taken under the world-DB write mutex.  limit=None means drain the current
+            # admissible queue in batches; the batch size is pagination, not a total cap.
+            request_limit = batch_limit if remaining is None else min(batch_limit, remaining)
+            events = self._store.fetch_pending(
+                decision_time=decision_time.astimezone(UTC).isoformat(),
+                limit=request_limit,
+            )
+            if not events:
+                break
+            for event in events:
+                self._process_event_unit(event, decision_time=decision_time, result=result)
+                if remaining is not None:
+                    remaining -= 1
+                if budget is not None and (time.monotonic() - cycle_start) >= budget:
+                    return result
+                if remaining is not None and remaining <= 0:
+                    return result
+            if len(events) < request_limit:
                 break
         return result
 

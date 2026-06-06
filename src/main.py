@@ -4145,9 +4145,13 @@ def _edli_event_reactor_cycle() -> None:
 
         now = datetime.now(timezone.utc)
         received_at = now.isoformat()
-        forecast_emit_limit = _edli_bounded_positive_int(edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50)
+        forecast_emit_limit = _edli_positive_int_or_unbounded(
+            edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50
+        )
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
-        proof_limit = _edli_bounded_positive_int(edli_cfg, "no_submit_proof_limit", default=10, maximum=50)
+        proof_limit = _edli_positive_int_or_unbounded(
+            edli_cfg, "no_submit_proof_limit", default=10, maximum=50
+        )
         store = EventStore(conn)
         # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
@@ -4211,7 +4215,9 @@ def _edli_event_reactor_cycle() -> None:
             # already_pending skip + cap bound the queue. Non-fatal: never breaks the reactor cycle.
             if bool(edli_cfg.get("redecision_continuous_enabled", False)):
                 try:
-                    _rd_cap = _edli_bounded_positive_int(edli_cfg, "redecision_max_per_cycle", default=50, maximum=200)
+                    _rd_cap = _edli_positive_int_or_unbounded(
+                        edli_cfg, "redecision_max_per_cycle", default=50, maximum=200
+                    )
                     # B4 (Phase-2): a monotonic `cycle-N` source so the coverage-fairness
                     # round-robin (int(source.split('-')[-1])) advances its window each cycle
                     # and reaches all cities within ceil(N/limit) cycles. Still distinct per
@@ -4228,8 +4234,8 @@ def _edli_event_reactor_cycle() -> None:
                         already_pending_keys=_rd_pending,
                     )
                     logger.info(
-                        "edli_redecision: enqueued=%d cap=%d skipped_pending=%d",
-                        _rd_n, _rd_cap, len(_rd_pending),
+                        "edli_redecision: enqueued=%d cap=%s skipped_pending=%d",
+                        _rd_n, "unbounded" if _rd_cap is None else str(_rd_cap), len(_rd_pending),
                     )
                 except Exception as _rd_exc:  # noqa: BLE001 — continuous re-decision is non-fatal
                     logger.warning("edli_redecision: enqueue failed (non-fatal): %r", _rd_exc)
@@ -4735,12 +4741,34 @@ def _edli_bounded_positive_int(config: dict, key: str, *, default: int, maximum:
     return max(1, min(maximum, value))
 
 
+def _edli_positive_int_or_unbounded(
+    config: dict, key: str, *, default: int, maximum: int
+) -> int | None:
+    raw = config.get(key, default)
+    if raw is False:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in {
+        "false",
+        "none",
+        "no_cap",
+        "uncapped",
+        "unbounded",
+        "unlimited",
+    }:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(maximum, value))
+
+
 def _edli_emit_forecast_snapshot_events(
     world_conn,
     *,
     decision_time: datetime,
     received_at: str,
-    limit: int,
+    limit: int | None,
     source: str | None = None,
     already_pending_keys: set[str] | None = None,
 ) -> int:

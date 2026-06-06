@@ -439,7 +439,7 @@ class ForecastSnapshotReadyTrigger:
         forecasts_conn: sqlite3.Connection,
         decision_time: datetime,
         received_at: str,
-        limit: int = 100,
+        limit: int | None = 100,
         source: str | None = None,
         already_pending_keys: set[str] | None = None,
     ) -> list[EventWriteResult]:
@@ -536,21 +536,33 @@ class ForecastSnapshotReadyTrigger:
                     _decision_iso,
                 ),
             )
-            rows = CoverageFairnessRequest(
-                limit=limit, cycle_index=_cycle_index
-            ).select_rows(rows)
+            if limit is not None:
+                rows = CoverageFairnessRequest(
+                    limit=max(1, int(limit)), cycle_index=_cycle_index
+                ).select_rows(rows)
         else:
-            # Legacy path: SQL LIMIT keeps behaviour byte-identical to pre-B4.
-            rows = _dict_rows(
-                forecasts_conn,
-                _select_sql_base + "\n            LIMIT ?",
-                (
-                    _decision_iso,
-                    _decision_iso,
-                    _decision_iso,
-                    limit,
-                ),
-            )
+            if limit is None:
+                rows = _dict_rows(
+                    forecasts_conn,
+                    _select_sql_base,
+                    (
+                        _decision_iso,
+                        _decision_iso,
+                        _decision_iso,
+                    ),
+                )
+            else:
+                # Legacy path: SQL LIMIT keeps behaviour byte-identical to pre-B4.
+                rows = _dict_rows(
+                    forecasts_conn,
+                    _select_sql_base + "\n            LIMIT ?",
+                    (
+                        _decision_iso,
+                        _decision_iso,
+                        _decision_iso,
+                        max(1, int(limit)),
+                    ),
+                )
         # WAVE-1 W1-T1 intake phase filter. For one-shot catch-up this remains
         # gated by edli_v1.edli_intake_phase_filter_enabled (default OFF). For
         # continuous re-decision (source is per-cycle) it is mandatory: same-day
