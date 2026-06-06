@@ -3,6 +3,7 @@
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 
 import pytest
@@ -54,7 +55,22 @@ def _event(snapshot_id: str, priority: int, available_at: str, received_at: str)
     )
 
 
-def _fsr_entity_event(entity_key: str, snapshot_id: str, available_at: str, received_at: str):
+def _fsr_entity_event(
+    entity_key: str,
+    snapshot_id: str,
+    available_at: str,
+    received_at: str,
+    *,
+    source_run_completeness_status: str = "COMPLETE",
+):
+    payload = _payload(snapshot_id)
+    if source_run_completeness_status != "COMPLETE":
+        payload = dataclasses.replace(
+            payload,
+            completeness_status="PARTIAL_ALLOWED",
+            source_run_completeness_status=source_run_completeness_status,
+            coverage_completeness_status=source_run_completeness_status,
+        )
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
         entity_key=entity_key,
@@ -63,7 +79,7 @@ def _fsr_entity_event(entity_key: str, snapshot_id: str, available_at: str, rece
         available_at=available_at,
         received_at=received_at,
         causal_snapshot_id=snapshot_id,
-        payload=_payload(snapshot_id),
+        payload=payload,
         priority=50,
     )
 
@@ -186,6 +202,35 @@ def test_archive_superseded_forecast_snapshot_events_keeps_latest_per_entity_key
     assert rows[older.event_id] == "expired"
     assert rows[newer.event_id] == "pending"
     assert rows[other.event_id] == "pending"
+
+
+def test_archive_superseded_forecast_snapshot_events_keeps_complete_over_newer_partial():
+    conn = _world_conn()
+    store = EventStore(conn)
+    entity_key = "Chicago|2026-05-24|high|source-run-1"
+    complete = _fsr_entity_event(
+        entity_key, "snap-complete", "2026-05-24T04:00:00+00:00", "2026-05-24T04:01:00+00:00"
+    )
+    partial = _fsr_entity_event(
+        entity_key,
+        "snap-partial",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        source_run_completeness_status="PARTIAL_ALLOWED",
+    )
+    for event in (complete, partial):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_superseded_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = dict(
+        conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    )
+    assert rows[complete.event_id] == "pending"
+    assert rows[partial.event_id] == "expired"
 
 
 def test_fetch_pending_prioritizes_day0_hard_fact_over_complete_forecast_backlog():

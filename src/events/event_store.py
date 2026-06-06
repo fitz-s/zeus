@@ -493,7 +493,15 @@ class EventStore:
                  WHERE e.event_type = 'FORECAST_SNAPSHOT_READY'
                    AND e.entity_key = ?
                    AND p.processing_status IN ('pending', 'processing')
-                 ORDER BY e.available_at DESC, e.received_at DESC, e.event_id DESC
+                 ORDER BY
+                   CASE
+                     WHEN json_extract(e.payload_json, '$.source_run_completeness_status') = 'COMPLETE'
+                     THEN 0
+                     ELSE 1
+                   END ASC,
+                   e.available_at DESC,
+                   e.received_at DESC,
+                   e.event_id DESC
                  LIMIT 1
                 """,
                 (self.consumer_name, entity_key),
