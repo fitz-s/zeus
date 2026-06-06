@@ -6801,22 +6801,19 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        # THROUGHPUT STRUCTURAL FIX (2026-06-01): dedicated executable-snapshot substrate
-        # warmer, DECOUPLED from the reactor decision cycle. The refresh
-        # (_refresh_pending_family_snapshots) does a ~76s-cold universe Gamma scan +
-        # per-token CLOB capture; running it inline in _edli_event_reactor_cycle blew the
-        # reactor's 1-min interval (overlapping triggers coalesced/skipped → 0 completed
-        # cycles → 0 trades). On its own cadence the reactor reads already-captured
-        # snapshots (DB-only) and reaches submit in seconds. Runs on a longer interval than
-        # the reactor (the universe scan is TTL-cached 300s; ~90s keeps pending families
-        # fresh without re-scanning every reactor tick). max_instances=1/coalesce so a slow
-        # warm never stacks. Data-only (no orders); fail-soft.
+        # THROUGHPUT + FRESHNESS STRUCTURAL FIX: dedicated executable-snapshot substrate
+        # warmer, DECOUPLED from the reactor decision cycle. It must run inside the
+        # 30s executable-price freshness window and start before the first reactor tick;
+        # otherwise the reactor reads valid-but-expired price rows and every candidate
+        # rejects as EXECUTABLE_SNAPSHOT_STALE. The refresh is scoped to pending families
+        # (not a global weather scan) and max_instances=1/coalesce prevents stacked venue
+        # I/O. Data-only (no orders); fail-soft.
         scheduler.add_job(
             _edli_market_substrate_warm_cycle,
             "interval",
-            seconds=90,
+            seconds=20,
             id="edli_market_substrate_warm",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 65.0),
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 1.0),
             max_instances=1,
             coalesce=True,
         )
