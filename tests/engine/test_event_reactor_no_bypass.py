@@ -16,6 +16,7 @@ import pytest
 
 from src.decision_kernel import claims
 from src.decision_kernel.compiler import DecisionCompiler
+from src.contracts.execution_intent import DecisionSourceContext
 from src.state.snapshot_repo import init_snapshot_schema
 from src.engine.event_reactor_adapter import (
     build_event_bound_no_submit_receipt,
@@ -759,7 +760,9 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             '2026-05-25', 'Chicago', 'America/Chicago', 'high',
             'temperature', 'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
             51, 51, '[0,3,6]', '[0,3,6]', 3, 3,
-            'COMPLETE', 0, 'hash-raw', 'hash-manifest', 'SUCCESS', NULL
+            'COMPLETE', 0, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            'SUCCESS', NULL
         )
         """
     )
@@ -1191,6 +1194,14 @@ def test_forecast_certificate_records_members_json_hash_and_window_authority():
     assert forecast["target_local_date"] == "2026-05-25"
     assert forecast["city_timezone"] == "America/Chicago"
     assert forecast["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
+    decision_context = DecisionSourceContext.from_forecast_context(forecast)
+    assert decision_context is not None
+    assert decision_context.source_id == "ecmwf_open_data"
+    assert decision_context.model_family == "ecmwf_ens"
+    assert decision_context.forecast_source_role == "entry_primary"
+    assert decision_context.degradation_level == "OK"
+    assert decision_context.authority_tier == "FORECAST"
+    assert decision_context.integrity_errors() == ()
 
 
 def test_high_forecast_snapshot_members_json_is_daily_max_extrema():

@@ -3252,6 +3252,7 @@ def _forecast_authority_payload_and_clock(
             "horizon_profile": snapshot.get("horizon_profile"),
         }
     )
+    ens_result = result.bundle.to_ens_result()
     payload_out = {
         "identity": str(result.bundle.snapshot.snapshot_id),
         "snapshot_id": str(result.bundle.snapshot.snapshot_id),
@@ -3284,6 +3285,17 @@ def _forecast_authority_payload_and_clock(
             }
         ),
         "forecast_source_id": evidence.forecast_source_id,
+        "model": ens_result.get("model"),
+        "model_family": ens_result.get("model"),
+        "forecast_issue_time": ens_result.get("issue_time"),
+        "forecast_valid_time": ens_result.get("valid_time"),
+        "forecast_fetch_time": ens_result.get("fetch_time"),
+        "forecast_available_at": ens_result.get("available_at"),
+        "degradation_level": ens_result.get("degradation_level"),
+        "forecast_source_role": ens_result.get("forecast_source_role"),
+        "authority_tier": ens_result.get("authority_tier"),
+        "decision_time": decision_time.astimezone(UTC).isoformat(),
+        "decision_time_status": "OK",
         "forecast_data_version": evidence.forecast_data_version,
         "source_transport": evidence.source_transport,
         "source_cycle_time": evidence.source_cycle_time,
