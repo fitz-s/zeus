@@ -805,6 +805,41 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
     assert pre_submit.payload["post_only"] is False
 
 
+def test_live_command_reuses_single_pre_submit_authority_witness():
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    accepted = replace(
+        accepted,
+        decision_proof_bundle=build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time),
+    )
+    calls = []
+
+    def _provider(final_intent, _executable_snapshot, _decision_time):
+        calls.append(final_intent.payload["token_id"])
+        return _pre_submit_authority_witness(current_best_bid=0.39, current_best_ask=0.40)
+
+    certs = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        tiny_live_max_notional_usd=5.0,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=_provider,
+        taker_fok_fak_live_enabled=True,
+    )
+
+    pre_submit = next(c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION)
+    assert calls == ["yes-1"]
+    assert pre_submit.payload["book_hash"] == "book-hash-1"
+
+
 def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
     from pathlib import Path
 
@@ -1373,6 +1408,34 @@ def test_main_pre_submit_authority_provider_hydrates_typed_provenance(monkeypatc
     assert witness.user_ws_authority_id == "ws_gap_guard"
     assert witness.balance_allowance_authority_id == "polymarket_wallet_readonly"
     assert witness.balance_allowance_status == "OK"
+
+
+def test_main_pre_submit_jit_book_provider_uses_short_http_timeout(monkeypatch):
+    import src.data.polymarket_client as polymarket_client
+    import src.main as main
+
+    captured = {}
+
+    class FakePolymarketClient:
+        def __init__(self, *, public_http_timeout=None):
+            captured["public_http_timeout"] = public_http_timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get_orderbook_snapshot(self, token_id):
+            return {"hash": "book-hash", "bids": [{"price": "0.40"}], "asks": [{"price": "0.42"}]}
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", FakePolymarketClient)
+    monkeypatch.setenv("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS", "2.5")
+
+    provider = main._edli_pre_submit_jit_book_quote_provider()
+
+    assert provider("yes-1")["hash"] == "book-hash"
+    assert captured["public_http_timeout"] == 2.5
 
 
 def test_main_pre_submit_authority_provider_blocks_insufficient_buy_allowance(monkeypatch):

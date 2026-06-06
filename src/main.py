@@ -4952,6 +4952,21 @@ def _edli_canary_force_taker_provider(world_conn, edli_cfg):
     return _provider
 
 
+def _edli_pre_submit_clob_timeout_seconds() -> float:
+    raw = os.environ.get("ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS")
+    if raw in (None, ""):
+        return 3.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
+        return 3.0
+    if value <= 0:
+        logger.warning("Invalid ZEUS_PRE_SUBMIT_CLOB_TIMEOUT_SECONDS=%r; using 3.0", raw)
+        return 3.0
+    return value
+
+
 def _edli_pre_submit_jit_book_quote_provider():
     """Build the just-in-time single-token ``/book`` fetcher for the pre-submit
     authority (GATE #84). Returns a ``token_id -> dict`` callable that pulls the
@@ -4966,7 +4981,7 @@ def _edli_pre_submit_jit_book_quote_provider():
     def _fetch(token_id: str) -> dict:
         from src.data.polymarket_client import PolymarketClient
 
-        with PolymarketClient() as clob:
+        with PolymarketClient(public_http_timeout=_edli_pre_submit_clob_timeout_seconds()) as clob:
             return clob.get_orderbook_snapshot(token_id)
 
     return _fetch

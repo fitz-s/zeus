@@ -1722,12 +1722,7 @@ def _build_live_execution_command_certificates(
                 final_intent=final_intent,
                 executable_snapshot=executable_snapshot,
                 decision_time=decision_time,
-                authority_witness=_require_pre_submit_authority_witness(
-                    pre_submit_authority_provider,
-                    final_intent,
-                    executable_snapshot,
-                    decision_time,
-                ),
+                authority_witness=authority_witness,
             ),
             occurred_at=decision_time,
             source_authority="engine_adapter",
