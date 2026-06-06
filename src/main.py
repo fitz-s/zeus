@@ -4934,13 +4934,13 @@ def _edli_prune_batch_limit(config: dict) -> int:
     return _edli_bounded_positive_int(
         config,
         "reactor_prune_batch_limit",
-        default=500,
+        default=100,
         maximum=5_000,
     )
 
 
 def _edli_prune_interval_seconds(config: dict) -> float:
-    raw = config.get("reactor_prune_interval_seconds", 180)
+    raw = config.get("reactor_prune_interval_seconds", 600)
     try:
         value = float(raw)
     except (TypeError, ValueError):

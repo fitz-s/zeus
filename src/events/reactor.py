@@ -38,13 +38,13 @@ from src.state.db import world_write_mutex
 
 UTC = timezone.utc
 
-DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 45.0
+DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
 
 
 def _cycle_budget_seconds() -> float | None:
     """Per-cycle wall-clock budget for process_pending (E1 / STEP 8).
 
-    Default 45.0s; override via ``ZEUS_REACTOR_CYCLE_BUDGET_SECONDS``. A value of
+    Default 30.0s; override via ``ZEUS_REACTOR_CYCLE_BUDGET_SECONDS``. A value of
     0 or negative disables the budget (unbounded cycle, legacy behavior). A
     malformed env value falls back to the default rather than crashing the
     reactor.
