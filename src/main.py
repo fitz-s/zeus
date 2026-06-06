@@ -69,6 +69,8 @@ logger = logging.getLogger("zeus")
 # Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
 _cycle_lock = threading.Lock()
 _market_discovery_lock = threading.Lock()
+_market_substrate_refresh_lock = threading.Lock()
+_market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
@@ -2754,6 +2756,98 @@ def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
     ).fetchall()
 
 
+def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
+    rows = write_conn.execute(
+        """
+        SELECT yes_token_id, no_token_id, selected_outcome_token_id
+        FROM executable_market_snapshots
+        WHERE condition_id = ? AND freshness_deadline >= ?
+        ORDER BY captured_at DESC, snapshot_id DESC
+        """,
+        (condition_id, fresh_at_iso),
+    ).fetchall()
+    if not rows:
+        return False
+
+    yes_token_id = ""
+    no_token_id = ""
+    fresh_selected_tokens: set[str] = set()
+
+    def _cell(row, key: str, index: int) -> str:
+        try:
+            value = row[key] if hasattr(row, "keys") else row[index]
+        except (KeyError, IndexError, TypeError):
+            value = None
+        return str(value or "").strip()
+
+    for row in rows:
+        yes = _cell(row, "yes_token_id", 0)
+        no = _cell(row, "no_token_id", 1)
+        selected = _cell(row, "selected_outcome_token_id", 2)
+        if yes and not yes_token_id:
+            yes_token_id = yes
+        if no and not no_token_id:
+            no_token_id = no
+        if selected:
+            fresh_selected_tokens.add(selected)
+    if not yes_token_id or not no_token_id:
+        return False
+    return yes_token_id in fresh_selected_tokens and no_token_id in fresh_selected_tokens
+
+
+def _prune_fresh_market_outcomes_for_snapshot_refresh(
+    write_conn,
+    markets: list[dict],
+    *,
+    fresh_at_iso: str,
+) -> tuple[list[dict], int, int]:
+    pruned: list[dict] = []
+    fresh_conditions_skipped = 0
+    stale_conditions_submitted = 0
+    for market in markets:
+        stale_outcomes: list[dict] = []
+        for outcome in market.get("outcomes", []) or []:
+            if not isinstance(outcome, dict):
+                continue
+            cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            if cid and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso):
+                fresh_conditions_skipped += 1
+                continue
+            stale_outcomes.append(outcome)
+            stale_conditions_submitted += 1
+        if not stale_outcomes:
+            continue
+        cloned = dict(market)
+        cloned["outcomes"] = stale_outcomes
+        if "condition_ids" in cloned:
+            cloned["condition_ids"] = [
+                str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+                for outcome in stale_outcomes
+                if str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            ]
+        pruned.append(cloned)
+    return pruned, fresh_conditions_skipped, stale_conditions_submitted
+
+
+def _gamma_lookup_deadline_for_snapshot_refresh(
+    *,
+    refresh_deadline: float,
+    refresh_budget_s: float,
+    snapshot_reserve_s: float,
+    cached_topology_count: int,
+) -> float:
+    base_deadline = refresh_deadline - snapshot_reserve_s
+    if cached_topology_count <= 0:
+        return base_deadline
+    cached_slice_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", "1.0")),
+    )
+    if cached_slice_s <= 0:
+        return refresh_deadline - refresh_budget_s
+    return min(base_deadline, (refresh_deadline - refresh_budget_s) + cached_slice_s)
+
+
 def _refresh_pending_family_snapshots(
     world_conn,
     forecasts_conn,
@@ -2807,6 +2901,17 @@ def _refresh_pending_family_snapshots(
     if not families:
         return {"status": "no_pending_families"}
 
+    refresh_budget_s = max(
+        5.0,
+        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "15.0")),
+    )
+    refresh_deadline = time.monotonic() + refresh_budget_s
+    snapshot_reserve_s = min(
+        max(1.0, float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "6.0"))),
+        max(0.1, refresh_budget_s - 0.1),
+    )
+    gamma_deadline = refresh_deadline - snapshot_reserve_s
+
     # Staleness pre-filter REMOVED (STEP 4, consolidated timeliness fix): the
     # local lexicographic _drop_stale_families is now redundant. Strictly-past
     # (already-settled) targets can no longer become pending events — the
@@ -2816,26 +2921,11 @@ def _refresh_pending_family_snapshots(
     # pending-event query above is the single source of families; it is sourced
     # from the same already-timeliness-filtered opportunity_events.
 
-    # A2 throughput (2026-05-31): cap per-cycle capture so a cycle COMPLETES fast.
-    # Each family's capture makes serial per-token order-book fetches (uncacheable,
-    # ~1s each); refreshing ALL pending families serially made cycles 10-30 min →
-    # process_pending never ran → 0 receipts. `families` is priority-ordered (query
-    # ORDER BY priority DESC, available_at ASC), so the highest-priority families are
-    # captured first; the remainder are picked up on subsequent cycles. The reactor's
-    # own proof_limit still bounds decisions; this bounds the venue-I/O per cycle.
-    # 2026-06-06: executable prices expire after 30s. The decoupled warmer must
-    # complete and commit before the reactor's next decision timestamp, not merely
-    # "eventually" refresh. Live evidence showed 16 families routinely hit the 25s
-    # time-box and committed after the reactor read, recreating
-    # EXECUTABLE_SNAPSHOT_STALE. Keep the per-tick venue-I/O slice small enough to
-    # finish inside the TTL; deferred families are retried on the next warm tick.
-    # 2026-06-05: prioritize newest target_date before applying the cap. Strictly
-    # stale pending rows can still exist in the processing ledger after Gamma no
-    # longer returns the market, and letting those rows spend the cap starves fresh
-    # family snapshots.
-    _FAMILY_REFRESH_CAP = 8
-    if len(families) > _FAMILY_REFRESH_CAP:
-        families = families[:_FAMILY_REFRESH_CAP]
+    # Throughput contract: never slice pending families by a fixed count. Live has
+    # hundreds of active weather families across time zones; a hard family cap lets
+    # a small prefix monopolise the freshness window. The wall-clock budget is the
+    # only per-tick bound, with a reserved CLOB capture slice so Gamma lookup cannot
+    # consume the whole tick and leave snapshot insertion at attempted=0.
 
     # Step 2: Cache-skip: for each family check whether ALL known condition_ids
     #         (from market_events topology) already have fresh snapshots.
@@ -2862,21 +2952,22 @@ def _refresh_pending_family_snapshots(
                 # Still include: Gamma may discover bins not yet in topology.
                 gamma_refresh_families.append((city, target_date, metric))
                 continue
+            topology_rows = [
+                {
+                    **dict(trow),
+                    "city": city,
+                    "target_date": target_date,
+                    "temperature_metric": metric,
+                }
+                for trow in topology_rows
+            ]
 
             any_stale = False
             for trow in topology_rows:
                 cid = str(trow.get("condition_id") or "").strip()
                 if not cid:
                     continue
-                fresh = write_conn.execute(
-                    """
-                    SELECT 1 FROM executable_market_snapshots
-                    WHERE condition_id = ? AND freshness_deadline >= ?
-                    LIMIT 1
-                    """,
-                    (cid, now_iso),
-                ).fetchone()
-                if not fresh:
+                if not _condition_buy_sides_fresh(write_conn, cid, now_iso):
                     any_stale = True
                     break
 
@@ -2915,6 +3006,12 @@ def _refresh_pending_family_snapshots(
         #         Gamma calls (vs the background slug-pattern scanner which
         #         enumerates all 14 cities × all dates and is budget-capped).
         #         Uses the City's slug_names[0] for the slug fragment.
+        gamma_deadline = _gamma_lookup_deadline_for_snapshot_refresh(
+            refresh_deadline=refresh_deadline,
+            refresh_budget_s=refresh_budget_s,
+            snapshot_reserve_s=snapshot_reserve_s,
+            cached_topology_count=len(cached_topology_markets),
+        )
         try:
             from datetime import date as _date_cls
             from src.config import cities_by_name as _cities_by_name
@@ -2930,21 +3027,16 @@ def _refresh_pending_family_snapshots(
 
             raw_events_seen: set = set()
             raw_events_collected: list[dict] = []
-            # Time-box the per-family Gamma fetch (2026-06-04 reactor-overrun antibody):
-            # each _gamma_get has up to a 10s timeout; 16 families x slow Gamma can blow
-            # past the 60s reactor interval ("max running instances reached"), so the
-            # cycle never reaches FSR-emit + process_pending -> 0 receipts. Bound the
-            # refresh phase to a deadline that ALWAYS leaves budget for the downstream
-            # emit+process; uncaptured families are picked up next cycle (priority-ordered).
-            _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "15.0")))
-            _refresh_deadline = time.monotonic() + _refresh_budget_s
             _refreshed_n = 0
             for fam_city, fam_date, fam_metric in gamma_refresh_families:
-                if time.monotonic() > _refresh_deadline:
+                if time.monotonic() > gamma_deadline:
                     logger.info(
-                        "refresh_pending_family_snapshots: time-box %.0fs hit after %d/%d "
-                        "families; deferring rest to next cycle (leaves budget for emit+process)",
-                        _refresh_budget_s, _refreshed_n, len(gamma_refresh_families),
+                        "refresh_pending_family_snapshots: Gamma time-box %.0fs hit after %d/%d "
+                        "families; reserving %.1fs for CLOB capture",
+                        max(0.1, gamma_deadline - (refresh_deadline - refresh_budget_s)),
+                        _refreshed_n,
+                        len(gamma_refresh_families),
+                        snapshot_reserve_s,
                     )
                     break
                 _refreshed_n += 1
@@ -3077,14 +3169,37 @@ def _refresh_pending_family_snapshots(
             1.0,
             float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
         )
+        markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
+            _prune_fresh_market_outcomes_for_snapshot_refresh(
+                write_conn,
+                markets,
+                fresh_at_iso=now_iso,
+            )
+        )
+        if not markets_for_refresh:
+            return {
+                "status": "all_fresh",
+                "families_checked": len(families),
+                "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
+                "gamma_refresh_families": len(gamma_refresh_families),
+                "cached_topology_families": cached_topology_families,
+                "cached_topology_incomplete": cached_topology_incomplete,
+                "no_topology": no_topology,
+                "fresh_skipped": fresh_skipped,
+                "fresh_condition_skipped": fresh_condition_skipped,
+                "stale_condition_submitted": stale_condition_submitted,
+            }
+
+        snapshot_budget_s = max(0.1, refresh_deadline - time.monotonic())
         with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
             summary = refresh_executable_market_substrate_snapshots(
                 write_conn,
-                markets=markets,
+                markets=markets_for_refresh,
                 clob=clob,
-                captured_at=now_utc,
+                captured_at=datetime.now(timezone.utc),
                 scan_authority="VERIFIED",
                 max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
+                budget_seconds=snapshot_budget_s,
             )
         write_conn.commit()
 
@@ -3103,23 +3218,101 @@ def _refresh_pending_family_snapshots(
         "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
         "fresh_skipped": fresh_skipped,
-        "markets_submitted": len(markets),
+        "markets_submitted": len(markets_for_refresh),
+        "fresh_condition_skipped": fresh_condition_skipped,
+        "stale_condition_submitted": stale_condition_submitted,
+        "refresh_budget_seconds": refresh_budget_s,
+        "snapshot_reserve_seconds": snapshot_reserve_s,
+        "snapshot_budget_seconds": snapshot_budget_s,
         **summary,
     }
     logger.info("refresh_pending_family_snapshots: %s", result)
     return result
 
 
+def _edli_pending_opportunity_count() -> int:
+    """Return current pending EDLI event count for background substrate arbitration."""
+
+    from src.state.db import get_world_connection
+
+    conn = get_world_connection()
+    try:
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM opportunity_event_processing
+                WHERE consumer_name = 'edli_reactor_v1'
+                  AND processing_status = 'pending'
+                """
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "market_discovery pending-count read failed; continuing discovery: %r",
+                exc,
+            )
+            return 0
+        return int(row[0] or 0) if row is not None else 0
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _market_discovery_pending_fairness_seconds() -> float:
+    return max(
+        0.0,
+        float(os.environ.get("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300.0")),
+    )
+
+
 @_scheduler_job("market_discovery")
 def _market_discovery_cycle() -> None:
     """Refresh executable market substrate outside decision-cycle critical path."""
 
+    global _market_discovery_last_completed_monotonic
+
     if _edli_reactor_active():
         logger.info("market_discovery deferred: EDLI reactor active")
         return
+    edli_cfg = _settings_section("edli_v1", {})
+    defer_when_pending = str(
+        os.environ.get("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    if edli_cfg.get("enabled") and defer_when_pending:
+        try:
+            pending_count = _edli_pending_opportunity_count()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "market_discovery pending-count arbitration failed; continuing discovery: %r",
+                exc,
+            )
+            pending_count = 0
+        fairness_s = _market_discovery_pending_fairness_seconds()
+        last_completed = _market_discovery_last_completed_monotonic
+        recent_discovery = (
+            fairness_s > 0
+            and last_completed is not None
+            and (time.monotonic() - last_completed) < fairness_s
+        )
+        if pending_count > 0 and recent_discovery:
+            logger.info(
+                "market_discovery deferred: %d EDLI pending events need substrate warm priority "
+                "(last discovery %.1fs ago, fairness %.1fs)",
+                pending_count,
+                time.monotonic() - last_completed,
+                fairness_s,
+            )
+            return
     acquired = _market_discovery_lock.acquire(blocking=False)
     if not acquired:
         logger.warning("market_discovery skipped: previous market_discovery still running")
+        return
+    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    if not substrate_acquired:
+        _market_discovery_lock.release()
+        logger.info("market_discovery deferred: executable substrate refresh already running")
         return
     try:
         from src.data.market_scanner import (
@@ -3160,7 +3353,9 @@ def _market_discovery_cycle() -> None:
             len(events),
             snapshot_summary,
         )
+        _market_discovery_last_completed_monotonic = time.monotonic()
     finally:
+        _market_substrate_refresh_lock.release()
         _market_discovery_lock.release()
 
 
@@ -4606,6 +4801,18 @@ def _edli_market_substrate_warm_cycle() -> None:
             "EDLI market-substrate warm: ATTACH forecasts failed (non-fatal): %r", _attach_exc
         )
     forecasts_conn = get_forecasts_connection_read_only()
+    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    if not substrate_acquired:
+        logger.info("EDLI market-substrate warm skipped: executable substrate refresh already running")
+        try:
+            forecasts_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return
     try:
         # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
         # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
@@ -4619,6 +4826,10 @@ def _edli_market_substrate_warm_cycle() -> None:
             exc,
         )
     finally:
+        try:
+            _market_substrate_refresh_lock.release()
+        except RuntimeError:
+            pass
         try:
             forecasts_conn.close()
         except Exception:  # noqa: BLE001
@@ -6224,8 +6435,15 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 )
                 from src.state.db import get_trade_connection
 
-                trade_conn = get_trade_connection(write_class="live")
+                substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+                if not substrate_acquired:
+                    logger.info(
+                        "EDLI market-channel refresh skipped: executable substrate refresh already running"
+                    )
+                    return
+                trade_conn = None
                 try:
+                    trade_conn = get_trade_connection(write_class="live")
                     try:
                         markets = find_weather_markets_or_raise(
                             min_hours_to_resolution=0.0,
@@ -6254,7 +6472,11 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     )
                     trade_conn.commit()
                 finally:
-                    trade_conn.close()
+                    try:
+                        if trade_conn is not None:
+                            trade_conn.close()
+                    finally:
+                        _market_substrate_refresh_lock.release()
                 logger.info(
                     "EDLI market-channel refreshed executable snapshots: reason=%s token_id=%s condition_id=%s summary=%s",
                     action.reason,
