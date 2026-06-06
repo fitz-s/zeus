@@ -37,7 +37,7 @@ from src.types.metric_identity import LOW_LOCALDAY_MIN
 def _default_fifty_one_raw_root() -> Path:
     """Return the extracted JSON cache root in normal and linked worktrees."""
     candidates = [
-        PROJECT_ROOT.parent / "51 source data" / "raw",
+        PROJECT_ROOT / "51 source data" / "raw",
         PROJECT_ROOT.parents[1] / "workspace-venus" / "51 source data" / "raw",
     ]
     for candidate in candidates:

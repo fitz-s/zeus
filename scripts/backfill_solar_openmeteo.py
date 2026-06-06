@@ -8,9 +8,8 @@ semantics), just requesting `daily=sunrise,sunset` instead of hourly temps.
 
 Why this script exists alongside `etl_solar_times.py`:
 The previous JSONL-import path (`etl_solar_times.py`) relied on a
-pre-generated file at
-  /Users/leofitz/.openclaw/workspace-venus/51 source data/raw/solar/
-   city_solar_times_20240101_20260331.jsonl
+pre-generated file at `51 source data/raw/solar/`
+(`city_solar_times_20240101_20260331.jsonl`).
 which only covered 38 of the 46 configured cities (missing: Auckland,
 Busan, Cape Town, Jakarta, Jeddah, Kuala Lumpur, Lagos, Panama City) and
 ended on 2026-03-31. Per the "every city must have the same data volume"

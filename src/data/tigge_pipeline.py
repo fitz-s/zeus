@@ -68,7 +68,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 ZEUS_ROOT = Path(__file__).resolve().parents[2]
-FIFTY_ONE_ROOT = ZEUS_ROOT.parent / "51 source data"
+FIFTY_ONE_ROOT = ZEUS_ROOT / "51 source data"
 RAW_ROOT = FIFTY_ONE_ROOT / "raw"
 SCRIPTS_DIR_51 = FIFTY_ONE_ROOT / "scripts"
 ECMWF_API_RC = Path.home() / ".ecmwfapirc"

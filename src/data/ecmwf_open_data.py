@@ -91,7 +91,7 @@ from src.state.source_run_repo import write_source_run
 
 logger = logging.getLogger(__name__)
 
-FIFTY_ONE_ROOT = PROJECT_ROOT.parent / "51 source data"
+FIFTY_ONE_ROOT = PROJECT_ROOT / "51 source data"
 # DOWNLOAD_SCRIPT deleted 2026-05-11: replaced by in-process parallel SDK fetch
 # (see PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md)
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"

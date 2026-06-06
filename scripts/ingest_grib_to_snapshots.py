@@ -80,7 +80,7 @@ from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, Metri
 
 logger = logging.getLogger(__name__)
 
-FIFTY_ONE_ROOT = PROJECT_ROOT.parent / "51 source data"
+FIFTY_ONE_ROOT = PROJECT_ROOT / "51 source data"
 
 _TRACK_CONFIGS: dict[str, dict[str, Any]] = {
     "mx2t6_high": {

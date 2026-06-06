@@ -42,7 +42,7 @@ from zoneinfo import ZoneInfo
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-FIFTY_ONE_ROOT = PROJECT_ROOT.parent / "51 source data"
+FIFTY_ONE_ROOT = PROJECT_ROOT / "51 source data"
 RAW_ROOT = FIFTY_ONE_ROOT / "raw"
 DEFAULT_MANIFEST = FIFTY_ONE_ROOT / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
 
