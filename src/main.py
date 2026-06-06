@@ -4148,10 +4148,11 @@ def _edli_event_reactor_cycle() -> None:
         forecast_emit_limit = _edli_bounded_positive_int(edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50)
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
         proof_limit = _edli_bounded_positive_int(edli_cfg, "no_submit_proof_limit", default=10, maximum=50)
+        store = EventStore(conn)
         # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
-        # emit+commit unit under the process-global world-DB write mutex so it
+        # prune+emit+commit unit under the process-global world-DB write mutex so it
         # never holds the WAL write lock concurrently with the ingestor (no HTTP
         # is done inside this block — the emit reads forecasts/trade DBs and
         # writes world — so the mutex stays short and never spans a venue fetch).
@@ -4159,6 +4160,7 @@ def _edli_event_reactor_cycle() -> None:
         _emit_mutex = _world_write_mutex()
         _emit_mutex.acquire()
         try:
+            _edli_prune_pending_working_set(store, decision_time=now)
             if edli_cfg.get("forecast_snapshot_trigger_enabled"):
                 # FAIL-SOFT (2026-05-31): the FSR event-emit is the queue-FILL step, writing
                 # opportunity_events to the WAL world DB shared with the market-channel
@@ -4267,57 +4269,6 @@ def _edli_event_reactor_cycle() -> None:
         # semantics are UNCHANGED: a family not yet captured by the warm job still
         # requeues via the reactor's existing EXECUTABLE_SNAPSHOT_RETRY path (fail-closed).
         trade_conn = get_trade_connection_with_world_required(write_class=None)
-        store = EventStore(conn)
-
-        # ARCHIVE SWEEP (operator directive 2026-06-04): before the reactor scans,
-        # prune candidates whose target LOCAL day has ENDED in their OWN city tz
-        # (Oceania-frontier anchored, never raw UTC) to terminal 'expired' status so
-        # the active scan (fetch_pending + warm-cache family queries) stops re-reading
-        # ~1.7M already-settled rows every cycle. Marks the MUTABLE processing row
-        # only — the append-only event log (provenance) is untouched. batch_limit
-        # bounds the one-time backlog drain so a giant first sweep does not blow the
-        # 60s cycle budget; subsequent cycles see a steady trickle. Fail-soft: a
-        # sweep error must never crash a decision cycle (the read floor in
-        # fetch_pending still independently drops strictly-past rows from this cycle).
-        try:
-            _archived = store.archive_expired_candidates(decision_time=now.isoformat())
-            if _archived:
-                logger.info(
-                    "EDLI reactor: archived %d expired (target-local-day-ended) "
-                    "candidates → 'expired' (excluded from future scans)",
-                    _archived,
-                )
-        except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
-            logger.warning(
-                "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
-                "fetch_pending read floor still drops strictly-past rows): %r",
-                _sweep_exc,
-            )
-
-        # CHANNEL EVENT SWEEP (operator directive 2026-06-04 companion): prune
-        # superseded BEST_BID_ASK_CHANGED / BOOK_SNAPSHOT / NEW_MARKET_DISCOVERED
-        # pending rows. For each (event_type, token_id) group only the LATEST
-        # available_at survives; all older ones are superseded state and marked
-        # 'expired'. The 1.7M pending channel-event backlog (1743 distinct tokens
-        # × ~990 ticks each) is the main fetch_pending JOIN cost; this sweep
-        # reduces it to ~1 row per token. batch_limit bounds the per-cycle work so
-        # the backlog drains across cycles rather than in one giant transaction.
-        # Fail-soft: a sweep error must never crash a decision cycle.
-        try:
-            _ch_archived = store.archive_superseded_channel_events()
-            if _ch_archived:
-                logger.info(
-                    "EDLI reactor: archived %d superseded channel events "
-                    "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) → "
-                    "'expired'; pending channel-event scan reduced",
-                    _ch_archived,
-                )
-        except Exception as _ch_sweep_exc:  # noqa: BLE001 — fail-soft
-            logger.warning(
-                "EDLI reactor: archive_superseded_channel_events sweep failed "
-                "(non-fatal): %r",
-                _ch_sweep_exc,
-            )
 
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
@@ -4848,6 +4799,41 @@ def _edli_pending_entity_keys(world_conn) -> set[str]:
     except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
         return set()
     return {str(r[0]) for r in rows}
+
+
+def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
+    """Prune stale/superseded rows before snapshotting the redecision skip set."""
+
+    try:
+        _archived = store.archive_expired_candidates(decision_time=decision_time.isoformat())
+        if _archived:
+            logger.info(
+                "EDLI reactor: archived %d expired (target-local-day-ended) "
+                "candidates → 'expired' (excluded from future scans)",
+                _archived,
+            )
+    except Exception as _sweep_exc:  # noqa: BLE001 — fail-soft; read floor still guards
+        logger.warning(
+            "EDLI reactor: archive_expired_candidates sweep failed (non-fatal; "
+            "fetch_pending read floor still drops strictly-past rows): %r",
+            _sweep_exc,
+        )
+
+    try:
+        _ch_archived = store.archive_superseded_channel_events()
+        if _ch_archived:
+            logger.info(
+                "EDLI reactor: archived %d superseded channel events "
+                "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) → "
+                "'expired'; pending channel-event scan reduced",
+                _ch_archived,
+            )
+    except Exception as _ch_sweep_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: archive_superseded_channel_events sweep failed "
+            "(non-fatal): %r",
+            _ch_sweep_exc,
+        )
 
 
 def _edli_emit_day0_extreme_events(

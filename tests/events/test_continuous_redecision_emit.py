@@ -8,10 +8,14 @@
 """Relationship tests for the per-cycle re-emission seam (src.events.triggers.forecast_snapshot_ready)."""
 from __future__ import annotations
 
+import inspect
 import sqlite3
 from datetime import datetime, timezone
 
+import src.main as main
 from src.events.event_writer import EventWriter
+from src.events.event_store import EventStore
+from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 from src.events.triggers.forecast_snapshot_ready import (
     ForecastSnapshotReadyTrigger,
     executable_forecast_live_eligible_reader,
@@ -138,3 +142,68 @@ def test_continuous_redecision_does_not_reemit_settlement_day_forecast_only():
 
     assert res == []
     assert world.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
+
+
+def test_prune_working_set_expires_stale_fsr_before_skip_snapshot():
+    """A stale FSR row must be expired before the continuous-redecision skip set snapshots."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    stale = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Chicago|2026-06-04|high|snap-stale",
+        source="forecast",
+        observed_at="2026-06-03T00:00:00+00:00",
+        available_at="2026-06-03T00:00:00+00:00",
+        received_at="2026-06-03T00:00:00+00:00",
+        causal_snapshot_id="snap-stale",
+        payload=ForecastSnapshotReadyPayload(
+            city="Chicago",
+            target_date="2026-06-04",
+            metric="high",
+            source_id="ecmwf-open-data",
+            source_run_id="run-1",
+            cycle="00",
+            track="ens",
+            snapshot_id="snap-stale",
+            snapshot_hash="snap-stale",
+            captured_at="2026-06-03T00:00:00+00:00",
+            available_at="2026-06-03T00:00:00+00:00",
+            required_fields_present=True,
+            required_steps_present=True,
+            member_count=51,
+            min_members_floor=40,
+            completeness_status="COMPLETE",
+            required_steps=[0, 3, 6],
+            observed_steps=[0, 3, 6],
+            expected_members=51,
+            source_run_status="COMMITTED",
+            source_run_completeness_status="COMPLETE",
+            coverage_completeness_status="COMPLETE",
+            coverage_readiness_status="LIVE_ELIGIBLE",
+        ),
+        priority=0,
+    )
+    store.insert_or_ignore(stale)
+
+    decision_time = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
+    assert stale.entity_key in main._edli_pending_entity_keys(world)
+
+    main._edli_prune_pending_working_set(store, decision_time=decision_time)
+
+    assert stale.entity_key not in main._edli_pending_entity_keys(world)
+    status = world.execute(
+        "SELECT processing_status FROM opportunity_event_processing "
+        "WHERE consumer_name = ? AND event_id = ?",
+        (store.consumer_name, stale.event_id),
+    ).fetchone()[0]
+    assert status == "expired"
+
+
+def test_redecision_cycle_prunes_before_snapshotting_pending_keys():
+    """The reactor cycle must prune the working set before taking the redecision skip snapshot."""
+
+    src = inspect.getsource(main._edli_event_reactor_cycle)
+    assert src.index("_edli_prune_pending_working_set(") < src.index("_edli_pending_entity_keys(")
