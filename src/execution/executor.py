@@ -1610,6 +1610,8 @@ def create_execution_intent(
     # type system couldn't catch a caller that meant 0.02 bps (200x
     # tighter) instead of 0.02 fraction. Import hoisted to module top
     # per PEP 8.
+    max_slippage_bps = float(intent.max_slippage_bps)
+    max_slippage_direction = "zero" if max_slippage_bps == 0.0 else "adverse"
     return ExecutionIntent(
         direction=edge_direction,
         target_size_usd=size_usd,
@@ -1822,8 +1824,8 @@ def _legacy_entry_intent_from_final(
         limit_price=float(intent.final_limit_price),
         toxicity_budget=0.05,
         max_slippage=SlippageBps(
-            value_bps=float(intent.max_slippage_bps),
-            direction="adverse",
+            value_bps=max_slippage_bps,
+            direction=max_slippage_direction,
         ),
         is_sandbox=False,
         market_id=market_id,
