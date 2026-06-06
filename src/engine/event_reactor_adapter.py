@@ -1432,6 +1432,26 @@ def _build_live_execution_command_certificates(
         quote_feasibility = _required_cert(base_certs, claims.QUOTE_FEASIBILITY)
         cost_model = _required_cert(base_certs, claims.COST_MODEL)
         quote_payload = quote_feasibility.payload
+        from types import SimpleNamespace
+
+        side = "BUY" if str(actionable.payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
+        provisional_final_intent = SimpleNamespace(
+            payload={
+                "token_id": actionable.payload["token_id"],
+                "side": side,
+                "tick_size": float(_float_or_default(executable_snapshot.payload.get("min_tick_size"), 0.01)),
+                "min_order_size": float(_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0)),
+                "neg_risk": bool(actionable.payload.get("neg_risk", False)),
+            }
+        )
+        authority_witness = _require_pre_submit_authority_witness(
+            pre_submit_authority_provider,
+            provisional_final_intent,
+            executable_snapshot,
+            decision_time,
+        )
+        fresh_best_bid = float(authority_witness.current_best_bid)
+        fresh_best_ask = float(authority_witness.current_best_ask)
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
         order_mode = _select_edli_order_mode(
@@ -1621,6 +1641,36 @@ def _build_live_execution_command_certificates(
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
         )
+        if (
+            taker_fok_fak_live_enabled
+            and final_intent.payload.get("post_only") is True
+            and _ev_boundary_favors_cross(
+                actionable_payload=actionable.payload,
+                quote_payload=quote_payload,
+                best_bid=fresh_best_bid,
+                best_ask=fresh_best_ask,
+                reservation=_optional_float(actionable.payload.get("c_fee_adjusted")),
+                side=str(actionable.payload.get("side") or "BUY"),
+            )
+        ):
+            final_intent = build_final_intent_certificate_from_actionable(
+                actionable_cert=actionable,
+                executable_snapshot_cert=executable_snapshot,
+                quote_feasibility_cert=quote_feasibility,
+                cost_model_cert=cost_model,
+                forecast_authority_cert=forecast_authority,
+                decision_source_context=forecast_authority.payload,
+                passive_maker_context=None,
+                decision_time=decision_time,
+                order_mode="TAKER",
+                tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _required_bound_tick_size(_snap_for_depth, executable_snapshot.payload),
+                min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
+                best_bid=fresh_best_bid,
+                best_ask=fresh_best_ask,
+                taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
+                available_crossable_shares=available_crossable_shares,
+                sweep_expected_fill_price=sweep_expected_fill_price,
+            )
         already_locked_reason = _locked_live_opportunity_no_price_improvement_reason(
             live_cap_conn,
             condition_id=str(final_intent.payload["condition_id"]),

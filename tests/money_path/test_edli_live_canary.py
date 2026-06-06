@@ -753,6 +753,58 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
         )
 
 
+def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
+    from src.decision_kernel import claims
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(
+        _accepted_receipt(event),
+        trade_score=0.015,
+        p_fill_lcb=0.10,
+    )
+    proof_bundle = build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time)
+    proof_bundle = replace(
+        proof_bundle,
+        quote_feasibility=replace(
+            proof_bundle.quote_feasibility,
+            payload={
+                **proof_bundle.quote_feasibility.payload,
+                "best_bid": 0.38,
+                "best_ask": 0.42,
+                "book_hash": "stale-book-hash",
+            },
+        ),
+    )
+    accepted = replace(accepted, decision_proof_bundle=proof_bundle)
+
+    certs = adapter._build_live_execution_command_certificates(
+        event=event,
+        receipt=accepted,
+        decision_time=decision_time,
+        tiny_live_max_notional_usd=5.0,
+        live_cap_conn=conn,
+        pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
+            current_best_bid=0.39,
+            current_best_ask=0.40,
+        ),
+        taker_fok_fak_live_enabled=True,
+    )
+
+    final_intent = next(c for c in certs if getattr(c, "certificate_type", None) == claims.FINAL_INTENT)
+    pre_submit = next(c for c in certs if getattr(c, "certificate_type", None) == claims.PRE_SUBMIT_REVALIDATION)
+
+    assert final_intent.payload["order_mode"] == "TAKER"
+    assert final_intent.payload["post_only"] is False
+    assert final_intent.payload["time_in_force"] in {"FOK", "FAK"}
+    assert pre_submit.payload["would_cross_book"] is True
+    assert pre_submit.payload["post_only"] is False
+
+
 def test_edli_live_cap_path_does_not_reference_legacy_cap_columns():
     from pathlib import Path
 
