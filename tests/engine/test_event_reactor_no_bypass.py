@@ -2136,6 +2136,56 @@ def test_capital_efficiency_allows_strong_after_cost_roi_new_market():
     ) is None
 
 
+def test_selection_prefers_best_robust_roi_not_largest_absolute_score():
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
+
+    expensive_micro_edge = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="expensive"),
+        token_id="expensive-token",
+        direction="buy_no",
+        row={"condition_id": "expensive"},
+        executable_snapshot_id="expensive-snapshot",
+        execution_price=ExecutionPrice(
+            0.98,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.999,
+        q_lcb_5pct=0.99,
+        c_cost_95pct=0.981,
+        p_fill_lcb=0.90,
+        trade_score=0.030,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+    cheaper_better_trade = replace(
+        expensive_micro_edge,
+        candidate=SimpleNamespace(condition_id="cheap"),
+        token_id="cheap-token",
+        row={"condition_id": "cheap"},
+        executable_snapshot_id="cheap-snapshot",
+        execution_price=ExecutionPrice(
+            0.20,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.25,
+        q_lcb_5pct=0.22,
+        c_cost_95pct=0.21,
+        trade_score=0.020,
+    )
+
+    selected = _selected_candidate_proof({}, (expensive_micro_edge, cheaper_better_trade))
+
+    assert selected is cheaper_better_trade
+
+
 def test_coverage_expired_between_event_available_and_decision_blocks_receipt(monkeypatch):
     from types import SimpleNamespace
 

@@ -3626,6 +3626,16 @@ def _capital_efficiency_untradeable_reason(
     return None
 
 
+def _candidate_robust_roi(proof: _CandidateProof) -> float:
+    execution_price = getattr(proof, "execution_price", None)
+    if execution_price is None:
+        return 0.0
+    price = _optional_float(execution_price.value)
+    if price is None or price <= 0.0:
+        return 0.0
+    return float(getattr(proof, "trade_score", 0.0) or 0.0) / price
+
+
 def _generate_candidate_proofs(
     *,
     event: OpportunityEvent,
@@ -3862,7 +3872,14 @@ def _selected_candidate_proof(
             return max(non_executable, key=lambda proof: proof.q_lcb_5pct, default=None)
     if not executable:
         return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
-    return max(executable, key=lambda proof: (proof.trade_score, proof.q_lcb_5pct))
+    return max(
+        executable,
+        key=lambda proof: (
+            _candidate_robust_roi(proof),
+            proof.trade_score,
+            proof.q_lcb_5pct,
+        ),
+    )
 
 
 def _locked_candidate_no_price_improvement_reason(
