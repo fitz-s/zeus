@@ -2189,13 +2189,16 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     if active_adapter is None:
         return "adapter_unavailable"
     now = datetime.now(timezone.utc)
+    m5_reconcile_required = _ws_gap_m5_reconcile_required()
     if (
+        not m5_reconcile_required
+        and
         _last_venue_background_maintenance_attempt_at is not None
         and (now - _last_venue_background_maintenance_attempt_at).total_seconds()
         < VENUE_BACKGROUND_MAINTENANCE_SECONDS
     ):
         return "throttled"
-    if _edli_reactor_pending_backlog_exists() and not _ws_gap_m5_reconcile_required():
+    if _edli_reactor_pending_backlog_exists() and not m5_reconcile_required:
         _last_venue_background_maintenance_attempt_at = now
         return "deferred_edli_pending_backlog"
     if not _venue_background_maintenance_lock.acquire(blocking=False):
@@ -2215,6 +2218,19 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     )
     thread.start()
     return "started"
+
+
+def _start_venue_background_maintenance_after_reactor_if_required() -> str:
+    """Deterministically retry M5 venue maintenance after the reactor releases."""
+
+    if not _ws_gap_m5_reconcile_required():
+        return "not_required"
+    try:
+        adapter = _ensure_venue_read_side_adapter()
+    except Exception as exc:  # noqa: BLE001 - post-cycle maintenance must not crash EDLI.
+        logger.warning("M5 post-reactor maintenance adapter unavailable: %s", exc)
+        return "adapter_unavailable"
+    return _start_venue_background_maintenance_async(adapter)
 
 
 _user_channel_ingestor = None
@@ -4842,6 +4858,7 @@ def _edli_event_reactor_cycle() -> None:
             pass
         conn.close()
         _edli_reactor_active_lock.release()
+        _start_venue_background_maintenance_after_reactor_if_required()
 
 
 @_scheduler_job("edli_bankroll_warm")
