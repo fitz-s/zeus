@@ -202,6 +202,73 @@ def test_prune_working_set_expires_stale_fsr_before_skip_snapshot():
     assert status == "expired"
 
 
+def test_prune_working_set_expires_superseded_fsr_across_source_runs():
+    """Supersession is by weather family, not entity_key with source_run baked in."""
+
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+
+    def _fsr(source_run_id: str, available_at: str):
+        return make_opportunity_event(
+            event_type="FORECAST_SNAPSHOT_READY",
+            entity_key=f"London|2026-06-07|low|ecmwf_open_data:mn2t6_low:{source_run_id}",
+            source="forecast",
+            observed_at=available_at,
+            available_at=available_at,
+            received_at=available_at,
+            causal_snapshot_id=source_run_id,
+            payload=ForecastSnapshotReadyPayload(
+                city="London",
+                target_date="2026-06-07",
+                metric="low",
+                source_id="ecmwf-open-data",
+                source_run_id=source_run_id,
+                cycle="00",
+                track="ens",
+                snapshot_id=source_run_id,
+                snapshot_hash=source_run_id,
+                captured_at=available_at,
+                available_at=available_at,
+                required_fields_present=True,
+                required_steps_present=True,
+                member_count=51,
+                min_members_floor=40,
+                completeness_status="COMPLETE",
+                required_steps=[0, 3, 6],
+                observed_steps=[0, 3, 6],
+                expected_members=51,
+                source_run_status="COMMITTED",
+                source_run_completeness_status="COMPLETE",
+                coverage_completeness_status="COMPLETE",
+                coverage_readiness_status="LIVE_ELIGIBLE",
+            ),
+            priority=0,
+        )
+
+    old = _fsr("2026-06-05T00Z", "2026-06-05T00:00:00+00:00")
+    new = _fsr("2026-06-06T00Z", "2026-06-06T00:00:00+00:00")
+    store.insert_or_ignore(old)
+    store.insert_or_ignore(new)
+
+    archived = store.archive_superseded_forecast_snapshot_events(batch_limit=10)
+
+    assert archived == 1
+    statuses = dict(
+        world.execute(
+            """
+            SELECT event_id, processing_status
+              FROM opportunity_event_processing
+             WHERE consumer_name = ?
+            """,
+            (store.consumer_name,),
+        ).fetchall()
+    )
+    assert statuses[old.event_id] == "expired"
+    assert statuses[new.event_id] == "pending"
+
+
 def test_redecision_skip_set_ignores_pending_channel_events():
     """Channel-cache events must not make forecast families look already pending."""
 
