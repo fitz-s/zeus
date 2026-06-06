@@ -389,7 +389,7 @@ def _build_bridge_position(
         cost_basis_usd=cost_basis,
         condition_id=identity["condition_id"],
         decision_snapshot_id=identity["decision_snapshot_id"],
-        entry_method="edli_event_driven",
+        entry_method="ens_member_counting",
         # The EDLI forecast-driven lane is the event-sourced re-implementation of
         # the settlement-capture strategy (forecast settlement edge → buy the
         # mispriced outcome). position_events.strategy_key CHECK admits only the

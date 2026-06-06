@@ -192,6 +192,7 @@ def test_green_bridge_materializes_one_correct_position(conn):
     assert abs(row["cost_basis_usd"] - (16.75 * 0.42)) < 1e-6
     assert row["fill_authority"] == "venue_confirmed_full"
     assert row["order_status"] == "filled"
+    assert row["entry_method"] == "ens_member_counting"
     fact = conn.execute(
         """
         SELECT position_id, order_role, strategy_key, fill_price, shares, terminal_exec_status
