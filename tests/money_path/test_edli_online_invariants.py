@@ -562,6 +562,21 @@ def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeyp
     assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live_canary"
 
 
+def test_edli_live_canary_does_not_consume_promotion_arm_artifact(monkeypatch, tmp_path):
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _edli_live_canary_updates(
+            **_stage_evidence_updates(tmp_path),
+            edli_arm_gate_artifact_required=True,
+            edli_arm_gate_artifact_path=str(tmp_path / "promotion-arm-not-yet-created.json"),
+        ),
+    )
+
+    assert scheduler.started is True
+    assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
+    assert settings_copy["edli_v1"]["edli_arm_gate_artifact_required"] is True
+
+
 def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs(monkeypatch):
     import src.main as main
 
