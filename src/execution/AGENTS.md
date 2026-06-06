@@ -14,7 +14,7 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 | File | What it does | Danger level |
 |------|-------------|--------------|
 | `executor.py` | Limit-order execution engine (live) | CRITICAL — real money flows here |
-| `exit_triggers.py` | 8-layer churn defense for exit decisions | HIGH — prevents false exits |
+| `exit_safety.py` | Churn defense / cancel-replace mutex for exit decisions | HIGH — prevents false exits |
 | `exit_lifecycle.py` | Exit lifecycle management | HIGH — state transitions |
 | `fill_tracker.py` | Order fill tracking and timeout | MEDIUM |
 | `collateral.py` | Compatibility sell-collateral facade over CollateralLedger | HIGH — fail-closed live exits |

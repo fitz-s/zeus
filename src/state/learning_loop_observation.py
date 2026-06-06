@@ -13,8 +13,9 @@ K1 contract (mirrors src/state/edge_observation.py + attribution_drift.py +
 ws_poll_reaction.py + calibration_observation.py):
   - Read-only projection. NO write path. NO JSON persistence. NO caches.
   - Reads canonical surfaces directly:
-    * src.calibration.store.list_active_platt_models / _legacy
-      (CALIBRATION_HARDENING BATCH 1 read-side additions)
+    * src.calibration.store.list_active_platt_models
+      (CALIBRATION_HARDENING BATCH 1 read-side addition;
+      _legacy reader removed B3cont 2026-05-28)
     * src.calibration.retrain_trigger.list_recent_retrain_versions
       (LEARNING_LOOP BATCH 1 read-side addition; pure SELECT on
       calibration_params_versions append-only audit log)

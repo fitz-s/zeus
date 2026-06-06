@@ -36,7 +36,7 @@ The runtime entry points are:
 - `src/engine/cycle_runner.py` - cycle orchestration
 - `src/engine/evaluator.py` - candidate to decision pipeline
 - `src/execution/executor.py` - live order placement
-- `src/engine/monitor_refresh.py` and `src/execution/exit_triggers.py` -
+- `src/engine/monitor_refresh.py` and `src/execution/exit_lifecycle.py` -
   monitoring and exits
 - `src/execution/harvester.py` - settlement and learning follow-through
 
