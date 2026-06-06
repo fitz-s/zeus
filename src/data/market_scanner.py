@@ -3683,7 +3683,11 @@ def _snapshot_refresh_city_key(market: dict[str, Any]) -> str:
     return slug or "_unknown"
 
 
-_BATCH_ORDERBOOK_CHUNK = 50
+# Live CLOB probe 2026-06-06: POST /books accepts 500 token_id rows in one
+# request and returns the full set; 1000 rows returns 400.  Keep the chunk at
+# the proven upper envelope so a 500+ token weather substrate cycle does not
+# degrade back into hundreds of serial GET /book calls.
+_BATCH_ORDERBOOK_CHUNK = 500
 
 
 def _selected_token_for_direction(outcome: dict, direction: str) -> str:

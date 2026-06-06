@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Lifecycle: created=2026-05-24; last_reviewed=2026-06-04; last_reused=2026-06-04
+# Lifecycle: created=2026-05-24; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Authority basis: fix(discovery): restore full-city market substrate coverage (50→7 regression);
 #   2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED antibody — non-tradeable family-identity bins
 #   must reach capture so executable_market_snapshots is family-COMPLETE (FDR full-family proof)
@@ -988,6 +988,64 @@ def test_slow_batch_orderbook_prefetch_leaves_budget_for_capture(monkeypatch):
         "Prefetch must stop at its earlier deadline instead of consuming the "
         f"full snapshot budget. summary={summary}"
     )
+
+
+def test_batch_orderbook_prefetch_uses_live_proven_large_chunks(monkeypatch):
+    """Large weather cycles must not regress to tiny POST /books chunks.
+
+    Live CLOB probe 2026-06-06 accepted 500 token IDs per POST /books request
+    and rejected 1000.  The warm path normally sees 600+ candidate outcomes; a
+    50-token chunk ceiling makes most cycles fall back to serial GET /book.
+    """
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", raising=False)
+
+    markets = [
+        _make_market(name, idx, metric="highest")
+        for idx, name in enumerate(list(ms.cities_by_name.keys())[:40], start=1)
+    ]
+    batch_sizes: list[int] = []
+
+    def _batch_books(token_ids: list[str]) -> dict[str, dict]:
+        batch_sizes.append(len(token_ids))
+        return {
+            token_id: {
+                "market": token_id,
+                "asset_id": token_id,
+                "bids": [{"price": "0.55", "size": "100"}],
+                "asks": [{"price": "0.60", "size": "100"}],
+            }
+            for token_id in token_ids
+        }
+
+    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        return None
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots.side_effect = _batch_books
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_mock_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=20.0,
+            max_outcomes=2,
+        )
+
+    assert batch_sizes, f"expected at least one POST /books prefetch: summary={summary}"
+    assert max(batch_sizes) > 50, (
+        "POST /books chunking must use the live-proven large batch envelope; "
+        f"batch_sizes={batch_sizes} summary={summary}"
+    )
+    assert clob.get_orderbook_snapshots.call_count == 1, (
+        "This fixture has fewer than 500 selected tokens, so it should fit in "
+        f"one live-proven chunk. batch_sizes={batch_sizes} summary={summary}"
+    )
+    assert summary["prefetched_orderbook_count"] > 50
 
 
 def test_tiny_prefetch_window_skips_batch_books_and_captures(monkeypatch):
