@@ -194,30 +194,32 @@ def _candidate_targets(
     skip_covered_sql = ""
     if _coverage_skip_schema_ready(conn, tables):
         skip_covered_sql = f"""
-          AND NOT EXISTS (
-              SELECT 1
-              FROM forecast_posteriors p
-              WHERE p.source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                AND p.city = c.city
-                AND p.target_date = c.target_local_date
-                AND p.temperature_metric = c.temperature_metric
-                AND p.training_allowed = 0
-                AND p.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
-                AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
-          )
-          AND NOT EXISTS (
-              SELECT 1
-              FROM readiness_state r
-              WHERE r.strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                AND json_extract(r.provenance_json, '$.city') = c.city
-                AND json_extract(r.provenance_json, '$.target_date') = c.target_local_date
-                AND json_extract(r.provenance_json, '$.temperature_metric') = c.temperature_metric
-                AND EXISTS (
-                    SELECT 1
-                    FROM json_each(r.dependency_json, '$.dependencies')
-                    WHERE json_extract(value, '$.role') = 'baseline_b0'
-                      AND json_extract(value, '$.source_run_id') = c.source_run_id
-                )
+          AND (
+              NOT EXISTS (
+                  SELECT 1
+                  FROM forecast_posteriors p
+                  WHERE p.source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                    AND p.city = c.city
+                    AND p.target_date = c.target_local_date
+                    AND p.temperature_metric = c.temperature_metric
+                    AND p.training_allowed = 0
+                    AND p.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                    AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
+              )
+              OR NOT EXISTS (
+                  SELECT 1
+                  FROM readiness_state r
+                  WHERE r.strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                    AND json_extract(r.provenance_json, '$.city') = c.city
+                    AND json_extract(r.provenance_json, '$.target_date') = c.target_local_date
+                    AND json_extract(r.provenance_json, '$.temperature_metric') = c.temperature_metric
+                    AND EXISTS (
+                        SELECT 1
+                        FROM json_each(r.dependency_json, '$.dependencies')
+                        WHERE json_extract(value, '$.role') = 'baseline_b0'
+                          AND json_extract(value, '$.source_run_id') = c.source_run_id
+                    )
+              )
           )
         """
     rows = conn.execute(

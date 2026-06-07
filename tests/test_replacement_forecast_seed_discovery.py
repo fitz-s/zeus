@@ -265,6 +265,44 @@ def test_seed_discovery_does_not_skip_current_source_run_because_stale_replaceme
     assert seed["baseline_source_run_id"] == "baseline-current-run"
 
 
+def test_seed_discovery_retries_when_current_posterior_exists_but_readiness_is_missing(tmp_path: Path) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    _init_db(db_path)
+    _write_raw_inputs(raw_dir)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO forecast_posteriors (
+                source_id, city, target_date, temperature_metric,
+                dependency_source_run_ids_json, trade_authority_status,
+                training_allowed
+            ) VALUES (
+                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
+                'NYC', '2026-06-07', 'high',
+                '{"baseline_b0":"baseline-run"}',
+                'SHADOW_VETO_ONLY', 0
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-07T09:00:00+00:00",
+    )
+
+    assert report.status == "DISCOVERED"
+    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
+    assert seed["baseline_source_run_id"] == "baseline-run"
+
+
 def test_seed_discovery_blocks_when_source_run_coverage_schema_is_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
