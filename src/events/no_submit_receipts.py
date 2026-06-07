@@ -224,6 +224,8 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload.pop("q_source", None)
     if payload.get("opportunity_book") is None:
         payload.pop("opportunity_book", None)
+    if payload.get("replacement_forecast") is None:
+        payload.pop("replacement_forecast", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

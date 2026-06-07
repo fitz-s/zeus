@@ -3445,6 +3445,11 @@ _FORECAST_TABLES = (
     "settlement_capture_verifications",
     # Data Temporal Kernel — SCHEMA_FORECASTS_VERSION 7 PR #329 D (2026-05-24)
     "source_time_frontier",
+    # Replacement forecast shadow/live-authority provenance (2026-06-07).
+    "raw_forecast_artifacts",
+    "deterministic_forecast_anchors",
+    "forecast_posteriors",
+    "replacement_shadow_decisions",
 )
 
 
@@ -3997,6 +4002,15 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # Data Temporal Kernel — SCHEMA_FORECASTS_VERSION 7 (2026-05-24, PR #329 D).
     # Persisted source-time frontier authority; forecasts-only static helper (not in world_src).
     _create_source_time_frontier(conn)
+
+    # Replacement forecast shadow/live-authority provenance (2026-06-07).
+    # Forecasts-only static helper; never copied from world_src and never
+    # created on world/trade DBs. Keeps boot-time registry equality aligned
+    # with apply_canonical_schema(forecast_tables=True).
+    from src.state.schema.v2_schema import (
+        _create_replacement_forecast_shadow_tables as _create_replacement_shadow,
+    )
+    _create_replacement_shadow(conn)
 
     # Mark schema current — MUST be last (partial failure must not mark ready).
     conn.execute("PRAGMA user_version = 7")

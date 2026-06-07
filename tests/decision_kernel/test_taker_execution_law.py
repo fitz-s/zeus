@@ -22,6 +22,7 @@ the three-layer post-only literals are the wall this design removes.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -37,6 +38,10 @@ from src.decision_kernel.verifier import (
 from src.engine.event_bound_final_intent import (
     EventBoundExecutorExpressibilityError,
     validate_final_intent_cert_for_existing_executor,
+)
+from src.contracts.execution_intent import (
+    quantize_submit_shares_for_venue_at_most,
+    venue_submit_amount_precision_error,
 )
 
 # Reuse the certificate-graph fixtures already proven in the sibling suite.
@@ -54,7 +59,9 @@ _UNSET = object()
 def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None = None,
                  quote_overrides: dict | None = None, return_parents: bool = False,
                  taker_fok_fak_live_enabled: bool = True,
-                 passive_maker_context=_UNSET):
+                 passive_maker_context=_UNSET,
+                 available_crossable_shares: float | None = None,
+                 sweep_expected_fill_price: str | None = None):
     """Build a final-intent + expressibility chain through the (parameterized) builder.
 
     Mirrors ``test_execution_command_certificate.builder_chain`` but threads an
@@ -184,6 +191,8 @@ def _taker_chain(*, order_mode: str = "TAKER", actionable_overrides: dict | None
         best_bid=float(quote_payload["best_bid"]),
         best_ask=float(quote_payload["best_ask"]),
         taker_fok_fak_live_enabled=bool(taker_fok_fak_live_enabled),  # F1 kill-lever
+        available_crossable_shares=available_crossable_shares,
+        sweep_expected_fill_price=sweep_expected_fill_price,
     )
     if return_parents:
         # The builder attaches all five parents; verify_final_intent requires them.
@@ -239,6 +248,70 @@ def test_taker_price_is_marketable_when_touch_inside_reservation():
     _, _, final_intent = _taker_chain(order_mode="TAKER")
     # best_ask=0.45 < reservation c_fee_adjusted=0.50 -> price at best_ask
     assert final_intent.payload["limit_price"] == pytest.approx(0.45)
+
+
+def test_taker_buy_final_intent_uses_venue_legal_size_within_reserved_notional():
+    """Immediate BUY final intents must not emit long-decimal venue-rejected sizes."""
+    _, _, final_intent, parents = _taker_chain(
+        order_mode="TAKER",
+        actionable_overrides={
+            "c_fee_adjusted": 0.51,
+            "kelly_size_usd": 18.5152684,
+            "live_cap_reserved_notional_usd": 18.5152684,
+            "live_cap_notional_cap_enabled": True,
+        },
+        quote_overrides={
+            "best_bid": 0.49,
+            "best_ask": 0.51,
+            "native_execution_price": 0.51,
+        },
+        available_crossable_shares=100.0,
+        sweep_expected_fill_price="0.51",
+        return_parents=True,
+    )
+
+    size = Decimal(str(final_intent.payload["size"]))
+    limit_price = Decimal(str(final_intent.payload["limit_price"]))
+    notional = Decimal(str(final_intent.payload["notional_usd"]))
+
+    assert size == Decimal("36.0")
+    assert size == size.quantize(Decimal("0.0001"))
+    assert (size * limit_price) == (size * limit_price).quantize(Decimal("0.01"))
+    assert notional <= Decimal("18.5152684")
+    verify_final_intent(final_intent, parents)
+    assert validate_final_intent_cert_for_existing_executor(final_intent)
+
+
+@pytest.mark.parametrize(
+    ("raw_size", "limit_price", "expected_size"),
+    (
+        ("10.338092370915971", "0.77", "10.00"),
+        ("36.304447843137254", "0.51", "36.00"),
+    ),
+)
+def test_reported_live_buy_sizes_quantize_to_valid_amounts_without_widening(
+    raw_size: str,
+    limit_price: str,
+    expected_size: str,
+):
+    quantized = quantize_submit_shares_for_venue_at_most(
+        "buy_no",
+        Decimal(raw_size),
+        final_limit_price=Decimal(limit_price),
+        order_type="FOK",
+    )
+
+    assert quantized == Decimal(expected_size)
+    assert quantized <= Decimal(raw_size)
+    assert (
+        venue_submit_amount_precision_error(
+            direction="buy_no",
+            final_limit_price=Decimal(limit_price),
+            submitted_shares=quantized,
+            order_type="FOK",
+        )
+        is None
+    )
 
 
 def test_taker_buy_rejects_non_crossing_reservation_limit():

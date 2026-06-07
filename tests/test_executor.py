@@ -1075,6 +1075,16 @@ class TestExecutor:
             def v2_preflight(self):
                 return None
 
+            def _ensure_v2_adapter(self):
+                return self
+
+            def get_collateral_payload(self):
+                return {
+                    "authority_tier": "CHAIN",
+                    "pusd_balance_micro": 10_000_000,
+                    "pusd_allowance_micro": 10_000_000,
+                }
+
             def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
                 raise PolyApiException(
                     "PolyApiException[status_code=400, "

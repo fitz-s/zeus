@@ -126,6 +126,34 @@ def test_frozen_as_of_excludes_row_recorded_after_pin(conn):
     )
 
 
+def test_frozen_as_of_iso_z_excludes_same_day_later_row(conn):
+    """ISO pins must compare by time, not by SQLite text separator order."""
+    _save_one(conn, recorded_at="2026-06-06 17:44:44", A=99.0)
+    pinned = load_platt_model(
+        conn,
+        temperature_metric="high",
+        cluster="NYC",
+        season="DJF",
+        data_version=HIGH_LOCALDAY_MAX.data_version,
+        frozen_as_of="2026-06-06T08:00:00Z",
+    )
+    assert pinned is None
+
+
+def test_frozen_as_of_iso_z_admits_same_day_earlier_row(conn):
+    _save_one(conn, recorded_at="2026-06-06 08:04:02", A=42.0)
+    pinned = load_platt_model(
+        conn,
+        temperature_metric="high",
+        cluster="NYC",
+        season="DJF",
+        data_version=HIGH_LOCALDAY_MAX.data_version,
+        frozen_as_of="2026-06-06T20:00:00Z",
+    )
+    assert pinned is not None
+    assert pinned["A"] == 42.0
+
+
 def test_frozen_as_of_unset_returns_row(conn):
     """No pin → legacy behavior: any is_active=VERIFIED row is eligible."""
     _save_one(conn, recorded_at="2026-05-02 00:00:00", A=99.0)

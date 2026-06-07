@@ -567,14 +567,14 @@ class TestFillPriceParityGREEN:
 
     def test_green_era_stores_sweep_as_string_not_float(self):
         """
-        Structural antibody: ERA must store str(_depth_sweep.average_price),
+        Structural antibody: ERA must store str(<final sweep>.average_price),
         not float(_depth_sweep.average_price).
         """
         with open("src/engine/event_reactor_adapter.py") as f:
             src = f.read()
-        assert "str(_depth_sweep.average_price)" in src, (
+        assert "str(_venue_quantized_sweep.average_price)" in src, (
             "ERA Bug-B fix missing: sweep_expected_fill_price must use "
-            "str(_depth_sweep.average_price), not float(...)"
+            "str(<final sweep>.average_price), not float(...)"
         )
 
     def test_green_era_uses_float_arithmetic_for_shares(self):
