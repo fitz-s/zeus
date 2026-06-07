@@ -129,10 +129,82 @@ def _write_settings_flags_with_refit_path(root, *, shadow: bool, veto: bool, ref
     )
 
 
+def _create_empty_current_target_table(conn: sqlite3.Connection, table: str) -> bool:
+    if table == "market_events":
+        conn.execute(
+            """
+            CREATE TABLE market_events (
+                event_id INTEGER PRIMARY KEY,
+                market_slug TEXT NOT NULL,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                condition_id TEXT,
+                token_id TEXT,
+                range_label TEXT
+            )
+            """
+        )
+        return True
+    if table == "source_run_coverage":
+        conn.execute(
+            """
+            CREATE TABLE source_run_coverage (
+                coverage_id TEXT PRIMARY KEY,
+                source_run_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                city TEXT NOT NULL,
+                target_local_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                data_version TEXT NOT NULL,
+                completeness_status TEXT NOT NULL,
+                readiness_status TEXT NOT NULL,
+                computed_at TEXT NOT NULL,
+                recorded_at TEXT NOT NULL
+            )
+            """
+        )
+        return True
+    if table == "readiness_state":
+        conn.execute(
+            """
+            CREATE TABLE readiness_state (
+                readiness_id TEXT PRIMARY KEY,
+                strategy_key TEXT NOT NULL,
+                dependency_json TEXT NOT NULL DEFAULT '{}',
+                provenance_json TEXT NOT NULL
+            )
+            """
+        )
+        return True
+    if table == "forecast_posteriors":
+        conn.execute(
+            """
+            CREATE TABLE forecast_posteriors (
+                posterior_id INTEGER PRIMARY KEY,
+                source_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                data_version TEXT NOT NULL,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                temperature_metric TEXT NOT NULL,
+                dependency_source_run_ids_json TEXT,
+                trade_authority_status TEXT NOT NULL,
+                training_allowed INTEGER NOT NULL,
+                computed_at TEXT
+            )
+            """
+        )
+        return True
+    return False
+
+
 def _create_db(path, tables) -> None:
     conn = sqlite3.connect(path)
     try:
         for table in tables:
+            if _create_empty_current_target_table(conn, table):
+                continue
             if table == "raw_forecast_artifacts":
                 conn.execute(
                     """
@@ -220,6 +292,8 @@ def _create_forecast_db_with_replacement_inventory(path) -> None:
                     """
                 )
                 continue
+            if _create_empty_current_target_table(conn, table):
+                continue
             if table == "raw_forecast_artifacts":
                 conn.execute(
                     """
@@ -281,6 +355,7 @@ def _create_forecast_db_with_replacement_inventory(path) -> None:
                 city TEXT NOT NULL,
                 target_date TEXT NOT NULL,
                 temperature_metric TEXT NOT NULL,
+                dependency_source_run_ids_json TEXT,
                 trade_authority_status TEXT NOT NULL,
                 training_allowed INTEGER NOT NULL,
                 computed_at TEXT NOT NULL
@@ -306,7 +381,7 @@ def _create_forecast_db_with_replacement_inventory(path) -> None:
             """
             INSERT INTO forecast_posteriors (
                 posterior_id, source_id, product_id, data_version, city, target_date,
-                temperature_metric, trade_authority_status, training_allowed, computed_at
+                temperature_metric, dependency_source_run_ids_json, trade_authority_status, training_allowed, computed_at
             ) VALUES (
                 7,
                 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
@@ -315,6 +390,7 @@ def _create_forecast_db_with_replacement_inventory(path) -> None:
                 'NYC',
                 '2026-06-07',
                 'high',
+                '{"baseline_b0":"baseline-run"}',
                 'SHADOW_VETO_ONLY',
                 0,
                 '2026-06-06T04:00:00+00:00'
@@ -696,6 +772,22 @@ def test_live_dry_run_blocks_live_authority_when_current_market_targets_lack_rep
                 "Will the highest temperature in Madrid be 37°C on June 9?",
             ),
         )
+        conn.execute(
+            """
+            INSERT INTO source_run_coverage (
+                coverage_id, source_run_id, source_id, city, target_local_date,
+                temperature_metric, data_version, completeness_status,
+                readiness_status, computed_at, recorded_at
+            ) VALUES (
+                'coverage-madrid', 'baseline-current-madrid',
+                'ecmwf_open_data', 'Madrid', '2026-06-09', 'high',
+                'ecmwf_opendata_mx2t3_local_calendar_day_max',
+                'COMPLETE', 'LIVE_ELIGIBLE',
+                '2026-06-07T08:00:00+00:00',
+                '2026-06-07T08:00:00+00:00'
+            )
+            """
+        )
         conn.commit()
     _create_db(tmp_path / "state" / "zeus-world.db", REQUIRED_WORLD_TABLES)
     _create_db(tmp_path / "state" / "zeus_trades.db", REQUIRED_TRADE_TABLES)
@@ -703,7 +795,7 @@ def test_live_dry_run_blocks_live_authority_when_current_market_targets_lack_rep
     report = build_replacement_forecast_live_dry_run_report(
         ReplacementForecastLiveDryRunInput(
             root=tmp_path,
-            runtime_flags=_flags(trade=True),
+            runtime_flags=_flags(),
             optional_dependencies=("requests",),
             assume_raw_artifact_lineage_available=True,
         )
@@ -714,3 +806,4 @@ def test_live_dry_run_blocks_live_authority_when_current_market_targets_lack_rep
     assert report.current_target_coverage_counts["target_count"] == 1
     assert report.current_target_coverage_counts["missing_posterior_count"] == 1
     assert report.current_target_coverage_missing_examples[0]["city"] == "Madrid"
+    assert "REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY" in report.reason_codes

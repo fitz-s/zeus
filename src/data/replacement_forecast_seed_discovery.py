@@ -146,19 +146,54 @@ def _manifest_allows_target_date(manifest: RawForecastArtifactManifest, *, targe
     return False
 
 
+def _table_names(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+    }
+
+
+def _columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
+    tables = _table_names(conn)
+    if "source_run_coverage" not in tables:
+        return False
+    required = {
+        "source_run_id",
+        "source_id",
+        "city",
+        "target_local_date",
+        "temperature_metric",
+        "data_version",
+        "computed_at",
+    }
+    return required.issubset(_columns(conn, "source_run_coverage"))
+
+
+def _coverage_skip_schema_ready(conn: sqlite3.Connection, tables: set[str]) -> bool:
+    if not {"forecast_posteriors", "readiness_state"}.issubset(tables):
+        return False
+    posterior_columns = _columns(conn, "forecast_posteriors")
+    readiness_columns = _columns(conn, "readiness_state")
+    return (
+        "dependency_source_run_ids_json" in posterior_columns
+        and "dependency_json" in readiness_columns
+    )
+
+
 def _candidate_targets(
     conn: sqlite3.Connection,
     *,
     limit: int,
     min_target_date: str,
 ) -> tuple[Mapping[str, object], ...]:
-    tables = {
-        str(row[0])
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
-    }
+    tables = _table_names(conn)
     skip_covered_sql = ""
-    if {"forecast_posteriors", "readiness_state"}.issubset(tables):
-        skip_covered_sql = """
+    if _coverage_skip_schema_ready(conn, tables):
+        skip_covered_sql = f"""
           AND NOT EXISTS (
               SELECT 1
               FROM forecast_posteriors p
@@ -168,6 +203,7 @@ def _candidate_targets(
                 AND p.temperature_metric = c.temperature_metric
                 AND p.training_allowed = 0
                 AND p.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
           )
           AND NOT EXISTS (
               SELECT 1
@@ -176,6 +212,12 @@ def _candidate_targets(
                 AND json_extract(r.provenance_json, '$.city') = c.city
                 AND json_extract(r.provenance_json, '$.target_date') = c.target_local_date
                 AND json_extract(r.provenance_json, '$.temperature_metric') = c.temperature_metric
+                AND EXISTS (
+                    SELECT 1
+                    FROM json_each(r.dependency_json, '$.dependencies')
+                    WHERE json_extract(value, '$.role') = 'baseline_b0'
+                      AND json_extract(value, '$.source_run_id') = c.source_run_id
+                )
           )
         """
     rows = conn.execute(
@@ -239,6 +281,14 @@ def discover_replacement_forecast_materialization_seeds(
     conn = _connect(Path(forecast_db), write_class="live")
     conn.row_factory = sqlite3.Row
     try:
+        if not _source_run_coverage_schema_ready(conn):
+            return ReplacementForecastSeedDiscoveryReport(
+                status="BLOCKED",
+                reason_codes=("REPLACEMENT_SEED_DISCOVERY_SOURCE_RUN_COVERAGE_SCHEMA_MISSING",),
+                discovered_count=0,
+                skipped_count=0,
+                failed_count=0,
+            )
         targets = _candidate_targets(conn, limit=limit, min_target_date=computed.date().isoformat())
         if not targets:
             return ReplacementForecastSeedDiscoveryReport(

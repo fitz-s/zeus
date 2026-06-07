@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-06
+# Last reused/audited: 2026-06-07
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-07
 # Purpose: Protect automatic replacement materialization seed generation from market/source context.
 # Reuse: Run before changing replacement shadow queue input generation.
 # Authority basis: Replacement materialization must be grounded in real market bins and source-run coverage, not hand-built seed JSON.
@@ -134,6 +134,53 @@ def test_seed_builder_uses_real_market_bins_and_fahrenheit_step(tmp_path: Path) 
     middle = seed["bins"][1]
     assert round(middle["lower_c"], 6) == round((70.0 - 32.0) * 5.0 / 9.0, 6)
     assert round(middle["upper_c"], 6) == round((71.0 - 32.0) * 5.0 / 9.0, 6)
+
+
+def test_seed_builder_writes_sibling_raw_paths_relative_to_seed_dir(tmp_path: Path) -> None:
+    raw_dir = tmp_path / "raw_manifests"
+    seed_dir = tmp_path / "seeds"
+    raw_dir.mkdir()
+    seed_dir.mkdir()
+    aifs_manifest = load_manifest_with_path(
+        _manifest(
+            raw_dir,
+            source_id="ecmwf_aifs_ens",
+            product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
+            data_version=AIFS_HIGH_DATA_VERSION,
+            name="aifs",
+        )
+    )
+    openmeteo_manifest = load_manifest_with_path(
+        _manifest(
+            raw_dir,
+            source_id="openmeteo_ecmwf_ifs_9km",
+            product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+            data_version=OPENMETEO_HIGH_DATA_VERSION,
+            name="openmeteo",
+        )
+    )
+
+    result = build_replacement_forecast_materialization_seed(
+        city="NYC",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        market_bins=_market_bins_f(),
+        baseline_coverage=_baseline_coverage(),
+        aifs_manifest=aifs_manifest,
+        openmeteo_manifest=openmeteo_manifest,
+        aifs_samples_json=raw_dir / "aifs_samples.json",
+        openmeteo_payload_json=raw_dir / "openmeteo_payload.json",
+        precision_metadata_json=raw_dir / "precision_metadata.json",
+        computed_at="2026-06-06T04:00:00+00:00",
+        base_dir=seed_dir,
+    )
+
+    assert result.ok is True
+    seed = result.seed
+    assert seed is not None
+    assert seed["aifs_samples_json"] == "../raw_manifests/aifs_samples.json"
+    assert seed["openmeteo_payload_json"] == "../raw_manifests/openmeteo_payload.json"
+    assert seed["precision_metadata_json"] == "../raw_manifests/precision_metadata.json"
 
 
 def test_seed_builder_blocks_future_dependency(tmp_path: Path) -> None:

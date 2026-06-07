@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -133,10 +134,17 @@ def _manifest_source_run_id(manifest: RawForecastArtifactManifest, *, role: str)
 
 
 def _relative_or_absolute(path: Path, *, base_dir: Path) -> str:
+    resolved = path.resolve()
+    base = base_dir.resolve()
     try:
-        return str(path.resolve().relative_to(base_dir.resolve()))
+        return str(resolved.relative_to(base))
     except ValueError:
-        return str(path)
+        stable_root = base.parent
+        try:
+            resolved.relative_to(stable_root)
+        except ValueError:
+            return str(resolved)
+        return os.path.relpath(resolved, base)
 
 
 def build_replacement_forecast_materialization_seed(

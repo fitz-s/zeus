@@ -376,87 +376,21 @@ def _current_target_coverage_inventory(
     if not forecast_db.exists():
         return "MISSING_FORECAST_DB", counts, ()
     try:
-        minimum_target_date = datetime.now(tz=timezone.utc).date().isoformat()
-        conn = _connect(forecast_db, write_class="live")
-        conn.row_factory = sqlite3.Row
-        try:
-            conn.execute("PRAGMA query_only=ON")
-            tables = set(_tables(forecast_db))
-            required_tables = {"market_events", "forecast_posteriors", "readiness_state"}
-            if not required_tables.issubset(tables):
-                return "NOT_APPLICABLE_MISSING_TABLE", counts, ()
-            market_columns = {
-                str(row["name"])
-                for row in conn.execute("PRAGMA table_info(market_events)").fetchall()
-            }
-            posterior_columns = {
-                str(row["name"])
-                for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
-            }
-            readiness_columns = {
-                str(row["name"])
-                for row in conn.execute("PRAGMA table_info(readiness_state)").fetchall()
-            }
-            if not {"city", "target_date", "temperature_metric", "token_id", "range_label"}.issubset(market_columns):
-                return "NOT_APPLICABLE_MARKET_SCHEMA", counts, ()
-            if not {"city", "target_date", "temperature_metric", "source_id", "data_version"}.issubset(posterior_columns):
-                return "NOT_APPLICABLE_POSTERIOR_SCHEMA", counts, ()
-            if not {"strategy_key", "provenance_json"}.issubset(readiness_columns):
-                return "NOT_APPLICABLE_READINESS_SCHEMA", counts, ()
-            rows = conn.execute(
-                """
-                WITH targets AS (
-                    SELECT city, target_date, temperature_metric, COUNT(*) AS market_bin_count
-                    FROM market_events
-                    WHERE token_id IS NOT NULL
-                      AND token_id != ''
-                      AND range_label IS NOT NULL
-                      AND range_label != ''
-                      AND target_date >= ?
-                    GROUP BY city, target_date, temperature_metric
-                ),
-                posteriors AS (
-                    SELECT city, target_date, temperature_metric, COUNT(*) AS posterior_count
-                    FROM forecast_posteriors
-                    WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                      AND training_allowed = 0
-                      AND trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
-                    GROUP BY city, target_date, temperature_metric
-                ),
-                readiness AS (
-                    SELECT
-                        json_extract(provenance_json, '$.city') AS city,
-                        json_extract(provenance_json, '$.target_date') AS target_date,
-                        json_extract(provenance_json, '$.temperature_metric') AS temperature_metric,
-                        COUNT(*) AS readiness_count
-                    FROM readiness_state
-                    WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
-                    GROUP BY 1, 2, 3
-                )
-                SELECT
-                    targets.city,
-                    targets.target_date,
-                    targets.temperature_metric,
-                    targets.market_bin_count,
-                    COALESCE(posteriors.posterior_count, 0) AS posterior_count,
-                    COALESCE(readiness.readiness_count, 0) AS readiness_count
-                FROM targets
-                LEFT JOIN posteriors USING (city, target_date, temperature_metric)
-                LEFT JOIN readiness USING (city, target_date, temperature_metric)
-                ORDER BY targets.target_date DESC, targets.city, targets.temperature_metric
-                """
-                ,
-                (minimum_target_date,),
-            ).fetchall()
-        finally:
-            conn.close()
+        from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
+
+        plan = build_replacement_forecast_current_target_plan(
+            forecast_db,
+            require_raw_artifacts=False,
+        )
     except Exception:
         return "UNREADABLE", counts, ()
+    if plan.status == "BLOCKED":
+        return "BLOCKED", counts, ()
     missing: list[Mapping[str, object]] = []
-    for row in rows:
+    for row in plan.rows:
         counts["target_count"] += 1
-        posterior_count = int(row["posterior_count"])
-        readiness_count = int(row["readiness_count"])
+        posterior_count = int(row.posterior_count)
+        readiness_count = int(row.readiness_count)
         if posterior_count > 0:
             counts["posterior_covered_count"] += 1
         else:
@@ -468,10 +402,11 @@ def _current_target_coverage_inventory(
         if posterior_count <= 0 or readiness_count <= 0:
             missing.append(
                 {
-                    "city": str(row["city"]),
-                    "target_date": str(row["target_date"]),
-                    "temperature_metric": str(row["temperature_metric"]),
-                    "market_bin_count": int(row["market_bin_count"]),
+                    "city": row.city,
+                    "target_date": row.target_date,
+                    "temperature_metric": row.temperature_metric,
+                    "baseline_source_run_id": row.baseline_source_run_id,
+                    "market_bin_count": int(row.market_bin_count),
                     "posterior_count": posterior_count,
                     "readiness_count": readiness_count,
                 }
@@ -654,11 +589,11 @@ def build_replacement_forecast_live_dry_run_report(
         reasons.append("REPLACEMENT_DRY_RUN_RAW_ARTIFACT_LINEAGE_NOT_READY")
     if latest_readiness_artifact_status not in {"READY", "ASSUMED_READY", "NOT_APPLICABLE_NO_POSTERIOR"}:
         reasons.append("REPLACEMENT_DRY_RUN_LATEST_READINESS_ARTIFACTS_NOT_READY")
-    if policy.can_initiate_trade and current_target_coverage_status not in {
-        "READY",
-        "NO_CURRENT_TARGETS",
-        "NOT_APPLICABLE_MARKET_SCHEMA",
-    }:
+    if (
+        policy.can_read_shadow_posterior
+        and not request.assume_replacement_shadow_schema_initialized
+        and current_target_coverage_status not in {"READY", "NO_CURRENT_TARGETS"}
+    ):
         reasons.append("REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY")
     if "requests" in dependencies and dependencies.get("requests") != "OK":
         reasons.append("REPLACEMENT_DRY_RUN_OPENMETEO_REQUESTS_MISSING")
