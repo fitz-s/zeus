@@ -16,6 +16,7 @@ import pytest
 
 from src.decision_kernel import claims
 from src.decision_kernel.compiler import DecisionCompiler
+from src.contracts.execution_intent import DecisionSourceContext
 from src.state.snapshot_repo import init_snapshot_schema
 from src.engine.event_reactor_adapter import (
     build_event_bound_no_submit_receipt,
@@ -759,7 +760,9 @@ def _insert_forecast_reader_authority(conn: sqlite3.Connection) -> None:
             '2026-05-25', 'Chicago', 'America/Chicago', 'high',
             'temperature', 'high_temp', 'ecmwf_opendata_mx2t3_local_calendar_day_max',
             51, 51, '[0,3,6]', '[0,3,6]', 3, 3,
-            'COMPLETE', 0, 'hash-raw', 'hash-manifest', 'SUCCESS', NULL
+            'COMPLETE', 0, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            'SUCCESS', NULL
         )
         """
     )
@@ -1191,6 +1194,17 @@ def test_forecast_certificate_records_members_json_hash_and_window_authority():
     assert forecast["target_local_date"] == "2026-05-25"
     assert forecast["city_timezone"] == "America/Chicago"
     assert forecast["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
+    decision_context = DecisionSourceContext.from_forecast_context(forecast)
+    assert decision_context is not None
+    assert decision_context.source_id == "ecmwf_open_data"
+    assert decision_context.model_family == "ecmwf_ens"
+    assert decision_context.forecast_source_role == "entry_primary"
+    assert decision_context.degradation_level == "OK"
+    assert decision_context.authority_tier == "FORECAST"
+    errors = set(decision_context.integrity_errors())
+    assert "missing_raw_payload_hash" not in errors
+    assert "missing_first_member_observed_time" not in errors
+    assert "missing_run_complete_time" not in errors
 
 
 def test_high_forecast_snapshot_members_json_is_daily_max_extrema():
@@ -1518,7 +1532,8 @@ def test_missing_market_topology_range_blocks_no_submit_receipt():
     assert receipt.reason == "EVENT_BOUND_MARKET_TOPOLOGY_INVALID:market topology bin range missing"
 
 
-def test_selected_snapshot_row_not_first_still_binds_matching_candidate():
+def test_selected_snapshot_row_not_first_still_binds_matching_candidate(monkeypatch):
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event(token_id="yes-2")
     receipt = _receipt(event, _trade_conn_with_snapshot())
 
@@ -1527,7 +1542,8 @@ def test_selected_snapshot_row_not_first_still_binds_matching_candidate():
     assert receipt.bin_label == "71-72°F"
 
 
-def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask():
+def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask(monkeypatch):
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event(token_id="no-1")
     receipt = _receipt(event, _trade_conn_with_snapshot(selected_ask="0.10", no_selected_ask="0.80"))
 
@@ -1539,7 +1555,8 @@ def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask():
     assert receipt.reason == "TRADE_SCORE_NON_POSITIVE"
 
 
-def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists():
+def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists(monkeypatch):
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     # Build a conn with only the YES-selected snapshot; the orderbook has no NO asks.
     # The reactor must select the YES snapshot (only one for condition-1) but
     # cannot find a NO ask → EXECUTABLE_NATIVE_ASK_MISSING.
@@ -2009,27 +2026,41 @@ def test_receipt_revalidates_executable_forecast_reader_authority(monkeypatch):
 
 
 def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
-    from types import SimpleNamespace
-
     from src.data import executable_forecast_reader
+    from src.data.executable_forecast_reader import (
+        ExecutableForecastBundle,
+        ExecutableForecastBundleResult,
+        ExecutableForecastEvidence,
+        ExecutableForecastSnapshot,
+    )
 
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
     decision_time = datetime(2026, 5, 24, 8, 17, tzinfo=timezone.utc)
     captured = []
-    evidence = SimpleNamespace(
+    evidence = ExecutableForecastEvidence(
         forecast_source_id="ecmwf_open_data",
         forecast_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
         source_transport="ensemble_snapshots_db_reader",
-        source_cycle_time="2026-05-24T00:00:00+00:00",
-        source_issue_time="2026-05-24T00:00:00+00:00",
         source_run_id="run-1",
+        release_calendar_key="ecmwf_open_data",
         coverage_id="coverage-1",
         producer_readiness_id="producer_readiness:coverage-1",
         entry_readiness_id=None,
+        source_cycle_time="2026-05-24T00:00:00+00:00",
+        source_issue_time="2026-05-24T00:00:00+00:00",
+        source_release_time="2026-05-24T07:00:00+00:00",
+        source_available_at="2026-05-24T08:10:00+00:00",
+        fetch_started_at="2026-05-24T07:10:00+00:00",
+        fetch_finished_at="2026-05-24T08:05:00+00:00",
+        captured_at="2026-05-24T08:10:00+00:00",
         input_snapshot_ids=(1,),
         raw_payload_hash="hash-raw",
         manifest_hash="hash-manifest",
+        target_local_date="2026-05-25",
+        target_window_start_utc="2026-05-25T05:00:00+00:00",
+        target_window_end_utc="2026-05-26T05:00:00+00:00",
+        city_timezone="America/Chicago",
         required_steps=(0, 3, 6),
         observed_steps=(0, 3, 6),
         expected_members=51,
@@ -2048,20 +2079,41 @@ def test_forecast_reader_revalidation_uses_reactor_decision_time(monkeypatch):
             "authority_verified",
             "available_at_not_future",
         ),
+    )
+    snapshot = ExecutableForecastSnapshot(
+        snapshot_id=1,
+        city="Chicago",
+        target_local_date=datetime(2026, 5, 25, tzinfo=timezone.utc).date(),
+        temperature_metric="high",
+        data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        members=tuple(float(60 + (index % 10)) for index in range(51)),
+        source_id="ecmwf_open_data",
+        source_transport="ensemble_snapshots_db_reader",
+        source_run_id="run-1",
+        release_calendar_key="ecmwf_open_data",
+        source_cycle_time="2026-05-24T00:00:00+00:00",
+        source_release_time="2026-05-24T07:00:00+00:00",
         source_available_at="2026-05-24T08:10:00+00:00",
-        fetch_started_at="2026-05-24T07:10:00+00:00",
-        fetch_finished_at="2026-05-24T08:05:00+00:00",
-        captured_at="2026-05-24T08:10:00+00:00",
+        issue_time="2026-05-24T00:00:00+00:00",
+        valid_time="2026-05-25",
+        available_at="2026-05-24T08:10:00+00:00",
+        fetch_time="2026-05-24T08:10:00+00:00",
+        manifest_hash="hash-manifest",
+        members_unit="degF",
+        local_day_start_utc="2026-05-25T05:00:00+00:00",
+        step_horizon_hours=32.0,
+        first_member_observed_time="2026-05-24T07:10:00+00:00",
+        run_complete_time="2026-05-24T08:05:00+00:00",
+        raw_orderbook_hash_transition_delta_ms=50,
     )
 
     monkeypatch.setattr(
         executable_forecast_reader,
         "read_executable_forecast",
         lambda *_args, **kwargs: captured.append(kwargs["decision_time"])
-        or SimpleNamespace(
-            ok=True,
+        or ExecutableForecastBundleResult(
             status="LIVE_ELIGIBLE",
-            bundle=SimpleNamespace(snapshot=SimpleNamespace(snapshot_id="1"), evidence=evidence),
+            bundle=ExecutableForecastBundle(snapshot=snapshot, evidence=evidence),
             reason_code="OK",
         ),
     )
@@ -2136,13 +2188,13 @@ def test_capital_efficiency_allows_strong_after_cost_roi_new_market():
     ) is None
 
 
-def test_capital_efficiency_has_no_default_hidden_roi_gate(monkeypatch):
+def test_capital_efficiency_has_default_production_roi_gate(monkeypatch):
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _capital_efficiency_untradeable_reason
 
     monkeypatch.delenv("ZEUS_ROBUST_ROI_EXPERIMENTAL_GATE", raising=False)
 
-    assert _capital_efficiency_untradeable_reason(
+    reason = _capital_efficiency_untradeable_reason(
         execution_price=ExecutionPrice(
             0.98196,
             "ask",
@@ -2150,59 +2202,81 @@ def test_capital_efficiency_has_no_default_hidden_roi_gate(monkeypatch):
             currency="probability_units",
         ),
         trade_score=0.00553868962634317,
-    ) is None
+    )
+
+    assert reason is not None
+    assert reason.startswith("CAPITAL_EFFICIENCY_ROI_BELOW_MIN:")
 
 
-def test_selection_prefers_best_robust_roi_not_largest_absolute_score(monkeypatch):
+def test_capital_efficiency_blocks_tokyo_style_high_price_micro_upside():
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _capital_efficiency_untradeable_reason
+
+    reason = _capital_efficiency_untradeable_reason(
+        execution_price=ExecutionPrice(
+            0.97,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        trade_score=0.019758898884025,
+    )
+
+    assert reason is not None
+    assert "robust_roi=0.020370" in reason
+
+
+def test_selection_prefers_lcb_kelly_growth_not_modal_adjacent_no(monkeypatch):
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
 
     monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
 
-    expensive_micro_edge = _CandidateProof(
-        candidate=SimpleNamespace(condition_id="expensive"),
-        token_id="expensive-token",
+    modal_adjacent_no = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="helsinki-22c"),
+        token_id="helsinki-22c-no-token",
         direction="buy_no",
-        row={"condition_id": "expensive"},
-        executable_snapshot_id="expensive-snapshot",
+        row={"condition_id": "helsinki-22c"},
+        executable_snapshot_id="helsinki-22c-snapshot",
         execution_price=ExecutionPrice(
-            0.98,
+            0.70,
             "ask",
             fee_deducted=True,
             currency="probability_units",
         ),
-        q_posterior=0.999,
-        q_lcb_5pct=0.99,
-        c_cost_95pct=0.981,
+        q_posterior=0.80,
+        q_lcb_5pct=0.72,
+        c_cost_95pct=0.71,
         p_fill_lcb=0.90,
-        trade_score=0.030,
+        trade_score=0.020,
         p_value=0.01,
         passed_prefilter=True,
         native_quote_available=True,
         p_cal_vector_hash="pcal",
         p_live_vector_hash="plive",
     )
-    cheaper_better_trade = replace(
-        expensive_micro_edge,
-        candidate=SimpleNamespace(condition_id="cheap"),
-        token_id="cheap-token",
-        row={"condition_id": "cheap"},
-        executable_snapshot_id="cheap-snapshot",
+    better_family_trade = replace(
+        modal_adjacent_no,
+        candidate=SimpleNamespace(condition_id="helsinki-23c"),
+        token_id="helsinki-23c-yes-token",
+        direction="buy_yes",
+        row={"condition_id": "helsinki-23c"},
+        executable_snapshot_id="helsinki-23c-snapshot",
         execution_price=ExecutionPrice(
-            0.20,
+            0.30,
             "ask",
             fee_deducted=True,
             currency="probability_units",
         ),
-        q_posterior=0.25,
-        q_lcb_5pct=0.22,
-        c_cost_95pct=0.21,
-        trade_score=0.020,
+        q_posterior=0.46,
+        q_lcb_5pct=0.42,
+        c_cost_95pct=0.31,
+        trade_score=0.040,
     )
 
-    selected = _selected_candidate_proof({}, (expensive_micro_edge, cheaper_better_trade))
+    selected = _selected_candidate_proof({}, (modal_adjacent_no, better_family_trade))
 
-    assert selected is cheaper_better_trade
+    assert selected is better_family_trade
 
 
 def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypatch):
@@ -2249,7 +2323,7 @@ def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypat
         q_posterior=0.40,
         q_lcb_5pct=0.35,
         c_cost_95pct=0.21,
-        trade_score=0.008,
+        trade_score=0.020,
     )
 
     selected = _selected_candidate_proof(
@@ -2258,6 +2332,160 @@ def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypat
     )
 
     assert selected is sibling
+
+
+def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch):
+    from src.config import settings
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
+
+    monkeypatch.delenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", raising=False)
+    edli = dict(settings._data["edli_v1"])
+    edli.pop("opportunity_book_selector_enabled", None)
+    monkeypatch.setitem(settings._data, "edli_v1", edli)
+
+    requested_bin = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="helsinki-22c"),
+        token_id="requested-22c-no-token",
+        direction="buy_no",
+        row={"condition_id": "helsinki-22c"},
+        executable_snapshot_id="requested-snapshot",
+        execution_price=ExecutionPrice(
+            0.70,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.80,
+        q_lcb_5pct=0.72,
+        c_cost_95pct=0.71,
+        p_fill_lcb=0.90,
+        trade_score=0.020,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+    better_sibling = replace(
+        requested_bin,
+        candidate=SimpleNamespace(condition_id="helsinki-23c"),
+        token_id="sibling-23c-no-token",
+        row={"condition_id": "helsinki-23c"},
+        executable_snapshot_id="sibling-snapshot",
+        execution_price=ExecutionPrice(
+            0.72,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.92,
+        q_lcb_5pct=0.84,
+        c_cost_95pct=0.73,
+        trade_score=0.050,
+    )
+
+    selected = _selected_candidate_proof(
+        {"token_id": "requested-22c-no-token", "condition_id": "helsinki-22c"},
+        (requested_bin, better_sibling),
+    )
+
+    assert selected is better_sibling
+
+
+def test_family_selector_keeps_stale_sibling_price_for_pre_submit_comparison(monkeypatch):
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+    event = _bound_forecast_event(token_id="yes-1")
+    conn = _trade_conn_with_snapshot(
+        selected_ask="0.70",
+        condition_count=2,
+        snapshot_condition_count=2,
+        freshness_deadline="2026-05-24T08:11:00+00:00",
+        captured_at="2026-05-24T08:10:00+00:00",
+    )
+    cols = [str(row[1]) for row in conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()]
+    for seed_id, fresh_id in (
+        ("snapshot-exec-1", "snapshot-exec-1-fresh"),
+        ("snapshot-exec-1-no", "snapshot-exec-1-no-fresh"),
+    ):
+        seed = dict(
+            conn.execute(
+                "SELECT * FROM executable_market_snapshots WHERE snapshot_id = ?",
+                (seed_id,),
+            ).fetchone()
+        )
+        seed["snapshot_id"] = fresh_id
+        seed["captured_at"] = "2026-05-24T08:12:00+00:00"
+        seed["freshness_deadline"] = "2026-05-25T00:00:00+00:00"
+        conn.execute(
+            f"INSERT INTO executable_market_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+            [seed.get(col) for col in cols],
+        )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.condition_id == "condition-2"
+    assert receipt.direction == "buy_no"
+    assert receipt.opportunity_book is not None
+    book = receipt.opportunity_book
+    assert book["selected_candidate_id"] == book["actual_receipt_selected_candidate_id"]
+    selected_id = book["selected_candidate_id"]
+    selected = next(c for c in book["candidates"] if c["candidate_id"] == selected_id)
+    assert selected["condition_id"] == "condition-2"
+    assert selected["direction"] == "buy_no"
+    assert selected["admitted"] is True
+    assert not str(book["loser_reasons"].get(selected_id, "")).startswith("EXECUTABLE_SNAPSHOT_STALE")
+
+
+def test_opportunity_book_selector_settings_false_preserves_legacy_binding(monkeypatch):
+    from src.config import settings
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
+
+    monkeypatch.delenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", raising=False)
+    edli = dict(settings._data["edli_v1"])
+    edli["opportunity_book_selector_enabled"] = "false"
+    monkeypatch.setitem(settings._data, "edli_v1", edli)
+
+    requested_bin = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="requested"),
+        token_id="requested-token",
+        direction="buy_no",
+        row={"condition_id": "requested"},
+        executable_snapshot_id="requested-snapshot",
+        execution_price=ExecutionPrice(
+            0.70,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.80,
+        q_lcb_5pct=0.72,
+        c_cost_95pct=0.71,
+        p_fill_lcb=0.90,
+        trade_score=0.020,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+    better_sibling = replace(
+        requested_bin,
+        candidate=SimpleNamespace(condition_id="sibling"),
+        token_id="sibling-token",
+        row={"condition_id": "sibling"},
+        executable_snapshot_id="sibling-snapshot",
+        trade_score=0.050,
+    )
+
+    selected = _selected_candidate_proof(
+        {"token_id": "requested-token", "condition_id": "requested"},
+        (requested_bin, better_sibling),
+    )
+
+    assert selected is requested_bin
 
 
 def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypatch):
@@ -2324,6 +2552,69 @@ def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypa
     assert book["proposed_selected_candidate_id"] == book["actual_receipt_selected_candidate_id"]
     loser_reason = next(iter(book["loser_reasons"].values()))
     assert loser_reason.startswith("EXECUTION_PRICE_BELOW_MIN_TICK:")
+
+
+def test_live_authority_rejects_receipt_token_that_is_not_book_selected():
+    from src.engine.event_reactor_adapter import _assert_event_bound_receipt_live_authority
+    from src.events.reactor import EventSubmissionReceipt
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-helsinki",
+        condition_id="cond-22",
+        token_id="no-22",
+        direction="buy_no",
+        q_source="emos",
+        opportunity_book={
+            "selected_candidate_id": "cand-23-yes",
+            "actual_receipt_selected_candidate_id": "cand-23-yes",
+            "candidates": [
+                {
+                    "candidate_id": "cand-22-no",
+                    "condition_id": "cond-22",
+                    "token_id": "no-22",
+                    "direction": "buy_no",
+                },
+                {
+                    "candidate_id": "cand-23-yes",
+                    "condition_id": "cond-23",
+                    "token_id": "yes-23",
+                    "direction": "buy_yes",
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_OPPORTUNITY_BOOK_RECEIPT_NOT_SELECTED"):
+        _assert_event_bound_receipt_live_authority(receipt)
+
+
+def test_live_authority_accepts_receipt_token_bound_to_book_selection():
+    from src.engine.event_reactor_adapter import _assert_event_bound_receipt_live_authority
+    from src.events.reactor import EventSubmissionReceipt
+
+    receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-helsinki",
+        condition_id="cond-23",
+        token_id="yes-23",
+        direction="buy_yes",
+        q_source="emos",
+        opportunity_book={
+            "selected_candidate_id": "cand-23-yes",
+            "actual_receipt_selected_candidate_id": "cand-23-yes",
+            "candidates": [
+                {
+                    "candidate_id": "cand-23-yes",
+                    "condition_id": "cond-23",
+                    "token_id": "yes-23",
+                    "direction": "buy_yes",
+                },
+            ],
+        },
+    )
+
+    _assert_event_bound_receipt_live_authority(receipt)
 
 
 def test_candidate_low_volume_preserves_zero_volume_usd():
@@ -2427,7 +2718,8 @@ def test_coverage_expired_between_event_available_and_decision_blocks_receipt(mo
     assert seen == [datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc)]
 
 
-def test_top_ask_without_depth_does_not_create_fillable_quote():
+def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(selected_ask="0.40", depth_json="{}")
 
@@ -2582,7 +2874,8 @@ def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoint():
+def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoint(monkeypatch):
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event()
     receipt = _receipt(event, _trade_conn_with_snapshot(selected_ask=""))
 

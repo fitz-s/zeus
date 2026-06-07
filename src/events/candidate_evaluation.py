@@ -39,6 +39,19 @@ class CandidateEvaluation:
         return float(self.trade_score) / float(self.execution_price)
 
     @property
+    def robust_kelly_fraction_lcb(self) -> float:
+        if self.execution_price is None or self.execution_price <= 0.0 or self.execution_price >= 1.0:
+            return 0.0
+        q_lcb = max(0.0, min(1.0, float(self.q_lcb_5pct)))
+        if q_lcb <= self.execution_price:
+            return 0.0
+        return (q_lcb - float(self.execution_price)) / (1.0 - float(self.execution_price))
+
+    @property
+    def robust_kelly_growth_score(self) -> float:
+        return self.robust_ev_per_dollar * self.robust_kelly_fraction_lcb
+
+    @property
     def expected_robust_dollars(self) -> float:
         if self.execution_price is None or self.execution_price <= 0.0:
             return 0.0
@@ -60,8 +73,9 @@ class CandidateEvaluation:
         )
 
     @property
-    def objective_tuple(self) -> tuple[float, float, float, float]:
+    def objective_tuple(self) -> tuple[float, float, float, float, float]:
         return (
+            self.robust_kelly_growth_score,
             self.robust_ev_per_dollar,
             self.expected_robust_dollars,
             float(self.q_lcb_5pct),
@@ -93,5 +107,7 @@ class CandidateEvaluation:
             "low_volume_usd": self.low_volume_usd,
             "admitted": self.admitted,
             "robust_ev_per_dollar": self.robust_ev_per_dollar,
+            "robust_kelly_fraction_lcb": self.robust_kelly_fraction_lcb,
+            "robust_kelly_growth_score": self.robust_kelly_growth_score,
             "expected_robust_dollars": self.expected_robust_dollars,
         }

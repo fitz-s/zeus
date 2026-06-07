@@ -146,6 +146,135 @@ class _LiveOpportunityAlreadyLocked(RuntimeError):
     """Raised when continuous redecision rediscovers an already-locked opportunity."""
 
 
+def _event_bound_strategy_key(
+    *,
+    event_type: str,
+    direction: str | None,
+    metric: str | None,
+    require_metric_live: bool = False,
+) -> str:
+    """Classify the EDLI event-bound entry strategy without defaulting to settlement_capture."""
+
+    normalized_direction = str(direction or "").strip().lower()
+    normalized_metric = str(metric or "").strip().lower()
+    if event_type == "DAY0_EXTREME_UPDATED":
+        strategy = "settlement_capture"
+    elif event_type == "FORECAST_SNAPSHOT_READY":
+        strategy = "opening_inertia" if normalized_direction == "buy_no" else "center_buy"
+    else:
+        raise ValueError(f"EDLI_STRATEGY_UNSUPPORTED_EVENT_TYPE:{event_type}")
+
+    from src.strategy.strategy_profile import try_get
+
+    profile = try_get(strategy)
+    if profile is None or not profile.is_runtime_live():
+        raise ValueError(f"EDLI_STRATEGY_NOT_RUNTIME_LIVE:{strategy}")
+    if normalized_direction and not profile.is_direction_allowed(normalized_direction):
+        raise ValueError(
+            f"EDLI_STRATEGY_DIRECTION_BLOCKED:{strategy}:direction={normalized_direction}"
+        )
+    if require_metric_live and normalized_metric and not profile.metric_is_live(normalized_metric):
+        raise ValueError(f"EDLI_STRATEGY_METRIC_BLOCKED:{strategy}:metric={normalized_metric}")
+    return strategy
+
+
+def _assert_event_bound_strategy_live_admitted(
+    *,
+    strategy_key: str | None,
+    direction: str | None,
+    metric: str | None,
+) -> None:
+    """Fail closed before the executor boundary if registry semantics reject the receipt."""
+
+    from src.strategy.strategy_profile import try_get
+
+    normalized_strategy = str(strategy_key or "").strip()
+    normalized_direction = str(direction or "").strip().lower()
+    normalized_metric = str(metric or "").strip().lower()
+    profile = try_get(normalized_strategy)
+    if profile is None or not profile.is_runtime_live():
+        raise ValueError(f"EDLI_STRATEGY_NOT_RUNTIME_LIVE:{normalized_strategy or 'missing'}")
+    if normalized_direction and not profile.is_direction_allowed(normalized_direction):
+        raise ValueError(
+            f"EDLI_STRATEGY_DIRECTION_BLOCKED:{normalized_strategy}:direction={normalized_direction}"
+        )
+    if normalized_metric and not profile.metric_is_live(normalized_metric):
+        raise ValueError(f"EDLI_STRATEGY_METRIC_BLOCKED:{normalized_strategy}:metric={normalized_metric}")
+
+
+def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertificate) -> None:
+    """Identity fallback is evidence-only; it must never authorize real live commands."""
+
+    payload = calibration.payload
+    authority = str(payload.get("authority") or "").strip().upper()
+    n_samples_raw = payload.get("n_samples")
+    try:
+        n_samples = int(n_samples_raw) if n_samples_raw is not None else None
+    except (TypeError, ValueError):
+        n_samples = None
+    if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
+        raise ValueError("EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:IDENTITY_FALLBACK_NO_PLATT_BUCKET")
+    if n_samples is not None and n_samples <= 0:
+        raise ValueError(f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}")
+
+
+def _assert_event_bound_receipt_live_authority(receipt: EventSubmissionReceipt) -> None:
+    """Real submit needs the family-selection provenance shown in receipts."""
+
+    if str(receipt.q_source or "").strip() == "":
+        raise ValueError("EDLI_LIVE_Q_SOURCE_MISSING")
+    book = receipt.opportunity_book
+    if not isinstance(book, dict):
+        raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_MISSING")
+    selected = str(book.get("selected_candidate_id") or "").strip()
+    actual = str(book.get("actual_receipt_selected_candidate_id") or "").strip()
+    if not selected:
+        raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_MISSING")
+    if actual and actual != selected:
+        raise ValueError(
+            "EDLI_LIVE_OPPORTUNITY_BOOK_SELECTION_MISMATCH:"
+            f"selected={selected}:actual={actual}"
+        )
+    receipt_candidate_id = _opportunity_book_candidate_id_for_receipt(book, receipt)
+    if not receipt_candidate_id:
+        raise ValueError(
+            "EDLI_LIVE_OPPORTUNITY_BOOK_RECEIPT_CANDIDATE_MISSING:"
+            f"condition_id={receipt.condition_id}:token_id={receipt.token_id}:direction={receipt.direction}"
+        )
+    if receipt_candidate_id != selected:
+        raise ValueError(
+            "EDLI_LIVE_OPPORTUNITY_BOOK_RECEIPT_NOT_SELECTED:"
+            f"selected={selected}:receipt_candidate={receipt_candidate_id}:"
+            f"condition_id={receipt.condition_id}:token_id={receipt.token_id}:direction={receipt.direction}"
+        )
+
+
+def _opportunity_book_candidate_id_for_receipt(
+    book: Mapping[str, object],
+    receipt: EventSubmissionReceipt,
+) -> str | None:
+    candidates = book.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    condition_id = str(receipt.condition_id or "").strip()
+    token_id = str(receipt.token_id or "").strip()
+    direction = str(receipt.direction or "").strip()
+    if not condition_id or not token_id or not direction:
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        if str(candidate.get("condition_id") or "").strip() != condition_id:
+            continue
+        if str(candidate.get("token_id") or "").strip() != token_id:
+            continue
+        if str(candidate.get("direction") or "").strip() != direction:
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        return candidate_id or None
+    return None
+
+
 def build_event_reactor(
     store: EventStore,
     *,
@@ -546,6 +675,18 @@ def event_bound_live_adapter_from_trade_conn(
             reason=reason,
             proof_accepted=True,
             decision_proof_bundle=certificates,
+            mainstream_agreement_pass=no_submit_receipt.mainstream_agreement_pass,
+            mainstream_agreement_fail_reason=no_submit_receipt.mainstream_agreement_fail_reason,
+            mainstream_point=no_submit_receipt.mainstream_point,
+            mainstream_delta=no_submit_receipt.mainstream_delta,
+            mainstream_bin_label=no_submit_receipt.mainstream_bin_label,
+            mainstream_source=no_submit_receipt.mainstream_source,
+            mainstream_fetched_at_utc=no_submit_receipt.mainstream_fetched_at_utc,
+            alpha_gap=no_submit_receipt.alpha_gap,
+            q_source=no_submit_receipt.q_source,
+            strategy_key=no_submit_receipt.strategy_key,
+            opportunity_book=no_submit_receipt.opportunity_book,
+            unit=no_submit_receipt.unit,
         )
 
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
@@ -1196,7 +1337,13 @@ def build_event_bound_no_submit_receipt(
             "city": family.city,
             "target_date": family.target_date,
             "metric": family.metric,
+            "strategy_key": _event_bound_strategy_key(
+                event_type=event.event_type,
+                direction=direction,
+                metric=family.metric,
+            ),
             "bin_label": candidate.bin.label,
+            "unit": getattr(candidate.bin, "unit", None),
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
             "q_live": proof.q_posterior,
             "q_lcb_5pct": proof.q_lcb_5pct,
@@ -1350,7 +1497,9 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_source=raw_receipt.get("mainstream_source"),
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
+        strategy_key=raw_receipt.get("strategy_key"),
         opportunity_book=raw_receipt.get("opportunity_book"),
+        unit=raw_receipt.get("unit"),
     )
 
 
@@ -1405,6 +1554,12 @@ def _build_live_execution_command_certificates(
     canary_force_taker: bool = False,
     taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
+    _assert_event_bound_strategy_live_admitted(
+        strategy_key=receipt.strategy_key,
+        direction=receipt.direction,
+        metric=receipt.metric,
+    )
+    _assert_event_bound_receipt_live_authority(receipt)
     proof_bundle = receipt.decision_proof_bundle
     compile_result = DecisionCompiler().compile_no_submit(
         event,
@@ -1434,6 +1589,7 @@ def _build_live_execution_command_certificates(
         for cert in compile_result.certificates
         if cert.certificate_type not in {claims.NO_SUBMIT_DECISION, claims.NO_SUBMIT_MODE}
     )
+    _assert_event_bound_calibration_live_admitted(_required_cert(base_certs, claims.CALIBRATION))
     executable_snapshot = _required_cert(base_certs, claims.EXECUTABLE_SNAPSHOT)
     live_cap = _build_live_cap_certificate_from_ledger(
         event=event,
@@ -1445,7 +1601,7 @@ def _build_live_execution_command_certificates(
     )
     try:
         actionable = build_actionable_trade_certificate(
-            payload=_actionable_payload_from_receipt(receipt, live_cap),
+            payload=_actionable_payload_from_receipt(receipt, live_cap, event=event),
             parent_certificates=base_certs + (live_cap,),
             decision_time=decision_time,
         )
@@ -1526,7 +1682,10 @@ def _build_live_execution_command_certificates(
         # executable_snapshot payload default, which is correct for the MAKER path.
         _snap_for_depth = None
         if str(order_mode).strip().upper() == "TAKER" and trade_conn is not None:
-            from src.contracts.execution_intent import simulate_clob_sweep
+            from src.contracts.execution_intent import (
+                quantize_submit_shares_for_venue_at_most,
+                simulate_clob_sweep,
+            )
             _snap_id_for_depth = str(
                 executable_snapshot.payload.get("identity")
                 or executable_snapshot.payload.get("selected_snapshot_id")
@@ -1622,48 +1781,47 @@ def _build_live_execution_command_certificates(
                     limit_price=_limit_price_d,
                 )
                 if _depth_sweep.filled_shares > 0:
-                    available_crossable_shares = float(_depth_sweep.filled_shares)
-                    # SEV-1.1 fix (2026-06-01): the cert builder caps size to
-                    # available_crossable_shares.  The executor guard re-sweeps on
-                    # the CAPPED submitted_shares and asserts exact VWAP equality.
-                    # If we store the VWAP from the uncapped _desired_shares sweep,
-                    # the two VWAPs diverge on any multi-level book where desired >
-                    # crossable → parity rejection on first armed TAKER order.
-                    # Fix: re-sweep on the capped size to get the VWAP that the
-                    # executor will actually see.  The cert builder's
-                    #   size = min(desired_shares, available_crossable_shares)
-                    # is mirrored here as min(_desired_shares_f, available_crossable_shares).
-                    # Single-source principle: ONE sweep result drives both the cert
-                    # fill price and the executor guard re-sweep (same snap, same
-                    # size, same limit → bitwise identical VWAP Decimal).
-                    _capped_shares_f = min(
-                        _desired_shares_f,
-                        available_crossable_shares,
+                    # SEV-1.2 fix (2026-06-06): the submitted share amount itself
+                    # must already obey the venue's immediate-BUY amount grids before
+                    # the final intent certificate is built.  The earlier Wall-B fix
+                    # mirrored the cert builder's size cap, but left many-decimal BUY
+                    # sizes such as 36.304447843137254 in SubmitPlanBuilt; the
+                    # executor correctly rejected them before contacting the SDK.
+                    #
+                    # Mirror the final builder's exact size law here, then sweep on
+                    # the largest venue-legal size that does not exceed the target or
+                    # available depth. If no venue-legal size can fully fill, fail
+                    # closed rather than submitting a deterministic reject.
+                    _raw_capped_shares = min(_desired_shares, _depth_sweep.filled_shares)
+                    _venue_quantized_shares = quantize_submit_shares_for_venue_at_most(
+                        _direction_for_depth,
+                        _raw_capped_shares,
+                        final_limit_price=_limit_price_d,
+                        order_type="FOK",
                     )
-                    _capped_shares = Decimal(str(_capped_shares_f))
-                    if _capped_shares < _desired_shares:
-                        # Capped by depth — re-sweep on the capped size so the
-                        # stored VWAP matches what the executor guard will compute.
-                        _capped_sweep = simulate_clob_sweep(
-                            snapshot=_snap_for_depth,
-                            direction=_direction_for_depth,
-                            requested_size_kind="shares",
-                            requested_size_value=_capped_shares,
-                            limit_price=_limit_price_d,
+                    _venue_quantized_sweep = simulate_clob_sweep(
+                        snapshot=_snap_for_depth,
+                        direction=_direction_for_depth,
+                        requested_size_kind="shares",
+                        requested_size_value=_venue_quantized_shares,
+                        limit_price=_limit_price_d,
+                    )
+                    if not _venue_quantized_sweep.fully_filled:
+                        raise ValueError(
+                            "DEPTH_BELOW_VENUE_QUANTIZED_SIZE:"
+                            f"filled_shares={_venue_quantized_sweep.filled_shares}:"
+                            f"venue_quantized_shares={_venue_quantized_shares}:"
+                            f"depth_status={_venue_quantized_sweep.depth_status}"
                         )
-                        sweep_expected_fill_price = (
-                            str(_capped_sweep.average_price)
-                            if _capped_sweep.average_price is not None else None
-                        )
-                    else:
-                        # Not capped — original sweep VWAP is already correct.
-                        # Bug B fix: store exact Decimal string, not float, so the
-                        # cert payload round-trips via _decimal(str) without losing
-                        # precision.
-                        sweep_expected_fill_price = (
-                            str(_depth_sweep.average_price)
-                            if _depth_sweep.average_price is not None else None
-                        )
+                    available_crossable_shares = float(_venue_quantized_shares)
+                    # Single-source principle: the final intent size, the stored
+                    # expected fill price, and the executor guard re-sweep are all
+                    # driven by the same snapshot, limit, and venue-legal size.
+                    sweep_expected_fill_price = (
+                        str(_venue_quantized_sweep.average_price)
+                        if _venue_quantized_sweep.average_price is not None else None
+                    )
+        executable_market_context = _executable_market_context_from_snapshot(_snap_for_depth)
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -1696,6 +1854,7 @@ def _build_live_execution_command_certificates(
             taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
+            executable_market_context=executable_market_context,
         )
         if (
             taker_fok_fak_live_enabled
@@ -1723,10 +1882,11 @@ def _build_live_execution_command_certificates(
                 min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
                 best_bid=fresh_best_bid,
                 best_ask=fresh_best_ask,
-                taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
-                available_crossable_shares=available_crossable_shares,
-                sweep_expected_fill_price=sweep_expected_fill_price,
-            )
+                    taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
+                    available_crossable_shares=available_crossable_shares,
+                    sweep_expected_fill_price=sweep_expected_fill_price,
+                    executable_market_context=executable_market_context,
+                )
         already_locked_reason = _locked_live_opportunity_no_price_improvement_reason(
             live_cap_conn,
             condition_id=str(final_intent.payload["condition_id"]),
@@ -1748,6 +1908,12 @@ def _build_live_execution_command_certificates(
                 "final_intent_id": final_intent.payload["final_intent_id"],
                 "no_submit_certificate_count": len(base_certs),
                 "no_submit_receipt_event_id": receipt.event_id,
+                "decision_audit": _live_decision_audit_payload(
+                    receipt=receipt,
+                    base_certs=base_certs,
+                    actionable=actionable,
+                    final_intent=final_intent,
+                ),
             },
             occurred_at=decision_time,
             source_authority="decision_kernel",
@@ -1876,18 +2042,26 @@ def _build_live_execution_command_certificates(
 def _actionable_payload_from_receipt(
     receipt: EventSubmissionReceipt,
     live_cap_cert: DecisionCertificate,
+    *,
+    event: OpportunityEvent | None = None,
 ) -> dict[str, object]:
     reserved_notional = float(live_cap_cert.payload["reserved_notional_usd"])
+    city = receipt.city or _event_identity_value(event, "city")
+    target_date = receipt.target_date or _event_identity_value(event, "target_date")
+    metric = receipt.metric or _event_identity_value(event, "metric") or _event_identity_value(event, "temperature_metric")
     return {
         "event_id": receipt.event_id,
-        "event_type": "FORECAST_SNAPSHOT_READY",
+        "event_type": event.event_type if event is not None else None,
         "causal_snapshot_id": receipt.causal_snapshot_id,
+        "strategy_key": receipt.strategy_key,
         "family_id": receipt.family_id,
         "candidate_id": receipt.candidate_id,
         "condition_id": receipt.condition_id,
         "token_id": receipt.token_id,
         "direction": receipt.direction,
         "executable_snapshot_id": receipt.executable_snapshot_id,
+        "q_source": receipt.q_source,
+        "opportunity_book": receipt.opportunity_book,
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -1906,8 +2080,79 @@ def _actionable_payload_from_receipt(
         "neg_risk": receipt.neg_risk,
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
         "native_quote_available": receipt.native_quote_available,
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+        "temperature_metric": metric,
+        "bin_label": receipt.bin_label,
+        "outcome_label": receipt.outcome_label,
+        "unit": receipt.unit,
         "submitted": False,
     }
+
+
+def _live_decision_audit_payload(
+    *,
+    receipt: EventSubmissionReceipt,
+    base_certs: tuple[DecisionCertificate, ...],
+    actionable: DecisionCertificate,
+    final_intent: DecisionCertificate,
+) -> dict[str, object]:
+    """Compact durable audit payload for real-submit aggregate root events.
+
+    ``edli_no_submit_receipts`` intentionally rejects real-submit receipts. The
+    live-order aggregate is therefore the durable source for reconstructing why a
+    submitted order existed. Keep this payload small and derived from the same
+    receipt/certificates already authorized by the money path.
+    """
+
+    return {
+        "schema": "edli_live_decision_audit_v1",
+        "event_id": receipt.event_id,
+        "final_intent_id": receipt.final_intent_id,
+        "family_id": receipt.family_id,
+        "candidate_id": receipt.candidate_id,
+        "condition_id": receipt.condition_id,
+        "token_id": receipt.token_id,
+        "direction": receipt.direction,
+        "city": receipt.city,
+        "target_date": receipt.target_date,
+        "metric": receipt.metric,
+        "bin_label": receipt.bin_label,
+        "outcome_label": receipt.outcome_label,
+        "unit": receipt.unit,
+        "strategy_key": receipt.strategy_key,
+        "q_source": receipt.q_source,
+        "q_live": receipt.q_live,
+        "q_lcb_5pct": receipt.q_lcb_5pct,
+        "c_fee_adjusted": receipt.c_fee_adjusted,
+        "c_cost_95pct": receipt.c_cost_95pct,
+        "p_fill_lcb": receipt.p_fill_lcb,
+        "trade_score": receipt.trade_score,
+        "kelly_size_usd": receipt.kelly_size_usd,
+        "kelly_decision_id": receipt.kelly_decision_id,
+        "risk_decision_id": receipt.risk_decision_id,
+        "opportunity_book": receipt.opportunity_book,
+        "actionable_certificate_hash": actionable.certificate_hash,
+        "final_intent_certificate_hash": final_intent.certificate_hash,
+        "parent_certificates": [
+            {
+                "certificate_type": cert.certificate_type,
+                "certificate_id": cert.certificate_id,
+                "certificate_hash": cert.certificate_hash,
+            }
+            for cert in base_certs
+        ],
+    }
+
+
+def _event_identity_value(event: OpportunityEvent | None, key: str) -> object | None:
+    if event is None:
+        return None
+    payload = getattr(event, "payload", None)
+    if isinstance(payload, dict):
+        return payload.get(key)
+    return getattr(payload, key, None)
 
 
 def _live_order_aggregate_id(event_id: str, final_intent_id: str) -> str:
@@ -2033,11 +2278,20 @@ def _pre_submit_revalidation_payload_from_final_intent(
     )
     return {
         "event_id": payload["event_id"],
+        "event_type": payload.get("event_type"),
         "final_intent_id": payload["final_intent_id"],
+        "strategy_key": payload.get("strategy_key"),
         "condition_id": payload["condition_id"],
         "token_id": payload["token_id"],
         "side": payload["side"],
         "direction": payload["direction"],
+        "city": payload.get("city"),
+        "target_date": payload.get("target_date"),
+        "metric": payload.get("metric") or payload.get("temperature_metric"),
+        "temperature_metric": payload.get("temperature_metric") or payload.get("metric"),
+        "bin_label": payload.get("bin_label"),
+        "outcome_label": payload.get("outcome_label"),
+        "unit": payload.get("unit"),
         "order_type": payload["order_type"],
         "time_in_force": payload["time_in_force"],
         "post_only": payload["post_only"],
@@ -2549,6 +2803,19 @@ def _queue_depth_ahead_from_quote(quote_payload: Mapping[str, object]) -> str | 
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _executable_market_context_from_snapshot(snapshot) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    context: dict[str, object] = {}
+    for field in ("event_id", "event_slug", "market_end_at", "market_close_at"):
+        value = getattr(snapshot, field, None)
+        if hasattr(value, "isoformat"):
+            value = value.isoformat()
+        if value not in (None, ""):
+            context[field] = value
+    return context or None
 
 
 def _select_edli_order_mode(
@@ -3252,6 +3519,7 @@ def _forecast_authority_payload_and_clock(
             "horizon_profile": snapshot.get("horizon_profile"),
         }
     )
+    ens_result = result.bundle.to_ens_result()
     payload_out = {
         "identity": str(result.bundle.snapshot.snapshot_id),
         "snapshot_id": str(result.bundle.snapshot.snapshot_id),
@@ -3284,6 +3552,19 @@ def _forecast_authority_payload_and_clock(
             }
         ),
         "forecast_source_id": evidence.forecast_source_id,
+        "model": ens_result.get("model"),
+        "model_family": ens_result.get("model"),
+        "forecast_issue_time": ens_result.get("issue_time"),
+        "forecast_valid_time": ens_result.get("valid_time"),
+        "forecast_fetch_time": ens_result.get("fetch_time"),
+        "forecast_available_at": ens_result.get("available_at"),
+        "degradation_level": ens_result.get("degradation_level"),
+        "forecast_source_role": ens_result.get("forecast_source_role"),
+        "authority_tier": ens_result.get("authority_tier"),
+        "decision_time": decision_time.astimezone(UTC).isoformat(),
+        "decision_time_status": "OK",
+        "first_member_observed_time": ens_result.get("first_member_observed_time"),
+        "run_complete_time": ens_result.get("run_complete_time"),
         "forecast_data_version": evidence.forecast_data_version,
         "source_transport": evidence.source_transport,
         "source_cycle_time": evidence.source_cycle_time,
@@ -3294,7 +3575,7 @@ def _forecast_authority_payload_and_clock(
         "producer_readiness_id": evidence.producer_readiness_id,
         "entry_readiness_id": evidence.entry_readiness_id,
         "input_snapshot_ids": tuple(str(item) for item in evidence.input_snapshot_ids),
-        "raw_payload_hash": evidence.raw_payload_hash,
+        "raw_payload_hash": ens_result.get("raw_payload_hash"),
         "manifest_hash": evidence.manifest_hash,
         "required_steps": tuple(evidence.required_steps),
         "observed_steps": tuple(evidence.observed_steps),
@@ -3561,11 +3842,26 @@ def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
 #     bound on p(NO) says the bin overwhelmingly will NOT settle). Default 0.95.
 _MARKET_DISAGREE_NO_PRICE_MAX = 0.15
 _MARKET_DISAGREE_QLCB_MIN_ESCAPE = 0.95
-_MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.02
+_MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.05
 
 
 def _env_flag_enabled(name: str) -> bool:
     return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _opportunity_book_selector_enabled() -> bool:
+    """Family selector is live-default; env/settings may only explicitly disable it."""
+
+    raw = os.environ.get("ZEUS_OPPORTUNITY_BOOK_SELECTOR")
+    if raw is not None:
+        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+    try:
+        configured = settings["edli_v1"].get("opportunity_book_selector_enabled", True)
+    except Exception:
+        return True
+    if isinstance(configured, str):
+        return configured.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(configured)
 
 
 def _market_disagreement_demotes_buy_no(
@@ -3626,8 +3922,6 @@ def _capital_efficiency_untradeable_reason(
     price = _optional_float(execution_price.value)
     if price is None or price <= 0.0:
         return "CAPITAL_EFFICIENCY_PRICE_INVALID"
-    if min_roi is None and not _env_flag_enabled("ZEUS_ROBUST_ROI_EXPERIMENTAL_GATE"):
-        return None
     threshold = (
         float(min_roi)
         if min_roi is not None
@@ -3673,6 +3967,28 @@ def _candidate_low_volume_usd(row: Mapping[str, object]) -> float | None:
     return None
 
 
+def _candidate_max_executable_shares(proof: _CandidateProof) -> float | None:
+    row = proof.row
+    if row is None or proof.execution_price is None:
+        return None
+    try:
+        book = _native_quote_book_from_snapshot_row(row)
+    except Exception:
+        return None
+    levels = {
+        "buy_yes": book.yes_asks,
+        "buy_no": book.no_asks,
+        "sell_yes": book.yes_bids,
+        "sell_no": book.no_bids,
+    }.get(str(proof.direction or ""))
+    if not levels:
+        return 0.0
+    try:
+        return float(sum((level.size for level in levels), Decimal("0")))
+    except Exception:
+        return None
+
+
 def _candidate_evaluation_from_proof(
     *,
     family_id: str,
@@ -3699,6 +4015,7 @@ def _candidate_evaluation_from_proof(
         passed_prefilter=bool(proof.passed_prefilter),
         native_quote_available=bool(proof.native_quote_available),
         missing_reason=proof.missing_reason,
+        max_executable_shares=_candidate_max_executable_shares(proof),
         book_hash=_nonnull(row.get("book_hash") or row.get("executable_book_hash") or row.get("snapshot_hash")),
         low_volume_usd=_candidate_low_volume_usd(row),
     )
@@ -3727,7 +4044,7 @@ def _opportunity_book_from_proofs(
             "belief_cache": "source_run_bound",
             "price_cache": "snapshot_rows_refreshed_for_family",
             "selector_shadow": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SHADOW"),
-            "selector_enabled": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SELECTOR"),
+            "selector_enabled": _opportunity_book_selector_enabled(),
             "actual_receipt_selected_candidate_id": (
                 _candidate_evaluation_id(selected_proof)
                 if selected_proof is not None
@@ -3888,18 +4205,16 @@ def _generate_candidate_proofs(
             elif row is None:
                 missing_reason = "missing executable snapshot row"
             else:
-                stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
-                if stale_reason is not None:
-                    missing_reason = stale_reason
-                else:
-                    try:
-                        execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
-                            row,
-                            selected_token_id=token_id,
-                            direction=direction,
-                        )
-                    except ValueError as exc:
-                        missing_reason = str(exc)
+                # Price TTL must not shrink the family selector. The selected
+                # executable is re-authorized against a JIT book at submit time.
+                try:
+                    execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
+                        row,
+                        selected_token_id=token_id,
+                        direction=direction,
+                    )
+                except ValueError as exc:
+                    missing_reason = str(exc)
             score = _robust_trade_score_from_generated_inputs(
                 q_posterior=q_value,
                 q_lcb_5pct=q_lcb,
@@ -3999,7 +4314,7 @@ def _selected_candidate_proof(
     *,
     locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> _CandidateProof | None:
-    selector_enabled = _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SELECTOR")
+    selector_enabled = _opportunity_book_selector_enabled()
     requested_token = _nonnull(payload.get("token_id"))
     requested_condition = _nonnull(payload.get("condition_id"))
     if requested_token and not selector_enabled:
@@ -4655,6 +4970,9 @@ def _market_analysis_from_event_snapshot(
         _apply_settlement_floor = bool(
             settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False)
         )
+        _require_settlement_floor = bool(
+            settings["edli_v1"].get("edli_settlement_sigma_floor_required", True)
+        )
         try:
             from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
             _emos_q = _build_emos_q(
@@ -4662,6 +4980,7 @@ def _market_analysis_from_event_snapshot(
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
                 apply_settlement_floor=_apply_settlement_floor,
+                require_settlement_floor=_require_settlement_floor,
             )
         except Exception as _emos_exc:
             # DE-SILENCED ANTIBODY (#149 / live-diagnosis 2026-06-04): a bare
@@ -4721,6 +5040,7 @@ def _market_analysis_from_event_snapshot(
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
                 apply_settlement_floor=_apply_settlement_floor,
+                require_settlement_floor=_require_settlement_floor,
             )
         except Exception as _hr_exc:  # noqa: BLE001 — best-effort floor; degrade to raw analytic, LOUD
             _hr = None

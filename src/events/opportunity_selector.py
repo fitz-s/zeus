@@ -49,6 +49,12 @@ def select_best_family_candidate(
         loser_reasons[evaluation.candidate_id] = (
             "FAMILY_RANK_LOST:"
             f"rank={rank}:selected={selected.candidate_id}:"
+            f"robust_kelly_growth_score={evaluation.robust_kelly_growth_score:.8f}:"
+            f"selected_robust_kelly_growth_score={selected.robust_kelly_growth_score:.8f}:"
+            f"robust_kelly_fraction_lcb={evaluation.robust_kelly_fraction_lcb:.8f}:"
+            f"selected_robust_kelly_fraction_lcb={selected.robust_kelly_fraction_lcb:.8f}:"
+            f"expected_robust_dollars={evaluation.expected_robust_dollars:.8f}:"
+            f"selected_expected_robust_dollars={selected.expected_robust_dollars:.8f}:"
             f"robust_ev_per_dollar={evaluation.robust_ev_per_dollar:.8f}:"
             f"selected_robust_ev_per_dollar={selected.robust_ev_per_dollar:.8f}"
         )

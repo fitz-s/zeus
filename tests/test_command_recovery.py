@@ -244,6 +244,40 @@ def _advance_to_submitting(conn, command_id="cmd-001", venue_order_id=None):
         conn.commit()
 
 
+def _insert_edli_live_order_event(
+    conn,
+    *,
+    aggregate_id: str,
+    sequence: int,
+    event_type: str,
+    payload: dict,
+    occurred_at: str,
+):
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    event_hash = hashlib.sha256(f"{aggregate_id}:{sequence}:{event_type}:{payload_hash}".encode("utf-8")).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'explicit_reconcile', ?, ?, 1)
+        """,
+        (
+            f"edli-test-{sequence}",
+            aggregate_id,
+            sequence,
+            event_type,
+            event_hash,
+            payload_json,
+            payload_hash,
+            occurred_at,
+            occurred_at,
+        ),
+    )
+
+
 def _advance_to_unknown(conn, command_id="cmd-001", venue_order_id=None):
     """Advance to UNKNOWN state (INTENT_CREATED u2192 SUBMITTING u2192 UNKNOWN)."""
     from src.state.venue_command_repo import append_event
@@ -372,6 +406,7 @@ def _seed_pending_entry_projection(
         "cost_basis_usd": 0.0,
         "entry_price": 0.0,
         "p_posterior": 0.9,
+        "entry_ci_width": 0.0,
         "last_monitor_prob": None,
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
@@ -817,6 +852,81 @@ class TestRecoveryResolutionTable:
         rr_event = next(e for e in events if e["event_type"] == "REVIEW_REQUIRED")
         payload = json.loads(rr_event["payload_json"])
         assert payload["reason"] == "recovery_no_venue_order_id"
+
+    def test_edli_confirmed_fill_terminalizes_submitting_without_order_id(
+        self, conn, mock_client
+    ):
+        execution_command_id = "edli_exec_cmd:test-event:test-intent:tok-001:buy_no"
+        final_intent_id = "edli_intent:test-event:tok-001"
+        venue_order_id = "0xedliorder"
+        trade_id = "edli-trade-001"
+        _insert(conn, decision_id=execution_command_id, size=9.0, price=0.97)
+        _advance_to_submitting(conn, venue_order_id=None)
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id="edli-aggregate",
+            sequence=1,
+            event_type="VenueSubmitAcknowledged",
+            occurred_at="2026-04-26T00:02:00+00:00",
+            payload={
+                "execution_command_id": execution_command_id,
+                "final_intent_id": final_intent_id,
+                "venue_order_id": venue_order_id,
+                "recovered_trade_id": trade_id,
+                "transaction_hash": "0xtx",
+            },
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id="edli-aggregate",
+            sequence=2,
+            event_type="UserTradeObserved",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "final_intent_id": final_intent_id,
+                "venue_order_id": venue_order_id,
+                "trade_id": trade_id,
+                "trade_status": "CONFIRMED",
+                "fill_authority_state": "FILL_CONFIRMED",
+                "filled_size": "9",
+                "fill_price": "0.97",
+                "avg_fill_price": "0.97",
+                "transaction_hash": "0xtx",
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_confirmed_legacy_command_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        mock_client.get_order.assert_not_called()
+        command = conn.execute(
+            "SELECT venue_order_id FROM venue_commands WHERE command_id = 'cmd-001'"
+        ).fetchone()
+        assert command["venue_order_id"] == venue_order_id
+        trade = conn.execute(
+            """
+            SELECT state, filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+               AND trade_id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+        assert dict(trade) == {
+            "state": "CONFIRMED",
+            "filled_size": "9",
+            "fill_price": "0.97",
+        }
+        events = [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert events == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_ACKED", "FILL_CONFIRMED"]
 
     # Case 3: UNKNOWN + venue_order_id + venue finds order u2192 ACKED
     def test_unknown_with_venue_order_resolves_to_acked(self, conn, mock_client):
