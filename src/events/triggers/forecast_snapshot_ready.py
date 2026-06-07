@@ -18,6 +18,8 @@ from src.events.opportunity_event import (
 from src.strategy.market_phase import market_phase_admits
 
 UTC = timezone.utc
+REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
+REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_aifs_openmeteo_soft_anchor"
 
 
 def _target_local_day_strictly_past(
@@ -80,6 +82,27 @@ def _coverage_fairness_emit_enabled() -> bool:
 
         return bool(settings["edli_v1"].get("coverage_fairness_emit_enabled", False))
     except Exception:  # noqa: BLE001 — config glitch must never dark all cities
+        return False
+
+
+def _replacement_trade_authority_enabled() -> bool:
+    """True when live FSR probability authority is the 0.1 replacement posterior.
+
+    Fail-closed for the replacement-specific paths: when this flag is on, an FSR
+    without a matching replacement posterior must not enter live re-decision as a
+    legacy OpenData/t3 candidate.
+    """
+
+    try:
+        from src.config import settings
+
+        return bool(
+            settings["feature_flags"].get(
+                "openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled",
+                False,
+            )
+        )
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -473,6 +496,20 @@ class ForecastSnapshotReadyTrigger:
                 " AND m.target_date = c.target_local_date"
                 " AND m.temperature_metric = c.temperature_metric))"
             )
+        replacement_filter = ""
+        if _replacement_trade_authority_enabled():
+            if not _table_exists(forecasts_conn, "forecast_posteriors"):
+                replacement_filter = " AND 0"
+            else:
+                replacement_filter = (
+                    " AND EXISTS (SELECT 1 FROM forecast_posteriors fp"
+                    " WHERE fp.product_id = '" + REPLACEMENT_0_1_PRODUCT_ID + "'"
+                    " AND fp.city = c.city"
+                    " AND fp.target_date = c.target_local_date"
+                    " AND fp.temperature_metric = c.temperature_metric"
+                    " AND fp.source_available_at <= ?"
+                    " AND fp.computed_at <= ?)"
+                )
         # B4 coverage-fairness contract (Phase-2, shadow-gated).
         # When flag ON: fetch ALL candidates (no SQL LIMIT) then apply
         # CoverageFairnessRequest.select_rows() which deduplicates to ≤1 row per
@@ -532,7 +569,7 @@ class ForecastSnapshotReadyTrigger:
              {_snapshot_latest_join}
             WHERE COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
               AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
-              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}
+              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}{replacement_filter}
             ORDER BY
                 CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
                 c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
@@ -586,12 +623,17 @@ class ForecastSnapshotReadyTrigger:
             WHERE c._family_rank = 1
               AND COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
               AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
-              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}
+              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}{replacement_filter}
             ORDER BY
                 CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
                 c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
             """
         _decision_iso = decision_time.astimezone(UTC).isoformat()
+        _replacement_params: tuple[str, ...] = (
+            (_decision_iso, _decision_iso)
+            if _replacement_trade_authority_enabled() and _table_exists(forecasts_conn, "forecast_posteriors")
+            else ()
+        )
         if _fairness_on:
             # Fetch all candidates (no LIMIT); fairness contract applies LIMIT per cycle.
             rows = _dict_rows(
@@ -602,6 +644,7 @@ class ForecastSnapshotReadyTrigger:
                     _decision_iso,
                     _decision_iso,
                     _decision_iso,
+                    *_replacement_params,
                 ),
             )
             if rows:
@@ -622,6 +665,7 @@ class ForecastSnapshotReadyTrigger:
                         _decision_iso,
                         _decision_iso,
                         _decision_iso,
+                        *_replacement_params,
                     ),
                 )
             else:
@@ -633,6 +677,7 @@ class ForecastSnapshotReadyTrigger:
                         _decision_iso,
                         _decision_iso,
                         _decision_iso,
+                        *_replacement_params,
                         max(1, int(limit)),
                     ),
                 )
@@ -806,12 +851,14 @@ def _required_expected_steps(*, source_run: dict[str, Any], coverage: dict[str, 
 def _serving_track_label(*, track: str, data_version: str) -> str:
     """Return the live-serving product label carried in FSR payloads.
 
-    OpenData source_run IDs still contain legacy mx2t6/mn2t6 track names, while
-    the actual written data_version is the post-cutover mx2t3/mn2t3 product.
-    Keep source_run_id unchanged for DB provenance, but expose the canonical
-    t3 serving track in trading receipts/events.
+    OpenData source_run IDs may still be the causal trigger row. Keep
+    source_run_id unchanged for DB provenance, but when 0.1 replacement is live
+    probability authority, expose the replacement serving product instead of
+    leaking legacy t3/t6 carrier names into trading receipts/events.
     """
 
+    if _replacement_trade_authority_enabled():
+        return REPLACEMENT_0_1_TRACK_LABEL
     if data_version == "ecmwf_opendata_mx2t3_local_calendar_day_max":
         return "mx2t3_high_full_horizon" if track.endswith("_full_horizon") else "mx2t3_high"
     if data_version == "ecmwf_opendata_mn2t3_local_calendar_day_min":
