@@ -82,7 +82,14 @@ def write_platt_fit(
         get_forecasts_connection,
     )
     from src.state.db_writer_lock import WriteClass, db_writer_lock
-    SCHEMA_FORECASTS_VERSION = 7  # B2: frozen row-provenance value; counter cancelled
+    # ThePath P1 ITEM 2 root-cause fix (2026-06-07): the deployed
+    # day0_horizon_platt_fits CHECK only permits schema_version IN (3, 4) (fresh
+    # DBs widen to 3,4,5). B2 had frozen this stamp at 7, which violates EVERY
+    # deployed/fresh CHECK -> the INSERT IntegrityErrors -> the wired write is
+    # swallowed by the fail-soft monitor wrapper -> read_latest_platt_fit() stays
+    # None -> the Day0 nowcast lane never fires. Stamp 4 (accepted by deployed
+    # IN(3,4) AND fresh IN(3,4,5)), mirroring the write_nowcast_run fix above.
+    SCHEMA_FORECASTS_VERSION = 4
 
     own_conn = conn is None
     if own_conn:
@@ -90,10 +97,16 @@ def write_platt_fit(
 
     try:
         with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
+            # The deployed column is `fit_version` (TEXT NOT NULL); the Python
+            # contract names the same semantic value `fit_artifact_id` on the
+            # HorizonPlattFit dataclass. Map dataclass.fit_artifact_id -> SQL
+            # fit_version. (The prior INSERT named a non-existent
+            # `fit_artifact_id` column -> OperationalError before the CHECK even
+            # ran; this is the dominant of the two latent write_platt_fit bugs.)
             conn.execute(
                 """
                 INSERT OR IGNORE INTO day0_horizon_platt_fits (
-                    fit_run_id, fit_artifact_id,
+                    fit_run_id, fit_version,
                     alpha, beta,
                     gamma_morning, gamma_afternoon, gamma_post_peak,
                     delta, epsilon,
@@ -283,10 +296,16 @@ def read_latest_platt_fit(
         conn.row_factory = sqlite3.Row
 
     try:
+        # Deployed column is `fit_version` (TEXT NOT NULL); it stores the semantic
+        # fit_artifact_id value (e.g. "hpf_v1"). The Python API keeps the
+        # fit_artifact_id keyword but must filter on the real SQL column. (The
+        # prior WHERE/SELECT referenced a non-existent `fit_artifact_id` column,
+        # mirroring the writer bug; this read would OperationalError once a row
+        # existed.)
         row = conn.execute(
             """
             SELECT * FROM day0_horizon_platt_fits
-            WHERE fit_artifact_id = ?
+            WHERE fit_version = ?
             ORDER BY rowid DESC LIMIT 1
             """,
             (fit_artifact_id,),
@@ -302,7 +321,7 @@ def read_latest_platt_fit(
             gamma_post_peak=float(r["gamma_post_peak"]),
             delta=float(r["delta"]),
             epsilon=float(r["epsilon"]),
-            fit_artifact_id=r.get("fit_artifact_id", fit_artifact_id),
+            fit_artifact_id=r.get("fit_version", fit_artifact_id),
             fit_run_id=r["fit_run_id"],
             fit_date=r.get("fit_date") or None,
             n_obs=r.get("n_obs"),

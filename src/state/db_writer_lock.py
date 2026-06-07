@@ -837,6 +837,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/mc_entry_gate.py",  # read_only_gate: P0 opens world DB mode=ro; P2 uses an isolated :memory: DB for the reader-behaviour check; never writes any production DB
         # --- one-shot admin: drain stale PARTIAL FSR events from opportunity_events (2026-05-31) ---
         "scripts/purge_partial_fsr_events.py",  # operator_invoked: drops/restores no_delete+no_update triggers; DELETE PARTIAL FSR rows only; ran once 2026-05-31 (941 rows); idempotent
+        # --- ThePath P1 (2026-06-07): activate the Day0 nowcast lane / start the obs-timing clock ---
+        "scripts/persist_day0_horizon_identity_fit.py",  # operator_invoked + already_guarded: the LIVE write goes through write_platt_fit -> get_forecasts_connection(LIVE) under db_writer_lock(LIVE); the bare sqlite3.connect() sites are ONLY the read-back/--verify (file:...?mode=ro uri, SELECT-only) and the --dry-run TEMP copy (throwaway file, never a canonical DB); persists a documented CONSERVATIVE/IDENTITY HorizonPlattFit (zero claimed skill)
     }
 )
 
