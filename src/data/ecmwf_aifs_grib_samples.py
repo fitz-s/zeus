@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +25,12 @@ class AifsGribPointSampleExtraction:
     step_hours: tuple[int, ...]
     nearest_points: tuple[Mapping[str, object], ...]
     identity_reason_codes: tuple[str, ...]
+    identity_decision_hash: str
+    raw_sha256: str
+
+
+def _canonical_hash(payload: Mapping[str, object]) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
 def _import_eccodes():
@@ -132,6 +140,20 @@ def extract_aifs_2t_point_samples_from_grib(
                 "distance": nearest.get("distance"),
             }
         )
+    raw_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    identity_decision_hash = _canonical_hash(
+        {
+            "valid": decision.valid,
+            "reason_codes": decision.reason_codes,
+            "member_ids": decision.member_ids,
+            "step_hours": decision.step_hours,
+            "message_count": decision.message_count,
+            "source_id": decision.source_id,
+            "product_id": decision.product_id,
+            "expected_members": decision.expected_members,
+            "raw_sha256": raw_sha256,
+        }
+    )
     return AifsGribPointSampleExtraction(
         samples=tuple(samples),
         message_count=decision.message_count,
@@ -139,4 +161,6 @@ def extract_aifs_2t_point_samples_from_grib(
         step_hours=decision.step_hours,
         nearest_points=tuple(nearest_payloads),
         identity_reason_codes=decision.reason_codes,
+        identity_decision_hash=identity_decision_hash,
+        raw_sha256=raw_sha256,
     )

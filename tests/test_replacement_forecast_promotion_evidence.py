@@ -163,8 +163,8 @@ def test_promotion_evidence_composes_runtime_admissible_evidence_from_reports() 
         {SHADOW_FLAG: True, VETO_FLAG: True, TRADE_AUTHORITY_FLAG: True, "openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled": False, "openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled": False},
         promotion_evidence=report.promotion_evidence,
     )
-    assert policy.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in policy.reason_codes
+    assert policy.status == "LIVE_AUTHORITY"
+    assert "REPLACEMENT_NEW_DATA_LIVE_AUTHORITY" in policy.reason_codes
 
 
 def test_promotion_evidence_blocks_low_q_lcb_coverage() -> None:

@@ -378,8 +378,6 @@ def build_replacement_forecast_go_live_readiness_report(
     live_dry_run_blockers = _live_dry_run_blockers(request.live_dry_run)
     if live_dry_run_blockers:
         blockers.setdefault("live_dry_run", []).extend(live_dry_run_blockers)
-    if request.runtime_policy.can_initiate_trade and not request.operator_approval_id:
-        blockers.setdefault("operator_approval", []).append("REPLACEMENT_GO_LIVE_OPERATOR_APPROVAL_REQUIRED")
     if request.runtime_policy.status == "BLOCKED":
         blockers.setdefault("runtime_policy", []).extend(request.runtime_policy.reason_codes)
     if request.switch_decision.status in {"BLOCKED", "DISABLED"}:
@@ -407,7 +405,6 @@ def build_replacement_forecast_go_live_readiness_report(
         and "before_after" not in blockers
         and "capital_replay" not in blockers
         and request.runtime_policy.can_initiate_trade
-        and bool(request.operator_approval_id)
     )
     if live_ready:
         status = "LIVE_PROMOTION_READY"

@@ -16,6 +16,7 @@ def test_bundle_reader_blocks_posterior_without_bin_topology_hash() -> None:
         target_date="2026-06-07",
         temperature_metric="high",
         decision_time="2026-06-06T04:00:00+00:00",
+        current_bin_topology_hash="test-topology",
     )
 
     assert result.reason_code == "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_MISSING"

@@ -8,11 +8,11 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import subprocess
 import sys
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
 from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
+from src.data.replacement_forecast_readiness import READY_STATUS
 from src.data.replacement_forecast_materializer import (
     ReplacementForecastMaterializeRequest,
     materialize_replacement_forecast_shadow,
@@ -58,6 +59,35 @@ def _conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     apply_canonical_schema(conn, forecast_tables=True)
     _create_readiness_state(conn)
+    for artifact_id in (11, 22):
+        conn.execute(
+            """
+            INSERT INTO raw_forecast_artifacts (
+                artifact_id, source_id, product_id, data_version,
+                source_cycle_time, source_available_at, captured_at,
+                artifact_path, sha256, byte_size, request_url,
+                request_params_json, artifact_metadata_json,
+                trade_authority_status, training_allowed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                artifact_id,
+                "ecmwf_aifs_ens",
+                "ecmwf_aifs_ens_sampled_2t_6h_v1",
+                "ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
+                _dt(0).isoformat(),
+                _dt(2, 30).isoformat(),
+                _dt(2, 30).isoformat(),
+                f"raw/aifs-{artifact_id}.grib",
+                "aifs-raw-sha256" if artifact_id == 11 else f"aifs-raw-sha256-{artifact_id}",
+                123,
+                "https://data.ecmwf.example/aifs",
+                "{}",
+                "{}",
+                "SHADOW_ONLY",
+                0,
+            ),
+        )
     return conn
 
 
@@ -81,6 +111,13 @@ def _aifs_extraction() -> AifsSampledLocalDayExtraction:
             )
             for i in range(51)
         ),
+        identity_decision_valid=True,
+        identity_reason_codes=("AIFS_GRIB_IDENTITY_VALID",),
+        identity_decision_hash="aifs-identity-hash",
+        member_ids_hash="aifs-member-ids-hash",
+        step_hours_hash="aifs-step-hours-hash",
+        artifact_id=11,
+        raw_sha256="aifs-raw-sha256",
     )
 
 
@@ -147,16 +184,27 @@ def _request(
     baseline_data_version: str = "ecmwf_opendata_mx2t3_local_calendar_day_max",
     baseline_source_run_id: str = "b0-run",
     baseline_source_available_at: datetime | None = None,
+    aifs_extraction: AifsSampledLocalDayExtraction | None = None,
     aifs_source_run_id: str = "aifs-run",
     aifs_source_available_at: datetime | None = None,
+    openmeteo_anchor: OpenMeteoIfs9LocalDayAnchor | None = None,
     openmeteo_source_run_id: str | None = "om9-run",
     openmeteo_source_available_at: datetime | None = None,
+    source_cycle_time: datetime | None = None,
+    computed_at: datetime | None = None,
     expires_at: datetime | None = None,
     anchor_artifact_id: int | None = None,
-    aifs_artifact_id: int | None = None,
+    aifs_artifact_id: int | None = 11,
     openmeteo_precision_guard=_DEFAULT_PRECISION_GUARD,
 ) -> ReplacementForecastMaterializeRequest:
     guard = _precision_guard() if openmeteo_precision_guard is _DEFAULT_PRECISION_GUARD else openmeteo_precision_guard
+    extraction = aifs_extraction or _aifs_extraction()
+    if aifs_artifact_id is not None and extraction.artifact_id != aifs_artifact_id:
+        extraction = replace(
+            extraction,
+            artifact_id=aifs_artifact_id,
+            raw_sha256="aifs-raw-sha256" if aifs_artifact_id == 11 else f"aifs-raw-sha256-{aifs_artifact_id}",
+        )
     return ReplacementForecastMaterializeRequest(
         city="Shanghai",
         city_id="Shanghai",
@@ -166,15 +214,15 @@ def _request(
         baseline_source_run_id=baseline_source_run_id,
         baseline_data_version=baseline_data_version,
         baseline_source_available_at=baseline_source_available_at or _dt(2),
-        aifs_extraction=_aifs_extraction(),
+        aifs_extraction=extraction,
         aifs_source_run_id=aifs_source_run_id,
         aifs_source_available_at=aifs_source_available_at or _dt(2, 30),
-        openmeteo_anchor=_anchor(),
+        openmeteo_anchor=openmeteo_anchor or _anchor(),
         openmeteo_source_run_id=openmeteo_source_run_id,
         openmeteo_source_available_at=openmeteo_source_available_at or _dt(3),
         bins=_bins(),
-        source_cycle_time=_dt(0),
-        computed_at=_dt(4),
+        source_cycle_time=source_cycle_time or _dt(0),
+        computed_at=computed_at or _dt(4),
         expires_at=expires_at or _dt(6),
         anchor_artifact_id=anchor_artifact_id,
         aifs_artifact_id=aifs_artifact_id,
@@ -192,10 +240,10 @@ def test_materializer_writes_posterior_and_readiness_readable_by_switch_reader()
     assert result.anchor_id is not None
     readiness_row = conn.execute("SELECT * FROM readiness_state WHERE readiness_id = ?", (result.readiness_id,)).fetchone()
     assert readiness_row is not None
-    assert readiness_row["status"] == "SHADOW_ONLY"
+    assert readiness_row["status"] == READY_STATUS
     posterior_row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
     assert posterior_row is not None
-    assert posterior_row["trade_authority_status"] == "SHADOW_VETO_ONLY"
+    assert posterior_row["trade_authority_status"] == "SHADOW_ONLY"
     assert posterior_row["training_allowed"] == 0
 
     from src.engine.replacement_forecast_hook_factory import _latest_replacement_readiness
@@ -215,11 +263,13 @@ def test_materializer_writes_posterior_and_readiness_readable_by_switch_reader()
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4, 30),
+        current_bin_topology_hash=posterior_row["bin_topology_hash"],
     )
     assert bundle.ok is True
     assert bundle.bundle is not None
     assert bundle.bundle.posterior_id == result.posterior_id
     assert set(bundle.bundle.q) == {"cool", "warm", "hot"}
+    assert bundle.bundle.trade_authority_status == "SHADOW_ONLY"
 
 
 def test_materializer_does_not_fabricate_directional_no_lcb() -> None:
@@ -234,6 +284,8 @@ def test_materializer_does_not_fabricate_directional_no_lcb() -> None:
     assert q
     assert posterior_row["q_lcb_json"] is None
     assert provenance["q_lcb_json_role"] == "absent_no_calibrated_lcb_available"
+    assert provenance["posterior_authority_status"] == "SHADOW_ONLY"
+    assert provenance["runtime_policy_status"] == "SHADOW_VETO_ONLY"
 
 
 def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None:
@@ -252,6 +304,26 @@ def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None
     assert conn.execute("SELECT COUNT(*) FROM deterministic_forecast_anchors").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
+
+
+def test_materializer_requires_aifs_identity_proof_on_extraction_object() -> None:
+    conn = _conn()
+    extraction = replace(_aifs_extraction(), identity_decision_valid=False)
+
+    result = materialize_replacement_forecast_shadow(conn, _request(aifs_extraction=extraction))
+
+    assert result.ok is False
+    assert "REPLACEMENT_MATERIALIZATION_AIFS_GRIB_IDENTITY_INVALID" in result.reason_codes
+
+
+def test_materializer_requires_aifs_identity_to_match_raw_artifact_row() -> None:
+    conn = _conn()
+    conn.execute("DELETE FROM raw_forecast_artifacts WHERE artifact_id = 11")
+
+    result = materialize_replacement_forecast_shadow(conn, _request())
+
+    assert result.ok is False
+    assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ROW_MISSING",)
 
 
 def test_materializer_preserves_raw_artifact_lineage_in_anchor_posterior_and_readiness() -> None:
@@ -321,6 +393,75 @@ def test_materializer_blocks_future_dependency_before_writing_shadow_rows() -> N
 
     assert result.ok is False
     assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT",)
+    assert result.posterior_id is None
+    assert result.anchor_id is None
+    assert result.readiness_id is None
+    assert conn.execute("SELECT COUNT(*) FROM deterministic_forecast_anchors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
+
+
+def test_materializer_requires_aifs_source_cycle_alignment_before_writing_shadow_rows() -> None:
+    conn = _conn()
+    shifted_cycle = _dt(6)
+    shifted_anchor = replace(_anchor(), source_cycle_time=shifted_cycle)
+
+    result = materialize_replacement_forecast_shadow(
+        conn,
+        _request(
+            source_cycle_time=shifted_cycle,
+            openmeteo_anchor=shifted_anchor,
+        ),
+    )
+
+    assert result.ok is False
+    assert "REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISMATCH" in result.reason_codes
+    assert "REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISMATCH" not in result.reason_codes
+    assert result.posterior_id is None
+    assert result.anchor_id is None
+    assert result.readiness_id is None
+    assert conn.execute("SELECT COUNT(*) FROM deterministic_forecast_anchors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
+
+
+def test_materializer_requires_om9_source_cycle_alignment_before_writing_shadow_rows() -> None:
+    conn = _conn()
+    shifted_cycle = _dt(6)
+    shifted_aifs = replace(_aifs_extraction(), source_cycle_time=shifted_cycle)
+
+    result = materialize_replacement_forecast_shadow(
+        conn,
+        _request(
+            source_cycle_time=shifted_cycle,
+            aifs_extraction=shifted_aifs,
+        ),
+    )
+
+    assert result.ok is False
+    assert "REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISMATCH" not in result.reason_codes
+    assert "REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISMATCH" in result.reason_codes
+    assert result.posterior_id is None
+    assert result.anchor_id is None
+    assert result.readiness_id is None
+    assert conn.execute("SELECT COUNT(*) FROM deterministic_forecast_anchors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM readiness_state").fetchone()[0] == 0
+
+
+def test_materializer_blocks_day0_without_observed_extreme_merge_before_writing_shadow_rows() -> None:
+    conn = _conn()
+
+    result = materialize_replacement_forecast_shadow(
+        conn,
+        _request(
+            computed_at=_dt(16, 30),
+            expires_at=datetime(2026, 6, 7, 1, tzinfo=UTC),
+        ),
+    )
+
+    assert result.ok is False
+    assert result.reason_codes == ("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED",)
     assert result.posterior_id is None
     assert result.anchor_id is None
     assert result.readiness_id is None

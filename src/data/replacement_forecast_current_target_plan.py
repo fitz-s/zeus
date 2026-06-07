@@ -201,6 +201,22 @@ def build_replacement_forecast_current_target_plan(
             required.add("raw_forecast_artifacts")
         if not required.issubset(tables):
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_REQUIRED_TABLE_MISSING")
+        try:
+            market_event_count = int(conn.execute("SELECT COUNT(*) FROM market_events").fetchone()[0])
+        except sqlite3.Error:
+            market_event_count = -1
+        if market_event_count == 0:
+            return ReplacementForecastCurrentTargetPlan(
+                status="NO_CURRENT_TARGETS",
+                reason_codes=("REPLACEMENT_CURRENT_TARGET_PLAN_NO_CURRENT_TARGETS",),
+                target_count=0,
+                covered_count=0,
+                missing_coverage_count=0,
+                can_seed_count=0,
+                missing_aifs_manifest_count=0,
+                missing_openmeteo_manifest_count=0,
+                rows=(),
+            )
         if not {"city", "target_date", "temperature_metric", "token_id", "range_label"}.issubset(_columns(conn, "market_events")):
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_MARKET_EVENTS_SCHEMA_MISSING")
         posterior_columns = _columns(conn, "forecast_posteriors")

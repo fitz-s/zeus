@@ -30,6 +30,7 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import OpenMeteoIfs9Precision
 from src.data.replacement_forecast_bundle_reader import HIGH_DATA_VERSION, LOW_DATA_VERSION
 from src.data.replacement_forecast_readiness import (
     PRODUCT_ID,
+    READY_STATUS,
     SOURCE_ID,
     STRATEGY_KEY,
     ReplacementForecastDependency,
@@ -82,7 +83,7 @@ class ReplacementForecastMaterializeResult:
 
     @property
     def ok(self) -> bool:
-        return self.status == "SHADOW_ONLY"
+        return self.status == READY_STATUS
 
 
 def _to_utc(value: datetime | str, *, field_name: str) -> datetime:
@@ -132,6 +133,49 @@ def _json_hash(value: Mapping[str, object] | Sequence[object]) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
+def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
+    """Keep old PR399 shadow DBs fail-closed instead of returning stale rows."""
+
+    anchor_columns = _table_columns(conn, "deterministic_forecast_anchors")
+    if anchor_columns and "anchor_identity_hash" not in anchor_columns:
+        conn.execute("ALTER TABLE deterministic_forecast_anchors ADD COLUMN anchor_identity_hash TEXT")
+    posterior_columns = _table_columns(conn, "forecast_posteriors")
+    for column in (
+        "q_ucb_json",
+        "family_id",
+        "bin_topology_hash",
+        "dependency_hash",
+        "posterior_config_hash",
+        "posterior_identity_hash",
+    ):
+        if posterior_columns and column not in posterior_columns:
+            conn.execute(f"ALTER TABLE forecast_posteriors ADD COLUMN {column} TEXT")
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_deterministic_forecast_anchors_identity_hash
+            ON deterministic_forecast_anchors(anchor_identity_hash)
+            WHERE anchor_identity_hash IS NOT NULL
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
+            ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
+            ON forecast_posteriors(posterior_identity_hash)
+            WHERE posterior_identity_hash IS NOT NULL
+        """
+    )
+
+
 def _bin_topology_payload(bins: Sequence[AifsTemperatureBin], *, settlement_step_c: float) -> list[dict[str, object]]:
     return [
         {
@@ -178,6 +222,8 @@ def _precision_guard_block_reason(
 def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> tuple[str, ...]:
     metric = _metric(request.temperature_metric)
     computed_at = _to_utc(request.computed_at, field_name="computed_at")
+    request_source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time")
+    target_date_value = date.fromisoformat(_date_text(request.target_date))
     reasons: list[str] = []
     dependency_times = (
         ("baseline_b0", _to_utc(request.baseline_source_available_at, field_name="baseline_source_available_at")),
@@ -195,13 +241,28 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_DATA_VERSION_MISMATCH")
     if len(request.aifs_extraction.members) != EXPECTED_AIFS_MEMBER_COUNT:
         reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_MEMBER_COVERAGE_INCOMPLETE")
+    if not request.aifs_extraction.identity_decision_valid:
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_GRIB_IDENTITY_INVALID")
+    if request.aifs_extraction.identity_reason_codes != ("AIFS_GRIB_IDENTITY_VALID",):
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_GRIB_IDENTITY_REASON_MISMATCH")
+    if not str(request.aifs_extraction.artifact_id or "").strip():
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISSING")
+    elif request.aifs_artifact_id is not None and int(request.aifs_extraction.artifact_id) != int(request.aifs_artifact_id):
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISMATCH")
+    if not str(request.aifs_extraction.raw_sha256 or "").strip():
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_RAW_SHA256_MISSING")
+    if request.aifs_extraction.source_product_id != AIFS_PRODUCT_ID:
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_PRODUCT_ID_MISMATCH")
     if request.aifs_extraction.source_cycle_time is None:
         reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISSING")
     else:
+        aifs_source_cycle_time = _to_utc(request.aifs_extraction.source_cycle_time, field_name="aifs_source_cycle_time")
+        if aifs_source_cycle_time != request_source_cycle_time:
+            reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISMATCH")
         expected_steps = expected_aifs_sample_steps_for_local_day(
             source_cycle_time=request.aifs_extraction.source_cycle_time,
             city_timezone=request.city_timezone,
-            target_local_date=date.fromisoformat(_date_text(request.target_date)),
+            target_local_date=target_date_value,
         )
         for member in request.aifs_extraction.members:
             observed_steps = tuple(
@@ -213,16 +274,50 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
             if observed_steps != expected_steps:
                 reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_STEP_COVERAGE_INCOMPLETE")
                 break
+    if request.openmeteo_anchor.source_cycle_time is None:
+        reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISSING")
+    else:
+        openmeteo_source_cycle_time = _to_utc(request.openmeteo_anchor.source_cycle_time, field_name="openmeteo_source_cycle_time")
+        if openmeteo_source_cycle_time != request_source_cycle_time:
+            reasons.append("REPLACEMENT_MATERIALIZATION_OM9_SOURCE_CYCLE_TIME_MISMATCH")
     expected_om9_count = _expected_om9_hourly_count(
         city_timezone=request.city_timezone,
         target_date=request.target_date,
     )
     if request.openmeteo_anchor.sample_count != expected_om9_count:
         reasons.append("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE")
+    target_window = compute_target_local_day_window_utc(
+        city_timezone=request.city_timezone,
+        target_local_date=target_date_value,
+    )
+    if target_window.start_utc <= computed_at < target_window.end_utc:
+        reasons.append("REPLACEMENT_MATERIALIZATION_DAY0_OBSERVED_EXTREME_REQUIRED")
     if any(source_available_at > computed_at for _, source_available_at in dependency_times):
         reasons.append("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT")
     if request.expires_at is not None and _to_utc(request.expires_at, field_name="expires_at") <= computed_at:
         reasons.append("REPLACEMENT_MATERIALIZATION_EXPIRY_NOT_AFTER_COMPUTED_AT")
+    return tuple(reasons)
+
+
+def _artifact_identity_block_reasons(conn: sqlite3.Connection, request: ReplacementForecastMaterializeRequest) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if request.aifs_extraction.artifact_id is None:
+        return ("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ID_MISSING",)
+    row = conn.execute(
+        """
+        SELECT artifact_id, product_id, sha256
+        FROM raw_forecast_artifacts
+        WHERE artifact_id = ?
+        """,
+        (int(request.aifs_extraction.artifact_id),),
+    ).fetchone()
+    if row is None:
+        return ("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_ROW_MISSING",)
+    row_map = dict(row)
+    if str(row_map.get("product_id") or "") != request.aifs_extraction.source_product_id:
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_PRODUCT_MISMATCH")
+    if str(row_map.get("sha256") or "") != str(request.aifs_extraction.raw_sha256 or ""):
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_ARTIFACT_SHA256_MISMATCH")
     return tuple(reasons)
 
 
@@ -233,18 +328,44 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
     source_available_at = _to_utc(request.openmeteo_source_available_at, field_name="openmeteo_source_available_at").isoformat()
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     value_c = anchor.high_c if metric == "high" else anchor.low_c
+    contributing_times = [item.isoformat() for item in anchor.contributing_valid_times_utc]
+    provenance = {
+        "city_timezone": request.city_timezone,
+        "source_run_id": request.openmeteo_source_run_id,
+        "measurement_policy": anchor.measurement_policy,
+        "precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
+        "role": "soft_spatial_anchor",
+        "trade_authority_status": "SHADOW_ONLY",
+        "training_allowed": False,
+    }
+    anchor_identity_hash = _json_hash(
+        {
+            "source_id": ANCHOR_SOURCE_ID,
+            "product_id": ANCHOR_PRODUCT_ID,
+            "data_version": _anchor_data_version(metric),
+            "city": request.city,
+            "target_date": target_date,
+            "temperature_metric": metric,
+            "source_cycle_time": source_cycle_time,
+            "source_available_at": source_available_at,
+            "captured_at": computed_at,
+            "artifact_id": request.anchor_artifact_id,
+            "source_run_id": request.openmeteo_source_run_id,
+            "anchor_value_c": float(value_c),
+            "contributing_times": contributing_times,
+            "precision_metadata": provenance["precision_guard"],
+        }
+    )
     conn.execute(
         """
-        INSERT INTO deterministic_forecast_anchors (
+        INSERT OR IGNORE INTO deterministic_forecast_anchors (
             source_id, product_id, data_version, city, target_date,
             temperature_metric, anchor_value_c, source_cycle_time,
             source_available_at, captured_at, artifact_id, model, native_grid,
             delivery_grid_resolution, interpolation_method,
-            contributing_times_json, provenance_json,
+            contributing_times_json, anchor_identity_hash, provenance_json,
             trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source_id, product_id, data_version, city, target_date, temperature_metric, source_cycle_time)
-        DO NOTHING
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             ANCHOR_SOURCE_ID,
@@ -262,18 +383,9 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
             "openmeteo_single_runs_ecmwf_ifs_9km",
             "9km/0.1_degree",
             "openmeteo_api_point_interpolation",
-            _json([item.isoformat() for item in anchor.contributing_valid_times_utc]),
-            _json(
-                {
-                    "city_timezone": request.city_timezone,
-                    "source_run_id": request.openmeteo_source_run_id,
-                    "measurement_policy": anchor.measurement_policy,
-                    "precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
-                    "role": "soft_spatial_anchor",
-                    "trade_authority_status": "SHADOW_ONLY",
-                    "training_allowed": False,
-                }
-            ),
+            _json(contributing_times),
+            anchor_identity_hash,
+            _json(provenance),
             "SHADOW_ONLY",
             0,
         ),
@@ -281,11 +393,9 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
     row = conn.execute(
         """
         SELECT anchor_id FROM deterministic_forecast_anchors
-        WHERE source_id = ? AND product_id = ? AND data_version = ?
-          AND city = ? AND target_date = ? AND temperature_metric = ?
-          AND source_cycle_time = ?
+        WHERE anchor_identity_hash = ?
         """,
-        (ANCHOR_SOURCE_ID, ANCHOR_PRODUCT_ID, _anchor_data_version(metric), request.city, target_date, metric, source_cycle_time),
+        (anchor_identity_hash,),
     ).fetchone()
     if row is None:
         raise RuntimeError("replacement anchor materialization failed")
@@ -319,18 +429,86 @@ def _insert_posterior(
     q = {key: float(value) for key, value in result.posterior.probabilities.items()}
     bin_topology_payload = _bin_topology_payload(request.bins, settlement_step_c=float(request.settlement_step_c))
     bin_topology_hash = _json_hash(bin_topology_payload)
+    dependency_payload = {
+        "baseline_b0": request.baseline_source_run_id,
+        "aifs_sampled_2t": request.aifs_source_run_id,
+        "openmeteo_ifs9_anchor": request.openmeteo_source_run_id,
+    }
+    dependency_hash = _json_hash(dependency_payload)
+    posterior_config = {
+        "posterior_method": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        "anchor_weight": float(request.anchor_weight),
+        "anchor_sigma_c": float(request.anchor_sigma_c),
+        "settlement_step_c": float(request.settlement_step_c),
+    }
+    posterior_config_hash = _json_hash(posterior_config)
+    family_id = f"{request.city}:{target_date}:{metric}:{bin_topology_hash}"
+    provenance_payload = {
+        "anchor_weight": request.anchor_weight,
+        "anchor_sigma_c": request.anchor_sigma_c,
+        "anchor_value_c": result.anchor_value_c,
+        "aifs_artifact_id": request.aifs_artifact_id,
+        "aifs_identity": {
+            "identity_decision_valid": request.aifs_extraction.identity_decision_valid,
+            "identity_reason_codes": list(request.aifs_extraction.identity_reason_codes),
+            "identity_decision_hash": request.aifs_extraction.identity_decision_hash,
+            "member_ids_hash": request.aifs_extraction.member_ids_hash,
+            "step_hours_hash": request.aifs_extraction.step_hours_hash,
+            "artifact_id": request.aifs_extraction.artifact_id,
+            "raw_sha256": request.aifs_extraction.raw_sha256,
+            "source_product_id": request.aifs_extraction.source_product_id,
+        },
+        "openmeteo_anchor_artifact_id": request.anchor_artifact_id,
+        "openmeteo_precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
+        "aifs_probabilities": dict(result.aifs_probabilities.probabilities),
+        "aifs_member_count": len(result.aifs_probabilities.member_values_c),
+        "q_point_json_role": "shadow_point_probability_only",
+        "q_lcb_json_role": "absent_no_calibrated_lcb_available",
+        "q_ucb_json_role": "absent_no_calibrated_ucb_available",
+        "bin_topology": bin_topology_payload,
+        "bin_topology_hash": bin_topology_hash,
+        "dependency_hash": dependency_hash,
+        "posterior_config_hash": posterior_config_hash,
+        "family_id": family_id,
+        "posterior_authority_status": "SHADOW_ONLY",
+        "runtime_policy_status": "SHADOW_VETO_ONLY",
+        "trade_authority_status": "SHADOW_ONLY",
+        "training_allowed": False,
+    }
+    posterior_identity_hash = _json_hash(
+        {
+            "source_id": SOURCE_ID,
+            "product_id": PRODUCT_ID,
+            "data_version": data_version,
+            "city": request.city,
+            "target_date": target_date,
+            "temperature_metric": metric,
+            "source_cycle_time": source_cycle_time,
+            "source_available_at": available_at,
+            "computed_at": computed_at,
+            "q": q,
+            "q_lcb": None,
+            "q_ucb": None,
+            "dependency_hash": dependency_hash,
+            "bin_topology_hash": bin_topology_hash,
+            "posterior_config_hash": posterior_config_hash,
+            "anchor_id": anchor_id,
+            "aifs_artifact_id": request.aifs_artifact_id,
+            "anchor_artifact_id": request.anchor_artifact_id,
+        }
+    )
     conn.execute(
         """
-        INSERT INTO forecast_posteriors (
+        INSERT OR IGNORE INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, q_lcb_json, posterior_method,
+            computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
             aifs_source_run_id, openmeteo_anchor_id,
-            dependency_source_run_ids_json, provenance_json,
+            dependency_source_run_ids_json, family_id, bin_topology_hash,
+            dependency_hash, posterior_config_hash, posterior_identity_hash,
+            provenance_json,
             trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(source_id, product_id, data_version, city, target_date, temperature_metric, source_cycle_time)
-        DO NOTHING
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             SOURCE_ID,
@@ -344,46 +522,27 @@ def _insert_posterior(
             computed_at,
             _json(q),
             None,
+            None,
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             request.aifs_source_run_id,
             anchor_id,
-            _json(
-                {
-                    "baseline_b0": request.baseline_source_run_id,
-                    "aifs_sampled_2t": request.aifs_source_run_id,
-                    "openmeteo_ifs9_anchor": request.openmeteo_source_run_id,
-                }
-            ),
-            _json(
-                {
-                    "anchor_weight": request.anchor_weight,
-                    "anchor_sigma_c": request.anchor_sigma_c,
-                    "anchor_value_c": result.anchor_value_c,
-                    "aifs_artifact_id": request.aifs_artifact_id,
-                    "openmeteo_anchor_artifact_id": request.anchor_artifact_id,
-                    "openmeteo_precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
-                    "aifs_probabilities": dict(result.aifs_probabilities.probabilities),
-                    "aifs_member_count": len(result.aifs_probabilities.member_values_c),
-                    "q_point_json_role": "shadow_point_probability_only",
-                    "q_lcb_json_role": "absent_no_calibrated_lcb_available",
-                    "bin_topology": bin_topology_payload,
-                    "bin_topology_hash": bin_topology_hash,
-                    "trade_authority_status": "SHADOW_VETO_ONLY",
-                    "training_allowed": False,
-                }
-            ),
-            "SHADOW_VETO_ONLY",
+            _json(dependency_payload),
+            family_id,
+            bin_topology_hash,
+            dependency_hash,
+            posterior_config_hash,
+            posterior_identity_hash,
+            _json(provenance_payload),
+            "SHADOW_ONLY",
             0,
         ),
     )
     row = conn.execute(
         """
         SELECT posterior_id FROM forecast_posteriors
-        WHERE source_id = ? AND product_id = ? AND data_version = ?
-          AND city = ? AND target_date = ? AND temperature_metric = ?
-          AND source_cycle_time = ?
+        WHERE posterior_identity_hash = ?
         """,
-        (SOURCE_ID, PRODUCT_ID, data_version, request.city, target_date, metric, source_cycle_time),
+        (posterior_identity_hash,),
     ).fetchone()
     if row is None:
         raise RuntimeError("replacement posterior materialization failed")
@@ -459,11 +618,21 @@ def materialize_replacement_forecast_shadow(
     """Write anchor, posterior, and readiness rows for replacement shadow/veto."""
 
     metric = _metric(request.temperature_metric)
+    _ensure_replacement_identity_columns(conn)
     prewrite_reasons = _prewrite_block_reasons(request)
     if prewrite_reasons:
         return ReplacementForecastMaterializeResult(
             status="BLOCKED",
             reason_codes=prewrite_reasons,
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
+    artifact_reasons = _artifact_identity_block_reasons(conn, request)
+    if artifact_reasons:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=artifact_reasons,
             posterior_id=None,
             anchor_id=None,
             readiness_id=None,

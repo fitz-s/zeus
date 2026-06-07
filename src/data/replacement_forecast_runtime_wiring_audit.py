@@ -10,7 +10,6 @@ from typing import Mapping
 from src.data.replacement_forecast_live_dry_run import (
     ReplacementForecastLiveDryRunInput,
     build_replacement_forecast_live_dry_run_report,
-    _configured_promotion_evidence,
 )
 from src.data.replacement_forecast_live_switch_surface import REFIT_HANDOFF_FILE
 from src.data.replacement_forecast_config_switch import TARGET_SHADOW_MATERIALIZATION_CONFIG
@@ -253,12 +252,7 @@ def build_replacement_forecast_runtime_wiring_audit(
     repo = Path(repo_root)
     settings_payload = _settings_payload(root)
     flags = _feature_flags(settings_payload, assume_shadow_veto=assume_shadow_veto)
-    promotion_evidence, capital_objective_evidence, _promotion_evidence_status = _configured_promotion_evidence(root)
-    policy = resolve_replacement_forecast_runtime_policy(
-        flags,
-        promotion_evidence=promotion_evidence,
-        capital_objective_evidence=capital_objective_evidence,
-    )
+    policy = resolve_replacement_forecast_runtime_policy(flags)
     dry_run = build_replacement_forecast_live_dry_run_report(
         ReplacementForecastLiveDryRunInput(
             root=root,
@@ -278,10 +272,6 @@ def build_replacement_forecast_runtime_wiring_audit(
         flags.get(key) is False
         for key in (TRADE_AUTHORITY_FLAG, KELLY_INCREASE_FLAG, DIRECTION_FLIP_FLAG)
     )
-    dangerous_authority_flags_false = all(
-        flags.get(key) is False
-        for key in (KELLY_INCREASE_FLAG, DIRECTION_FLIP_FLAG)
-    )
     refit_status = _refit_status(root, settings_payload, assume_refit_handoff=assume_refit_handoff)
     missing_shadow_config = _missing_shadow_materialization_config(settings_payload, assume_shadow_veto=assume_shadow_veto)
     shadow_config_status = "READY" if not missing_shadow_config else "MISSING"
@@ -295,8 +285,6 @@ def build_replacement_forecast_runtime_wiring_audit(
     if policy.status not in {SHADOW_VETO_ONLY_STATUS, LIVE_AUTHORITY_STATUS}:
         reasons.append("REPLACEMENT_RUNTIME_WIRING_POLICY_NOT_SWITCHABLE")
         reasons.extend(policy.reason_codes)
-    if not dangerous_authority_flags_false:
-        reasons.append("REPLACEMENT_RUNTIME_WIRING_DANGEROUS_AUTHORITY_FLAGS_NOT_FALSE")
     if not dry_run.ok:
         reasons.append("REPLACEMENT_RUNTIME_WIRING_DRY_RUN_NOT_READY")
         reasons.extend(dry_run.reason_codes)

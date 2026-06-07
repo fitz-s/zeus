@@ -102,8 +102,6 @@ def evaluate_replacement_forecast_switch_decision(
     policy = request.runtime_policy
     live_switch = request.live_switch_report
     readiness = request.readiness
-    refit = request.refit_decision
-    capital_objective = request.capital_objective_evidence
 
     if policy.status == SAFE_DEFAULT_STATUS:
         return ReplacementForecastSwitchDecision(
@@ -132,21 +130,6 @@ def evaluate_replacement_forecast_switch_decision(
         reasons.append("REPLACEMENT_SWITCH_READINESS_MISSING")
     elif readiness.status != READY_STATUS:
         reasons.extend(readiness.reason_codes)
-    if policy.status == LIVE_AUTHORITY_STATUS and refit is None:
-        reasons.append("REPLACEMENT_SWITCH_REFIT_DECISION_MISSING")
-    if policy.status == LIVE_AUTHORITY_STATUS and refit is not None and not refit.product_specific_training_allowed:
-        reasons.extend(refit.reason_codes)
-    if policy.status != LIVE_AUTHORITY_STATUS and refit is not None and refit.live_promotion_allowed:
-        reasons.append("REPLACEMENT_SWITCH_REFIT_PROMOTION_NOT_ADMITTED")
-    capital_objective_allowed = (
-        capital_objective is not None
-        and capital_objective.capital_objective_allowed()
-        and refit is not None
-        and refit.product_specific_training_allowed
-    )
-    if policy.status == LIVE_AUTHORITY_STATUS and (refit is None or not (refit.live_promotion_allowed or capital_objective_allowed)):
-        reasons.append("REPLACEMENT_SWITCH_REFIT_LIVE_PROMOTION_REQUIRED")
-
     if reasons:
         return ReplacementForecastSwitchDecision(
             status=SWITCH_BLOCKED,

@@ -98,7 +98,12 @@ def test_replacement_readiness_is_shadow_only_when_all_dependencies_are_availabl
     assert decision.dependency_json["missing_roles"] == []
     assert decision.dependency_json["unavailable_roles"] == []
     assert decision.dependency_json["identity_mismatch_roles"] == []
-    assert decision.provenance_json["trade_authority_status"] == "SHADOW_VETO_ONLY"
+    assert decision.dependency_json["product_id_authority_by_role"]["baseline_b0"] == "derived_from_current_registry_data_version"
+    assert decision.dependency_json["product_id_authority_by_role"]["aifs_sampled_2t"] == "declared_replacement_product_contract"
+    assert decision.provenance_json["readiness_status"] == READY_STATUS
+    assert decision.provenance_json["posterior_authority_status"] == "SHADOW_ONLY"
+    assert decision.provenance_json["runtime_policy_status"] == "SHADOW_VETO_ONLY"
+    assert decision.provenance_json["trade_authority_status"] == "SHADOW_ONLY"
     assert decision.provenance_json["training_allowed"] is False
 
 

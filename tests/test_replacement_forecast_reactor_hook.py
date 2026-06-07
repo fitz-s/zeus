@@ -52,6 +52,7 @@ from src.engine.event_reactor_adapter import (
 from src.engine.replacement_forecast_reactor_hook import ReplacementForecastCandidateView, apply_replacement_forecast_reactor_hook
 from src.events.opportunity_event import OpportunityEvent
 from src.state.schema.v2_schema import apply_canonical_schema
+from src.types.market import Bin
 
 
 UTC = timezone.utc
@@ -72,6 +73,10 @@ def _flags(*, shadow: bool = False, veto: bool = False, trade: bool = False, kel
 
 
 def _bundle() -> ReplacementForecastPosteriorBundle:
+    bin_topology = [
+        {"bin_id": "cool", "lower_c": None, "upper_c": 20.0, "center_c": 19.0},
+        {"bin_id": "warm", "lower_c": 21.0, "upper_c": 21.0, "center_c": 21.0},
+    ]
     return ReplacementForecastPosteriorBundle(
         posterior_id=77,
         city="Shanghai",
@@ -82,14 +87,17 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         data_version=HIGH_DATA_VERSION,
         q={"cool": 0.25, "warm": 0.75},
         q_lcb={"cool": 0.20, "warm": 0.65},
+        q_ucb=None,
+        bin_topology_hash="test-topology",
+        family_id="test-family",
         posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         source_cycle_time="2026-06-06T00:00:00+00:00",
         source_available_at="2026-06-06T03:00:00+00:00",
         computed_at="2026-06-06T03:05:00+00:00",
         baseline_source_run_id="b0-run",
         dependency_json={"source_run_ids": ["b0-run", "aifs-run", "om9-run"]},
-        provenance_json={"test": True, "bin_topology_hash": "test-topology"},
-        trade_authority_status="SHADOW_VETO_ONLY",
+        provenance_json={"test": True, "bin_topology_hash": "test-topology", "bin_topology": bin_topology},
+        trade_authority_status="SHADOW_ONLY",
     )
 
 
@@ -105,6 +113,9 @@ def _bundle_with_directional_no_lcb() -> ReplacementForecastPosteriorBundle:
         data_version=base.data_version,
         q=base.q,
         q_lcb={**dict(base.q_lcb or {}), "buy_no:warm": 0.18},
+        q_ucb=base.q_ucb,
+        bin_topology_hash=base.bin_topology_hash,
+        family_id=base.family_id,
         posterior_method=base.posterior_method,
         source_cycle_time=base.source_cycle_time,
         source_available_at=base.source_available_at,
@@ -380,7 +391,7 @@ def _event() -> OpportunityEvent:
         idempotency_key="idem-1",
         priority=0,
         expires_at=None,
-        payload_json=json.dumps({"city": "Shanghai", "target_date": "2026-06-07", "metric": "high"}),
+        payload_json=json.dumps({"city": "Shanghai", "target_date": "2026-06-07", "metric": "high", "bin_topology_hash": "test-topology"}),
         schema_version=1,
         created_at=_dt(4).isoformat(),
     )
@@ -393,7 +404,8 @@ def _proof(*, direction: str = "buy_yes:warm", q_lcb: float = 0.62):
             target_date="2026-06-07",
             metric="high",
             condition_id="cond-1",
-            bin=SimpleNamespace(label="warm"),
+            bin_topology_hash="test-topology",
+            bin=Bin(low=21.0, high=21.0, unit="C", label="mismatched display label"),
         ),
         token_id="token-yes",
         direction=direction,
@@ -422,6 +434,98 @@ def test_hook_factory_caps_replacement_q_lcb_only_before_live_authority() -> Non
     assert shadow_view.candidate_q_lcb == pytest.approx(0.62)
     assert live_view.candidate_q_posterior == pytest.approx(0.75)
     assert live_view.candidate_q_lcb == pytest.approx(0.65)
+
+
+def test_hook_factory_q_lookup_uses_canonical_bin_bounds_not_direction_suffix_or_label() -> None:
+    from src.engine.replacement_forecast_hook_factory import _candidate_view_from_proof
+
+    view = _candidate_view_from_proof(
+        _proof(direction="buy_yes:cool", q_lcb=0.62),
+        _dt(4),
+        replacement_bundle=_bundle(),
+        cap_replacement_q_lcb_to_baseline=False,
+    )
+
+    assert view.candidate_q_posterior == pytest.approx(0.75)
+    assert view.candidate_q_lcb == pytest.approx(0.65)
+
+
+def test_hook_factory_q_lookup_without_matching_topology_preserves_baseline() -> None:
+    from src.engine.replacement_forecast_hook_factory import _candidate_view_from_proof
+
+    bundle = ReplacementForecastPosteriorBundle(
+        **{
+            **_bundle().__dict__,
+            "provenance_json": {
+                "bin_topology_hash": "test-topology",
+                "bin_topology": [
+                    {"bin_id": "cool", "lower_c": None, "upper_c": 20.0, "center_c": 19.0},
+                ],
+            },
+        }
+    )
+    view = _candidate_view_from_proof(
+        _proof(direction="buy_yes:warm", q_lcb=0.62),
+        _dt(4),
+        replacement_bundle=bundle,
+        cap_replacement_q_lcb_to_baseline=False,
+    )
+
+    assert view.candidate_q_posterior == pytest.approx(0.70)
+    assert view.candidate_q_lcb == pytest.approx(0.62)
+
+
+def test_h3_shadow_veto_requires_real_lcb_or_direction_disagreement() -> None:
+    from src.engine.replacement_forecast_hook_factory import _candidate_view_from_proof
+
+    bundle = ReplacementForecastPosteriorBundle(
+        **{
+            **_bundle().__dict__,
+            "q": {"cool": 0.25, "warm": 0.75},
+            "q_lcb": None,
+            "q_ucb": None,
+        }
+    )
+    view = _candidate_view_from_proof(
+        _proof(direction="buy_yes:warm", q_lcb=0.62),
+        _dt(4),
+        replacement_bundle=bundle,
+    )
+
+    assert view.candidate_direction == "buy_yes:warm"
+    assert view.candidate_q_lcb == pytest.approx(0.62)
+
+
+def test_h3_materialized_posterior_can_trigger_expected_veto_when_h3_disagrees() -> None:
+    policy = resolve_replacement_forecast_runtime_policy(_flags(shadow=True, veto=True))
+    bundle = ReplacementForecastPosteriorBundle(
+        **{
+            **_bundle().__dict__,
+            "q": {"cool": 0.90, "warm": 0.10},
+            "q_lcb": None,
+            "q_ucb": None,
+        }
+    )
+    from src.engine.replacement_forecast_hook_factory import _candidate_view_from_proof
+
+    view = _candidate_view_from_proof(
+        _proof(direction="buy_yes:warm", q_lcb=0.62),
+        _dt(4),
+        replacement_bundle=bundle,
+    )
+    result = apply_replacement_forecast_reactor_hook(
+        policy=policy,
+        switch_decision=_switch_decision(policy),
+        candidate=view,
+        replacement_bundle=bundle,
+        readiness=_readiness(),
+    )
+
+    assert result.status == "SHADOW_VETO_ONLY"
+    assert result.veto_decision is not None
+    assert result.veto_decision.veto is True
+    assert "SOFT_ANCHOR_DIRECTION_DISAGREEMENT" in result.reason_codes
+    assert result.effective_direction == "buy_yes:warm"
 
 
 def _create_minimal_readiness_state(conn: sqlite3.Connection) -> None:
@@ -464,10 +568,12 @@ def _forecast_conn_with_replacement_rows(*, dependency_source_run_ids: dict[str,
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, q_lcb_json, posterior_method,
-            dependency_source_run_ids_json, provenance_json,
+            computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
+            dependency_source_run_ids_json, family_id, bin_topology_hash,
+            dependency_hash, posterior_config_hash, posterior_identity_hash,
+            provenance_json,
             trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             SOURCE_ID,
@@ -481,6 +587,7 @@ def _forecast_conn_with_replacement_rows(*, dependency_source_run_ids: dict[str,
             _dt(3, 5).isoformat(),
             json.dumps({"cool": 0.25, "warm": 0.75}),
             json.dumps({"cool": 0.20, "warm": 0.55}),
+            None,
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             json.dumps(
                 dependency_source_run_ids
@@ -490,8 +597,22 @@ def _forecast_conn_with_replacement_rows(*, dependency_source_run_ids: dict[str,
                     "openmeteo_ifs9_anchor": "om9-run",
                 }
             ),
-            json.dumps({"factory_test": True, "bin_topology_hash": "test-topology"}),
-            "SHADOW_VETO_ONLY",
+            "reader-family",
+            "test-topology",
+            "dependency-hash",
+            "posterior-config-hash",
+            "posterior-identity-factory-test",
+            json.dumps(
+                {
+                    "factory_test": True,
+                    "bin_topology_hash": "test-topology",
+                    "bin_topology": [
+                        {"bin_id": "cool", "lower_c": None, "upper_c": 20.0, "center_c": 19.0},
+                        {"bin_id": "warm", "lower_c": 21.0, "upper_c": 21.0, "center_c": 21.0},
+                    ],
+                }
+            ),
+            "SHADOW_ONLY",
             0,
         ),
     )
@@ -841,7 +962,7 @@ def test_event_adapter_builds_replacement_hook_from_runtime_flags_without_manual
     assert result.effective_q_lcb == pytest.approx(0.55)
 
 
-def test_db_backed_replacement_hook_blocks_capital_objective_live_authority_in_pr399() -> None:
+def test_db_backed_replacement_hook_allows_direct_capital_objective_live_authority() -> None:
     forecast_conn = _forecast_conn_with_replacement_rows()
     trade_conn = _trade_conn_with_required_tables()
     hook = build_replacement_forecast_event_hook(
@@ -861,13 +982,13 @@ def test_db_backed_replacement_hook_blocks_capital_objective_live_authority_in_p
     result = hook(_proof(q_lcb=0.62), _event(), _dt(4))
 
     assert result is not None
-    assert result.status == "SHADOW_ONLY"
+    assert result.status == "LIVE_AUTHORITY"
     assert result.effective_direction == "buy_yes:warm"
-    assert result.effective_q_lcb == pytest.approx(0.62)
+    assert result.effective_q_lcb == pytest.approx(0.55)
     assert result.effective_kelly_fraction == pytest.approx(0.0)
 
 
-def test_db_backed_live_authority_does_not_use_readiness_baseline_for_initiation_in_pr399() -> None:
+def test_db_backed_live_authority_uses_replacement_bundle_without_baseline_provider() -> None:
     forecast_conn = _forecast_conn_with_replacement_rows()
     trade_conn = _trade_conn_with_required_tables()
     hook = build_replacement_forecast_event_hook(
@@ -887,8 +1008,8 @@ def test_db_backed_live_authority_does_not_use_readiness_baseline_for_initiation
     result = hook(_proof(q_lcb=0.62), _event(), _dt(4))
 
     assert result is not None
-    assert result.status == "SHADOW_ONLY"
-    assert result.effective_q_lcb == pytest.approx(0.62)
+    assert result.status == "LIVE_AUTHORITY"
+    assert result.effective_q_lcb == pytest.approx(0.55)
     assert result.receipt_provenance is None
 
 
@@ -1029,9 +1150,9 @@ def test_replacement_promotion_evidence_is_read_from_settings_payload(monkeypatc
     )
 
     assert evidence == _promotion_evidence()
-    assert policy.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in policy.reason_codes
-    assert policy.can_initiate_trade is False
+    assert policy.status == "LIVE_AUTHORITY"
+    assert policy.reason_codes == ("REPLACEMENT_NEW_DATA_LIVE_AUTHORITY",)
+    assert policy.can_initiate_trade is True
     assert policy.can_increase_kelly is False
     assert policy.can_flip_direction is False
 
@@ -1062,9 +1183,9 @@ def test_replacement_capital_objective_evidence_is_read_from_settings_payload(mo
     )
 
     assert evidence == _capital_objective_evidence()
-    assert policy.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in policy.reason_codes
-    assert policy.can_initiate_trade is False
+    assert policy.status == "LIVE_AUTHORITY"
+    assert policy.reason_codes == ("REPLACEMENT_NEW_DATA_LIVE_AUTHORITY",)
+    assert policy.can_initiate_trade is True
     assert policy.can_increase_kelly is False
     assert policy.can_flip_direction is False
 
@@ -1132,7 +1253,7 @@ def test_reactor_hook_blocks_stale_switch_decision_before_veto_logic() -> None:
     assert result.as_receipt_tag() is None
 
 
-def test_reactor_hook_live_authority_is_blocked_in_pr399() -> None:
+def test_reactor_hook_live_authority_uses_replacement_effective_values() -> None:
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
         promotion_evidence=_promotion_evidence(),
@@ -1147,17 +1268,17 @@ def test_reactor_hook_live_authority_is_blocked_in_pr399() -> None:
         readiness=_readiness(),
     )
 
-    assert result.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in result.reason_codes
+    assert result.status == "LIVE_AUTHORITY"
+    assert result.reason_codes == ("REPLACEMENT_NEW_DATA_LIVE_AUTHORITY",)
     assert result.effective_direction == "buy_yes:warm"
-    assert result.effective_q_posterior == pytest.approx(0.7)
-    assert result.effective_q_lcb == pytest.approx(0.62)
+    assert result.effective_q_posterior == pytest.approx(0.75)
+    assert result.effective_q_lcb == pytest.approx(0.95)
     assert result.effective_kelly_fraction == pytest.approx(0.04)
     receipt_tag = result.as_receipt_tag()
     assert receipt_tag is None
 
 
-def test_reactor_hook_live_authority_blocks_unauthorized_kelly_increase_and_direction_flip() -> None:
+def test_reactor_hook_live_authority_allows_replacement_kelly_and_direction() -> None:
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
         promotion_evidence=_promotion_evidence(),
@@ -1178,7 +1299,7 @@ def test_reactor_hook_live_authority_blocks_unauthorized_kelly_increase_and_dire
         readiness=_readiness(),
     )
 
-    assert kelly.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in kelly.reason_codes
-    assert flip.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in flip.reason_codes
+    assert kelly.status == "LIVE_AUTHORITY"
+    assert kelly.effective_kelly_fraction == pytest.approx(0.20)
+    assert flip.status == "LIVE_AUTHORITY"
+    assert flip.effective_direction == "buy_yes:cool"

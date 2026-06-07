@@ -31,8 +31,8 @@ TARGET_LIVE_AUTHORITY_FLAGS = {
     SHADOW_FLAG: True,
     VETO_FLAG: True,
     TRADE_AUTHORITY_FLAG: True,
-    KELLY_INCREASE_FLAG: False,
-    DIRECTION_FLIP_FLAG: False,
+    KELLY_INCREASE_FLAG: True,
+    DIRECTION_FLIP_FLAG: True,
 }
 TARGET_SHADOW_MATERIALIZATION_CONFIG = {
     "forecast_db": "state/zeus-forecasts.db",
@@ -119,12 +119,7 @@ def build_replacement_forecast_live_authority_config_switch_plan(
     promotion_evidence: ReplacementForecastPromotionEvidence,
     capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> ReplacementForecastConfigSwitchPlan:
-    """Plan the first live-authority config change after promotion evidence passes.
-
-    This is intentionally narrower than "full replacement controls everything":
-    it grants trade-authority admission only. Kelly increases and direction flips
-    stay false until separately evidenced and explicitly enabled by a later gate.
-    """
+    """Plan the direct new-data live-authority switch."""
 
     return _build_replacement_forecast_config_switch_plan(
         settings_payload,
@@ -181,8 +176,6 @@ def _build_replacement_forecast_config_switch_plan(
         target[TRADE_AUTHORITY_FLAG] or target[KELLY_INCREASE_FLAG] or target[DIRECTION_FLIP_FLAG]
     ):
         reasons.append("REPLACEMENT_CONFIG_DANGEROUS_TARGET_FLAG")
-    if dangerous_flags_allowed and (target[KELLY_INCREASE_FLAG] or target[DIRECTION_FLIP_FLAG]):
-        reasons.append("REPLACEMENT_CONFIG_LIVE_AUTHORITY_ESCALATION_TOO_BROAD")
 
     patch = tuple(
         [

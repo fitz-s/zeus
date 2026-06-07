@@ -574,7 +574,7 @@ def is_replacement_forecast_raw_ensemble_data_version(data_version: str | None) 
 def select_empirical_replacement_strategy(
     evidence: list[ForecastReplacementEvidence],
     *,
-    min_settled_decisions: int = 200,
+    min_settled_decisions: int = 250,
     min_q_lcb_coverage: float = 0.95,
 ) -> ForecastReplacementSelection:
     """Choose the best replacement candidate from settled evidence.

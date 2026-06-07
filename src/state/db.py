@@ -2017,7 +2017,7 @@ def init_schema(
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -3387,7 +3387,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,

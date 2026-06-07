@@ -250,26 +250,24 @@ def test_switch_decision_blocks_not_ready_dependencies() -> None:
     assert "REPLACEMENT_DEPENDENCY_AFTER_DECISION_TIME" in decision.reason_codes
 
 
-def test_switch_decision_blocks_refit_promotion_without_live_policy() -> None:
+def test_switch_decision_ignores_refit_promotion_without_live_policy() -> None:
     refit_promotion = _decision(refit=_refit(live_promotion=True))
 
-    assert refit_promotion.status == "BLOCKED"
-    assert "REPLACEMENT_SWITCH_REFIT_PROMOTION_NOT_ADMITTED" in refit_promotion.reason_codes
+    assert refit_promotion.status == "SHADOW_VETO_ONLY"
+    assert refit_promotion.can_initiate_trade is False
 
 
-def test_switch_decision_blocks_live_authority_in_pr399_even_with_refit_promotion() -> None:
+def test_switch_decision_admits_direct_new_data_live_authority() -> None:
     policy = _policy(trade=True)
     missing_refit_promotion = _decision(policy=policy, live_switch=_live_switch(policy))
     live_authority = _decision(policy=policy, live_switch=_live_switch(policy), refit=_refit(live_promotion=True))
 
-    assert missing_refit_promotion.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in missing_refit_promotion.reason_codes
-    assert live_authority.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in live_authority.reason_codes
-    assert live_authority.can_read_shadow_posterior is False
-    assert live_authority.can_apply_reactor_hook is False
-    assert live_authority.can_apply_veto is False
-    assert live_authority.can_initiate_trade is False
+    assert missing_refit_promotion.status == "LIVE_AUTHORITY"
+    assert live_authority.status == "LIVE_AUTHORITY"
+    assert live_authority.can_read_shadow_posterior is True
+    assert live_authority.can_apply_reactor_hook is True
+    assert live_authority.can_apply_veto is True
+    assert live_authority.can_initiate_trade is True
     assert live_authority.can_increase_kelly is False
     assert live_authority.can_flip_direction is False
 

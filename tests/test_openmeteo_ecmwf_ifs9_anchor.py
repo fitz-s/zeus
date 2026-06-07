@@ -151,8 +151,11 @@ def test_anchor_artifact_manifest_preserves_run_pinned_request_and_metric_identi
     assert high_manifest.request_url == SINGLE_RUNS_FORECAST_URL
     assert high_manifest.request_params["run"] == "2026-06-06T00:00"
     assert high_manifest.request_params["models"] == MODEL
+    assert high_manifest.source_available_at == datetime(2026, 6, 6, 8, tzinfo=timezone.utc)
     assert high_manifest.product_metadata["metric"] == "high"
     assert high_manifest.product_metadata["generationtime_ms"] == 1.23
+    assert high_manifest.product_metadata["requested_source_available_at"] == "2026-06-06T07:00:00+00:00"
+    assert high_manifest.product_metadata["source_available_at_authority"] == "captured_at_no_signed_openmeteo_generation_time"
     assert "single-runs-api.open-meteo.com" in str(high_manifest.product_metadata["openmeteo_single_runs_url"])
     high_manifest.verify_artifact()
 
@@ -176,14 +179,15 @@ def test_anchor_artifact_manifest_rejects_bad_metric_or_pre_available_capture(tm
             captured_at=datetime(2026, 6, 6, 8, tzinfo=timezone.utc),
         )
 
-    with pytest.raises(ValueError, match="captured_at cannot precede source_available_at"):
-        build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
-            artifact,
-            request=request,
-            metric="high",
-            source_available_at=datetime(2026, 6, 6, 8, tzinfo=timezone.utc),
-            captured_at=datetime(2026, 6, 6, 7, tzinfo=timezone.utc),
-        )
+    manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
+        artifact,
+        request=request,
+        metric="high",
+        source_available_at=datetime(2026, 6, 6, 8, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 6, 6, 7, tzinfo=timezone.utc),
+    )
+    assert manifest.source_available_at == datetime(2026, 6, 6, 7, tzinfo=timezone.utc)
+    assert manifest.product_metadata["requested_source_available_at_role"] == "diagnostic_not_authority"
 
 
 def test_anchor_response_extracts_localday_high_low_from_hourly_json() -> None:

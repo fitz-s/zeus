@@ -25,13 +25,16 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         data_version="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1",
         q={"cold": 0.2, "warm": 0.8},
         q_lcb={"cold": 0.1, "warm": 0.7},
+        q_ucb=None,
+        bin_topology_hash="test-topology",
+        family_id="test-family",
         posterior_method="openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
         source_cycle_time="2026-06-06T00:00:00+00:00",
         source_available_at="2026-06-06T03:00:00+00:00",
         computed_at="2026-06-06T03:05:00+00:00",
         baseline_source_run_id="b0-run",
         dependency_json={"source_run_ids": ["b0-run", "aifs-run", "om9-run"]},
-        provenance_json={"reader_test": True},
+        provenance_json={"reader_test": True, "bin_topology_hash": "test-topology"},
         trade_authority_status="SHADOW_VETO_ONLY",
     )
 

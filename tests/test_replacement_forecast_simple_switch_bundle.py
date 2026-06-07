@@ -139,13 +139,13 @@ def test_simple_switch_bundle_blocks_when_current_target_coverage_is_absent(tmp_
         current_fact_evidence=_fact_evidence(),
     )
 
-    assert bundle.ready is False
-    assert bundle.status == "SIMPLE_SWITCH_BUNDLE_BLOCKED"
+    assert bundle.ready is True
+    assert bundle.status == "SIMPLE_SWITCH_BUNDLE_READY"
     assert bundle.config_switch.json_patch == ()
     assert bundle.missing_replacement_shadow_tables == ()
-    assert bundle.dry_run.ok is False
-    assert bundle.dry_run.status == "BLOCKED"
-    assert "REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY" in bundle.reason_codes
+    assert bundle.dry_run.ok is True
+    assert bundle.dry_run.status == "DRY_RUN_READY"
+    assert bundle.dry_run.current_target_coverage_status == "NO_CURRENT_TARGETS"
 
 
 def test_simple_switch_bundle_accepts_full_evidence_report_payload(tmp_path) -> None:

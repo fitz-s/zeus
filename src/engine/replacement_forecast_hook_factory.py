@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import math
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
@@ -23,6 +25,7 @@ from src.data.replacement_forecast_readiness import (
     SOURCE_ID,
     STRATEGY_KEY,
     ReplacementForecastReadinessDecision,
+    normalize_replacement_readiness_status,
 )
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import (
@@ -123,7 +126,7 @@ def _latest_replacement_readiness(
     if row is None:
         return None
     row_map = dict(row)
-    status = str(row_map.get("status") or "BLOCKED")
+    status = normalize_replacement_readiness_status(str(row_map.get("status") or "BLOCKED"))
     return ReplacementForecastReadinessDecision(
         readiness_id=str(row_map["readiness_id"]),
         status=status if status in {READY_STATUS, "BLOCKED"} else "BLOCKED",
@@ -185,22 +188,110 @@ def _shadow_unavailable_result(
     )
 
 
-def _candidate_bin_id(proof: Any) -> str | None:
-    direction = str(getattr(proof, "direction", "") or "")
-    if ":" in direction:
-        suffix = direction.rsplit(":", 1)[-1].strip()
-        if suffix:
-            return suffix
+def _temperature_bound_to_c(value: object, *, unit: str) -> float | None:
+    if value is None:
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("candidate bin bounds must be finite")
+    normalized = unit.strip().upper()
+    if normalized == "C":
+        return number
+    if normalized == "F":
+        return (number - 32.0) * 5.0 / 9.0
+    raise ValueError("candidate bin unit must be C or F")
+
+
+def _same_optional_float(left: object, right: object) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-9)
+
+
+def _canonical_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _json_hash(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _current_bin_topology_hash(proof: Any, event: OpportunityEvent | None = None) -> str | None:
+    for owner in (
+        proof,
+        getattr(proof, "candidate", None),
+        getattr(getattr(proof, "candidate", None), "family", None),
+        getattr(proof, "family", None),
+    ):
+        raw = getattr(owner, "bin_topology_hash", None)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    if event is not None:
+        try:
+            payload = json.loads(event.payload_json or "{}")
+        except Exception:
+            payload = {}
+        if isinstance(payload, Mapping):
+            for key in ("bin_topology_hash", "current_bin_topology_hash", "market_family_hash"):
+                raw = payload.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    return raw.strip()
+    return None
+
+
+def _candidate_bin_id(proof: Any, *, replacement_bundle: object | None = None) -> str | None:
+    """Resolve the replacement q key from canonical bin bounds, never labels.
+
+    Human labels and direction suffixes are display/provenance text; they are
+    not stable enough to bind a replacement posterior vector. The only accepted
+    mapping here is candidate Bin(low/high/unit) -> posterior provenance
+    bin_topology lower_c/upper_c -> bin_id.
+    """
+
+    if replacement_bundle is None:
+        return None
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    topology = provenance.get("bin_topology")
+    if not isinstance(topology, list) or not topology:
+        return None
     candidate = getattr(proof, "candidate", None)
     bin_obj = getattr(candidate, "bin", None)
-    label = getattr(bin_obj, "label", None)
-    if isinstance(label, str) and label:
-        return label
-    for attr in ("range_label", "label", "bin_label"):
-        value = getattr(candidate, attr, None)
-        if isinstance(value, str) and value:
-            return value
-    return None
+    unit = str(getattr(bin_obj, "unit", "") or "")
+    if not unit:
+        return None
+    lower_c = _temperature_bound_to_c(getattr(bin_obj, "low", None), unit=unit)
+    upper_c = _temperature_bound_to_c(getattr(bin_obj, "high", None), unit=unit)
+    matches: list[str] = []
+    for item in topology:
+        if not isinstance(item, Mapping):
+            continue
+        bin_id = str(item.get("bin_id") or "").strip()
+        if not bin_id:
+            continue
+        if _same_optional_float(item.get("lower_c"), lower_c) and _same_optional_float(item.get("upper_c"), upper_c):
+            matches.append(bin_id)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _h3_selected_bin_id(replacement_bundle: object | None) -> str | None:
+    if replacement_bundle is None:
+        return None
+    q = getattr(replacement_bundle, "q", None) or {}
+    if not isinstance(q, Mapping) or not q:
+        return None
+    return max((str(key) for key in q), key=lambda key: (float(q[key]), key))
+
+
+def _h3_direction_for_candidate_bin(*, candidate_bin_id: str | None, replacement_bundle: object | None) -> str | None:
+    selected = _h3_selected_bin_id(replacement_bundle)
+    if not selected or not candidate_bin_id:
+        return None
+    side = "buy_yes" if selected == candidate_bin_id else "buy_no"
+    return f"{side}:{candidate_bin_id}"
 
 
 def _replacement_q_lcb_for_candidate(
@@ -212,7 +303,7 @@ def _replacement_q_lcb_for_candidate(
     baseline_q_lcb = float(getattr(proof, "q_lcb_5pct"))
     if replacement_bundle is None:
         return baseline_q_lcb
-    bin_id = _candidate_bin_id(proof)
+    bin_id = _candidate_bin_id(proof, replacement_bundle=replacement_bundle)
     if not bin_id:
         return baseline_q_lcb
     direction = str(getattr(proof, "direction", "") or "")
@@ -255,11 +346,13 @@ def _replacement_q_posterior_for_candidate(
     baseline_q = float(getattr(proof, "q_posterior", getattr(proof, "q_lcb_5pct", 0.0)))
     if replacement_bundle is None:
         return min(max(baseline_q, 0.0), 1.0)
-    bin_id = _candidate_bin_id(proof)
+    bin_id = _candidate_bin_id(proof, replacement_bundle=replacement_bundle)
     if not bin_id:
         return min(max(baseline_q, 0.0), 1.0)
     q = getattr(replacement_bundle, "q", {}) or {}
-    direction = str(getattr(proof, "direction", "") or "")
+    direction = _h3_direction_for_candidate_bin(candidate_bin_id=bin_id, replacement_bundle=replacement_bundle)
+    if direction is None:
+        direction = str(getattr(proof, "direction", "") or "")
     if direction.startswith("buy_no"):
         for key in (
             f"buy_no:{bin_id}",
@@ -286,12 +379,16 @@ def _candidate_view_from_proof(
     cap_replacement_q_lcb_to_baseline: bool = True,
 ) -> ReplacementForecastCandidateView:
     candidate = getattr(proof, "candidate")
+    bin_id = _candidate_bin_id(proof, replacement_bundle=replacement_bundle)
+    candidate_direction = _h3_direction_for_candidate_bin(candidate_bin_id=bin_id, replacement_bundle=replacement_bundle)
+    if candidate_direction is None:
+        candidate_direction = str(getattr(proof, "direction"))
     return ReplacementForecastCandidateView(
         baseline_direction=str(getattr(proof, "direction")),
         baseline_q_posterior=float(getattr(proof, "q_posterior", getattr(proof, "q_lcb_5pct", 0.0))),
         baseline_q_lcb=float(getattr(proof, "q_lcb_5pct")),
         baseline_kelly_fraction=0.0,
-        candidate_direction=str(getattr(proof, "direction")),
+        candidate_direction=candidate_direction,
         candidate_q_posterior=_replacement_q_posterior_for_candidate(
             proof,
             replacement_bundle=replacement_bundle,
@@ -379,7 +476,13 @@ def _write_replacement_shadow_decision(
 def build_replacement_forecast_event_hook(
     request: ReplacementForecastHookFactoryInput,
 ) -> Callable[[Any, OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None]:
-    """Build a read-only replacement hook for the real event reactor path."""
+    """Build the DB-backed replacement hook for the real event reactor path.
+
+    The underlying reactor hook is pure. This factory-owned wrapper may persist
+    one ``replacement_shadow_decisions`` audit row after a shadow-veto result.
+    Audit-write failure returns baseline/no-mutation behavior before live
+    authority and blocks under live authority.
+    """
 
     if not isinstance(request, ReplacementForecastHookFactoryInput):
         raise TypeError("request must be ReplacementForecastHookFactoryInput")
@@ -468,6 +571,7 @@ def build_replacement_forecast_event_hook(
                 target_date=target_date,
                 temperature_metric=temperature_metric,
                 decision_time=decision_time,
+                current_bin_topology_hash=_current_bin_topology_hash(proof, event),
                 require_baseline_bundle=policy.status != "LIVE_AUTHORITY",
             )
         if bundle_result is None or not bundle_result.ok:

@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
+from pathlib import Path
 
 from src.data.replacement_forecast_live_dry_run import (
     ReplacementForecastLiveDryRunInput,
@@ -31,6 +33,9 @@ from scripts.init_replacement_forecast_shadow_schema import (
     REPLACEMENT_SHADOW_TABLES,
     initialize_replacement_forecast_shadow_schema,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _flags(*, shadow: bool = True, veto: bool = True, trade: bool = False) -> dict[str, bool]:
@@ -764,6 +769,28 @@ def test_live_dry_run_preview_can_assume_schema_flags_and_current_facts_without_
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
     assert replacement_tables.isdisjoint(rows)
+
+
+def test_live_dry_run_cli_forbids_assume_flags_in_production_release(tmp_path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/check_replacement_forecast_live_dry_run.py",
+            "--root",
+            str(tmp_path),
+            "--assume-current-facts",
+        ],
+        cwd=str(REPO_ROOT),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "ZEUS_REPLACEMENT_FORECAST_PRODUCTION_RELEASE": "1"},
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stderr)
+    assert payload["error_type"] == "ProductionAssumptionForbidden"
 
 
 def test_live_dry_run_cli_reads_settings_from_root_not_imported_worktree_config(tmp_path) -> None:

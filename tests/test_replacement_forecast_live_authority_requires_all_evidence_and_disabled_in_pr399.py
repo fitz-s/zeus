@@ -8,7 +8,7 @@ from src.data.replacement_forecast_runtime_policy import (
 )
 
 
-def test_live_authority_requires_all_evidence_and_is_disabled_in_pr399() -> None:
+def test_live_authority_is_direct_new_data_authority() -> None:
     flags = _flags(**{SHADOW_FLAG: True, VETO_FLAG: True, TRADE_AUTHORITY_FLAG: True})
 
     policy = resolve_replacement_forecast_runtime_policy(
@@ -17,6 +17,6 @@ def test_live_authority_requires_all_evidence_and_is_disabled_in_pr399() -> None
         capital_objective_evidence=_capital_objective_evidence(),
     )
 
-    assert policy.status == "BLOCKED"
-    assert policy.reason_codes == ("REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED",)
-    assert policy.can_initiate_trade is False
+    assert policy.status == "LIVE_AUTHORITY"
+    assert policy.reason_codes == ("REPLACEMENT_NEW_DATA_LIVE_AUTHORITY",)
+    assert policy.can_initiate_trade is True

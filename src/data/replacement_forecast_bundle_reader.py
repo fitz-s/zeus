@@ -33,6 +33,9 @@ class ReplacementForecastPosteriorBundle:
     data_version: str
     q: Mapping[str, float]
     q_lcb: Mapping[str, float] | None
+    q_ucb: Mapping[str, float] | None
+    bin_topology_hash: str
+    family_id: str | None
     posterior_method: str
     source_cycle_time: str
     source_available_at: str
@@ -53,6 +56,12 @@ class ReplacementForecastPosteriorBundle:
             _normalize_probability_map(self.q_lcb, field_name="q_lcb", require_sum=False)
             if set(self.q_lcb) != set(self.q):
                 raise ValueError("q_lcb keys must exactly match q keys")
+        if self.q_ucb is not None:
+            _normalize_probability_map(self.q_ucb, field_name="q_ucb", require_sum=False)
+            if set(self.q_ucb) != set(self.q):
+                raise ValueError("q_ucb keys must exactly match q keys")
+        if not self.bin_topology_hash.strip():
+            raise ValueError("bin_topology_hash is required")
 
 
 @dataclass(frozen=True)
@@ -167,6 +176,10 @@ def _parse_utc(value: str, *, field_name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+
+
 def read_replacement_forecast_bundle(
     conn: sqlite3.Connection,
     *,
@@ -177,6 +190,7 @@ def read_replacement_forecast_bundle(
     temperature_metric: str,
     decision_time: datetime | str,
     require_baseline_bundle: bool = True,
+    current_bin_topology_hash: str | None = None,
 ) -> ReplacementForecastBundleReadResult:
     """Read a derived replacement posterior only after B0 executable proof exists."""
 
@@ -193,6 +207,12 @@ def read_replacement_forecast_bundle(
     metric = _metric(temperature_metric)
     target_date_text = _date_text(target_date)
     data_version = _data_version_for_metric(metric)
+    posterior_columns = _table_columns(conn, "forecast_posteriors")
+    required_identity_columns = {"q_ucb_json", "bin_topology_hash", "posterior_identity_hash", "dependency_hash", "posterior_config_hash"}
+    if not required_identity_columns.issubset(posterior_columns):
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_IDENTITY_SCHEMA_MISSING")
+    if not str(current_bin_topology_hash or "").strip():
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_CURRENT_BIN_TOPOLOGY_HASH_REQUIRED")
     decision_utc = decision_time if isinstance(decision_time, datetime) else datetime.fromisoformat(decision_time.replace("Z", "+00:00"))
     if decision_utc.tzinfo is None or decision_utc.utcoffset() is None:
         raise ValueError("decision_time must be timezone-aware")
@@ -236,9 +256,20 @@ def read_replacement_forecast_bundle(
     q = _normalize_probability_map(_json_mapping(row_map["q_json"], field_name="q_json"), field_name="q")
     q_lcb_raw = _json_mapping(row_map["q_lcb_json"], field_name="q_lcb_json") if row_map.get("q_lcb_json") else None
     q_lcb = _normalize_probability_map(q_lcb_raw, field_name="q_lcb", require_sum=False) if q_lcb_raw is not None else None
+    q_ucb_raw = _json_mapping(row_map["q_ucb_json"], field_name="q_ucb_json") if row_map.get("q_ucb_json") else None
+    q_ucb = _normalize_probability_map(q_ucb_raw, field_name="q_ucb", require_sum=False) if q_ucb_raw is not None else None
     provenance = _json_mapping(row_map["provenance_json"], field_name="provenance_json")
-    if not str(provenance.get("bin_topology_hash") or "").strip():
+    row_topology_hash = str(row_map.get("bin_topology_hash") or "").strip()
+    provenance_topology_hash = str(provenance.get("bin_topology_hash") or "").strip()
+    if not row_topology_hash or not provenance_topology_hash:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_MISSING")
+    if row_topology_hash != provenance_topology_hash:
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_CONFLICT")
+    if row_topology_hash != str(current_bin_topology_hash).strip():
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_MISMATCH")
+    for field_name in ("posterior_identity_hash", "dependency_hash", "posterior_config_hash"):
+        if not str(row_map.get(field_name) or "").strip():
+            return ReplacementForecastBundleReadResult("BLOCKED", f"REPLACEMENT_POSTERIOR_{field_name.upper()}_MISSING")
     bundle = ReplacementForecastPosteriorBundle(
         posterior_id=int(row_map["posterior_id"]),
         city=str(row_map["city"]),
@@ -249,6 +280,9 @@ def read_replacement_forecast_bundle(
         data_version=str(row_map["data_version"]),
         q=q,
         q_lcb=q_lcb,
+        q_ucb=q_ucb,
+        bin_topology_hash=row_topology_hash,
+        family_id=str(row_map.get("family_id") or "") or None,
         posterior_method=str(row_map["posterior_method"]),
         source_cycle_time=str(row_map["source_cycle_time"]),
         source_available_at=str(row_map["source_available_at"]),

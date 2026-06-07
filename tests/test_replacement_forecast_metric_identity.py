@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import pytest
 
-from src.data.forecast_source_registry import replacement_forecast_product
+from src.data.forecast_source_registry import (
+    ForecastReplacementEvidence,
+    replacement_forecast_product,
+    select_empirical_replacement_strategy,
+)
 from src.data.replacement_forecast_metric_identity import (
     replacement_forecast_metric_identity,
     replacement_physical_quantity_for_data_version,
@@ -130,3 +134,27 @@ def test_replacement_metric_identity_rejects_baseline_control_and_transcript_sho
 
     with pytest.raises(Exception):
         replacement_forecast_metric_identity("H" + "3", "high")
+
+
+def test_replacement_empirical_selector_default_requires_250_settled_decisions() -> None:
+    evidence = ForecastReplacementEvidence(
+        label=OPENMETEO_ECMWF_IFS9_AIFS_SOFT_ANCHOR_LABEL,
+        settled_decisions=249,
+        anti_lookahead_violations=0,
+        availability_violations=0,
+        q_lcb_coverage=0.99,
+        after_cost_pnl=1.0,
+        max_drawdown=0.1,
+        brier=0.1,
+        log_loss=0.2,
+    )
+
+    blocked = select_empirical_replacement_strategy([evidence])
+    selected = select_empirical_replacement_strategy([
+        ForecastReplacementEvidence(**{**evidence.__dict__, "settled_decisions": 250})
+    ])
+
+    assert blocked.status == "NO_PROMOTION_CANDIDATE"
+    assert "INSUFFICIENT_SETTLED_DECISIONS" in blocked.reason_codes
+    assert selected.status == "PROMOTION_CANDIDATE"
+    assert selected.selected_label == OPENMETEO_ECMWF_IFS9_AIFS_SOFT_ANCHOR_LABEL

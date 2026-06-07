@@ -16,9 +16,16 @@ from src.data.replacement_forecast_source_run_identity import (
 STRATEGY_KEY = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
 PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
 SOURCE_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
-READY_STATUS = "SHADOW_ONLY"
+READY_STATUS = "READY"
+LEGACY_READY_STATUS = "SHADOW_ONLY"
 BLOCKED_STATUS = "BLOCKED"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
+
+
+def normalize_replacement_readiness_status(status: str) -> str:
+    if status == LEGACY_READY_STATUS:
+        return READY_STATUS
+    return status
 
 
 def _to_utc(value: datetime | str, *, field_name: str) -> datetime:
@@ -102,11 +109,11 @@ class ReplacementForecastReadinessDecision:
 
     def __post_init__(self) -> None:
         if self.status not in {READY_STATUS, BLOCKED_STATUS}:
-            raise ValueError("replacement readiness status must be SHADOW_ONLY or BLOCKED")
+            raise ValueError("replacement readiness status must be READY or BLOCKED")
         for field_name, value in (("source_id", self.source_id), ("product_id", self.product_id), ("strategy_key", self.strategy_key)):
             _reject_alias(value, field_name=field_name)
         if self.status == READY_STATUS and self.expires_at is None:
-            raise ValueError("SHADOW_ONLY replacement readiness requires expires_at")
+            raise ValueError("READY replacement readiness requires expires_at")
         if self.expires_at is not None:
             object.__setattr__(self, "expires_at", _to_utc(self.expires_at, field_name="expires_at"))
 
@@ -177,7 +184,8 @@ def build_replacement_forecast_readiness(
                 identity_mismatch_roles.append(role)
         if dependency.source_available_at > decision_utc:
             unavailable_roles.append(role)
-        if dependency.status not in {READY_STATUS, "LIVE_ELIGIBLE"}:
+        dependency_status = normalize_replacement_readiness_status(dependency.status)
+        if dependency_status not in {READY_STATUS, "LIVE_ELIGIBLE"}:
             blocked_roles.append(role)
     if unavailable_roles:
         reasons.append("REPLACEMENT_DEPENDENCY_AFTER_DECISION_TIME")
@@ -198,6 +206,14 @@ def build_replacement_forecast_readiness(
     dependency_payload: dict[str, object] = {
         "required_roles": list(required),
         "dependencies": [by_role[role].as_payload() for role in required],
+        "product_id_authority_by_role": {
+            role: (
+                "derived_from_current_registry_data_version"
+                if role == "baseline_b0"
+                else "declared_replacement_product_contract"
+            )
+            for role in required
+        },
         "missing_roles": missing_roles,
         "unavailable_roles": unavailable_roles,
         "blocked_roles": blocked_roles,
@@ -210,7 +226,10 @@ def build_replacement_forecast_readiness(
         "decision_time": decision_utc.isoformat(),
         "computed_at": computed_utc.isoformat(),
         "role": "soft_anchor_readiness_dependency_builder",
-        "trade_authority_status": "SHADOW_VETO_ONLY",
+        "readiness_status": final_status,
+        "posterior_authority_status": "SHADOW_ONLY",
+        "runtime_policy_status": "SHADOW_VETO_ONLY",
+        "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
     identity_payload = {

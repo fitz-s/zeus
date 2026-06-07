@@ -42,6 +42,13 @@ def _coerce_cycle(value: datetime | str) -> datetime:
     return run
 
 
+def _parse_utc(value: datetime | str, *, field_name: str) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
 def _reject_transcript_alias(value: str, *, field_name: str) -> str:
     if _FORBIDDEN_TRANSCRIPT_ALIAS in value.lower():
         raise ValueError(f"{field_name} must use the full product identity, not transcript shorthand")
@@ -238,14 +245,21 @@ def build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(
     metadata.update(dict(product_metadata or {}))
     metadata["metric"] = normalized_metric
     metadata["openmeteo_single_runs_url"] = request.url()
+    captured_at_utc = _parse_utc(captured_at, field_name="captured_at")
+    requested_source_available_at = _parse_utc(source_available_at, field_name="source_available_at")
+    effective_source_available_at = captured_at_utc
+    metadata["requested_source_available_at"] = requested_source_available_at.isoformat()
+    metadata["source_available_at_authority"] = "captured_at_no_signed_openmeteo_generation_time"
+    if requested_source_available_at != captured_at_utc:
+        metadata["requested_source_available_at_role"] = "diagnostic_not_authority"
     return RawForecastArtifactManifest.from_file(
         artifact_path,
         source_id=SOURCE_ID,
         product_id=PRODUCT_ID,
         data_version=data_version,
         source_cycle_time=request.run,
-        source_available_at=source_available_at,
-        captured_at=captured_at,
+        source_available_at=effective_source_available_at,
+        captured_at=captured_at_utc,
         request_url=SINGLE_RUNS_FORECAST_URL,
         request_params=request.params(),
         product_metadata=metadata,

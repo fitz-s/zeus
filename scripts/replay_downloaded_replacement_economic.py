@@ -1344,7 +1344,6 @@ def _write_go_live_payload_json(
         "q_lcb_source_counts": _q_lcb_source_counts(rows, product_label=replacement_label),
         "q_lcb_covered_rows": q_lcb_covered_rows,
         "q_lcb_official_rows": q_lcb_official_rows,
-        "nested_walk_forward_rule": "official_days>=5 and product_rows>=250 and selected_parameter=w0.80_sigma3.00",
         "nested_walk_forward_passed": nested_walk_forward_passed,
     }
     payload["refit_evidence"] = {

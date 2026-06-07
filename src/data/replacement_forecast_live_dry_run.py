@@ -520,12 +520,7 @@ def build_replacement_forecast_live_dry_run_report(
         raise TypeError("request must be ReplacementForecastLiveDryRunInput")
     root = Path(request.root)
     flags = {key: bool(request.runtime_flags.get(key, False)) for key in REQUIRED_FLAGS}
-    promotion_evidence, capital_objective_evidence, promotion_evidence_status = _configured_promotion_evidence(root)
-    policy = resolve_replacement_forecast_runtime_policy(
-        flags,
-        promotion_evidence=promotion_evidence,
-        capital_objective_evidence=capital_objective_evidence,
-    )
+    policy = resolve_replacement_forecast_runtime_policy(flags)
     forecast_db = root / "state" / "zeus-forecasts.db"
     world_db = root / "state" / "zeus-world.db"
     trade_db = root / "state" / "zeus_trades.db"
@@ -589,14 +584,6 @@ def build_replacement_forecast_live_dry_run_report(
     elif configured_refit_handoff_status.startswith("INVALID_SETTINGS:"):
         reasons.append("REPLACEMENT_DRY_RUN_SETTINGS_INVALID")
     elif configured_refit_handoff_status == "MISSING_SETTINGS":
-        reasons.append("REPLACEMENT_DRY_RUN_SETTINGS_MISSING")
-    if policy.can_initiate_trade and promotion_evidence_status == "MISSING":
-        reasons.append("REPLACEMENT_DRY_RUN_PROMOTION_EVIDENCE_MISSING")
-    elif policy.can_initiate_trade and promotion_evidence_status.startswith("INVALID:"):
-        reasons.append("REPLACEMENT_DRY_RUN_PROMOTION_EVIDENCE_INVALID")
-    elif policy.can_initiate_trade and promotion_evidence_status.startswith("INVALID_SETTINGS:"):
-        reasons.append("REPLACEMENT_DRY_RUN_SETTINGS_INVALID")
-    elif policy.can_initiate_trade and promotion_evidence_status == "MISSING_SETTINGS":
         reasons.append("REPLACEMENT_DRY_RUN_SETTINGS_MISSING")
     if raw_artifact_lineage_status not in {"READY", "ASSUMED_READY"}:
         reasons.append("REPLACEMENT_DRY_RUN_RAW_ARTIFACT_LINEAGE_NOT_READY")

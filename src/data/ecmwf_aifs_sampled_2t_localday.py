@@ -88,6 +88,14 @@ class AifsSampledLocalDayExtraction:
     low_data_version: str = LOW_DATA_VERSION
     physical_quantity: str = PHYSICAL_QUANTITY
     aggregation_window_policy: str = AGGREGATION_WINDOW_POLICY
+    identity_decision_valid: bool = False
+    identity_reason_codes: tuple[str, ...] = ()
+    identity_decision_hash: str | None = None
+    member_ids_hash: str | None = None
+    step_hours_hash: str | None = None
+    artifact_id: int | None = None
+    raw_sha256: str | None = None
+    source_product_id: str = PRODUCT_ID
     trade_authority_status: str = "SHADOW_ONLY"
     training_allowed: bool = False
 
@@ -106,6 +114,9 @@ class AifsSampledLocalDayExtraction:
             raise ValueError("AIFS sampled-2t extraction is shadow-only until promoted by evidence")
         if not self.members:
             raise ValueError("AIFS sampled extraction requires at least one member")
+        if self.source_product_id != PRODUCT_ID:
+            raise ValueError("AIFS sampled extraction source_product_id mismatch")
+        object.__setattr__(self, "identity_reason_codes", tuple(str(item) for item in self.identity_reason_codes))
         object.__setattr__(self, "target_window_start_utc", _to_utc(self.target_window_start_utc, field_name="target_window_start_utc"))
         object.__setattr__(self, "target_window_end_utc", _to_utc(self.target_window_end_utc, field_name="target_window_end_utc"))
         if self.source_cycle_time is not None:

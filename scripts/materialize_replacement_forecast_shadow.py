@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import replace
@@ -15,7 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.data.ecmwf_aifs_sampled_2t_localday import AifsInstantSample, extract_aifs_sampled_2t_localday  # noqa: E402
+from src.data.ecmwf_aifs_sampled_2t_localday import (  # noqa: E402
+    PRODUCT_ID as AIFS_PRODUCT_ID,
+    AifsInstantSample,
+    extract_aifs_sampled_2t_localday,
+)
 from src.data.ecmwf_aifs_grib_samples import extract_aifs_2t_point_samples_from_grib  # noqa: E402
 from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     build_anchor_request,
@@ -48,6 +53,10 @@ def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _hash_json(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+
 def _aifs_samples(payload: Mapping[str, Any]) -> list[AifsInstantSample]:
     rows = payload.get("samples")
     if not isinstance(rows, list) or not rows:
@@ -65,6 +74,26 @@ def _aifs_samples(payload: Mapping[str, Any]) -> list[AifsInstantSample]:
             )
         )
     return samples
+
+
+def _aifs_identity_from_samples_payload(payload: Mapping[str, Any]) -> dict[str, object]:
+    identity = payload.get("identity")
+    if not isinstance(identity, Mapping):
+        raise ValueError("AIFS samples JSON must contain identity{} from GRIB scanner")
+    required = {
+        "identity_decision_valid",
+        "identity_reason_codes",
+        "identity_decision_hash",
+        "member_ids_hash",
+        "step_hours_hash",
+        "artifact_id",
+        "raw_sha256",
+        "source_product_id",
+    }
+    missing = sorted(key for key in required if key not in identity or identity.get(key) in (None, ""))
+    if missing:
+        raise ValueError("AIFS samples identity missing fields: " + ",".join(missing))
+    return dict(identity)
 
 
 def _bins(payload: Mapping[str, Any]) -> tuple[AifsTemperatureBin, ...]:
@@ -144,23 +173,38 @@ def main(argv: list[str] | None = None) -> int:
             if payload.get("openmeteo_anchor_artifact_id") in (None, "")
             else int(payload["openmeteo_anchor_artifact_id"])
         )
+        if "precision_metadata_json" not in payload:
+            raise ValueError("input JSON requires precision_metadata_json for Open-Meteo ECMWF IFS 9km anchor")
+        precision_payload = _load_json(base_dir / str(payload["precision_metadata_json"]))
+        if not isinstance(precision_payload, Mapping):
+            raise ValueError("precision_metadata_json must decode to an object")
         if "aifs_samples_json" in payload:
             aifs_payload = _load_json(base_dir / str(payload["aifs_samples_json"]))
             if not isinstance(aifs_payload, Mapping):
                 raise ValueError("AIFS samples JSON must decode to an object")
             aifs_samples = _aifs_samples(aifs_payload)
+            aifs_identity = _aifs_identity_from_samples_payload(aifs_payload)
         elif "aifs_grib_path" in payload:
             if "latitude" not in payload or "longitude" not in payload:
                 raise ValueError("aifs_grib_path input requires latitude and longitude")
             aifs_grib = base_dir / str(payload["aifs_grib_path"])
-            aifs_samples = list(
-                extract_aifs_2t_point_samples_from_grib(
-                    aifs_grib,
-                    latitude=float(payload["latitude"]),
-                    longitude=float(payload["longitude"]),
-                    source_cycle_time=source_cycle_time,
-                ).samples
+            grib_extraction = extract_aifs_2t_point_samples_from_grib(
+                aifs_grib,
+                latitude=float(payload["latitude"]),
+                longitude=float(payload["longitude"]),
+                source_cycle_time=source_cycle_time,
             )
+            aifs_samples = list(grib_extraction.samples)
+            aifs_identity = {
+                "identity_decision_valid": True,
+                "identity_reason_codes": list(grib_extraction.identity_reason_codes),
+                "identity_decision_hash": grib_extraction.identity_decision_hash,
+                "member_ids_hash": _hash_json(list(grib_extraction.member_ids)),
+                "step_hours_hash": _hash_json(list(grib_extraction.step_hours)),
+                "artifact_id": aifs_artifact_id,
+                "raw_sha256": grib_extraction.raw_sha256,
+                "source_product_id": AIFS_PRODUCT_ID,
+            }
         else:
             raise ValueError("input JSON requires aifs_samples_json or aifs_grib_path")
         if "openmeteo_payload_json" in payload:
@@ -184,17 +228,23 @@ def main(argv: list[str] | None = None) -> int:
             target_local_date=target_date,
             source_cycle_time=source_cycle_time,
         )
+        aifs_extraction = replace(
+            aifs_extraction,
+            identity_decision_valid=bool(aifs_identity["identity_decision_valid"]),
+            identity_reason_codes=tuple(str(item) for item in aifs_identity["identity_reason_codes"]),
+            identity_decision_hash=str(aifs_identity["identity_decision_hash"]),
+            member_ids_hash=str(aifs_identity["member_ids_hash"]),
+            step_hours_hash=str(aifs_identity["step_hours_hash"]),
+            artifact_id=None if aifs_identity["artifact_id"] in (None, "") else int(aifs_identity["artifact_id"]),
+            raw_sha256=str(aifs_identity["raw_sha256"]),
+            source_product_id=str(aifs_identity["source_product_id"]),
+        )
         openmeteo_anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
             openmeteo_payload,
             city_timezone=str(payload["city_timezone"]),
             target_local_date=target_date,
             source_cycle_time=source_cycle_time,
         )
-        if "precision_metadata_json" not in payload:
-            raise ValueError("input JSON requires precision_metadata_json for Open-Meteo ECMWF IFS 9km anchor")
-        precision_payload = _load_json(base_dir / str(payload["precision_metadata_json"]))
-        if not isinstance(precision_payload, Mapping):
-            raise ValueError("precision_metadata_json must decode to an object")
         precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
             OpenMeteoIfs9PrecisionMetadata(**dict(precision_payload))
         )
@@ -236,10 +286,14 @@ def main(argv: list[str] | None = None) -> int:
             if "openmeteo_manifest_json" in payload:
                 anchor_artifact_id = write_manifest_to_db(conn, read_manifest(base_dir / str(payload["openmeteo_manifest_json"])), root=base_dir)
             if aifs_artifact_id is not None or anchor_artifact_id is not None:
+                updated_aifs_extraction = request.aifs_extraction
+                if aifs_artifact_id is not None and updated_aifs_extraction.artifact_id is None:
+                    updated_aifs_extraction = replace(updated_aifs_extraction, artifact_id=aifs_artifact_id)
                 request = replace(
                     request,
                     anchor_artifact_id=anchor_artifact_id,
                     aifs_artifact_id=aifs_artifact_id,
+                    aifs_extraction=updated_aifs_extraction,
                 )
             result = materialize_replacement_forecast_shadow(conn, request)
             if args.commit:

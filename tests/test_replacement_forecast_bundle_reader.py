@@ -26,6 +26,7 @@ from src.state.schema.v2_schema import apply_canonical_schema
 
 
 UTC = timezone.utc
+TEST_TOPOLOGY_HASH = "test-topology"
 
 
 @dataclass(frozen=True)
@@ -62,10 +63,12 @@ def _insert_posterior(
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, q_lcb_json, posterior_method,
-            dependency_source_run_ids_json, provenance_json,
+            computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
+            dependency_source_run_ids_json, family_id, bin_topology_hash,
+            dependency_hash, posterior_config_hash, posterior_identity_hash,
+            provenance_json,
             trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             SOURCE_ID,
@@ -79,6 +82,7 @@ def _insert_posterior(
             (computed_at or _dt(3, 5)).isoformat(),
             json.dumps({"cold": 0.2, "warm": 0.8}),
             json.dumps({"cold": 0.1, "warm": 0.7}),
+            json.dumps({"cold": 0.3, "warm": 0.9}),
             "openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
             json.dumps(
                 dependency_source_run_ids
@@ -88,8 +92,13 @@ def _insert_posterior(
                     "openmeteo_ifs9_anchor": "om9-run",
                 }
             ),
-            json.dumps({"reader_test": True, "bin_topology_hash": "test-topology"}),
-            "SHADOW_VETO_ONLY",
+            "reader-family",
+            TEST_TOPOLOGY_HASH,
+            "dependency-hash",
+            "posterior-config-hash",
+            f"posterior-identity-{computed_at or source_available_at or 'default'}",
+            json.dumps({"reader_test": True, "bin_topology_hash": TEST_TOPOLOGY_HASH}),
+            "SHADOW_ONLY",
             training_allowed,
         ),
     )
@@ -157,6 +166,7 @@ def test_replacement_bundle_reader_requires_baseline_executable_bundle() -> None
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
 
     assert result.ok is False
@@ -175,6 +185,7 @@ def test_replacement_bundle_reader_returns_posterior_when_b0_and_readiness_match
         target_date="2026-06-07",
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
 
     assert result.ok is True
@@ -184,7 +195,27 @@ def test_replacement_bundle_reader_returns_posterior_when_b0_and_readiness_match
     assert result.bundle.baseline_source_run_id == "b0-run"
     assert result.bundle.q == pytest.approx({"cold": 0.2, "warm": 0.8})
     assert result.bundle.q_lcb == pytest.approx({"cold": 0.1, "warm": 0.7})
-    assert result.bundle.trade_authority_status == "SHADOW_VETO_ONLY"
+    assert result.bundle.q_ucb == pytest.approx({"cold": 0.3, "warm": 0.9})
+    assert result.bundle.trade_authority_status == "SHADOW_ONLY"
+
+
+def test_replacement_bundle_reader_rejects_wrong_bin_topology_hash() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="different-topology",
+    )
+
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_MISMATCH"
 
 
 def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids() -> None:
@@ -200,6 +231,7 @@ def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids() 
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
     assert blocked.reason_code == "REPLACEMENT_READINESS_NOT_READY"
 
@@ -211,6 +243,7 @@ def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids() 
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
     assert mismatch.reason_code == "REPLACEMENT_BASELINE_READINESS_MISMATCH"
 
@@ -222,6 +255,7 @@ def test_replacement_bundle_reader_blocks_unready_readiness_or_mismatched_ids() 
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
     assert posterior_mismatch.reason_code == "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
 
@@ -245,6 +279,7 @@ def test_replacement_bundle_reader_blocks_dependency_source_run_drift() -> None:
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
 
     assert aifs_drift.reason_code == "REPLACEMENT_DEPENDENCY_SOURCE_RUN_MISMATCH"
@@ -267,6 +302,7 @@ def test_replacement_bundle_reader_blocks_dependency_source_run_drift() -> None:
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
 
     assert openmeteo_drift.reason_code == "REPLACEMENT_DEPENDENCY_SOURCE_RUN_MISMATCH"
@@ -282,6 +318,7 @@ def test_replacement_bundle_reader_blocks_missing_or_late_posterior() -> None:
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
     assert missing.reason_code == "REPLACEMENT_POSTERIOR_MISSING"
 
@@ -294,6 +331,7 @@ def test_replacement_bundle_reader_blocks_missing_or_late_posterior() -> None:
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
     assert late.reason_code == "REPLACEMENT_POSTERIOR_AFTER_DECISION_TIME"
 
@@ -307,5 +345,6 @@ def test_replacement_bundle_reader_blocks_missing_or_late_posterior() -> None:
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(4),
+        current_bin_topology_hash=TEST_TOPOLOGY_HASH,
     )
     assert computed_late.reason_code == "REPLACEMENT_POSTERIOR_COMPUTED_AFTER_DECISION_TIME"

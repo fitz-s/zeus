@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -30,6 +31,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--receipt-json", type=Path, default=None)
     parser.add_argument("--stdout", action="store_true")
     args = parser.parse_args(argv)
+    assume_flags = (
+        args.assume_shadow_veto,
+        args.assume_current_facts,
+        args.assume_shadow_schema,
+        args.assume_refit_handoff,
+    )
+    if os.environ.get("ZEUS_REPLACEMENT_FORECAST_PRODUCTION_RELEASE") == "1" and any(assume_flags):
+        print(
+            json.dumps(
+                {
+                    "status": "ERROR",
+                    "error_type": "ProductionAssumptionForbidden",
+                    "error": "replacement forecast production release forbids --assume-* flags",
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     try:
         report = build_replacement_forecast_runtime_wiring_audit(
             live_root=args.live_root,

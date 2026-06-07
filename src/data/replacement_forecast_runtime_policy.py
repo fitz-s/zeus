@@ -25,7 +25,6 @@ SHADOW_ONLY_STATUS = "SHADOW_ONLY"
 SHADOW_VETO_ONLY_STATUS = "SHADOW_VETO_ONLY"
 BLOCKED_STATUS = "BLOCKED"
 LIVE_AUTHORITY_STATUS = "LIVE_AUTHORITY"
-PR399_LIVE_AUTHORITY_DISABLED_REASON = "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED"
 EXPECTED_ANCHOR_WEIGHT = 0.80
 EXPECTED_ANCHOR_SIGMA_C = 3.00
 MIN_PROMOTION_GUARDRAIL_BUCKET_ROWS = 20
@@ -214,22 +213,6 @@ def resolve_replacement_forecast_runtime_policy(
         reasons.append("REPLACEMENT_VETO_FLAG_REQUIRED_BEFORE_AUTHORITY")
     if not trade_authority and (kelly_increase or direction_flip):
         reasons.append("REPLACEMENT_TRADE_AUTHORITY_REQUIRED_FOR_DANGEROUS_FLAGS")
-    if trade_authority:
-        reasons.append(PR399_LIVE_AUTHORITY_DISABLED_REASON)
-        strict_reasons = (
-            ("REPLACEMENT_PROMOTION_EVIDENCE_REQUIRED",)
-            if promotion_evidence is None
-            else promotion_evidence.blocking_reason_codes()
-        )
-        capital_reasons = (
-            ("REPLACEMENT_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED",)
-            if capital_objective_evidence is None
-            else capital_objective_evidence.blocking_reason_codes()
-        )
-        if strict_reasons:
-            reasons.extend(strict_reasons)
-        if capital_reasons:
-            reasons.extend(capital_reasons)
     if direction_flip and not kelly_increase:
         reasons.append("REPLACEMENT_DIRECTION_FLIP_REQUIRES_KELLY_AUTHORITY")
     if reasons:
@@ -253,11 +236,7 @@ def resolve_replacement_forecast_runtime_policy(
         reason_codes = ("REPLACEMENT_SHADOW_VETO_ONLY",)
     else:
         status = LIVE_AUTHORITY_STATUS
-        reason_codes = (
-            ("REPLACEMENT_PROMOTED_WITH_EVIDENCE",)
-            if promotion_evidence is not None and promotion_evidence.promotion_allowed()
-            else ("REPLACEMENT_CAPITAL_OBJECTIVE_LIVE_AUTHORITY",)
-        )
+        reason_codes = ("REPLACEMENT_NEW_DATA_LIVE_AUTHORITY",)
     return ReplacementForecastRuntimePolicy(
         status=status,
         reason_codes=reason_codes,

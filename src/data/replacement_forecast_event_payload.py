@@ -91,7 +91,7 @@ def build_replacement_forecast_event_payload(
     """Attach replacement product/dependency identity without changing baseline FSR payloads."""
 
     if readiness.status != READY_STATUS:
-        raise ValueError("replacement event payload requires SHADOW_ONLY readiness")
+        raise ValueError("replacement event payload requires READY readiness")
     if replacement_bundle.trade_authority_status not in {"SHADOW_ONLY", "SHADOW_VETO_ONLY"}:
         raise ValueError("replacement event payload requires shadow/veto-only bundle authority")
     if replacement_bundle.source_id != readiness.source_id or replacement_bundle.product_id != readiness.product_id:

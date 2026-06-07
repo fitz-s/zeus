@@ -14,6 +14,7 @@ from typing import Any, Iterator
 from src.state.connection_pair import WorldConnection
 
 READINESS_STATUSES = frozenset({
+    "READY",
     "LIVE_ELIGIBLE",
     "SHADOW_ONLY",
     "BLOCKED",

@@ -331,18 +331,23 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             delivery_grid_resolution TEXT,
             interpolation_method TEXT,
             contributing_times_json TEXT NOT NULL DEFAULT '[]',
+            anchor_identity_hash TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
             trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
                 CHECK (trade_authority_status IN ('SHADOW_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(source_id, product_id, data_version, city, target_date, temperature_metric, source_cycle_time)
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_deterministic_forecast_anchors_target
             ON deterministic_forecast_anchors(city, target_date, temperature_metric, source_id, product_id)
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_deterministic_forecast_anchors_identity_hash
+            ON deterministic_forecast_anchors(anchor_identity_hash)
+            WHERE anchor_identity_hash IS NOT NULL
     """)
 
     conn.execute("""
@@ -359,22 +364,36 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             computed_at TEXT NOT NULL,
             q_json TEXT NOT NULL,
             q_lcb_json TEXT,
+            q_ucb_json TEXT,
             posterior_method TEXT NOT NULL,
             aifs_source_run_id TEXT,
             openmeteo_anchor_id INTEGER REFERENCES deterministic_forecast_anchors(anchor_id),
             dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
+            family_id TEXT,
+            bin_topology_hash TEXT,
+            dependency_hash TEXT,
+            posterior_config_hash TEXT,
+            posterior_identity_hash TEXT,
             provenance_json TEXT NOT NULL DEFAULT '{}',
             trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
                 CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
-            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(source_id, product_id, data_version, city, target_date, temperature_metric, source_cycle_time)
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_target
             ON forecast_posteriors(city, target_date, temperature_metric, product_id, computed_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
+            ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
+            ON forecast_posteriors(posterior_identity_hash)
+            WHERE posterior_identity_hash IS NOT NULL
     """)
 
     conn.execute("""

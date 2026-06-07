@@ -8,7 +8,7 @@ from src.data.replacement_forecast_runtime_policy import (
 )
 
 
-def test_runtime_policy_helper_cannot_return_live_authority_in_pr399() -> None:
+def test_runtime_policy_helper_returns_direct_live_authority_when_trade_flagged() -> None:
     flags = _flags(**{SHADOW_FLAG: True, VETO_FLAG: True, TRADE_AUTHORITY_FLAG: True})
 
     policy = resolve_replacement_forecast_runtime_policy(
@@ -17,5 +17,5 @@ def test_runtime_policy_helper_cannot_return_live_authority_in_pr399() -> None:
         capital_objective_evidence=_capital_objective_evidence(),
     )
 
-    assert policy.status != "LIVE_AUTHORITY"
-    assert policy.can_initiate_trade is False
+    assert policy.status == "LIVE_AUTHORITY"
+    assert policy.can_initiate_trade is True

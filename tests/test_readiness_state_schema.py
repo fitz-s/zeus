@@ -253,7 +253,7 @@ def test_readiness_logical_scope_upsert_overwrites_prior_green_state() -> None:
 def test_readiness_repo_rejects_unknown_status() -> None:
     conn = _conn()
     kwargs = _ready_kwargs()
-    kwargs["status"] = "READY"
+    kwargs["status"] = "NOT_A_READINESS_STATUS"
 
     with pytest.raises(ValueError, match="invalid readiness status"):
         write_readiness_state(conn, **kwargs)

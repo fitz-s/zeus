@@ -61,6 +61,13 @@ def test_aifs_grib_identity_blocks_wrong_class_model_stream_or_type() -> None:
     assert "AIFS_GRIB_TYPE_MISMATCH" in decision.reason_codes
 
 
+def test_aifs_grib_identity_rejects_waef_stream_without_explicit_product_proof() -> None:
+    decision = scan_aifs_ens_grib_identity(_messages(stream="waef"))
+
+    assert decision.valid is False
+    assert "AIFS_GRIB_STREAM_MISMATCH" in decision.reason_codes
+
+
 def test_aifs_grib_identity_blocks_wrong_param_levtype_or_step_grid() -> None:
     decision = scan_aifs_ens_grib_identity(_messages(**{"shortName": "mx2t3", "paramId": 201, "levtype": "pl", "step": 3}))
 

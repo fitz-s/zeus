@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -19,7 +20,6 @@ from src.data.replacement_forecast_runtime_wiring_audit import build_replacement
 from src.data.replacement_forecast_runtime_policy import (
     DIRECTION_FLIP_FLAG,
     KELLY_INCREASE_FLAG,
-    PR399_LIVE_AUTHORITY_DISABLED_REASON,
     SHADOW_FLAG,
     TRADE_AUTHORITY_FLAG,
     VETO_FLAG,
@@ -219,7 +219,7 @@ def test_runtime_wiring_audit_ready_with_apply_receipt_assumptions(tmp_path) -> 
     assert all(report.hook_factory_anchor_status.values())
 
 
-def test_runtime_wiring_audit_blocks_live_authority_in_pr399_even_with_capital_evidence(tmp_path) -> None:
+def test_runtime_wiring_audit_accepts_direct_new_data_live_authority(tmp_path) -> None:
     live_root = tmp_path / "live"
     receipt_path = tmp_path / "receipt.json"
     _write_live_root(live_root)
@@ -266,9 +266,8 @@ def test_runtime_wiring_audit_blocks_live_authority_in_pr399_even_with_capital_e
         optional_dependencies=("requests",),
     )
 
-    assert report.status == "RUNTIME_WIRING_BLOCKED", report.as_dict()
-    assert report.runtime_policy_status == "BLOCKED"
-    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in report.reason_codes
+    assert report.status == "RUNTIME_WIRING_READY", report.as_dict()
+    assert report.runtime_policy_status == "LIVE_AUTHORITY"
     assert report.live_authority_flags_false is False
     assert report.receipt_status == "LIVE_AUTHORITY_SWITCH_APPLIED"
 
@@ -400,3 +399,27 @@ def test_runtime_wiring_audit_cli_returns_ready_json(tmp_path) -> None:
     assert payload["status"] == "RUNTIME_WIRING_READY"
     assert payload["runtime_policy_status"] == "SHADOW_VETO_ONLY"
     assert json.loads(audit_receipt_path.read_text(encoding="utf-8"))["status"] == "RUNTIME_WIRING_READY"
+
+
+def test_runtime_wiring_audit_cli_forbids_assume_flags_in_production_release(tmp_path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/audit_replacement_forecast_runtime_wiring.py",
+            "--live-root",
+            str(tmp_path),
+            "--repo-root",
+            str(REPO_ROOT),
+            "--assume-current-facts",
+        ],
+        cwd=str(REPO_ROOT),
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "ZEUS_REPLACEMENT_FORECAST_PRODUCTION_RELEASE": "1"},
+    )
+
+    assert result.returncode == 2
+    payload = json.loads(result.stderr)
+    assert payload["error_type"] == "ProductionAssumptionForbidden"

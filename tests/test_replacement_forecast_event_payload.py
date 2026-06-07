@@ -15,7 +15,7 @@ import pytest
 
 from src.data.replacement_forecast_bundle_reader import HIGH_DATA_VERSION, PRODUCT_ID, SOURCE_ID, ReplacementForecastPosteriorBundle
 from src.data.replacement_forecast_event_payload import build_replacement_forecast_event_payload
-from src.data.replacement_forecast_readiness import ReplacementForecastDependency, build_replacement_forecast_readiness
+from src.data.replacement_forecast_readiness import READY_STATUS, ReplacementForecastDependency, build_replacement_forecast_readiness
 from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
 
 
@@ -65,14 +65,17 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         data_version=HIGH_DATA_VERSION,
         q={"cool": 0.25, "warm": 0.75},
         q_lcb={"cool": 0.20, "warm": 0.65},
+        q_ucb=None,
+        bin_topology_hash="test-topology",
+        family_id="test-family",
         posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         source_cycle_time="2026-06-06T00:00:00+00:00",
         source_available_at="2026-06-06T03:00:00+00:00",
         computed_at="2026-06-06T03:05:00+00:00",
         baseline_source_run_id="b0-run",
         dependency_json={"source_run_ids": ["b0-run", "aifs-run", "om9-run"]},
-        provenance_json={"test": True},
-        trade_authority_status="SHADOW_VETO_ONLY",
+        provenance_json={"test": True, "bin_topology_hash": "test-topology"},
+        trade_authority_status="SHADOW_ONLY",
     )
 
 
@@ -164,8 +167,8 @@ def test_replacement_shadow_payload_carries_product_and_dependency_identity() ->
     assert replacement["product_id"] == PRODUCT_ID
     assert replacement["data_version"] == HIGH_DATA_VERSION
     assert replacement["posterior_id"] == 77
-    assert replacement["readiness_status"] == "SHADOW_ONLY"
-    assert replacement["trade_authority_status"] == "SHADOW_VETO_ONLY"
+    assert replacement["readiness_status"] == READY_STATUS
+    assert replacement["trade_authority_status"] == "SHADOW_ONLY"
     assert replacement["dependency_source_run_ids"] == {
         "baseline_b0": "b0-run",
         "aifs_sampled_2t": "aifs-run",
@@ -220,7 +223,7 @@ def test_replacement_shadow_payload_blocks_unready_or_mismatched_identity() -> N
             ),
         ),
     )
-    with pytest.raises(ValueError, match="SHADOW_ONLY readiness"):
+    with pytest.raises(ValueError, match="READY readiness"):
         build_replacement_forecast_event_payload(
             base_payload=_baseline_payload(),
             replacement_bundle=_bundle(),

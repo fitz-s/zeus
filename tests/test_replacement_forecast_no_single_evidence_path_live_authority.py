@@ -8,19 +8,19 @@ from src.data.replacement_forecast_runtime_policy import (
 )
 
 
-def test_promotion_evidence_alone_cannot_enable_live_authority() -> None:
+def test_promotion_evidence_does_not_gate_direct_live_authority() -> None:
     flags = _flags(**{SHADOW_FLAG: True, VETO_FLAG: True, TRADE_AUTHORITY_FLAG: True})
     policy = resolve_replacement_forecast_runtime_policy(flags, promotion_evidence=_passing_evidence())
 
-    assert policy.status == "BLOCKED"
-    assert "REPLACEMENT_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED" in policy.reason_codes
-    assert policy.can_initiate_trade is False
+    assert policy.status == "LIVE_AUTHORITY"
+    assert "REPLACEMENT_NEW_DATA_LIVE_AUTHORITY" in policy.reason_codes
+    assert policy.can_initiate_trade is True
 
 
-def test_capital_objective_evidence_alone_cannot_enable_live_authority() -> None:
+def test_capital_objective_evidence_does_not_gate_direct_live_authority() -> None:
     flags = _flags(**{SHADOW_FLAG: True, VETO_FLAG: True, TRADE_AUTHORITY_FLAG: True})
     policy = resolve_replacement_forecast_runtime_policy(flags, capital_objective_evidence=_capital_objective_evidence())
 
-    assert policy.status == "BLOCKED"
-    assert "REPLACEMENT_PROMOTION_EVIDENCE_REQUIRED" in policy.reason_codes
-    assert policy.can_initiate_trade is False
+    assert policy.status == "LIVE_AUTHORITY"
+    assert "REPLACEMENT_NEW_DATA_LIVE_AUTHORITY" in policy.reason_codes
+    assert policy.can_initiate_trade is True

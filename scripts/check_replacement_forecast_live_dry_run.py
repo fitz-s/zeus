@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Mapping
@@ -46,6 +47,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--assume-shadow-schema", action="store_true", help="Preview replacement shadow schema after targeted initializer")
     parser.add_argument("--assume-refit-handoff", action="store_true", help="Preview a ready refit handoff file without editing live root")
     args = parser.parse_args(argv)
+    assume_flags = (
+        args.assume_shadow_veto_flags,
+        args.assume_current_facts,
+        args.assume_shadow_schema,
+        args.assume_refit_handoff,
+    )
+    if os.environ.get("ZEUS_REPLACEMENT_FORECAST_PRODUCTION_RELEASE") == "1" and any(assume_flags):
+        print(
+            json.dumps(
+                {
+                    "status": "ERROR",
+                    "error_type": "ProductionAssumptionForbidden",
+                    "error": "replacement forecast production release forbids --assume-* flags",
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     try:
         flags = dict(_load_root_feature_flags(args.root))
         if args.assume_shadow_veto_flags:
