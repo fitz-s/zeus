@@ -57,6 +57,7 @@ from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReac
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
+from src.data.replacement_forecast_runtime_policy import replacement_live_authority_evidence_gate
 from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.candidate_evaluation import CandidateEvaluation
@@ -823,6 +824,8 @@ def event_bound_no_submit_adapter_from_trade_conn(
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
             replacement_forecast_hook=resolved_replacement_forecast_hook,
+            replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+            replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
         )
 
     # Expose the per-cycle ledger so the reactor can commit/rollback provisional
@@ -912,6 +915,8 @@ def event_bound_live_adapter_from_trade_conn(
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
             replacement_forecast_hook=resolved_replacement_forecast_hook,
+            replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+            replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
         )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
@@ -1225,6 +1230,8 @@ def build_event_bound_no_submit_receipt(
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -1360,6 +1367,8 @@ def build_event_bound_no_submit_receipt(
             forecast_conn=source_conn,
             calibration_conn=calibration_conn,
             decision_time=decision_time,
+            promotion_evidence=replacement_forecast_promotion_evidence,
+            capital_objective_evidence=replacement_forecast_capital_objective_evidence,
         )
     except ValueError as exc:
         return EventSubmissionReceipt(
@@ -4925,6 +4934,8 @@ def _generate_candidate_proofs(
     forecast_conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
     decision_time: datetime,
+    promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> tuple[_CandidateProof, ...]:
     native_costs = _native_costs_by_candidate_direction(family=family, snapshot_rows=snapshot_rows)
     (
@@ -4941,6 +4952,8 @@ def _generate_candidate_proofs(
         calibration_conn=calibration_conn,
         native_costs=native_costs,
         decision_time=decision_time,
+        promotion_evidence=promotion_evidence,
+        capital_objective_evidence=capital_objective_evidence,
     )
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
@@ -5304,6 +5317,8 @@ def _live_yes_probabilities(
     calibration_conn: sqlite3.Connection,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     decision_time: datetime,
+    promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> tuple[
     dict[str, float],
     dict[tuple[str, str], float],
@@ -5315,6 +5330,9 @@ def _live_yes_probabilities(
     # hypothesis-family scan + evaluate_live_bins). Gated by the acceptance suite in
     # tests/engine/test_event_reactor_no_bypass.py; SHADOW until #24 bias. See task Break-4.
     if event.event_type == "FORECAST_SNAPSHOT_READY":
+        # FIX-1 Insertion A: thread the settlement-evidence objects (loaded once in
+        # main.py, carried through the adapter closure) into the live 0.1 authority
+        # builder so the shared gate runs on the path that is actually live.
         replacement = _replacement_authority_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -5322,6 +5340,8 @@ def _live_yes_probabilities(
             conn=conn,
             native_costs=native_costs,
             decision_time=decision_time,
+            promotion_evidence=promotion_evidence,
+            capital_objective_evidence=capital_objective_evidence,
         )
         if replacement is not None:
             return replacement
@@ -5452,6 +5472,8 @@ def _replacement_authority_probability_and_fdr_proof(
     conn: sqlite3.Connection,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     decision_time: datetime,
+    promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> tuple[
     dict[str, float],
     dict[tuple[str, str], float],
@@ -5460,6 +5482,23 @@ def _replacement_authority_probability_and_fdr_proof(
     dict[str, str],
 ] | None:
     if not _replacement_authority_enabled():
+        return None
+    # INSERTION A (REAUDIT_0_1.md §1.3) — the SINGLE shared settlement-evidence gate
+    # on the path that is ACTUALLY live for FORECAST_SNAPSHOT_READY. Consulted
+    # immediately AFTER the flag check and BEFORE the readiness load, so a flag-only
+    # arm can NEVER grant live 0.1 authority on absent/failing promotion+capital
+    # evidence. ``return None`` (NOT raise) is the deliberate fail-safe DEGRADE:
+    # _live_yes_probabilities falls through to the canonical kernel so live trading
+    # continues on canonical truth rather than crashing the cycle. Because this runs
+    # BEFORE payload['_edli_q_source']='replacement_0_1' is stamped, the q_source is
+    # NOT stamped on a failed-evidence cycle — which re-enables the legacy
+    # evidence-gated reactor hook as the second backstop layer (one degrade ladder,
+    # one gate; iron rule #4). Same predicate as resolve_replacement_forecast_runtime_policy.
+    permitted, _gate_reason_codes = replacement_live_authority_evidence_gate(
+        promotion_evidence,
+        capital_objective_evidence,
+    )
+    if not permitted:
         return None
     from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
     from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle

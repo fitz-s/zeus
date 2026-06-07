@@ -143,6 +143,45 @@ class ReplacementForecastCapitalObjectiveEvidence:
         return not self.blocking_reason_codes()
 
 
+def replacement_live_authority_evidence_gate(
+    promotion_evidence: ReplacementForecastPromotionEvidence | None,
+    capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None,
+) -> tuple[bool, tuple[str, ...]]:
+    """The single shared evidence gate for replacement live (replacement_0_1) authority.
+
+    REAUDIT_0_1.md §1.1 (re-pointed FIX-1): ONE pure predicate, co-located with
+    the evidence dataclasses (NO new module, NO second loader). It performs NO IO
+    (takes already-constructed dataclasses), so it cannot drift from
+    ``promotion_allowed()`` / ``capital_objective_allowed()`` — it reuses their
+    ``blocking_reason_codes()``. Consulted by BOTH the live 0.1 probability path
+    (event_reactor_adapter._replacement_authority_probability_and_fdr_proof,
+    Insertion A) AND ``resolve_replacement_forecast_runtime_policy`` (Insertion B)
+    so there is ONE gate, one truth (iron rule #4).
+
+    Returns ``(permitted, reason_codes)``:
+      - promotion_evidence is None  -> (False, (PROMOTION_EVIDENCE_REQUIRED,))
+      - capital_objective_evidence is None -> (False, (CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED,))
+      - either disallows -> (False, union of both blocking_reason_codes())
+      - else -> (True, ())
+
+    Overconfidence = ruin: promotion evidence (statistical validation) and
+    capital-objective evidence (empirical winner + after-cost EV) are DIFFERENT
+    proofs; a single passing proof is necessary but NOT sufficient to risk capital.
+    """
+
+    if promotion_evidence is None:
+        return (False, ("REPLACEMENT_LIVE_AUTHORITY_PROMOTION_EVIDENCE_REQUIRED",))
+    if capital_objective_evidence is None:
+        return (False, ("REPLACEMENT_LIVE_AUTHORITY_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED",))
+    blocking = (
+        promotion_evidence.blocking_reason_codes()
+        + capital_objective_evidence.blocking_reason_codes()
+    )
+    if blocking:
+        return (False, blocking)
+    return (True, ())
+
+
 def _finite_nonnegative(value: float | None) -> bool:
     return value is not None and math.isfinite(float(value)) and float(value) >= 0.0
 
@@ -235,9 +274,19 @@ def resolve_replacement_forecast_runtime_policy(
     # its own blocking codes verbatim). This makes "alert but do not block" theater
     # AND "one proof is enough" both unconstructable: the resolver cannot reach
     # LIVE_AUTHORITY from flags alone, nor from a single passing evidence object.
-    promotion_live_authority = promotion_evidence is not None and promotion_evidence.promotion_allowed()
-    capital_live_authority = capital_objective_evidence is not None and capital_objective_evidence.capital_objective_allowed()
-    both_evidence_live_authority = promotion_live_authority and capital_live_authority
+    #
+    # FIX-1 re-point (REAUDIT_0_1.md §1.4 Insertion B): the boolean verdict is now
+    # owned by the SINGLE shared gate ``replacement_live_authority_evidence_gate`` so
+    # the live 0.1 path (event_reactor_adapter) and this legacy resolver cannot drift
+    # — one gate, one truth (iron rule #4). The legacy-specific *_EVIDENCE_REQUIRED
+    # reason codes and the per-evidence blocking codes are still surfaced verbatim
+    # here so the established §0.3 antibody contract (and its tests) hold unchanged;
+    # the gate's own require-codes are folded in via ``gate_codes`` so the SAME
+    # verdict the 0.1 path sees is also recorded on the resolver receipt.
+    both_evidence_live_authority, gate_codes = replacement_live_authority_evidence_gate(
+        promotion_evidence,
+        capital_objective_evidence,
+    )
     evidence_reasons: list[str] = []
     if trade_authority and not both_evidence_live_authority:
         evidence_reasons.append("REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE")
@@ -249,6 +298,11 @@ def resolve_replacement_forecast_runtime_policy(
             evidence_reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED")
         else:
             evidence_reasons.extend(capital_objective_evidence.blocking_reason_codes())
+        # Fold the shared gate's own codes (single-owner proof: the resolver records
+        # the EXACT verdict the live 0.1 path observed) without duplicating any code.
+        for code in gate_codes:
+            if code not in evidence_reasons:
+                evidence_reasons.append(code)
 
     # FIX-1 AND posture (strictly-more-restrictive, never weaken an existing guard):
     # whenever trade_authority is armed but the BOTH-evidence conjunction is unmet,
