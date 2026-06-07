@@ -277,6 +277,101 @@ def _current_market_bin_topology_hash(
     return _json_hash(topology)
 
 
+def _current_market_bin_topology_payload(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: str,
+    temperature_metric: str,
+) -> list[dict[str, object]] | None:
+    columns = _table_columns(conn, "market_events")
+    required = {"city", "target_date", "temperature_metric", "condition_id", "range_label", "range_low", "range_high"}
+    if not required.issubset(columns):
+        return None
+    rows = conn.execute(
+        """
+        SELECT range_label, outcome, range_low, range_high, condition_id
+        FROM market_events
+        WHERE city = ?
+          AND target_date = ?
+          AND temperature_metric = ?
+          AND COALESCE(condition_id, '') != ''
+        ORDER BY
+          CASE WHEN range_low IS NULL THEN -999999 ELSE range_low END,
+          CASE WHEN range_high IS NULL THEN 999999 ELSE range_high END,
+          condition_id
+        """,
+        (city, target_date, temperature_metric),
+    ).fetchall()
+    if not rows:
+        return None
+    topology: list[dict[str, object]] = []
+    for row in rows:
+        label = str(row["range_label"] or row["outcome"] or "").strip()
+        if not label:
+            return None
+        city_cfg = cities_by_name.get(city)
+        settlement_unit = str(getattr(city_cfg, "settlement_unit", "") or getattr(city_cfg, "unit", "") or "").strip().upper()
+        if settlement_unit not in {"C", "F"}:
+            settlement_unit = _display_unit_for_label(label, fallback="C")
+        display_unit = _display_unit_for_label(label, fallback=settlement_unit)
+        rounding_rule = "oracle_truncate" if str(getattr(city_cfg, "settlement_source_type", "") or "") == "hko" else "wmo_half_up"
+        settlement_step_c = 5.0 / 9.0 if settlement_unit == "F" else 1.0
+        lower_c = _temperature_bound_to_c(row["range_low"], unit=display_unit)
+        upper_c = _temperature_bound_to_c(row["range_high"], unit=display_unit)
+        if lower_c is None and upper_c is not None:
+            center_c = upper_c - settlement_step_c
+        elif upper_c is None and lower_c is not None:
+            center_c = lower_c + settlement_step_c
+        elif lower_c is not None and upper_c is not None:
+            center_c = (lower_c + upper_c) / 2.0
+        else:
+            return None
+        topology.append(
+            {
+                "bin_id": label,
+                "lower_c": lower_c,
+                "upper_c": upper_c,
+                "center_c": center_c,
+                "display_unit": display_unit,
+                "settlement_unit": settlement_unit,
+                "rounding_rule": rounding_rule,
+                "settlement_step_c": float(settlement_step_c),
+            }
+        )
+    return topology
+
+
+def _topology_core(value: object) -> list[dict[str, object]] | None:
+    if not isinstance(value, list) or not value:
+        return None
+    out: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            return None
+        bin_id = str(item.get("bin_id") or "").strip()
+        if not bin_id:
+            return None
+        row = {
+            "bin_id": bin_id,
+            "lower_c": item.get("lower_c"),
+            "upper_c": item.get("upper_c"),
+            "center_c": item.get("center_c"),
+            "settlement_step_c": item.get("settlement_step_c"),
+        }
+        for key in ("lower_c", "upper_c", "center_c", "settlement_step_c"):
+            if row[key] is not None:
+                row[key] = round(float(row[key]), 12)
+        out.append(row)
+    return out
+
+
+def _topology_core_equivalent(left: object, right: object) -> bool:
+    left_core = _topology_core(left)
+    right_core = _topology_core(right)
+    return left_core is not None and right_core is not None and left_core == right_core
+
+
 def read_replacement_forecast_bundle(
     conn: sqlite3.Connection,
     *,
@@ -374,7 +469,14 @@ def read_replacement_forecast_bundle(
     if row_topology_hash != provenance_topology_hash:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_CONFLICT")
     if row_topology_hash != current_topology_hash:
-        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_MISMATCH")
+        current_topology_payload = _current_market_bin_topology_payload(
+            conn,
+            city=city,
+            target_date=target_date_text,
+            temperature_metric=metric,
+        )
+        if not _topology_core_equivalent(provenance.get("bin_topology"), current_topology_payload):
+            return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_MISMATCH")
     for field_name in ("posterior_identity_hash", "dependency_hash", "posterior_config_hash"):
         if not str(row_map.get(field_name) or "").strip():
             return ReplacementForecastBundleReadResult("BLOCKED", f"REPLACEMENT_POSTERIOR_{field_name.upper()}_MISSING")

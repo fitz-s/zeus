@@ -13,6 +13,7 @@ side-effect boundary.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from dataclasses import dataclass, replace as dataclass_replace
@@ -5293,6 +5294,16 @@ def _live_yes_probabilities(
     # hypothesis-family scan + evaluate_live_bins). Gated by the acceptance suite in
     # tests/engine/test_event_reactor_no_bypass.py; SHADOW until #24 bias. See task Break-4.
     if event.event_type == "FORECAST_SNAPSHOT_READY":
+        replacement = _replacement_authority_probability_and_fdr_proof(
+            event=event,
+            payload=payload,
+            family=family,
+            conn=conn,
+            native_costs=native_costs,
+            decision_time=decision_time,
+        )
+        if replacement is not None:
+            return replacement
         return _canonical_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -5328,6 +5339,178 @@ def _live_yes_probabilities(
             ),
         }
     raise ValueError(f"unsupported EDLI event type for inference: {event.event_type}")
+
+
+def _replacement_authority_enabled() -> bool:
+    try:
+        flags = settings["feature_flags"]
+    except Exception:
+        return False
+    return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled", False))
+
+
+def _wilson_lower_bound(successes: float, trials: float, *, z: float = 1.645) -> float:
+    if trials <= 0.0:
+        return 0.0
+    successes = min(max(float(successes), 0.0), float(trials))
+    p_hat = successes / float(trials)
+    z2 = z * z
+    denom = 1.0 + z2 / float(trials)
+    center = p_hat + z2 / (2.0 * float(trials))
+    margin = z * float(np.sqrt((p_hat - (p_hat * p_hat) + z2 / (4.0 * float(trials))) / float(trials)))
+    return max(0.0, min(1.0, (center - margin) / denom))
+
+
+def _candidate_replacement_bin_id(candidate: object, replacement_bundle: object) -> str | None:
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    topology = provenance.get("bin_topology")
+    if not isinstance(topology, list) or not topology:
+        return None
+    bin_obj = getattr(candidate, "bin", None)
+    unit = str(getattr(bin_obj, "unit", "") or "")
+    if not unit:
+        return None
+    lower_c = _replacement_bound_to_c(getattr(bin_obj, "low", None), unit=unit)
+    upper_c = _replacement_bound_to_c(getattr(bin_obj, "high", None), unit=unit)
+    matches: list[str] = []
+    for item in topology:
+        if not isinstance(item, Mapping):
+            continue
+        bin_id = str(item.get("bin_id") or "").strip()
+        if not bin_id:
+            continue
+        item_lower = item.get("lower_c")
+        item_upper = item.get("upper_c")
+        lower_ok = (item_lower is None and lower_c is None) or (
+            item_lower is not None and lower_c is not None and math.isclose(float(item_lower), float(lower_c), rel_tol=0.0, abs_tol=1e-9)
+        )
+        upper_ok = (item_upper is None and upper_c is None) or (
+            item_upper is not None and upper_c is not None and math.isclose(float(item_upper), float(upper_c), rel_tol=0.0, abs_tol=1e-9)
+        )
+        if lower_ok and upper_ok:
+            matches.append(bin_id)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _replacement_bound_to_c(value: object, *, unit: str) -> float | None:
+    if value is None:
+        return None
+    number = float(value)
+    if unit == "C":
+        return number
+    if unit == "F":
+        return (number - 32.0) * 5.0 / 9.0
+    raise ValueError("replacement candidate bin unit must be C or F")
+
+
+def _replacement_yes_lcb_for_bin(replacement_bundle: object, *, bin_id: str, q_yes: float) -> float:
+    q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
+    if isinstance(q_lcb, Mapping) and bin_id in q_lcb:
+        return min(max(float(q_lcb[bin_id]), 0.0), max(0.0, min(float(q_yes), 1.0)))
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    aifs_probabilities = provenance.get("aifs_probabilities") if isinstance(provenance, Mapping) else None
+    if isinstance(aifs_probabilities, Mapping) and bin_id in aifs_probabilities:
+        try:
+            member_count = float(provenance.get("aifs_member_count") or 51.0)
+            successes = float(aifs_probabilities[bin_id]) * member_count
+            return min(max(float(q_yes), 0.0), _wilson_lower_bound(successes, member_count))
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _replacement_authority_probability_and_fdr_proof(
+    *,
+    event: OpportunityEvent,
+    payload: dict[str, object],
+    family,
+    conn: sqlite3.Connection,
+    native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
+    decision_time: datetime,
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, str],
+] | None:
+    if not _replacement_authority_enabled():
+        return None
+    from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
+    from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
+    from src.engine.replacement_forecast_hook_factory import _latest_replacement_readiness
+
+    readiness = _latest_replacement_readiness(
+        conn,
+        city=str(family.city),
+        target_date=str(family.target_date),
+        temperature_metric=str(family.metric),
+    )
+    if readiness is None:
+        raise ValueError("REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING")
+    bundle_result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=None,
+        readiness=readiness,
+        city=str(family.city),
+        target_date=str(family.target_date),
+        temperature_metric=str(family.metric),
+        decision_time=decision_time,
+        require_baseline_bundle=False,
+    )
+    if not bundle_result.ok or bundle_result.bundle is None:
+        raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED:{bundle_result.reason_code}")
+    replacement_bundle = bundle_result.bundle
+    q_by_condition: dict[str, float] = {}
+    lcb_by_direction: QlcbByDirection = QlcbByDirection()
+    p_values: dict[tuple[str, str], float] = {}
+    prefilter: dict[tuple[str, str], bool] = {}
+    q_map = replacement_bundle.q
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
+        if not bin_id or bin_id not in q_map:
+            raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BIN_BINDING_MISSING:{condition_id}")
+        q_yes = min(max(float(q_map[bin_id]), 0.0), 1.0)
+        yes_lcb = _replacement_yes_lcb_for_bin(replacement_bundle, bin_id=bin_id, q_yes=q_yes)
+        q_by_condition[condition_id] = q_yes
+        _set_qlcb_provenance(
+            lcb_by_direction,
+            (condition_id, "buy_yes"),
+            yes_lcb,
+            source="FORECAST_BOOTSTRAP",
+        )
+        _set_qlcb_provenance(
+            lcb_by_direction,
+            (condition_id, "buy_no"),
+            0.0,
+            source="FORECAST_BOOTSTRAP",
+        )
+        yes_price = native_costs.get((condition_id, "buy_yes"), (None, None, 0.0, None, None))[1]
+        yes_cost = float(yes_price.value) if yes_price is not None else 1.0
+        yes_edge_lcb_positive = yes_price is not None and yes_lcb > yes_cost
+        p_values[(condition_id, "buy_yes")] = 0.0 if yes_edge_lcb_positive else 1.0
+        prefilter[(condition_id, "buy_yes")] = bool(yes_edge_lcb_positive)
+        p_values[(condition_id, "buy_no")] = 1.0
+        prefilter[(condition_id, "buy_no")] = False
+    payload["_edli_q_source"] = "replacement_0_1"
+    return q_by_condition, lcb_by_direction, p_values, prefilter, {
+        "probability_authority": "replacement_0_1",
+        "posterior_id": str(replacement_bundle.posterior_id),
+        "replacement_product_id": replacement_bundle.product_id,
+        "p_cal_vector_hash": _probability_vector_hash(
+            q_by_condition[str(candidate.condition_id or "")]
+            for candidate in family.candidates
+        ),
+        "p_live_vector_hash": _probability_vector_hash(
+            q_by_condition[str(candidate.condition_id or "")]
+            for candidate in family.candidates
+        ),
+    }
 
 
 def _forecast_snapshot_probability_and_fdr_proof(
