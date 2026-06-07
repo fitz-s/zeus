@@ -1725,6 +1725,24 @@ def _final_intent_target_size_usd(intent: FinalExecutionIntent, shares: float) -
     return float(Decimal(str(shares)) * intent.final_limit_price)
 
 
+MIN_MARKETABLE_BUY_NOTIONAL_USD = Decimal("1")
+
+
+def _assert_final_intent_buy_notional_meets_venue_minimum(
+    intent: FinalExecutionIntent,
+    *,
+    submitted_shares: float,
+) -> None:
+    if intent.direction not in {"buy_yes", "buy_no"}:
+        return
+    notional = Decimal(str(submitted_shares)) * Decimal(str(intent.final_limit_price))
+    if notional < MIN_MARKETABLE_BUY_NOTIONAL_USD:
+        raise ValueError(
+            "FinalExecutionIntent BUY notional is below venue minimum: "
+            f"notional={notional} min_notional={MIN_MARKETABLE_BUY_NOTIONAL_USD}"
+        )
+
+
 def _final_intent_timeout_seconds(intent: FinalExecutionIntent) -> int:
     if intent.cancel_after is None:
         raise ValueError("FinalExecutionIntent missing cancel_after")
@@ -1989,6 +2007,10 @@ def execute_final_intent(
         intent.assert_no_recompute_inputs()
         intent.assert_submit_ready()
         submitted_shares = _final_intent_submit_shares(intent)
+        _assert_final_intent_buy_notional_meets_venue_minimum(
+            intent,
+            submitted_shares=submitted_shares,
+        )
         market_id, event_id = _final_intent_snapshot_metadata(
             intent,
             snapshot_conn if snapshot_conn is not None else conn,
