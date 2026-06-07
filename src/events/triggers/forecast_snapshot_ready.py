@@ -488,6 +488,16 @@ class ForecastSnapshotReadyTrigger:
             except (ValueError, IndexError):
                 _cycle_index = 0
 
+        _snapshot_latest_join = """
+             AND s.snapshot_id = (
+                SELECT MAX(s2.snapshot_id)
+                  FROM ensemble_snapshots s2
+                 WHERE s2.source_run_id = c.source_run_id
+                   AND s2.city = c.city
+                   AND s2.target_date = c.target_local_date
+                   AND s2.temperature_metric = c.temperature_metric
+             )
+        """
         _select_sql_base = f"""
             SELECT
                 c.*,
@@ -519,6 +529,7 @@ class ForecastSnapshotReadyTrigger:
              AND s.city = c.city
              AND s.target_date = c.target_local_date
              AND s.temperature_metric = c.temperature_metric
+             {_snapshot_latest_join}
             WHERE COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
               AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
               AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}
@@ -526,6 +537,60 @@ class ForecastSnapshotReadyTrigger:
                 CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
                 c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
         """
+        if _fairness_on:
+            _select_sql_base = f"""
+            WITH ranked_coverage AS (
+                SELECT
+                    c0.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY c0.city, c0.target_local_date, c0.temperature_metric
+                        ORDER BY
+                            CASE WHEN c0.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
+                            c0.computed_at DESC,
+                            c0.coverage_id DESC
+                    ) AS _family_rank
+                  FROM source_run_coverage c0
+                 WHERE c0.computed_at IS NULL OR c0.computed_at <= ?
+            )
+            SELECT
+                c.*,
+                sr.source_cycle_time AS sr_source_cycle_time,
+                sr.source_issue_time AS sr_source_issue_time,
+                sr.source_release_time AS sr_source_release_time,
+                sr.source_available_at AS sr_source_available_at,
+                sr.fetch_started_at AS sr_fetch_started_at,
+                sr.fetch_finished_at AS sr_fetch_finished_at,
+                sr.captured_at AS sr_captured_at,
+                sr.status AS sr_status,
+                sr.completeness_status AS sr_completeness_status,
+                sr.expected_steps_json AS sr_expected_steps_json,
+                sr.observed_steps_json AS sr_observed_steps_json,
+                sr.expected_members AS sr_expected_members,
+                sr.observed_members AS sr_observed_members,
+                s.snapshot_id,
+                s.city AS snapshot_city,
+                s.target_date AS snapshot_target_date,
+                s.temperature_metric AS snapshot_temperature_metric,
+                s.available_at AS snapshot_available_at,
+                s.fetch_time AS snapshot_fetch_time,
+                s.manifest_hash AS snapshot_manifest_hash,
+                s.members_json AS snapshot_members_json
+            FROM ranked_coverage c
+            JOIN source_run sr ON sr.source_run_id = c.source_run_id
+            JOIN ensemble_snapshots s
+              ON s.source_run_id = c.source_run_id
+             AND s.city = c.city
+             AND s.target_date = c.target_local_date
+             AND s.temperature_metric = c.temperature_metric
+             {_snapshot_latest_join}
+            WHERE c._family_rank = 1
+              AND COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
+              AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
+              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}
+            ORDER BY
+                CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
+                c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
+            """
         _decision_iso = decision_time.astimezone(UTC).isoformat()
         if _fairness_on:
             # Fetch all candidates (no LIMIT); fairness contract applies LIMIT per cycle.
@@ -533,6 +598,7 @@ class ForecastSnapshotReadyTrigger:
                 forecasts_conn,
                 _select_sql_base,
                 (
+                    _decision_iso,
                     _decision_iso,
                     _decision_iso,
                     _decision_iso,
