@@ -6335,11 +6335,11 @@ def evaluate_candidate(
                 f"oracle_penalty_observed_{oracle.penalty_multiplier:g}x"
             )
 
-        # DDD v2 Rail 2 discount: reduce Kelly by (1 − ddd_discount). Applied
+        # DDD v2 Rail 2 discount: reduce Kelly by the remaining multiplier. Applied
         # AFTER oracle penalty so the two compose multiplicatively. ddd_discount
         # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
         if ddd_discount > 0.0:
-            km *= max(0.0, 1.0 + (-ddd_discount))
+            km *= max(0.0, (1.0 / ddd_discount - 1.0) * ddd_discount)
         km *= source_quality_haircut
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.

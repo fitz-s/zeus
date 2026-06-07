@@ -123,10 +123,9 @@ class TestDeterministicImpossibilityShortCircuit:
 
     def test_buy_no_on_impossible_yes_bin_holds_as_guaranteed_winner(self):
         """Operator §5 nuance + critic F-1 fix (2026-05-27):
-        buy_no on an impossible YES bin is the WINNING side. The held-side
-        win probability is (1 - p_obs) = 1.0 when YES is impossible, so
-        hold_value = shares × 1.0 dominates any sell bid < 1.0. Optimizer
-        must HOLD, not liquidate the guaranteed winner."""
+        buy_no on an impossible YES bin can be the winning side, but the
+        optimizer must receive that as native held-side probability instead
+        of deriving it from the YES posterior."""
         bins = [_wbin(60, 61), _wbin(62, 63)]
         p = [0.30, 0.70]
         constraint = _det_high(value=63.0)
@@ -137,6 +136,7 @@ class TestDeterministicImpossibilityShortCircuit:
             ExitLegInput(
                 leg_id="no_winner", bin_index=0, bin_label="60-61",
                 direction="buy_no", shares=80.0, best_bid=0.90,
+                held_probability=1.0,
             ),
         ]
         decision = optimize_exit_family(
@@ -147,7 +147,7 @@ class TestDeterministicImpossibilityShortCircuit:
         # Not impossibility short-circuit (that branch is buy_yes-only).
         assert leg.reason != "OBSERVATION_IMPOSSIBLE_HIGH"
         assert leg.reason != "OBSERVATION_IMPOSSIBLE_NO_BID"
-        # held_p = 1 - 0 = 1.0; hold_value = 80; sell_value ≈ 72.
+        # Native held-side probability is 1.0; hold_value = 80; sell_value ≈ 72.
         assert leg.action == "HOLD"
         assert leg.reason == "HOLD_DOMINANT"
         assert leg.hold_value > leg.sell_value
@@ -208,8 +208,9 @@ class TestContradictionFailClosed:
 
     def test_contradiction_buy_no_defers_to_ev_does_not_fail_close_sell(self):
         """Critic F-1 fix (2026-05-27): when YES posterior is all-impossible
-        (contradiction), a buy_no leg is the guaranteed winner — held_p =
-        1 - 0 = 1.0 — so EV cash-out path must HOLD against any bid < 1.0.
+        (contradiction), a buy_no leg may be the guaranteed winner only when
+        native held-side probability says so; EV cash-out path must HOLD
+        against any bid < 1.0.
         The contradiction-fail-closed branch must NOT blindly sell buy_no."""
         bins = [_wbin(60, 61), _wbin(62, 63)]
         p = [0.5, 0.5]
@@ -220,6 +221,7 @@ class TestContradictionFailClosed:
             ExitLegInput(
                 leg_id="no_winner", bin_index=0, bin_label="60-61",
                 direction="buy_no", shares=100.0, best_bid=0.90,
+                held_probability=1.0,
             ),
         ]
         decision = optimize_exit_family(
@@ -428,15 +430,14 @@ class TestHeldProbabilityDirection:
         from src.strategy.exit_family_optimizer import _held_probability
         assert _held_probability(0.4, "buy_yes") == 0.4
 
-    def test_buy_no_held_probability_equals_one_minus_p_obs(self):
+    def test_buy_no_held_probability_requires_native_probability(self):
         from src.strategy.exit_family_optimizer import _held_probability
-        assert math.isclose(_held_probability(0.4, "buy_no"), 0.6, rel_tol=1e-12)
+        with pytest.raises(ValueError, match="native held-side probability"):
+            _held_probability(0.4, "buy_no")
 
-    def test_buy_no_on_zero_p_obs_yields_one(self):
-        # The exact regression class fixed by F-1: impossible YES bin gives
-        # p_obs=0, so held_p for buy_no must be 1.0.
+    def test_buy_no_held_probability_uses_native_probability(self):
         from src.strategy.exit_family_optimizer import _held_probability
-        assert _held_probability(0.0, "buy_no") == 1.0
+        assert _held_probability(0.0, "buy_no", native_held_probability=0.93) == 0.93
 
     def test_unknown_direction_raises(self):
         from src.strategy.exit_family_optimizer import _held_probability

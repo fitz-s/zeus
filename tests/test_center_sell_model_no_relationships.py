@@ -164,6 +164,7 @@ _CAL_Y = [0,    1,    1,    0,    1,    0,    1,    1,    0,    1   ]
 def _analysis(
     p_hat: float = 0.40,
     no_ask: float = 0.45,
+    no_p_lower: float | None = 0.70,
     cal_p_hats: object = None,
     cal_outcomes: object = None,
     alpha: float = 0.10,
@@ -173,6 +174,7 @@ def _analysis(
     return SimpleNamespace(
         center_sell_model_no_p_hat=p_hat,
         center_sell_model_no_no_ask=no_ask,
+        center_sell_model_no_no_p_lower=no_p_lower,
         center_sell_model_no_cal_p_hats=cal_p_hats if cal_p_hats is not None else _CAL_P,
         center_sell_model_no_cal_outcomes=cal_outcomes if cal_outcomes is not None else _CAL_Y,
         center_sell_model_no_alpha=alpha,
@@ -185,25 +187,16 @@ def _analysis(
 # ---------------------------------------------------------------------------
 
 class TestMN1UpperBoundGate:
-    """Candidate enters/rejects based on p⁺, not raw p_hat."""
+    """Candidate enters/rejects based on native NO lower bound."""
 
-    def test_raw_pass_but_upper_fail_gives_no_trade(self) -> None:
-        """If 1−p_hat−b−phi > 0 but 1−p⁺−b−phi ≤ 0, must be no_trade."""
-        fee_rate = venue_fee_rate()
-        # Choose inputs so raw would pass but p⁺ pushes past threshold.
-        # Use very tight cal set with large q_alpha so p⁺ ≈ 1.
-        large_residual_cal_p = [0.0] * 10
-        large_residual_cal_y  = [1]  * 10  # residuals = |1-0| = 1.0 → q_alpha = 1.0
-        p_hat = 0.30
-        no_ask = Decimal("0.55")
-        raw_ev = 1 - p_hat - float(no_ask) - float(phi(Decimal("1"), no_ask, fee_rate))
-        assert raw_ev > 0, "raw EV must be positive for this test to be meaningful"
-
+    def test_missing_native_no_lower_bound_gives_no_trade(self) -> None:
+        """NO cannot be inferred from p_hat or calibrated YES upper bounds."""
         analysis = _analysis(
-            p_hat=p_hat,
-            no_ask=float(no_ask),
-            cal_p_hats=large_residual_cal_p,
-            cal_outcomes=large_residual_cal_y,
+            p_hat=0.30,
+            no_ask=0.20,
+            no_p_lower=None,
+            cal_p_hats=[0.0] * 10,
+            cal_outcomes=[1] * 10,
         )
         ctx = _make_context(analysis)
         candidate = CenterSellModelNo()
@@ -211,21 +204,20 @@ class TestMN1UpperBoundGate:
 
         assert isinstance(result, CandidateDecision)
         assert result.outcome == "no_trade"
-        assert result.reason == NoTradeReason.CENTER_SELL_MODEL_NO_NO_EDGE
+        assert result.reason == NoTradeReason.CENTER_SELL_MODEL_NO_CALIBRATION_UNAVAILABLE
 
-    def test_p_plus_used_not_p_hat(self) -> None:
-        """When p⁺ leaves positive edge, enter decision's p_posterior == p⁺, not p_hat."""
-        # Cal set: all residuals = 0.5 → q_alpha=0.5 → p⁺=0.1+0.5=0.60.
-        # no_ask=0.20 → edge=1−0.60−0.20−phi(0.20) > 0.
+    def test_native_no_lower_used_not_p_hat(self) -> None:
+        """Enter decision's p_posterior equals native NO lower bound."""
         p_hat = 0.10
         no_ask_f = 0.20
+        no_p_lower = 0.62
         cal_p = [0.5] * 20
         cal_y  = [1]   * 20
-        _, p_plus = calibrated_bounds(p_hat, cal_p, cal_y, alpha=0.10)
 
         analysis = _analysis(
             p_hat=p_hat,
             no_ask=no_ask_f,
+            no_p_lower=no_p_lower,
             cal_p_hats=cal_p,
             cal_outcomes=cal_y,
         )
@@ -235,37 +227,34 @@ class TestMN1UpperBoundGate:
 
         assert result.outcome == "enter", f"Expected enter, got no_trade: {result.reason_detail}"
         assert result.p_posterior is not None
-        assert abs(float(result.p_posterior) - p_plus) < 1e-9, (
-            f"p_posterior={result.p_posterior} but expected p⁺={p_plus} (not raw p_hat={p_hat})"
+        assert abs(float(result.p_posterior) - no_p_lower) < 1e-9, (
+            f"p_posterior={result.p_posterior} but expected native no_p_lower={no_p_lower}"
         )
 
 
 # ---------------------------------------------------------------------------
-# MN2 — Edge formula: edge == 1 − p⁺ − b − phi(b, fee_rate)
+# MN2 — Edge formula: edge == native no_p_lower − b − phi(b, fee_rate)
 # ---------------------------------------------------------------------------
 
 class TestMN2EdgeFormula:
     def test_edge_matches_formula(self) -> None:
-        """Returned edge == 1 − p⁺ − b − phi(1, b, fee_rate).
-
-        Cal set: residuals = 0.5 → q_alpha=0.5 → p⁺=0.10+0.5=0.60.
-        no_ask=0.20 → edge = 1−0.60−0.20−phi(0.20) which is deterministically positive.
-        """
+        """Returned edge == native no_p_lower − b − phi(1, b, fee_rate)."""
         fee_rate = venue_fee_rate()
         p_hat = 0.10
         no_ask_f = 0.20
+        no_p_lower = 0.62
         cal_p = [0.5] * 20
         cal_y  = [1]   * 20
 
-        _, p_plus = calibrated_bounds(p_hat, cal_p, cal_y, alpha=0.10)
         b = Decimal(str(no_ask_f))
-        expected_edge = Decimal("1") - Decimal(str(p_plus)) - b - phi(Decimal("1"), b, fee_rate)
+        expected_edge = Decimal(str(no_p_lower)) - b - phi(Decimal("1"), b, fee_rate)
 
         assert expected_edge > Decimal("0"), f"Test fixture broken: expected_edge={expected_edge}"
 
         analysis = _analysis(
             p_hat=p_hat,
             no_ask=no_ask_f,
+            no_p_lower=no_p_lower,
             cal_p_hats=cal_p,
             cal_outcomes=cal_y,
         )
@@ -360,12 +349,12 @@ class TestMN3CalibrationUnavailable:
 # ---------------------------------------------------------------------------
 
 class TestMN4NonPositiveEdge:
-    def test_high_p_plus_gives_no_edge(self) -> None:
-        """p⁺ close to 1 → 1−p⁺−b−phi ≤ 0 → no_trade NO_EDGE."""
-        # Force large q_alpha: residuals = |1−0| = 1.0 → p⁺ = min(1, p_hat+1) = 1.0
+    def test_low_native_no_lower_gives_no_edge(self) -> None:
+        """Native NO lower bound below cost gives no_trade NO_EDGE."""
         analysis = _analysis(
             p_hat=0.30,
             no_ask=0.55,
+            no_p_lower=0.40,
             cal_p_hats=[0.0] * 10,
             cal_outcomes=[1] * 10,
         )
@@ -380,6 +369,7 @@ class TestMN4NonPositiveEdge:
         analysis = _analysis(
             p_hat=0.10,
             no_ask=0.98,
+            no_p_lower=0.70,
             cal_p_hats=_CAL_P,
             cal_outcomes=_CAL_Y,
         )
@@ -392,23 +382,15 @@ class TestMN4NonPositiveEdge:
     def test_edge_exactly_zero_is_no_trade(self) -> None:
         """Edge == 0 (not strictly positive) → no_trade."""
         fee_rate = venue_fee_rate()
-        # Construct: 1 − p⁺ − b − phi(1,b,r) == 0
-        # Use tight cal so q_alpha ≈ 0 → p⁺ ≈ p_hat.
-        # Then set p_hat = 1 − b − phi; that makes edge = 0.
         tight_cal_p = [0.50] * 20
         tight_cal_y  = [1]    * 20  # residuals = 0.50 exactly
-        # With all residuals = 0.50, q_alpha = 0.50, p⁺ = p_hat + 0.50
-        # To get edge=0: 1 − (p_hat + 0.50) − b − phi = 0
-        # Pick b = 0.40: phi(1, 0.40, r) ≈ 0.40 * (1-0.40) * r = 0.24*0.05 = 0.012
-        # → p_hat = 1 − 0.50 − 0.40 − 0.012 = 0.088
         b_val = Decimal("0.40")
         fee_for_b = phi(Decimal("1"), b_val, fee_rate)
-        # q_alpha with all residuals = |1 − 0.5| = 0.5 → 0.5 (sorted, index = ceil(21*0.9)-1 = 18-1=18 → value=0.5)
-        q_alpha = Decimal("0.5")
-        p_hat_zero_edge = float(Decimal("1") - q_alpha - b_val - fee_for_b)
+        no_p_lower_zero_edge = float(b_val + fee_for_b)
         analysis = _analysis(
-            p_hat=p_hat_zero_edge,
+            p_hat=0.10,
             no_ask=float(b_val),
+            no_p_lower=no_p_lower_zero_edge,
             cal_p_hats=tight_cal_p,
             cal_outcomes=tight_cal_y,
         )
@@ -427,12 +409,12 @@ class TestMN5EnterPath:
     def _enter_analysis(self) -> SimpleNamespace:
         """Analysis that deterministically produces a positive edge.
 
-        Cal set: all residuals = |1−0.5| = 0.5 → q_alpha ≈ 0.5 → p⁺ ≈ 0.1+0.5 = 0.60.
-        no_ask = 0.20 → edge = 1−0.60−0.20−phi(0.20) = 0.20−phi >> 0.
+        Native no_p_lower = 0.62 and no_ask = 0.20 gives positive edge.
         """
         return _analysis(
             p_hat=0.10,
             no_ask=0.20,
+            no_p_lower=0.62,
             cal_p_hats=[0.5] * 20,
             cal_outcomes=[1] * 20,  # residuals = |1−0.5| = 0.5 → q_alpha = 0.5; p⁺ = 0.60
         )
@@ -462,19 +444,13 @@ class TestMN5EnterPath:
         assert result.edge is not None
         assert result.edge > Decimal("0")
 
-    def test_p_posterior_is_upper_bound(self) -> None:
+    def test_p_posterior_is_native_no_lower_bound(self) -> None:
         analysis = self._enter_analysis()
-        _, p_plus = calibrated_bounds(
-            analysis.center_sell_model_no_p_hat,
-            analysis.center_sell_model_no_cal_p_hats,
-            analysis.center_sell_model_no_cal_outcomes,
-            alpha=analysis.center_sell_model_no_alpha,
-        )
         result = CenterSellModelNo().evaluate(
             context=_make_context(analysis), conn=_make_db(), decision_time=_DT
         )
         assert result.p_posterior is not None
-        assert abs(float(result.p_posterior) - p_plus) < 1e-9
+        assert abs(float(result.p_posterior) - analysis.center_sell_model_no_no_p_lower) < 1e-9
 
     def test_strategy_key_is_center_sell(self) -> None:
         candidate = CenterSellModelNo()
@@ -511,6 +487,7 @@ class TestMN6ShadowOnly:
         analysis = _analysis(
             p_hat=0.10,
             no_ask=0.20,
+            no_p_lower=0.62,
             cal_p_hats=[0.5] * 20,
             cal_outcomes=[1]   * 20,
         )

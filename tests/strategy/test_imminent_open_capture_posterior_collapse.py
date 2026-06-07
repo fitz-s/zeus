@@ -13,7 +13,7 @@ implementation in imminent_open_capture_posterior_collapse.py is complete.
 
 Theorem (§9): T* = μ_t + η_t, Var(η_t) = σ²(τ) ↓ 0 as τ ↓ 0.
   YES iff p⁻_i(t) − a_i − phi(1, a_i, fee_rate) > 0
-  NO  iff 1 − p⁺_i(t) − b_i − phi(1, b_i, fee_rate) > 0
+  NO  iff native no_p_lower_i(t) − b_i − phi(1, b_i, fee_rate) > 0
 
 Core invariants:
   R1: YES entry uses p⁻ (calibrated lower bound), NOT raw p_hat.
@@ -21,7 +21,7 @@ Core invariants:
   R3: Variance collapse: calibration interval narrows as τ → 0 (tighter q_alpha
       → smaller [p⁻, p⁺] width). More residual spread in cal set = wider bound.
   R4: YES gate: p⁻ − ask − phi > 0 required; zero or negative edge → no_trade.
-  R5: NO gate: 1 − p⁺ − bid − phi > 0 required; non-positive edge → no_trade.
+  R5: NO gate: native no_p_lower − bid − phi > 0 required; non-positive edge → no_trade.
   R6: Calibration unavailable (empty cal set) → no_trade (fail-closed).
   R7: All inputs present, edge > 0 → enter; shadow row carries computed edge (not placeholder).
   R8: p_hat/ask present but both YES and NO gates negative → no_trade.
@@ -147,6 +147,7 @@ def _make_analysis(
     cal_p_hats: Sequence[float] = (0.6, 0.7, 0.5, 0.8, 0.4),
     cal_outcomes: Sequence[int] = (1, 1, 0, 1, 0),
     hours_to_resolution: float = 8.0,
+    no_p_lower: float | None = None,
     **overrides: Any,
 ) -> SimpleNamespace:
     """Build a minimal analysis object for the imminent posterior-collapse candidate.
@@ -158,6 +159,7 @@ def _make_analysis(
       cal_p_hats: calibration set probability estimates (for calibrated_bounds).
       cal_outcomes: calibration set binary outcomes.
       hours_to_resolution: τ (time to resolution in hours); affects σ²(τ).
+      no_p_lower: native NO-side lower bound; absent means NO is not scoreable.
     """
     defaults = dict(
         p_hat=p_hat,
@@ -166,6 +168,7 @@ def _make_analysis(
         cal_p_hats=list(cal_p_hats),
         cal_outcomes=list(cal_outcomes),
         hours_to_resolution=hours_to_resolution,
+        no_p_lower=no_p_lower,
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -201,12 +204,12 @@ def test_r1_yes_entry_uses_p_lower_not_raw_p_hat() -> None:
 
     # p_hat=0.70, ask=0.65: raw gap 0.05; phi(0.65)=0.05*0.65*0.35≈0.0114
     # raw YES edge ≈ 0.70 - 0.65 - 0.0114 = 0.0386 > 0  (raw p_hat would enter)
-    # Cal set: scores all = |1 - 0.70| = 0.30 → q_alpha = 0.30 → p⁻ = max(0, 0.40)
+    # Cal set: scores all put q_alpha at 0.30 → p⁻ = max(0, 0.40)
     # p⁻ YES edge = 0.40 - 0.65 - 0.0114 < 0  → must be no_trade
     analysis = _make_analysis(
         p_hat=0.70,
         ask=0.65,
-        bid=0.20,        # NO gate also infeasible (1-p⁺-bid-phi: p⁺=1.0, edge≤0)
+        bid=0.20,        # NO gate unavailable without native no_p_lower.
         cal_p_hats=[0.70, 0.70, 0.70, 0.70, 0.70],
         cal_outcomes=[1, 1, 1, 1, 1],   # all outcomes 1 → scores = 0.30 each
         hours_to_resolution=8.0,
@@ -224,19 +227,11 @@ def test_r1_yes_entry_uses_p_lower_not_raw_p_hat() -> None:
 # R2: NO entry uses p⁺ (calibrated upper bound), NOT raw p_hat
 # ---------------------------------------------------------------------------
 
-def test_r2_no_entry_uses_p_upper_not_raw_p_hat() -> None:
-    """R2: candidate uses p⁺ = calibrated_bounds(p_hat, ...)[1] for NO gate.
-
-    Invariant: if raw 1-p_hat would pass the NO gate but 1-p⁺ would not, outcome
-    must be no_trade.
-    """
+def test_r2_no_entry_requires_native_no_lower_bound() -> None:
+    """R2: candidate must not derive NO authority from YES-side bounds."""
     conn = _make_conn()
     candidate = ImminentOpenCapturePosteriorCollapse()
 
-    # p_hat=0.30, bid=0.25: raw NO gap = 1-0.30-0.25 = 0.45; phi(0.25)=0.05*0.25*0.75=0.009
-    # raw NO edge ≈ 0.45 - 0.009 > 0  (would enter if using raw p_hat)
-    # Cal set: scores all = |1 - 0.30| = 0.70 → q_alpha = 0.70 → p⁺ = min(1, 0.30+0.70)=1.0
-    # p⁺ NO edge = 1 - 1.0 - 0.25 - phi = -0.25 - phi < 0  → must be no_trade
     analysis = _make_analysis(
         p_hat=0.30,
         ask=0.80,        # YES gate: p⁻=max(0,0.30-0.70)=0 < ask → no_trade
@@ -249,8 +244,8 @@ def test_r2_no_entry_uses_p_upper_not_raw_p_hat() -> None:
     decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
 
     assert decision.outcome == "no_trade", (
-        f"R2: 1-p⁺ << bid; must be no_trade but got {decision.outcome}. "
-        "Candidate appears to be using raw 1-p_hat instead of calibrated 1-p⁺."
+        f"R2: absent native no_p_lower must be no_trade but got {decision.outcome}. "
+        "Candidate appears to be constructing NO from YES-side evidence."
     )
 
 
@@ -324,7 +319,7 @@ def test_r4_yes_gate_edge_sign_determines_outcome(ask: float, expected_outcome: 
     analysis = _make_analysis(
         p_hat=0.80,
         ask=ask,
-        bid=0.10,    # NO gate: 1-p⁺=1-min(1,0.80+0.20)=0 → no_trade on NO path regardless
+        bid=0.10,    # NO gate unavailable without native no_p_lower.
         cal_p_hats=[0.80, 0.80, 0.80, 0.80, 0.80],
         cal_outcomes=[1, 1, 1, 1, 1],
         hours_to_resolution=8.0,
@@ -339,31 +334,20 @@ def test_r4_yes_gate_edge_sign_determines_outcome(ask: float, expected_outcome: 
 
 
 # ---------------------------------------------------------------------------
-# R5: NO gate — 1 − p⁺ − bid − phi > 0 required; non-positive → no_trade
+# R5: NO gate — native no_p_lower − bid − phi > 0 required; non-positive → no_trade
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("bid,expected_outcome", [
-    # bid=0.60: 1-p⁺-bid-phi = 1-0.60-0.60-phi < 0 → no_trade
     (0.60, "no_trade"),
-    # bid=0.10: 1-p⁺=1-0.60=0.40, edge=0.40-0.10-phi(0.10)>0 → enter
     (0.10, "enter"),
 ])
 def test_r5_no_gate_edge_sign_determines_outcome(bid: float, expected_outcome: str) -> None:
-    """R5: NO gate strictly requires 1 − p⁺ − bid − phi > 0.
-
-    p_hat=0.40, tight cal → p⁺ ≈ 0.60.
-    bid=0.60: 1-0.60-0.60-phi < 0 → no_trade.
-    bid=0.10: 1-0.60-0.10-phi(0.10) > 0 → enter.
-    """
+    """R5: NO gate strictly requires native no_p_lower − bid − phi > 0."""
     conn = _make_conn()
     candidate = ImminentOpenCapturePosteriorCollapse()
 
-    # Tight cal: scores = |0-0.40| = 0.60 → q_alpha=0.60 → p⁺=min(1,0.40+0.60)=1.0
-    # Wait: we need p⁺ to be manageable. Use p_hat=0.40, outcomes=0 (all fail):
-    # scores = |0-0.40| = 0.40 each → q_alpha=0.40 → p⁺=min(1,0.40+0.40)=0.80
     # YES gate: p⁻=max(0,0.40-0.40)=0.0 < ask=0.90 → no_trade on YES regardless
-    # NO gate (bid=0.10): 1-0.80-0.10-phi(1,0.10,0.05)=0.10-0.004=0.096>0 → enter
-    # NO gate (bid=0.60): 1-0.80-0.60-phi(0.60) = -0.40-phi < 0 → no_trade
+    # Native NO lower bound (0.25) clears bid=0.10 and fails bid=0.60.
     analysis = _make_analysis(
         p_hat=0.40,
         ask=0.90,    # YES gate always no_trade (p⁻=0.0)
@@ -371,13 +355,14 @@ def test_r5_no_gate_edge_sign_determines_outcome(bid: float, expected_outcome: s
         cal_p_hats=[0.40, 0.40, 0.40, 0.40, 0.40],
         cal_outcomes=[0, 0, 0, 0, 0],   # all Y=0, scores = |0-0.40| = 0.40
         hours_to_resolution=8.0,
+        no_p_lower=0.25,
     )
     ctx = _make_context(conn, analysis)
     decision = candidate.evaluate(context=ctx, conn=conn, decision_time=_DECISION_TIME)
 
     assert decision.outcome == expected_outcome, (
         f"R5: bid={bid}, expected {expected_outcome}, got {decision.outcome}. "
-        f"NO gate 1−p⁺−bid−phi must be strictly positive for enter."
+        f"NO gate native no_p_lower−bid−phi must be strictly positive for enter."
     )
     if expected_outcome == "enter":
         assert decision.side == "buy_no", (
@@ -435,7 +420,7 @@ def test_r7_positive_yes_edge_writes_enter_with_computed_edge() -> None:
     analysis = _make_analysis(
         p_hat=0.80,
         ask=0.50,
-        bid=0.10,    # NO gate: 1-p⁺=1-min(1,1.0)=0 → no YES wins by positive edge
+        bid=0.10,    # NO gate unavailable without native no_p_lower, so YES wins.
         cal_p_hats=[0.80, 0.80, 0.80, 0.80, 0.80],
         cal_outcomes=[1, 1, 1, 1, 1],
         hours_to_resolution=8.0,
@@ -469,7 +454,7 @@ def test_r7_positive_yes_edge_writes_enter_with_computed_edge() -> None:
 # ---------------------------------------------------------------------------
 
 def test_r8_both_gates_negative_is_no_trade() -> None:
-    """R8: when NEITHER YES gate (p⁻ − ask − phi > 0) NOR NO gate (1−p⁺−bid−phi > 0)
+    """R8: when NEITHER YES gate nor native NO gate
     is met, outcome must be no_trade.
 
     No edge theorem applies → no trade. This is the baseline case for many markets.
@@ -479,7 +464,7 @@ def test_r8_both_gates_negative_is_no_trade() -> None:
 
     # p_hat=0.50 with tight cal → p⁻≈0.30, p⁺≈0.70
     # ask=0.80: YES edge = 0.30-0.80-phi < 0 → no
-    # bid=0.40: NO edge = 1-0.70-0.40-phi < 0 → no
+    # bid=0.40: NO gate is unavailable without native no_p_lower.
     analysis = _make_analysis(
         p_hat=0.50,
         ask=0.80,

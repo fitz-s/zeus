@@ -14,9 +14,10 @@ Theorem (STRATEGY_TAXONOMY_DIRECTIVE §4):
   price-discovery rate.
 
   Buy YES iff EV⁻(t) = p⁻ − a(t) − φ(a(t)) > 0   (strict)
-  Buy NO  iff EV⁻_NO  = 1 − p⁺ − b(t) − φ(b(t)) > 0  (strict)
+  Buy NO  iff EV⁻_NO  = native_no_p_lower − b(t) − φ(b(t)) > 0  (strict)
 
-  where p⁻ = calibrated lower bound (split conformal), p⁺ = upper bound.
+  where p⁻ = calibrated YES lower bound (split conformal). NO requires a
+  native NO lower bound; YES upper bounds are not executable NO evidence.
 
   Verifiable params: λ̂, σ_cal, m(0)−p  (NOT win-rate).
 
@@ -148,7 +149,7 @@ class OpeningInertiaRelaxation(BaseStrategyCandidate):
                 family="opening_inertia",
                 description=(
                     "Shadow candidate: exponential price-discovery relaxation model. "
-                    "Buy YES iff p⁻ − ask − phi > 0; buy NO iff 1 − p⁺ − noAsk − phi > 0. "
+                    "Buy YES iff p⁻ − ask − phi > 0; buy NO iff native no_p_lower − noAsk − phi > 0. "
                     "Uses split-conformal calibrated bounds. Verifiable params: λ, σ_cal, m(0)−p. "
                     "Data-gated on calibration set; λ estimation optional."
                 ),
@@ -168,7 +169,7 @@ class OpeningInertiaRelaxation(BaseStrategyCandidate):
         Gate 1: Calibration set must be non-empty → INSUFFICIENT_VERIFIED_CALIBRATION.
         Gate 2: Compute p⁻ / p⁺ via split conformal calibrated_bounds().
         Gate 3: YES buy iff p⁻ − ask − phi(ask) > 0 (strict).
-                NO buy iff 1 − p⁺ − noAsk − phi(noAsk) > 0 (strict).
+                NO buy iff native no_p_lower − noAsk − phi(noAsk) > 0 (strict).
                 Neither positive → no_trade(CONFIDENCE_BAND_INSUFFICIENT).
         Shadow log: reason_detail carries λ̂, σ_cal, m(0)−p for regret decomposition.
 
@@ -180,6 +181,11 @@ class OpeningInertiaRelaxation(BaseStrategyCandidate):
         p_hat: float = float(getattr(analysis, "p_hat", 0.5))
         ask_raw = getattr(analysis, "ask", None)
         no_ask_raw = getattr(analysis, "no_ask", None)
+        native_no_p_lower_raw = getattr(
+            analysis,
+            "opening_inertia_no_p_lower",
+            getattr(analysis, "no_p_lower", None),
+        )
         cal_p_hats: list[float] = list(getattr(analysis, "cal_p_hats", []))
         cal_outcomes: list[int] = list(getattr(analysis, "cal_outcomes", []))
         opening_ticks = getattr(analysis, "opening_ticks", None) or []
@@ -241,13 +247,23 @@ class OpeningInertiaRelaxation(BaseStrategyCandidate):
                 yes_enter = True
                 yes_edge = ev_yes
 
-        # ── Gate 3b: NO buy EV⁻_NO = 1 − p⁺ − noAsk − phi(noAsk) ──────────
+        # ── Gate 3b: NO buy requires native held-side lower bound ───────────
         no_enter = False
         no_edge: Optional[Decimal] = None
-        if no_ask_raw is not None:
+        native_no_p_lower: Optional[Decimal] = None
+        if native_no_p_lower_raw is not None:
+            try:
+                native_no_p_lower = Decimal(str(native_no_p_lower_raw))
+            except Exception:
+                native_no_p_lower = None
+        if (
+            no_ask_raw is not None
+            and native_no_p_lower is not None
+            and Decimal("0") <= native_no_p_lower <= Decimal("1")
+        ):
             no_ask_d = Decimal(str(no_ask_raw))
             fee_no = phi(Decimal("1"), no_ask_d, fee_rate)
-            ev_no = Decimal("1") - Decimal(str(p_hi)) - no_ask_d - fee_no
+            ev_no = native_no_p_lower - no_ask_d - fee_no
             if ev_no > Decimal("0"):
                 no_enter = True
                 no_edge = ev_no
@@ -296,7 +312,7 @@ class OpeningInertiaRelaxation(BaseStrategyCandidate):
         if no_enter:
             side = "buy_no"
             edge = no_edge
-            p_posterior = Decimal(str(p_hi))
+            p_posterior = native_no_p_lower
             decision = CandidateDecision(
                 outcome="enter",
                 side=side,

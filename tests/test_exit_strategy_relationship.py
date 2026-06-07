@@ -287,14 +287,10 @@ class TestFamilyMassConservation:
 # ----- Invariant 6.5: direction-aware hold_value across the seam (critic F-1) -----
 
 
-class TestBuyNoDirectionFlipAcrossSeam:
-    """Critic F-1 (2026-05-27): the optimizer must apply the YES→held-side
-    direction flip when consuming D2.p_obs for a buy_no leg. Without the
-    flip, a buy_no on an impossible YES bin is liquidated at the bid even
-    though it is the guaranteed winner. This is the cross-module contract
-    that locks the buy_no direction semantics — D1 marks the YES bin
-    impossible, D2 zeros the YES mass, D3 must compute held_p = 1 - p_obs
-    so the NO holder's hold_value reflects guaranteed-winner status."""
+class TestBuyNoNativeHeldProbabilityAcrossSeam:
+    """The optimizer must not construct a NO held probability from D2's
+    YES-side p_obs. D1/D2 can prove a YES bin impossible, but D3 still requires
+    native held-side probability before evaluating a buy_no leg."""
 
     def test_buy_no_on_impossible_yes_bin_yields_hold_dominant(self):
         bins = [_wbin(60, 61), _wbin(62, 63)]
@@ -306,11 +302,19 @@ class TestBuyNoDirectionFlipAcrossSeam:
         assert posterior.impossible_mask == (True, False)
         assert posterior.p_obs[0] == 0.0
 
-        # buy_no on impossible YES bin: held_p must be 1 - 0 = 1.0.
-        # hold_value = 100 * 1.0 = 100. sell_value ≈ 100*0.85 = 85. HOLD.
+        # buy_no on impossible YES bin: caller supplies native held-side
+        # probability. hold_value = 100 * 1.0 = 100. sell_value ≈ 85. HOLD.
         from src.strategy.exit_family_optimizer import ExitLegInput, optimize_exit_family
         legs = [
-            ExitLegInput("no_winner", 0, "60-61", "buy_no", 100.0, 0.85),
+            ExitLegInput(
+                "no_winner",
+                0,
+                "60-61",
+                "buy_no",
+                100.0,
+                0.85,
+                held_probability=1.0,
+            ),
         ]
         decision = optimize_exit_family(
             family_key=("X",), constraint=constraint,
@@ -319,12 +323,23 @@ class TestBuyNoDirectionFlipAcrossSeam:
         leg = decision.legs[0]
         assert leg.action == "HOLD"
         assert leg.reason == "HOLD_DOMINANT"
-        # If the F-1 regression came back (held_p naively = p_obs = 0.0),
-        # hold_value would be 0 < sell_value (85), and SELL_FULL EV_CASH_OUT
-        # would fire — this assertion catches the inversion.
         assert leg.hold_value > leg.sell_value
-        # Stronger lock: the actual hold_value is shares × (1 - p_obs).
-        assert math.isclose(leg.hold_value, 100.0 * (1.0 - 0.0), rel_tol=1e-12)
+        assert math.isclose(leg.hold_value, 100.0, rel_tol=1e-12)
+
+    def test_buy_no_without_native_probability_raises(self):
+        bins = [_wbin(60, 61), _wbin(62, 63)]
+        p = [0.30, 0.70]
+        constraint = build_settlement_progress_constraint(_full_high_row(63.0))
+        posterior = constrain_family_posterior_by_observation(p, bins, constraint)
+        from src.strategy.exit_family_optimizer import ExitLegInput, optimize_exit_family
+
+        with pytest.raises(ValueError, match="native held-side probability"):
+            optimize_exit_family(
+                family_key=("X",),
+                constraint=constraint,
+                constrained_posterior=posterior,
+                legs=[ExitLegInput("no_winner", 0, "60-61", "buy_no", 100.0, 0.85)],
+            )
 
     def test_buy_yes_on_impossible_yes_bin_yields_immediate_sell(self):
         """Sister case: buy_yes IS the loser, must sell. Locks the

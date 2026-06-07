@@ -55,7 +55,9 @@ class CandidateEvaluation:
         q_lcb = max(0.0, min(1.0, float(self.q_lcb_5pct)))
         if q_lcb <= self.execution_price:
             return 0.0
-        return (q_lcb - float(self.execution_price)) / (1.0 + (-float(self.execution_price)))
+        price = float(self.execution_price)
+        denominator = ((1.0 / price) - 1.0) * price
+        return (q_lcb - price) / denominator
 
     @property
     def robust_kelly_growth_score(self) -> float:

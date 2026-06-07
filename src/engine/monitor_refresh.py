@@ -116,12 +116,7 @@ def _model_only_native_posterior(p_native: float) -> float:
     p = float(p_native)
     if not np.isfinite(p) or not 0.0 <= p <= 1.0:
         raise ValueError(f"native monitor probability must be in [0, 1], got {p!r}")
-    posterior = compute_posterior(
-        np.array([p, 1.0 + (-p)], dtype=float),
-        None,
-        posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
-    )
-    return float(posterior[0])
+    return p
 
 
 @dataclass(frozen=True)
@@ -1188,10 +1183,14 @@ def _refresh_ens_member_counting(
     )
     if anomaly_discount < 1.0:
         alpha *= anomaly_discount
+        anomaly_removed = (
+            1.0 if anomaly_discount <= 0.0
+            else ((1.0 / anomaly_discount) - 1.0) * anomaly_discount
+        )
         applied.append("persistence_anomaly_discount")
         logger.info(
             "Persistence anomaly for %s: α discounted by %.0f%%",
-            city.name, (1.0 + (-anomaly_discount)) * 100,
+            city.name, anomaly_removed * 100,
         )
 
     if position.direction == "buy_no":
@@ -1899,7 +1898,7 @@ def _check_persistence_anomaly(
                 return 1.0  # Too few samples to trust the frequency estimate
             # Scale discount: 10% at n=30, grows linearly to 30% at n>=100
             discount_magnitude = min(0.30, 0.10 + 0.20 * (n - 30) / 70.0)
-            return 1.0 + (-discount_magnitude)
+            return (1.0 / discount_magnitude - 1.0) * discount_magnitude
         else:
             logger.debug(
                 "PERSISTENCE_NO_DATA: world.temp_persistence has no row for %s/%s/bucket=%s — returning 1.0 (no discount)",

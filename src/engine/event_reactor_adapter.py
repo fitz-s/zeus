@@ -3609,7 +3609,7 @@ def _ev_boundary_favors_cross(
     fee = _optional_float(actionable_payload.get("fee_rate")) or 0.0
     adverse = _adverse_selection_proxy(actionable_payload=actionable_payload, spread_usd=spread)
     a = float(adverse) if adverse is not None else 0.0
-    lhs = e * (1.0 + (-p_fill))
+    lhs = e - (e * p_fill)
     rhs = (spread / 2.0) * (1.0 + p_fill) + fee - a
     return lhs >= rhs
 
@@ -4494,13 +4494,12 @@ def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
 #
 # q_lcb SEMANTICS (the seam the 2026-06-05 review caught — DIRECTION LAW / Fitz
 # #4): for direction="buy_no", q_lcb_5pct is the conservative lower bound of
-# p(NO) = "the bin will NOT settle here" (market_analysis_family_scan derives the
-# buy_no hypothesis from p_posterior_no = 1 - p_posterior and bootstraps ci_lo in
-# NO-space). So "OVERWHELMING settlement-licensed evidence the bin won't settle"
-# means q_lcb_5pct is HIGH (→1), not low. The original guard read the escape in
-# YES-space (low q_lcb), which inverted it: it demoted exactly the high-conviction
-# contrarian (high NO-lower-bound) and waved through the weakest one. Corrected
-# below to NO-space.
+# native NO evidence: "the bin will NOT settle here." So "OVERWHELMING
+# settlement-licensed evidence the bin won't settle" means q_lcb_5pct is HIGH
+# (→1), not low. The original guard read the escape in YES-space (low q_lcb),
+# which inverted it: it demoted exactly the high-conviction contrarian
+# (high NO-lower-bound) and waved through the weakest one. Corrected below
+# to NO-space.
 #
 #   market_disagree_no_price_max  — a NO token cheaper than this means the market
 #     prices the bin as LIKELY to settle (YES expensive). Buying NO here is betting
@@ -4958,8 +4957,8 @@ def _generate_candidate_proofs(
             row = rows_by_direction.get((condition_id, direction))
             # R5/#176 boundary antibody (2026-06-04): a recorded lower bound can
             # never exceed its own recorded point. q_value is the inference-engine
-            # NORMALIZED point (1 - yes_q); q_lcb is the market_analysis bootstrap
-            # lower bound, clamped only against market_analysis's OWN un-normalized
+            # native direction point; q_lcb is the market_analysis bootstrap
+            # lower bound, clamped only against market_analysis's OWN
             # p_posterior (the BUG #129 within-module clamp). When the two modules'
             # normalizations diverge (sum(P)<1) the raw q_lcb can land ABOVE
             # q_value (43% of live buy_no on 2026-06-03, worst gap 0.79) — a
@@ -6995,7 +6994,7 @@ def _write_emos_shadow_ledger(
 
         # Robust edge scores (replicate trade_score.py:48-52 using q_live, NOT raw_q).
         # buy_yes: q_posterior = q_live, q_5pct = raw_q_lcb_buy_yes, cost = cost_buy_yes
-        # buy_no:  q_posterior = 1 - q_live, q_5pct = raw_q_lcb_buy_no, cost = cost_buy_no
+        # buy_no:  q_posterior = native NO posterior, q_5pct = raw_q_lcb_buy_no, cost = cost_buy_no
         #          (INV/#106: buy_no lcb is independent, NOT negation of buy_yes lcb)
         _PENALTY = 0.01  # mirror adapter:4525-4526
 
@@ -7118,10 +7117,7 @@ def _maybe_override_lcb_with_emos_ci(
         emos_q          = bin_probability(mu_native, sigma_native, low, high)
         q_inflated      = bin_probability(mu_native, k_cov * sigma_native, low, high)
         buy_yes lcb     = min(emos_q, q_inflated)            # never optimistic (widening σ lowers a peaked bin)
-        buy_no  lcb     = min(1 - emos_q, 1 - q_inflated)    # = 1 - max(emos_q, q_inflated); the INDEPENDENT
-                                                              #   honest NO-mass lower bound (mirrors the shadow
-                                                              #   hook's 1 - emos_q at k_cov=1, never optimistic
-                                                              #   for NO at k_cov>1). NOT 1 - yes_lcb (#106).
+        buy_no  lcb     = native NO lower bound only; absent native NO evidence means no live NO authority.
 
     Native unit: °F cities convert (mu_c, sigma_c) to °F exactly as
     _write_emos_shadow_ledger does (mirror EXACTLY). k_cov comes from the per-city
@@ -8218,7 +8214,7 @@ def _wilson_depth_fill_lcb(*, coverage: float, depth_cushion: float) -> float:
     z2 = z * z
     denom = 1.0 + z2 / n
     center = p_hat + z2 / (2.0 * n)
-    margin = z * float(np.sqrt((p_hat * (1.0 + (-p_hat)) / n) + (z2 / (4.0 * n * n))))
+    margin = z * float(np.sqrt(((p_hat - (p_hat * p_hat)) / n) + (z2 / (4.0 * n * n))))
     lower = (center - margin) / denom
     return max(0.0, min(1.0, lower))
 

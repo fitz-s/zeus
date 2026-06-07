@@ -6807,6 +6807,8 @@ def _decision_vector_value(decision, attr_name: str) -> float | None:
     vector = getattr(decision, attr_name, None)
     if edge is None or vector is None:
         return None
+    if getattr(edge, "direction", "") == "buy_no":
+        return None
     try:
         values = vector.tolist() if hasattr(vector, "tolist") else list(vector)
     except TypeError:
@@ -6829,8 +6831,6 @@ def _decision_vector_value(decision, attr_name: str) -> float | None:
         probability = float(values[idx])
     except (TypeError, ValueError):
         return None
-    if getattr(edge, "direction", "") == "buy_no":
-        probability = 1.0 - probability
     return probability
 
 

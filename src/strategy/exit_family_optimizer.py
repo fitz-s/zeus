@@ -25,10 +25,8 @@
 #                     # raises on invalid inputs — we clamp the {0,1} boundary
 #                     # to zero fee, matching HoldValue.compute_with_exit_costs.
 #     held_p_i =
-#         p_i^obs              if direction == "buy_yes" (held side = YES)
-#         (1 - p_i^obs)        if direction == "buy_no"  (held side = NO; if
-#                                YES bin is impossible then p_i^obs == 0, so
-#                                NO holder's true win probability is 1.0)
+#         p_i^obs                     if direction == "buy_yes" (held side = YES)
+#         leg.held_probability_native if direction == "buy_no"  (held side = NO)
 #     hold_value_i = x_i · held_p_i - hold_cost_extras_i
 #                     # time-cost / correlation-crowding extras come from the
 #                     # caller (cycle_runtime threads HoldValue inputs).
@@ -113,6 +111,7 @@ class ExitLegInput:
                             # tracks `last_monitor_best_bid` as held-side).
     fee_rate: float = 0.0  # Polymarket maker fee rate (e.g., 0.05)
     hold_cost_extras: float = 0.0  # $ hold-side cost (fee+time+crowding) from HoldValue
+    held_probability: float | None = None  # Native held-side probability; required for buy_no.
 
 
 @dataclass(frozen=True)
@@ -181,36 +180,43 @@ def _per_leg_sell_value(shares: float, bid: float, fee_rate: float) -> float:
     return float(shares) * (float(bid) - _polymarket_fee(bid, fee_rate))
 
 
-def _held_probability(p_obs_yes: float, direction: str) -> float:
-    """Map the YES-side posterior mass at this bin to the HELD-SIDE win prob.
+def _validate_probability(value: float, *, field_name: str) -> float:
+    p = float(value)
+    if not math.isfinite(p) or p < 0.0 or p > 1.0:
+        raise ValueError(f"{field_name} {value!r} outside [0, 1]")
+    return p
 
-    For buy_yes the held side is YES, so held_p = p_obs.
-    For buy_no the held side is NO, which pays iff YES does NOT settle in
-    this bin (mutually exclusive family), so held_p = 1 - p_obs.
 
-    The flip is the family-level mirror of the entry-side Position invariant
-    ("For buy_no: P(NO) and NO market price ... never flipped"). Pre-merge
-    critic F-1 (2026-05-27) caught a regression where this was skipped.
-    """
-    p = float(p_obs_yes)
+def _held_probability(
+    p_obs_yes: float,
+    direction: str,
+    native_held_probability: float | None = None,
+) -> float:
+    """Return held-side win probability without constructing YES/NO complements."""
     if direction == "buy_yes":
-        return p
+        return _validate_probability(p_obs_yes, field_name="p_obs_yes")
     if direction == "buy_no":
-        return 1.0 - p
+        if native_held_probability is None:
+            raise ValueError("buy_no requires native held-side probability")
+        return _validate_probability(native_held_probability, field_name="native_held_probability")
     raise ValueError(f"unknown direction {direction!r}")
 
 
 def _per_leg_hold_value(
-    shares: float, p_obs_yes: float, direction: str, hold_cost_extras: float,
+    shares: float,
+    p_obs_yes: float,
+    direction: str,
+    hold_cost_extras: float,
+    native_held_probability: float | None = None,
 ) -> float:
-    """Expected hold value under the OBSERVATION-CONSTRAINED HELD-SIDE prob.
-
-    Always pass the direction here — passing raw p_obs without the flip is
-    the F-1 regression class.
-    """
+    """Expected hold value under the observation-constrained held-side probability."""
     if shares <= 0.0:
         return 0.0
-    return float(shares) * _held_probability(p_obs_yes, direction) - float(hold_cost_extras)
+    return (
+        float(shares)
+        * _held_probability(p_obs_yes, direction, native_held_probability)
+        - float(hold_cost_extras)
+    )
 
 
 # ----- The optimizer -----
@@ -242,8 +248,7 @@ def optimize_exit_family(
         arrays MUST cover every bin_index referenced by `legs`).
       legs — held positions in this family. Only buy_yes legs participate
         in the impossibility short-circuit AND the contradiction-fail-closed
-        branch (a buy_no on an impossible YES bin is the WINNING side —
-        held_p = 1 - p_obs = 1.0). buy_no legs are routed through the
+        branch. buy_no legs are routed through the
         direction-aware EV cash-out (branch c), where hold_value uses the
         flipped probability; the per-position cash-out / settlement-imminent
         / panic gates run after, in Position.evaluate_exit.
@@ -299,7 +304,11 @@ def optimize_exit_family(
             leg.shares, float(bid) if bid is not None else 0.0, leg.fee_rate
         )
         hold_value = _per_leg_hold_value(
-            leg.shares, p_obs, leg.direction, leg.hold_cost_extras,
+            leg.shares,
+            p_obs,
+            leg.direction,
+            leg.hold_cost_extras,
+            leg.held_probability,
         )
 
         # (a) Deterministic impossibility short-circuit (buy_yes only — buy_no
@@ -339,11 +348,9 @@ def optimize_exit_family(
         # (b) Contradiction fail-closed (buy_yes only): when the model and
         # observation disagree at the family level, the YES-side posterior
         # cannot be normalised; sell what we can. For buy_no, the NO side
-        # MIGHT be the guaranteed winner (e.g., when the impossible YES
-        # mass implies a NO payoff), so blindly selling buy_no here would
-        # liquidate winners. Defer buy_no to the EV cash-out branch where
-        # direction-aware hold_value will compare correctly (held_p = 1 -
-        # p_obs = 1.0 in the all-impossible case, dominating any bid < 1).
+        # MIGHT be the guaranteed winner, so blindly selling buy_no here
+        # would liquidate winners. Defer buy_no to the EV cash-out branch,
+        # where native held-side probability is required.
         if is_deterministic and contradiction and leg.direction == "buy_yes":
             if has_executable_bid:
                 leg_decisions.append(ExitLegDecision(
