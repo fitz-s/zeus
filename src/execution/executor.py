@@ -184,15 +184,16 @@ def _is_polymarket_invalid_amount_400(exc: Exception) -> bool:
 def _is_polymarket_invalid_amount_400_message(message: str) -> bool:
     if "status_code=400" not in message:
         return False
+    normalized = " ".join(message.split())
     precision_rejection = (
-        "invalid amounts" in message
-        and "maker amount" in message
-        and "taker amount" in message
+        "invalid amounts" in normalized
+        and "maker amount" in normalized
+        and "taker amount" in normalized
     )
     marketable_buy_min_rejection = (
-        "invalid amount" in message
-        and "marketable BUY order" in message
-        and "min size: $1" in message
+        "invalid amount" in normalized
+        and "marketable BUY order" in normalized
+        and ("min size: $1" in normalized or "min size: 1" in normalized)
     )
     return precision_rejection or marketable_buy_min_rejection
 
@@ -3168,7 +3169,18 @@ def _live_order(
             order_role="entry",
         )
 
-    risk_allocator_decision = _assert_risk_allocator_allows_submit(intent)
+    try:
+        risk_allocator_decision = _assert_risk_allocator_allows_submit(intent)
+    except Exception as exc:
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"risk_allocator_pre_submit_blocked: {exc}",
+            submitted_price=intent.limit_price,
+            shares=shares,
+            order_role="entry",
+            command_state="REJECTED",
+        )
     required_pusd_micro = _buy_order_notional_micro(intent, shares)
 
     # -----------------------------------------------------------------------

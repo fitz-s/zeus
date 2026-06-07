@@ -46,6 +46,7 @@ from src.execution.command_bus import (
     IN_FLIGHT_STATES,
     VenueCommand,
 )
+from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.state.venue_command_repo import (
     find_unresolved_commands,
     append_event,
@@ -534,6 +535,26 @@ def _edli_live_order_events_ref(conn: sqlite3.Connection) -> str | None:
         return "world.edli_live_order_events"
     if _table_exists(conn, "edli_live_order_events"):
         return "edli_live_order_events"
+    return None
+
+
+def _edli_live_order_projection_ref(conn: sqlite3.Connection) -> str | None:
+    _maybe_attach_world_for_recovery(conn)
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached and _attached_table_exists(conn, "world", "edli_live_order_projection"):
+        return "world.edli_live_order_projection"
+    if _table_exists(conn, "edli_live_order_projection"):
+        return "edli_live_order_projection"
+    return None
+
+
+def _edli_live_cap_ref(conn: sqlite3.Connection, table: str) -> str | None:
+    _maybe_attach_world_for_recovery(conn)
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached and _attached_table_exists(conn, "world", table):
+        return f"world.{table}"
+    if _table_exists(conn, table):
+        return table
     return None
 
 
@@ -5094,7 +5115,394 @@ def _terminalize_submit_unknown_invalid_amount_400_if_proven(
         occurred_at=occurred_at,
         payload=payload,
     )
+    _reconcile_edli_pending_no_order_if_proven(
+        conn,
+        execution_command_id=str(command.get("decision_id") or ""),
+        occurred_at=occurred_at,
+        reason="venue_rejected_invalid_amount_400",
+        proof_class="deterministic_venue_invalid_amount_400",
+        command_id=command_id,
+        required_predicates=predicates,
+    )
     return payload
+
+
+def _latest_edli_event(conn: sqlite3.Connection, events_ref: str, aggregate_id: str, event_type: str | None = None) -> dict:
+    if event_type is None:
+        row = conn.execute(
+            f"""
+            SELECT *
+            FROM {events_ref}
+            WHERE aggregate_id = ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            f"""
+            SELECT *
+            FROM {events_ref}
+            WHERE aggregate_id = ? AND event_type = ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id, event_type),
+        ).fetchone()
+    return _dict_row(row)
+
+
+def _edli_payload(row: Mapping[str, object] | None) -> dict:
+    if not row:
+        return {}
+    return _json_dict(_dict_row(row).get("payload_json"))
+
+
+def _append_edli_event_qualified(
+    conn: sqlite3.Connection,
+    *,
+    events_ref: str,
+    aggregate_id: str,
+    event_type: str,
+    payload: dict,
+    occurred_at: str,
+    source_authority: str,
+) -> dict:
+    latest = _latest_edli_event(conn, events_ref, aggregate_id)
+    if not latest:
+        raise ValueError("EDLI recovery requires existing aggregate event")
+    parent_hash = str(latest.get("event_hash") or "")
+    next_sequence = int(latest.get("event_sequence") or 0) + 1
+    payload_json = canonical_json(payload)
+    payload_hash = stable_hash(payload)
+    event_hash = stable_hash(
+        {
+            "aggregate_id": aggregate_id,
+            "event_sequence": next_sequence,
+            "event_type": event_type,
+            "parent_event_hash": parent_hash,
+            "payload_hash": payload_hash,
+            "source_authority": source_authority,
+            "occurred_at": occurred_at,
+        }
+    )
+    aggregate_event_id = "edli_live_order_event:" + event_hash[:32]
+    conn.execute(
+        f"""
+        INSERT INTO {events_ref} (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            aggregate_event_id,
+            aggregate_id,
+            next_sequence,
+            event_type,
+            parent_hash,
+            event_hash,
+            payload_json,
+            payload_hash,
+            source_authority,
+            occurred_at,
+            _now_iso(),
+        ),
+    )
+    return {
+        "aggregate_event_id": aggregate_event_id,
+        "event_hash": event_hash,
+        "event_sequence": next_sequence,
+    }
+
+
+def _rebuild_edli_projection_qualified(
+    conn: sqlite3.Connection,
+    *,
+    events_ref: str,
+    projection_ref: str,
+    aggregate_id: str,
+) -> None:
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM {events_ref}
+        WHERE aggregate_id = ?
+        ORDER BY event_sequence ASC
+        """,
+        (aggregate_id,),
+    ).fetchall()
+    if not rows:
+        raise ValueError("cannot rebuild EDLI projection for empty aggregate")
+    event_id = str(_edli_payload(rows[0]).get("event_id") or "")
+    final_intent_id = None
+    venue_order_id = None
+    pending_reconcile = False
+    current_state = "UNKNOWN"
+    state_by_type = {
+        "DecisionProofAccepted": "DECISION_PROOF_ACCEPTED",
+        "SubmitPlanBuilt": "SUBMIT_PLAN_BUILT",
+        "PreSubmitRevalidated": "PRE_SUBMIT_REVALIDATED",
+        "LiveCapReserved": "LIVE_CAP_RESERVED",
+        "ExecutionCommandCreated": "EXECUTION_COMMAND_CREATED",
+        "VenueSubmitAttempted": "VENUE_SUBMIT_ATTEMPTED",
+        "VenueSubmitAcknowledged": "VENUE_SUBMIT_ACKED",
+        "SubmitRejected": "SUBMIT_REJECTED",
+        "SubmitUnknown": "PENDING_RECONCILE",
+        "UserOrderObserved": "USER_ORDER_OBSERVED",
+        "UserTradeObserved": "USER_TRADE_OBSERVED",
+        "Reconciled": "RECONCILED",
+        "CapTransitioned": "CAP_TRANSITIONED",
+        "OrderLifecycleProjected": "ORDER_LIFECYCLE_PROJECTED",
+    }
+    for row in rows:
+        payload = _edli_payload(row)
+        if payload.get("final_intent_id") is not None:
+            final_intent_id = str(payload["final_intent_id"])
+        if payload.get("venue_order_id") is not None:
+            venue_order_id = str(payload["venue_order_id"])
+        current_event_type = str(row["event_type"])
+        if current_event_type == "SubmitUnknown":
+            current_state = "PENDING_RECONCILE"
+            pending_reconcile = True
+        elif current_event_type == "CapTransitioned" and str(payload.get("to_status") or "") == "PENDING_RECONCILE":
+            current_state = "PENDING_RECONCILE"
+            pending_reconcile = True
+        elif current_event_type == "Reconciled":
+            current_state = "RECONCILED"
+            pending_reconcile = bool(payload.get("pending_reconcile", False))
+        else:
+            current_state = state_by_type.get(current_event_type, current_event_type)
+    last = rows[-1]
+    conn.execute(
+        f"""
+        INSERT INTO {projection_ref} (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(aggregate_id) DO UPDATE SET
+            event_id = excluded.event_id,
+            final_intent_id = excluded.final_intent_id,
+            current_state = excluded.current_state,
+            last_sequence = excluded.last_sequence,
+            last_event_type = excluded.last_event_type,
+            last_event_hash = excluded.last_event_hash,
+            pending_reconcile = excluded.pending_reconcile,
+            venue_order_id = excluded.venue_order_id,
+            updated_at = excluded.updated_at,
+            schema_version = excluded.schema_version
+        """,
+        (
+            aggregate_id,
+            event_id,
+            final_intent_id,
+            current_state,
+            int(last["event_sequence"]),
+            str(last["event_type"]),
+            str(last["event_hash"]),
+            1 if pending_reconcile else 0,
+            venue_order_id,
+            _now_iso(),
+        ),
+    )
+
+
+def _reconcile_edli_pending_no_order_if_proven(
+    conn: sqlite3.Connection,
+    *,
+    execution_command_id: str,
+    occurred_at: str,
+    reason: str,
+    proof_class: str,
+    command_id: str | None = None,
+    required_predicates: Mapping[str, object] | None = None,
+) -> bool:
+    if not execution_command_id:
+        return False
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
+    day_slots_ref = _edli_live_cap_ref(conn, "edli_live_cap_day_slots")
+    rate_window_ref = _edli_live_cap_ref(conn, "edli_live_cap_rate_window")
+    if not events_ref or not projection_ref or not cap_usage_ref:
+        return False
+    row = conn.execute(
+        f"""
+        SELECT aggregate_id, payload_json
+        FROM {events_ref}
+        WHERE event_type = 'SubmitUnknown'
+          AND json_extract(payload_json, '$.execution_command_id') = ?
+        ORDER BY event_sequence DESC
+        LIMIT 1
+        """,
+        (execution_command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    aggregate_id = str(row["aggregate_id"])
+    submit_unknown_payload = _json_dict(row["payload_json"])
+    if submit_unknown_payload.get("side_effect_known") is True:
+        return False
+    unsafe_count = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {events_ref}
+        WHERE aggregate_id = ?
+          AND event_type IN ('VenueSubmitAcknowledged', 'UserOrderObserved', 'UserTradeObserved')
+        """,
+        (aggregate_id,),
+    ).fetchone()[0]
+    if int(unsafe_count) != 0:
+        return False
+    projection = conn.execute(
+        f"""
+        SELECT pending_reconcile, venue_order_id
+        FROM {projection_ref}
+        WHERE aggregate_id = ?
+        """,
+        (aggregate_id,),
+    ).fetchone()
+    if projection is None or not bool(projection["pending_reconcile"]):
+        return False
+    if str(projection["venue_order_id"] or "").strip():
+        return False
+    cap = conn.execute(
+        f"""
+        SELECT usage_id, event_id, final_intent_id, reservation_status
+        FROM {cap_usage_ref}
+        WHERE execution_command_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (execution_command_id,),
+    ).fetchone()
+    if cap is None or str(cap["reservation_status"]) != "RESERVED":
+        return False
+    usage_id = str(cap["usage_id"])
+    event_id = str(cap["event_id"])
+    final_intent_id = str(cap["final_intent_id"] or submit_unknown_payload.get("final_intent_id") or "")
+    reconcile_payload = {
+        "schema_version": 1,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "source_authority": "venue_reconcile",
+        "pending_reconcile": False,
+        "venue_order_exists": False,
+        "cap_transition_recommendation": "RELEASED",
+        "reason": reason,
+        "proof_class": proof_class,
+        "execution_command_id": execution_command_id,
+        "command_id": command_id,
+        "required_predicates": dict(required_predicates or {}),
+    }
+    reconciled = _append_edli_event_qualified(
+        conn,
+        events_ref=events_ref,
+        aggregate_id=aggregate_id,
+        event_type="Reconciled",
+        payload=reconcile_payload,
+        occurred_at=occurred_at,
+        source_authority="explicit_reconcile",
+    )
+    conn.execute(
+        f"UPDATE {cap_usage_ref} SET reservation_status = 'RELEASED' WHERE usage_id = ?",
+        (usage_id,),
+    )
+    if day_slots_ref:
+        conn.execute(f"DELETE FROM {day_slots_ref} WHERE usage_id = ?", (usage_id,))
+    if rate_window_ref:
+        conn.execute(f"DELETE FROM {rate_window_ref} WHERE usage_id = ?", (usage_id,))
+    _append_edli_event_qualified(
+        conn,
+        events_ref=events_ref,
+        aggregate_id=aggregate_id,
+        event_type="CapTransitioned",
+        payload={
+            "schema_version": 1,
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "execution_command_id": execution_command_id,
+            "execution_receipt_hash": str(submit_unknown_payload.get("execution_receipt_hash") or reconciled["event_hash"]),
+            "to_status": "RELEASED",
+            "projection_status": "RELEASED",
+            "transition_reason": reason,
+            "reconciled_event_hash": reconciled["event_hash"],
+        },
+        occurred_at=occurred_at,
+        source_authority="live_cap_ledger",
+    )
+    _rebuild_edli_projection_qualified(
+        conn,
+        events_ref=events_ref,
+        projection_ref=projection_ref,
+        aggregate_id=aggregate_id,
+    )
+    return True
+
+
+def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> dict:
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
+    if not events_ref or not projection_ref or not cap_usage_ref:
+        return summary
+    rows = conn.execute(
+        f"""
+        SELECT proj.aggregate_id,
+               json_extract(unknown.payload_json, '$.execution_command_id') AS execution_command_id,
+               unknown.payload_json AS unknown_payload_json
+        FROM {projection_ref} proj
+        JOIN {events_ref} unknown
+          ON unknown.aggregate_id = proj.aggregate_id
+         AND unknown.event_type = 'SubmitUnknown'
+        WHERE proj.pending_reconcile = 1
+          AND COALESCE(proj.venue_order_id, '') = ''
+          AND json_extract(unknown.payload_json, '$.reason_code') = 'EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM venue_commands cmd
+              WHERE cmd.decision_id = json_extract(unknown.payload_json, '$.execution_command_id')
+          )
+        ORDER BY unknown.occurred_at
+        """
+    ).fetchall()
+    for row in rows:
+        summary["scanned"] += 1
+        execution_command_id = str(row["execution_command_id"] or "")
+        conn.execute("SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
+        try:
+            advanced = _reconcile_edli_pending_no_order_if_proven(
+                conn,
+                execution_command_id=execution_command_id,
+                occurred_at=_now_iso(),
+                reason="pre_venue_risk_allocator_block_misclassified_unknown",
+                proof_class="pre_venue_no_command_no_venue_order",
+                command_id=None,
+                required_predicates={
+                    "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold",
+                    "no_venue_command": True,
+                    "no_projection_venue_order_id": True,
+                    "pending_reconcile": True,
+                },
+            )
+            conn.execute("RELEASE SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
+            conn.execute("RELEASE SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
+            logger.error(
+                "recovery: EDLI pre-venue unknown-threshold reconcile failed for %s: %s",
+                execution_command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
@@ -6064,6 +6472,12 @@ def reconcile_unresolved_commands(
         summary["advanced"] += completed_partial_summary["advanced"]
         summary["stayed"] += completed_partial_summary["stayed"]
         summary["errors"] += completed_partial_summary["errors"]
+
+        edli_pre_venue_summary = _reconcile_edli_pre_venue_unknown_thresholds(conn)
+        summary["edli_pre_venue_unknown_thresholds"] = edli_pre_venue_summary
+        summary["advanced"] += edli_pre_venue_summary["advanced"]
+        summary["stayed"] += edli_pre_venue_summary["stayed"]
+        summary["errors"] += edli_pre_venue_summary["errors"]
 
         live_entry_repair_summary = reconcile_live_entry_projection_repairs(conn, client=client)
         summary["live_entry_projection_repair"] = live_entry_repair_summary
