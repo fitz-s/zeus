@@ -426,6 +426,32 @@ state_machines:
     invariant_tests:
       - tests/test_decision_integrity_quarantine.py
       - tests/test_decision_integrity_quarantine_extended.py
+  replacement_forecast_authority:
+    owner: src/engine/replacement_forecast_reactor_hook.py
+    description: >
+      Replacement forecast runtime/dry-run/report/intent-immutability labels
+      for Open-Meteo ECMWF ecmwf_ifs 9km/0.1 soft spatial anchor plus AIFS ENS
+      sampled-2t posterior integration. These are not venue command states.
+      They classify terrain-review blocks, rollback-plan findings, and
+      same-snapshot intent immutability checks before replacement forecast
+      authority can affect event-reactor no-submit/live receipts.
+    states:
+      - OM9_TERRAIN_ELEVATION_REVIEW_REQUIRED
+      - REPLACEMENT_GO_LIVE_ROLLBACK_PLAN_MISSING_FLAG_UPDATES
+      - REPLACEMENT_GO_LIVE_ROLLBACK_MAY_DELETE_SHADOW_ROWS
+      - REPLACEMENT_INTENT_CLOB_SNAPSHOT_CHANGED
+      - REPLACEMENT_INTENT_CONDITION_CHANGED
+      - REPLACEMENT_INTENT_NATIVE_TOKEN_CHANGED
+      - REPLACEMENT_INTENT_DIRECTION_CHANGED
+      - REPLACEMENT_INTENT_LIMIT_PRICE_CHANGED
+      - REPLACEMENT_INTENT_KELLY_INCREASED
+      - REPLACEMENT_INTENT_SIZE_INCREASED
+      - REPLACEMENT_INTENT_IMMUTABILITY_PASS
+    invariant_tests:
+      - tests/test_openmeteo_ecmwf_ifs9_precision_guard.py
+      - tests/test_replacement_forecast_go_live_report.py
+      - tests/test_replacement_forecast_intent_immutability.py
+      - tests/test_replacement_forecast_reactor_hook.py
   edli_opportunity_event_processing:
     owner: src/events/event_store.py
     states:

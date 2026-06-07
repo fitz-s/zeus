@@ -667,6 +667,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/promote_calibration.py",  # RO inspect/verify; RW only with --commit (zeus-forecasts.db)
         # --- ARM-gate settlement win-rate measurement (2026-06-03, read-only diagnostic) ---
         "scripts/measure_arm_gate_settlement.py",  # read_only_ro_uri: opens world+forecasts DBs via file:...?mode=ro uri; SELECT-only; never writes; ARM MEASURE step tool
+        "src/data/replacement_forecast_live_dry_run.py",  # read_only_ro_uri: replacement live switch verifier opens canonical DBs mode=ro + query_only; SELECT/table inspection only
+        "scripts/replay_downloaded_replacement_economic.py",  # read_only_ro_uri: replacement before/after and current-holding replay reads world/forecast DBs; report output only
         # --- calibration bake-off + settlement backfill (2026-06-02, operator-invoked offline) ---
         "scripts/fit_settlement_sigma_floor.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over settlement_outcomes(VERIFIED); writes settlement_sigma_floor.json only; EMPIRICAL σ-floor offline fit (q1000 2026-06-05)
         "scripts/calibration_bakeoff.py",   # read_only: scores calibrators vs settlements VERIFIED; writes JSON/txt only

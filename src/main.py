@@ -4465,6 +4465,182 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
         }
 
 
+def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
+    from src.data.replacement_forecast_runtime_policy import REQUIRED_FLAGS
+
+    try:
+        flags = settings["feature_flags"]
+    except Exception:
+        flags = {}
+    return {key: bool(flags.get(key, False)) for key in REQUIRED_FLAGS}
+
+
+def _replacement_forecast_refit_decision_from_settings():
+    from src.config import PROJECT_ROOT
+    from src.data.replacement_forecast_refit_handoff import refit_decision_from_handoff_payload
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    raw_path = cfg.get("refit_handoff_path") or "state/replacement_forecast_shadow/refit_handoff.json"
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - fail closed at switch decision
+        logger.warning("replacement forecast refit handoff unreadable: %s", exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("replacement forecast refit handoff must be a JSON object: %s", path)
+        return None
+    try:
+        return refit_decision_from_handoff_payload(payload)
+    except Exception as exc:  # noqa: BLE001 - fail closed at switch decision
+        logger.warning("replacement forecast refit handoff invalid: %s", exc)
+        return None
+
+
+def _replacement_forecast_promotion_evidence_from_settings():
+    from src.config import PROJECT_ROOT
+    from src.data.replacement_forecast_go_live_report import (
+        replacement_forecast_promotion_evidence_from_payload,
+    )
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    raw_path = cfg.get("promotion_evidence_path") or "state/replacement_forecast_shadow/promotion_evidence.json"
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
+        logger.warning("replacement forecast promotion evidence unreadable: %s", exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("replacement forecast promotion evidence must be a JSON object: %s", path)
+        return None
+    try:
+        return replacement_forecast_promotion_evidence_from_payload(payload)
+    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
+        logger.warning("replacement forecast promotion evidence invalid: %s", exc)
+        return None
+
+
+def _replacement_forecast_capital_objective_evidence_from_settings():
+    from src.config import PROJECT_ROOT
+    from src.data.replacement_forecast_go_live_report import (
+        replacement_forecast_capital_objective_evidence_from_payload,
+    )
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    raw_path = cfg.get("promotion_evidence_path") or "state/replacement_forecast_shadow/promotion_evidence.json"
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
+        logger.warning("replacement forecast capital objective evidence unreadable: %s", exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("replacement forecast capital objective evidence must be a JSON object: %s", path)
+        return None
+    try:
+        return replacement_forecast_capital_objective_evidence_from_payload(payload)
+    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
+        logger.warning("replacement forecast capital objective evidence invalid: %s", exc)
+        return None
+
+
+def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, object]:
+    from src.config import PROJECT_ROOT
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_shadow"
+    raw_manifest_dir = cfg.get("raw_manifest_dir")
+    forecast_db = cfg.get("forecast_db")
+
+    def _rooted_path(value, fallback: Path | None = None) -> Path | None:
+        raw = value if value not in (None, "") else fallback
+        if raw in (None, ""):
+            return None
+        path = Path(str(raw))
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    return {
+        "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),
+        "seed_processed_dir": _rooted_path(cfg.get("seed_processed_dir"), base_dir / "seeds_processed"),
+        "seed_failed_dir": _rooted_path(cfg.get("seed_failed_dir"), base_dir / "seeds_failed"),
+        "forecast_db": _rooted_path(forecast_db),
+        "raw_manifest_dir": _rooted_path(raw_manifest_dir),
+        "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
+        "request_dir": _rooted_path(cfg.get("request_dir"), base_dir / "requests"),
+        "processed_dir": _rooted_path(cfg.get("processed_dir"), base_dir / "processed"),
+        "failed_dir": _rooted_path(cfg.get("failed_dir"), base_dir / "failed"),
+        "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
+        "limit": int(cfg.get("materialization_limit_per_cycle") or 10),
+    }
+
+
+def _sqlite_table_names(conn) -> tuple[str, ...]:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+    names: list[str] = []
+    for row in rows:
+        if isinstance(row, dict):
+            names.append(str(row["name"]))
+        else:
+            names.append(str(row[0]))
+    return tuple(sorted(names))
+
+
+def _current_live_fact_status(relative_path: str) -> str:
+    from src.config import PROJECT_ROOT
+
+    path = PROJECT_ROOT / relative_path
+    try:
+        first_lines = path.read_text(encoding="utf-8").splitlines()[:20]
+    except OSError:
+        return "STALE_FOR_LIVE"
+    for line in first_lines:
+        if line.startswith("Status:"):
+            return "CURRENT_FOR_LIVE" if "CURRENT_FOR_LIVE" in line else "STALE_FOR_LIVE"
+    return "STALE_FOR_LIVE"
+
+
+@_scheduler_job("replacement_forecast_shadow_materialize")
+def _replacement_forecast_shadow_materialize_cycle() -> None:
+    flags = _replacement_forecast_runtime_flags_from_settings()
+    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+        return
+    from src.data.replacement_forecast_shadow_materialization_queue import (
+        process_replacement_forecast_shadow_materialization_queue,
+    )
+
+    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    report = process_replacement_forecast_shadow_materialization_queue(
+        request_dir=cfg["request_dir"],
+        processed_dir=cfg["processed_dir"],
+        failed_dir=cfg["failed_dir"],
+        seed_dir=cfg["seed_dir"],
+        seed_processed_dir=cfg["seed_processed_dir"],
+        seed_failed_dir=cfg["seed_failed_dir"],
+        forecast_db=cfg["forecast_db"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        seed_discovery_limit=int(cfg["seed_discovery_limit"]),
+        seed_limit=int(cfg["seed_limit"]),
+        limit=int(cfg["limit"]),
+    )
+    if report.failed_count:
+        logger.warning("replacement forecast shadow materialization queue failures: %s", report.as_dict())
+    elif report.processed_count:
+        logger.info("replacement forecast shadow materialization queue processed: %s", report.as_dict())
+
+
 @_scheduler_job("edli_event_reactor")
 def _edli_event_reactor_cycle() -> None:
     """EDLI event-reactor scheduler hook.
@@ -4486,6 +4662,7 @@ def _edli_event_reactor_cycle() -> None:
         event_bound_live_adapter_from_trade_conn,
         event_bound_no_submit_adapter_from_trade_conn,
         executable_snapshot_gate_from_trade_conn,
+        replacement_forecast_baseline_bundle_provider_from_forecast_conn,
         riskguard_allows_new_entries,
     )
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
@@ -4732,6 +4909,21 @@ def _edli_event_reactor_cycle() -> None:
         # and portfolio reads; use the actual processing timestamp so fresh executable/book
         # parent certificates are never later than the decision they support.
         process_pending_decision_time = datetime.now(timezone.utc)
+        replacement_forecast_runtime_flags = _replacement_forecast_runtime_flags_from_settings()
+        replacement_forecast_refit_decision = _replacement_forecast_refit_decision_from_settings()
+        replacement_forecast_promotion_evidence = _replacement_forecast_promotion_evidence_from_settings()
+        replacement_forecast_capital_objective_evidence = _replacement_forecast_capital_objective_evidence_from_settings()
+        replacement_forecast_baseline_bundle_provider = replacement_forecast_baseline_bundle_provider_from_forecast_conn(
+            forecasts_conn
+        )
+        replacement_forecast_world_tables = _sqlite_table_names(conn)
+        from src.data.replacement_forecast_live_switch_surface import (
+            CURRENT_DATA_FACT_FILE,
+            CURRENT_SOURCE_FACT_FILE,
+        )
+
+        replacement_forecast_source_fact_status = _current_live_fact_status(CURRENT_SOURCE_FACT_FILE)
+        replacement_forecast_data_fact_status = _current_live_fact_status(CURRENT_DATA_FACT_FILE)
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -4749,6 +4941,14 @@ def _edli_event_reactor_cycle() -> None:
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
+                replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
+                replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+                replacement_forecast_world_tables=replacement_forecast_world_tables,
+                replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
+                replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
+                replacement_forecast_refit_decision=replacement_forecast_refit_decision,
+                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
                 canary_force_taker_provider=_edli_canary_force_taker_provider(conn, edli_cfg),
                 pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(
                     conn,
@@ -4777,6 +4977,14 @@ def _edli_event_reactor_cycle() -> None:
                 calibration_conn=conn,
                 get_current_level=get_current_level,
                 portfolio_state_provider=_portfolio_state_provider,
+                replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
+                replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+                replacement_forecast_world_tables=replacement_forecast_world_tables,
+                replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
+                replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
+                replacement_forecast_refit_decision=replacement_forecast_refit_decision,
+                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
             )
         )
 
@@ -7243,6 +7451,15 @@ def main():
             seconds=90,
             id="edli_mainstream_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 70.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            _replacement_forecast_shadow_materialize_cycle,
+            "interval",
+            minutes=int((_settings_section("replacement_forecast_shadow", {}) or {}).get("materialization_interval_min") or 5),
+            id="replacement_forecast_shadow_materialize",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 95.0),
             max_instances=1,
             coalesce=True,
         )

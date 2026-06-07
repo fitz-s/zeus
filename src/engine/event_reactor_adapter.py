@@ -52,6 +52,10 @@ from src.engine.event_bound_final_intent import (
     serialize_event_bound_final_intent_receipt,
     validate_final_intent_cert_for_existing_executor,
 )
+from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReactorHookResult
+from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
+from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
+from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
 from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.candidate_evaluation import CandidateEvaluation
@@ -264,6 +268,153 @@ def edli_trade_score_gate(event: OpportunityEvent) -> bool:
     return event.event_type in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}
 
 
+def _resolve_replacement_forecast_adapter_hook(
+    *,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None,
+    replacement_forecast_runtime_flags: Mapping[str, object] | None,
+    replacement_forecast_baseline_bundle_provider: Callable[["_CandidateProof", OpportunityEvent, datetime], object | None] | None,
+    replacement_forecast_world_tables: tuple[str, ...],
+    replacement_forecast_source_fact_status: str,
+    replacement_forecast_data_fact_status: str,
+    replacement_forecast_refit_decision: ReplacementForecastRefitDecision | None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None,
+    forecast_conn: sqlite3.Connection | None,
+    trade_conn: sqlite3.Connection,
+) -> Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None:
+    if replacement_forecast_hook is not None or replacement_forecast_runtime_flags is None:
+        return replacement_forecast_hook
+    if forecast_conn is None:
+        def _missing_forecast_conn_hook(
+            proof: _CandidateProof,
+            _event: OpportunityEvent,
+            _decision_time: datetime,
+        ) -> ReplacementForecastReactorHookResult:
+            return ReplacementForecastReactorHookResult(
+                status="BLOCKED",
+                reason_codes=("REPLACEMENT_FORECAST_HOOK_FORECAST_CONNECTION_MISSING",),
+                effective_direction=proof.direction,
+                effective_q_posterior=proof.q_posterior,
+                effective_q_lcb=proof.q_lcb_5pct,
+                effective_kelly_fraction=0.0,
+            )
+
+        return _missing_forecast_conn_hook
+    from src.engine.replacement_forecast_hook_factory import (
+        ReplacementForecastHookFactoryInput,
+        build_replacement_forecast_event_hook,
+    )
+
+    return build_replacement_forecast_event_hook(
+        ReplacementForecastHookFactoryInput(
+            forecast_conn=forecast_conn,
+            trade_conn=trade_conn,
+            runtime_flags=replacement_forecast_runtime_flags,
+            baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+            refit_decision=replacement_forecast_refit_decision,
+            promotion_evidence=replacement_forecast_promotion_evidence,
+            capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+            world_tables=replacement_forecast_world_tables,
+            source_fact_status=replacement_forecast_source_fact_status,
+            data_fact_status=replacement_forecast_data_fact_status,
+        )
+    )
+
+
+def replacement_forecast_baseline_bundle_provider_from_forecast_conn(
+    forecast_conn: sqlite3.Connection,
+) -> Callable[["_CandidateProof", OpportunityEvent, datetime], object | None]:
+    """Build the B0 executable forecast provider used by replacement shadow/veto."""
+
+    def _provider(
+        proof: _CandidateProof,
+        event: OpportunityEvent,
+        decision_time: datetime,
+    ) -> object | None:
+        from src.data.executable_forecast_reader import SOURCE_TRANSPORT, read_executable_forecast
+
+        payload = _payload(event)
+        candidate = proof.candidate
+        city = str(payload.get("city") or candidate.city)
+        target_date_text = str(payload.get("target_date") or candidate.target_date)
+        metric = str(payload.get("metric") or candidate.metric)
+        source_run_id = str(payload.get("source_run_id") or "")
+        source_id = str(payload.get("source_id") or "")
+        track = str(payload.get("track") or "")
+        if not city or not target_date_text or metric not in {"high", "low"} or not source_run_id:
+            return None
+        table_ref = _authority_table_ref(forecast_conn, "source_run_coverage")
+        if table_ref is None:
+            return None
+        columns = _table_ref_columns(forecast_conn, table_ref)
+        required = {
+            "source_run_id",
+            "city",
+            "target_local_date",
+            "temperature_metric",
+            "data_version",
+            "source_id",
+            "track",
+            "computed_at",
+        }
+        if not required.issubset(columns):
+            return None
+        predicates = [
+            "source_run_id = ?",
+            "city = ?",
+            "target_local_date = ?",
+            "temperature_metric = ?",
+        ]
+        params: list[object] = [source_run_id, city, target_date_text, metric]
+        if source_id:
+            predicates.append("source_id = ?")
+            params.append(source_id)
+        if track:
+            predicates.append("track = ?")
+            params.append(track)
+        row = forecast_conn.execute(
+            f"""
+            SELECT *
+            FROM {table_ref}
+            WHERE {' AND '.join(predicates)}
+            ORDER BY computed_at DESC, recorded_at DESC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+        if row is None:
+            return None
+        coverage = dict(row)
+        city_id = str(coverage.get("city_id") or city)
+        city_timezone = str(coverage.get("city_timezone") or getattr(runtime_cities_by_name().get(city), "timezone", "UTC"))
+        final_source_id = str(coverage.get("source_id") or source_id)
+        source_transport = str(coverage.get("source_transport") or SOURCE_TRANSPORT)
+        data_version = str(coverage.get("data_version") or "")
+        final_track = str(coverage.get("track") or track)
+        if not final_source_id or not data_version or not final_track:
+            return None
+        result = read_executable_forecast(
+            forecast_conn,
+            city_id=city_id,
+            city_name=str(coverage.get("city") or city),
+            city_timezone=city_timezone,
+            target_local_date=date.fromisoformat(target_date_text),
+            temperature_metric=metric,
+            source_id=final_source_id,
+            source_transport=source_transport,
+            data_version=data_version,
+            track=final_track,
+            strategy_key="entry_forecast",
+            market_family=str(candidate.condition_id or ""),
+            condition_id=str(candidate.condition_id or ""),
+            decision_time=decision_time,
+            require_entry_readiness=False,
+        )
+        return result.bundle if result.ok and result.bundle is not None else None
+
+    return _provider
+
+
 def event_bound_no_submit_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
@@ -274,6 +425,15 @@ def event_bound_no_submit_adapter_from_trade_conn(
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
+    replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
+    replacement_forecast_baseline_bundle_provider: Callable[["_CandidateProof", OpportunityEvent, datetime], object | None] | None = None,
+    replacement_forecast_world_tables: tuple[str, ...] = (),
+    replacement_forecast_source_fact_status: str = "STALE_FOR_LIVE",
+    replacement_forecast_data_fact_status: str = "STALE_FOR_LIVE",
+    replacement_forecast_refit_decision: ReplacementForecastRefitDecision | None = None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build a proof-only final-intent receipt adapter for EDLI events.
 
@@ -289,6 +449,19 @@ def event_bound_no_submit_adapter_from_trade_conn(
     # ledger (not a bare list) so a candidate rejected downstream of Kelly is
     # rolled back by the reactor before the next sequential event reads it.
     portfolio_reservation = PortfolioReservationLedger()
+    resolved_replacement_forecast_hook = _resolve_replacement_forecast_adapter_hook(
+        replacement_forecast_hook=replacement_forecast_hook,
+        replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
+        replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+        replacement_forecast_world_tables=replacement_forecast_world_tables,
+        replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
+        replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
+        replacement_forecast_refit_decision=replacement_forecast_refit_decision,
+        replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+        replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+        forecast_conn=forecast_conn,
+        trade_conn=trade_conn,
+    )
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         return build_event_bound_no_submit_receipt(
@@ -303,6 +476,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
+            replacement_forecast_hook=resolved_replacement_forecast_hook,
         )
 
     # Expose the per-cycle ledger so the reactor can commit/rollback provisional
@@ -323,6 +497,15 @@ def event_bound_live_adapter_from_trade_conn(
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
+    replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
+    replacement_forecast_baseline_bundle_provider: Callable[["_CandidateProof", OpportunityEvent, datetime], object | None] | None = None,
+    replacement_forecast_world_tables: tuple[str, ...] = (),
+    replacement_forecast_source_fact_status: str = "STALE_FOR_LIVE",
+    replacement_forecast_data_fact_status: str = "STALE_FOR_LIVE",
+    replacement_forecast_refit_decision: ReplacementForecastRefitDecision | None = None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
     real_order_submit_enabled: bool = False,
     live_canary_enabled: bool = False,
     tiny_live_max_notional_usd: float = 5.0,
@@ -349,6 +532,19 @@ def event_bound_live_adapter_from_trade_conn(
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
     # rolled back by the reactor before the next sequential event reads it.
     portfolio_reservation = PortfolioReservationLedger()
+    resolved_replacement_forecast_hook = _resolve_replacement_forecast_adapter_hook(
+        replacement_forecast_hook=replacement_forecast_hook,
+        replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
+        replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+        replacement_forecast_world_tables=replacement_forecast_world_tables,
+        replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
+        replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
+        replacement_forecast_refit_decision=replacement_forecast_refit_decision,
+        replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+        replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+        forecast_conn=forecast_conn,
+        trade_conn=trade_conn,
+    )
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         no_submit_receipt = build_event_bound_no_submit_receipt(
@@ -363,6 +559,7 @@ def event_bound_live_adapter_from_trade_conn(
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
+            replacement_forecast_hook=resolved_replacement_forecast_hook,
         )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
@@ -646,6 +843,7 @@ def build_event_bound_no_submit_receipt(
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -924,6 +1122,149 @@ def build_event_bound_no_submit_receipt(
             source_status="MATCH",
             family_complete=True,
         )
+    replacement_forecast_receipt_tag: dict[str, Any] | None = None
+    if replacement_forecast_hook is not None:
+        replacement_hook_result = replacement_forecast_hook(proof, event, decision_time)
+        if replacement_hook_result is not None:
+            if replacement_hook_result.status == "BLOCKED":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="REPLACEMENT_FORECAST_HOOK_BLOCKED:" + ",".join(replacement_hook_result.reason_codes),
+                    city=family.city,
+                    target_date=family.target_date,
+                    metric=family.metric,
+                    condition_id=str(candidate.condition_id or ""),
+                    token_id=selected_token_id,
+                    executable_snapshot_id=proof.executable_snapshot_id,
+                    family_id=family.family_id,
+                    bin_label=candidate.bin.label,
+                    direction=direction,
+                    q_live=proof.q_posterior,
+                    q_lcb_5pct=proof.q_lcb_5pct,
+                    c_fee_adjusted=execution_price.value,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                    trade_score=proof.trade_score,
+                    native_quote_available=True,
+                    source_status="MATCH",
+                    family_complete=True,
+                    replacement_forecast=replacement_forecast_receipt_tag,
+                )
+            if replacement_hook_result.status == "SHADOW_VETO_ONLY":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+                if replacement_hook_result.effective_direction != direction:
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason="REPLACEMENT_FORECAST_HOOK_DIRECTION_FLIP",
+                        city=family.city,
+                        target_date=family.target_date,
+                        metric=family.metric,
+                        condition_id=str(candidate.condition_id or ""),
+                        token_id=selected_token_id,
+                        executable_snapshot_id=proof.executable_snapshot_id,
+                        family_id=family.family_id,
+                        bin_label=candidate.bin.label,
+                        direction=direction,
+                        q_live=proof.q_posterior,
+                        q_lcb_5pct=proof.q_lcb_5pct,
+                        c_fee_adjusted=execution_price.value,
+                        c_cost_95pct=proof.c_cost_95pct,
+                        p_fill_lcb=proof.p_fill_lcb,
+                        trade_score=proof.trade_score,
+                        native_quote_available=True,
+                        source_status="MATCH",
+                        family_complete=True,
+                        replacement_forecast=replacement_forecast_receipt_tag,
+                    )
+                effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)
+                effective_trade_score = _robust_trade_score_from_generated_inputs(
+                    q_posterior=proof.q_posterior,
+                    q_lcb_5pct=effective_q_lcb,
+                    execution_price=execution_price,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                )
+                proof = dataclass_replace(
+                    proof,
+                    q_lcb_5pct=effective_q_lcb,
+                    trade_score=min(proof.trade_score, effective_trade_score),
+                )
+            elif replacement_hook_result.status == "LIVE_AUTHORITY":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+                if replacement_hook_result.effective_direction != direction:
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason="REPLACEMENT_FORECAST_HOOK_DIRECTION_FLIP",
+                        city=family.city,
+                        target_date=family.target_date,
+                        metric=family.metric,
+                        condition_id=str(candidate.condition_id or ""),
+                        token_id=selected_token_id,
+                        executable_snapshot_id=proof.executable_snapshot_id,
+                        family_id=family.family_id,
+                        bin_label=candidate.bin.label,
+                        direction=direction,
+                        q_live=proof.q_posterior,
+                        q_lcb_5pct=proof.q_lcb_5pct,
+                        c_fee_adjusted=execution_price.value,
+                        c_cost_95pct=proof.c_cost_95pct,
+                        p_fill_lcb=proof.p_fill_lcb,
+                        trade_score=proof.trade_score,
+                        native_quote_available=True,
+                        source_status="MATCH",
+                        family_complete=True,
+                        replacement_forecast=replacement_forecast_receipt_tag,
+                    )
+                effective_trade_score = _robust_trade_score_from_generated_inputs(
+                    q_posterior=replacement_hook_result.effective_q_posterior,
+                    q_lcb_5pct=replacement_hook_result.effective_q_lcb,
+                    execution_price=execution_price,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                )
+                proof = dataclass_replace(
+                    proof,
+                    q_posterior=replacement_hook_result.effective_q_posterior,
+                    q_lcb_5pct=replacement_hook_result.effective_q_lcb,
+                    trade_score=effective_trade_score,
+                )
+            elif replacement_hook_result.status == "SHADOW_ONLY":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+            elif replacement_hook_result.status != "DISABLED":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=f"REPLACEMENT_FORECAST_HOOK_UNSUPPORTED:{replacement_hook_result.status}",
+                    city=family.city,
+                    target_date=family.target_date,
+                    metric=family.metric,
+                    condition_id=str(candidate.condition_id or ""),
+                    token_id=selected_token_id,
+                    executable_snapshot_id=proof.executable_snapshot_id,
+                    family_id=family.family_id,
+                    bin_label=candidate.bin.label,
+                    direction=direction,
+                    q_live=proof.q_posterior,
+                    q_lcb_5pct=proof.q_lcb_5pct,
+                    c_fee_adjusted=execution_price.value,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                    trade_score=proof.trade_score,
+                    native_quote_available=True,
+                    source_status="MATCH",
+                    family_complete=True,
+                    replacement_forecast=replacement_forecast_receipt_tag,
+                )
+    trade_score = proof.trade_score
     hypothesis_id = f"{family.family_id}:{selected_token_id}"
     try:
         fdr = evaluate_fdr_full_family(
@@ -1218,6 +1559,8 @@ def build_event_bound_no_submit_receipt(
     )
     if opportunity_book is not None:
         raw_receipt["opportunity_book"] = opportunity_book.to_receipt_dict()
+    if replacement_forecast_receipt_tag is not None:
+        raw_receipt["replacement_forecast"] = replacement_forecast_receipt_tag
     # Mainstream-agreement gate fields (#135). Added when the verdict is available on the
     # selected proof; absent otherwise (gate OFF or evaluation error — receipt stays clean).
     if proof.mainstream_agreement is not None:
@@ -1352,6 +1695,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
         opportunity_book=raw_receipt.get("opportunity_book"),
+        replacement_forecast=raw_receipt.get("replacement_forecast"),
         unit=raw_receipt.get("unit"),
     )
 

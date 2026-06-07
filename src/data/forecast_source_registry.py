@@ -24,19 +24,33 @@ from src.data.ecmwf_open_data_ingest import ECMWFOpenDataIngest
 
 
 ForecastSourceTier = Literal["primary", "secondary", "experimental", "disabled"]
-ForecastSourceKind = Literal["forecast_table", "live_ensemble", "experimental_ingest", "scheduled_collector"]
+ForecastSourceKind = Literal[
+    "forecast_table",
+    "live_ensemble",
+    "experimental_ingest",
+    "scheduled_collector",
+    "deterministic_anchor",
+    "derived_posterior",
+]
 ForecastSourceRole = Literal[
     "entry_primary",
     "entry_fallback",
     "monitor_fallback",
     "diagnostic",
     "learning",
+    "training_archive_alignment",
 ]
 ForecastDegradationLevel = Literal[
     "OK",
     "DEGRADED_FORECAST_FALLBACK",
     "EXPERIMENTAL_DISABLED",
     "DIAGNOSTIC_NON_EXECUTABLE",
+]
+ForecastTradeAuthorityStatus = Literal[
+    "LIVE_AUTHORITY",
+    "SHADOW_ONLY",
+    "COMPARATOR_ONLY",
+    "DISABLED",
 ]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -77,6 +91,64 @@ class ForecastSourceSpec:
             raise ValueError(
                 "operator-gated forecast sources require artifact pattern and env flag"
             )
+
+
+@dataclass(frozen=True)
+class ForecastProductSpec:
+    """Static forecast-product identity for shadow replacement candidates.
+
+    This is product policy only. Membership here does not make a source
+    fetchable, trainable, or live-tradeable; runtime activation still flows
+    through ``ForecastSourceSpec`` gates and calibration/promotion evidence.
+    """
+
+    label: str
+    source_id: str
+    product_id: str
+    source_family: str
+    model_name: str
+    product_class: str
+    stream: str
+    product_type: str
+    param: str
+    aggregation_window_policy: str
+    high_data_version: str | None
+    low_data_version: str | None
+    expected_members: int | None
+    trade_authority_status: ForecastTradeAuthorityStatus
+    training_allowed: bool
+
+    @property
+    def data_versions(self) -> tuple[str, ...]:
+        return tuple(
+            version
+            for version in (self.high_data_version, self.low_data_version)
+            if version is not None
+        )
+
+
+@dataclass(frozen=True)
+class ForecastReplacementEvidence:
+    """Settled empirical evidence for choosing among replacement products."""
+
+    label: str
+    settled_decisions: int
+    anti_lookahead_violations: int
+    availability_violations: int
+    q_lcb_coverage: float
+    after_cost_pnl: float
+    max_drawdown: float
+    brier: float
+    log_loss: float
+
+
+@dataclass(frozen=True)
+class ForecastReplacementSelection:
+    """Result of evidence-gated replacement tournament selection."""
+
+    status: str
+    selected_label: str | None
+    reason_codes: tuple[str, ...]
 
 
 OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP: dict[str, str] = {
@@ -198,6 +270,184 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         ),
         degradation_level="OK",
     ),
+    "ecmwf_ifs_ens_0p1": ForecastSourceSpec(
+        source_id="ecmwf_ifs_ens_0p1",
+        tier="disabled",
+        kind="experimental_ingest",
+        enabled_by_default=False,
+        model_name="ecmwf_ifs_ens_0p1",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    "ecmwf_aifs_ens": ForecastSourceSpec(
+        source_id="ecmwf_aifs_ens",
+        tier="disabled",
+        kind="experimental_ingest",
+        enabled_by_default=False,
+        model_name="ecmwf_aifs_ens",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    "openmeteo_ecmwf_ifs_9km": ForecastSourceSpec(
+        source_id="openmeteo_ecmwf_ifs_9km",
+        tier="disabled",
+        kind="deterministic_anchor",
+        enabled_by_default=False,
+        model_name="openmeteo_ecmwf_ifs_9km",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor": ForecastSourceSpec(
+        source_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        tier="disabled",
+        kind="derived_posterior",
+        enabled_by_default=False,
+        model_name="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    "ecmwf_ifs_control_0p1": ForecastSourceSpec(
+        source_id="ecmwf_ifs_control_0p1",
+        tier="disabled",
+        kind="experimental_ingest",
+        enabled_by_default=False,
+        model_name="ecmwf_ifs_control_0p1",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+}
+
+
+REPLACEMENT_FORECAST_PRODUCTS: dict[str, ForecastProductSpec] = {
+    "B0": ForecastProductSpec(
+        label="B0",
+        source_id="ecmwf_open_data",
+        product_id="ecmwf_opendata_ifs_ens_0p25",
+        source_family="ecmwf_ifs",
+        model_name="ecmwf_open_data",
+        product_class="ifs_ens_public_subset",
+        stream="enfo",
+        product_type="pf+cf",
+        param="mx2t3/mn2t3",
+        aggregation_window_policy="period_3h_local_calendar_day",
+        high_data_version="ecmwf_opendata_mx2t3_local_calendar_day_max",
+        low_data_version="ecmwf_opendata_mn2t3_local_calendar_day_min",
+        expected_members=51,
+        trade_authority_status="LIVE_AUTHORITY",
+        training_allowed=True,
+    ),
+    "R1": ForecastProductSpec(
+        label="R1",
+        source_id="ecmwf_ifs_ens_0p1",
+        product_id="ecmwf_ifs_ens_0p1_mx2t3",
+        source_family="ecmwf_ifs",
+        model_name="ecmwf_ifs_ens",
+        product_class="ifs_ens_direct_model_output",
+        stream="enfo",
+        product_type="pf+cf",
+        param="mx2t3/mn2t3",
+        aggregation_window_policy="period_3h_local_calendar_day",
+        high_data_version="ecmwf_ifs_ens_0p1_mx2t3_local_calendar_day_max",
+        low_data_version="ecmwf_ifs_ens_0p1_mn2t3_local_calendar_day_min",
+        expected_members=51,
+        trade_authority_status="SHADOW_ONLY",
+        training_allowed=False,
+    ),
+    "R2": ForecastProductSpec(
+        label="R2",
+        source_id="ecmwf_ifs_ens_0p1",
+        product_id="ecmwf_ifs_ens_0p1_since_prev_postproc",
+        source_family="ecmwf_ifs",
+        model_name="ecmwf_ifs_ens",
+        product_class="ifs_ens_direct_model_output",
+        stream="enfo",
+        product_type="pf+cf",
+        param="mx2t/mn2t",
+        aggregation_window_policy="since_prev_postproc_local_calendar_day",
+        high_data_version=(
+            "ecmwf_ifs_ens_0p1_mx2t_since_prev_postproc_local_calendar_day_max"
+        ),
+        low_data_version=(
+            "ecmwf_ifs_ens_0p1_mn2t_since_prev_postproc_local_calendar_day_min"
+        ),
+        expected_members=51,
+        trade_authority_status="SHADOW_ONLY",
+        training_allowed=False,
+    ),
+    "C1": ForecastProductSpec(
+        label="C1",
+        source_id="ecmwf_ifs_control_0p1",
+        product_id="ecmwf_ifs_control_0p1",
+        source_family="ecmwf_ifs",
+        model_name="ecmwf_ifs_control",
+        product_class="ifs_control_comparator",
+        stream="oper",
+        product_type="fc",
+        param="mx2t3/mn2t3",
+        aggregation_window_policy="period_3h_local_calendar_day",
+        high_data_version=None,
+        low_data_version=None,
+        expected_members=1,
+        trade_authority_status="COMPARATOR_ONLY",
+        training_allowed=False,
+    ),
+    "A1": ForecastProductSpec(
+        label="A1",
+        source_id="ecmwf_aifs_ens",
+        product_id="ecmwf_aifs_ens_sampled_2t_6h_v1",
+        source_family="ecmwf_aifs",
+        model_name="aifs_ens",
+        product_class="ai_ensemble",
+        stream="enfo",
+        product_type="pf+cf",
+        param="2t",
+        aggregation_window_policy="sampled_2t_6h_local_calendar_day",
+        high_data_version="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_max",
+        low_data_version="ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_min",
+        expected_members=51,
+        trade_authority_status="SHADOW_ONLY",
+        training_allowed=False,
+    ),
+    "Open-Meteo ECMWF ecmwf_ifs 9km/0.1 deterministic forecast soft spatial anchor": ForecastProductSpec(
+        label=(
+            "Open-Meteo ECMWF ecmwf_ifs 9km/0.1 deterministic forecast "
+            "soft spatial anchor"
+        ),
+        source_id="openmeteo_ecmwf_ifs_9km",
+        product_id="openmeteo_ecmwf_ifs9_deterministic_anchor_v1",
+        source_family="openmeteo_ecmwf",
+        model_name="ecmwf_ifs",
+        product_class="deterministic_spatial_anchor",
+        stream="openmeteo_run_pinned",
+        product_type="deterministic_anchor",
+        param="2t",
+        aggregation_window_policy="deterministic_local_calendar_day_anchor",
+        high_data_version="openmeteo_ecmwf_ifs9_anchor_localday_high",
+        low_data_version="openmeteo_ecmwf_ifs9_anchor_localday_low",
+        expected_members=None,
+        trade_authority_status="SHADOW_ONLY",
+        training_allowed=False,
+    ),
+    "Open-Meteo ECMWF ecmwf_ifs 9km/0.1 deterministic forecast soft spatial anchor plus AIFS ENS sampled-2t posterior": ForecastProductSpec(
+        label=(
+            "Open-Meteo ECMWF ecmwf_ifs 9km/0.1 deterministic forecast "
+            "soft spatial anchor plus AIFS ENS sampled-2t posterior"
+        ),
+        source_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        product_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
+        source_family="derived_posterior",
+        model_name="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+        product_class="derived_shadow_posterior",
+        stream="derived",
+        product_type="soft_anchor_posterior",
+        param="aifs_sampled_2t_posterior+openmeteo_ecmwf_ifs9_anchor",
+        aggregation_window_policy="aifs_sampled_2t_6h_plus_deterministic_anchor_local_calendar_day",
+        high_data_version="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1",
+        low_data_version="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_low_v1",
+        expected_members=None,
+        trade_authority_status="SHADOW_ONLY",
+        training_allowed=False,
+    ),
 }
 
 
@@ -271,6 +521,127 @@ def calibration_source_id_for_lookup(source_id: str | None) -> str | None:
     if not key:
         return None
     return _CALIBRATION_LOOKUP_SOURCE_ID_BY_FORECAST_SOURCE_ID.get(key)
+
+
+def replacement_forecast_product(label: str) -> ForecastProductSpec:
+    """Return a registered replacement-tournament product by label."""
+
+    try:
+        return REPLACEMENT_FORECAST_PRODUCTS[label]
+    except KeyError as exc:
+        raise SourceNotEnabled(f"replacement forecast product {label!r} is not registered") from exc
+
+
+def replacement_forecast_data_versions() -> frozenset[str]:
+    """Data versions reserved for non-B0 replacement candidates."""
+
+    return frozenset(
+        data_version
+        for label, product in REPLACEMENT_FORECAST_PRODUCTS.items()
+        if label != "B0"
+        for data_version in product.data_versions
+    )
+
+
+def replacement_forecast_raw_ensemble_data_versions() -> frozenset[str]:
+    """Replacement data versions eligible for raw ensemble snapshot rows.
+
+    Deterministic spatial anchors and derived posterior products are not raw
+    ensemble measurements. Keeping this whitelist separate prevents the
+    Open-Meteo 9km anchor or the soft-anchor posterior from masquerading as
+    member-level forecast evidence.
+    """
+
+    return frozenset(
+        data_version
+        for label, product in REPLACEMENT_FORECAST_PRODUCTS.items()
+        if label != "B0"
+        and product.expected_members is not None
+        and product.expected_members > 1
+        and product.product_class in {"ifs_ens_direct_model_output", "ai_ensemble"}
+        and product.trade_authority_status == "SHADOW_ONLY"
+        for data_version in product.data_versions
+    )
+
+
+def is_replacement_forecast_raw_ensemble_data_version(data_version: str | None) -> bool:
+    """Return whether a replacement data version is raw ensemble eligible."""
+
+    key = str(data_version or "").strip()
+    return key in replacement_forecast_raw_ensemble_data_versions()
+
+
+def select_empirical_replacement_strategy(
+    evidence: list[ForecastReplacementEvidence],
+    *,
+    min_settled_decisions: int = 200,
+    min_q_lcb_coverage: float = 0.95,
+) -> ForecastReplacementSelection:
+    """Choose the best replacement candidate from settled evidence.
+
+    Selection is deliberately empirical and fail-closed. A candidate is
+    promotable only if it has enough settled decisions, no time-filtration
+    violations, q_lcb coverage at or above threshold, and positive
+    after-cost PnL. Eligible candidates are ranked by economic result first,
+    then forecast skill metrics.
+    """
+
+    if not evidence:
+        return ForecastReplacementSelection(
+            status="NO_EMPIRICAL_EVIDENCE",
+            selected_label=None,
+            reason_codes=("EMPIRICAL_EVIDENCE_MISSING",),
+        )
+
+    eligible: list[ForecastReplacementEvidence] = []
+    blocked_reasons: set[str] = set()
+    for row in evidence:
+        product = replacement_forecast_product(row.label)
+        if product.trade_authority_status == "LIVE_AUTHORITY":
+            blocked_reasons.add("BASELINE_NOT_REPLACEMENT_CANDIDATE")
+            continue
+        if product.trade_authority_status not in {"SHADOW_ONLY", "COMPARATOR_ONLY"}:
+            blocked_reasons.add("PRODUCT_NOT_SHADOW_EVALUABLE")
+            continue
+        if row.settled_decisions < min_settled_decisions:
+            blocked_reasons.add("INSUFFICIENT_SETTLED_DECISIONS")
+            continue
+        if row.anti_lookahead_violations:
+            blocked_reasons.add("ANTI_LOOKAHEAD_VIOLATION")
+            continue
+        if row.availability_violations:
+            blocked_reasons.add("DECISION_TIME_AVAILABILITY_VIOLATION")
+            continue
+        if row.q_lcb_coverage < min_q_lcb_coverage:
+            blocked_reasons.add("QLCB_COVERAGE_INSUFFICIENT")
+            continue
+        if row.after_cost_pnl <= 0:
+            blocked_reasons.add("AFTER_COST_PNL_NOT_POSITIVE")
+            continue
+        eligible.append(row)
+
+    if not eligible:
+        return ForecastReplacementSelection(
+            status="NO_PROMOTION_CANDIDATE",
+            selected_label=None,
+            reason_codes=tuple(sorted(blocked_reasons)) or ("NO_ELIGIBLE_CANDIDATES",),
+        )
+
+    winner = max(
+        eligible,
+        key=lambda row: (
+            row.after_cost_pnl,
+            -row.max_drawdown,
+            -row.log_loss,
+            -row.brier,
+            row.q_lcb_coverage,
+        ),
+    )
+    return ForecastReplacementSelection(
+        status="PROMOTION_CANDIDATE",
+        selected_label=winner.label,
+        reason_codes=("EMPIRICAL_WINNER_AFTER_COST",),
+    )
 
 
 def _env_enabled(flag_name: str, environ: Mapping[str, str]) -> bool:
