@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Mapping
 
 from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, read_manifest
+from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
 from src.data.replacement_forecast_materialization_seed_builder import (
     build_replacement_forecast_materialization_seed,
     latest_baseline_coverage_for_replacement_seed,
@@ -291,7 +292,33 @@ def discover_replacement_forecast_materialization_seeds(
                 skipped_count=0,
                 failed_count=0,
             )
-        targets = _candidate_targets(conn, limit=limit, min_target_date=computed.date().isoformat())
+        target_plan = build_replacement_forecast_current_target_plan(
+            forecast_db,
+            limit=limit,
+            min_target_date=computed.date().isoformat(),
+            require_raw_artifacts=False,
+        )
+        if target_plan.status == "BLOCKED":
+            return ReplacementForecastSeedDiscoveryReport(
+                status="BLOCKED",
+                reason_codes=tuple(
+                    f"REPLACEMENT_SEED_DISCOVERY_CURRENT_TARGET_PLAN_{reason}"
+                    for reason in target_plan.reason_codes
+                ),
+                discovered_count=0,
+                skipped_count=0,
+                failed_count=0,
+            )
+        targets = tuple(
+            {
+                "city": row.city,
+                "target_date": row.target_date,
+                "temperature_metric": row.temperature_metric,
+                "baseline_source_run_id": row.baseline_source_run_id,
+            }
+            for row in target_plan.rows
+            if not row.covered
+        )
         if not targets:
             return ReplacementForecastSeedDiscoveryReport(
                 status="NO_ELIGIBLE_TARGETS",

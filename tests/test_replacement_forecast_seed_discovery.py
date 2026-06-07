@@ -91,6 +91,8 @@ def _init_db(path: Path) -> None:
             CREATE TABLE forecast_posteriors (
                 posterior_id INTEGER PRIMARY KEY,
                 source_id TEXT NOT NULL,
+                product_id TEXT NOT NULL DEFAULT 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
+                data_version TEXT NOT NULL DEFAULT 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
                 city TEXT NOT NULL,
                 target_date TEXT NOT NULL,
                 temperature_metric TEXT NOT NULL,
@@ -303,6 +305,57 @@ def test_seed_discovery_retries_when_current_posterior_exists_but_readiness_is_m
     assert seed["baseline_source_run_id"] == "baseline-run"
 
 
+def test_seed_discovery_skips_when_current_posterior_and_readiness_exist(tmp_path: Path) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    _init_db(db_path)
+    _write_raw_inputs(raw_dir)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            INSERT INTO forecast_posteriors (
+                source_id, city, target_date, temperature_metric,
+                dependency_source_run_ids_json, trade_authority_status,
+                training_allowed
+            ) VALUES (
+                'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
+                'NYC', '2026-06-07', 'high',
+                '{"baseline_b0":"baseline-run"}',
+                'SHADOW_VETO_ONLY', 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO readiness_state (
+                readiness_id, strategy_key, dependency_json, provenance_json
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (
+                "ready-current",
+                "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+                json.dumps({"dependencies": [{"role": "baseline_b0", "source_run_id": "baseline-run"}]}),
+                json.dumps({"city": "NYC", "target_date": "2026-06-07", "temperature_metric": "high"}),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-07T09:00:00+00:00",
+    )
+
+    assert report.status == "NO_ELIGIBLE_TARGETS"
+    assert report.reason_codes == ("REPLACEMENT_SEED_DISCOVERY_DB_TARGETS_MISSING",)
+    assert not list(seed_dir.glob("*.json"))
+
+
 def test_seed_discovery_blocks_when_source_run_coverage_schema_is_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
@@ -337,7 +390,7 @@ def test_seed_discovery_blocks_when_source_run_coverage_schema_is_missing(tmp_pa
     assert report.reason_codes == ("REPLACEMENT_SEED_DISCOVERY_SOURCE_RUN_COVERAGE_SCHEMA_MISSING",)
 
 
-def test_seed_discovery_does_not_skip_covered_target_when_dependency_schema_is_missing(tmp_path: Path) -> None:
+def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp_path: Path) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
     seed_dir = tmp_path / "seeds"
@@ -448,6 +501,7 @@ def test_seed_discovery_does_not_skip_covered_target_when_dependency_schema_is_m
         computed_at="2026-06-07T09:00:00+00:00",
     )
 
-    assert report.status == "DISCOVERED"
-    seed = json.loads(Path(report.written_seed_files[0]).read_text(encoding="utf-8"))
-    assert seed["baseline_source_run_id"] == "baseline-current-run"
+    assert report.status == "BLOCKED"
+    assert report.reason_codes == (
+        "REPLACEMENT_SEED_DISCOVERY_CURRENT_TARGET_PLAN_REPLACEMENT_CURRENT_TARGET_PLAN_POSTERIOR_SCHEMA_MISSING",
+    )

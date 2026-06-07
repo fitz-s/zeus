@@ -202,10 +202,10 @@ def build_replacement_forecast_current_target_plan(
         if not required.issubset(tables):
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_REQUIRED_TABLE_MISSING")
         if not {"city", "target_date", "temperature_metric", "token_id", "range_label"}.issubset(_columns(conn, "market_events")):
-            raise ValueError("market_events schema lacks current target columns")
+            return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_MARKET_EVENTS_SCHEMA_MISSING")
         posterior_columns = _columns(conn, "forecast_posteriors")
         if not {"city", "target_date", "temperature_metric", "source_id", "data_version"}.issubset(posterior_columns):
-            raise ValueError("forecast_posteriors schema lacks replacement coverage columns")
+            return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_POSTERIOR_SCHEMA_MISSING")
         readiness_columns = _columns(conn, "readiness_state")
         metadata_column = None
         if require_raw_artifacts:
