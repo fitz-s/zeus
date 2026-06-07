@@ -105,7 +105,7 @@ def test_configured_replacement_forecast_flags_fail_closed_without_runtime_evide
     assert policy.can_flip_direction is False
 
 
-def test_configured_production_replacement_is_shadow_veto_only_in_pr399_even_with_evidence() -> None:
+def test_configured_production_replacement_is_shadow_veto_only_in_pr399() -> None:
     settings_path = Path(__file__).resolve().parents[1] / "config/settings.json"
     settings_payload = json.loads(settings_path.read_text())
     flags = settings_payload["feature_flags"]
@@ -115,7 +115,7 @@ def test_configured_production_replacement_is_shadow_veto_only_in_pr399_even_wit
     assert settings_payload["edli_v1"]["edli_emos_sole_calibrator_enabled"] is True
     assert flags[SHADOW_FLAG] is True
     assert flags[VETO_FLAG] is True
-    assert flags[TRADE_AUTHORITY_FLAG] is True
+    assert flags[TRADE_AUTHORITY_FLAG] is False
     assert flags[KELLY_INCREASE_FLAG] is False
     assert flags[DIRECTION_FLIP_FLAG] is False
     assert promotion_evidence is not None
@@ -127,10 +127,10 @@ def test_configured_production_replacement_is_shadow_veto_only_in_pr399_even_wit
         capital_objective_evidence=capital_objective_evidence,
     )
 
-    assert policy.status == "BLOCKED"
-    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in policy.reason_codes
-    assert policy.can_read_shadow_posterior is False
-    assert policy.can_apply_veto is False
+    assert policy.status == "SHADOW_VETO_ONLY"
+    assert policy.reason_codes == ("REPLACEMENT_SHADOW_VETO_ONLY",)
+    assert policy.can_read_shadow_posterior is True
+    assert policy.can_apply_veto is True
     assert policy.can_initiate_trade is False
     assert policy.can_increase_kelly is False
     assert policy.can_flip_direction is False

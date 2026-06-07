@@ -73,15 +73,16 @@ def test_soft_anchor_sigma_unit_conversion_is_explicit_for_temperature_deltas() 
         anchor_sigma_to_celsius(3.0, "rankine")
 
 
-def test_soft_anchor_cannot_create_mass_for_zero_prior_bin() -> None:
+def test_soft_anchor_dirichlet_floor_can_rescue_zero_prior_bin() -> None:
     posterior = build_soft_anchor_posterior(
         aifs_probabilities={"cold": 0.50, "middle": 0.50, "warm": 0.0},
         bins=_bins(),
         anchor_c=17.0,
     )
 
-    assert posterior.anchor_likelihood["warm"] == pytest.approx(1.0)
-    assert posterior.probabilities["warm"] == 0.0
+    assert posterior.anchor_likelihood["warm"] > posterior.anchor_likelihood["middle"]
+    assert posterior.probabilities["warm"] > 0.0
+    assert posterior.probabilities["warm"] < posterior.probabilities["middle"]
 
 
 def test_source_disagreement_widens_anchor_sigma_instead_of_tightening_confidence() -> None:
@@ -174,12 +175,13 @@ def test_soft_anchor_rejects_bad_inputs_and_transcript_shorthand() -> None:
             anchor_c=17.0,
         )
 
-    with pytest.raises(ValueError, match="open-ended"):
-        build_soft_anchor_posterior(
-            aifs_probabilities={"open": 1.0},
-            bins=(ProbabilityBin("open", lower_c=20.0),),
-            anchor_c=21.0,
-        )
+    open_posterior = build_soft_anchor_posterior(
+        aifs_probabilities={"open": 1.0},
+        bins=(ProbabilityBin("open", lower_c=20.0),),
+        anchor_c=21.0,
+    )
+    assert open_posterior.anchor_likelihood["open"] > 0.0
+    assert open_posterior.probabilities["open"] == pytest.approx(1.0)
 
     for identifier in (SOURCE_ID, PRODUCT_ID):
         assert ("h" + "3") not in identifier.lower()

@@ -202,7 +202,11 @@ def build_soft_anchor_posterior(
     if not math.isfinite(anchor_c):
         raise ValueError("anchor_c must be finite")
     raw_prior = _normalize_probabilities(aifs_probabilities)
-    prior = _normalize_probabilities({key: value + DIRICHLET_PRIOR_FLOOR for key, value in raw_prior.items()})
+    prior = (
+        raw_prior
+        if config.anchor_weight == 0.0
+        else _normalize_probabilities({key: value + DIRICHLET_PRIOR_FLOOR for key, value in raw_prior.items()})
+    )
     bin_by_id = {bin_spec.bin_id: bin_spec for bin_spec in bins}
     if set(bin_by_id) != set(prior):
         raise ValueError("bins and aifs_probabilities must cover the same bin ids")

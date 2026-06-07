@@ -7241,6 +7241,10 @@ def _execution_price_from_snapshot(
     selected_token_id: str,
     direction: str,
 ) -> tuple[ExecutionPrice, float, float]:
+    tradeability_status = _json_object(row.get("tradeability_status_json") or row.get("tradeability_status") or {})
+    if tradeability_status.get("executable_allowed") is False:
+        reason = _nonnull(tradeability_status.get("reason") or "not_executable")
+        raise ValueError(f"EDLI executable snapshot marked non-executable: {reason}")
     if selected_token_id not in {str(row.get("yes_token_id") or ""), str(row.get("no_token_id") or "")}:
         raise ValueError("EDLI executable snapshot selected token mismatch")
     if _nonnull(row.get("selected_outcome_token_id")) == selected_token_id and not _snapshot_outcome_matches_selected_token(row, selected_token_id):

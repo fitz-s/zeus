@@ -249,6 +249,7 @@ def _trade_conn_with_snapshot(
     freshness_deadline: str = "2026-05-25T00:00:00+00:00",
     captured_at: str = "2026-05-24T08:12:00+00:00",
     depth_json: str | None = None,
+    tradeability_status_json: str = "{}",
 ):
     if snapshot_condition_count is None:
         snapshot_condition_count = condition_count
@@ -281,7 +282,7 @@ def _trade_conn_with_snapshot(
         authority_tier="CLOB",
         wide_spread_display_substitution=0,
         depth_at_best_ask=0,
-        tradeability_status_json="{}",
+        tradeability_status_json=tradeability_status_json,
     )
     conn.execute(
         """
@@ -2484,6 +2485,24 @@ def test_top_ask_without_depth_does_not_create_fillable_quote():
 
     assert receipt.submitted is False
     assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
+    assert receipt.native_quote_available is False
+
+
+def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(
+        selected_ask="0.40",
+        tradeability_status_json=json.dumps(
+            {"executable_allowed": False, "reason": "synthetic_clob_market_info_substrate_only"}
+        ),
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
+    assert "synthetic_clob_market_info_substrate_only" in receipt.reason
+    assert receipt.proof_accepted is False
     assert receipt.native_quote_available is False
 
 

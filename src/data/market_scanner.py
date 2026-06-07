@@ -2698,7 +2698,11 @@ def capture_executable_market_snapshot(
     # spending one serial /markets HTTP per condition.
     use_synthetic_clob_market = tolerate_missing_book and _bool_env(
         "ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO",
-        True,
+        False,
+    )
+    use_default_substrate_fee = tolerate_missing_book and _bool_env(
+        "ZEUS_PENDING_SUBSTRATE_DEFAULT_FEE_DETAILS",
+        False,
     )
 
     if not use_synthetic_clob_market and clob_market_info_cache is not None and condition_id in clob_market_info_cache:
@@ -2838,13 +2842,20 @@ def capture_executable_market_snapshot(
             token_id=selected_token,
         )
     else:
-        if tolerate_missing_book:
+        if use_default_substrate_fee:
             tradeability_status = replace(
                 tradeability_status,
                 executable_allowed=False,
                 reason="default_substrate_fee_details_not_final_intent_authority",
             )
             fee_details = _default_substrate_fee_details(selected_token)
+        elif fee_details_cache is not None:
+            fee_details = _fetch_family_cached_fee_details(
+                clob,
+                selected_token,
+                cache_key=_substrate_fee_cache_key(market, condition_id),
+                fee_details_cache=fee_details_cache,
+            )
         else:
             fee_details = _fetch_fee_details(clob, selected_token)
 
