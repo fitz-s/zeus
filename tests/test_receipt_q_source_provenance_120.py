@@ -61,6 +61,24 @@ def test_q_source_present_is_recorded():
     assert payload.get("q_source") == "emos", f"q_source not persisted: {rj}"
 
 
+def test_replacement_forecast_receipt_tag_is_hash_stable_when_absent_and_recorded_when_set():
+    """replacement_forecast=None must not drift pre-replacement receipt hashes."""
+    no_tag = json.loads(_receipt_json(_receipt(replacement_forecast=None)))
+    assert "replacement_forecast" not in no_tag
+
+    tagged = json.loads(
+        _receipt_json(
+            _receipt(
+                replacement_forecast={
+                    "status": "SHADOW_VETO_ONLY",
+                    "reason": "REPLACEMENT_FORECAST_ALLOWED",
+                }
+            )
+        )
+    )
+    assert tagged["replacement_forecast"]["status"] == "SHADOW_VETO_ONLY"
+
+
 def test_q_source_maze_value_recorded():
     rj = _receipt_json(_receipt(q_source="bias_platt"))
     assert json.loads(rj).get("q_source") == "bias_platt"

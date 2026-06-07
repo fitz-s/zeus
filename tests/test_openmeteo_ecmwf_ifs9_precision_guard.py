@@ -120,7 +120,7 @@ def test_openmeteo_ifs9_precision_guard_demotes_high_risk_coastal_and_terrain_bu
     assert coastal.status == "SHADOW_ONLY"
     assert coastal.high_risk_bucket == "coastal"
     assert "OM9_LAND_SEA_HIGH_RISK_FOR_CITY_CLASS" in coastal.reason_codes
-    assert coastal.passable_for_shadow_veto is True
+    assert coastal.passable_for_shadow_veto is False
 
     mountain = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         _metadata(city_class="mountain", grid_elevation_m=300.0, station_elevation_m=120.0)
@@ -128,6 +128,7 @@ def test_openmeteo_ifs9_precision_guard_demotes_high_risk_coastal_and_terrain_bu
     assert mountain.status == "SHADOW_ONLY"
     assert mountain.high_risk_bucket == "mountain"
     assert "OM9_TERRAIN_ELEVATION_REVIEW_REQUIRED" in mountain.reason_codes
+    assert mountain.passable_for_shadow_veto is False
 
 
 def test_openmeteo_ifs9_precision_metadata_rejects_bad_local_day_window() -> None:

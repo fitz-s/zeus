@@ -150,6 +150,9 @@ class EventSubmissionReceipt:
     # Shadow-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
     opportunity_book: dict[str, Any] | None = None
+    # Shadow/veto replacement forecast evidence tag. This is receipt provenance
+    # only; submit authority remains owned by the event-bound final intent path.
+    replacement_forecast: dict[str, Any] | None = None
     unit: str | None = None
 
     def __post_init__(self) -> None:
