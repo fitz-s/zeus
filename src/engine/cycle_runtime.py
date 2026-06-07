@@ -4469,6 +4469,57 @@ def execute_discovery_phase(conn, clob, portfolio, artifact, tracker, limits, mo
 
         _queue_derived_write("forward_market_substrate", _write_guarded)
 
+        # ThePath P1 ITEM 3 (2026-06-07): additive, fail-soft intraday order-book
+        # DEPTH capture for the fill model. The mid-only substrate write above
+        # leaves best_bid/best_ask/raw_orderbook_hash NULL. This sibling derived
+        # write taps the executable_market_snapshots rows the executor/scanner
+        # already captured (no new external poll) and writes full-linkage depth
+        # rows for the scanned conditions. Purely additive (new 'full' rows only),
+        # fail-soft (never raises, never blocks the cycle), and the helper itself
+        # degrades to a no-op if EMS is absent. Flag-off/absent-EMS => byte-identical
+        # behaviour to today (the helper writes nothing).
+        def _write_intraday_depth_guarded(markets_to_record=markets_payload) -> None:
+            try:
+                condition_ids: list[str] = []
+                _seen_cid: set[str] = set()
+                for _market in markets_to_record or ():
+                    if not isinstance(_market, dict):
+                        continue
+                    for _outcome in _market.get("outcomes") or ():
+                        if not isinstance(_outcome, dict):
+                            continue
+                        _cid = str(_outcome.get("condition_id") or "").strip()
+                        if _cid and _cid not in _seen_cid:
+                            _seen_cid.add(_cid)
+                            condition_ids.append(_cid)
+                if not condition_ids:
+                    summary["intraday_depth_capture_status"] = "no_condition_ids"
+                    return
+                from src.state.db import capture_intraday_orderbook_depth_from_snapshots
+
+                depth_result = capture_intraday_orderbook_depth_from_snapshots(
+                    conn,
+                    condition_ids=condition_ids,
+                    recorded_at=decision_time.isoformat(),
+                )
+                summary["intraday_depth_capture_status"] = str(depth_result.get("status", ""))
+                for _k in ("rows_inserted", "skipped_no_snapshot", "conditions_seen"):
+                    if _k in depth_result:
+                        summary[f"intraday_depth_capture_{_k}"] = int(depth_result.get(_k) or 0)
+                # The helper does not commit (caller owns the txn boundary, like
+                # log_executable_snapshot_market_price_linkage). Persist the new
+                # full-linkage rows; commit is fail-soft so a busy DB never blocks
+                # the cycle and never corrupts other pending derived telemetry.
+                try:
+                    conn.commit()
+                except Exception as _cexc:  # noqa: BLE001
+                    deps.logger.warning("Intraday depth capture commit failed (non-fatal): %s", _cexc)
+            except Exception as exc:  # noqa: BLE001 — fail-soft: never block the cycle
+                deps.logger.warning("Intraday depth capture failed (non-fatal): %s", exc)
+                summary["intraday_depth_capture_status"] = "error"
+
+        _queue_derived_write("intraday_orderbook_depth", _write_intraday_depth_guarded)
+
     def _execution_snapshot_fields(tokens: dict) -> dict:
         tokens = tokens or {}
         return {

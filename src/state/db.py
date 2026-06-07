@@ -3584,8 +3584,17 @@ def _create_day0_nowcast_runs(conn: sqlite3.Connection) -> None:
             hours_remaining     REAL NOT NULL,
             daypart             TEXT NOT NULL
                 CHECK (daypart IN ('pre_sunrise','morning','afternoon','post_peak')),
-            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4, 5)),
+            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4, 5, 7)),
             source              TEXT NOT NULL CHECK (source IN ('live_nowcast', 'replay')),
+            -- ThePath P1 ITEM 1 (2026-06-07): forward-only obs-availability instrumentation.
+            -- observation_available_at = wall-clock time Zeus could query the obs that fed
+            -- this run (Day0ObservationContext.observation_available_at = now()-at-fetch).
+            -- NEVER synthesized from now() in the writer; absent => NULL + 'UNVERIFIED'.
+            -- obs_availability_provenance enumerated; CHECK permits NULL for legacy rows.
+            observation_available_at    TEXT,
+            obs_availability_provenance TEXT
+                CHECK (obs_availability_provenance IS NULL OR obs_availability_provenance IN
+                    ('live_fetch','rolling_hourly_imported_at','archive_dissemination_lag','UNVERIFIED')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, run_seq)
         )
     """)
@@ -3975,6 +3984,14 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     for _alter_sql in (
         "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_grid_id TEXT",
         "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_schema_id TEXT",
+        # ThePath P1 ITEM 1 (2026-06-07): obs-availability instrumentation on the
+        # Day0 nowcast lane. Nullable TEXT, no default — ADD COLUMN is non-rewriting,
+        # idempotent on already-migrated DBs (duplicate-column swallow below).
+        # SQLite cannot ADD a CHECK constraint via ALTER, so the provenance vocab
+        # CHECK is enforced at the writer (write_nowcast_run) for existing DBs and
+        # in the CREATE TABLE above for fresh DBs.
+        "ALTER TABLE day0_nowcast_runs ADD COLUMN observation_available_at TEXT",
+        "ALTER TABLE day0_nowcast_runs ADD COLUMN obs_availability_provenance TEXT",
     ):
         try:
             conn.execute(_alter_sql)
@@ -5557,6 +5574,170 @@ def log_executable_snapshot_market_price_linkage(
         "token_id": token_id,
         "recorded_at": recorded_at_value,
     }
+
+
+def capture_intraday_orderbook_depth_from_snapshots(
+    conn: sqlite3.Connection | None,
+    *,
+    condition_ids: "Iterable[str]",
+    recorded_at: str,
+    as_of: str | None = None,
+) -> dict:
+    """ThePath P1 ITEM 3 (2026-06-07): additive, fail-soft intraday depth capture.
+
+    The intraday Gamma scanner writes mid-only ``market_price_history`` rows
+    (best_bid/best_ask/raw_orderbook_hash are 100% NULL on the price_only plane).
+    This helper closes the order-book depth gap for the fill model WITHOUT adding
+    any new high-frequency external poll: it taps the ``executable_market_snapshots``
+    rows the executor/scanner has ALREADY captured (which carry the full CLOB
+    ladder + top-of-book + raw_orderbook_hash), selects the most-recent snapshot
+    at-or-before ``as_of`` (default ``recorded_at``) per condition_id, and writes a
+    ``market_price_linkage='full'`` row with best_bid/best_ask/raw_orderbook_hash.
+
+    Design properties (iron rules):
+      - ADDITIVE: only writes new full-linkage rows; never updates/rewrites the
+        existing mid-only price_only rows. Columns already exist (no schema change).
+      - FAIL-SOFT: every per-condition failure (no snapshot, crossed book, missing
+        facts) is recorded as a typed counter and skipped — this function NEVER
+        raises and NEVER aborts the caller's cycle. A missing EMS table degrades
+        to a no-op status.
+      - NO NEW POLL: reads only already-persisted EMS rows; performs no network I/O.
+      - ANTI-LOOKAHEAD: ``captured_at <= as_of`` strictly (uses already-captured
+        snapshots only); never a future snapshot.
+      - Caller owns the transaction boundary (no commit, no default-DB open),
+        mirroring ``log_executable_snapshot_market_price_linkage``.
+
+    Returns a status dict with per-condition outcome counters.
+    """
+    table = "market_price_history"
+    snapshot_table = "executable_market_snapshots"
+    counts = {
+        "rows_inserted": 0,
+        "rows_unchanged": 0,
+        "rows_conflicted": 0,
+        "skipped_no_snapshot": 0,
+        "skipped_crossed_book": 0,
+        "skipped_missing_facts": 0,
+        "conditions_seen": 0,
+    }
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": (table, snapshot_table), **counts}
+
+    recorded_at_value = _forward_clean_str(recorded_at)
+    if recorded_at_value is None:
+        return {"status": "refused_missing_recorded_at", "tables": (table, snapshot_table), **counts}
+    as_of_value = _forward_clean_str(as_of) or recorded_at_value
+
+    # Fail-soft schema guard: if EMS or mph is absent (or mph lacks the depth
+    # columns), degrade to a no-op rather than raising.
+    if not _table_exists(conn, snapshot_table) or not _table_exists(conn, table):
+        return {"status": "skipped_missing_tables", "tables": (table, snapshot_table), **counts}
+    missing_columns = tuple(
+        sorted(set(_FULL_LINKAGE_PRICE_REQUIRED_COLUMNS) - _table_columns(conn, table))
+    )
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "missing_columns": missing_columns,
+            **counts,
+        }
+
+    seen: set[str] = set()
+    saved_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        for raw_condition in condition_ids or ():
+            condition_id = _forward_clean_str(raw_condition)
+            if condition_id is None or condition_id in seen:
+                continue
+            seen.add(condition_id)
+            counts["conditions_seen"] += 1
+
+            # Most-recent already-captured snapshot at-or-before as_of (anti-lookahead).
+            try:
+                row = conn.execute(
+                    """
+                    SELECT snapshot_id, event_slug, condition_id,
+                           selected_outcome_token_id,
+                           orderbook_top_bid, orderbook_top_ask, raw_orderbook_hash,
+                           captured_at
+                    FROM executable_market_snapshots
+                    WHERE condition_id = ? AND captured_at <= ?
+                    ORDER BY captured_at DESC
+                    LIMIT 1
+                    """,
+                    (condition_id, as_of_value),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                # EMS query failed (e.g. schema mismatch) — fail soft for this cond.
+                counts["skipped_no_snapshot"] += 1
+                continue
+            if row is None:
+                counts["skipped_no_snapshot"] += 1
+                continue
+
+            market_slug = _forward_clean_str(row["event_slug"])
+            token_id = _forward_clean_str(row["selected_outcome_token_id"])
+            best_bid = _forward_price(row["orderbook_top_bid"])
+            best_ask = _forward_price(row["orderbook_top_ask"])
+            raw_orderbook_hash = _forward_clean_str(row["raw_orderbook_hash"])
+            snapshot_id_value = _forward_clean_str(row["snapshot_id"])
+            if not (
+                market_slug
+                and token_id
+                and best_bid is not None
+                and best_ask is not None
+                and raw_orderbook_hash
+                and snapshot_id_value
+            ):
+                counts["skipped_missing_facts"] += 1
+                continue
+
+            price = _mid_price(best_bid, best_ask)
+            if price is None:
+                counts["skipped_crossed_book"] += 1
+                continue
+
+            values = {
+                "market_slug": market_slug,
+                "token_id": token_id,
+                "price": price,
+                # recorded_at is the SCAN time (the intraday cadence), not the
+                # snapshot capture time — so the depth row aligns with the
+                # mid-only row written by the same scan cycle. snapshot_id +
+                # raw_orderbook_hash retain the provenance back to the EMS book.
+                "recorded_at": recorded_at_value,
+                "hours_since_open": None,
+                "hours_to_resolution": None,
+                "market_price_linkage": "full",
+                "source": "CLOB_ORDERBOOK_EMS_TAP",
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "raw_orderbook_hash": raw_orderbook_hash,
+                "snapshot_id": snapshot_id_value,
+                "condition_id": condition_id,
+            }
+            try:
+                result = _insert_full_linkage_price_history(conn, values)
+            except sqlite3.Error:
+                # UNIQUE(token_id, recorded_at) collision or any insert error:
+                # fail soft, count as conflict, never abort the cycle.
+                counts["rows_conflicted"] += 1
+                continue
+            if result == "inserted":
+                counts["rows_inserted"] += 1
+            elif result == "unchanged":
+                counts["rows_unchanged"] += 1
+            else:
+                counts["rows_conflicted"] += 1
+    finally:
+        conn.row_factory = saved_factory
+
+    status = "ok"
+    if counts["rows_conflicted"]:
+        status = "ok_with_conflicts"
+    return {"status": status, "table": table, **counts}
 
 
 def log_forward_market_substrate(

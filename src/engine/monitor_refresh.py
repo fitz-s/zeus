@@ -1659,6 +1659,10 @@ def _refresh_day0_observation(
         temperature_metric=temperature_metric,
         target_d=target_d,
         observation_time=_day0_observation_field(obs, "observation_time"),
+        # ThePath P1 ITEM 1: honest obs-availability clock from the live obs ctx
+        # (observation_client stamps it = now()-at-fetch). Read verbatim; the
+        # helper records NULL + 'UNVERIFIED' when absent (never synthesizes now()).
+        observation_available_at=_day0_observation_field(obs, "observation_available_at"),
     )
 
     return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
@@ -1720,10 +1724,18 @@ def _maybe_write_day0_nowcast(
     temperature_metric: "MetricIdentity",
     target_d: "date",
     observation_time: "str | None",
+    observation_available_at: "str | None" = None,
 ) -> None:
     """Attempt a day0_nowcast_runs write if position carries a market_slug and
     hours_remaining <= 6.  Fail-soft: any write error is logged as WARNING
     and swallowed so the monitor loop is never interrupted.
+
+    observation_available_at: pre-extracted from the live Day0ObservationContext
+        (observation_client.Day0ObservationContext.observation_available_at =
+        now()-at-fetch). ThePath P1 ITEM 1 (2026-06-07): threaded to persist the
+        honest obs-availability clock per nowcast run. When absent/empty, the
+        write records NULL + provenance 'UNVERIFIED' — NEVER a synthesized now().
+        Default None keeps every existing call signature valid.
 
     Guards:
       - position.market_slug must be non-empty (positions from v1-vintage
@@ -1766,6 +1778,13 @@ def _maybe_write_day0_nowcast(
             else str(temperature_metric)
         )
 
+        # ThePath P1 ITEM 1: thread the honest obs-availability clock. The live
+        # observation_client stamps observation_available_at = now()-at-fetch.
+        # Treat empty string (the contract default when no fetch produced one) as
+        # absent -> NULL + 'UNVERIFIED'. NEVER synthesize now() here.
+        _obs_avail = observation_available_at or None
+        _obs_provenance = "live_fetch" if _obs_avail else "UNVERIFIED"
+
         write_nowcast_run(
             market_slug=position.market_slug,
             temperature_metric=_metric_str,
@@ -1777,6 +1796,8 @@ def _maybe_write_day0_nowcast(
             hours_remaining=hours_remaining,
             daypart=temporal_context.daypart,
             source="live_nowcast",
+            observation_available_at=_obs_avail,
+            obs_availability_provenance=_obs_provenance,
         )
         logger.debug(
             "T5 nowcast write OK: %s market_slug=%s hours_remaining=%.1f daypart=%s fit_run_id=%s",
