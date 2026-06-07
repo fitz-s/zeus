@@ -240,6 +240,7 @@ def build_aifs_sampled_2t_bin_probabilities(
     metric: str,
     bins: Sequence[AifsTemperatureBin],
     settlement_step_c: float = 1.0,
+    bias_shift_c: float | None = None,
 ) -> AifsBinProbabilityResult:
     """Convert AIFS member local-day extrema into uncalibrated bin probabilities.
 
@@ -247,6 +248,16 @@ def build_aifs_sampled_2t_bin_probabilities(
     family. The output is the AIFS sampled-2t prior used by the Open-Meteo ECMWF
     IFS 9km deterministic soft-anchor posterior; it is not B0 calibration,
     EMOS, raw-honest fallback, or trade authority.
+
+    ``bias_shift_c`` (P2_BLEND.md §3,§4): per-city Empirical-Bayes forecast bias in
+    degC, sign convention ``bias = forecast - actual`` (negative = cold). When set,
+    each member extremum is corrected ``corrected = raw - bias_shift_c`` BEFORE the
+    vote is cast, so the votes move (mitigating BOTH the cold center AND the
+    soft_anchor zero-prior veto on cold-shifted bins). The member extrema are ALWAYS
+    degC here (high_c/low_c are unit-normalized on ingest), so the shift is degC-vs-degC
+    and unit-correct by construction — NO Fahrenheit ×1.8 (that belongs to the legacy
+    edli p_raw path where members carry the city's settlement unit). ``None`` or ``0.0``
+    is byte-identical to the un-corrected path (default-OFF).
     """
 
     normalized_metric = _normalize_metric(metric)
@@ -259,11 +270,16 @@ def build_aifs_sampled_2t_bin_probabilities(
         raise ValueError("bin ids must be unique")
     _validate_full_family_bins(bins, settlement_step_c=settlement_step_c)
 
+    shift = 0.0 if bias_shift_c is None else float(bias_shift_c)
+    if not math.isfinite(shift):
+        raise ValueError("bias_shift_c must be finite")
+
     counts = {bin_spec.bin_id: 0 for bin_spec in bins}
     assignments: dict[str, str] = {}
     member_values: dict[str, float] = {}
     for member in extraction.members:
-        value_c = _member_value(member, normalized_metric)
+        # corrected = raw - bias (bias = forecast - actual); cold bias warms the value.
+        value_c = _member_value(member, normalized_metric) - shift
         bin_id = _assign_bin(value_c, bins, settlement_step_c=settlement_step_c)
         counts[bin_id] += 1
         assignments[member.member_id] = bin_id
@@ -291,19 +307,36 @@ def build_openmeteo_ifs9_aifs_soft_anchor_result(
     bins: Sequence[AifsTemperatureBin],
     config: SoftAnchorConfig = SoftAnchorConfig(),
     settlement_step_c: float = 1.0,
+    bias_shift_c: float | None = None,
 ) -> OpenMeteoIfs9AifsSoftAnchorResearchResult:
-    """Build the fixed research posterior from raw AIFS and Open-Meteo anchors."""
+    """Build the fixed research posterior from raw AIFS and Open-Meteo anchors.
+
+    ``bias_shift_c`` (P2_BLEND.md §3,§4,§5): per-city EB forecast bias (degC, sign
+    ``forecast - actual``). When set, BOTH the AIFS member votes (via
+    build_aifs_sampled_2t_bin_probabilities) AND the deterministic anchor center are
+    corrected ``corrected = raw - bias_shift_c`` BEFORE the soft-anchor fusion and the
+    zero-prior veto (soft_anchor.py:197-198). LAYERING: this center correction precedes
+    the veto and any downstream q_lcb sigma widening, so the widened interval covers the
+    corrected location (not the cold-shifted one) and the veto vetoes the corrected
+    zero-vote bins. ``None`` / ``0.0`` is byte-identical to today (default-OFF).
+    """
 
     normalized_metric = _normalize_metric(metric)
     if not isinstance(openmeteo_anchor, OpenMeteoIfs9LocalDayAnchor):
         raise TypeError("openmeteo_anchor must be OpenMeteoIfs9LocalDayAnchor")
+    shift = 0.0 if bias_shift_c is None else float(bias_shift_c)
+    if not math.isfinite(shift):
+        raise ValueError("bias_shift_c must be finite")
     aifs_probabilities = build_aifs_sampled_2t_bin_probabilities(
         aifs_extraction,
         metric=normalized_metric,
         bins=bins,
         settlement_step_c=settlement_step_c,
+        bias_shift_c=bias_shift_c,
     )
-    anchor_value_c = openmeteo_anchor.high_c if normalized_metric == "high" else openmeteo_anchor.low_c
+    raw_anchor_value_c = openmeteo_anchor.high_c if normalized_metric == "high" else openmeteo_anchor.low_c
+    # Shift the anchor center consistently with the member votes (corrected = raw - bias).
+    anchor_value_c = raw_anchor_value_c - shift
     posterior = build_soft_anchor_posterior(
         aifs_probabilities=aifs_probabilities.probabilities,
         bins=aifs_probabilities.soft_anchor_bins,

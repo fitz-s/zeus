@@ -411,6 +411,77 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["anchor_id"])
 
 
+def _replacement_eb_bias_shift_c(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> float | None:
+    """Flag-gated per-city EB bias shift (degC) for the replacement_0_1 center.
+
+    P2_BLEND.md §3,§4,§5. Returns the degC shift to subtract from the AIFS member votes
+    and the OM9 anchor center BEFORE the zero-prior veto, or None when the flag is OFF or
+    no VERIFIED promoted bias exists (FAIL-CLOSED). REUSES the already-built
+    zeus-world.model_bias_ens via src/calibration/replacement_eb_bias (ONE-BUILDER — no
+    parallel store). Self-calibrating: the shift is whatever the accruing per-city VERIFIED
+    residuals currently say (no hardcoded magnitude).
+
+    The bias row is keyed by the LIVE forecast product the bias was fit on
+    (model_bias_ens.live_data_version = the OpenData ECMWF ENS product, the same ECMWF
+    family as AIFS — P2_BLEND.md §1b), NOT the soft-anchor posterior data_version. The key
+    + the cell unit + season come from config so this surface holds no magic constants. Any
+    failure / missing config / missing row degrades to None (no correction). Never raises.
+    """
+    try:
+        from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
+
+        edli_cfg = settings["edli_v1"]
+        if not bool(edli_cfg.get("replacement_0_1_eb_bias_correction_enabled", False)):
+            return None
+
+        # live_data_version the promoted bias was fit on (OpenData ENS product family).
+        # Product-keyed (HIGH vs LOW); resolved from config, fail-closed if absent.
+        ldv_map = edli_cfg.get("replacement_0_1_eb_bias_live_data_version") or {}
+        bias_ldv = ldv_map.get(metric) if isinstance(ldv_map, dict) else None
+        if not bias_ldv:
+            return None
+
+        city_obj = runtime_cities_by_name().get(request.city)
+        if city_obj is None:
+            return None
+        lat = float(getattr(city_obj, "lat", 90.0))
+        settlement_unit = str(getattr(city_obj, "settlement_unit", "C"))
+
+        from src.contracts.season import season_from_date  # noqa: PLC0415
+
+        target_date = _date_text(request.target_date)
+        season = season_from_date(target_date, lat=lat)
+        month = int(str(target_date)[5:7])
+
+        from src.calibration.replacement_eb_bias import resolve_replacement_eb_bias_shift_c  # noqa: PLC0415
+        from src.state.db import get_world_connection  # noqa: PLC0415
+        import contextlib  # noqa: PLC0415
+
+        with contextlib.closing(get_world_connection()) as world_conn:
+            return resolve_replacement_eb_bias_shift_c(
+                world_conn,
+                city=request.city,
+                season=season,
+                month=month,
+                metric=metric,
+                live_data_version=str(bias_ldv),
+                settlement_unit=settlement_unit,
+            )
+    except Exception as exc:  # fail-closed: never break shadow materialization
+        try:
+            import logging  # noqa: PLC0415
+            logging.getLogger("zeus.replacement_eb_bias").warning(
+                "replacement_0_1 EB bias wiring skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
 def _insert_posterior(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -418,6 +489,10 @@ def _insert_posterior(
     metric: str,
     anchor_id: int,
 ) -> int:
+    # P2_BLEND.md §3-§5: flag-gated per-city EB bias-correction of the center, applied
+    # BEFORE the soft-anchor zero-prior veto (inside build_openmeteo_ifs9_aifs_soft_anchor_result).
+    # None when flag OFF or no VERIFIED row -> byte-identical to today.
+    bias_shift_c = _replacement_eb_bias_shift_c(request, metric=metric)
     result = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=request.aifs_extraction,
         openmeteo_anchor=request.openmeteo_anchor,
@@ -425,6 +500,7 @@ def _insert_posterior(
         bins=request.bins,
         config=SoftAnchorConfig(anchor_weight=request.anchor_weight, anchor_sigma_c=request.anchor_sigma_c),
         settlement_step_c=float(request.settlement_step_c),
+        bias_shift_c=bias_shift_c,
     )
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
