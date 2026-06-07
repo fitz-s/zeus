@@ -380,6 +380,25 @@ class PolymarketV2Adapter:
             )
         return self._client
 
+    def _refresh_signer_bound_l2_api_creds(self, client: Any) -> None:
+        set_api_creds = getattr(client, "set_api_creds", None)
+        if not callable(set_api_creds):
+            raise V2AdapterError("SDK client does not expose set_api_creds")
+        api_creds = _derive_l2_api_creds(client)
+        set_api_creds(api_creds)
+        _store_derived_api_creds(
+            host=self.host,
+            chain_id=self.chain_id,
+            signer_key=self.signer_key,
+            signature_type=self.signature_type,
+            funder_address=self.funder_address,
+            api_creds=api_creds,
+        )
+        logger.warning(
+            "VENUE_AUTH_RUNTIME_CREDS_REFRESHED: runtime L2 creds failed auth; "
+            "re-derived signer-bound L2 creds and retried once",
+        )
+
     def preflight(self) -> PreflightResult:
         if self.q1_egress_evidence_path is not None:
             evidence_result = _validate_q1_egress_evidence(self.q1_egress_evidence_path)
@@ -744,9 +763,19 @@ class PolymarketV2Adapter:
                 signature_type=self.signature_type,
             )
         update_balance_allowance = getattr(client, "update_balance_allowance", None)
-        if callable(update_balance_allowance):
-            update_balance_allowance(params)
-        raw = get_balance_allowance(params)
+
+        def _read_once() -> Any:
+            if callable(update_balance_allowance):
+                update_balance_allowance(params)
+            return get_balance_allowance(params)
+
+        try:
+            raw = _read_once()
+        except Exception as exc:
+            if not _is_l2_auth_error(exc):
+                raise
+            self._refresh_signer_bound_l2_api_creds(client)
+            raw = _read_once()
         if not isinstance(raw, dict):
             raw = dict(raw)
         if raw.get("balance") is None:
@@ -2491,6 +2520,11 @@ def _derive_l2_api_creds(client: Any) -> Any:
     if callable(derive_api_key):
         return derive_api_key()
     return client.create_or_derive_api_key()
+
+
+def _is_l2_auth_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}:{exc}".lower()
+    return "unauthorized" in text or "invalid api key" in text or "status_code=401" in text
 
 
 def _api_creds_from_runtime() -> Any | None:

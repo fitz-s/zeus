@@ -138,6 +138,27 @@ class FakeBalanceAllowanceClient:
         return {}
 
 
+class FakeStaleL2CredsBalanceClient(FakeBalanceAllowanceClient):
+    def __init__(self):
+        super().__init__()
+        self._refreshed = False
+        self.derived_creds = FakeApiCreds("derived-key", "derived-secret", "derived-passphrase")
+
+    def derive_api_key(self):
+        self.calls.append(("derive_api_key",))
+        return self.derived_creds
+
+    def set_api_creds(self, creds):
+        self.calls.append(("set_api_creds", creds))
+        self._refreshed = True
+
+    def update_balance_allowance(self, params):
+        self.calls.append(("update_balance_allowance", params))
+        if not self._refreshed:
+            raise RuntimeError("PolyApiException[status_code=401, error_message={'error':'Unauthorized/Invalid api key'}]")
+        return {}
+
+
 class FakeOpenOrdersClient:
     def __init__(self):
         self.calls = []
@@ -500,6 +521,42 @@ def test_collateral_payload_syncs_and_reads_with_configured_signature_type(tmp_p
     for _name, params in fake.calls[:2]:
         assert getattr(params, "asset_type") == "COLLATERAL"
         assert getattr(params, "signature_type") == 3
+
+
+def test_collateral_payload_rederives_once_when_runtime_l2_creds_are_stale(tmp_path):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    adapter_mod._DERIVED_API_CREDS_CACHE.clear()
+    fake = FakeStaleL2CredsBalanceClient()
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        chain_id=137,
+        signature_type=2,
+        q1_egress_evidence_path=tmp_path / "unused.txt",
+        client_factory=lambda **kwargs: fake,
+    )
+
+    payload = adapter.get_collateral_payload()
+
+    assert payload["pusd_balance_micro"] == "100000000"
+    call_names = [call[0] for call in fake.calls]
+    assert call_names == [
+        "update_balance_allowance",
+        "derive_api_key",
+        "set_api_creds",
+        "update_balance_allowance",
+        "get_balance_allowance",
+    ]
+    assert adapter_mod._cached_derived_api_creds(
+        host="https://clob.polymarket.com",
+        chain_id=137,
+        signer_key="test-key",
+        signature_type=2,
+        funder_address="0xfunder",
+    ) is fake.derived_creds
 
 
 def test_collateral_payload_missing_allowance_remains_fail_closed_zero(tmp_path):
