@@ -5777,11 +5777,15 @@ def _edli_pending_entity_keys(world_conn) -> set[str]:
     re-decision event already queued are not re-emitted (bounds the pending queue; the rate
     self-regulates to families the reactor has already drained)."""
     try:
+        try:
+            world_conn.execute("PRAGMA busy_timeout = 250")
+        except Exception:  # noqa: BLE001
+            pass
         rows = world_conn.execute(
             """
             SELECT DISTINCT e.entity_key
-            FROM opportunity_events e
-            JOIN opportunity_event_processing p ON p.event_id = e.event_id
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            JOIN opportunity_events e ON e.event_id = p.event_id
             WHERE p.consumer_name = 'edli_reactor_v1'
               AND p.processing_status IN ('pending', 'processing', 'claimed')
               AND e.event_type = 'FORECAST_SNAPSHOT_READY'

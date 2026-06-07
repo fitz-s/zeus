@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
@@ -44,6 +45,17 @@ from src.strategy.live_inference.live_admission import (
 UTC = timezone.utc
 
 DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
+
+
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database is busy" in message
+    )
 
 
 def _cycle_budget_seconds() -> float | None:
@@ -325,7 +337,14 @@ class OpportunityEventReactor:
         pre_disposition: str | None
         should_submit = False
         try:
-            if not self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat()):
+            try:
+                claimed = self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat())
+            except Exception as exc:
+                if _is_sqlite_lock_error(exc):
+                    result.retried += 1
+                    return
+                raise
+            if not claimed:
                 # Claim lost (another worker / lease not yet stale): release any
                 # open txn and the mutex; nothing to process this cycle.
                 self._commit_event_unit()
@@ -423,6 +442,19 @@ class OpportunityEventReactor:
                 self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                 self._commit_event_unit()
             except Exception as exc:
+                if _is_sqlite_lock_error(exc):
+                    with contextlib.suppress(Exception):
+                        self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
+                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    with contextlib.suppress(Exception):
+                        self._finalize_reservation(event, emitted=False)
+                    # If the lock failure happened before the savepoint opened
+                    # (for example BEGIN IMMEDIATE in Window B), we cannot safely
+                    # write requeue/dead-letter surfaces because the same writer
+                    # lock is unavailable. Leave the event in processing; the
+                    # store's stale-lease fetch path will retry it next cycle.
+                    result.retried += 1
+                    return
                 with contextlib.suppress(Exception):
                     self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")

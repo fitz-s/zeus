@@ -4024,6 +4024,121 @@ class TestRecoveryResolutionTable:
         assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
         assert payload["venue_order_created"] is False
 
+    def test_unknown_side_effect_marketable_buy_min_size_without_currency_400_terminalizes_without_lookup(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, price=0.01, size=12.0)
+        _advance_to_submitting(conn)
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_TIMEOUT_UNKNOWN",
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={
+                "reason": "post_submit_exception_possible_side_effect",
+                "exception_type": "PolyApiException",
+                "exception_message": (
+                    "PolyApiException[status_code=400, "
+                    "error_message={'error': 'invalid amount for a marketable "
+                    "BUY order ($0.12), min size: 1'}]"
+                ),
+                "idempotency_key": _DEFAULT_IDEM_KEY,
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert _get_state(conn, "cmd-001") == "SUBMIT_REJECTED"
+        mock_client.get_order.assert_not_called()
+        events = _get_events(conn, "cmd-001")
+        rejected = [e for e in events if e["event_type"] == "SUBMIT_REJECTED"][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "venue_rejected_invalid_amount_400"
+        assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
+        assert payload["venue_order_created"] is False
+
+    def test_edli_pre_venue_unknown_threshold_reconcile_releases_cap(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        execution_command_id = "edli_exec_cmd:event-1:intent-1:token-1:token-1:buy_yes"
+        aggregate_id = "event-1:intent-1"
+        payload = {
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": execution_command_id,
+            "execution_receipt_hash": "receipt-hash-1",
+            "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold",
+            "submit_status": "POST_SUBMIT_UNKNOWN",
+            "reconciliation_followup_required": True,
+            "side_effect_known": False,
+            "venue_call_started": True,
+        }
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_events (
+                aggregate_event_id, aggregate_id, event_sequence, event_type,
+                parent_event_hash, event_hash, payload_json, payload_hash,
+                source_authority, occurred_at, created_at, schema_version
+            ) VALUES ('evt-1', ?, 1, 'SubmitUnknown', NULL, 'hash-1', ?, 'payload-hash-1',
+                      'existing_executor', '2026-04-26T00:02:00+00:00',
+                      '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (aggregate_id, json.dumps(payload, sort_keys=True)),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-1', 'intent-1', 'PENDING_RECONCILE',
+                      1, 'SubmitUnknown', 'hash-1', 1, NULL,
+                      '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (aggregate_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+                max_orders_per_day, reserved_notional_usd, order_count,
+                reservation_status, final_intent_id, execution_command_id,
+                created_at, schema_version
+            ) VALUES ('cap-1', 'event-1', '2026-04-26T00:02:00+00:00',
+                      'tiny-live', 100.0, 100, 0.18, 1, 'RESERVED',
+                      'intent-1', ?, '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (execution_command_id,),
+        )
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_pre_venue_unknown_thresholds"]["advanced"] == 1
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        assert projection["current_state"] == "CAP_TRANSITIONED"
+        assert bool(projection["pending_reconcile"]) is False
+        cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-1'").fetchone()
+        assert cap["reservation_status"] == "RELEASED"
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM edli_live_order_events WHERE aggregate_id = ? ORDER BY event_sequence",
+                (aggregate_id,),
+            )
+        ]
+        assert event_types == ["SubmitUnknown", "Reconciled", "CapTransitioned"]
+
     def test_partial_confirmed_fill_absent_from_open_orders_expires_remainder_without_voiding_fill(
         self,
         conn,

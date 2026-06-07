@@ -467,6 +467,89 @@ def test_sqlite_lock_during_live_certificate_build_is_retryable_not_consumed():
     assert _processing_status(conn, event.event_id) == "pending"
 
 
+def test_sqlite_lock_during_post_submit_begin_is_retryable_not_dead_lettered(tmp_path):
+    """A Window-B BEGIN IMMEDIATE lock is transient and cannot write evidence.
+
+    The event is already claimed/committed as ``processing`` after Window A.
+    When another writer holds the WAL write lock before Window B starts, the
+    reactor must not try to write dead-letter/ledger rows through the same lock.
+    Leaving the processing lease in place lets fetch_pending retry it once the
+    lease is stale.
+    """
+    db_path = tmp_path / "world.db"
+    conn = sqlite3.connect(db_path, timeout=0)
+    init_schema(conn)
+    store = EventStore(conn)
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    locker_holder: dict[str, sqlite3.Connection] = {}
+    payload = json.loads(event.payload_json)
+
+    def _submit(_event, decision_time):
+        locker = sqlite3.connect(db_path, timeout=0)
+        locker.execute("BEGIN IMMEDIATE")
+        locker_holder["conn"] = locker
+        receipt = EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            condition_id="condition-1",
+            token_id="yes-1",
+            executable_snapshot_id="snapshot-exec-1",
+            family_id="family-1",
+            trade_score_positive=True,
+            fdr_pass=True,
+            fdr_family_id="family-1",
+            fdr_hypothesis_count=2,
+            kelly_pass=True,
+            kelly_execution_price_type="ExecutionPrice",
+            kelly_price_fee_deducted=True,
+            kelly_size_usd=1.0,
+            kelly_cost_basis_id="cost-1",
+            kelly_decision_id="kelly-1",
+            risk_decision_id="risk-1",
+            final_intent_id="intent-1",
+        )
+        return replace(
+            receipt,
+            decision_proof_bundle=build_test_no_submit_proof_bundle(
+                event,
+                receipt,
+                decision_time=decision_time,
+            ),
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _decision_time: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+    locker_holder["conn"].rollback()
+    locker_holder["conn"].close()
+
+    assert result.processed == 0
+    assert result.dead_lettered == 0
+    assert result.retried == 1
+    assert _terminal_surfaces(conn, event.event_id) == {
+        "verified_no_submit": 0,
+        "execution_receipt": 0,
+        "compile_failure": 0,
+        "regret": 0,
+        "dead_letter": 0,
+    }
+    assert _processing_status(conn, event.event_id) == "processing"
+
+
 def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
     """Stale JIT price failures may return before the adapter can build a bound final intent."""
     payload = json.loads(_forecast_event().payload_json)

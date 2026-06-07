@@ -12,6 +12,8 @@ import inspect
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
+
 import src.main as main
 from src.events.event_writer import EventWriter
 from src.events.event_store import EventStore
@@ -23,6 +25,14 @@ from src.events.triggers.forecast_snapshot_ready import (
 from src.state.db import init_schema, init_schema_forecasts
 
 ENTITY_KEY = "Chicago|2026-05-24|high|run-1"
+
+
+@pytest.fixture(autouse=True)
+def _replacement_authority_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        lambda: False,
+    )
 
 
 def _decision_time() -> datetime:
