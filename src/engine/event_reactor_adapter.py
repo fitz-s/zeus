@@ -86,6 +86,14 @@ from src.strategy.live_inference.live_admission import (
 )
 from src.strategy import market_phase_evidence as _market_phase_evidence
 from src.types.market import Bin
+# QLCB_HONESTY.md FIX-C — the EXISTING settlement σ-floor (state/settlement_sigma_floor.json,
+# 232 cells, median 3.18C realized residual) + its WMO-aware settlement-preimage bin
+# integrator. Module-level so the live replacement q_lcb floor reuses the SAME antibody
+# that already protects the canonical/EMOS path (one builder; no parallel sigma mechanism).
+from src.calibration.emos import (
+    settlement_sigma_floor,
+    bin_probability_settlement as _bin_probability_settlement,
+)
 
 
 UTC = timezone.utc
@@ -5390,6 +5398,52 @@ def _replacement_authority_enabled() -> bool:
     return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled", False))
 
 
+def _replacement_qlcb_settlement_sigma_floor_enabled() -> bool:
+    """QLCB_HONESTY.md FIX-C flag (default FALSE). When OFF the replacement q_lcb is
+    byte-identical to the raw Wilson/bundle value — the settlement σ-floor is NEVER
+    consulted, no DB/table read on this path. When ON the per-bin q_lcb is floored at
+    the realized-settlement residual (settlement_sigma_floor) so a tight member cluster
+    cannot manufacture an overconfident lower bound (iron rule #6)."""
+    try:
+        return bool(settings["edli_v1"].get("replacement_qlcb_settlement_sigma_floor_enabled", False))
+    except Exception:
+        return False
+
+
+def _replacement_settlement_grounded_lcb(
+    *,
+    mu_c: float,
+    sigma_floor_c: float,
+    sigma_model_c: float | None,
+    lower_c: float | None,
+    upper_c: float | None,
+) -> float:
+    """The settlement-grounded YES-bin q_lcb under ``N(mu_c, max(sigma_model_c, sigma_floor_c))``.
+
+    QLCB_HONESTY.md §2 Construction B root cause: the live replacement q_lcb is sized
+    from the ~0.67C member spread (Wilson over 51 AIFS votes), ignoring the ~3.2x
+    settlement underdispersion. This integrates the WMO settlement preimage of the bin
+    under a Gaussian whose σ is FLOORED at the per-(city,season,metric) realized residual
+    (settlement_sigma_floor, median 3.18C). The floor only WIDENS σ → LOWERS the q_lcb
+    (never tightens), so caller's ``min(raw_wilson, this)`` is ONLY-LOWERS by construction.
+
+    ``sigma_model_c`` (the AIFS member spread, when carried) participates via ``max`` so a
+    legitimately-wider model σ is preserved; ``None`` (the usual live case — provenance
+    carries vote frequencies, not a member std) means the floor is the effective σ. Uses
+    the SAME ``bin_probability_settlement`` (WMO round-half-up preimage) the canonical/EMOS
+    path uses, so the grounded mass matches the settlement grading semantics.
+    """
+    floor = float(sigma_floor_c)
+    if not (floor > 0.0):
+        # No usable floor — degrade to a non-binding ceiling (caller's min() keeps raw).
+        return 1.0
+    sigma_eff = floor if sigma_model_c is None else max(float(sigma_model_c), floor)
+    if not (sigma_eff > 0.0):
+        return 1.0
+    grounded = _bin_probability_settlement(float(mu_c), sigma_eff, lower_c, upper_c)
+    return float(min(max(grounded, 0.0), 1.0))
+
+
 def _wilson_lower_bound(successes: float, trials: float, *, z: float = 1.645) -> float:
     if trials <= 0.0:
         return 0.0
@@ -5448,17 +5502,81 @@ def _replacement_bound_to_c(value: object, *, unit: str) -> float | None:
     raise ValueError("replacement candidate bin unit must be C or F")
 
 
-def _replacement_yes_lcb_for_bin(replacement_bundle: object, *, bin_id: str, q_yes: float) -> float:
+def _replacement_bin_bounds_c(replacement_bundle: object, bin_id: str) -> tuple[float | None, float | None] | None:
+    """The (lower_c, upper_c) of ``bin_id`` from the bundle's bin_topology (°C).
+
+    ``None`` shoulders are open ends (e.g. an "X or below" floor bin has lower_c None);
+    the settlement-preimage integrator handles them. Returns ``None`` when the topology
+    is absent/malformed so the caller skips the floor (degrade, never crash the hot path).
+    """
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    topology = provenance.get("bin_topology")
+    if not isinstance(topology, list):
+        return None
+    for item in topology:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("bin_id") or "").strip() != bin_id:
+            continue
+        lower = item.get("lower_c")
+        upper = item.get("upper_c")
+        return (
+            None if lower is None else float(lower),
+            None if upper is None else float(upper),
+        )
+    return None
+
+
+def _replacement_anchor_mu_c(replacement_bundle: object) -> float | None:
+    """The soft-anchor point estimate μ (°C) the bundle was built around.
+
+    Read from ``provenance_json.anchor_value_c`` (the deterministic IFS9 anchor the AIFS
+    prior is fused with; confirmed present on all live posteriors). ``None`` when absent
+    so the floor is skipped (degrade, never crash)."""
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    value = provenance.get("anchor_value_c")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _replacement_yes_lcb_for_bin(
+    replacement_bundle: object,
+    *,
+    bin_id: str,
+    q_yes: float,
+    settlement_floor_lcb: float | None = None,
+) -> float:
+    """Raw replacement YES q_lcb (bundle q_lcb map, else Wilson over AIFS votes).
+
+    QLCB_HONESTY.md FIX-C: ``settlement_floor_lcb`` is the settlement-grounded ceiling
+    (``_replacement_settlement_grounded_lcb``); when supplied (flag ON) the returned
+    bound is ``min(raw, settlement_floor_lcb)`` so it ONLY-LOWERS — the floor can never
+    raise the q_lcb. ``None`` (the default, flag OFF) keeps the result byte-identical to
+    the pre-fix Wilson/bundle value.
+    """
+    def _apply_floor(raw: float) -> float:
+        if settlement_floor_lcb is None:
+            return raw
+        return min(raw, float(settlement_floor_lcb))
+
     q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
     if isinstance(q_lcb, Mapping) and bin_id in q_lcb:
-        return min(max(float(q_lcb[bin_id]), 0.0), max(0.0, min(float(q_yes), 1.0)))
+        return _apply_floor(min(max(float(q_lcb[bin_id]), 0.0), max(0.0, min(float(q_yes), 1.0))))
     provenance = getattr(replacement_bundle, "provenance_json", None) or {}
     aifs_probabilities = provenance.get("aifs_probabilities") if isinstance(provenance, Mapping) else None
     if isinstance(aifs_probabilities, Mapping) and bin_id in aifs_probabilities:
         try:
             member_count = float(provenance.get("aifs_member_count") or 51.0)
             successes = float(aifs_probabilities[bin_id]) * member_count
-            return min(max(float(q_yes), 0.0), _wilson_lower_bound(successes, member_count))
+            return _apply_floor(min(max(float(q_yes), 0.0), _wilson_lower_bound(successes, member_count)))
         except (TypeError, ValueError):
             return 0.0
     return 0.0
@@ -5500,6 +5618,7 @@ def _replacement_authority_probability_and_fdr_proof(
     )
     if not permitted:
         return None
+    import logging as _logging
     from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
     from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
     from src.engine.replacement_forecast_hook_factory import _latest_replacement_readiness
@@ -5530,13 +5649,72 @@ def _replacement_authority_probability_and_fdr_proof(
     p_values: dict[tuple[str, str], float] = {}
     prefilter: dict[tuple[str, str], bool] = {}
     q_map = replacement_bundle.q
+    # QLCB_HONESTY.md FIX-C — settlement σ-floor inputs, resolved ONCE per family (flag
+    # ON only). μ is the soft-anchor point (°C); σ-floor is the per-(city,season,metric)
+    # realized-residual cell. Resolved fail-soft: any miss → floor_enabled stays True but
+    # the per-bin grounded ceiling is skipped, so the q_lcb degrades to the raw Wilson
+    # value (NEVER a crash, NEVER an optimistic widen).
+    floor_enabled = _replacement_qlcb_settlement_sigma_floor_enabled()
+    anchor_mu_c: float | None = None
+    sigma_floor_c: float | None = None
+    if floor_enabled:
+        try:
+            anchor_mu_c = _replacement_anchor_mu_c(replacement_bundle)
+            from src.contracts.season import season_from_date
+
+            city_obj = runtime_cities_by_name().get(family.city)
+            lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+            season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
+            sigma_floor_c = settlement_sigma_floor(
+                str(family.city), season, str(family.metric).lower()
+            )
+        except Exception as _floor_exc:  # noqa: BLE001 — fail-soft: no floor, keep raw lcb
+            _logging.getLogger("zeus.replacement_qlcb_shadow").warning(
+                "replacement q_lcb floor setup failed (non-fatal, raw lcb kept): %s",
+                _floor_exc,
+            )
+            anchor_mu_c = None
+            sigma_floor_c = None
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
         if not bin_id or bin_id not in q_map:
             raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BIN_BINDING_MISSING:{condition_id}")
         q_yes = min(max(float(q_map[bin_id]), 0.0), 1.0)
-        yes_lcb = _replacement_yes_lcb_for_bin(replacement_bundle, bin_id=bin_id, q_yes=q_yes)
+        # FIX-C: the settlement-grounded ceiling for THIS bin (flag ON + inputs resolved).
+        settlement_floor_lcb: float | None = None
+        if floor_enabled and anchor_mu_c is not None and sigma_floor_c is not None:
+            bounds = _replacement_bin_bounds_c(replacement_bundle, bin_id)
+            if bounds is not None:
+                settlement_floor_lcb = _replacement_settlement_grounded_lcb(
+                    mu_c=anchor_mu_c,
+                    sigma_floor_c=sigma_floor_c,
+                    # AIFS member std is not carried in provenance (vote frequencies only);
+                    # None → the floor IS the effective σ (not the tight member spread).
+                    sigma_model_c=None,
+                    lower_c=bounds[0],
+                    upper_c=bounds[1],
+                )
+        claimed_yes_lcb = _replacement_yes_lcb_for_bin(
+            replacement_bundle, bin_id=bin_id, q_yes=q_yes, settlement_floor_lcb=None
+        )
+        yes_lcb = _replacement_yes_lcb_for_bin(
+            replacement_bundle,
+            bin_id=bin_id,
+            q_yes=q_yes,
+            settlement_floor_lcb=settlement_floor_lcb,
+        )
+        # ITEM 3 — shadow-log claimed -> floored on EVERY replacement q_lcb decision so
+        # live before/after validation data accrues from the next daemon run (the
+        # coverage-shrunk value, when licensed, is logged separately by the K3 helper).
+        _logging.getLogger("zeus.replacement_qlcb_shadow").info(
+            "replacement q_lcb floor city=%s cond=%s bin=%s claimed=%.6f floored=%.6f "
+            "floor_enabled=%s sigma_floor_c=%s anchor_mu_c=%s",
+            family.city, condition_id, bin_id, claimed_yes_lcb, yes_lcb,
+            floor_enabled,
+            "None" if sigma_floor_c is None else f"{sigma_floor_c:.4f}",
+            "None" if anchor_mu_c is None else f"{anchor_mu_c:.4f}",
+        )
         q_by_condition[condition_id] = q_yes
         _set_qlcb_provenance(
             lcb_by_direction,
@@ -5557,6 +5735,18 @@ def _replacement_authority_probability_and_fdr_proof(
         prefilter[(condition_id, "buy_yes")] = bool(yes_edge_lcb_positive)
         p_values[(condition_id, "buy_no")] = 1.0
         prefilter[(condition_id, "buy_no")] = False
+    # ITEM 2 (FIX-B) — wire the EXISTING K3 settlement-backward-coverage shrink into the
+    # LIVE replacement path (its sole prior call site was the canonical/EMOS path). SAME
+    # helper, SAME flag (edli_v1.q_lcb_settlement_coverage_gate_enabled, default FALSE):
+    # flag OFF → immediate no-op (byte-identical); flag ON → only ever LOWERS the q_lcb,
+    # fails open. No-op (INSUFFICIENT_DATA) until ≥min_n replacement markets settle —
+    # wired now so the protection is live the moment June fills resolve (one builder; no
+    # duplicate helper).
+    _maybe_apply_settlement_coverage_to_lcb(
+        family=family,
+        forecast_conn=conn,
+        lcb_by_direction=lcb_by_direction,
+    )
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",
