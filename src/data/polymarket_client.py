@@ -210,13 +210,11 @@ def _resolve_credentials() -> dict:
 
     Returns {'private_key', 'funder_address'}.
 
-    L2 API creds (key/secret/passphrase) are intentionally NOT read here:
-    they are deterministically derivable from the L1 signer via
-    `ClobClient.create_or_derive_api_key()` inside the v2 adapter. Storing a
-    second copy in Keychain creates a drift hazard — observed 2026-05-01,
-    where the keychain copy was stale and caused PolyException(401 Invalid
-    api key) for the entire trading boot. The adapter now derives at
-    construction time so api_creds always match the active signer.
+    L2 API creds (key/secret/passphrase) are resolved inside the v2 adapter.
+    The adapter reads the operator-owned Keychain copy first, then env, and
+    only derives signer-bound creds when runtime creds are absent. Keeping that
+    resolution in one place prevents stale env/plist values and avoids the
+    SDK's create-api-key path during normal live boot.
 
     The two L1 reads are memoized via _cached_keychain_creds (efficiency #2, 2026-06-05); a fresh
     dict is returned each call so a mutating caller cannot corrupt the shared cache.

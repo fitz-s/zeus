@@ -25,8 +25,8 @@ Pins seven cross-module invariants:
      websockets.connect() — HTTPS_PROXY env var must NOT route WS traffic through
      the local proxy (which killed the connection in <2s before this fix).
   7. (2026-05-01 live-blocker) The live daemon sources WSAuth from the adapter's
-     SDK creds (create_or_derive_api_key), NOT from POLYMARKET_API_KEY env var.
-     The plist key was stale; derived creds are always the canonical source.
+     resolved SDK creds, NOT directly from POLYMARKET_API_KEY env var. The
+     adapter owns Keychain/env/derive ordering.
 """
 
 from __future__ import annotations
@@ -384,11 +384,10 @@ def test_ws_auth_sourced_from_adapter_not_env(monkeypatch, _stub_ingestor):
     """Invariant #7 (2026-05-01 live-blocker): the live daemon must source WSAuth
     from adapter.sdk_client().creds, NOT from POLYMARKET_API_KEY env var.
 
-    Root cause: POLYMARKET_API_KEY in the plist was stale (old key). The valid L2
-    key is derived deterministically via create_or_derive_api_key() inside the
-    adapter's SDK client. WSAuth.from_env() therefore produces invalid credentials
-    and the WS server closes the connection immediately after the subscription
-    message is sent (no close frame received or sent).
+    Root cause: POLYMARKET_API_KEY in the plist can drift from the runtime
+    credential source. The valid L2 key must come from the adapter's SDK client;
+    WSAuth.from_env() can therefore produce invalid credentials and cause the WS
+    server to close immediately after subscription.
 
     This test verifies that the ingestor is constructed with the adapter-derived
     credentials, not the raw env-var credentials.

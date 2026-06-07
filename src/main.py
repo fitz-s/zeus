@@ -2530,8 +2530,8 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     _WS_RETRY_BASE_SECONDS = 5
     _WS_RETRY_MAX_SECONDS = 300  # cap at 5 minutes
 
-    # Boot-time transient failures from create_or_derive_api_key() (e.g., Polymarket
-    # /auth/api-key returning 400) used to latch AUTH_FAILED forever because the
+    # Boot-time transient failures from signer-bound L2 credential resolution
+    # used to latch AUTH_FAILED forever because the
     # creds fetch lived outside the retry loop with a bare `return` on exception —
     # no thread ever started, ws_gap_guard never received a SUBSCRIBED message,
     # daemon stayed in reduce_only=True until the next SIGTERM.
@@ -2570,8 +2570,8 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     def _build_ingestor() -> "PolymarketUserChannelIngestor | None":
         global _user_channel_ingestor
         # Invalidate the adapter's memoized SDK client so this attempt forces a
-        # fresh create_or_derive_api_key() rather than reusing a cached client
-        # whose creds were None from a prior failed boot
+        # fresh signer-bound L2 credential resolution rather than reusing a cached
+        # client whose creds were None from a prior failed boot
         # (codereview-may19 / Codex P1: src/venue/polymarket_v2_adapter.py:286
         # memoizes self._client; without reset, every retry sees the same bad
         # creds and the loop never recovers).
@@ -2587,7 +2587,7 @@ def _start_user_channel_ingestor_if_enabled() -> None:
             if sdk_creds is None:
                 raise RuntimeError(
                     "adapter._sdk_client().creds is None "
-                    "(create_or_derive_api_key() failed; likely transient /auth/api-key error)"
+                    "(signer-bound L2 credential resolution failed)"
                 )
             ws_auth = WSAuth(
                 api_key=sdk_creds.api_key,

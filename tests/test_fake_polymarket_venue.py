@@ -130,7 +130,7 @@ def test_fake_redeem_preserves_r1_command_ledger_boundary():
 
 def test_venue_auth_fallback_logs_greppable_warning(caplog):
     """F92: VENUE_AUTH_FALLBACK_TRIGGERED must appear in logs when
-    create_or_derive_api_key is used (no static api_creds provided).
+    signer-bound L2 API creds are derived (no static api_creds provided).
     Regression: silent fallback means invisible degradation."""
     import logging
     from unittest.mock import MagicMock, patch
@@ -139,7 +139,7 @@ def test_venue_auth_fallback_logs_greppable_warning(caplog):
 
     fake_creds = object()
     mock_client = MagicMock()
-    mock_client.create_or_derive_api_key.return_value = fake_creds
+    mock_client.derive_api_key.return_value = fake_creds
 
     with patch.object(
         PolymarketV2Adapter,

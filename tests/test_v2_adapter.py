@@ -205,6 +205,12 @@ class FakeAuthClient:
             raise self.derive_error
         return self.derive_response
 
+    def derive_api_key(self):
+        self.calls.append(("derive_api_key",))
+        if self.derive_error is not None:
+            raise self.derive_error
+        return self.derive_response
+
     def set_api_creds(self, creds):
         self.calls.append(("set_api_creds", creds))
         self.creds = creds
@@ -262,19 +268,21 @@ def _adapter(tmp_path: Path, fake_client=None):
     ), fake_client
 
 
-def test_default_client_factory_prefers_derived_creds_over_env(monkeypatch):
+def test_default_client_factory_prefers_keychain_creds_over_env_and_derivation(monkeypatch):
     ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
     import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
     adapter_mod._DERIVED_API_CREDS_CACHE.clear()
-    FakeAuthClient.instances = []
-    FakeAuthClient.derive_error = None
-    FakeAuthClient.derive_response = ApiCreds(
-        api_key="derived-key",
-        api_secret="derived-secret",
-        api_passphrase="derived-passphrase",
+    keychain_creds = ApiCreds(
+        api_key="keychain-key",
+        api_secret="keychain-secret",
+        api_passphrase="keychain-passphrase",
     )
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: keychain_creds)
+    FakeAuthClient.instances = []
+    FakeAuthClient.derive_error = AssertionError("derive should not run when keychain creds exist")
+    FakeAuthClient.derive_response = None
     monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
     monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
     monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
@@ -288,13 +296,8 @@ def test_default_client_factory_prefers_derived_creds_over_env(monkeypatch):
 
     client = adapter._sdk_client()
 
-    assert client.creds.api_key == "derived-key"
-    assert client.creds.api_secret == "derived-secret"
-    assert client.creds.api_passphrase == "derived-passphrase"
-    assert [call[0] for call in client.calls] == [
-        "create_or_derive_api_key",
-        "set_api_creds",
-    ]
+    assert client.creds is keychain_creds
+    assert client.calls == []
 
 
 def test_default_client_factory_reuses_cached_derived_creds(monkeypatch):
@@ -319,6 +322,7 @@ def test_default_client_factory_reuses_cached_derived_creds(monkeypatch):
     FakeAuthClient.instances = []
     FakeAuthClient.derive_error = AssertionError("derive should not be called when cached creds exist")
     FakeAuthClient.derive_response = None
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: None)
     monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
     monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
     monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
@@ -336,7 +340,36 @@ def test_default_client_factory_reuses_cached_derived_creds(monkeypatch):
     assert client.calls == []
 
 
-def test_default_client_factory_derives_only_when_env_creds_absent(monkeypatch):
+def test_default_client_factory_uses_env_creds_when_keychain_absent(monkeypatch):
+    ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
+    import src.venue.polymarket_v2_adapter as adapter_mod
+    from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
+
+    adapter_mod._DERIVED_API_CREDS_CACHE.clear()
+    FakeAuthClient.instances = []
+    FakeAuthClient.derive_error = AssertionError("derive should not run when env creds exist")
+    FakeAuthClient.derive_response = None
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: None)
+    monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
+    monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
+    monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")
+
+    adapter = PolymarketV2Adapter(
+        host="https://clob.polymarket.com",
+        funder_address="0xfunder",
+        signer_key="test-key",
+        q1_egress_evidence_path=None,
+    )
+
+    client = adapter._sdk_client()
+
+    assert client.creds.api_key == "env-key"
+    assert client.creds.api_secret == "env-secret"
+    assert client.creds.api_passphrase == "env-passphrase"
+    assert client.calls == []
+
+
+def test_default_client_factory_does_not_create_api_key_when_derive_supported(monkeypatch):
     ApiCreds = _install_fake_py_clob_client_v2(monkeypatch)
     import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
@@ -349,6 +382,7 @@ def test_default_client_factory_derives_only_when_env_creds_absent(monkeypatch):
         api_secret="derived-secret",
         api_passphrase="derived-passphrase",
     )
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: None)
     monkeypatch.delenv("POLYMARKET_API_KEY", raising=False)
     monkeypatch.delenv("POLYMARKET_API_SECRET", raising=False)
     monkeypatch.delenv("POLYMARKET_API_PASSPHRASE", raising=False)
@@ -363,10 +397,8 @@ def test_default_client_factory_derives_only_when_env_creds_absent(monkeypatch):
     client = adapter._sdk_client()
 
     assert client.creds.api_key == "derived-key"
-    assert [call[0] for call in client.calls] == [
-        "create_or_derive_api_key",
-        "set_api_creds",
-    ]
+    assert "derive_api_key" in [call[0] for call in client.calls]
+    assert "create_or_derive_api_key" not in [call[0] for call in client.calls]
 
 
 def test_default_client_factory_does_not_override_explicit_api_creds(monkeypatch):
@@ -383,6 +415,7 @@ def test_default_client_factory_does_not_override_explicit_api_creds(monkeypatch
     FakeAuthClient.instances = []
     FakeAuthClient.derive_response = None
     FakeAuthClient.derive_error = AssertionError("derive should not be called")
+    monkeypatch.setattr(adapter_mod, "_api_creds_from_keychain", lambda: None)
     monkeypatch.setenv("POLYMARKET_API_KEY", "env-key")
     monkeypatch.setenv("POLYMARKET_API_SECRET", "env-secret")
     monkeypatch.setenv("POLYMARKET_API_PASSPHRASE", "env-passphrase")

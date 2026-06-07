@@ -315,6 +315,8 @@ class PolymarketV2Adapter:
                 signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
                 funder_address=kwargs.get("funder_address"),
             )
+        if effective_api_creds is None:
+            effective_api_creds = _api_creds_from_runtime()
 
         client = ClobClient(
             kwargs["host"],
@@ -325,13 +327,16 @@ class PolymarketV2Adapter:
             funder=kwargs.get("funder_address"),
         )
         # CLOB v2 L2 endpoints (balance/order/user-channel auth) require L2 API
-        # creds bound to the active signer. Static POLYMARKET_API_* copies can
-        # drift from that signer; derive first, cache per process, and use static
-        # creds only as a fail-open telemetry fallback when derivation itself is
-        # unavailable.
+        # creds bound to the active signer. Use runtime creds first: Keychain is
+        # the operator-owned source of truth, env is a fallback for non-Keychain
+        # runtimes. Only derive when neither runtime surface has complete creds.
+        # Prefer the SDK's pure derive endpoint when derivation is needed:
+        # create_or_derive attempts POST /auth/api-key before deriving, which
+        # logs a persistent upstream 400 for accounts that already have
+        # signer-bound credentials.
         if explicit_api_creds is None and effective_api_creds is None:
             try:
-                derived_api_creds = client.create_or_derive_api_key()
+                derived_api_creds = _derive_l2_api_creds(client)
                 client.set_api_creds(derived_api_creds)
                 _store_derived_api_creds(
                     host=kwargs["host"],
@@ -342,20 +347,20 @@ class PolymarketV2Adapter:
                     api_creds=derived_api_creds,
                 )
                 logger.warning(
-                    "VENUE_AUTH_FALLBACK_TRIGGERED: create_or_derive_api_key used "
+                    "VENUE_AUTH_FALLBACK_TRIGGERED: signer-bound L2 API creds derived "
                     "(no cached signer-bound L2 creds); L2 calls proceeding via derived creds",
                 )
             except Exception as exc:  # pragma: no cover - upstream SDK behaviour
                 runtime_api_creds = _api_creds_from_runtime()
                 if runtime_api_creds is None:
                     logger.warning(
-                        "create_or_derive_api_key failed; L2-authenticated calls will "
+                        "signer-bound L2 API credential derivation failed; L2-authenticated calls will "
                         "fail until creds are provided: %s", exc,
                     )
                 else:
                     client.set_api_creds(runtime_api_creds)
                     logger.warning(
-                        "VENUE_AUTH_STATIC_FALLBACK_TRIGGERED: create_or_derive_api_key "
+                        "VENUE_AUTH_STATIC_FALLBACK_TRIGGERED: signer-bound L2 API credential derivation "
                         "failed; using runtime CLOB creds and deferring validity "
                         "to the next L2-authenticated preflight: %s",
                         exc,
@@ -2481,8 +2486,15 @@ def _store_derived_api_creds(
     ] = api_creds
 
 
+def _derive_l2_api_creds(client: Any) -> Any:
+    derive_api_key = getattr(client, "derive_api_key", None)
+    if callable(derive_api_key):
+        return derive_api_key()
+    return client.create_or_derive_api_key()
+
+
 def _api_creds_from_runtime() -> Any | None:
-    return _api_creds_from_env()
+    return _api_creds_from_keychain() or _api_creds_from_env()
 
 
 def _api_creds_from_keychain() -> Any | None:

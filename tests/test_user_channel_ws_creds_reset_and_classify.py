@@ -10,15 +10,15 @@
 ## Codex P1 (line 1061 of original PR #211)
 
 `PolymarketV2Adapter._sdk_client()` memoizes `self._client` after the first
-call. If `create_or_derive_api_key()` failed at boot (e.g., transient
-Polymarket /auth/api-key 400), the cached client has `creds=None`. The
+call. If signer-bound L2 credential resolution failed at boot, the cached
+client has `creds=None`. The
 WS-retry loop in src/main.py would call `_sdk_client()` again on each
 retry, get the SAME cached bad client, and never recover until the next
 SIGTERM.
 
 Antibody C1: every call to _build_ingestor() must invalidate the cached
 SDK client BEFORE asking for creds, so the next call to _sdk_client()
-re-runs the factory + create_or_derive_api_key. Sed-flip: remove
+re-runs the factory + credential resolution. Sed-flip: remove
 `adapter._client = None` → C1 → RED.
 
 ## Copilot (line 1081)
