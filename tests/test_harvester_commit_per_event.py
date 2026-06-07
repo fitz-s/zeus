@@ -1,6 +1,6 @@
 # Created: 2026-06-02
-# Last reused or audited: 2026-06-02
-# Authority basis: lock-storm antibody (data-ingest bootout 2026-05-27, "database is locked" flood); task #81-class commit-per-item
+# Last reused or audited: 2026-06-06
+# Authority basis: lock-storm antibody (data-ingest bootout 2026-05-27, "database is locked" flood); 2026-06-05 HKO realtime settlement ingestion gap
 """Relationship test: write_settlement_truth_for_open_markets releases the write lock between events.
 
 Root: write_settlement_truth_for_open_markets committed ONCE after the full batch, holding
@@ -66,6 +66,22 @@ CREATE TABLE IF NOT EXISTS observations (
 K_EVENTS = 4  # number of settled events fed through the function
 
 
+def _hko_city() -> "City":
+    from src.config import City
+
+    return City(
+        name="Hong Kong",
+        lat=22.3027,
+        lon=114.1747,
+        timezone="Asia/Hong_Kong",
+        settlement_unit="C",
+        cluster="Hong Kong",
+        wu_station="HKO",
+        country_code="HK",
+        settlement_source_type="hko",
+    )
+
+
 def _make_forecasts_db():
     """Return a real on-disk temp SQLite forecasts DB (path, conn)."""
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -75,6 +91,51 @@ def _make_forecasts_db():
     conn.executescript(_SCHEMA)
     conn.commit()
     return tmp.name, conn
+
+
+def test_hko_realtime_daily_observation_is_settlement_source_family():
+    """HKO realtime daily supplement is settlement truth for HKO until archive publishes.
+
+    Regression root: 2026-06-05 Hong Kong had a VERIFIED hko_realtime_api daily
+    observation, but harvester_truth_writer accepted only hko_daily_api for HKO
+    settlement markets, so settlement_outcomes stayed incomplete.
+    """
+    from src.ingest.harvester_truth_writer import (
+        _lookup_settlement_obs,
+        _source_matches_settlement_family,
+    )
+
+    _, conn = _make_forecasts_db()
+    conn.execute(
+        """
+        INSERT INTO observations
+            (city, target_date, source, high_temp, low_temp, unit, fetched_at, authority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "Hong Kong",
+            "2026-06-05",
+            "hko_realtime_api",
+            35.0,
+            28.0,
+            "C",
+            "2026-06-06T02:00:00Z",
+            "VERIFIED",
+        ),
+    )
+    conn.commit()
+
+    try:
+        assert _source_matches_settlement_family("hko_daily_api", "hko")
+        assert _source_matches_settlement_family("hko_realtime_api", "hko")
+        assert not _source_matches_settlement_family("wu_icao_history", "hko")
+
+        obs = _lookup_settlement_obs(conn, _hko_city(), "2026-06-05", temperature_metric="high")
+        assert obs is not None
+        assert obs["source"] == "hko_realtime_api"
+        assert obs["observed_temp"] == 35.0
+    finally:
+        conn.close()
 
 
 def _minimal_event(slug: str) -> dict:

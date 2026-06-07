@@ -277,12 +277,12 @@ def main() -> int:
     parser.add_argument(
         "--mx-root",
         type=Path,
-        default=Path("/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_regions_mx2t6"),
+        default=Path(__file__).resolve().parents[1] / "raw" / "tigge_ecmwf_ens_regions_mx2t6",
     )
     parser.add_argument(
         "--mn-root",
         type=Path,
-        default=Path("/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_regions_mn2t6"),
+        default=Path(__file__).resolve().parents[1] / "raw" / "tigge_ecmwf_ens_regions_mn2t6",
     )
     parser.add_argument("--expected", type=int, default=2232)
     parser.add_argument("--expected-mx2t6", type=int, default=None)

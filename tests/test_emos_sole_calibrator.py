@@ -306,6 +306,26 @@ def test_settlement_floor_on_requires_floor_cell_emos(monkeypatch):
         mod.build_emos_q(apply_settlement_floor=True, **kw)
 
 
+def test_settlement_floor_on_nonrequired_keeps_emos_cell_when_floor_missing(monkeypatch):
+    # Canary coverage contract: EMOS is the calibrator; settlement floor is an additional
+    # conservative widening when the empirical floor artifact has the cell. A missing floor
+    # cell may not route back to the bias maze or starve coverage when strict mode is off.
+    mod = importlib.import_module("src.calibration.emos_q_builder")
+    table = {"_meta": {"metric": "multi"},
+             "cells": {"TelAviv|JJA|high": {"params": [0.0, 1.0, -0.4, 0.5, 0.0],
+                                             "n": 99, "served": "emos"}}}
+    monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", {"_meta": {"k_default": 0.8}, "cells": {}}, raising=False)
+    out = mod.build_emos_q(
+        city="TelAviv", season="JJA", metric="high", lead_days=3.0,
+        members_native=np.array([26.6, 27.0, 27.4, 27.0], dtype=float),
+        unit="C", bins=[(None, 30.0), (31.0, None)],
+        apply_settlement_floor=True,
+        require_settlement_floor=False,
+    )
+    assert out is not None, "non-strict floor miss keeps the EMOS q path rather than starving coverage"
+
+
 def test_settlement_floor_on_requires_positive_floor_honest_raw(monkeypatch):
     mod = importlib.import_module("src.calibration.emos_q_builder")
     table = {"_meta": {}, "cells": {"RawCity|JJA|high": {"params": [0.0, 1.0, -0.4, 0.5, 0.0],

@@ -238,6 +238,11 @@ class ChainOnlyFact:
     # PR D1: lifecycle status; default UNRESOLVED so legacy producers
     # that don't populate this field still block entries (fail-safe).
     review_state: ChainOnlyReviewState = ChainOnlyReviewState.UNRESOLVED
+    # Chain-only inventory is unknown exposure and blocks new entries globally.
+    # Entry-proof review facts for a represented local position use
+    # "position_only": the position must not be auto-managed, but unrelated new
+    # fully proven entries are not frozen.
+    entry_block_scope: str = "global"
 
     @property
     def is_review_required(self) -> bool:
@@ -252,6 +257,13 @@ class ChainOnlyFact:
         expired chain-only fact in place is a stronger operator signal,
         not a weaker one.
         """
+        return (
+            self.review_state != ChainOnlyReviewState.RESOLVED
+            and self.entry_block_scope != "position_only"
+        )
+
+    @property
+    def blocks_position_management(self) -> bool:
         return self.review_state != ChainOnlyReviewState.RESOLVED
 
 

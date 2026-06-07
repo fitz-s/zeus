@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from tigge_regions import region_for_city
 
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
 STEP_HOURS = 6
 CEIL_EPSILON_HOURS = 1e-9

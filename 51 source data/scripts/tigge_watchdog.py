@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 TMP_DIR = ROOT / "tmp"
 LOG_DIR = ROOT / "logs"
 DEFAULT_STATE_PATH = TMP_DIR / "tigge_watchdog_state.json"

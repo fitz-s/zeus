@@ -36,9 +36,7 @@ This module has NO side effects — it does not write to any DB. The caller
 """
 from __future__ import annotations
 
-import json
 import logging
-import pathlib
 import threading
 from datetime import datetime, timezone
 from typing import Any
@@ -65,35 +63,27 @@ _MAX_AGE_HOURS_DEFAULT = 6.0
 _WARM_CACHE_LOCK = threading.Lock()
 _WARM_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
 
-# City config is loaded once at module import (read-only).
-_CITY_CONFIG: dict[str, dict[str, Any]] = {}
+def _city_entry(city: str) -> dict[str, Any] | None:
+    """Resolve city coordinates through the runtime-reloadable config map."""
 
-
-def _load_city_config() -> None:
-    """Populate _CITY_CONFIG from config/cities.json (repo root relative)."""
-    global _CITY_CONFIG
-    if _CITY_CONFIG:
-        return
-    # Walk up from this file to the repo root (src/data/../../)
-    repo_root = pathlib.Path(__file__).parent.parent.parent
-    path = repo_root / "config" / "cities.json"
     try:
-        raw = json.loads(path.read_text())
-        cities = raw.get("cities", [])
-        for c in cities:
-            name = c.get("name", "")
-            if name:
-                _CITY_CONFIG[name.lower()] = c
-                # Also index by known aliases
-                for alias in c.get("aliases", []):
-                    _CITY_CONFIG[alias.lower()] = c
+        from src.config import cities_by_alias, runtime_cities_by_name  # noqa: PLC0415
+
+        city_key = str(city).lower()
+        city_obj = runtime_cities_by_name().get(city)
+        if city_obj is None:
+            city_obj = cities_by_alias.get(city_key)
+        if city_obj is None:
+            return None
+        return {
+            "lat": city_obj.lat,
+            "lon": city_obj.lon,
+            "unit": city_obj.settlement_unit,
+            "timezone": city_obj.timezone,
+        }
     except Exception as exc:  # noqa: BLE001
         logger.warning("mainstream_forecast_source: failed to load city config: %s", exc)
-
-
-def _city_entry(city: str) -> dict[str, Any] | None:
-    _load_city_config()
-    return _CITY_CONFIG.get(city.lower())
+        return None
 
 
 def fetch_mainstream_point(

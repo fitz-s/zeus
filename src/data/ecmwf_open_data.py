@@ -77,6 +77,7 @@ from src.data.forecast_target_contract import (
     evaluate_horizon_coverage,
     evaluate_producer_coverage,
 )
+from src.data.forecast_extrema_authority import POSITIVE_ATTRIBUTION_STATUSES
 from src.data.producer_readiness import build_producer_readiness_for_scope
 from src.data.forecast_source_registry import gate_source, gate_source_role
 from src.data.release_calendar import FetchDecision, select_source_run_for_target_horizon
@@ -95,6 +96,7 @@ FIFTY_ONE_ROOT = PROJECT_ROOT / "51 source data"
 # DOWNLOAD_SCRIPT deleted 2026-05-11: replaced by in-process parallel SDK fetch
 # (see PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md)
 EXTRACT_SCRIPT = FIFTY_ONE_ROOT / "scripts" / "extract_open_ens_localday.py"
+EXTRACT_MANIFEST_PATH = FIFTY_ONE_ROOT / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
 INGEST_SCRIPT_DIR = PROJECT_ROOT / "scripts"
 
 # ECMWF hang antibody #1 (2026-05-13) — eager-import ingest_grib_to_snapshots
@@ -596,6 +598,59 @@ def _parse_utc(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _snapshot_coordinate_manifest_sha(row: dict[str, Any]) -> str:
+    raw = row.get("provenance_json")
+    if not isinstance(raw, str) or not raw:
+        return ""
+    try:
+        provenance = json.loads(raw)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(provenance, dict):
+        return ""
+    return str(provenance.get("manifest_sha256") or "").strip()
+
+
+def _snapshot_provenance(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("provenance_json")
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        provenance = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return provenance if isinstance(provenance, dict) else {}
+
+
+def _is_finite_number(value: object) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _station_grid_provenance_reason(row: dict[str, Any]) -> str | None:
+    provenance = _snapshot_provenance(row)
+    contract = provenance.get("contract_outcome_evidence")
+    if not isinstance(contract, dict):
+        contract = {}
+    source_type = str(
+        row.get("settlement_source_type")
+        or contract.get("settlement_source_type")
+        or ""
+    ).strip().lower()
+    if source_type != "wu_icao":
+        return None
+    required = (
+        provenance.get("nearest_grid_lat"),
+        provenance.get("nearest_grid_lon"),
+        provenance.get("nearest_grid_distance_km"),
+    )
+    if not all(_is_finite_number(value) for value in required):
+        return "EXECUTABLE_FORECAST_STATION_GRID_PROVENANCE_MISSING"
+    return None
+
+
 def _snapshot_rows_for_source_run(conn, *, source_run_id: str, data_version: str) -> list[dict[str, Any]]:
     return [
         dict(row)
@@ -733,6 +788,8 @@ def _coverage_reason(reason_codes: list[str]) -> str:
     preferred = (
         "MISSING_EXPECTED_MEMBERS",
         "MISSING_REQUIRED_STEPS",
+        "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA",
+        "EXECUTABLE_FORECAST_STATION_GRID_PROVENANCE_MISSING",
         "SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH",
         "SOURCE_RUN_PARTIAL",
     )
@@ -774,6 +831,25 @@ def _write_source_authority_chain(
         data_version=data_version,
     )
     source_run_status, source_run_completeness, partial_run, reason_code = _source_run_outcome(summary, status)
+    snapshot_coordinate_manifest_shas = {
+        manifest_sha
+        for row in rows
+        if (manifest_sha := _snapshot_coordinate_manifest_sha(row))
+    }
+    source_run_manifest_sha = (
+        next(iter(snapshot_coordinate_manifest_shas))
+        if len(snapshot_coordinate_manifest_shas) == 1
+        else None
+    )
+    if rows and source_run_manifest_sha is None:
+        source_run_status = "FAILED"
+        source_run_completeness = "MISSING"
+        partial_run = False
+        reason_code = (
+            "SNAPSHOT_COORDINATE_MANIFEST_SHA_MISSING"
+            if not snapshot_coordinate_manifest_shas
+            else "SNAPSHOT_COORDINATE_MANIFEST_SHA_MISMATCH"
+        )
     # source_run.observed_members is the run-level "did we ingest the ensemble"
     # signal that gates the decision certificate (compiler
     # _validate_forecast_authority_payload reads source_run_completeness_status).
@@ -849,6 +925,7 @@ def _write_source_authority_chain(
         observed_count=len(rows),
         completeness_status=source_run_completeness,
         partial_run=partial_run,
+        manifest_hash=source_run_manifest_sha,
         status=source_run_status,
         reason_code=reason_code,
     )
@@ -918,12 +995,23 @@ def _write_source_authority_chain(
         snapshot_window_start = _parse_utc(row.get("local_day_start_utc"))
         if snapshot_window_start != scope.target_window_start_utc:
             reason_codes.append("SNAPSHOT_LOCAL_DAY_WINDOW_MISMATCH")
+        contributes_to_target_extrema = int(row.get("contributes_to_target_extrema") or 0) == 1
+        attribution_status = str(row.get("forecast_window_attribution_status") or "")
+        positive_attribution = attribution_status in POSITIVE_ATTRIBUTION_STATUSES
+        if not (contributes_to_target_extrema and positive_attribution):
+            reason_codes.append("EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA")
+        grid_reason = _station_grid_provenance_reason(row)
+        if grid_reason is not None:
+            reason_codes.append(grid_reason)
         live_eligible = (
             source_run_status in {"SUCCESS", "PARTIAL"}
             and source_run_completeness in {"COMPLETE", "PARTIAL"}
             and horizon_decision.status == "LIVE_ELIGIBLE"
             and coverage_decision.status == "LIVE_ELIGIBLE"
             and snapshot_window_start == scope.target_window_start_utc
+            and contributes_to_target_extrema
+            and positive_attribution
+            and grid_reason is None
         )
         if live_eligible:
             completeness_status = "COMPLETE"
@@ -1503,6 +1591,7 @@ def collect_open_ens_cycle(
                 "--grib-path", str(output_path),
                 "--track", cfg["ingest_track"],
                 "--output-root", str(FIFTY_ONE_ROOT / "raw"),
+                "--manifest-path", str(EXTRACT_MANIFEST_PATH),
             ],
             label=f"extract_{track}",
             timeout=extract_timeout_seconds,

@@ -87,7 +87,8 @@ def _costs(bins, no_price=0.75, yes_price=0.25):
 
 
 def _run_seam(*, monkeypatch, emos_serves: bool, city: str, mock_legacy_pcal: bool = False,
-              emos_flag: bool = True, sigma_floor_flag: bool = False):
+              emos_flag: bool = True, sigma_floor_flag: bool = False,
+              sigma_floor_required: bool = True):
     """Drive the REAL seam with the EMOS flag (``emos_flag``) and a deterministic served/raw cell.
 
     Returns (payload, analysis). Always uses proper Bin objects (the live forecast shape),
@@ -113,6 +114,7 @@ def _run_seam(*, monkeypatch, emos_serves: bool, city: str, mock_legacy_pcal: bo
     monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
     monkeypatch.setitem(settings["edli_v1"], "edli_emos_sole_calibrator_enabled", emos_flag)
     monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", sigma_floor_flag)
+    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_required", sigma_floor_required)
 
     if mock_legacy_pcal:
         def _fake_pcal(_cal, *, snapshot, family, bins, p_raw, payload, decision_time):

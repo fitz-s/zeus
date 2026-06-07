@@ -32,6 +32,13 @@ def _store() -> tuple[sqlite3.Connection, EventStore]:
     return conn, EventStore(conn)
 
 
+def _processing_status(conn: sqlite3.Connection, event_id: str) -> str:
+    return conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()[0]
+
+
 def _day0_event(key_suffix: str = "a"):
     payload = Day0ExtremeUpdatedPayload(
         city="Chicago",
@@ -229,13 +236,18 @@ def test_event_cannot_bypass_source_truth():
     assert submitted == []
 
 
-def test_market_channel_event_no_direct_stale_trade():
+def test_market_channel_event_not_direct_reactor_input():
     _conn, store = _store()
-    store.insert_or_ignore(_market_event())
+    event = _market_event()
+    store.insert_or_ignore(event)
     reactor, rejected, submitted = _reactor(store)
     result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
-    assert result.rejection_reasons == ["MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE"]
+    assert result.rejection_reasons == []
+    assert result.processed == 0
+    assert result.rejected == 0
+    assert rejected == []
     assert submitted == []
+    assert _processing_status(_conn, event.event_id) == "pending"
 
 
 def _retry_reactor(store, snapshot_present: dict):
@@ -404,6 +416,55 @@ def test_stale_executable_snapshot_receipt_is_retryable_not_consumed():
         (event.event_id,),
     ).fetchone()[0]
     assert status == "pending"
+
+
+def test_sqlite_lock_during_live_certificate_build_is_retryable_not_consumed():
+    """SQLite writer contention during live certificate construction is transient.
+
+    The event must stay pending for the next cycle; non-lock certificate failures
+    remain terminal through the existing rejection path.
+    """
+    payload = json.loads(_forecast_event().payload_json)
+
+    def _submit(event, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=False,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            city=payload.get("city"),
+            target_date=payload.get("target_date"),
+            metric=payload.get("metric"),
+            trade_score_positive=False,
+            reason="EDLI_LIVE_CERTIFICATE_BUILD_FAILED:database is locked",
+        )
+
+    conn, store = _store()
+    event = _forecast_event()
+    store.insert_or_ignore(event)
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _dt: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(store.conn),
+    )
+    result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
+
+    assert result.processed == 0
+    assert result.rejected == 0
+    assert result.retried == 1
+    assert _terminal_surfaces(conn, event.event_id) == {
+        "verified_no_submit": 0,
+        "execution_receipt": 0,
+        "compile_failure": 0,
+        "regret": 0,
+        "dead_letter": 0,
+    }
+    assert _processing_status(conn, event.event_id) == "pending"
 
 
 def test_stale_unbound_executable_snapshot_receipt_is_retryable_not_consumed():
@@ -1515,8 +1576,8 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
     thread.join(timeout=5.0)
 
     assert writer_errors == []
-    assert result.processed == len(forecast_events) + 1
-    assert result.rejected == 1
+    assert result.processed == len(forecast_events)
+    assert result.rejected == 0
     rows = conn.execute(
         """
         SELECT event_id, processing_status
@@ -1525,7 +1586,9 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
         """.format(",".join("?" for _ in [*forecast_events, book_event])),
         tuple(event.event_id for event in [*forecast_events, book_event]),
     ).fetchall()
-    assert {row["processing_status"] for row in rows} == {"processed"}
+    statuses = {row["event_id"]: row["processing_status"] for row in rows}
+    assert {statuses[event.event_id] for event in forecast_events} == {"processed"}
+    assert statuses[book_event.event_id] == "pending"
     for event in forecast_events:
         cert_count = conn.execute(
             """
@@ -1546,7 +1609,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
         "SELECT COUNT(*) FROM no_trade_regret_events WHERE event_id = ?",
         (book_event.event_id,),
     ).fetchone()[0]
-    assert regret_count == 1
+    assert regret_count == 0
     future_pending = conn.execute(
         """
         SELECT COUNT(*)
@@ -1554,7 +1617,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
         WHERE processing_status = 'pending'
         """
     ).fetchone()[0]
-    assert future_pending == 1
+    assert future_pending == 2
 
 
 def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_letter():
@@ -1569,9 +1632,9 @@ def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_l
 
     result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc), limit=10)
 
-    assert result.processed == 3
+    assert result.processed == 2
     assert result.proof_accepted == 1
-    assert result.rejected == 2
+    assert result.rejected == 1
     rows = conn.execute(
         """
         SELECT event_id, processing_status
@@ -1580,11 +1643,14 @@ def test_processed_event_has_verified_certificate_or_failure_or_regret_or_dead_l
         """,
         (accepted.event_id, source_rejected.event_id, market_rejected.event_id),
     ).fetchall()
-    assert {row[1] for row in rows} == {"processed"}
+    statuses = {row[0]: row[1] for row in rows}
+    assert statuses[accepted.event_id] == "processed"
+    assert statuses[source_rejected.event_id] == "processed"
+    assert statuses[market_rejected.event_id] == "pending"
     expected = {
         accepted.event_id: {"verified_no_submit": 1, "execution_receipt": 0, "compile_failure": 0, "regret": 0, "dead_letter": 0},
         source_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
-        market_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 1, "regret": 1, "dead_letter": 0},
+        market_rejected.event_id: {"verified_no_submit": 0, "execution_receipt": 0, "compile_failure": 0, "regret": 0, "dead_letter": 0},
     }
     for event_id, expected_surfaces in expected.items():
         assert _terminal_surfaces(conn, event_id) == expected_surfaces
@@ -1827,7 +1893,7 @@ def test_day0_source_mismatch_blocks_before_trade_score_path():
     assert submitted == []
 
 
-def test_reactor_rejections_write_no_trade_regret_events():
+def test_reactor_does_not_write_regret_for_channel_cache_events():
     conn, store = _store()
     store.insert_or_ignore(_market_event())
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
@@ -1845,7 +1911,7 @@ def test_reactor_rejections_write_no_trade_regret_events():
 
     reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
 
-    assert conn.execute("SELECT rejection_reason FROM no_trade_regret_events").fetchone()[0] == "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE"
+    assert conn.execute("SELECT COUNT(*) FROM no_trade_regret_events").fetchone()[0] == 0
 
 
 def test_reactor_exception_dead_letters_event():
@@ -1976,6 +2042,66 @@ def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
     # COMPLETE event must be processed (reached submit), PARTIAL must not reach submit
     assert complete_event.event_id in submitted_order, "COMPLETE FSR must reach submit"
     assert partial_event.event_id not in submitted_order, "PARTIAL FSR must not reach submit"
+
+
+def test_source_run_partial_window_complete_fsr_reaches_submit():
+    """Run-level PARTIAL must not veto a COMPLETE/LIVE_ELIGIBLE target window."""
+    conn, store = _store()
+    payload = ForecastSnapshotReadyPayload(
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        source_id="opendata",
+        source_run_id="run-partial-window-complete",
+        cycle="00",
+        track="live",
+        snapshot_id="snap-partial-window-complete",
+        snapshot_hash="hash-partial-window-complete",
+        captured_at="2026-05-24T04:00:00+00:00",
+        available_at="2026-05-24T04:00:00+00:00",
+        required_fields_present=True,
+        required_steps_present=True,
+        member_count=51,
+        min_members_floor=40,
+        completeness_status="COMPLETE",
+        required_steps=[0, 3, 6],
+        observed_steps=[0, 3, 6],
+        expected_members=51,
+        source_run_status="PARTIAL",
+        source_run_completeness_status="PARTIAL",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    event = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="Chicago|2026-05-24|high|run-partial-window-complete",
+        source="forecast_live",
+        observed_at="2026-05-24T04:00:00+00:00",
+        available_at="2026-05-24T04:00:00+00:00",
+        received_at="2026-05-24T04:01:00+00:00",
+        payload=payload,
+        causal_snapshot_id="snap-partial-window-complete",
+    )
+    store.insert_or_ignore(event)
+    submitted_order = []
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda event, _dt: submitted_order.append(event.event_id),
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc), limit=1)
+
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()[0]
+    assert status != "dead_letter"
+    assert event.event_id in submitted_order
 
 
 def _market_channel_event(event_type: str, key_suffix: str, available_at: str = "2026-05-24T04:00:00+00:00"):

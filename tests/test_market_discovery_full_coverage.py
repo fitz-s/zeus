@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Lifecycle: created=2026-05-24; last_reviewed=2026-06-04; last_reused=2026-06-04
+# Lifecycle: created=2026-05-24; last_reviewed=2026-06-06; last_reused=2026-06-06
 # Authority basis: fix(discovery): restore full-city market substrate coverage (50→7 regression);
 #   2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED antibody — non-tradeable family-identity bins
 #   must reach capture so executable_market_snapshots is family-COMPLETE (FDR full-family proof)
@@ -25,7 +25,7 @@ import re
 import sqlite3
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -149,10 +149,15 @@ def _make_in_memory_trade_db() -> sqlite3.Connection:
             snapshot_id TEXT PRIMARY KEY,
             event_slug TEXT NOT NULL,
             condition_id TEXT NOT NULL,
+            question_id TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            selected_outcome_token_id TEXT,
             outcome_label TEXT NOT NULL,
             direction TEXT NOT NULL,
             execution_side TEXT NOT NULL,
             captured_at TEXT NOT NULL,
+            freshness_deadline TEXT,
             raw_clob_market_info_hash TEXT,
             raw_orderbook_hash TEXT,
             top_bid REAL,
@@ -255,6 +260,358 @@ def test_per_city_cap_applies_across_slugs_not_per_slug(monkeypatch):
     assert summary["executable_substrate_coverage_status"] == "FULL"
 
 
+def test_refresh_order_pairs_yes_no_sides_before_next_city():
+    """A tight live budget must complete conditions, not spray one-sided YES rows.
+
+    ``_condition_buy_sides_fresh`` only treats a condition as fresh when both
+    selected tokens have fresh snapshots.  Therefore the substrate refresh order
+    must keep buy_yes/buy_no adjacent for the same condition before moving to the
+    next city's first side.
+    """
+    city_names = list(ms.cities_by_name.keys())[:5]
+    markets = [
+        _make_market(name, idx, metric="highest")
+        for idx, name in enumerate(city_names, start=1)
+    ]
+    captured: list[tuple[str, str, str]] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured.append(
+            (
+                str(market.get("slug") or ""),
+                str(decision.tokens.get("market_id") or ""),
+                str(decision.edge.direction),
+            )
+        )
+
+    clob = _make_clob_mock()
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=2,
+        )
+
+    assert len(captured) >= 4
+    first_slug, first_condition, first_direction = captured[0]
+    second_slug, second_condition, second_direction = captured[1]
+    assert first_slug == second_slug
+    assert first_condition == second_condition
+    assert [first_direction, second_direction] == ["buy_yes", "buy_no"]
+
+    third_slug, third_condition, third_direction = captured[2]
+    fourth_slug, fourth_condition, fourth_direction = captured[3]
+    assert third_slug == fourth_slug
+    assert third_condition == fourth_condition
+    assert [third_direction, fourth_direction] == ["buy_yes", "buy_no"]
+    assert third_condition != first_condition
+
+
+def test_refresh_order_prioritizes_one_sided_fresh_condition_completion():
+    """A one-sided fresh condition should be completed before new conditions.
+
+    Live regression 2026-06-06: the warm cycle had a 30s freshness window, a
+    ~20s cadence, and only enough CLOB budget for a few captures.  Alphabetical
+    city ordering repeatedly refreshed one-sided prefixes while hundreds of
+    conditions never became complete.  Since the gate requires both YES and NO
+    selected tokens, a partial condition is the fastest route to a usable fresh
+    condition and must sort before never-captured conditions.
+    """
+    city_names = list(ms.cities_by_name.keys())[:3]
+    markets = [
+        _make_market(name, idx, metric="highest")
+        for idx, name in enumerate(city_names, start=1)
+    ]
+    partial_condition = markets[0]["condition_ids"][0]
+    partial_outcome = markets[0]["outcomes"][0]
+    partial_yes_token = partial_outcome["token_id"]
+    conn = _make_in_memory_trade_db()
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, event_slug, condition_id, question_id,
+            yes_token_id, no_token_id, selected_outcome_token_id,
+            outcome_label, direction, execution_side, captured_at,
+            freshness_deadline, scan_authority
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "partial-prefix-yes",
+            markets[0]["slug"],
+            partial_condition,
+            partial_condition,
+            partial_outcome["token_id"],
+            partial_outcome["no_token_id"],
+            partial_yes_token,
+            "YES",
+            "buy_yes",
+            "BUY",
+            _NOW.isoformat(),
+            (_NOW + timedelta(seconds=30)).isoformat(),
+            "VERIFIED",
+        ),
+    )
+    conn.commit()
+
+    captured: list[tuple[str, str, str]] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured.append(
+            (
+                str(market.get("slug") or ""),
+                str(decision.tokens.get("market_id") or ""),
+                str(decision.edge.direction),
+            )
+        )
+
+    clob = _make_clob_mock()
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=2,
+        )
+
+    assert len(captured) >= 2
+    assert captured[0][1] == partial_condition
+    assert captured[0][2] == "buy_no"
+    assert captured[1][1] != partial_condition
+
+
+def test_refresh_skips_already_fresh_side_on_partial_condition():
+    """Partial conditions should refresh only the missing selected side.
+
+    The live warm path was repeatedly spending one CLOB slot on a side that was
+    already fresh, then running out of budget before enough other families could
+    complete.  The correct invariant is side-specific freshness: if YES is fresh
+    and NO is stale/missing, only ``buy_no`` should enter capture.
+    """
+    markets = [_make_market("Miami", 1, metric="highest")]
+    condition_id = markets[0]["condition_ids"][0]
+    outcome = markets[0]["outcomes"][0]
+    yes_token = outcome["token_id"]
+    conn = _make_in_memory_trade_db()
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, event_slug, condition_id, question_id,
+            yes_token_id, no_token_id, selected_outcome_token_id,
+            outcome_label, direction, execution_side, captured_at,
+            freshness_deadline, scan_authority
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "fresh-yes-only",
+            markets[0]["slug"],
+            condition_id,
+            condition_id,
+            outcome["token_id"],
+            outcome["no_token_id"],
+            yes_token,
+            "YES",
+            "buy_yes",
+            "BUY",
+            _NOW.isoformat(),
+            (_NOW + timedelta(seconds=30)).isoformat(),
+            "VERIFIED",
+        ),
+    )
+    conn.commit()
+    captured: list[str] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured.append(str(decision.edge.direction))
+
+    clob = _make_clob_mock()
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=2,
+        )
+
+    assert captured == ["buy_no"]
+    assert summary["selected_executable_snapshot_count"] == 1
+
+
+def test_sparse_fresh_snapshot_does_not_skip_identity_capture():
+    """A legacy/sparse fresh row is not enough to skip identity capture."""
+    markets = [_make_market("Miami", 1, metric="highest")]
+    condition_id = markets[0]["condition_ids"][0]
+    yes_token = markets[0]["outcomes"][0]["token_id"]
+    conn = _make_in_memory_trade_db()
+    conn.execute(
+        """
+        INSERT INTO executable_market_snapshots (
+            snapshot_id, event_slug, condition_id, selected_outcome_token_id,
+            outcome_label, direction, execution_side, captured_at,
+            freshness_deadline, scan_authority
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "sparse-fresh-yes",
+            markets[0]["slug"],
+            condition_id,
+            yes_token,
+            "YES",
+            "buy_yes",
+            "BUY",
+            _NOW.isoformat(),
+            (_NOW + timedelta(seconds=30)).isoformat(),
+            "VERIFIED",
+        ),
+    )
+    conn.commit()
+    captured: list[str] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured.append(str(decision.edge.direction))
+
+    clob = _make_clob_mock()
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=2,
+        )
+
+    assert captured == ["buy_yes", "buy_no"]
+    assert summary["selected_executable_snapshot_count"] == 2
+
+
+def test_capture_reuses_clob_market_info_for_adjacent_condition_sides():
+    """Adjacent YES/NO captures for one condition should not refetch /markets."""
+    market = {
+        "event_id": "evt-cache",
+        "slug": "highest-temperature-in-cache-on-may-25-2026",
+        "outcomes": [
+            {
+                "condition_id": "cond-cache",
+                "market_id": "cond-cache",
+                "question_id": "question-cache",
+                "gamma_market_id": "gamma-cache",
+                "token_id": "yes-cache",
+                "no_token_id": "no-cache",
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "raw_gamma_payload_hash": "f" * 64,
+                "gamma_market_raw": {
+                    "id": "gamma-cache",
+                    "conditionId": "cond-cache",
+                    "questionID": "question-cache",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": ["yes-cache", "no-cache"],
+                },
+            }
+        ],
+    }
+
+    class CountingClob:
+        def __init__(self) -> None:
+            self.market_info_calls = 0
+
+        def get_clob_market_info(self, condition_id: str) -> dict:
+            self.market_info_calls += 1
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": "yes-cache"}, {"token_id": "no-cache"}],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate(self, token_id: str) -> float:
+            return 0.0
+
+    conn = _make_in_memory_trade_db()
+    clob = CountingClob()
+    cache: dict[str, dict] = {}
+    ms._prev_orderbook_hash_by_market.pop("cond-cache", None)
+
+    with (
+        patch("src.data.market_scanner.insert_snapshot"),
+        patch("src.data.market_scanner._write_book_hash_transition"),
+    ):
+        for direction in ("buy_yes", "buy_no"):
+            decision = SimpleNamespace(
+                tokens={
+                    "token_id": "yes-cache",
+                    "no_token_id": "no-cache",
+                    "market_id": "cond-cache",
+                },
+                edge=SimpleNamespace(direction=direction),
+            )
+            ms.capture_executable_market_snapshot(
+                conn,
+                market=market,
+                decision=decision,
+                clob=clob,
+                captured_at=_NOW,
+                scan_authority="VERIFIED",
+                clob_market_info_cache=cache,
+            )
+
+    assert clob.market_info_calls == 1
+    assert set(cache) == {"cond-cache"}
+
+
+def test_cached_topology_limits_gamma_lookup_window(monkeypatch):
+    """Warm cycles with cached topology must reserve most time for CLOB prices."""
+    import src.main as main_mod
+
+    fake_now = 108.0
+    monkeypatch.setattr(main_mod.time, "monotonic", lambda: fake_now)
+    monkeypatch.delenv("ZEUS_REACTOR_CACHED_TOPOLOGY_GAMMA_SECONDS", raising=False)
+
+    deadline_with_cache = main_mod._gamma_lookup_deadline_for_snapshot_refresh(
+        refresh_deadline=115.0,
+        refresh_budget_s=15.0,
+        snapshot_reserve_s=6.0,
+        cached_topology_count=50,
+    )
+    deadline_without_cache = main_mod._gamma_lookup_deadline_for_snapshot_refresh(
+        refresh_deadline=115.0,
+        refresh_budget_s=15.0,
+        snapshot_reserve_s=6.0,
+        cached_topology_count=0,
+    )
+
+    assert deadline_with_cache == pytest.approx(101.0)
+    assert deadline_without_cache == pytest.approx(109.0)
+
+
 # ---------------------------------------------------------------------------
 # R2: _market_discovery_cycle calls find_weather_markets (tag path)
 # ---------------------------------------------------------------------------
@@ -273,6 +630,7 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
 
     tag_scan_called = []
     slug_only_called = []
+    monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", None)
 
     def _mock_find_weather_markets(**kwargs):
         tag_scan_called.append(kwargs)
@@ -285,6 +643,7 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
     import src.data.market_scanner as scanner_mod
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
     monkeypatch.setattr(scanner_mod, "find_slug_pattern_weather_markets", _mock_find_slug_pattern)
+    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 0)
 
     monkeypatch.setattr(
         "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
@@ -314,6 +673,156 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
         "path covering all 51 cities). Pre-fix: only find_slug_pattern_weather_markets "
         "(14-city slug-only) is called."
     )
+
+
+def test_market_discovery_defers_while_edli_pending_backlog(monkeypatch):
+    """Universe discovery should yield to the pending-family CLOB warm path.
+
+    In EDLI mode, pending-family warm is the latency-critical path that can
+    unlock receipts.  A universe-wide discovery scan is data-only and can wait
+    when hundreds of pending opportunity events need fresh executable prices.
+    """
+    import src.main as main_mod
+    import src.data.market_scanner as scanner_mod
+
+    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
+    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
+    monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", 100.0)
+    monkeypatch.setattr(main_mod.time, "monotonic", lambda: 120.0)
+    monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: pytest.fail("must defer"))
+
+    main_mod._market_discovery_cycle()
+
+
+def test_market_discovery_with_pending_runs_topology_only_not_substrate_capture(monkeypatch):
+    """Pending backlog may refresh market topology but must not steal substrate capture."""
+    import src.main as main_mod
+    import src.data.market_scanner as scanner_mod
+
+    calls: list[dict] = []
+    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
+    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
+    monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", 100.0)
+    monkeypatch.setattr(main_mod.time, "monotonic", lambda: 500.0)
+
+    def _mock_find_weather_markets(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
+    monkeypatch.setattr(
+        "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
+        lambda *args, **kwargs: pytest.fail(
+            "pending EDLI backlog must not let market_discovery steal executable substrate capture"
+        ),
+    )
+    with patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls:
+        main_mod._market_discovery_cycle()
+
+    assert calls
+    assert mock_clob_cls.call_count == 0
+
+
+def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
+    """Missing EDLI processing schema must not break universe discovery."""
+    import src.main as main_mod
+    import src.data.market_scanner as scanner_mod
+
+    calls: list[dict] = []
+    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
+    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: (_ for _ in ()).throw(sqlite3.OperationalError("no such table")))
+
+    def _mock_find_weather_markets(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
+    monkeypatch.setattr(
+        "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
+        lambda conn, *, markets, clob, captured_at, scan_authority: {
+            "attempted": 0, "inserted": 0, "skipped": 0, "failed": 0,
+            "truncated": 0, "budget_exhausted": 0,
+        },
+    )
+    mock_conn = MagicMock()
+    with (
+        patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls,
+        patch("src.state.db.get_trade_connection", return_value=mock_conn),
+    ):
+        mock_clob_cls.return_value.__enter__ = lambda s: MagicMock()
+        mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
+        main_mod._market_discovery_cycle()
+
+    assert calls
+
+
+class _FakeLock:
+    def __init__(self, acquire_result: bool = True) -> None:
+        self.acquire_result = acquire_result
+        self.acquire_calls = 0
+        self.release_calls = 0
+
+    def acquire(self, blocking: bool = True) -> bool:
+        self.acquire_calls += 1
+        return self.acquire_result
+
+    def release(self) -> None:
+        self.release_calls += 1
+
+
+def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatch):
+    import src.main as main_mod
+    import src.data.market_scanner as scanner_mod
+
+    discovery_lock = _FakeLock(True)
+    substrate_lock = _FakeLock(False)
+    monkeypatch.setattr(main_mod, "_market_discovery_lock", discovery_lock)
+    monkeypatch.setattr(main_mod, "_market_substrate_refresh_lock", substrate_lock)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
+    monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: pytest.fail("must not scan"))
+
+    main_mod._market_discovery_cycle()
+
+    assert discovery_lock.acquire_calls == 1
+    assert discovery_lock.release_calls == 1
+    assert substrate_lock.acquire_calls == 1
+    assert substrate_lock.release_calls == 0
+
+
+def test_market_discovery_releases_locks_when_refresh_raises(monkeypatch):
+    import src.main as main_mod
+    import src.data.market_scanner as scanner_mod
+
+    discovery_lock = _FakeLock(True)
+    substrate_lock = _FakeLock(True)
+    monkeypatch.setattr(main_mod, "_market_discovery_lock", discovery_lock)
+    monkeypatch.setattr(main_mod, "_market_substrate_refresh_lock", substrate_lock)
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
+    monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: [_make_market("Miami", 1)])
+
+    def _raise_refresh(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
+        _raise_refresh,
+    )
+    mock_conn = MagicMock()
+    with (
+        patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls,
+        patch("src.state.db.get_trade_connection", return_value=mock_conn),
+    ):
+        mock_clob_cls.return_value.__enter__ = lambda s: MagicMock()
+        mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
+        main_mod._market_discovery_cycle()
+
+    assert discovery_lock.release_calls == 1
+    assert substrate_lock.release_calls == 1
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +907,542 @@ def test_clob_latency_cannot_overrun_budget(monkeypatch):
         f"Must abort before all 10 cities when budget={BUDGET_SECONDS}s. "
         f"attempted={summary.get('attempted')}, elapsed={elapsed:.1f}s."
     )
+
+
+def test_slow_batch_orderbook_prefetch_leaves_budget_for_capture(monkeypatch):
+    """A large warm cycle must not spend the whole budget in POST /books prefetch.
+
+    Live regression 2026-06-06: after topology cache started submitting all 57
+    families, the batch prefetch used the entire snapshot budget before the
+    capture loop ran, producing ``attempted=0`` and no fresh receipt flow.  The
+    fix gives prefetch its own deadline before the overall deadline so at least
+    some selected candidates can move into capture in the same cycle.
+    """
+    BUDGET_SECONDS = 10.0
+    RESERVE_SECONDS = 2.0
+    PREFETCH_SECONDS_PER_CHUNK = 8.2
+
+    fake_now = 0.0
+
+    def _fake_monotonic() -> float:
+        return fake_now
+
+    monkeypatch.setattr(ms.time, "monotonic", _fake_monotonic)
+    monkeypatch.setenv(
+        "ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS",
+        str(RESERVE_SECONDS),
+    )
+
+    markets = [
+        _make_market(name, idx, metric="highest")
+        for idx, name in enumerate(list(ms.cities_by_name.keys())[:40], start=1)
+    ]
+    capture_calls: list[str] = []
+
+    def _batch_books(token_ids: list[str]) -> dict[str, dict]:
+        nonlocal fake_now
+        fake_now += PREFETCH_SECONDS_PER_CHUNK
+        return {
+            token_id: {
+                "market": token_id,
+                "asset_id": token_id,
+                "bids": [{"price": "0.55", "size": "100"}],
+                "asks": [{"price": "0.60", "size": "100"}],
+            }
+            for token_id in token_ids
+        }
+
+    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        capture_calls.append(str(decision.tokens.get("market_id") or ""))
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots.side_effect = _batch_books
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_mock_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=BUDGET_SECONDS,
+            max_outcomes=2,
+        )
+
+    assert summary["attempted"] > 0, (
+        "Snapshot refresh must leave budget for capture even when the first "
+        "batch /books chunk is slow. Pre-fix behavior consumed a second chunk "
+        "under the full deadline and reached capture only after budget expiry: "
+        f"summary={summary}"
+    )
+    assert capture_calls, f"capture loop must run after batch prefetch: summary={summary}"
+    assert summary["snapshot_capture_reserve_seconds"] == pytest.approx(RESERVE_SECONDS)
+    assert clob.get_orderbook_snapshots.call_count == 1, (
+        "Prefetch must stop at its earlier deadline instead of consuming the "
+        f"full snapshot budget. summary={summary}"
+    )
+
+
+def test_batch_orderbook_prefetch_uses_live_proven_large_chunks(monkeypatch):
+    """Large weather cycles must not regress to tiny POST /books chunks.
+
+    Live CLOB probe 2026-06-06 accepted 500 token IDs per POST /books request
+    and rejected 1000.  The warm path normally sees 600+ candidate outcomes; a
+    50-token chunk ceiling makes most cycles fall back to serial GET /book.
+    """
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", raising=False)
+
+    markets = [
+        _make_market(name, idx, metric="highest")
+        for idx, name in enumerate(list(ms.cities_by_name.keys())[:40], start=1)
+    ]
+    batch_sizes: list[int] = []
+
+    def _batch_books(token_ids: list[str]) -> dict[str, dict]:
+        batch_sizes.append(len(token_ids))
+        return {
+            token_id: {
+                "market": token_id,
+                "asset_id": token_id,
+                "bids": [{"price": "0.55", "size": "100"}],
+                "asks": [{"price": "0.60", "size": "100"}],
+            }
+            for token_id in token_ids
+        }
+
+    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        return None
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots.side_effect = _batch_books
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_mock_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=20.0,
+            max_outcomes=2,
+        )
+
+    assert batch_sizes, f"expected at least one POST /books prefetch: summary={summary}"
+    assert max(batch_sizes) > 50, (
+        "POST /books chunking must use the live-proven large batch envelope; "
+        f"batch_sizes={batch_sizes} summary={summary}"
+    )
+    assert clob.get_orderbook_snapshots.call_count == 1, (
+        "This fixture has fewer than 500 selected tokens, so it should fit in "
+        f"one live-proven chunk. batch_sizes={batch_sizes} summary={summary}"
+    )
+    assert summary["prefetched_orderbook_count"] > 50
+
+
+def test_tiny_prefetch_window_skips_batch_books_and_captures(monkeypatch):
+    """Default reserve math must not start a batch chunk with no prefetch window.
+
+    With ``budget_seconds`` near the default capture reserve, the prefetch
+    deadline can be only milliseconds away.  Starting one POST /books chunk in
+    that window can consume the entire cycle and produce attempted=0.
+    """
+    BUDGET_SECONDS = 6.0
+    fake_now = 0.0
+
+    def _fake_monotonic() -> float:
+        return fake_now
+
+    monkeypatch.setattr(ms.time, "monotonic", _fake_monotonic)
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", raising=False)
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", raising=False)
+
+    markets = [
+        _make_market(name, idx, metric="highest")
+        for idx, name in enumerate(list(ms.cities_by_name.keys())[:10], start=1)
+    ]
+    capture_calls: list[str] = []
+
+    def _batch_books(token_ids: list[str]) -> dict[str, dict]:
+        raise AssertionError("batch prefetch must be skipped when its window is tiny")
+
+    def _mock_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        capture_calls.append(str(decision.tokens.get("market_id") or ""))
+
+    clob = _make_clob_mock()
+    clob.get_orderbook_snapshots.side_effect = _batch_books
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_mock_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=BUDGET_SECONDS,
+            max_outcomes=2,
+        )
+
+    assert clob.get_orderbook_snapshots.call_count == 0
+    assert summary["attempted"] > 0
+    assert capture_calls
+    assert summary["prefetched_orderbook_count"] == 0
+    assert summary["snapshot_capture_reserve_seconds"] == pytest.approx(BUDGET_SECONDS - 0.05)
+
+
+def test_snapshot_capture_retries_short_sqlite_lock(monkeypatch):
+    """A transient trade-DB WAL lock must not drop an otherwise fresh bin."""
+
+    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_SQLITE_LOCK_RETRIES", "2")
+    monkeypatch.setattr(ms.time, "sleep", lambda _seconds: None)
+
+    markets = [_make_market("Tokyo", 1, metric="lowest", target_date="2026-06-08")]
+    calls: list[str] = []
+
+    def _flaky_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        calls.append(str(decision.tokens.get("market_id") or ""))
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+
+    clob = _make_clob_mock()
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_flaky_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=markets,
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            budget_seconds=5.0,
+            max_outcomes=1,
+        )
+
+    assert len(calls) == 2
+    assert summary["attempted"] == 1
+    assert summary["inserted"] == 1
+    assert summary["failed"] == 0
+    assert "failure_samples" not in summary
+    assert summary["executable_substrate_coverage_status"] == "FULL"
+
+
+def test_default_snapshot_capture_reserve_keeps_prefetch_from_starving_capture(monkeypatch):
+    """The default pending-family path must reserve a real capture phase.
+
+    Live-shadow showed the old 6s default let /books prefetch consume most of a
+    warm tick and left CLOB capture writing only a handful of snapshots.
+    """
+
+    monkeypatch.delenv("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", raising=False)
+
+    summary_budget = 15.0
+    assert ms._snapshot_capture_reserve_seconds_from_env(summary_budget) == pytest.approx(12.0)
+
+
+def test_illiquid_identity_capture_skips_fee_rate_http():
+    """No-ask identity rows are non-executable and must not spend fee-rate HTTP."""
+
+    condition_id = "0x" + "1" * 64
+    yes_token = "0x" + "2" * 64
+    no_token = "0x" + "3" * 64
+    market = {
+        "event_id": "evt-illiquid",
+        "slug": "highest-temperature-in-chicago-on-june-7-2026",
+        "city": ms.cities_by_name.get("Chicago", "Chicago"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "market_id": condition_id,
+                "question_id": condition_id,
+                "token_id": yes_token,
+                "no_token_id": no_token,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "conditionId": condition_id,
+                    "questionID": condition_id,
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": [yes_token, no_token],
+                },
+            }
+        ],
+    }
+    decision = SimpleNamespace(
+        tokens={"token_id": yes_token, "no_token_id": no_token, "market_id": condition_id},
+        edge=SimpleNamespace(direction="buy_yes"),
+    )
+
+    class IlliquidClob:
+        def get_clob_market_info(self, _condition_id: str) -> dict:
+            return {
+                "condition_id": condition_id,
+                "tokens": [{"token_id": yes_token}, {"token_id": no_token}],
+                "archived": False,
+                "enable_order_book": True,
+                "accepting_orders": True,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+            }
+
+        def get_orderbook_snapshot(self, _token_id: str) -> dict:
+            return {
+                "asset_id": yes_token,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.01", "size": "1"}],
+                "asks": [],
+            }
+
+        def get_fee_rate_details(self, _token_id: str) -> dict:
+            raise AssertionError("illiquid identity capture must not fetch fee-rate")
+
+    captured = []
+    with (
+        patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
+        patch("src.data.market_scanner._write_book_hash_transition"),
+    ):
+        ms.capture_executable_market_snapshot(
+            _make_in_memory_trade_db(),
+            market=market,
+            decision=decision,
+            clob=IlliquidClob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            tolerate_missing_book=True,
+        )
+
+    assert len(captured) == 1
+    assert captured[0].tradeability_status.executable_allowed is False
+    assert captured[0].tradeability_status.reason == "clob_no_ask_illiquid"
+    assert captured[0].fee_details["source"] == "not_applicable_illiquid_identity"
+    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.0)
+
+
+def test_substrate_identity_capture_skips_clob_market_info_http(monkeypatch):
+    """Background substrate identity rows should not spend one /markets HTTP per bin."""
+
+    monkeypatch.delenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", raising=False)
+    condition_id = "0x" + "4" * 64
+    yes_token = "0x" + "5" * 64
+    no_token = "0x" + "6" * 64
+    market = {
+        "event_id": "evt-liquid",
+        "slug": "highest-temperature-in-austin-on-june-7-2026",
+        "city": ms.cities_by_name.get("Austin", "Austin"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "market_id": condition_id,
+                "question_id": condition_id,
+                "token_id": yes_token,
+                "no_token_id": no_token,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "conditionId": condition_id,
+                    "questionID": condition_id,
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": [yes_token, no_token],
+                    "tradability_authority": "persisted_snapshot_reconstruction",
+                },
+            }
+        ],
+    }
+    decision = SimpleNamespace(
+        tokens={"token_id": yes_token, "no_token_id": no_token, "market_id": condition_id},
+        edge=SimpleNamespace(direction="buy_yes"),
+    )
+
+    class LiquidSubstrateClob:
+        def get_clob_market_info(self, _condition_id: str) -> dict:
+            raise AssertionError("substrate identity capture must not fetch /markets")
+
+        def get_orderbook_snapshot(self, _token_id: str) -> dict:
+            return {
+                "asset_id": yes_token,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate_details(self, _token_id: str) -> dict:
+            raise AssertionError("substrate identity capture must not fetch /fee-rate")
+
+    captured = []
+    with (
+        patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
+        patch("src.data.market_scanner._write_book_hash_transition"),
+    ):
+        ms.capture_executable_market_snapshot(
+            _make_in_memory_trade_db(),
+            market=market,
+            decision=decision,
+            clob=LiquidSubstrateClob(),
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            tolerate_missing_book=True,
+        )
+
+    assert len(captured) == 1
+    assert captured[0].tradeability_status.executable_allowed is True
+    assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
+    assert captured[0].fee_details["authority"] == "local_weather_fee_contract"
+    assert captured[0].fee_details["submit_boundary_revalidates_fee"] is True
+    assert captured[0].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
+
+
+def test_substrate_identity_capture_uses_contract_fee_without_http(monkeypatch):
+    """Background substrate refresh should not fetch fee rate for every token."""
+
+    monkeypatch.delenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", raising=False)
+    condition_id = "0x" + "7" * 64
+    yes_token = "0x" + "8" * 64
+    no_token = "0x" + "9" * 64
+    market = {
+        "event_id": "evt-fee-cache",
+        "slug": "highest-temperature-in-austin-on-june-7-2026",
+        "city": ms.cities_by_name.get("Austin", "Austin"),
+        "target_date": "2026-06-07",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "market_id": condition_id,
+                "question_id": condition_id,
+                "token_id": yes_token,
+                "no_token_id": no_token,
+                "active": True,
+                "closed": False,
+                "accepting_orders": True,
+                "enable_orderbook": True,
+                "gamma_market_raw": {
+                    "conditionId": condition_id,
+                    "questionID": condition_id,
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": [yes_token, no_token],
+                    "tradability_authority": "persisted_snapshot_reconstruction",
+                },
+            }
+        ],
+    }
+
+    class FamilyFeeClob:
+        def __init__(self) -> None:
+            self.fee_tokens: list[str] = []
+
+        def get_clob_market_info(self, _condition_id: str) -> dict:
+            raise AssertionError("substrate identity capture must not fetch /markets")
+
+        def get_orderbook_snapshot(self, token_id: str) -> dict:
+            return {
+                "asset_id": token_id,
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "neg_risk": True,
+                "bids": [{"price": "0.40", "size": "10"}],
+                "asks": [{"price": "0.42", "size": "10"}],
+            }
+
+        def get_fee_rate_details(self, token_id: str) -> dict:
+            self.fee_tokens.append(token_id)
+            raise AssertionError("substrate identity capture must not fetch /fee-rate")
+
+    captured = []
+    clob = FamilyFeeClob()
+    fee_cache: dict[str, dict[str, object]] = {}
+    with (
+        patch("src.data.market_scanner.insert_snapshot", side_effect=lambda _conn, snapshot: captured.append(snapshot)),
+        patch("src.data.market_scanner._write_book_hash_transition"),
+    ):
+        for direction in ("buy_yes", "buy_no"):
+            ms.capture_executable_market_snapshot(
+                _make_in_memory_trade_db(),
+                market=market,
+                decision=SimpleNamespace(
+                    tokens={"token_id": yes_token, "no_token_id": no_token, "market_id": condition_id},
+                    edge=SimpleNamespace(direction=direction),
+                ),
+                clob=clob,
+                captured_at=_NOW,
+                scan_authority="VERIFIED",
+                fee_details_cache=fee_cache,
+                tolerate_missing_book=True,
+            )
+
+    assert clob.fee_tokens == []
+    assert len(captured) == 2
+    assert captured[0].fee_details["source"] == "weather_fee_contract_substrate_identity"
+    assert captured[1].fee_details["source"] == "weather_fee_contract_substrate_identity"
+    assert captured[1].fee_details["token_id"] == no_token
+    assert captured[1].fee_details["fee_rate_fraction"] == pytest.approx(0.05)
+
+
+def test_unlimited_pending_refresh_completes_family_before_next_city():
+    """max_outcomes=0 is the pending-family path; it must complete families.
+
+    The FDR gate needs a complete family proof.  If unlimited refresh interleaves
+    one condition across every city, a tight live budget keeps all families
+    partially fresh and reactor remains EXECUTABLE_SNAPSHOT_BLOCKED.
+    """
+    first = _make_family_market_with_tail("Chicago")
+    second = _make_family_market_with_tail("Austin", target_date="2026-06-05")
+    second["condition_ids"] = []
+    for idx, outcome in enumerate(second["outcomes"], start=11):
+        cid = (f"0x{idx:02x}" + "d" * 62)[:66]
+        outcome["condition_id"] = cid
+        outcome["market_id"] = cid
+        outcome["question_id"] = cid
+        outcome["token_id"] = (f"0x{idx:02x}" + "e" * 62)[:66]
+        outcome["no_token_id"] = (f"0x{idx:02x}" + "f" * 62)[:66]
+        outcome["gamma_market_raw"]["conditionId"] = cid
+        second["condition_ids"].append(cid)
+    captured_slugs: list[str] = []
+
+    def _spy_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side="BUY", **kwargs):
+        captured_slugs.append(str(market.get("slug") or ""))
+
+    clob = _make_clob_mock()
+    conn = _make_in_memory_trade_db()
+
+    with patch("src.data.market_scanner.capture_executable_market_snapshot", side_effect=_spy_capture):
+        summary = refresh_executable_market_substrate_snapshots(
+            conn,
+            markets=[first, second],
+            clob=clob,
+            captured_at=_NOW,
+            scan_authority="VERIFIED",
+            max_outcomes=0,
+        )
+
+    assert summary["selected_executable_snapshot_count"] == 12
+    assert len(captured_slugs) == 12
+    assert len(set(captured_slugs[:6])) == 1
+    assert len(set(captured_slugs[6:])) == 1
+    assert captured_slugs[0] != captured_slugs[6]
 # ---------------------------------------------------------------------------
 # P1-2: tag-fetch loop is bounded by wall-clock budget
 # ---------------------------------------------------------------------------

@@ -1682,6 +1682,19 @@ def _merge_current_outcome_with_exit_identity_seed(
         for key in ("id", "conditionId", "questionID", "clobTokenIds"):
             if gamma_raw.get(key) in (None, "") and seed_raw.get(key) not in (None, ""):
                 gamma_raw[key] = seed_raw[key]
+    has_current_tradability = any(
+        _field_present(source, key)
+        for source in (merged, gamma_raw)
+        for key in (
+            "accepting_orders",
+            "acceptingOrders",
+            "enable_orderbook",
+            "enableOrderBook",
+            "orderbookEnabled",
+        )
+    )
+    if not has_current_tradability:
+        gamma_raw["tradability_authority"] = "persisted_snapshot_reconstruction"
     if gamma_raw:
         merged["gamma_market_raw"] = gamma_raw
 
@@ -1693,6 +1706,10 @@ def _merge_current_outcome_with_exit_identity_seed(
         else None,
     }
     return merged
+
+
+def _field_present(source: Mapping[str, object], key: str) -> bool:
+    return key in source and source.get(key) not in (None, "")
 
 
 def _seed_exit_snapshot_identity(
@@ -1752,6 +1769,12 @@ def _latest_or_capture_exit_snapshot_context(
     ).strip()
     yes_token = str(getattr(position, "token_id", "") or "").strip()
     no_token = str(getattr(position, "no_token_id", "") or "").strip()
+    identity_seed: dict[str, object] = {}
+    if market_id and (not yes_token or not no_token):
+        identity_seed = _latest_exit_snapshot_identity_seed(conn, token_id)
+        yes_token = yes_token or str(identity_seed.get("token_id") or "").strip()
+        no_token = no_token or str(identity_seed.get("no_token_id") or "").strip()
+        market_id = market_id or str(identity_seed.get("condition_id") or "").strip()
     if not market_id or not yes_token or not no_token:
         return {}
 
@@ -1779,7 +1802,8 @@ def _latest_or_capture_exit_snapshot_context(
             )
             return {}
         if not any(_outcome_has_executable_identity(outcome) for outcome in siblings):
-            identity_seed = _latest_exit_snapshot_identity_seed(conn, token_id)
+            if not identity_seed:
+                identity_seed = _latest_exit_snapshot_identity_seed(conn, token_id)
             if identity_seed:
                 siblings = _seed_exit_snapshot_identity(siblings, identity_seed, token_id)
 

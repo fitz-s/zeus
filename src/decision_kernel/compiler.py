@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from typing import Any, Literal
 
 from src.decision_kernel import claims
@@ -385,6 +386,14 @@ def _validate_no_submit_parent_consistency(event: OpportunityEvent, bundle: NoSu
         # WAVE-1 W1-T3: dual-chain source_run binding (gated; legacy single-chain
         # equality preserved when the flag is OFF or derived_from_source_run_id absent).
         bind_source_run_chains(source, forecast)
+        event_payload = _event_payload_dict(event)
+        if event_payload.get("source_run_id") not in (None, ""):
+            _require_equal(
+                "source_truth.source_run_id",
+                source.get("source_run_id"),
+                "event.payload.source_run_id",
+                event_payload.get("source_run_id"),
+            )
         _require_equal("source_truth.source_id", source.get("source_id"), "forecast.forecast_source_id", forecast.get("forecast_source_id"))
         _require_equal("source_truth.payload_hash", source.get("payload_hash"), "event.payload_hash", event.payload_hash)
         _require_equal("source_truth.event_source", source.get("event_source"), "event.source", event.source)
@@ -509,8 +518,13 @@ def _validate_forecast_authority_payload(forecast: dict[str, Any]) -> None:
         raise ValueError("forecast.coverage_readiness_status must be LIVE_ELIGIBLE")
     if forecast.get("coverage_completeness_status") != "COMPLETE":
         raise ValueError("forecast.coverage_completeness_status must be COMPLETE")
-    if forecast.get("source_run_completeness_status") != "COMPLETE":
-        raise ValueError("forecast.source_run_completeness_status must be COMPLETE")
+    source_run_completeness = str(forecast.get("source_run_completeness_status") or "")
+    if source_run_completeness not in {"COMPLETE", "PARTIAL"}:
+        raise ValueError("forecast.source_run_completeness_status must be COMPLETE or PARTIAL")
+    if source_run_completeness == "PARTIAL":
+        source_run_status = str(forecast.get("source_run_status") or "")
+        if source_run_status not in {"SUCCESS", "PARTIAL"}:
+            raise ValueError("forecast.source_run_status must be SUCCESS or PARTIAL for PARTIAL source_run")
     required_steps = {str(item) for item in (forecast.get("required_steps") or ())}
     observed_steps = {str(item) for item in (forecast.get("observed_steps") or ())}
     if not required_steps:
@@ -662,6 +676,16 @@ def _require_equal(left_name: str, left: Any, right_name: str, right: Any) -> No
         raise ValueError(f"missing consistency field: {left_name if left in (None, '') else right_name}")
     if str(left) != str(right):
         raise ValueError(f"{left_name} != {right_name}: {left!r} != {right!r}")
+
+
+def _event_payload_dict(event: OpportunityEvent) -> dict[str, Any]:
+    payload = event.payload_json
+    if isinstance(payload, dict):
+        return payload
+    if not isinstance(payload, str) or payload == "":
+        return {}
+    parsed = json.loads(payload)
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _dual_chain_source_run_enabled() -> bool:

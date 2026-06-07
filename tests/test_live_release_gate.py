@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from scripts.check_live_release_gate import (
     PAPER_PROOF_KEYS, FAIL, PASS,
@@ -190,6 +191,7 @@ def _settings_for_stage(stage: str, **overrides: object) -> dict[str, object]:
         "edli_user_channel_reconcile_enabled": stage in {"edli_submit_disabled_bridge", "edli_live_canary", "edli_live"},
         "real_order_submit_enabled": stage in {"edli_live_canary", "edli_live"},
         "live_canary_enabled": stage in {"edli_live_canary", "edli_live"},
+        "taker_fok_fak_live_enabled": stage in {"edli_live_canary", "edli_live"},
         "durable_submit_outbox_enabled": stage in {"edli_live_canary", "edli_live"},
         "edli_live_operator_authorized": stage == "edli_live",
     }
@@ -410,6 +412,23 @@ def test_release_gate_stage_settings_reject_live_submit_disabled(tmp_path: Path)
     assert any(result.name == "stage_settings" and "real_order_submit_enabled=false" in result.detail for result in report.results)
 
 
+def test_release_gate_stage_settings_reject_live_taker_disabled(tmp_path: Path) -> None:
+    args = _make_gate_args(
+        tmp_path,
+        settings_payload=_settings_for_stage("edli_live_canary", taker_fok_fak_live_enabled=False),
+    )
+    args.stage = "edli_live_canary"
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL
+    assert report.submit_allowed is False
+    assert any(
+        result.name == "stage_settings" and "taker_fok_fak_live_enabled=false" in result.detail
+        for result in report.results
+    )
+
+
 def test_release_gate_stage_settings_accept_matching_canary_config(tmp_path: Path) -> None:
     args = _make_gate_args(tmp_path, settings_payload=_settings_for_stage("edli_live_canary"))
     args.stage = "edli_live_canary"
@@ -548,6 +567,127 @@ def test_release_gate_fails_when_no_live_eligible_readiness(tmp_path: Path) -> N
 
     assert report.status == FAIL
     assert any(r.name == "forecast_executable_bundle" and r.status == FAIL for r in report.results)
+
+
+def test_release_gate_fails_when_replacement_current_targets_missing_coverage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Real-live release must fail when 0.1 replacement targets are not fully covered."""
+    import scripts.check_live_release_gate as gate
+
+    args = _make_gate_args(tmp_path)
+    conn = sqlite3.connect(str(args.forecasts_db))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS market_events (event_id INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS forecast_posteriors (posterior_id INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS source_run_coverage (coverage_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS raw_forecast_artifacts (artifact_id INTEGER PRIMARY KEY);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        gate,
+        "build_replacement_forecast_current_target_plan",
+        lambda _path: SimpleNamespace(
+            ready=False,
+            status="CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
+            covered_count=70,
+            target_count=153,
+            missing_coverage_count=83,
+            can_seed_count=83,
+            day0_observed_extreme_required_count=0,
+            reason_codes=("REPLACEMENT_CURRENT_TARGET_PLAN_MISSING_REPLACEMENT_COVERAGE",),
+        ),
+    )
+
+    report = evaluate_release_gate(args)
+
+    assert report.status == FAIL
+    result = next(r for r in report.results if r.name == "replacement_current_target_coverage")
+    assert result.status == FAIL
+    assert "covered=70/153" in result.detail
+
+
+def test_release_gate_accepts_day0_observation_coverage_for_replacement_gap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Forecast-only replacement gaps can pass only when day0 observation facts cover them."""
+    import scripts.check_live_release_gate as gate
+
+    args = _make_gate_args(tmp_path)
+    conn = sqlite3.connect(str(args.forecasts_db))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS market_events (event_id INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS forecast_posteriors (posterior_id INTEGER PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS source_run_coverage (coverage_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS raw_forecast_artifacts (artifact_id INTEGER PRIMARY KEY);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    conn = sqlite3.connect(str(args.world_db))
+    try:
+        conn.executescript(
+            """
+            DROP VIEW IF EXISTS observation_hourly_extrema;
+            DROP TABLE IF EXISTS observation_hourly_extrema;
+            CREATE TABLE observation_hourly_extrema (
+                city TEXT,
+                target_date TEXT,
+                authority TEXT,
+                temp_unit TEXT,
+                running_max REAL,
+                running_min REAL,
+                hour_bucket_max REAL,
+                hour_bucket_min REAL
+            );
+            INSERT INTO observation_hourly_extrema
+                (city, target_date, authority, temp_unit, running_max, running_min)
+            VALUES ('Tokyo', '2026-06-08', 'VERIFIED', 'C', 24.0, 16.0);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setattr(
+        gate,
+        "build_replacement_forecast_current_target_plan",
+        lambda _path: SimpleNamespace(
+            ready=False,
+            status="CURRENT_TARGETS_REQUIRE_DAY0_OBSERVED_EXTREME",
+            covered_count=75,
+            target_count=153,
+            missing_coverage_count=1,
+            can_seed_count=0,
+            day0_observed_extreme_required_count=1,
+            reason_codes=("REPLACEMENT_CURRENT_TARGET_PLAN_DAY0_OBSERVED_EXTREME_REQUIRED",),
+            rows=(
+                SimpleNamespace(
+                    city="Tokyo",
+                    target_date="2026-06-08",
+                    temperature_metric="high",
+                    covered=False,
+                    day0_observed_extreme_required=True,
+                ),
+            ),
+        ),
+    )
+
+    report = evaluate_release_gate(args)
+
+    result = next(r for r in report.results if r.name == "replacement_current_target_coverage")
+    assert result.status == PASS
+    assert "day0_observed_extreme_covered=1/1" in result.detail
 
 
 # ---------------------------------------------------------------------------

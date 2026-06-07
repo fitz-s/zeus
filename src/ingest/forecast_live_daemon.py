@@ -45,6 +45,7 @@ FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
+FORECAST_LIVE_DISABLE_OPENDATA_ENV = "ZEUS_FORECAST_LIVE_DISABLE_OPENDATA_JOBS"
 _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
 # Why SUCCESS-only: ECMWF Open Data disseminates a cycle incrementally over ~10h.
 # A PARTIAL journal at T+8h means more steps may still publish; treating it as
@@ -68,6 +69,7 @@ FORECAST_LIVE_JOB_IDS = frozenset(
         FORECAST_LIVE_SOURCE_HEALTH_JOB_ID,
     }
 )
+FORECAST_LIVE_HEARTBEAT_ONLY_JOB_IDS = frozenset({FORECAST_LIVE_HEARTBEAT_JOB_ID})
 
 FORECAST_LIVE_WORK_JOB_NAME_BY_TRACK = {
     "mx2t6_high": "forecast_live_opendata_mx2t6_high",
@@ -83,6 +85,30 @@ _TRUTHFUL_FAIL_STATUSES = frozenset(
         "bad_target_date",
     }
 )
+
+
+def _truthy(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _opendata_jobs_disabled_by_replacement_cutover() -> bool:
+    if _truthy(os.environ.get(FORECAST_LIVE_DISABLE_OPENDATA_ENV)):
+        return True
+    try:
+        from src.config import settings
+
+        cfg = getattr(settings, "_data", {}).get("replacement_forecast_shadow", {})
+        if isinstance(cfg, dict):
+            return _truthy(cfg.get("disable_legacy_opendata_forecast_live_jobs"))
+    except Exception as exc:
+        logger.warning("forecast-live replacement cutover setting read failed: %s", exc)
+    return False
+
+
+def _active_forecast_live_job_ids() -> frozenset[str]:
+    if _opendata_jobs_disabled_by_replacement_cutover():
+        return FORECAST_LIVE_HEARTBEAT_ONLY_JOB_IDS
+    return FORECAST_LIVE_JOB_IDS
 
 
 def _utcnow() -> datetime:
@@ -106,7 +132,7 @@ def _write_forecast_live_heartbeat(
         "timestamp": now.isoformat(),
         "written_at": now.isoformat(),
         "pid": os.getpid(),
-        "jobs": sorted(FORECAST_LIVE_JOB_IDS),
+        "jobs": sorted(_active_forecast_live_job_ids()),
         "cadence_seconds": FORECAST_LIVE_HEARTBEAT_SECONDS,
     }
     try:
@@ -732,7 +758,7 @@ def forecast_live_job_specs(
     startup_run_date: datetime | None = None,
 ) -> tuple[tuple[Callable[..., object], str, dict[str, object]], ...]:
     startup_at = startup_run_date or datetime.now(timezone.utc)
-    return (
+    specs = (
         (
             _heartbeat_tick,
             "interval",
@@ -842,11 +868,15 @@ def forecast_live_job_specs(
             },
         ),
     )
+    if not _opendata_jobs_disabled_by_replacement_cutover():
+        return specs
+    return tuple(spec for spec in specs if spec[2]["id"] in FORECAST_LIVE_HEARTBEAT_ONLY_JOB_IDS)
 
 
 # spec->job_defs derivation is shared across both ingest daemons (one implementation, see
 # src.data.scheduler_adapter) so the trigger-param stripping can never diverge between them.
 from src.data.scheduler_adapter import (  # noqa: E402
+    REGISTRY_OWNED_KWARGS as _REGISTRY_OWNED_KWARGS,
     job_defs_from_specs as _job_defs_from_specs,
 )
 
@@ -862,6 +892,16 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
     )
 
     specs = forecast_live_job_specs(startup_run_date=startup_run_date)
+
+    if _opendata_jobs_disabled_by_replacement_cutover():
+        scheduler = BlockingScheduler(
+            timezone=timezone.utc,
+            executors={"heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1)},
+        )
+        for func, trigger, kwargs in specs:
+            scheduler.add_job(func, trigger, **kwargs)
+        logger.info("Forecast-live OpenData jobs disabled by replacement cutover; heartbeat-only scheduler active")
+        return scheduler
 
     # REGISTRY mode (default, PR #329 A): build jobs FROM the registry with executor-lane routing +
     # a fail-fast boot assert. The hand-coded loop below is the LEGACY (rollback) path only.
@@ -927,7 +967,10 @@ def main() -> None:
         conn.close()
 
     signal.signal(signal.SIGTERM, _graceful_shutdown)
-    _source_health_probe_tick()
+    if _opendata_jobs_disabled_by_replacement_cutover():
+        logger.info("Forecast-live OpenData source health probe skipped by replacement cutover")
+    else:
+        _source_health_probe_tick()
     _scheduler = build_scheduler()
     jobs = [job.id for job in _scheduler.get_jobs()]
     _write_forecast_live_heartbeat(status="scheduler_ready")

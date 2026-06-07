@@ -15,7 +15,7 @@ from tigge_download_ecmwf_ens_region_multistep import download_region_multistep
 from tigge_local_calendar_day_common import required_max_step_for_lead_horizon
 from tigge_regions import region_for_city
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
 DEFAULT_STATUS = ROOT / "tmp" / "tigge_mx2t6_download_status.json"
 DEFAULT_RAW_ROOT = ROOT / "raw"

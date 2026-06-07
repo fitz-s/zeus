@@ -34,6 +34,7 @@ import sqlite3
 import pytest
 
 from src.events.edli_position_bridge import (
+    EdliPositionBridgeError,
     edli_bridge_position_id,
     materialize_position_current_from_edli_fill,
 )
@@ -115,6 +116,7 @@ def _seed_identity(conn: sqlite3.Connection, aggregate_id: str) -> None:
         "target_date": "2026-06-02",
         "bin_label": "30-32",
         "metric": "high",
+        "unit": "C",
         "market_id": CONDITION_ID,
         "q_live": 0.55,
         "executable_snapshot_id": "exec-snap-mf2",
@@ -164,6 +166,53 @@ def _seed_trade_leg(
 # 1. RED: one fill, three lifecycle re-reports sharing one trade_id, each
 #    filled_size=100 -> bridge must yield shares == 100, NOT 300.
 # --------------------------------------------------------------------------- #
+
+def test_bridge_rejects_fill_materialization_without_market_unit(conn):
+    aggregate_id = "agg-mf2-missing-unit"
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=1,
+        event_type="PreSubmitRevalidated",
+        payload={
+            "event_id": EVENT_ID,
+            "final_intent_id": FINAL_INTENT_ID,
+            "condition_id": CONDITION_ID,
+            "token_id": ELECTED_NO_TOKEN,
+            "side": "BUY",
+            "direction": "buy_no",
+            "native_token_side": "NO",
+            "outcome_label": "NO",
+            "city": "Shanghai",
+            "target_date": "2026-06-02",
+            "bin_label": "30-32",
+            "metric": "high",
+            "market_id": CONDITION_ID,
+            "q_live": 0.55,
+            "executable_snapshot_id": "exec-snap-mf2",
+        },
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "execution_command_id": EXECUTION_COMMAND_ID},
+    )
+    _seed_trade_leg(
+        conn,
+        aggregate_id,
+        3,
+        trade_status="CONFIRMED",
+        trade_id="trade-missing-unit",
+        filled_size=100.0,
+        price=0.40,
+        fees=0.20,
+    )
+
+    with pytest.raises(EdliPositionBridgeError, match="EDLI_BRIDGE_MARKET_IDENTITY_MISSING: unit"):
+        materialize_position_current_from_edli_fill(conn, aggregate_id)
+
 
 def test_red_same_trade_id_multistatus_legs_do_not_triple_count(conn):
     """ONE venue fill re-reported MATCHED -> MINED -> CONFIRMED (same trade_id,

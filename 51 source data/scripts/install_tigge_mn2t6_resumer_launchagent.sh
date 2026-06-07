@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/leofitz/.openclaw/workspace-venus/51 source data"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PLIST_PATH="$HOME/Library/LaunchAgents/com.openclaw.tigge.mn2t6.resumer.plist"
 LOG_PATH="$ROOT/logs/tigge_mn2t6_resumer.launchd.log"
 

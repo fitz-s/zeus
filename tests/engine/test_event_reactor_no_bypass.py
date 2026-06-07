@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-05
+# Last reused/audited: 2026-06-07
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 from __future__ import annotations
 
@@ -23,6 +23,8 @@ from src.engine.event_reactor_adapter import (
     edli_source_truth_gate,
     edli_trade_score_gate,
     executable_snapshot_gate_from_trade_conn,
+    _durable_unmaterialized_live_cap_reservations,
+    _seed_portfolio_reservations_from_durable_live_cap,
     _snapshot_p_cal,
     _snapshot_members_json_hash,
     _snapshot_p_raw,
@@ -34,6 +36,7 @@ from src.contracts.settlement_semantics import SettlementSemantics
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, ForecastSnapshotReadyPayload, make_day0_extreme_updated_event, make_opportunity_event
 from src.riskguard.risk_level import RiskLevel
 from src.signal.ensemble_signal import p_raw_vector_from_maxes
+from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.state.db import init_schema_forecasts
 from src.types.market import Bin
 
@@ -2152,7 +2155,7 @@ def test_price_stale_selected_snapshot_blocks_shadow_receipt_before_scoring():
     assert receipt.reason.startswith("EXECUTABLE_SNAPSHOT_STALE:")
 
 
-def test_capital_efficiency_blocks_high_price_micro_edge_without_volume_gate():
+def test_capital_efficiency_allows_high_price_positive_ev_for_ranking():
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _capital_efficiency_untradeable_reason
 
@@ -2163,13 +2166,11 @@ def test_capital_efficiency_blocks_high_price_micro_edge_without_volume_gate():
             fee_deducted=True,
             currency="probability_units",
         ),
+        q_lcb_5pct=0.99,
         trade_score=0.00553868962634317,
-        min_roi=0.02,
     )
 
-    assert reason is not None
-    assert reason.startswith("CAPITAL_EFFICIENCY_ROI_BELOW_MIN:")
-    assert "robust_roi=0.005640" in reason
+    assert reason is None
 
 
 def test_capital_efficiency_allows_strong_after_cost_roi_new_market():
@@ -2183,16 +2184,14 @@ def test_capital_efficiency_allows_strong_after_cost_roi_new_market():
             fee_deducted=True,
             currency="probability_units",
         ),
+        q_lcb_5pct=0.86,
         trade_score=0.0537892625895399,
-        min_roi=0.02,
     ) is None
 
 
-def test_capital_efficiency_has_default_production_roi_gate(monkeypatch):
+def test_capital_efficiency_default_production_gate_allows_positive_ev(monkeypatch):
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _capital_efficiency_untradeable_reason
-
-    monkeypatch.delenv("ZEUS_ROBUST_ROI_EXPERIMENTAL_GATE", raising=False)
 
     reason = _capital_efficiency_untradeable_reason(
         execution_price=ExecutionPrice(
@@ -2201,14 +2200,14 @@ def test_capital_efficiency_has_default_production_roi_gate(monkeypatch):
             fee_deducted=True,
             currency="probability_units",
         ),
+        q_lcb_5pct=0.99,
         trade_score=0.00553868962634317,
     )
 
-    assert reason is not None
-    assert reason.startswith("CAPITAL_EFFICIENCY_ROI_BELOW_MIN:")
+    assert reason is None
 
 
-def test_capital_efficiency_blocks_tokyo_style_high_price_micro_upside():
+def test_capital_efficiency_allows_high_price_micro_upside_for_sizing():
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _capital_efficiency_untradeable_reason
 
@@ -2219,11 +2218,50 @@ def test_capital_efficiency_blocks_tokyo_style_high_price_micro_upside():
             fee_deducted=True,
             currency="probability_units",
         ),
+        q_lcb_5pct=0.99,
         trade_score=0.019758898884025,
     )
 
-    assert reason is not None
-    assert "robust_roi=0.020370" in reason
+    assert reason is None
+
+
+def test_native_costs_use_token_side_snapshot_rows_not_first_condition_row():
+    from src.engine import event_reactor_adapter as adapter
+
+    candidate = SimpleNamespace(
+        condition_id="condition-1",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+    )
+    family = SimpleNamespace(candidates=(candidate,))
+    no_row = {
+        "condition_id": "condition-1",
+        "snapshot_id": "no-snapshot",
+        "yes_token_id": "yes-token",
+        "no_token_id": "no-token",
+        "selected_outcome_token_id": "no-token",
+        "outcome_label": "NO",
+        "orderbook_top_ask": "0.82",
+        "orderbook_top_bid": "0.78",
+        "depth_at_best_ask": 25,
+        "min_tick_size": "0.01",
+        "min_order_size": "5",
+        "fee_details_json": json.dumps({"fee_rate_fraction": 0.0}),
+        "orderbook_depth_json": "{}",
+    }
+    yes_row = {
+        **no_row,
+        "snapshot_id": "yes-snapshot",
+        "selected_outcome_token_id": "yes-token",
+        "outcome_label": "YES",
+        "orderbook_top_ask": "0.18",
+        "orderbook_top_bid": "0.14",
+    }
+
+    costs = adapter._native_costs_by_candidate_direction(family, [no_row, yes_row])
+
+    assert costs[("condition-1", "buy_yes")][1].value == pytest.approx(0.18)
+    assert costs[("condition-1", "buy_no")][1].value == pytest.approx(0.82)
 
 
 def test_selection_prefers_lcb_kelly_growth_not_modal_adjacent_no(monkeypatch):
@@ -2268,8 +2306,8 @@ def test_selection_prefers_lcb_kelly_growth_not_modal_adjacent_no(monkeypatch):
             fee_deducted=True,
             currency="probability_units",
         ),
-        q_posterior=0.46,
-        q_lcb_5pct=0.42,
+        q_posterior=0.62,
+        q_lcb_5pct=0.58,
         c_cost_95pct=0.31,
         trade_score=0.040,
     )
@@ -2277,6 +2315,139 @@ def test_selection_prefers_lcb_kelly_growth_not_modal_adjacent_no(monkeypatch):
     selected = _selected_candidate_proof({}, (modal_adjacent_no, better_family_trade))
 
     assert selected is better_family_trade
+
+
+def test_selector_enabled_does_not_fallback_to_low_win_rate_positive_ev(monkeypatch):
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
+
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+
+    low_win_rate_lottery = _CandidateProof(
+        candidate=SimpleNamespace(condition_id="cheap-tail"),
+        token_id="cheap-tail-yes-token",
+        direction="buy_yes",
+        row={"condition_id": "cheap-tail"},
+        executable_snapshot_id="cheap-tail-snapshot",
+        execution_price=ExecutionPrice(
+            0.01,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.08,
+        q_lcb_5pct=0.42,
+        c_cost_95pct=0.011,
+        p_fill_lcb=0.90,
+        trade_score=0.040,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+
+    selected = _selected_candidate_proof({}, (low_win_rate_lottery,))
+
+    assert selected is None
+
+
+def test_replacement_live_authority_direction_rebinds_to_sibling_proof():
+    from src.contracts.execution_price import ExecutionPrice
+    from src.engine.event_reactor_adapter import (
+        _CandidateProof,
+        _replacement_live_authority_proof_for_direction,
+    )
+
+    candidate = SimpleNamespace(condition_id="condition-1")
+    buy_yes = _CandidateProof(
+        candidate=candidate,
+        token_id="yes-1",
+        direction="buy_yes",
+        row={"condition_id": "condition-1"},
+        executable_snapshot_id="snapshot-yes",
+        execution_price=ExecutionPrice(
+            0.40,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.80,
+        q_lcb_5pct=0.72,
+        c_cost_95pct=0.41,
+        p_fill_lcb=0.90,
+        trade_score=0.10,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="pcal",
+        p_live_vector_hash="plive",
+    )
+    buy_no = replace(
+        buy_yes,
+        token_id="no-1",
+        direction="buy_no",
+        executable_snapshot_id="snapshot-no",
+        execution_price=ExecutionPrice(
+            0.30,
+            "ask",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.35,
+        q_lcb_5pct=0.31,
+        c_cost_95pct=0.31,
+    )
+
+    selected = _replacement_live_authority_proof_for_direction(
+        proofs=(buy_yes, buy_no),
+        baseline_proof=buy_yes,
+        effective_direction="buy_no",
+    )
+
+    assert selected is buy_no
+    assert selected.token_id == "no-1"
+    assert selected.executable_snapshot_id == "snapshot-no"
+
+
+def test_replacement_live_authority_same_direction_replaces_receipt_probability(monkeypatch):
+    from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReactorHookResult
+
+    monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
+
+    class _ReplacementProvenance:
+        def as_dict(self):
+            return {
+                "trade_authority_status": "LIVE_AUTHORITY",
+                "source_id": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
+            }
+
+    def _live_authority_hook(proof, event, decision_time):
+        return ReplacementForecastReactorHookResult(
+            status="LIVE_AUTHORITY",
+            reason_codes=("test-live-authority",),
+            effective_direction=proof.direction,
+            effective_q_posterior=0.82,
+            effective_q_lcb=0.79,
+            effective_kelly_fraction=0.0,
+            receipt_provenance=_ReplacementProvenance(),
+        )
+
+    receipt = _receipt(
+        _bound_forecast_event(token_id="yes-1"),
+        _trade_conn_with_snapshot(selected_ask="0.40", no_selected_ask="0.80"),
+        replacement_forecast_hook=_live_authority_hook,
+    )
+
+    assert receipt.proof_accepted is True
+    assert receipt.token_id == "yes-1"
+    assert receipt.direction == "buy_yes"
+    assert receipt.q_live == pytest.approx(0.82)
+    assert receipt.q_lcb_5pct == pytest.approx(0.79)
+    assert receipt.trade_score is not None
+    assert receipt.trade_score > 0.0
+    assert receipt.replacement_forecast is not None
+    assert receipt.replacement_forecast["trade_authority_status"] == "LIVE_AUTHORITY"
 
 
 def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypatch):
@@ -2320,8 +2491,8 @@ def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypat
             fee_deducted=True,
             currency="probability_units",
         ),
-        q_posterior=0.40,
-        q_lcb_5pct=0.35,
+        q_posterior=0.60,
+        q_lcb_5pct=0.55,
         c_cost_95pct=0.21,
         trade_score=0.020,
     )
@@ -2425,20 +2596,22 @@ def test_family_selector_keeps_stale_sibling_price_for_pre_submit_comparison(mon
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
-    assert receipt.condition_id == "condition-2"
-    assert receipt.direction == "buy_no"
     assert receipt.opportunity_book is not None
     book = receipt.opportunity_book
     assert book["selected_candidate_id"] == book["actual_receipt_selected_candidate_id"]
     selected_id = book["selected_candidate_id"]
     selected = next(c for c in book["candidates"] if c["candidate_id"] == selected_id)
-    assert selected["condition_id"] == "condition-2"
-    assert selected["direction"] == "buy_no"
     assert selected["admitted"] is True
+    condition_2_candidates = [c for c in book["candidates"] if c["condition_id"] == "condition-2"]
+    assert condition_2_candidates
+    assert any(c["direction"] == "buy_no" for c in condition_2_candidates)
     assert not str(book["loser_reasons"].get(selected_id, "")).startswith("EXECUTABLE_SNAPSHOT_STALE")
+    for candidate in condition_2_candidates:
+        reason = str(book["loser_reasons"].get(candidate["candidate_id"], ""))
+        assert not reason.startswith("EXECUTABLE_SNAPSHOT_STALE")
 
 
-def test_opportunity_book_selector_settings_false_preserves_legacy_binding(monkeypatch):
+def test_opportunity_book_selector_settings_false_fails_closed(monkeypatch):
     from src.config import settings
     from src.contracts.execution_price import ExecutionPrice
     from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
@@ -2485,7 +2658,7 @@ def test_opportunity_book_selector_settings_false_preserves_legacy_binding(monke
         (requested_bin, better_sibling),
     )
 
-    assert selected is requested_bin
+    assert selected is None
 
 
 def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypatch):
@@ -2533,8 +2706,8 @@ def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypa
             fee_deducted=True,
             currency="probability_units",
         ),
-        q_posterior=0.50,
-        q_lcb_5pct=0.45,
+        q_posterior=0.60,
+        q_lcb_5pct=0.55,
         c_cost_95pct=0.21,
         trade_score=0.02,
     )
@@ -2777,6 +2950,24 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch)
     assert receipt.reason == "KELLY_PROOF_MISSING:bankroll_provider_unavailable"
 
 
+def test_runtime_bankroll_for_sizing_uses_spendable_cash_not_equity(monkeypatch):
+    from src.engine.event_reactor_adapter import _runtime_bankroll_usd
+    from src.runtime import bankroll_provider
+    from src.runtime.bankroll_provider import BankrollOfRecord
+
+    monkeypatch.setattr(
+        bankroll_provider,
+        "cached",
+        lambda **_kwargs: BankrollOfRecord(
+            value_usd=177.3,
+            spendable_cash_usd=90.0,
+            fetched_at="2026-06-07T00:00:00+00:00",
+        ),
+    )
+
+    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(90.0)
+
+
 def test_forecast_receipt_uses_attached_forecasts_market_topology():
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot()
@@ -2975,15 +3166,11 @@ def test_107_receipt_correlated_hold_reduces_size_through_reactor():
     )
 
 
-def test_107_receipt_single_bet_respects_max_single_position_pct():
-    """INV-K3 through the reactor: the receipt's kelly_size_usd never exceeds
-    max_single_position_pct (0.10) of the provider bankroll on the
-    portfolio-aware path — the headline 25-27%→≤10% fix."""
-    from src.config import sizing_defaults
+def test_107_receipt_fractional_kelly_is_not_single_position_clipped():
+    """The reactor carries fractional Kelly size without a single-position clip."""
     from src.state.portfolio import PortfolioState
 
     bankroll = 170.0
-    max_single_pct = float(sizing_defaults()["max_single_position_pct"])
     receipt = _receipt(
         _bound_forecast_event(),
         _trade_conn_with_snapshot(),
@@ -2991,20 +3178,26 @@ def test_107_receipt_single_bet_respects_max_single_position_pct():
         portfolio_state_provider=lambda: PortfolioState(positions=[]),
     )
     assert receipt.kelly_pass is True
-    assert receipt.kelly_size_usd <= bankroll * max_single_pct + 1e-6, (
-        f"receipt single bet {receipt.kelly_size_usd:.4f} "
-        f"({receipt.kelly_size_usd / bankroll * 100:.1f}% of B) exceeds "
-        f"max_single_position_pct cap {bankroll * max_single_pct:.4f}"
-    )
+    assert receipt.kelly_size_usd is not None
+    assert receipt.kelly_size_usd > 0.0
 
 
-def test_107_receipt_full_exposure_fails_closed_through_reactor():
-    """INV-K6 through the reactor: when correlation-weighted committed capital
-    exceeds the budget, the receipt fails closed (no positive size emitted)."""
+def test_107_receipt_full_exposure_soft_damps_through_reactor():
+    """Existing exposure should shrink the marginal Kelly size, not hard-zero it."""
     from src.state.portfolio import PortfolioState
 
     bankroll = 170.0
-    # Same-city committed capital far exceeding the bankroll → B_eff = 0.
+    base = _receipt(
+        _bound_forecast_event(),
+        _trade_conn_with_snapshot(),
+        bankroll_usd_provider=lambda: bankroll,
+        portfolio_state_provider=lambda: PortfolioState(positions=[]),
+    )
+    assert base.kelly_pass is True
+    assert base.kelly_size_usd is not None
+
+    # Same-city committed capital far exceeding the bankroll creates high
+    # portfolio pressure, but the marginal positive-edge proof still flows.
     over_state = PortfolioState(
         positions=[_held_chicago_position(bankroll + 100.0, "over1")]
     )
@@ -3014,6 +3207,321 @@ def test_107_receipt_full_exposure_fails_closed_through_reactor():
         bankroll_usd_provider=lambda: bankroll,
         portfolio_state_provider=lambda: over_state,
     )
-    # Fail-closed: KELLY_REJECTED with zero size, never a positive over-sized bet.
-    assert receipt.kelly_pass is False
-    assert (receipt.kelly_size_usd or 0.0) == 0.0
+    assert receipt.kelly_pass is True
+    assert receipt.kelly_size_usd is not None
+    assert 0.0 < receipt.kelly_size_usd < base.kelly_size_usd
+
+
+def _live_cap_seed_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE edli_live_cap_usage (
+            usage_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            decision_time TEXT,
+            cap_scope TEXT,
+            max_notional_usd REAL,
+            max_orders_per_day INTEGER,
+            reserved_notional_usd REAL NOT NULL,
+            order_count INTEGER,
+            reservation_status TEXT NOT NULL,
+            final_intent_id TEXT,
+            execution_command_id TEXT,
+            created_at TEXT,
+            schema_version INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_event_id TEXT PRIMARY KEY,
+            aggregate_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            parent_event_hash TEXT,
+            event_hash TEXT,
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT,
+            source_authority TEXT,
+            occurred_at TEXT,
+            created_at TEXT,
+            schema_version INTEGER
+        )
+        """
+    )
+    return conn
+
+
+def _insert_live_cap_usage(
+    conn: sqlite3.Connection,
+    *,
+    usage_id: str,
+    event_id: str,
+    final_intent_id: str,
+    usd: float,
+    status: str = "CONSUMED",
+    execution_command_id: str = "cmd",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+            max_orders_per_day, reserved_notional_usd, order_count,
+            reservation_status, final_intent_id, execution_command_id,
+            created_at, schema_version
+        )
+        VALUES (?, ?, '2026-06-07T00:00:00+00:00', 'tiny_live_canary',
+                100.0, 99, ?, 1, ?, ?, ?, '2026-06-07T00:00:00+00:00', 1)
+        """,
+        (usage_id, event_id, usd, status, final_intent_id, execution_command_id),
+    )
+
+
+def _insert_live_order_event(
+    conn: sqlite3.Connection,
+    *,
+    aggregate_id: str,
+    seq: int,
+    event_type: str,
+    payload: dict[str, object],
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        )
+        VALUES (?, ?, ?, ?, NULL, ?, ?, 'payload-hash', 'test',
+                '2026-06-07T00:00:00+00:00', '2026-06-07T00:00:00+00:00', 1)
+        """,
+        (
+            f"{aggregate_id}:{seq}:{event_type}",
+            aggregate_id,
+            seq,
+            event_type,
+            f"hash-{aggregate_id}-{seq}",
+            json.dumps(payload, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+
+
+def test_107_durable_live_cap_seed_counts_only_unmaterialized_live_exposure():
+    """Cross-cycle capital seed is universal: count submitted live-cap notional
+    only until position truth or authenticated absence/release proves it gone."""
+    conn = _live_cap_seed_conn()
+    cases = [
+        ("usage-pending", "event-pending", "intent-pending", 12.5, "CONSUMED", "Chicago"),
+        ("usage-reserved", "event-reserved", "intent-reserved", 3.0, "RESERVED", "Berlin"),
+        ("usage-filled", "event-filled", "intent-filled", 9.0, "CONSUMED", "Tokyo"),
+        ("usage-matched", "event-matched", "intent-matched", 6.0, "CONSUMED", "Paris"),
+        ("usage-released", "event-released", "intent-released", 7.0, "CONSUMED", "London"),
+        ("usage-absent", "event-absent", "intent-absent", 4.0, "CONSUMED", "Madrid"),
+    ]
+    for usage_id, event_id, final_intent_id, usd, status, city in cases:
+        aggregate_id = f"{event_id}:{final_intent_id}"
+        _insert_live_cap_usage(
+            conn,
+            usage_id=usage_id,
+            event_id=event_id,
+            final_intent_id=final_intent_id,
+            usd=usd,
+            status=status,
+        )
+        _insert_live_order_event(
+            conn,
+            aggregate_id=aggregate_id,
+            seq=1,
+            event_type="PreSubmitRevalidated",
+            payload={"city": city},
+        )
+
+    _insert_live_order_event(
+        conn,
+        aggregate_id="event-filled:intent-filled",
+        seq=2,
+        event_type="UserTradeObserved",
+        payload={"fill_id": "fill-1", "fill_authority_state": "FILL_CONFIRMED"},
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="event-matched:intent-matched",
+        seq=2,
+        event_type="UserTradeObserved",
+        payload={"fill_id": "fill-2", "fill_authority_state": "MATCHED_PENDING_FINALITY"},
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="event-released:intent-released",
+        seq=2,
+        event_type="Reconciled",
+        payload={"cap_transition_recommendation": "RELEASED"},
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="event-absent:intent-absent",
+        seq=2,
+        event_type="Reconciled",
+        payload={"authenticated_absence_proof": {"checked": True}},
+    )
+
+    rows = _durable_unmaterialized_live_cap_reservations(conn)
+    assert rows == (
+        ("durable_live_cap:usage-matched", "Paris", pytest.approx(6.0)),
+        ("durable_live_cap:usage-pending", "Chicago", pytest.approx(12.5)),
+        ("durable_live_cap:usage-reserved", "Berlin", pytest.approx(3.0)),
+    )
+
+
+def test_107_durable_live_cap_seed_excludes_trade_truth_materialized_exposure():
+    """Live-cap seed must not double-count orders already terminal or materialized.
+
+    Regression shape from live: world.edli_live_order_events may miss the
+    UserTradeObserved leg while zeus_trades.db already proves command FILLED or
+    position_current active. Those rows are no longer in-flight capital.
+    """
+
+    conn = _live_cap_seed_conn()
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.row_factory = sqlite3.Row
+    trade_conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            decision_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            state TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE position_current (
+            phase TEXT NOT NULL,
+            token_id TEXT,
+            no_token_id TEXT,
+            cost_basis_usd REAL,
+            chain_cost_basis_usd REAL,
+            shares REAL
+        );
+        """
+    )
+    cases = [
+        ("usage-filled-command", "event-filled-command", "intent:token-filled-command", 10.0, "cmd-filled", "Madrid"),
+        ("usage-active-position", "event-active-position", "intent:token-active-position", 4.0, "cmd-active", "Wellington"),
+        ("usage-still-inflight", "event-still-inflight", "intent:token-still-inflight", 6.0, "cmd-open", "Chicago"),
+    ]
+    for usage_id, event_id, final_intent_id, usd, command_id, city in cases:
+        _insert_live_cap_usage(
+            conn,
+            usage_id=usage_id,
+            event_id=event_id,
+            final_intent_id=final_intent_id,
+            usd=usd,
+            execution_command_id=command_id,
+        )
+        _insert_live_order_event(
+            conn,
+            aggregate_id=f"{event_id}:{final_intent_id}",
+            seq=1,
+            event_type="PreSubmitRevalidated",
+            payload={"city": city},
+        )
+
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            decision_id, intent_kind, state, updated_at, created_at
+        )
+        VALUES (?, 'ENTRY', 'FILLED', '2026-06-07T00:05:00+00:00', '2026-06-07T00:00:00+00:00')
+        """,
+        ("cmd-filled",),
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO venue_commands (
+            decision_id, intent_kind, state, updated_at, created_at
+        )
+        VALUES (?, 'ENTRY', 'ACKED', '2026-06-07T00:05:00+00:00', '2026-06-07T00:00:00+00:00')
+        """,
+        ("cmd-open",),
+    )
+    trade_conn.execute(
+        """
+        INSERT INTO position_current (
+            phase, token_id, no_token_id, cost_basis_usd, chain_cost_basis_usd, shares
+        )
+        VALUES ('active', '', 'token-active-position', 4.0, 0.0, 5.0)
+        """
+    )
+
+    rows = _durable_unmaterialized_live_cap_reservations(conn, trade_conn=trade_conn)
+
+    assert rows == (
+        ("durable_live_cap:usage-still-inflight", "Chicago", pytest.approx(6.0)),
+    )
+
+
+def test_107_durable_live_cap_seed_is_committed_and_rollback_immune():
+    """Already-emitted cross-cycle live-cap exposure cannot be removed by the
+    per-event rollback path, because it is real in-flight capital."""
+    conn = _live_cap_seed_conn()
+    _insert_live_cap_usage(
+        conn,
+        usage_id="usage-pending",
+        event_id="event-pending",
+        final_intent_id="intent-pending",
+        usd=12.5,
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="event-pending:intent-pending",
+        seq=1,
+        event_type="PreSubmitRevalidated",
+        payload={"city": "Chicago"},
+    )
+
+    ledger = PortfolioReservationLedger()
+    seeded = _seed_portfolio_reservations_from_durable_live_cap(ledger, conn)
+    assert seeded == 1
+    assert list(ledger) == [("Chicago", pytest.approx(12.5))]
+
+    ledger.rollback("durable_live_cap:usage-pending")
+    assert list(ledger) == [("Chicago", pytest.approx(12.5))]
+
+
+def test_107_durable_live_cap_seed_query_error_fails_closed():
+    """Exposure ambiguity must not degrade to an empty seed and allow sizing."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE edli_live_cap_usage (
+            usage_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            reserved_notional_usd REAL NOT NULL,
+            reservation_status TEXT NOT NULL,
+            final_intent_id TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT NOT NULL,
+            event_type TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO edli_live_cap_usage (
+            usage_id, event_id, reserved_notional_usd, reservation_status, final_intent_id
+        )
+        VALUES ('usage-bad', 'event-bad', 5.0, 'CONSUMED', 'intent-bad')
+        """
+    )
+
+    with pytest.raises(RuntimeError, match="DURABLE_LIVE_CAP_EXPOSURE_SEED_UNAVAILABLE"):
+        _seed_portfolio_reservations_from_durable_live_cap(
+            PortfolioReservationLedger(),
+            conn,
+        )

@@ -159,7 +159,7 @@ def main() -> int:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_regions_mx2t6"),
+        default=Path(__file__).resolve().parents[1] / "raw" / "tigge_ecmwf_ens_regions_mx2t6",
         help="Root directory to scan recursively for *.grib",
     )
     parser.add_argument("--path", action="append", type=Path, default=[], help="Extra explicit GRIB path(s)")

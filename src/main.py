@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import faulthandler
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +70,8 @@ logger = logging.getLogger("zeus")
 # Cross-mode lock: prevents two discovery modes from reading/writing portfolio concurrently
 _cycle_lock = threading.Lock()
 _market_discovery_lock = threading.Lock()
+_market_substrate_refresh_lock = threading.Lock()
+_market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
@@ -124,6 +127,10 @@ EDLI_STAGE_RISK_REASON_PREFIXES = (
 _EDLI_SHADOW_DEFERRED_REASON_PREFIXES = (
     "EDLI_STAGE_SOURCE_HEALTH_STALE",
     "EDLI_STAGE_SOURCE_HEALTH_MISSING",
+    "EDLI_STAGE_STATUS_SUMMARY_STALE",
+    "EDLI_STAGE_STATUS_SUMMARY_MISSING",
+)
+_EDLI_LIVE_CANARY_BOOT_DEFERRED_REASON_PREFIXES = (
     "EDLI_STAGE_STATUS_SUMMARY_STALE",
     "EDLI_STAGE_STATUS_SUMMARY_MISSING",
 )
@@ -809,9 +816,34 @@ def _assert_edli_stage_readiness(edli_cfg: dict) -> EdliStageReadiness:
                 )
         return report
     if stage == "edli_live_canary":
-        risk_reasons = [reason for reason in report.reasons if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
-        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} or risk_reasons:
-            raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:" + ",".join(report.reasons or (report.status,)))
+        deferred = [
+            reason for reason in (report.reasons or ())
+            if reason.startswith(_EDLI_LIVE_CANARY_BOOT_DEFERRED_REASON_PREFIXES)
+        ]
+        blocking = [
+            reason for reason in (report.reasons or ())
+            if not reason.startswith(_EDLI_LIVE_CANARY_BOOT_DEFERRED_REASON_PREFIXES)
+        ]
+        risk_reasons = [reason for reason in blocking if reason.startswith(EDLI_STAGE_RISK_REASON_PREFIXES)]
+        if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING} and blocking:
+            raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:" + ",".join(blocking or (report.status,)))
+        if risk_reasons:
+            raise RuntimeError("EDLI_LIVE_CANARY_READINESS_FAIL:" + ",".join(risk_reasons))
+        if deferred:
+            logger.warning(
+                "EDLI live-canary boot: status_summary freshness is deferred "
+                "until the scheduler emits its first genuine cycle pulse: %s",
+                ", ".join(deferred),
+            )
+            if report.status not in {EDLI_STAGE_PASS, EDLI_STAGE_WAITING}:
+                return EdliStageReadiness(
+                    stage=stage,
+                    status=EDLI_STAGE_WAITING,
+                    live_entries_allowed=True,
+                    submit_allowed=True,
+                    scaleout_allowed=False,
+                    reasons=tuple(deferred),
+                )
         if report.submit_allowed is not True:
             raise RuntimeError("EDLI_LIVE_CANARY_SUBMIT_NOT_ALLOWED")
         return report
@@ -1079,6 +1111,7 @@ def _assert_live_execution_mode_contract(edli_cfg: dict) -> str:
                 "edli_user_channel_reconcile_enabled",
                 "real_order_submit_enabled",
                 "live_canary_enabled",
+                "taker_fok_fak_live_enabled",
                 "durable_submit_outbox_enabled",
             ),
         )
@@ -1926,6 +1959,18 @@ def _edli_reactor_pending_backlog_exists(*, conn_factory=None) -> bool:
             conn.close()
 
 
+def _ws_gap_m5_reconcile_required() -> bool:
+    """Return True when venue maintenance is required to clear the WS submit latch."""
+
+    try:
+        from src.control.ws_gap_guard import summary as _ws_gap_summary
+
+        return bool(_ws_gap_summary().get("m5_reconcile_required", False))
+    except Exception as exc:  # noqa: BLE001 - heartbeat maintenance must stay alive.
+        logger.warning("WS gap M5 requirement check failed closed: %r", exc)
+        return False
+
+
 def _configure_external_venue_heartbeat_supervisor_if_needed() -> None:
     from src.control.heartbeat_supervisor import (
         ExternalHeartbeatSupervisor,
@@ -2130,10 +2175,11 @@ def _run_venue_background_maintenance_once(adapter=None) -> dict:
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
         return {"status": "adapter_unavailable"}
+    reconcile_findings_refresh = _refresh_reconcile_findings_if_required(active_adapter)
     return {
         "status": "ok",
         "ws_gap_reconcile": _run_ws_gap_reconcile_if_required(active_adapter),
-        "reconcile_findings_refresh": _refresh_reconcile_findings_if_required(active_adapter),
+        "reconcile_findings_refresh": reconcile_findings_refresh,
         "collateral_refreshed": _refresh_global_collateral_snapshot_if_due(active_adapter),
     }
 
@@ -2173,13 +2219,16 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     if active_adapter is None:
         return "adapter_unavailable"
     now = datetime.now(timezone.utc)
+    m5_reconcile_required = _ws_gap_m5_reconcile_required()
     if (
+        not m5_reconcile_required
+        and
         _last_venue_background_maintenance_attempt_at is not None
         and (now - _last_venue_background_maintenance_attempt_at).total_seconds()
         < VENUE_BACKGROUND_MAINTENANCE_SECONDS
     ):
         return "throttled"
-    if _edli_reactor_pending_backlog_exists():
+    if _edli_reactor_pending_backlog_exists() and not m5_reconcile_required:
         _last_venue_background_maintenance_attempt_at = now
         return "deferred_edli_pending_backlog"
     if not _venue_background_maintenance_lock.acquire(blocking=False):
@@ -2199,6 +2248,19 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     )
     thread.start()
     return "started"
+
+
+def _start_venue_background_maintenance_after_reactor_if_required() -> str:
+    """Deterministically retry M5 venue maintenance after the reactor releases."""
+
+    if not _ws_gap_m5_reconcile_required():
+        return "not_required"
+    try:
+        adapter = _ensure_venue_read_side_adapter()
+    except Exception as exc:  # noqa: BLE001 - post-cycle maintenance must not crash EDLI.
+        logger.warning("M5 post-reactor maintenance adapter unavailable: %s", exc)
+        return "adapter_unavailable"
+    return _start_venue_background_maintenance_async(adapter)
 
 
 _user_channel_ingestor = None
@@ -2268,9 +2330,6 @@ def _set_edli_redecision_boot_token(token: str) -> None:
 USER_CHANNEL_REQUIRED_ENV_VARS = (
     "ZEUS_USER_CHANNEL_WS_ENABLED",
     "POLYMARKET_USER_WS_CONDITION_IDS",
-    "POLYMARKET_API_KEY",
-    "POLYMARKET_API_SECRET",
-    "POLYMARKET_API_PASSPHRASE",
 )
 
 
@@ -2429,8 +2488,10 @@ def _start_user_channel_ingestor_if_enabled() -> None:
 
     Disabled by default so M3 adds no live WebSocket side effect until an
     operator explicitly enables `ZEUS_USER_CHANNEL_WS_ENABLED=1` and supplies
-    condition IDs plus L2 API credentials. If enabled but misconfigured, the
-    WS guard records an auth/config gap so new submits fail closed.
+    condition IDs or enables condition auto-derive. L2 API credentials come
+    from the Polymarket adapter's signer-bound SDK client, not static env. If
+    enabled but misconfigured, the WS guard records an auth/config gap so new
+    submits fail closed.
 
     Live-blockers 2026-05-01: when the WS is NOT enabled (or required env
     vars are missing) we now emit a single CLEAR WARNING line listing every
@@ -2499,8 +2560,8 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     _WS_RETRY_BASE_SECONDS = 5
     _WS_RETRY_MAX_SECONDS = 300  # cap at 5 minutes
 
-    # Boot-time transient failures from create_or_derive_api_key() (e.g., Polymarket
-    # /auth/api-key returning 400) used to latch AUTH_FAILED forever because the
+    # Boot-time transient failures from signer-bound L2 credential derivation
+    # used to latch AUTH_FAILED forever because the
     # creds fetch lived outside the retry loop with a bare `return` on exception —
     # no thread ever started, ws_gap_guard never received a SUBSCRIBED message,
     # daemon stayed in reduce_only=True until the next SIGTERM.
@@ -2539,8 +2600,8 @@ def _start_user_channel_ingestor_if_enabled() -> None:
     def _build_ingestor() -> "PolymarketUserChannelIngestor | None":
         global _user_channel_ingestor
         # Invalidate the adapter's memoized SDK client so this attempt forces a
-        # fresh create_or_derive_api_key() rather than reusing a cached client
-        # whose creds were None from a prior failed boot
+        # fresh signer-bound L2 credential derivation rather than reusing a cached
+        # client whose creds were None from a prior failed boot
         # (codereview-may19 / Codex P1: src/venue/polymarket_v2_adapter.py:286
         # memoizes self._client; without reset, every retry sees the same bad
         # creds and the loop never recovers).
@@ -2556,7 +2617,7 @@ def _start_user_channel_ingestor_if_enabled() -> None:
             if sdk_creds is None:
                 raise RuntimeError(
                     "adapter._sdk_client().creds is None "
-                    "(create_or_derive_api_key() failed; likely transient /auth/api-key error)"
+                    "(signer-bound L2 credential derivation failed)"
                 )
             ws_auth = WSAuth(
                 api_key=sdk_creds.api_key,
@@ -2772,6 +2833,143 @@ def _pending_family_rows_for_refresh(world_conn, *, consumer_name: str):
     ).fetchall()
 
 
+def _condition_buy_sides_fresh(write_conn, condition_id: str, fresh_at_iso: str) -> bool:
+    rows = write_conn.execute(
+        """
+        SELECT yes_token_id, no_token_id, selected_outcome_token_id
+        FROM executable_market_snapshots
+        WHERE condition_id = ? AND freshness_deadline >= ?
+        ORDER BY captured_at DESC, snapshot_id DESC
+        """,
+        (condition_id, fresh_at_iso),
+    ).fetchall()
+    if not rows:
+        return False
+
+    yes_token_id = ""
+    no_token_id = ""
+    fresh_selected_tokens: set[str] = set()
+
+    def _cell(row, key: str, index: int) -> str:
+        try:
+            value = row[key] if hasattr(row, "keys") else row[index]
+        except (KeyError, IndexError, TypeError):
+            value = None
+        return str(value or "").strip()
+
+    for row in rows:
+        yes = _cell(row, "yes_token_id", 0)
+        no = _cell(row, "no_token_id", 1)
+        selected = _cell(row, "selected_outcome_token_id", 2)
+        if yes and not yes_token_id:
+            yes_token_id = yes
+        if no and not no_token_id:
+            no_token_id = no
+        if selected:
+            fresh_selected_tokens.add(selected)
+    if not yes_token_id or not no_token_id:
+        return False
+    return yes_token_id in fresh_selected_tokens and no_token_id in fresh_selected_tokens
+
+
+def _prune_fresh_market_outcomes_for_snapshot_refresh(
+    write_conn,
+    markets: list[dict],
+    *,
+    fresh_at_iso: str,
+) -> tuple[list[dict], int, int]:
+    pruned: list[dict] = []
+    fresh_conditions_skipped = 0
+    stale_conditions_submitted = 0
+    for market in markets:
+        stale_outcomes: list[dict] = []
+        for outcome in market.get("outcomes", []) or []:
+            if not isinstance(outcome, dict):
+                continue
+            cid = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            if cid and _condition_buy_sides_fresh(write_conn, cid, fresh_at_iso):
+                fresh_conditions_skipped += 1
+                continue
+            stale_outcomes.append(outcome)
+            stale_conditions_submitted += 1
+        if not stale_outcomes:
+            continue
+        cloned = dict(market)
+        cloned["outcomes"] = stale_outcomes
+        if "condition_ids" in cloned:
+            cloned["condition_ids"] = [
+                str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+                for outcome in stale_outcomes
+                if str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+            ]
+        pruned.append(cloned)
+    return pruned, fresh_conditions_skipped, stale_conditions_submitted
+
+
+def _gamma_lookup_deadline_for_snapshot_refresh(
+    *,
+    refresh_deadline: float,
+    refresh_budget_s: float,
+    snapshot_reserve_s: float,
+    cached_topology_count: int,
+) -> float:
+    del refresh_budget_s, cached_topology_count
+    return refresh_deadline - snapshot_reserve_s
+
+
+def _topology_lookup_deadline_for_snapshot_refresh(
+    *,
+    refresh_deadline: float,
+    refresh_budget_s: float,
+    snapshot_reserve_s: float,
+) -> float:
+    """Stop topology reconstruction early enough to attempt direct Gamma lookup."""
+
+    pre_capture_deadline = refresh_deadline - snapshot_reserve_s
+    gamma_min_slice_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "15.0")),
+    )
+    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
+    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s)
+    return max(refresh_deadline - refresh_budget_s, pre_capture_deadline - gamma_min_slice_s)
+
+
+def _snapshot_capture_budget_for_refresh(
+    *,
+    refresh_deadline: float,
+    snapshot_reserve_s: float,
+) -> float:
+    """Return the CLOB capture slice for pending-family snapshot refresh.
+
+    The warm job has two qualitatively different phases: cheap topology/cache
+    selection and price capture.  Live evidence showed the selection phase can
+    consume the full nominal refresh budget; passing the leftover 0.1s to CLOB
+    creates one-row "progress" while every pending family remains effectively
+    blocked.  The reserve is therefore a phase budget, not a leftover hint.
+    """
+
+    min_prefetch_window_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS", "0.75")),
+    )
+    target_prefetch_window_s = max(
+        min_prefetch_window_s,
+        float(os.environ.get("ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_TARGET_WINDOW_SECONDS", "2.0")),
+    )
+    # refresh_executable_market_substrate_snapshots internally reserves
+    # snapshot_reserve_s for the capture loop and admits /books only before that
+    # reserve starts. Passing exactly snapshot_reserve_s double-reserves the
+    # same phase and makes the batch prefetch deadline effectively immediate.
+    # The admission threshold is not enough as a budget: real scheduler/function
+    # overhead can burn milliseconds between budget construction and prefetch,
+    # making a nominal 0.750s window measure as "below 0.750s" and collapse back
+    # to serial /book reads. Keep prefetch as its own small phase budget.
+    min_budget_s = snapshot_reserve_s + target_prefetch_window_s
+    remaining_s = refresh_deadline - time.monotonic()
+    return max(min_budget_s, remaining_s)
+
+
 def _refresh_pending_family_snapshots(
     world_conn,
     forecasts_conn,
@@ -2814,16 +3012,67 @@ def _refresh_pending_family_snapshots(
         logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
         return {"status": "error", "reason": str(exc)}
 
+    from src.config import cities_by_name as _refresh_cities_by_name
+
+    def _refresh_family_text_key(value: object) -> str:
+        text = str(value or "").strip().lower()
+        return " ".join(text.replace("-", " ").replace("_", " ").split())
+
+    _refresh_city_alias_to_name: dict[str, str] = {}
+    for _city in _refresh_cities_by_name.values():
+        for _surface in (
+            _city.name,
+            *_city.aliases,
+            *_city.slug_names,
+        ):
+            _key = _refresh_family_text_key(_surface)
+            if _key:
+                _refresh_city_alias_to_name[_key] = _city.name
+
+    def _canonical_refresh_city_name(city: object) -> str:
+        raw = str(city or "").strip()
+        return _refresh_city_alias_to_name.get(_refresh_family_text_key(raw), raw)
+
+    def _canonical_refresh_metric(metric: object) -> str:
+        text = _refresh_family_text_key(metric)
+        if text in {"low", "lowest", "min", "minimum"} or text.startswith("lowest "):
+            return "low"
+        if text in {"high", "highest", "max", "maximum"} or text.startswith("highest "):
+            return "high"
+        return text
+
+    def _refresh_family_key(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
+        return (
+            _refresh_family_text_key(_canonical_refresh_city_name(city)),
+            str(target_date or "").strip(),
+            _canonical_refresh_metric(metric),
+        )
+
     families: list[tuple[str, str, str]] = []
     for row in pending_rows:
-        city = str(row[0] or "").strip()
+        city = _canonical_refresh_city_name(row[0])
         target_date = str(row[1] or "").strip()
-        metric = str(row[2] or "").strip()
+        metric = _canonical_refresh_metric(row[2])
         if city and target_date and metric:
             families.append((city, target_date, metric))
 
     if not families:
         return {"status": "no_pending_families"}
+
+    refresh_budget_s = max(
+        5.0,
+        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "29.0")),
+    )
+    refresh_deadline = time.monotonic() + refresh_budget_s
+    snapshot_reserve_s = min(
+        max(1.0, float(os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0"))),
+        max(0.1, refresh_budget_s - 0.1),
+    )
+    topology_deadline = _topology_lookup_deadline_for_snapshot_refresh(
+        refresh_deadline=refresh_deadline,
+        refresh_budget_s=refresh_budget_s,
+        snapshot_reserve_s=snapshot_reserve_s,
+    )
 
     # Staleness pre-filter REMOVED (STEP 4, consolidated timeliness fix): the
     # local lexicographic _drop_stale_families is now redundant. Strictly-past
@@ -2834,26 +3083,11 @@ def _refresh_pending_family_snapshots(
     # pending-event query above is the single source of families; it is sourced
     # from the same already-timeliness-filtered opportunity_events.
 
-    # A2 throughput (2026-05-31): cap per-cycle capture so a cycle COMPLETES fast.
-    # Each family's capture makes serial per-token order-book fetches (uncacheable,
-    # ~1s each); refreshing ALL pending families serially made cycles 10-30 min →
-    # process_pending never ran → 0 receipts. `families` is priority-ordered (query
-    # ORDER BY priority DESC, available_at ASC), so the highest-priority families are
-    # captured first; the remainder are picked up on subsequent cycles. The reactor's
-    # own proof_limit still bounds decisions; this bounds the venue-I/O per cycle.
-    # 2026-06-06: executable prices expire after 30s. The decoupled warmer must
-    # complete and commit before the reactor's next decision timestamp, not merely
-    # "eventually" refresh. Live evidence showed 16 families routinely hit the 25s
-    # time-box and committed after the reactor read, recreating
-    # EXECUTABLE_SNAPSHOT_STALE. Keep the per-tick venue-I/O slice small enough to
-    # finish inside the TTL; deferred families are retried on the next warm tick.
-    # 2026-06-05: prioritize newest target_date before applying the cap. Strictly
-    # stale pending rows can still exist in the processing ledger after Gamma no
-    # longer returns the market, and letting those rows spend the cap starves fresh
-    # family snapshots.
-    _FAMILY_REFRESH_CAP = 8
-    if len(families) > _FAMILY_REFRESH_CAP:
-        families = families[:_FAMILY_REFRESH_CAP]
+    # Throughput contract: never slice pending families by a fixed count. Live has
+    # hundreds of active weather families across time zones; a hard family cap lets
+    # a small prefix monopolise the freshness window. The wall-clock budget is the
+    # only per-tick bound, with a reserved CLOB capture slice so Gamma lookup cannot
+    # consume the whole tick and leave snapshot insertion at attempted=0.
 
     # Step 2: Cache-skip: for each family check whether ALL known condition_ids
     #         (from market_events topology) already have fresh snapshots.
@@ -2864,10 +3098,25 @@ def _refresh_pending_family_snapshots(
     cached_topology_markets: list[dict] = []
     cached_topology_families = 0
     cached_topology_incomplete = 0
+    topology_budget_exhausted = False
+    topology_deferred_families = 0
 
     write_conn = get_trade_connection(write_class="live")
     try:
-        for city, target_date, metric in families:
+        for index, (city, target_date, metric) in enumerate(families):
+            if time.monotonic() >= topology_deadline and (
+                cached_topology_markets or gamma_refresh_families
+            ):
+                topology_budget_exhausted = True
+                topology_deferred_families = len(families) - index
+                logger.info(
+                    "refresh_pending_family_snapshots: topology time-box hit after %d/%d "
+                    "families; reserving %.1fs for CLOB capture",
+                    index,
+                    len(families),
+                    snapshot_reserve_s,
+                )
+                break
             payload = {"city": city, "target_date": target_date, "metric": metric}
             topology_rows = _event_family_market_topology_rows(forecasts_conn, payload)
             if not topology_rows:
@@ -2880,21 +3129,22 @@ def _refresh_pending_family_snapshots(
                 # Still include: Gamma may discover bins not yet in topology.
                 gamma_refresh_families.append((city, target_date, metric))
                 continue
+            topology_rows = [
+                {
+                    **dict(trow),
+                    "city": city,
+                    "target_date": target_date,
+                    "temperature_metric": metric,
+                }
+                for trow in topology_rows
+            ]
 
             any_stale = False
             for trow in topology_rows:
                 cid = str(trow.get("condition_id") or "").strip()
                 if not cid:
                     continue
-                fresh = write_conn.execute(
-                    """
-                    SELECT 1 FROM executable_market_snapshots
-                    WHERE condition_id = ? AND freshness_deadline >= ?
-                    LIMIT 1
-                    """,
-                    (cid, now_iso),
-                ).fetchone()
-                if not fresh:
+                if not _condition_buy_sides_fresh(write_conn, cid, now_iso):
                     any_stale = True
                     break
 
@@ -2933,14 +3183,20 @@ def _refresh_pending_family_snapshots(
         #         Gamma calls (vs the background slug-pattern scanner which
         #         enumerates all 14 cities × all dates and is budget-capped).
         #         Uses the City's slug_names[0] for the slug fragment.
+        gamma_deadline = _gamma_lookup_deadline_for_snapshot_refresh(
+            refresh_deadline=refresh_deadline,
+            refresh_budget_s=refresh_budget_s,
+            snapshot_reserve_s=snapshot_reserve_s,
+            cached_topology_count=len(cached_topology_markets),
+        )
+        skipped_not_found = 0
         try:
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
             from datetime import date as _date_cls
-            from src.config import cities_by_name as _cities_by_name
             from src.data.market_scanner import (
                 _gamma_get,
                 _parse_and_persist_weather_events,
             )
-            _cbm = _cities_by_name
 
             def _date_to_slug_fragment(date_str: str) -> str:
                 d = _date_cls.fromisoformat(date_str)
@@ -2948,27 +3204,25 @@ def _refresh_pending_family_snapshots(
 
             raw_events_seen: set = set()
             raw_events_collected: list[dict] = []
-            # Time-box the per-family Gamma fetch (2026-06-04 reactor-overrun antibody):
-            # each _gamma_get has up to a 10s timeout; 16 families x slow Gamma can blow
-            # past the 60s reactor interval ("max running instances reached"), so the
-            # cycle never reaches FSR-emit + process_pending -> 0 receipts. Bound the
-            # refresh phase to a deadline that ALWAYS leaves budget for the downstream
-            # emit+process; uncaptured families are picked up next cycle (priority-ordered).
-            _refresh_budget_s = max(5.0, float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "15.0")))
-            _refresh_deadline = time.monotonic() + _refresh_budget_s
-            _refreshed_n = 0
+            gamma_slug_attempted = 0
+            gamma_slug_empty = 0
+            gamma_slug_http_non_200 = 0
+            gamma_slug_failed = 0
+            gamma_slug_invalid = 0
+            gamma_slug_timebox_unattempted = 0
+            gamma_attempted_family_keys: set[tuple[str, str, str]] = set()
+            gamma_empty_family_keys: set[tuple[str, str, str]] = set()
+
+            gamma_jobs: list[dict] = []
             for fam_city, fam_date, fam_metric in gamma_refresh_families:
-                if time.monotonic() > _refresh_deadline:
-                    logger.info(
-                        "refresh_pending_family_snapshots: time-box %.0fs hit after %d/%d "
-                        "families; deferring rest to next cycle (leaves budget for emit+process)",
-                        _refresh_budget_s, _refreshed_n, len(gamma_refresh_families),
-                    )
-                    break
-                _refreshed_n += 1
-                city_obj = _cbm.get(fam_city)
+                family_key = _refresh_family_key(fam_city, fam_date, fam_metric)
+                if time.monotonic() > gamma_deadline:
+                    gamma_slug_timebox_unattempted += 1
+                    continue
+                city_obj = _refresh_cities_by_name.get(_canonical_refresh_city_name(fam_city))
                 if city_obj is None:
-                    logger.warning(
+                    gamma_slug_invalid += 1
+                    logger.info(
                         "refresh_pending_family_snapshots: city %r not in config, skipping",
                         fam_city,
                     )
@@ -2977,41 +3231,121 @@ def _refresh_pending_family_snapshots(
                 try:
                     slug_date = _date_to_slug_fragment(fam_date)
                 except (ValueError, TypeError):
-                    logger.warning(
+                    gamma_slug_invalid += 1
+                    logger.info(
                         "refresh_pending_family_snapshots: invalid date %r for %s, skipping",
                         fam_date, fam_city,
                     )
                     continue
                 prefix = "lowest" if fam_metric == "low" else "highest"
                 slug = f"{prefix}-temperature-in-{slug_fragment}-on-{slug_date}"
-                _gamma_timeout = max(
-                    1.0,
-                    float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "10.0")),
+                gamma_jobs.append(
+                    {
+                        "city": fam_city,
+                        "target_date": fam_date,
+                        "metric": fam_metric,
+                        "family_key": family_key,
+                        "slug": slug,
+                    }
                 )
-                try:
-                    resp = _gamma_get("/events", params={"slug": slug}, timeout=_gamma_timeout)
-                    if resp.status_code != 200:
-                        logger.debug(
-                            "refresh_pending_family_snapshots: Gamma %s → HTTP %s",
-                            slug, resp.status_code,
-                        )
-                        continue
-                    batch = resp.json()
-                    if not isinstance(batch, list):
-                        batch = [batch] if isinstance(batch, dict) and batch else []
-                    for event in batch:
-                        if not isinstance(event, dict):
+
+            def _fetch_gamma_slug(job: dict) -> dict:
+                remaining = max(0.1, gamma_deadline - time.monotonic())
+                _gamma_timeout = min(
+                    max(1.0, float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "10.0"))),
+                    remaining,
+                )
+                slug = str(job["slug"])
+                resp = _gamma_get("/events", params={"slug": slug}, timeout=_gamma_timeout)
+                if resp.status_code != 200:
+                    return {**job, "status": "http_non_200", "status_code": resp.status_code, "events": []}
+                batch = resp.json()
+                if not isinstance(batch, list):
+                    batch = [batch] if isinstance(batch, dict) and batch else []
+                events = [event for event in batch if isinstance(event, dict)]
+                return {**job, "status": "ok" if events else "empty", "events": events}
+
+            gamma_concurrency = max(
+                1,
+                min(32, int(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_CONCURRENCY", "8"))),
+            )
+            pending_futures: dict = {}
+            next_job_index = 0
+
+            def _submit_gamma_jobs(executor: ThreadPoolExecutor) -> None:
+                nonlocal gamma_slug_attempted, next_job_index
+                while (
+                    len(pending_futures) < gamma_concurrency
+                    and next_job_index < len(gamma_jobs)
+                    and time.monotonic() <= gamma_deadline
+                ):
+                    job = gamma_jobs[next_job_index]
+                    next_job_index += 1
+                    gamma_slug_attempted += 1
+                    gamma_attempted_family_keys.add(job["family_key"])
+                    pending_futures[executor.submit(_fetch_gamma_slug, job)] = job
+
+            if gamma_jobs:
+                with ThreadPoolExecutor(
+                    max_workers=gamma_concurrency,
+                    thread_name_prefix="zeus-gamma-refresh",
+                ) as executor:
+                    _submit_gamma_jobs(executor)
+                    while pending_futures:
+                        remaining = gamma_deadline - time.monotonic()
+                        if remaining <= 0.0:
+                            gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
+                            for future in pending_futures:
+                                future.cancel()
+                            logger.info(
+                                "refresh_pending_family_snapshots: Gamma time-box %.0fs hit after %d/%d "
+                                "submitted families; reserving %.1fs for CLOB capture",
+                                max(0.1, gamma_deadline - (refresh_deadline - refresh_budget_s)),
+                                gamma_slug_attempted,
+                                len(gamma_jobs),
+                                snapshot_reserve_s,
+                            )
+                            next_job_index = len(gamma_jobs)
+                            pending_futures.clear()
+                            break
+                        try:
+                            future = next(
+                                as_completed(
+                                    tuple(pending_futures),
+                                    timeout=max(0.05, min(remaining, 0.5)),
+                                )
+                            )
+                        except FuturesTimeoutError:
                             continue
-                        event_id = event.get("id") or event.get("slug")
-                        if event_id and event_id not in raw_events_seen:
-                            raw_events_seen.add(event_id)
-                            raw_events_collected.append(event)
-                except Exception as _exc:
-                    logger.warning(
-                        "refresh_pending_family_snapshots: Gamma fetch failed for %s: %s",
-                        slug, _exc,
-                    )
-                    continue
+                        job = pending_futures.pop(future)
+                        try:
+                            result = future.result()
+                        except Exception as _exc:
+                            gamma_slug_failed += 1
+                            logger.warning(
+                                "refresh_pending_family_snapshots: Gamma fetch failed for %s: %s",
+                                job["slug"], _exc,
+                            )
+                            _submit_gamma_jobs(executor)
+                            continue
+                        if result["status"] == "http_non_200":
+                            gamma_slug_http_non_200 += 1
+                            logger.debug(
+                                "refresh_pending_family_snapshots: Gamma %s -> HTTP %s",
+                                result["slug"], result.get("status_code"),
+                            )
+                        elif result["status"] == "empty":
+                            gamma_slug_empty += 1
+                            gamma_empty_family_keys.add(result["family_key"])
+                        else:
+                            for event in result["events"]:
+                                event_id = event.get("id") or event.get("slug")
+                                if event_id and event_id not in raw_events_seen:
+                                    raw_events_seen.add(event_id)
+                                    raw_events_collected.append(event)
+                        _submit_gamma_jobs(executor)
+
+            gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
 
             # 2026-06-06 throughput repair: keep this refresh truly scoped to pending
             # families. The old fallback called the global weather discovery scanner,
@@ -3028,9 +3362,14 @@ def _refresh_pending_family_snapshots(
             logger.info(
                 "refresh_pending_family_snapshots: slug fetch complete "
                 "gamma_refresh_families=%d cached_topology_families=%d "
-                "raw_events=%d discovered_events=%d",
+                "raw_events=%d discovered_events=%d attempted=%d empty=%d "
+                "http_non_200=%d failed=%d invalid=%d timebox_unattempted=%d "
+                "concurrency=%d",
                 len(gamma_refresh_families), cached_topology_families,
                 len(raw_events_collected), len(discovered_events),
+                gamma_slug_attempted, gamma_slug_empty, gamma_slug_http_non_200,
+                gamma_slug_failed, gamma_slug_invalid, gamma_slug_timebox_unattempted,
+                gamma_concurrency,
             )
         except Exception as exc:
             logger.warning(
@@ -3045,23 +3384,36 @@ def _refresh_pending_family_snapshots(
             city_name = getattr(city_obj, "name", None) or (city_obj if isinstance(city_obj, str) else "")
             td = str(ev.get("target_date") or "")
             metric_ev = str(ev.get("temperature_metric") or "")
-            key = (city_name.lower(), td, metric_ev)
+            key = _refresh_family_key(city_name, td, metric_ev)
             gamma_by_family[key] = ev
 
         # Filter to ONLY the pending families (bounded CLOB calls, no universe sweep).
         markets: list[dict] = []
-        skipped_not_found = 0
         markets.extend(cached_topology_markets)
         for city, target_date, metric in gamma_refresh_families:
-            key = (city.lower(), target_date, metric)
+            key = _refresh_family_key(city, target_date, metric)
             ev = gamma_by_family.get(key)
             if ev is None:
-                skipped_not_found += 1
-                logger.warning(
-                    "refresh_pending_family_snapshots: Gamma did not return event for "
-                    "%s/%s/%s — bin identity unknown, family will stay at FDR gate",
-                    city, target_date, metric,
-                )
+                if key in gamma_attempted_family_keys:
+                    skipped_not_found += 1
+                    if key in gamma_empty_family_keys:
+                        logger.warning(
+                            "refresh_pending_family_snapshots: Gamma returned empty event list for "
+                            "%s/%s/%s — bin identity unknown, family will stay at FDR gate",
+                            city, target_date, metric,
+                        )
+                    else:
+                        logger.warning(
+                            "refresh_pending_family_snapshots: Gamma response did not parse to pending family "
+                            "%s/%s/%s — bin identity unknown, family will stay at FDR gate",
+                            city, target_date, metric,
+                        )
+                else:
+                    logger.info(
+                        "refresh_pending_family_snapshots: Gamma not attempted before time-box for "
+                        "%s/%s/%s — family remains retryable",
+                        city, target_date, metric,
+                    )
                 continue
             markets.append(ev)
 
@@ -3095,14 +3447,46 @@ def _refresh_pending_family_snapshots(
             1.0,
             float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
         )
+        markets_for_refresh, fresh_condition_skipped, stale_condition_submitted = (
+            _prune_fresh_market_outcomes_for_snapshot_refresh(
+                write_conn,
+                markets,
+                fresh_at_iso=now_iso,
+            )
+        )
+        if not markets_for_refresh:
+            return {
+                "status": "all_fresh",
+                "families_checked": len(families),
+                "families_needing_refresh": len(gamma_refresh_families) + cached_topology_families,
+                "gamma_refresh_families": len(gamma_refresh_families),
+                "cached_topology_families": cached_topology_families,
+                "cached_topology_incomplete": cached_topology_incomplete,
+                "no_topology": no_topology,
+                "fresh_skipped": fresh_skipped,
+                "gamma_slug_attempted": gamma_slug_attempted,
+                "gamma_slug_empty": gamma_slug_empty,
+                "gamma_slug_http_non_200": gamma_slug_http_non_200,
+                "gamma_slug_failed": gamma_slug_failed,
+                "gamma_slug_invalid": gamma_slug_invalid,
+                "gamma_slug_timebox_unattempted": gamma_slug_timebox_unattempted,
+                "fresh_condition_skipped": fresh_condition_skipped,
+                "stale_condition_submitted": stale_condition_submitted,
+            }
+
+        snapshot_budget_s = _snapshot_capture_budget_for_refresh(
+            refresh_deadline=refresh_deadline,
+            snapshot_reserve_s=snapshot_reserve_s,
+        )
         with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
             summary = refresh_executable_market_substrate_snapshots(
                 write_conn,
-                markets=markets,
+                markets=markets_for_refresh,
                 clob=clob,
-                captured_at=now_utc,
+                captured_at=datetime.now(timezone.utc),
                 scan_authority="VERIFIED",
                 max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
+                budget_seconds=snapshot_budget_s,
             )
         write_conn.commit()
 
@@ -3121,23 +3505,129 @@ def _refresh_pending_family_snapshots(
         "cached_topology_incomplete": cached_topology_incomplete,
         "no_topology": no_topology,
         "fresh_skipped": fresh_skipped,
-        "markets_submitted": len(markets),
+        "topology_budget_exhausted": int(topology_budget_exhausted),
+        "topology_deferred_families": topology_deferred_families,
+        "skipped_not_found": skipped_not_found,
+        "gamma_slug_attempted": gamma_slug_attempted,
+        "gamma_slug_empty": gamma_slug_empty,
+        "gamma_slug_http_non_200": gamma_slug_http_non_200,
+        "gamma_slug_failed": gamma_slug_failed,
+        "gamma_slug_invalid": gamma_slug_invalid,
+        "gamma_slug_timebox_unattempted": gamma_slug_timebox_unattempted,
+        "markets_submitted": len(markets_for_refresh),
+        "fresh_condition_skipped": fresh_condition_skipped,
+        "stale_condition_submitted": stale_condition_submitted,
+        "refresh_budget_seconds": refresh_budget_s,
+        "snapshot_reserve_seconds": snapshot_reserve_s,
+        "snapshot_budget_seconds": snapshot_budget_s,
         **summary,
     }
     logger.info("refresh_pending_family_snapshots: %s", result)
     return result
 
 
+def _edli_pending_opportunity_count() -> int:
+    """Return current pending EDLI event count for background substrate arbitration."""
+
+    from src.state.db import get_world_connection
+
+    conn = get_world_connection()
+    try:
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM opportunity_event_processing
+                WHERE consumer_name = 'edli_reactor_v1'
+                  AND processing_status = 'pending'
+                """
+            ).fetchone()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "market_discovery pending-count read failed; continuing discovery: %r",
+                exc,
+            )
+            return 0
+        return int(row[0] or 0) if row is not None else 0
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _market_discovery_pending_fairness_seconds() -> float:
+    return max(
+        0.0,
+        float(os.environ.get("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300.0")),
+    )
+
+
 @_scheduler_job("market_discovery")
 def _market_discovery_cycle() -> None:
     """Refresh executable market substrate outside decision-cycle critical path."""
 
+    global _market_discovery_last_completed_monotonic
+
     if _edli_reactor_active():
         logger.info("market_discovery deferred: EDLI reactor active")
         return
+    edli_cfg = _settings_section("edli_v1", {})
+    pending_count = 0
+    defer_when_pending = str(
+        os.environ.get("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    if edli_cfg.get("enabled") and defer_when_pending:
+        try:
+            pending_count = _edli_pending_opportunity_count()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "market_discovery pending-count arbitration failed; continuing discovery: %r",
+                exc,
+            )
+            pending_count = 0
+        fairness_s = _market_discovery_pending_fairness_seconds()
+        last_completed = _market_discovery_last_completed_monotonic
+        recent_discovery = (
+            fairness_s > 0
+            and last_completed is not None
+            and (time.monotonic() - last_completed) < fairness_s
+        )
+        if pending_count > 0 and recent_discovery:
+            logger.info(
+                "market_discovery deferred: %d EDLI pending events need substrate warm priority "
+                "(last discovery %.1fs ago, fairness %.1fs)",
+                pending_count,
+                time.monotonic() - last_completed,
+                fairness_s,
+            )
+            return
     acquired = _market_discovery_lock.acquire(blocking=False)
     if not acquired:
         logger.warning("market_discovery skipped: previous market_discovery still running")
+        return
+    if pending_count > 0 and defer_when_pending and edli_cfg.get("enabled"):
+        try:
+            from src.data.market_scanner import find_weather_markets_or_raise
+
+            events = find_weather_markets_or_raise(
+                min_hours_to_resolution=0.0,
+                include_slug_pattern=True,
+            )
+            logger.info(
+                "market_discovery: topology-only refresh for %d weather events while "
+                "%d EDLI pending events keep executable substrate priority",
+                len(events),
+                pending_count,
+            )
+            _market_discovery_last_completed_monotonic = time.monotonic()
+            return
+        finally:
+            _market_discovery_lock.release()
+    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    if not substrate_acquired:
+        _market_discovery_lock.release()
+        logger.info("market_discovery deferred: executable substrate refresh already running")
         return
     try:
         from src.data.market_scanner import (
@@ -3178,7 +3668,9 @@ def _market_discovery_cycle() -> None:
             len(events),
             snapshot_summary,
         )
+        _market_discovery_last_completed_monotonic = time.monotonic()
     finally:
+        _market_substrate_refresh_lock.release()
         _market_discovery_lock.release()
 
 
@@ -4167,6 +4659,236 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
         }
 
 
+def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
+    from src.data.replacement_forecast_runtime_policy import REQUIRED_FLAGS
+
+    try:
+        flags = settings["feature_flags"]
+    except Exception:
+        flags = {}
+    return {key: bool(flags.get(key, False)) for key in REQUIRED_FLAGS}
+
+
+def _replacement_forecast_refit_decision_from_settings():
+    from src.config import PROJECT_ROOT
+    from src.data.replacement_forecast_refit_handoff import refit_decision_from_handoff_payload
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    raw_path = cfg.get("refit_handoff_path") or "state/replacement_forecast_shadow/refit_handoff.json"
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - fail closed at switch decision
+        logger.warning("replacement forecast refit handoff unreadable: %s", exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("replacement forecast refit handoff must be a JSON object: %s", path)
+        return None
+    try:
+        return refit_decision_from_handoff_payload(payload)
+    except Exception as exc:  # noqa: BLE001 - fail closed at switch decision
+        logger.warning("replacement forecast refit handoff invalid: %s", exc)
+        return None
+
+
+def _replacement_forecast_promotion_evidence_from_settings():
+    from src.config import PROJECT_ROOT
+    from src.data.replacement_forecast_go_live_report import (
+        replacement_forecast_promotion_evidence_from_payload,
+    )
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    raw_path = cfg.get("promotion_evidence_path") or "state/replacement_forecast_shadow/promotion_evidence.json"
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
+        logger.warning("replacement forecast promotion evidence unreadable: %s", exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("replacement forecast promotion evidence must be a JSON object: %s", path)
+        return None
+    try:
+        return replacement_forecast_promotion_evidence_from_payload(payload)
+    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
+        logger.warning("replacement forecast promotion evidence invalid: %s", exc)
+        return None
+
+
+def _replacement_forecast_capital_objective_evidence_from_settings():
+    from src.config import PROJECT_ROOT
+    from src.data.replacement_forecast_go_live_report import (
+        replacement_forecast_capital_objective_evidence_from_payload,
+    )
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    raw_path = cfg.get("promotion_evidence_path") or "state/replacement_forecast_shadow/promotion_evidence.json"
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
+        logger.warning("replacement forecast capital objective evidence unreadable: %s", exc)
+        return None
+    if not isinstance(payload, dict):
+        logger.warning("replacement forecast capital objective evidence must be a JSON object: %s", path)
+        return None
+    try:
+        return replacement_forecast_capital_objective_evidence_from_payload(payload)
+    except Exception as exc:  # noqa: BLE001 - fail closed in runtime policy
+        logger.warning("replacement forecast capital objective evidence invalid: %s", exc)
+        return None
+
+
+def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, object]:
+    from src.config import PROJECT_ROOT
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_shadow"
+    raw_manifest_dir = cfg.get("raw_manifest_dir")
+    forecast_db = cfg.get("forecast_db")
+
+    def _rooted_path(value, fallback: Path | None = None) -> Path | None:
+        raw = value if value not in (None, "") else fallback
+        if raw in (None, ""):
+            return None
+        path = Path(str(raw))
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
+    return {
+        "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),
+        "seed_processed_dir": _rooted_path(cfg.get("seed_processed_dir"), base_dir / "seed_processed"),
+        "seed_failed_dir": _rooted_path(cfg.get("seed_failed_dir"), base_dir / "seed_failed"),
+        "forecast_db": _rooted_path(forecast_db),
+        "raw_manifest_dir": _rooted_path(raw_manifest_dir),
+        "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
+        "request_dir": _rooted_path(cfg.get("request_dir"), base_dir / "requests"),
+        "processed_dir": _rooted_path(cfg.get("processed_dir"), base_dir / "processed"),
+        "failed_dir": _rooted_path(cfg.get("failed_dir"), base_dir / "failed"),
+        "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
+        "limit": int(cfg.get("materialization_limit_per_cycle") or 10),
+        "download_current_targets_enabled": bool(cfg.get("download_current_targets_enabled", False)),
+        "download_output_dir": _rooted_path(cfg.get("download_output_dir"), _rooted_path(raw_manifest_dir, base_dir / "raw_manifests")),
+        "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
+        "download_release_lag_hours": float(cfg.get("download_release_lag_hours") or 14.0),
+        "download_anchor_sigma_c": float(cfg.get("download_anchor_sigma_c") or 3.0),
+        "download_aifs_retries": int(cfg.get("download_aifs_retries") or 4),
+    }
+
+
+def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+    if not bool(cfg.get("download_current_targets_enabled", False)):
+        return None
+    forecast_db = cfg.get("forecast_db")
+    output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
+    if forecast_db is None or output_dir is None:
+        raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
+    from scripts.download_replacement_forecast_current_targets import (
+        _parse_cycle,
+        download_current_target_raw_inputs,
+    )
+    from src.data.replacement_forecast_current_target_plan import (
+        build_replacement_forecast_current_target_plan,
+    )
+
+    plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+    if plan.ready:
+        return {
+            "status": "CURRENT_TARGETS_ALREADY_COVERED",
+            "coverage": plan.as_dict(),
+        }
+    if plan.missing_aifs_manifest_count <= 0 and plan.missing_openmeteo_manifest_count <= 0:
+        return {
+            "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+            "coverage": plan.as_dict(),
+        }
+    release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
+    cycle = _parse_cycle(None, now=datetime.now(timezone.utc), release_lag_hours=release_lag_hours)
+    return download_current_target_raw_inputs(
+        forecast_db=Path(str(forecast_db)),
+        output_dir=Path(str(output_dir)),
+        cycle=cycle,
+        limit=int(cfg.get("download_limit") or 10),
+        write_db=True,
+        skip_aifs=False,
+        skip_openmeteo=False,
+        release_lag_hours=release_lag_hours,
+        anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
+        aifs_retries=int(cfg.get("download_aifs_retries") or 4),
+    )
+
+
+def _sqlite_table_names(conn) -> tuple[str, ...]:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
+    names: list[str] = []
+    for row in rows:
+        if isinstance(row, dict):
+            names.append(str(row["name"]))
+        else:
+            names.append(str(row[0]))
+    return tuple(sorted(names))
+
+
+def _current_live_fact_status(relative_path: str) -> str:
+    from src.config import PROJECT_ROOT
+
+    path = PROJECT_ROOT / relative_path
+    try:
+        first_lines = path.read_text(encoding="utf-8").splitlines()[:20]
+    except OSError:
+        return "STALE_FOR_LIVE"
+    for line in first_lines:
+        if line.startswith("Status:"):
+            return "CURRENT_FOR_LIVE" if "CURRENT_FOR_LIVE" in line else "STALE_FOR_LIVE"
+    return "STALE_FOR_LIVE"
+
+
+@_scheduler_job("replacement_forecast_shadow_materialize")
+def _replacement_forecast_shadow_materialize_cycle() -> None:
+    flags = _replacement_forecast_runtime_flags_from_settings()
+    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+        return
+    from src.data.replacement_forecast_shadow_materialization_queue import (
+        process_replacement_forecast_shadow_materialization_queue,
+    )
+
+    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
+    if download_report is not None and download_report.get("status") not in {
+        "CURRENT_TARGETS_ALREADY_COVERED",
+        "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+    }:
+        logger.info("replacement forecast current-target download report: %s", download_report)
+    report = process_replacement_forecast_shadow_materialization_queue(
+        request_dir=cfg["request_dir"],
+        processed_dir=cfg["processed_dir"],
+        failed_dir=cfg["failed_dir"],
+        seed_dir=cfg["seed_dir"],
+        seed_processed_dir=cfg["seed_processed_dir"],
+        seed_failed_dir=cfg["seed_failed_dir"],
+        forecast_db=cfg["forecast_db"],
+        raw_manifest_dir=cfg["raw_manifest_dir"],
+        seed_discovery_limit=int(cfg["seed_discovery_limit"]),
+        seed_limit=int(cfg["seed_limit"]),
+        limit=int(cfg["limit"]),
+    )
+    if report.failed_count:
+        logger.warning("replacement forecast shadow materialization queue failures: %s", report.as_dict())
+    elif report.processed_count:
+        logger.info("replacement forecast shadow materialization queue processed: %s", report.as_dict())
+
+
 @_scheduler_job("edli_event_reactor")
 def _edli_event_reactor_cycle() -> None:
     """EDLI event-reactor scheduler hook.
@@ -4188,6 +4910,7 @@ def _edli_event_reactor_cycle() -> None:
         event_bound_live_adapter_from_trade_conn,
         event_bound_no_submit_adapter_from_trade_conn,
         executable_snapshot_gate_from_trade_conn,
+        replacement_forecast_baseline_bundle_provider_from_forecast_conn,
         riskguard_allows_new_entries,
     )
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
@@ -4395,9 +5118,9 @@ def _edli_event_reactor_cycle() -> None:
         # / baseline undefined / exception), degrade THIS cycle to the no-submit adapter rather
         # than submit live with an unconfigured-but-proceeding allocator.
         live_submit_effective = live_bridge_mode or submit_disabled_effective_mode
-        if live_bridge_mode:
-            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(conn)
-            if not _alloc_refresh.get("configured"):
+        if live_submit_effective:
+            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)
+            if live_bridge_mode and not _alloc_refresh.get("configured"):
                 live_submit_effective = False
                 logger.error(
                     "EDLI reactor: live-bridge allocator refresh did not configure "
@@ -4434,6 +5157,21 @@ def _edli_event_reactor_cycle() -> None:
         # and portfolio reads; use the actual processing timestamp so fresh executable/book
         # parent certificates are never later than the decision they support.
         process_pending_decision_time = datetime.now(timezone.utc)
+        replacement_forecast_runtime_flags = _replacement_forecast_runtime_flags_from_settings()
+        replacement_forecast_refit_decision = _replacement_forecast_refit_decision_from_settings()
+        replacement_forecast_promotion_evidence = _replacement_forecast_promotion_evidence_from_settings()
+        replacement_forecast_capital_objective_evidence = _replacement_forecast_capital_objective_evidence_from_settings()
+        replacement_forecast_baseline_bundle_provider = replacement_forecast_baseline_bundle_provider_from_forecast_conn(
+            forecasts_conn
+        )
+        replacement_forecast_world_tables = _sqlite_table_names(conn)
+        from src.data.replacement_forecast_live_switch_surface import (
+            CURRENT_DATA_FACT_FILE,
+            CURRENT_SOURCE_FACT_FILE,
+        )
+
+        replacement_forecast_source_fact_status = _current_live_fact_status(CURRENT_SOURCE_FACT_FILE)
+        replacement_forecast_data_fact_status = _current_live_fact_status(CURRENT_DATA_FACT_FILE)
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -4451,6 +5189,14 @@ def _edli_event_reactor_cycle() -> None:
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
                 tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
+                replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
+                replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+                replacement_forecast_world_tables=replacement_forecast_world_tables,
+                replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
+                replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
+                replacement_forecast_refit_decision=replacement_forecast_refit_decision,
+                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
                 canary_force_taker_provider=_edli_canary_force_taker_provider(conn, edli_cfg),
                 pre_submit_authority_provider=_edli_pre_submit_authority_provider_from_world_conn(
                     conn,
@@ -4479,6 +5225,14 @@ def _edli_event_reactor_cycle() -> None:
                 calibration_conn=conn,
                 get_current_level=get_current_level,
                 portfolio_state_provider=_portfolio_state_provider,
+                replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
+                replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+                replacement_forecast_world_tables=replacement_forecast_world_tables,
+                replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
+                replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
+                replacement_forecast_refit_decision=replacement_forecast_refit_decision,
+                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
             )
         )
 
@@ -4508,6 +5262,42 @@ def _edli_event_reactor_cycle() -> None:
             ),
         )
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
+        _rejection_counts = dict(Counter(_rr.rejection_reasons))
+        _edli_candidates = int(_rr.proof_accepted + _rr.rejected + _rr.retried + _rr.dead_lettered)
+        try:
+            from src.observability.status_summary import write_cycle_pulse
+
+            write_cycle_pulse(
+                {
+                    "mode": "edli_event_reactor",
+                    "started_at": process_pending_decision_time.isoformat(),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "candidates": _edli_candidates,
+                    "candidates_evaluated": _edli_candidates,
+                    "processed": int(_rr.processed),
+                    "proof_accepted": int(_rr.proof_accepted),
+                    "final_intents_built": int(_rr.proof_accepted),
+                    "submit_attempts": int(_rr.proof_accepted),
+                    "venue_acks": 0,
+                    "no_trades": int(_rr.rejected + _rr.retried + _rr.dead_lettered),
+                    "rejected": int(_rr.rejected),
+                    "retried": int(_rr.retried),
+                    "dead_lettered": int(_rr.dead_lettered),
+                    "rejection_reason_counts": _rejection_counts,
+                    "top_no_trade_reasons": _rejection_counts,
+                    "deterministic_rejections": (
+                        {"real_order_submit_disabled": int(_rr.proof_accepted)}
+                        if submit_disabled_effective_mode and _rr.proof_accepted > 0
+                        else {}
+                    ),
+                }
+            )
+        except Exception as exc:
+            logger.error(
+                "EDLI reactor: status pulse failed (non-fatal): %s",
+                exc,
+                exc_info=True,
+            )
         logger.info(
             "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d reasons=%r",
             _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered, _rr.rejection_reasons[:8],
@@ -4524,6 +5314,7 @@ def _edli_event_reactor_cycle() -> None:
             pass
         conn.close()
         _edli_reactor_active_lock.release()
+        _start_venue_background_maintenance_after_reactor_if_required()
 
 
 @_scheduler_job("edli_bankroll_warm")
@@ -4624,6 +5415,18 @@ def _edli_market_substrate_warm_cycle() -> None:
             "EDLI market-substrate warm: ATTACH forecasts failed (non-fatal): %r", _attach_exc
         )
     forecasts_conn = get_forecasts_connection_read_only()
+    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+    if not substrate_acquired:
+        logger.info("EDLI market-substrate warm skipped: executable substrate refresh already running")
+        try:
+            forecasts_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return
     try:
         # _refresh_pending_family_snapshots never raises by contract (it logs+returns an
         # error dict), but wrap defensively so a venue-I/O failure can NEVER propagate out
@@ -4637,6 +5440,10 @@ def _edli_market_substrate_warm_cycle() -> None:
             exc,
         )
     finally:
+        try:
+            _market_substrate_refresh_lock.release()
+        except RuntimeError:
+            pass
         try:
             forecasts_conn.close()
         except Exception:  # noqa: BLE001
@@ -4760,8 +5567,10 @@ def _arm_gate_emit_cycle() -> None:
     edli_cfg = _settings_section("edli_v1", {})
     if not edli_cfg.get("enabled"):
         return
-    if not bool(edli_cfg.get("edli_arm_gate_emit_enabled", True)):
-        # Flag-OFF: strict no-op (byte-identical to pre-antibody behavior).
+    if not bool(edli_cfg.get("edli_arm_gate_emit_enabled", False)):
+        # Flag-OFF/default: strict no-op. This settlement measurement is not part
+        # of the live trading critical path and must not compete with reactor or
+        # price-substrate DB traffic.
         return
 
     artifact_path = str(edli_cfg.get("edli_arm_gate_artifact_path") or "").strip()
@@ -4780,7 +5589,7 @@ def _arm_gate_emit_cycle() -> None:
             cwd=str(repo_root),
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=float(edli_cfg.get("edli_arm_gate_emit_timeout_seconds", 30)),
         )
     except Exception as exc:  # noqa: BLE001 — fail-soft; next tick / next boot retries
         logger.error(
@@ -4964,10 +5773,17 @@ def _edli_prune_interval_seconds(config: dict) -> float:
 
 
 def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
-    """Prune stale/superseded rows before snapshotting the redecision skip set."""
+    """Prune stale/superseded rows before snapshotting the redecision skip set.
+
+    Backlog pruning is maintenance, not trade decision logic. Keep it explicit
+    opt-in so a slow sweep cannot pin the reactor worker and stop live candidate
+    evaluation.
+    """
 
     global _EDLI_LAST_PRUNE_MONOTONIC
     edli_cfg = _settings_section("edli_v1", {})
+    if not bool(edli_cfg.get("reactor_prune_enabled", False)):
+        return
     interval_s = _edli_prune_interval_seconds(edli_cfg)
     now_mono = time.monotonic()
     if (
@@ -5013,6 +5829,23 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
             "EDLI reactor: archive_superseded_channel_events sweep failed "
             "(non-fatal): %r",
             _ch_sweep_exc,
+        )
+    try:
+        _ch_ignored = store.ignore_channel_cache_events(batch_limit=batch_limit)
+        if _ch_ignored:
+            logger.info(
+                "EDLI reactor: ignored %d channel cache events "
+                "(BEST_BID_ASK_CHANGED/BOOK_SNAPSHOT/NEW_MARKET_DISCOVERED) after "
+                "quote-cache/feasibility ingestion; excluded from submit reactor "
+                "working set (batch_limit=%d)",
+                _ch_ignored,
+                batch_limit,
+            )
+    except Exception as _ch_ignore_exc:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "EDLI reactor: ignore_channel_cache_events sweep failed "
+            "(non-fatal): %r",
+            _ch_ignore_exc,
         )
 
     try:
@@ -5897,6 +6730,9 @@ def _edli_user_channel_reconcile_cycle() -> None:
                 payload=fact.get("payload") if isinstance(fact.get("payload"), dict) else None,
             )
             reconcile_count += 1
+        from src.events.edli_trade_fact_bridge import append_confirmed_trade_facts_to_edli
+
+        reconcile_count += append_confirmed_trade_facts_to_edli(conn, now=now)
         conn.commit()
     finally:
         conn.close()
@@ -6251,8 +7087,15 @@ def _edli_market_channel_ingestor_cycle() -> None:
                 )
                 from src.state.db import get_trade_connection
 
-                trade_conn = get_trade_connection(write_class="live")
+                substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+                if not substrate_acquired:
+                    logger.info(
+                        "EDLI market-channel refresh skipped: executable substrate refresh already running"
+                    )
+                    return
+                trade_conn = None
                 try:
+                    trade_conn = get_trade_connection(write_class="live")
                     try:
                         markets = find_weather_markets_or_raise(
                             min_hours_to_resolution=0.0,
@@ -6281,7 +7124,11 @@ def _edli_market_channel_ingestor_cycle() -> None:
                     )
                     trade_conn.commit()
                 finally:
-                    trade_conn.close()
+                    try:
+                        if trade_conn is not None:
+                            trade_conn.close()
+                    finally:
+                        _market_substrate_refresh_lock.release()
                 logger.info(
                     "EDLI market-channel refreshed executable snapshots: reason=%s token_id=%s condition_id=%s summary=%s",
                     action.reason,
@@ -6861,6 +7708,15 @@ def main():
             seconds=90,
             id="edli_mainstream_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 70.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            _replacement_forecast_shadow_materialize_cycle,
+            "interval",
+            minutes=int((_settings_section("replacement_forecast_shadow", {}) or {}).get("materialization_interval_min") or 5),
+            id="replacement_forecast_shadow_materialize",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 95.0),
             max_instances=1,
             coalesce=True,
         )

@@ -140,7 +140,7 @@ def main() -> int:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_regions_mn2t6"),
+        default=Path(__file__).resolve().parents[1] / "raw" / "tigge_ecmwf_ens_regions_mn2t6",
     )
     parser.add_argument("--expected", type=int, required=True)
     parser.add_argument("--interval-seconds", type=int, default=5)

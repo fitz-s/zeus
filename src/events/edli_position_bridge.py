@@ -130,6 +130,22 @@ def _edli_events_table(conn: sqlite3.Connection) -> str:
     return "edli_live_order_events"
 
 
+def _resolved_table(conn: sqlite3.Connection, table_name: str) -> str:
+    """Prefer the ATTACHed world table when present, else the local table."""
+    try:
+        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+    except sqlite3.Error:
+        attached = set()
+    if "world" in attached:
+        row = conn.execute(
+            "SELECT 1 FROM world.sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if row is not None:
+            return f"world.{table_name}"
+    return table_name
+
+
 def _aggregate_event_rows(conn: sqlite3.Connection, aggregate_id: str) -> list[tuple[str, dict[str, Any]]]:
     table = _edli_events_table(conn)
     rows = conn.execute(
@@ -152,6 +168,116 @@ def _aggregate_event_rows(conn: sqlite3.Connection, aggregate_id: str) -> list[t
             payload = {}
         out.append((event_type, payload))
     return out
+
+
+def _certificate_by_hash(conn: sqlite3.Connection, certificate_hash: str) -> dict[str, Any] | None:
+    if not certificate_hash:
+        return None
+    table = _resolved_table(conn, "decision_certificates")
+    try:
+        row = conn.execute(
+            f"""
+            SELECT certificate_id, certificate_type, payload_json, certificate_hash
+            FROM {table}
+            WHERE certificate_hash = ?
+            LIMIT 1
+            """,
+            (certificate_hash,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] if isinstance(row, sqlite3.Row) else row[2]))
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "certificate_id": str(row["certificate_id"] if isinstance(row, sqlite3.Row) else row[0]),
+        "certificate_type": str(row["certificate_type"] if isinstance(row, sqlite3.Row) else row[1]),
+        "payload": payload,
+        "certificate_hash": str(row["certificate_hash"] if isinstance(row, sqlite3.Row) else row[3]),
+    }
+
+
+def _parent_certificate_hashes(conn: sqlite3.Connection, child_certificate_id: str) -> dict[str, str]:
+    if not child_certificate_id:
+        return {}
+    table = _resolved_table(conn, "decision_certificate_edges")
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT parent_role, parent_certificate_hash
+            FROM {table}
+            WHERE child_certificate_id = ?
+            """,
+            (child_certificate_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {
+        str(row["parent_role"] if isinstance(row, sqlite3.Row) else row[0]): str(
+            row["parent_certificate_hash"] if isinstance(row, sqlite3.Row) else row[1]
+        )
+        for row in rows
+    }
+
+
+def _entry_authority_from_certificates(
+    conn: sqlite3.Connection,
+    *,
+    actionable_certificate_hash: str,
+) -> tuple[Any | None, float | None, float]:
+    """Recover entry DecisionEvidence and belief CI from persisted certificates.
+
+    This never fabricates authority: if the Actionable/Belief/FDR certificate
+    chain is incomplete or malformed, the bridge returns no evidence and leaves
+    the D4 exit gate fail-closed.
+    """
+    if not actionable_certificate_hash:
+        return None, None, 0.0
+    actionable = _certificate_by_hash(conn, actionable_certificate_hash)
+    if actionable is None:
+        return None, None, 0.0
+    actionable_payload = actionable["payload"]
+    q_live = _float_or_none(actionable_payload.get("q_live"))
+    q_lcb = _float_or_none(actionable_payload.get("q_lcb_5pct"))
+    ci_width = 0.0
+    if q_live is not None and q_lcb is not None and q_live > q_lcb:
+        ci_width = min(1.0, max(0.0, 2.0 * (q_live - q_lcb)))
+
+    parents = _parent_certificate_hashes(conn, actionable["certificate_id"])
+    belief = _certificate_by_hash(conn, parents.get("belief", ""))
+    fdr = _certificate_by_hash(conn, parents.get("fdr", ""))
+    if belief is None or fdr is None:
+        return None, q_live, ci_width
+    belief_payload = belief["payload"]
+    fdr_payload = fdr["payload"]
+    bootstrap_n = _float_or_none(
+        belief_payload.get("bootstrap_n") or fdr_payload.get("edge_bootstrap_n")
+    )
+    if bootstrap_n is None or bootstrap_n < 1:
+        return None, q_live, ci_width
+    if fdr_payload.get("passed") is not True:
+        return None, q_live, ci_width
+
+    from src.contracts.decision_evidence import DecisionEvidence
+    from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
+
+    return (
+        DecisionEvidence(
+            evidence_type="entry",
+            statistical_method="bootstrap_ci_bh_fdr",
+            sample_size=int(bootstrap_n),
+            confidence_level=DEFAULT_FDR_ALPHA,
+            fdr_corrected=True,
+            consecutive_confirmations=1,
+        ),
+        q_live,
+        ci_width,
+    )
 
 
 def _latest_payload(events: list[tuple[str, dict[str, Any]]], event_type: str) -> dict[str, Any] | None:
@@ -259,6 +385,44 @@ def _aggregate_fill_economics(fill_payloads: list[dict[str, Any]]) -> tuple[floa
     return total_size, avg_price, total_fees
 
 
+def _resolve_strategy_key_from_pre_submit(
+    pre_submit: dict[str, Any],
+    *,
+    direction: str,
+    metric: str,
+) -> str:
+    """Resolve strategy identity from the EDLI money path, never by default."""
+
+    strategy_key = str(pre_submit.get("strategy_key") or "").strip()
+    if not strategy_key:
+        event_type = str(pre_submit.get("event_type") or "").strip()
+        if event_type == "DAY0_EXTREME_UPDATED":
+            strategy_key = "settlement_capture"
+        elif event_type == "FORECAST_SNAPSHOT_READY":
+            strategy_key = "opening_inertia" if direction == "buy_no" else "center_buy"
+        else:
+            raise EdliPositionBridgeError(
+                "EDLI_BRIDGE_STRATEGY_MISSING: strategy_key required when event_type is absent"
+            )
+
+    from src.strategy.strategy_profile import try_get
+
+    profile = try_get(strategy_key)
+    if profile is None:
+        raise EdliPositionBridgeError(f"EDLI_BRIDGE_STRATEGY_UNKNOWN:{strategy_key}")
+    if not profile.is_runtime_live():
+        raise EdliPositionBridgeError(f"EDLI_BRIDGE_STRATEGY_NOT_RUNTIME_LIVE:{strategy_key}")
+    if not profile.is_direction_allowed(direction):
+        raise EdliPositionBridgeError(
+            f"EDLI_BRIDGE_STRATEGY_DIRECTION_BLOCKED:{strategy_key}:direction={direction}"
+        )
+    if metric and not profile.metric_is_live(metric):
+        raise EdliPositionBridgeError(
+            f"EDLI_BRIDGE_STRATEGY_METRIC_BLOCKED:{strategy_key}:metric={metric}"
+        )
+    return strategy_key
+
+
 def _resolve_identity(events: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
     """Pull condition_id / token_id / direction / identity from the aggregate.
 
@@ -297,18 +461,59 @@ def _resolve_identity(events: list[tuple[str, dict[str, Any]]]) -> dict[str, Any
             raise EdliPositionBridgeError(
                 "EDLI_BRIDGE_DIRECTION_UNRESOLVED: cannot determine buy_yes/buy_no for fill"
             )
+    city = str(pre_submit.get("city") or "").strip()
+    target_date = str(pre_submit.get("target_date") or "").strip()
+    bin_label = str(pre_submit.get("bin_label") or "").strip()
+    metric = str(pre_submit.get("metric") or pre_submit.get("temperature_metric") or "").strip().lower()
+    unit = str(pre_submit.get("unit") or pre_submit.get("temperature_unit") or "").strip().upper()
+    strategy_key = _resolve_strategy_key_from_pre_submit(
+        pre_submit,
+        direction=direction,
+        metric=metric,
+    )
+    missing_identity = [
+        name
+        for name, value in (
+            ("city", city),
+            ("target_date", target_date),
+            ("bin_label", bin_label),
+            ("metric", metric),
+            ("unit", unit),
+        )
+        if not value
+    ]
+    if missing_identity:
+        raise EdliPositionBridgeError(
+            "EDLI_BRIDGE_MARKET_IDENTITY_MISSING: "
+            + ",".join(missing_identity)
+            + " required before materializing position_current"
+        )
+    if metric not in {"high", "low"}:
+        raise EdliPositionBridgeError(f"EDLI_BRIDGE_METRIC_INVALID: {metric!r}")
+    if unit not in {"C", "F"}:
+        raise EdliPositionBridgeError(f"EDLI_BRIDGE_UNIT_INVALID: {unit!r}")
+
     return {
         "condition_id": condition_id,
         "token_id": token_id,
         "direction": direction,
         "outcome_label": str(pre_submit.get("outcome_label") or ("NO" if direction == "buy_no" else "YES")),
-        "city": str(pre_submit.get("city") or ""),
-        "target_date": str(pre_submit.get("target_date") or ""),
-        "bin_label": str(pre_submit.get("bin_label") or ""),
-        "metric": str(pre_submit.get("metric") or "high"),
+        "city": city,
+        "target_date": target_date,
+        "bin_label": bin_label,
+        "metric": metric,
+        "unit": unit,
+        "strategy_key": strategy_key,
         "market_id": str(pre_submit.get("market_id") or condition_id),
-        "cluster": str(pre_submit.get("cluster") or pre_submit.get("city") or ""),
+        "cluster": str(pre_submit.get("cluster") or city),
         "p_posterior": _float_or_none(pre_submit.get("q_live")) or 0.0,
+        "entry_ci_width": 0.0,
+        "actionable_certificate_hash": str(
+            pre_submit.get("expected_edge_source_certificate_hash")
+            or pre_submit.get("actionable_certificate_hash")
+            or ""
+        ),
+        "final_intent_certificate_hash": str(pre_submit.get("final_intent_certificate_hash") or ""),
         "decision_snapshot_id": str(pre_submit.get("executable_snapshot_id") or pre_submit.get("snapshot_id") or ""),
         "final_intent_id": str(pre_submit.get("final_intent_id") or ""),
         "execution_command_id": str(command.get("execution_command_id") or (last_fill or {}).get("execution_command_id") or ""),
@@ -341,7 +546,7 @@ def _build_bridge_position(
     direction = identity["direction"]
     elected_token = identity["token_id"]
     cost_basis = filled_size * avg_fill_price
-    temperature_metric = "low" if str(identity.get("metric") or "").lower() in {"low", "min"} else "high"
+    temperature_metric = str(identity["metric"])
 
     pos = Position(
         trade_id=position_id,
@@ -351,23 +556,19 @@ def _build_bridge_position(
         target_date=identity["target_date"],
         bin_label=identity["bin_label"],
         direction=direction,
-        unit="F",
+        unit=str(identity["unit"]),
         temperature_metric=temperature_metric,
         env=env,
         size_usd=cost_basis,
         entry_price=avg_fill_price,
         p_posterior=float(identity.get("p_posterior") or 0.0),
+        entry_ci_width=float(identity.get("entry_ci_width") or 0.0),
         shares=filled_size,
         cost_basis_usd=cost_basis,
         condition_id=identity["condition_id"],
         decision_snapshot_id=identity["decision_snapshot_id"],
-        entry_method="edli_event_driven",
-        # The EDLI forecast-driven lane is the event-sourced re-implementation of
-        # the settlement-capture strategy (forecast settlement edge → buy the
-        # mispriced outcome). position_events.strategy_key CHECK admits only the
-        # four canonical strategy keys; settlement_capture is the correct
-        # semantic home. final_intent_id linkage lives on order_id / the audit.
-        strategy_key="settlement_capture",
+        entry_method="ens_member_counting",
+        strategy_key=str(identity["strategy_key"]),
         order_id=identity.get("venue_order_id") or identity.get("execution_command_id") or "",
         order_status="filled",
         order_posted_at=filled_at,
@@ -428,6 +629,18 @@ def materialize_position_current_from_edli_fill(
         return None
 
     identity = _resolve_identity(events)
+    (
+        decision_evidence,
+        certificate_q_live,
+        certificate_entry_ci_width,
+    ) = _entry_authority_from_certificates(
+        conn,
+        actionable_certificate_hash=str(identity.get("actionable_certificate_hash") or ""),
+    )
+    if certificate_q_live is not None:
+        identity["p_posterior"] = certificate_q_live
+    if certificate_entry_ci_width > 0.0:
+        identity["entry_ci_width"] = certificate_entry_ci_width
     fill_payloads = _confirmed_fill_payloads(events)
     filled_size, avg_fill_price, fees = _aggregate_fill_economics(fill_payloads)
     if filled_size <= 0 or avg_fill_price <= 0:
@@ -454,6 +667,7 @@ def materialize_position_current_from_edli_fill(
         build_entry_canonical_write,
         build_position_current_projection,
     )
+    from src.state.db import log_execution_fact
     from src.state.ledger import append_many_and_project, upsert_position_current
 
     position_id = pos.trade_id
@@ -466,6 +680,7 @@ def materialize_position_current_from_edli_fill(
             pos,
             phase_after=ACTIVE,
             source_module="src.events.edli_position_bridge",
+            decision_evidence=decision_evidence,
         )
         append_many_and_project(conn, events_batch, projection)
         created = True
@@ -479,6 +694,24 @@ def materialize_position_current_from_edli_fill(
         projection["phase"] = ACTIVE
         upsert_position_current(conn, projection)
         created = False
+
+    log_execution_fact(
+        conn,
+        intent_id=identity["final_intent_id"] or identity["execution_command_id"] or aggregate_id,
+        position_id=position_id,
+        order_role="entry",
+        decision_id=identity["final_intent_id"] or None,
+        command_id=identity["execution_command_id"] or None,
+        strategy_key=str(identity["strategy_key"]),
+        posted_at=filled_at,
+        filled_at=filled_at,
+        submitted_price=avg_fill_price,
+        fill_price=avg_fill_price,
+        shares=filled_size,
+        fill_quality=1.0,
+        venue_status="CONFIRMED",
+        terminal_exec_status="filled",
+    )
 
     return {
         "position_id": position_id,

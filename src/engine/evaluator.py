@@ -2686,7 +2686,7 @@ def _apply_edli_live_family_before_selection(
 
         def _edli_bootstrap_bin_no(bin_idx: int, _n: int) -> tuple[float, float, float]:
             p_market_no = analysis.buy_no_market_price(bin_idx)
-            edge = float((1.0 - probabilities[bin_idx]) - p_market_no)
+            edge = -float("inf")
             return edge, edge, (0.0 if edge > 0.0 else 1.0)
 
         analysis._bootstrap_bin = _edli_bootstrap_bin  # type: ignore[method-assign]
@@ -6339,7 +6339,7 @@ def evaluate_candidate(
         # AFTER oracle penalty so the two compose multiplicatively. ddd_discount
         # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
         if ddd_discount > 0.0:
-            km *= max(0.0, 1.0 - ddd_discount)
+            km *= max(0.0, 1.0 + (-ddd_discount))
         km *= source_quality_haircut
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.

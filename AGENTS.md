@@ -1,6 +1,6 @@
 # Zeus AGENTS
 
-Zeus is a **live quantitative trading engine** operating in Polymarket weather derivatives.
+Zeus is a **quantitative trading engine** operating in Polymarket weather derivatives.
 
 It converts atmospheric data into sized limit orders with positive expectation, bound by market settlement mechanics and dynamic risk limits.
 
@@ -13,9 +13,7 @@ The mathematical construction of an edge:
 `51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
 
 **TOPOLOGY NAVIGATION:**
-Before modifying code, run the topology doctor. It returns which files you may
-change, which you must not touch, what tests must pass, and when to stop — scope
-that grep cannot provide:
+Before modifying code, run the topology doctor. It returns additional context
 `python3 scripts/topology_doctor.py --navigation --task "<your task>" --files <files>`
 
 For pipeline-impacting tasks (pricing, data, risk, settlement), also load the
@@ -44,7 +42,7 @@ The truth path is:
 
 `chain/CLOB facts -> canonical DB/events -> projections/status -> derived reports`
 
-**K1 DB split (2026-05-11):** Zeus operates three canonical SQLite files.
+Zeus operates three canonical SQLite files.
 `state/zeus-world.db` holds `WORLD_CLASS` tables (markets, positions, lifecycle).
 `state/zeus-forecasts.db` holds `FORECAST_CLASS` tables (observations, settlements,
 calibration_pairs_v2, ensemble_snapshots, source_run, market_events).
@@ -513,5 +511,3 @@ manual Claude session):
 The review doctrine surface is owned by `docs/review/AGENTS.md`.
 
 ---
-
-<!-- AUDIT NOTE 2026-05-15: AGENTS.md audited against K1 DB split + data daemon authority chain (PRs #114, #116, #117). K1 DB split section (lines 47-54) correctly describes WORLD_CLASS/FORECAST_CLASS split and get_forecasts_connection_with_world() as the sanctioned cross-DB write path. No stale world.db-opening routing instructions found. Passes. -->

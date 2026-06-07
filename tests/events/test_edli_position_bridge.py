@@ -27,6 +27,7 @@ import sqlite3
 import pytest
 
 from src.events.edli_position_bridge import (
+    EdliPositionBridgeError,
     edli_bridge_position_id,
     materialize_position_current_from_edli_fill,
 )
@@ -111,7 +112,9 @@ def _seed_confirmed_buy_no_aggregate(
         fills = [(16.75, 0.42, 0.03)]
     pre_submit = {
         "event_id": EVENT_ID,
+        "event_type": "FORECAST_SNAPSHOT_READY",
         "final_intent_id": FINAL_INTENT_ID,
+        "strategy_key": "opening_inertia",
         "condition_id": CONDITION_ID,
         "token_id": ELECTED_NO_TOKEN,  # elected NATIVE token == no_token for buy_no
         "side": "BUY",
@@ -193,6 +196,7 @@ def test_green_bridge_materializes_one_correct_position(conn):
     assert row["fill_authority"] == "venue_confirmed_full"
     assert row["order_status"] == "filled"
     assert row["entry_method"] == "ens_member_counting"
+    assert row["strategy_key"] == "opening_inertia"
     fact = conn.execute(
         """
         SELECT position_id, order_role, strategy_key, fill_price, shares, terminal_exec_status
@@ -204,7 +208,7 @@ def test_green_bridge_materializes_one_correct_position(conn):
     assert fact is not None
     assert fact["position_id"] == row["position_id"]
     assert fact["order_role"] == "entry"
-    assert fact["strategy_key"] == "settlement_capture"
+    assert fact["strategy_key"] == "opening_inertia"
     assert fact["fill_price"] == pytest.approx(0.42)
     assert fact["shares"] == pytest.approx(16.75)
     assert fact["terminal_exec_status"] == "filled"
@@ -220,7 +224,8 @@ def test_green_bridge_materializes_one_correct_position(conn):
 def test_green_bridge_buy_yes_places_token_on_token_id(conn):
     aggregate_id = "agg-edli-buyyes-1"
     pre_submit = {
-        "event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "condition_id": CONDITION_ID,
+        "event_id": EVENT_ID, "event_type": "FORECAST_SNAPSHOT_READY",
+        "final_intent_id": FINAL_INTENT_ID, "strategy_key": "center_buy", "condition_id": CONDITION_ID,
         "token_id": ELECTED_YES_TOKEN, "side": "BUY", "direction": "buy_yes",
         "native_token_side": "YES", "outcome_label": "YES", "city": "Tokyo",
         "target_date": "2026-06-02", "bin_label": "28-30", "metric": "high", "unit": "C", "q_live": 0.6,
@@ -237,6 +242,56 @@ def test_green_bridge_buy_yes_places_token_on_token_id(conn):
     assert row["direction"] == "buy_yes"
     assert row["token_id"] == ELECTED_YES_TOKEN
     assert (row["no_token_id"] or "") == ""
+    assert row["strategy_key"] == "center_buy"
+
+
+def test_bridge_rejects_day0_buy_no_as_settlement_capture(conn):
+    aggregate_id = "agg-edli-day0-buyno-1"
+    pre_submit = {
+        "event_id": EVENT_ID,
+        "event_type": "DAY0_EXTREME_UPDATED",
+        "final_intent_id": FINAL_INTENT_ID,
+        "condition_id": CONDITION_ID,
+        "token_id": ELECTED_NO_TOKEN,
+        "side": "BUY",
+        "direction": "buy_no",
+        "native_token_side": "NO",
+        "outcome_label": "NO",
+        "city": "Shanghai",
+        "target_date": "2026-06-02",
+        "bin_label": "30-32",
+        "metric": "high",
+        "unit": "C",
+        "q_live": 0.55,
+        "executable_snapshot_id": "exec-snap-1",
+    }
+    _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit)
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=2,
+        event_type="ExecutionCommandCreated",
+        payload={"event_id": EVENT_ID, "final_intent_id": FINAL_INTENT_ID, "execution_command_id": EXECUTION_COMMAND_ID},
+    )
+    _insert_edli_event(
+        conn,
+        aggregate_id=aggregate_id,
+        sequence=3,
+        event_type="UserTradeObserved",
+        payload={
+            "event_id": EVENT_ID,
+            "final_intent_id": FINAL_INTENT_ID,
+            "trade_status": "CONFIRMED",
+            "fill_authority_state": "FILL_CONFIRMED",
+            "venue_order_id": VENUE_ORDER_ID,
+            "filled_size": 5.0,
+            "avg_fill_price": 0.5,
+        },
+        source_authority="user_channel",
+    )
+
+    with pytest.raises(EdliPositionBridgeError, match="EDLI_BRIDGE_STRATEGY_DIRECTION_BLOCKED:settlement_capture"):
+        materialize_position_current_from_edli_fill(conn, aggregate_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -669,7 +724,9 @@ def test_two_distinct_fills_create_two_distinct_position_current_rows(conn):
         token = f"token-yes-collision-{i}"
         pre_submit = {
             "event_id": f"evt-{aggregate_id}",
+            "event_type": "FORECAST_SNAPSHOT_READY",
             "final_intent_id": f"intent-{aggregate_id}",
+            "strategy_key": "center_buy",
             "condition_id": cond,
             "token_id": token,
             "side": "BUY",

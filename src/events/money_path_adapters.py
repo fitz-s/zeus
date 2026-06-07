@@ -1,7 +1,9 @@
 # Last reused or audited: 2026-06-05
 # Authority basis: Operator GOAL 2026-06-04 — Kelly size=0 observability (zero-receipt root-cause);
 #   P1 ZERO-SUBMIT FIX A (2026-06-05, iron-rule-1) — f_cap budget-ceiling vs variance-haircut
-#   semantic mismatch in evaluate_kelly (corr/raw effective-bankroll). INV-K1/K1b preserved.
+#   semantic mismatch in evaluate_kelly (corr/raw effective-bankroll).
+#   P0 LIVE-FLOW FIX (2026-06-07) — portfolio heat is a soft marginal Kelly
+#   pressure input, not a hard total-portfolio cut.
 #   MINOR (2026-06-05): tightened the raw-cap comment — every factor IN THIS CALL (ci/lead/heat)
 #   is ≤ 1.0; city/strategy multipliers ([0.0,2.0] fail-open) are intentionally NOT passed here.
 """No-submit money-path adapter contracts for EDLI redemption."""
@@ -146,7 +148,6 @@ def evaluate_kelly(
     """
 
     from src.config import sizing_defaults
-    from src.sizing.sizing_context import effective_bankroll, effective_bankroll_raw
     from src.strategy.kelly import dynamic_kelly_mult, kelly_size
 
     if sizing_context is None and kelly_multiplier is None:
@@ -157,14 +158,43 @@ def evaluate_kelly(
 
     execution_price.assert_kelly_safe()
 
-    # Task #107 (portfolio/multi Kelly): source portfolio_heat for the existing
-    # kelly.py >0.40 damper (placement B, threshold UNCHANGED). This is a
-    # secondary observable damper, NOT the primary budget (design §3c verdict).
+    # Task #107 (portfolio/multi Kelly), corrected 2026-06-07:
+    # portfolio state is a MARGINAL Kelly pressure input, not a hard total-
+    # portfolio cut. Fractional Kelly already scales every new bet. A hard
+    # ``max_portfolio_heat_pct * B - raw_committed`` effective-bankroll gate or
+    # per-order clipping turns half/quarter Kelly into a fixed cash rule. That
+    # is mathematically different from multi-Kelly and was the live zero-flow /
+    # bad-sizing blocker.
+    #
+    # The pressure fed to ``dynamic_kelly_mult`` is normalized by the configured
+    # soft budgets:
+    #   raw_pressure  = raw_committed / (max_portfolio_heat_pct * B)
+    #   corr_pressure = corr_committed / (max_correlated_pct * B)
+    # The maximum is used so raw heat and local correlation can both reduce the
+    # next marginal size. ``dynamic_kelly_mult`` applies continuous attenuation;
+    # it neither fabricates a zero-size proof nor clips to a single-position cap.
     portfolio_heat = 0.0
     if sizing_context is not None and sizing_context.has_portfolio_context:
         _heat_bankroll = float(sizing_context.bankroll_usd)
         if _heat_bankroll > 0.0:
-            portfolio_heat = float(sizing_context.corr_committed_usd) / _heat_bankroll
+            _sdc_for_heat = sizing_defaults()
+            _raw_budget = (
+                float(_sdc_for_heat["max_portfolio_heat_pct"]) * _heat_bankroll
+            )
+            _corr_budget = (
+                float(_sdc_for_heat["max_correlated_pct"]) * _heat_bankroll
+            )
+            _raw_pressure = (
+                float(sizing_context.raw_committed_usd) / _raw_budget
+                if _raw_budget > 0.0
+                else 0.0
+            )
+            _corr_pressure = (
+                float(sizing_context.corr_committed_usd) / _corr_budget
+                if _corr_budget > 0.0
+                else 0.0
+            )
+            portfolio_heat = max(0.0, _raw_pressure, _corr_pressure)
 
     if sizing_context is not None:
         base = 0.25 if kelly_multiplier is None else float(kelly_multiplier)
@@ -177,75 +207,12 @@ def evaluate_kelly(
     else:
         effective_multiplier = float(kelly_multiplier)
 
-    # Task #107 placement A (the budget ENFORCER): size against the bankroll NET
-    # of committed capital. Two limits applied — the binding one (min) is used:
-    #
-    # (corr limit) effective_bankroll: corr-weighted reduction, ensures corr-
-    #   weighted simultaneous stakes ≤ f_cap·B (INV-K1 corr path).
-    #
-    # (raw limit) effective_bankroll_raw: ABSOLUTE raw-dollar floor — total cash
-    #   deployed across ALL positions regardless of correlation. Fixes the
-    #   verifier defect: 15 distant cities at corr=0.10 floor could deploy $254
-    #   against a $170 bankroll because the corr weighting barely reduces the
-    #   effective bankroll for independent bets. Raw constraint: Σ raw deployed
-    #   ≤ max_portfolio_heat_pct·B (0.5·B = $85 at $170). INV-K1b.
-    #
-    # A context with no portfolio fields (the #103 3-arg ``from_candidate_proof``,
-    # ``has_portfolio_context`` False) sizes against the raw bankroll exactly as
-    # before #107 — INV-K8 holds with EQUALITY for the unwired case.
+    # Multi-Kelly sizing: size against the actual bankroll. Portfolio exposure
+    # has already entered through the dynamic multiplier above. Do not subtract
+    # committed capital from a global heat budget here; that reintroduces a hard
+    # cap and makes positive-edge marginal opportunities impossible after a
+    # portfolio crosses the arbitrary soft-budget line.
     sizing_bankroll = float(bankroll_usd)
-    if sizing_context is not None and sizing_context.has_portfolio_context:
-        _sdc = sizing_defaults()
-        _b = float(sizing_context.bankroll_usd)
-        # P1 ZERO-SUBMIT FIX A (2026-06-05): ``f_cap`` is the BUDGET CEILING, not
-        # the variance haircut. Two DISTINCT concepts were previously wired to one
-        # variable: ``effective_bankroll``/``effective_bankroll_raw`` were passed
-        # ``f_cap=effective_multiplier`` (the Kelly VARIANCE HAIRCUT ~0.04–0.18),
-        # but their contract (sizing_context.py:47-93/96-133) is that ``f_cap`` is
-        # the CORRELATED-RISK / heat CEILING that committed capital draws down. The
-        # haircut is far below the ceiling live, so ``f_cap·B`` collapsed the corr
-        # budget to ~$8.9 (mult·B) instead of $42.5 (max_correlated_pct·B); the
-        # first same-cycle candidate exhausted it and every later positive-edge
-        # candidate got KELLY_REJECTED:corr_budget:size=0.0000 → zero submits.
-        #
-        # The ceiling and the per-bet haircut are INDEPENDENT (proven by the
-        # INV-K1/K1b relationship tests, NOT by the §3a "cancellation" prose):
-        #   stake = f*·effective_multiplier·effective_bankroll(B, committed, f_cap)
-        #         = f*·m·(f_cap·B − committed)/f_cap = (f*·m/f_cap)·(f_cap·B − committed)
-        # Since m ≤ base ≤ kelly_multiplier and f* ≤ 1, choosing
-        #   f_cap_corr = max_correlated_pct  AND  f_cap_raw = the kelly base cap
-        # gives f*·m/f_cap ≤ 1, so each corr-weighted stake ≤ (max_correlated_pct·B
-        # − committed) → Σ ≤ max_correlated_pct·B (INV-K1) and each raw stake ≤
-        # (max_portfolio_heat_pct·B − raw) → Σ ≤ max_portfolio_heat_pct·B (INV-K1b).
-        # The /f_cap and ·m do NOT cancel — and must not: the haircut only makes
-        # each bet smaller (more conservative), never breaching the ceiling.
-        #
-        # The raw-path ceiling is the kelly base cap (== the MAXIMUM possible
-        # ``effective_multiplier`` FOR THIS CALL, since every factor IN THIS CALL
-        # — ci, lead, heat — is ≤ 1.0). city/strategy multipliers are intentionally
-        # NOT passed to the dynamic_kelly_mult call above (no city=/strategy_key=),
-        # so the [0.0, 2.0] fail-open city_kelly_multiplier (kelly.py:341-369)
-        # cannot apply here. Do NOT add city=/strategy_key= to that call without
-        # re-deriving the raw cap — a city mult can reach 2.0 and would breach
-        # INV-K1b. When ``kelly_multiplier`` is supplied it is that base; else the
-        # ``evaluate_kelly`` default of 0.25.
-        _f_cap_corr = float(_sdc["max_correlated_pct"])
-        _kelly_base_cap = 0.25 if kelly_multiplier is None else float(kelly_multiplier)
-        # Corr-weighted limit (INV-K1): ceiling = max_correlated_pct·B.
-        _eff_corr = effective_bankroll(
-            _b,
-            float(sizing_context.corr_committed_usd),
-            f_cap=_f_cap_corr,
-        )
-        # Absolute raw-dollar limit (INV-K1b): ceiling = max_portfolio_heat_pct·B,
-        # reproduced in raw-bankroll space by the kelly base cap so f*·m/f_cap ≤ 1.
-        _eff_raw = effective_bankroll_raw(
-            _b,
-            float(sizing_context.raw_committed_usd),
-            float(_sdc["max_portfolio_heat_pct"]),
-            f_cap=_kelly_base_cap,
-        )
-        sizing_bankroll = min(_eff_corr, _eff_raw)
 
     size_usd = kelly_size(
         float(p_posterior),
@@ -253,19 +220,6 @@ def evaluate_kelly(
         sizing_bankroll,
         kelly_mult=effective_multiplier,
     )
-
-    # Task #107 INV-K3 (the single-bet cap): no single bet may exceed
-    # ``max_single_position_pct·B`` (config 0.10) — the named headline defect
-    # (live receipts showed 25-27%). Effective-bankroll reduction does NOT bound
-    # a first (uncommitted) bet, so this hard clamp against the FULL bankroll is
-    # the second belt. Only ever shrinks (never amplifies, INV-K8). Applied only
-    # on the portfolio-aware path; unwired callers keep exact single-Kelly.
-    _single_cap_usd: float | None = None
-    if sizing_context is not None and sizing_context.has_portfolio_context:
-        max_single_pct = float(sizing_defaults()["max_single_position_pct"])
-        _single_cap_usd = max_single_pct * float(sizing_context.bankroll_usd)
-        if size_usd > _single_cap_usd:
-            size_usd = _single_cap_usd
 
     # ── Diagnostic: compute binding_constraint (purely observational) ────────
     # Determines WHICH limit drove size to 0 (or which path produced the result).
@@ -287,9 +241,12 @@ def evaluate_kelly(
     if sizing_context is not None and sizing_context.has_portfolio_context:
         _corr_committed_diag = float(sizing_context.corr_committed_usd)
         _raw_committed_diag = float(sizing_context.raw_committed_usd)
-        # _eff_corr / _eff_raw were already computed above.
-        _eff_corr_diag = float(_eff_corr)
-        _eff_raw_diag = float(_eff_raw)
+        # These legacy diagnostic fields now report the bankroll actually used
+        # for marginal sizing. The heat/correlation pressure is carried in
+        # ``portfolio_heat`` and ``effective_multiplier`` instead of a hard
+        # reduced-bankroll gate.
+        _eff_corr_diag = float(sizing_bankroll)
+        _eff_raw_diag = float(sizing_bankroll)
 
     # Determine binding_constraint label.
     if size_usd == 0.0:
@@ -303,30 +260,10 @@ def evaluate_kelly(
         )
         if _unconstrained <= 0.0:
             _binding = "zero_edge"
-        elif (
-            sizing_context is not None
-            and sizing_context.has_portfolio_context
-            and _eff_corr_diag is not None
-            and _eff_raw_diag is not None
-        ):
-            if _eff_corr_diag <= _eff_raw_diag:
-                _binding = "corr_budget"
-            else:
-                _binding = "raw_heat_budget"
         else:
-            # Non-portfolio path collapsed — should not normally happen if edge>0.
-            _binding = "sized_ok" if size_usd > 0.0 else "zero_edge"
-    elif (
-        _single_cap_usd is not None
-        and size_usd == _single_cap_usd
-        and size_usd < kelly_size(
-            float(p_posterior),
-            execution_price,
-            float(sizing_bankroll),
-            kelly_mult=float(effective_multiplier),
-        )
-    ):
-        _binding = "single_cap"
+            # Positive-edge sizing should not collapse solely because portfolio
+            # heat is high; heat is continuous multiplier pressure.
+            _binding = "positive_edge_unexpected_zero"
     else:
         _binding = "sized_ok"
 
@@ -344,7 +281,7 @@ def evaluate_kelly(
         ci_width=_ci_w,
         lead_days=_lead,
         portfolio_heat=float(portfolio_heat),
-        single_cap_usd=_single_cap_usd,
+        single_cap_usd=None,
         binding_constraint=_binding,
     )
 

@@ -899,6 +899,7 @@ def test_venue_background_maintenance_is_throttled_between_heartbeat_ticks(monke
             self._target()
 
     monkeypatch.setattr(main, "_run_venue_background_maintenance_once", _maintenance)
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
     monkeypatch.setattr(main.threading, "Thread", InlineThread)
     main._last_venue_background_maintenance_attempt_at = None
     deadline = time.monotonic() + 1.0
@@ -910,6 +911,34 @@ def test_venue_background_maintenance_is_throttled_between_heartbeat_ticks(monke
     assert calls == [adapter]
 
 
+def test_venue_background_maintenance_bypasses_throttle_for_m5_latch(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    class InlineThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: True)
+    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: False)
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+    monkeypatch.setattr(
+        main,
+        "_run_venue_background_maintenance_once",
+        lambda active_adapter: calls.append(active_adapter),
+    )
+    main._last_venue_background_maintenance_attempt_at = None
+
+    assert main._start_venue_background_maintenance_async(adapter) == "started"
+    assert main._start_venue_background_maintenance_async(adapter) == "started"
+    assert calls == [adapter, adapter]
+
+
 def test_venue_background_maintenance_defers_when_edli_pending_backlog_exists(monkeypatch):
     from src import main
 
@@ -917,6 +946,7 @@ def test_venue_background_maintenance_defers_when_edli_pending_backlog_exists(mo
     calls = []
 
     monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
     monkeypatch.setattr(
         main,
         "_run_venue_background_maintenance_once",
@@ -927,6 +957,55 @@ def test_venue_background_maintenance_defers_when_edli_pending_backlog_exists(mo
     assert main._start_venue_background_maintenance_async(adapter) == "deferred_edli_pending_backlog"
     assert main._start_venue_background_maintenance_async(adapter) == "throttled"
     assert calls == []
+
+
+def test_venue_background_maintenance_runs_m5_reconcile_despite_edli_pending_backlog(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    class InlineThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: True)
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+    monkeypatch.setattr(
+        main,
+        "_run_venue_background_maintenance_once",
+        lambda active_adapter: calls.append(active_adapter),
+    )
+    main._last_venue_background_maintenance_attempt_at = None
+
+    assert main._start_venue_background_maintenance_async(adapter) == "started"
+    assert calls == [adapter]
+
+
+def test_post_reactor_maintenance_starts_only_when_m5_required(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    monkeypatch.setattr(main, "_ensure_venue_read_side_adapter", lambda: adapter)
+    monkeypatch.setattr(
+        main,
+        "_start_venue_background_maintenance_async",
+        lambda active_adapter: calls.append(active_adapter) or "started",
+    )
+
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
+    assert main._start_venue_background_maintenance_after_reactor_if_required() == "not_required"
+    assert calls == []
+
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: True)
+    assert main._start_venue_background_maintenance_after_reactor_if_required() == "started"
+    assert calls == [adapter]
 
 
 def test_collateral_background_refresh_defers_when_edli_pending_backlog_exists(monkeypatch):
@@ -1080,6 +1159,38 @@ def test_venue_background_maintenance_defers_while_cycle_runs(monkeypatch):
 
     assert result == {"status": "deferred_cycle_running"}
     assert calls == []
+
+
+def test_venue_background_maintenance_refreshes_findings_before_ws_latch_clear(monkeypatch):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    def _refresh(active_adapter):
+        assert active_adapter is adapter
+        calls.append("refresh")
+        return {"status": "resolved", "remaining": 0}
+
+    def _ws_gap(active_adapter):
+        assert active_adapter is adapter
+        calls.append("ws_gap")
+        return {"status": "cleared", "unresolved_findings": 0}
+
+    monkeypatch.setattr(main, "_refresh_reconcile_findings_if_required", _refresh)
+    monkeypatch.setattr(main, "_run_ws_gap_reconcile_if_required", _ws_gap)
+    monkeypatch.setattr(
+        main,
+        "_refresh_global_collateral_snapshot_if_due",
+        lambda active_adapter: calls.append("collateral") or False,
+    )
+
+    result = main._run_venue_background_maintenance_once(adapter)
+
+    assert result["status"] == "ok"
+    assert result["reconcile_findings_refresh"]["status"] == "resolved"
+    assert result["ws_gap_reconcile"]["status"] == "cleared"
+    assert calls == ["refresh", "ws_gap", "collateral"]
 
 
 def test_venue_background_maintenance_refreshes_stale_global_collateral(monkeypatch):

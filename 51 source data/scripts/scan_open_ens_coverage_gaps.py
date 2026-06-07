@@ -7,7 +7,7 @@ import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = ROOT / "raw" / "ecmwf_open_ens"
 DEFAULT_MANIFEST = ROOT / "docs" / "tigge_city_coordinate_manifest_full_20260330.json"
 DEFAULT_OUTPUT = ROOT / "tmp" / "open_ens_coverage_gaps_latest.json"

@@ -25,7 +25,7 @@ ROOT = SCRIPT_DIR.parent
 TMP_DIR = ROOT / "tmp"
 LOG_DIR = Path("/Users/leofitz/.openclaw/logs")
 RAW_ROOT = ROOT / "raw"
-ZEUS_ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/zeus")
+ZEUS_ROOT = Path(__file__).resolve().parents[2]
 ZEUS_PYTHON = str(ZEUS_ROOT / ".venv" / "bin" / "python")
 DEFAULT_ZEUS_DBS = (
     ZEUS_ROOT / "state" / "zeus-world.db",

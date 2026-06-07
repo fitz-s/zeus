@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -757,6 +758,37 @@ def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_p
     assert any(reason.startswith("EDLI_STAGE_SOURCE_HEALTH_STALE") for reason in report.reasons)
 
 
+def test_edli_live_canary_boot_defers_self_written_status_summary_staleness(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    _init_stage_world_db(db_path).close()
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+    monkeypatch.setitem(main._BOOT_STATE, "sha", "abc123")
+    loaded = tmp_path / "loaded_sha.json"
+    source = tmp_path / "source_health.json"
+    status = tmp_path / "status_summary.json"
+    now = datetime.now(timezone.utc)
+    loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
+    source.write_text(json.dumps({"generated_at": now.isoformat()}))
+    status.write_text(json.dumps({"generated_at": (now - timedelta(hours=1)).isoformat()}))
+
+    report = main._assert_edli_stage_readiness(
+        {
+            "live_execution_mode": "edli_live_canary",
+            "edli_stage_loaded_sha_file": str(loaded),
+            "edli_stage_source_health_json": str(source),
+            "edli_stage_status_json": str(status),
+            "edli_stage_readiness_max_age_seconds": 60,
+        }
+    )
+
+    assert report.status == "WAITING_FOR_QUALIFYING_EVENT"
+    assert report.live_entries_allowed is True
+    assert report.submit_allowed is True
+    assert any(reason.startswith("EDLI_STAGE_STATUS_SUMMARY_STALE") for reason in report.reasons)
+
+
 def _edli_live_canary_updates(**overrides):
     values = {
         "enabled": True,
@@ -768,6 +800,7 @@ def _edli_live_canary_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
+        "taker_fok_fak_live_enabled": True,
         "durable_submit_outbox_enabled": True,
         # 2026-06-04: the arm direction-gate boot guard is DELETED (mainstream is
         # display-only). These keys are now INERT (no boot guard reads them); retained
@@ -790,6 +823,7 @@ def _edli_live_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
+        "taker_fok_fak_live_enabled": True,
         "durable_submit_outbox_enabled": True,
         "edli_live_operator_authorized": True,
         "edli_live_promotion_artifact_required": True,

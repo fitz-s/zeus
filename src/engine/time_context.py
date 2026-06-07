@@ -6,7 +6,7 @@ anchored to a timezone-aware reference time rather than `date.today()`.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 
@@ -65,8 +65,41 @@ def lead_hours_to_settlement_close(
     target_day = _coerce_target_date(target_date)
     reference = _coerce_datetime(reference_time)
     tz = ZoneInfo(city_timezone)
-    from datetime import timedelta
     target_end_local = datetime.combine(target_day, time.min, tzinfo=tz) + timedelta(days=1)
     reference_local = reference.astimezone(tz)
     delta = target_end_local - reference_local
     return delta.total_seconds() / 3600.0
+
+
+def city_local_date_at(city_timezone: str, reference_time: datetime | str | None = None) -> date:
+    """Calendar date at ``reference_time`` in the city's settlement timezone."""
+
+    reference = _coerce_datetime(reference_time)
+    return reference.astimezone(ZoneInfo(city_timezone)).date()
+
+
+def city_local_fetch_window(
+    city_timezone: str,
+    *,
+    reference_time: datetime | str | None = None,
+    days_back: int,
+) -> tuple[date, date]:
+    """Rolling inclusive source-fetch window in the city-local calendar."""
+
+    if days_back < 0:
+        raise ValueError("days_back must be non-negative")
+    local_date = city_local_date_at(city_timezone, reference_time)
+    return local_date - timedelta(days=days_back), local_date
+
+
+def has_city_local_day_started(
+    target_date: date | str,
+    city_timezone: str,
+    reference_time: datetime | str | None = None,
+) -> bool:
+    """Whether the city-local settlement day has started at ``reference_time``."""
+
+    target_day = _coerce_target_date(target_date)
+    reference = _coerce_datetime(reference_time).astimezone(timezone.utc)
+    target_start_local = datetime.combine(target_day, time.min, tzinfo=ZoneInfo(city_timezone))
+    return target_start_local.astimezone(timezone.utc) <= reference

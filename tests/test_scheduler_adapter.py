@@ -240,13 +240,18 @@ def test_build_registry_scheduler_boot_assert_catches_drift() -> None:
         build_registry_scheduler(_FakeScheduler(), "ingest_main", extra, forecast_live_owner_env="ingest_main")
 
 
-def test_forecast_live_legacy_and_registry_triggers_are_equivalent() -> None:
+def test_forecast_live_legacy_and_registry_triggers_are_equivalent(monkeypatch) -> None:
     """BRIDGE EQUIVALENCE (advisor #1): the registry path and the legacy path are TWO CONSUMERS of
     ONE spec list, so per job the (id, trigger_type, trigger_params) must be identical. The
     boot-assert guards the id SET; this guards the trigger PARAMS — catching a future edit where
     the two paths silently diverge on cadence. Executor/concurrency intentionally differ (lanes)."""
     import src.ingest.forecast_live_daemon as fld
     from datetime import datetime, timezone
+    from src.config import settings
+
+    cfg = dict(settings._data.get("replacement_forecast_shadow", {}))
+    cfg["disable_legacy_opendata_forecast_live_jobs"] = False
+    monkeypatch.setitem(settings._data, "replacement_forecast_shadow", cfg)
 
     specs = fld.forecast_live_job_specs(startup_run_date=datetime(2026, 5, 24, tzinfo=timezone.utc))
 
@@ -274,6 +279,11 @@ def test_forecast_live_boot_assert_holds_in_both_owner_envs(monkeypatch) -> None
     from src.data.scheduler_adapter import (
         build_registry_scheduler, expected_registry_job_ids, job_defs_from_specs,
     )
+    from src.config import settings
+
+    cfg = dict(settings._data.get("replacement_forecast_shadow", {}))
+    cfg["disable_legacy_opendata_forecast_live_jobs"] = False
+    monkeypatch.setitem(settings._data, "replacement_forecast_shadow", cfg)
 
     specs = fld.forecast_live_job_specs(startup_run_date=datetime(2026, 5, 24, tzinfo=timezone.utc))
     job_defs = job_defs_from_specs(specs)

@@ -723,6 +723,16 @@ class TestRiskGuardSettlementSource:
             cost_basis_usd=20.0,
             last_monitor_market_price=2.5,
         )
+        _insert_position_current(
+            conn,
+            position_id="db-pos-settled",
+            strategy_key="center_buy",
+            phase="settled",
+            size_usd=1000.0,
+            shares=1000.0,
+            cost_basis_usd=1000.0,
+            last_monitor_market_price=1.0,
+        )
         conn.commit()
         conn.close()
 
@@ -788,12 +798,14 @@ class TestRiskGuardSettlementSource:
         assert details["portfolio_truth_source"] == "position_current"
         assert details["portfolio_loader_status"] == "ok"
         assert details["portfolio_fallback_active"] is False
-        assert details["portfolio_position_count"] == 1
+        assert details["portfolio_position_count"] == 2
         assert details["portfolio_capital_source"] == "dual_source_blended"
-        # Bankroll truth axis (P0-A): provider-sourced wallet; DEF A
-        # makes effective_bankroll == initial_bankroll (no PnL fold-in).
+        # Bankroll truth axis: provider-sourced wallet cash plus canonical
+        # open-position value, with no realized-PnL fold-in.
         assert details["initial_bankroll"] == pytest.approx(211.37)
-        assert details["effective_bankroll"] == pytest.approx(211.37)
+        assert details["account_equity_components"]["wallet_cash_usd"] == pytest.approx(211.37)
+        assert details["account_equity_components"]["open_position_equity_usd"] == pytest.approx(25.0)
+        assert details["effective_bankroll"] == pytest.approx(236.37)
         assert details["bankroll_truth_source"] == "polymarket_wallet"
         # Baselines come from PortfolioState's daily/weekly snapshots (still
         # provided by the legacy load_portfolio path).
@@ -2332,6 +2344,39 @@ def test_refresh_strategy_health_records_rows_from_lawful_surfaces():
     assert row["edge_compression_flag"] == 1
     assert snapshot["status"] == "fresh"
     assert snapshot["stale_strategy_keys"] == []
+
+
+def test_refresh_strategy_health_omits_noncanonical_execution_strategy_rows():
+    conn = _policy_conn()
+    as_of = "2026-04-04T12:00:00+00:00"
+
+    _insert_position_current(
+        conn,
+        position_id="pos-center",
+        strategy_key="center_buy",
+        size_usd=25.0,
+        shares=10.0,
+        cost_basis_usd=20.0,
+        last_monitor_market_price=2.5,
+    )
+    _insert_execution_fact(
+        conn,
+        intent_id="legacy-null-strategy-fill",
+        strategy_key=None,  # type: ignore[arg-type]
+        terminal_exec_status="filled",
+        posted_at="2026-04-02T12:00:00+00:00",
+    )
+
+    result = refresh_strategy_health(conn, as_of=as_of)
+    rows = conn.execute(
+        "SELECT strategy_key, fill_rate_14d FROM strategy_health ORDER BY strategy_key"
+    ).fetchall()
+
+    assert result["status"] == "refreshed"
+    assert result["omitted_noncanonical_strategy_counts"]["execution_fact"] == 1
+    assert [(row["strategy_key"], row["fill_rate_14d"]) for row in rows] == [
+        ("center_buy", None)
+    ]
 
 
 def test_refresh_strategy_health_ignores_authorityless_outcome_fact_rows():

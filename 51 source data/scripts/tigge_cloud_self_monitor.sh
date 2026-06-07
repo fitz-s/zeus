@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CLOUD_ROOT="${CLOUD_ROOT:-/data/tigge}"
-CLOUD_DATA_ROOT="${CLOUD_DATA_ROOT:-$CLOUD_ROOT/workspace-venus/51 source data}"
+CLOUD_DATA_ROOT="${CLOUD_DATA_ROOT:-$CLOUD_ROOT/zeus/51 source data}"
 CLOUD_BUNDLE_ROOT="${CLOUD_BUNDLE_ROOT:-$HOME/tigge_bundle}"
 ACCOUNT_LIMIT="${ACCOUNT_LIMIT:-5}"
 MAX_WORKERS="${MAX_WORKERS:-2}"
@@ -26,6 +26,7 @@ echo "account_limit=$ACCOUNT_LIMIT"
 echo "max_workers=$MAX_WORKERS"
 echo "date_from=$DATE_FROM"
 echo "date_to=${DATE_TO:-dynamic}"
+export CLOUD_DATA_ROOT
 
 if ! findmnt -T "$CLOUD_ROOT" >/dev/null 2>&1; then
   echo "status=CRITICAL reason=data_disk_not_mounted"
@@ -95,9 +96,10 @@ python_bin="$CLOUD_ROOT/venv/bin/python"
 "$python_bin" - <<'PY'
 from pathlib import Path
 from datetime import datetime
+import os
 import re
 
-root = Path("/data/tigge/workspace-venus/51 source data")
+root = Path(os.environ["CLOUD_DATA_ROOT"])
 logs = root / "logs"
 raw = root / "raw"
 expected_total = 4464

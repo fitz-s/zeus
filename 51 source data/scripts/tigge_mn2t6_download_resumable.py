@@ -9,7 +9,7 @@ from pathlib import Path
 from tigge_mx2t6_download_resumable import run
 
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
 DEFAULT_STATUS = ROOT / "tmp" / "tigge_mn2t6_download_status.json"
 DEFAULT_RAW_ROOT = ROOT / "raw"

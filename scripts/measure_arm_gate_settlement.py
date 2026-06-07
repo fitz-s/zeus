@@ -238,6 +238,12 @@ def _grade_row_won(
 # the pooled CW-ROI is positive (one strong city must not mask a losing one).
 _PER_CITY_CW_ROI_TOLERANCE = -1e-9
 
+# Current live probability-regime provenance. Older receipts omitted q_source
+# for hash stability before #120; those rows are useful diagnostic settlement
+# history, but they cannot license the current EMOS/honest-raw production
+# mechanism for real submit.
+CURRENT_ARM_Q_SOURCES = frozenset({"emos", "raw_honest"})
+
 
 @dataclass(frozen=True)
 class CapitalWeightedArmVerdict:
@@ -438,6 +444,20 @@ def _capital_weighted_arm_decision(
     )
 
 
+def _current_regime_rows(rows: list[dict]) -> list[dict]:
+    """Rows allowed to license the current live probability mechanism.
+
+    Missing q_source means pre-provenance history. Treat it as diagnostic only:
+    it must neither grant nor deny a current-regime ARM license. This keeps the
+    boot gate fail-closed on new mechanisms until their own settled receipts
+    exist, instead of mixing an older calibration era into live promotion.
+    """
+    return [
+        r for r in rows
+        if str(r.get("q_source") or "").strip() in CURRENT_ARM_Q_SOURCES
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Bin label parsing helpers
 # ---------------------------------------------------------------------------
@@ -505,6 +525,7 @@ def _load_deduped_receipts(world_db: str) -> list[dict]:
                 "kelly_size_usd": d["kelly_size_usd"],
                 "mainstream_agreement_pass": d["mainstream_agreement_pass"],
                 "decision_time": d["decision_time"],
+                "q_source": rj.get("q_source"),
                 "bin_label": bin_label,
                 "traded_lo": parsed[0] if parsed else None,
                 "traded_hi": parsed[1] if parsed else None,
@@ -607,6 +628,7 @@ def _compute_rows(receipts: list[dict], settlements: dict) -> list[dict]:
             "price": r["c_fee_adjusted"],
             "kelly_size_usd": r["kelly_size_usd"],
             "gate_pass": r["mainstream_agreement_pass"] == 1,
+            "q_source": r.get("q_source"),
             "settlement_value": s["settlement_value"],
             "settlement_unit": s["settlement_unit"],
             "traded_lo": lo,
@@ -937,12 +959,24 @@ def main(argv: Optional[list[str]] = None) -> None:
     # --- Join ---
     all_rows = _compute_rows(receipts, settlements)
     gate_rows = [r for r in all_rows if r["gate_pass"]]
+    production_rows = _current_regime_rows(all_rows)
+    legacy_or_unproven_rows = [
+        r for r in all_rows
+        if str(r.get("q_source") or "").strip() not in CURRENT_ARM_Q_SOURCES
+    ]
 
     # Coverage summary
     settled_dates = sorted({(r["city"], r["target_date"]) for r in all_rows})
     gate_dates = sorted({(r["city"], r["target_date"]) for r in gate_rows})
+    production_dates = sorted({(r["city"], r["target_date"]) for r in production_rows})
     print(f"\nSettled (city,date) pairs in ALL cohort:      {len(settled_dates)}")
     print(f"Settled (city,date) pairs in gate-PASS cohort:{len(gate_dates)}")
+    print(f"Settled (city,date) pairs in CURRENT regime: {len(production_dates)}")
+    print(
+        "Current-regime q_source allowlist:       "
+        f"{', '.join(sorted(CURRENT_ARM_Q_SOURCES))}"
+    )
+    print(f"Legacy/unproven rows excluded from ARM:  {len(legacy_or_unproven_rows)}")
 
     if not gate_rows:
         print("\n" + "!" * 78)
@@ -976,27 +1010,29 @@ def main(argv: Optional[list[str]] = None) -> None:
     # continuity. The ARM DECISION is the capital-weighted one: a cohort can
     # clear 51% by row count while losing money once sized.
     # OPERATOR INTENT RESTORED (2026-06-04): mainstream-agreement is REFERENCE-ONLY
-    # and must NEVER wire into a production/arm decision. The ARM VERDICT is therefore
-    # computed on the PRODUCTION cohort (all_rows = every deduped receipt that passed
-    # the real trade gates), NOT the gate-PASS (mainstream_agreement_pass=1) subset.
-    # Settlement proves EMOS beats mainstream, so an agreement filter selects the
-    # low-edge subset and makes arming structurally UNREACHABLE (the infinite-deferral
-    # trap). The gate-PASS split above is DIAGNOSTIC only. The statistical bar
-    # (>51%, sigma>=2, per-city n, capital-weighted ROI>0) is unchanged — this is a
-    # cohort correction, not a gate relaxation (all_rows is a superset; currently
-    # DENIED on negative EV).
+    # and must NEVER wire into a production/arm decision. The ARM VERDICT is
+    # computed on the PRODUCTION cohort for the CURRENT probability mechanism
+    # (q_source in CURRENT_ARM_Q_SOURCES), NOT the gate-PASS subset and NOT old
+    # pre-provenance receipts. Legacy/no-q_source rows remain diagnostic only:
+    # they cannot license current EMOS/honest-raw, and they cannot deny it by
+    # being mixed into the current regime. If no current-regime settled rows
+    # exist, arming fails closed as INSUFFICIENT.
     print("\n" + "=" * 78)
-    print("CAPITAL-WEIGHTED ARM VERDICT (PRODUCTION cohort — mainstream is diagnostic only)")
+    print("CAPITAL-WEIGHTED ARM VERDICT (CURRENT PRODUCTION regime — q_source provenanced)")
     print("=" * 78)
     cw_verdict: Optional[CapitalWeightedArmVerdict] = None
     cw_eligible = False
     try:
-        cw_verdict = _compute_capital_weighted_verdict(all_rows)
+        cw_verdict = _compute_capital_weighted_verdict(production_rows)
         print(f"  equal_row_win_rate      = {_fmt_pct(cw_verdict.equal_row_win_rate)}")
         print(f"  equal_row_ev_sigma      = {_fmt_f(cw_verdict.equal_row_ev_sigma, '.2f')}")
         print(f"  capital_weighted_roi    = {_fmt_pct(cw_verdict.capital_weighted_roi)}")
         print(f"  capital_weighted_sigma  = {_fmt_f(cw_verdict.capital_weighted_ev_sigma, '.2f')}")
         print(f"  pooled n                = {cw_verdict.n}")
+        print(
+            f"  legacy/unproven excluded= {len(legacy_or_unproven_rows)} "
+            "(diagnostic only; cannot license current regime)"
+        )
         if cw_verdict.per_city_cw_roi:
             print("  per-city capital-weighted ROI:")
             for c in sorted(cw_verdict.per_city_cw_roi):
@@ -1011,8 +1047,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         print(f"  ARM (capital-weighted): DENIED — {exc}")
 
     # --- Equal-row verdict (continuity; NOT the arming decision) ---
-    # PRODUCTION cohort (all_rows), per operator reference-only intent (see above).
-    arm_eligible, arm_reason = _arm_verdict(all_stats, all_rows)
+    # PRODUCTION cohort (current q_source rows), per reference-only intent above.
+    production_stats = _stats(production_rows, "CURRENT production pooled")
+    arm_eligible, arm_reason = _arm_verdict(production_stats, production_rows)
     print("\n" + "=" * 78)
     print("EQUAL-ROW VERDICT (continuity only; thresholds: win_rate>51%, sigma>=2.0, n>=20, per-city n>=5)")
     print("=" * 78)
@@ -1040,11 +1077,12 @@ def main(argv: Optional[list[str]] = None) -> None:
             # coverage_licensed is ALWAYS False here: no settlement-calibrated
             # coverage license (K3) exists on this branch. The honest verdict on
             # current data is DENIED, so the artifact is BLOCKING by construction.
-            # PRODUCTION cohort (all_rows) for date-coverage evidence too — the
-            # artifact reflects what the system actually trades, not the
-            # mainstream-agreeing subset (operator reference-only intent).
+            # PRODUCTION cohort (current q_source rows) for date-coverage
+            # evidence too — the artifact reflects what the current live
+            # mechanism actually trades, not old unproven receipts and not the
+            # mainstream-agreeing subset.
             artifact = build_arm_artifact(
-                cw_verdict, all_rows, argv=argv, coverage_licensed=False
+                cw_verdict, production_rows, argv=argv, coverage_licensed=False
             )
         emit_arm_artifact(args.emit_artifact, artifact)
         blocks = (artifact["capital_weighted_ev"] <= 0.0) or (not artifact["coverage_licensed"])

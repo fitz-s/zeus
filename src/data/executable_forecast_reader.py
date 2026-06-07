@@ -230,6 +230,55 @@ def _parse_date(value: date | str) -> date:
     return date.fromisoformat(value)
 
 
+def _snapshot_provenance(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("provenance_json")
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _is_finite_number(value: object) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _station_grid_provenance_reason(row: dict[str, Any]) -> str | None:
+    """WU airport-settled markets need explicit grid-to-station provenance.
+
+    This is an input-authority gate, not a second probability model: EMOS remains
+    the single q builder, but a current OpenData row cannot be live-executable
+    unless it proves which grid point represented the settlement station.
+    """
+    data_version = str(row.get("dataset_id") or "")
+    if "ecmwf_opendata" not in data_version:
+        return None
+    provenance = _snapshot_provenance(row)
+    contract = provenance.get("contract_outcome_evidence")
+    if not isinstance(contract, dict):
+        contract = {}
+    source_type = str(
+        row.get("settlement_source_type")
+        or contract.get("settlement_source_type")
+        or ""
+    ).strip().lower()
+    if source_type != "wu_icao":
+        return None
+    required = (
+        provenance.get("nearest_grid_lat"),
+        provenance.get("nearest_grid_lon"),
+        provenance.get("nearest_grid_distance_km"),
+    )
+    if not all(_is_finite_number(value) for value in required):
+        return "EXECUTABLE_FORECAST_STATION_GRID_PROVENANCE_MISSING"
+    return None
+
+
 def _parse_utc(value: object) -> datetime | None:
     if not isinstance(value, str) or not value:
         return None
@@ -788,6 +837,9 @@ def read_executable_forecast_snapshot(
         return ExecutableForecastReadResult(
             "BLOCKED", "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
         )
+    grid_reason = _station_grid_provenance_reason(row)
+    if grid_reason is not None:
+        return ExecutableForecastReadResult("BLOCKED", grid_reason)
     if now_utc is not None:
         if now_utc.tzinfo is None or now_utc.utcoffset() is None:
             return ExecutableForecastReadResult("UNKNOWN_BLOCKED", "READ_NOW_INVALID")

@@ -144,7 +144,7 @@ def test_continuous_redecision_does_not_reemit_settlement_day_forecast_only():
     assert world.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
 
 
-def test_prune_working_set_expires_stale_fsr_before_skip_snapshot():
+def test_prune_working_set_expires_stale_fsr_before_skip_snapshot(monkeypatch):
     """A stale FSR row must be expired before the continuous-redecision skip set snapshots."""
 
     world = sqlite3.connect(":memory:")
@@ -190,6 +190,17 @@ def test_prune_working_set_expires_stale_fsr_before_skip_snapshot():
 
     decision_time = datetime(2026, 6, 5, 12, 0, tzinfo=timezone.utc)
     assert stale.entity_key in main._edli_pending_entity_keys(world)
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda name, default=None: {
+            "reactor_prune_enabled": True,
+            "reactor_prune_interval_seconds": 0,
+            "reactor_prune_batch_limit": 10,
+        }
+        if name == "edli_v1"
+        else (default if default is not None else {}),
+    )
 
     main._edli_prune_pending_working_set(store, decision_time=decision_time)
 

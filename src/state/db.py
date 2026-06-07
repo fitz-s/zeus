@@ -52,6 +52,15 @@ ZEUS_FORECASTS_DB_PATH = STATE_DIR / "zeus-forecasts.db"  # K1 split 2026-05-11:
 ZEUS_BACKTEST_DB_PATH = STATE_DIR / "zeus_backtest.db"  # Derived audit output; never runtime authority
 RISK_DB_PATH = STATE_DIR / "risk_state.db"  # Single risk DB (live-only)
 
+CANONICAL_STRATEGY_KEYS = frozenset(
+    {
+        "settlement_capture",
+        "shoulder_sell",
+        "center_buy",
+        "opening_inertia",
+    }
+)
+
 _EXIT_LIFECYCLE_EVENT_TYPES = frozenset(
     {
         "EXIT_ORDER_POSTED",
@@ -805,6 +814,7 @@ CANONICAL_POSITION_SETTLED_DETAIL_FIELDS = (
     "settlement_value",
 )
 SETTLEMENT_METRIC_READY_TRUTH_SOURCES = frozenset({
+    "forecasts.settlement_outcomes",
     "forecasts.settlements",
     "world.settlements",
     "harvester_live_verified_settlement",
@@ -2017,7 +2027,7 @@ def init_schema(
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -3387,7 +3397,7 @@ def _create_readiness_state(conn: sqlite3.Connection) -> None:
             token_ids_json TEXT NOT NULL DEFAULT '[]',
             strategy_key TEXT,
             status TEXT NOT NULL CHECK (status IN (
-                'LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
+                'READY','LIVE_ELIGIBLE','SHADOW_ONLY','BLOCKED','DEGRADED_LOG_ONLY','UNKNOWN_BLOCKED'
             )),
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             computed_at TEXT NOT NULL,
@@ -4134,6 +4144,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     cost_basis_usd REAL,
     entry_price REAL,
     p_posterior REAL,
+    entry_ci_width REAL,
     last_monitor_prob REAL,
     last_monitor_edge REAL,
     last_monitor_market_price REAL,
@@ -5073,6 +5084,28 @@ def _table_or_view_exists(conn: sqlite3.Connection, name: str) -> bool:
         (name,),
     ).fetchone()
     return row is not None
+
+
+def list_sqlite_tables_and_views_read_only(db_path: str | Path) -> tuple[str, ...]:
+    """Return table/view names from a SQLite DB using a read-only URI."""
+
+    path = Path(db_path)
+    if not path.exists():
+        return ()
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return ()
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+    finally:
+        conn.close()
+    return tuple(str(row[0]) for row in rows)
 
 
 _FORWARD_MARKET_EVENT_COLUMNS = (
@@ -8756,8 +8789,17 @@ def refresh_strategy_health(
 
     position_view = query_position_current_status_view(conn)
     position_metrics: dict[str, dict[str, float]] = {}
+    omitted_noncanonical_strategy_counts = {
+        "position_current": 0,
+        "settlement": 0,
+        "execution_fact": 0,
+        "risk_actions": 0,
+    }
     for position in position_view.get("positions", []):
         strategy_key = str(position.get("strategy") or "unclassified")
+        if strategy_key not in CANONICAL_STRATEGY_KEYS:
+            omitted_noncanonical_strategy_counts["position_current"] += 1
+            continue
         bucket = position_metrics.setdefault(
             strategy_key,
             {
@@ -8800,6 +8842,9 @@ def refresh_strategy_health(
         elif settled_at < settled_cutoff:
             continue
         strategy_key = str(settlement_row.get("strategy") or "unclassified")
+        if strategy_key not in CANONICAL_STRATEGY_KEYS:
+            omitted_noncanonical_strategy_counts["settlement"] += 1
+            continue
         bucket = settlement_metrics.setdefault(
             strategy_key,
             {
@@ -8841,11 +8886,15 @@ def refresh_strategy_health(
             (execution_cutoff,),
         ).fetchall()
         for row in execution_rows:
+            strategy_key = str(row["strategy_key"] or "unclassified")
+            if strategy_key not in CANONICAL_STRATEGY_KEYS:
+                omitted_noncanonical_strategy_counts["execution_fact"] += 1
+                continue
             filled = int(row["filled"] or 0)
             rejected = int(row["rejected"] or 0)
             observed = filled + rejected
             fill_rate = round(filled / observed, 4) if observed else None
-            execution_metrics[str(row["strategy_key"])] = {
+            execution_metrics[strategy_key] = {
                 "fill_rate_14d": fill_rate,
                 "execution_decay_flag": int(fill_rate is not None and observed >= 10 and fill_rate < 0.3),
             }
@@ -8865,6 +8914,9 @@ def refresh_strategy_health(
         for row in risk_action_rows:
             strategy_key = str(row["strategy_key"] or "")
             if not strategy_key:
+                continue
+            if strategy_key not in CANONICAL_STRATEGY_KEYS:
+                omitted_noncanonical_strategy_counts["risk_actions"] += 1
                 continue
             bucket = risk_action_metrics.setdefault(
                 strategy_key,
@@ -8950,6 +9002,7 @@ def refresh_strategy_health(
             "brier_30d",
             "edge_trend_30d",
         ],
+        "omitted_noncanonical_strategy_counts": omitted_noncanonical_strategy_counts,
     }
 
 
@@ -9263,6 +9316,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
         "chain_cost_basis_usd",
         "chain_seen_at",
         "chain_absence_at",
+        "entry_ci_width",
     )
     authority_select_expr = ", ".join(
         c if c in actual_cols else f"NULL AS {c}" for c in _authority_cols
@@ -9332,6 +9386,7 @@ def query_portfolio_loader_view(conn: sqlite3.Connection | None, *, temperature_
                 "execution_fact_intent_id": fill_economics["execution_fact_intent_id"],
                 "execution_fact_filled_at": fill_economics["execution_fact_filled_at"],
                 "p_posterior": row["p_posterior"],
+                "entry_ci_width": row["entry_ci_width"],
                 "last_monitor_prob": _finite_float_or_none(row["last_monitor_prob"]),
                 "last_monitor_edge": _finite_float_or_none(row["last_monitor_edge"]),
                 "last_monitor_market_price": row["last_monitor_market_price"],

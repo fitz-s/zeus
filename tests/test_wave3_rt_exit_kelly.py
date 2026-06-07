@@ -244,18 +244,18 @@ class TestDeadKellyParamsRemoved:
         assert m_with_heat < m_no_heat, (
             f"portfolio_heat=0.45 should reduce sizing: {m_with_heat} >= {m_no_heat}"
         )
-        upper = 0.25 * 0.7 * 0.8 * 0.55  # base * ci_haircut(>0.10) * lead_days(>=3)->x0.8 * (1-0.45)
+        upper = 0.25 * 0.7 * 0.8 / 1.45
         assert 0 < m_with_heat <= upper + 1e-9, (
             f"dynamic_kelly_mult(base=0.25, ci_width=0.12, lead_days=4, portfolio_heat=0.45, city='Warsaw') "
             f"= {m_with_heat} not in (0, {upper}]"
         )
 
     def test_canonical_call_returns_valid_range(self):
-        """The canonical call from the brief must return a value in (0, 0.25*0.7*0.8*0.55].
+        """The canonical call from the brief must return a value in (0, 0.25*0.7*0.8/1.45].
 
         Haircut breakdown: base=0.25, ci_width=0.12 (>0.10) → ×0.7,
-        lead_days=4 (≥3) → ×0.8, portfolio_heat=0.45 → ×(1-0.45)=×0.55.
-        Upper bound = 0.25 × 0.7 × 0.8 × 0.55 ≈ 0.0770."""
+        lead_days=4 (≥3) → ×0.8, portfolio_heat=0.45 → ×1/(1+0.45).
+        Upper bound = 0.25 × 0.7 × 0.8 / 1.45 ≈ 0.0966."""
         from src.strategy.kelly import dynamic_kelly_mult
         m = dynamic_kelly_mult(
             base=0.25,
@@ -264,7 +264,7 @@ class TestDeadKellyParamsRemoved:
             portfolio_heat=0.45,
             city="Warsaw",
         )
-        upper = 0.25 * 0.7 * 0.8 * 0.55  # ci_width=0.12->x0.7; lead_days=4(>=3)->x0.8; heat=0.45->x0.55
+        upper = 0.25 * 0.7 * 0.8 / 1.45
         assert 0 < m <= upper + 1e-9, (
             f"Expected in (0, {upper:.4f}], got {m:.6f}"
         )

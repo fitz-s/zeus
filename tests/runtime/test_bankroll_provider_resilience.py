@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-05-31
+# Last reused/audited: 2026-06-07
 # Authority basis: /tmp/contested_bin_root_2026_05_31.md (KILLER 1) + docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
 """Relationship test for bankroll_provider RESILIENCE across transient wallet-RPC blips.
 
@@ -94,6 +94,37 @@ def test_warm_success_then_failure_keeps_cached_value(real_provider, monkeypatch
     assert cv.value_usd == 185.0
     assert cv.authority == "canonical"
     assert cv.source == "polymarket_wallet"
+
+
+def test_fetch_balance_returns_equity_and_spendable_cash(monkeypatch):
+    import src.data.polymarket_client as polymarket_client_module
+    import src.runtime.bankroll_provider as bp
+
+    importlib.reload(bp)
+    bp.reset_cache_for_tests()
+
+    class FakePolymarketClient:
+        def get_wallet_balance(self):
+            return 100.0
+
+        def get_positions_from_api(self):
+            return [
+                {"current_value": 12.25},
+                {"current_value": "28.25"},
+                {"current_value": 0.0},
+            ]
+
+    monkeypatch.setattr(polymarket_client_module, "PolymarketClient", FakePolymarketClient)
+
+    record = bp.current(max_age_seconds=0.0)
+
+    assert record is not None
+    assert record.value_usd == pytest.approx(140.5)
+    assert record.spendable_cash_usd == pytest.approx(100.0)
+    assert record.source == "polymarket_wallet"
+    assert record.authority == "canonical"
+    bp.reset_cache_for_tests()
+    importlib.reload(bp)
 
 
 def test_cached_survives_sustained_blip_cluster_beyond_old_300s_window(real_provider, monkeypatch):

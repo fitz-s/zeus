@@ -177,7 +177,7 @@ def _source_matches_settlement_family(source: str, settlement_source_type: str) 
     if settlement_source_type == "noaa":
         return source.startswith("ogimet_metar_")
     if settlement_source_type == "hko":
-        return source == "hko_daily_api"
+        return source in {"hko_daily_api", "hko_realtime_api"}
     return False
 
 

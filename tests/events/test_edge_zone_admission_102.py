@@ -21,7 +21,7 @@ gate is the LAST money-path step.
 Adversarial coverage:
   * the gate uses q_lcb (conservative), so an overconfident POINT q cannot game
     it (a wide-CI bin with high point q but low q_lcb is rejected);
-  * OFF is byte-identical (the blocker falls through exactly as legacy);
+  * OFF still leaves always-on live-admission safeguards in place;
   * the gate only ever TIGHTENS (it never admits a proof the legacy chain
     rejected).
 """
@@ -107,7 +107,7 @@ def test_floor_tightens_admission():
 # ---------------------------------------------------------------------------
 
 
-def _admissible_receipt(*, q_lcb: float, cost: float) -> EventSubmissionReceipt:
+def _admissible_receipt(*, q_lcb: float, cost: float, trade_score: float | None = None) -> EventSubmissionReceipt:
     """A receipt that clears EVERY legacy money-path gate (trade_score / FDR /
     Kelly / final_intent), so the ONLY thing that can block it is the new
     edge-zone step. This proves the gate is a tightening applied LAST."""
@@ -115,8 +115,11 @@ def _admissible_receipt(*, q_lcb: float, cost: float) -> EventSubmissionReceipt:
         submitted=False,
         event_id="evt-1",
         side_effect_status="NO_SUBMIT",
+        direction="buy_yes",
+        q_live=max(q_lcb, cost),
         q_lcb_5pct=q_lcb,
         c_fee_adjusted=cost,
+        trade_score=q_lcb - cost if trade_score is None else trade_score,
         trade_score_positive=True,
         fdr_pass=True,
         fdr_family_id="fam-1",
@@ -130,29 +133,48 @@ def _admissible_receipt(*, q_lcb: float, cost: float) -> EventSubmissionReceipt:
     )
 
 
-def test_blocker_off_is_byte_identical_legacy():
-    """OFF (no config / flag False): a negative-EV-per-dollar but otherwise
-    fully-admissible proof passes the blocker exactly as it does on legacy HEAD."""
-    receipt = _admissible_receipt(q_lcb=0.90, cost=0.93)  # negative EV/$
-    # No config -> legacy chain, admitted.
-    assert _receipt_money_path_blocker(receipt) == (None, "")
-    # Explicit flag OFF -> identical.
+def test_blocker_off_still_runs_always_on_live_admission():
+    """OFF still runs always-on live admission for non-positive conservative EV."""
+    receipt = _admissible_receipt(q_lcb=0.90, cost=0.93, trade_score=0.01)
+
+    stage, reason = _receipt_money_path_blocker(receipt)
+    assert stage == "TRADE_SCORE"
+    assert reason.startswith("ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:")
+
     off = ReactorConfig(edge_zone_admission_enabled=False)
-    assert _receipt_money_path_blocker(receipt, off) == (None, "")
+    stage, reason = _receipt_money_path_blocker(receipt, off)
+    assert stage == "TRADE_SCORE"
+    assert reason.startswith("ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:")
 
 
 def test_blocker_on_rejects_negative_ev_tail():
-    receipt = _admissible_receipt(q_lcb=0.90, cost=0.93)  # confident tail, -EV/$
+    receipt = _admissible_receipt(q_lcb=0.90, cost=0.93, trade_score=0.01)  # confident tail, -EV/$
     on = ReactorConfig(edge_zone_admission_enabled=True)
     stage, reason = _receipt_money_path_blocker(receipt, on)
     assert stage == "TRADE_SCORE"
-    assert reason == "EDGE_ZONE_EV_PER_DOLLAR_BELOW_FLOOR"
+    assert reason.startswith("ADMISSION_CAPITAL_EFFICIENCY_LCB_EV:")
 
 
 def test_blocker_on_admits_positive_ev_midrange():
     receipt = _admissible_receipt(q_lcb=0.70, cost=0.55)  # mid-range, +EV/$
     on = ReactorConfig(edge_zone_admission_enabled=True)
     assert _receipt_money_path_blocker(receipt, on) == (None, "")
+
+
+def test_blocker_rejects_buy_no_on_material_yes_bin():
+    receipt = _admissible_receipt(q_lcb=0.667, cost=0.62, trade_score=0.021)
+    receipt = EventSubmissionReceipt(
+        **{
+            **receipt.__dict__,
+            "direction": "buy_no",
+            "q_live": 0.77,
+        },
+    )
+
+    stage, reason = _receipt_money_path_blocker(receipt, ReactorConfig(edge_zone_admission_enabled=False))
+
+    assert stage == "TRADE_SCORE"
+    assert reason == "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING"
 
 
 def test_blocker_on_is_a_pure_tightening():
@@ -173,7 +195,7 @@ def test_blocker_on_admission_is_order_independent_at_the_seam():
     through the real blocker, yield admit(good)/reject(bad) both ways — the
     arrival-order defect (ROOT A) cannot fire the worse order over the better."""
     good = _admissible_receipt(q_lcb=0.70, cost=0.55)   # +EV/$
-    bad = _admissible_receipt(q_lcb=0.90, cost=0.93)    # -EV/$
+    bad = _admissible_receipt(q_lcb=0.90, cost=0.93, trade_score=0.01)    # -EV/$
     on = ReactorConfig(edge_zone_admission_enabled=True)
 
     # good-then-bad

@@ -68,6 +68,21 @@ def test_celsius_city_bias_over_threshold_halves(patched):
     assert mult == pytest.approx(0.20)  # halved
 
 
+@pytest.mark.parametrize("q_source", ["emos", "raw_honest", " EMOS "])
+def test_one_calibrator_q_source_skips_legacy_bias_haircut(patched, q_source):
+    """EMOS/honest-raw already owns uncertainty; do not add the old bias
+    haircut as a second live sizing mechanism."""
+    patched(-9.0)
+    mult, applied, native, reason = era._maybe_bias_decay_kelly_haircut(
+        0.40,
+        family=_Family("Tokyo"),
+        q_source=q_source,
+    )
+    assert applied is False and reason == "one_calibrator_regime"
+    assert native is None
+    assert mult == pytest.approx(0.40)
+
+
 def test_celsius_city_bias_within_threshold_unchanged(patched):
     patched(-1.0)  # |1.0| <= 2.0
     mult, applied, native, reason = era._maybe_bias_decay_kelly_haircut(0.40, family=_Family("LowBiasC"))

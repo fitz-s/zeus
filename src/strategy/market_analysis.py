@@ -493,14 +493,8 @@ class MarketAnalysis:
         return float(self.p_market_no[bin_idx])
 
     def buy_no_complement_diagnostic_price(self, bin_idx: int) -> float:
-        """Return binary complement as a non-executable diagnostic only."""
-        if bin_idx < 0 or bin_idx >= len(self.bins):
-            raise IndexError(f"bin_idx out of range: {bin_idx}")
-        if len(self.bins) > 2:
-            raise ValueError("buy_no complement diagnostic is only defined for binary markets")
-        if self.p_market is None:
-            raise ValueError("binary buy_no complement diagnostic requires YES-side market price")
-        return 1.0 - float(self.p_market[bin_idx])
+        """Reject legacy binary complement diagnostics."""
+        raise ValueError("buy_no complement diagnostic is forbidden; require native NO quote")
 
     def find_edges(
         self, n_bootstrap: int | None = None
@@ -694,9 +688,26 @@ class MarketAnalysis:
                         )
                     )
 
-            # Buy NO direction: payoff probability is complement; executable
-            # entry price must come from the native NO side when available.
+            # Buy NO requires an independently materialized NO-side posterior.
+            # The legacy YES-complement construction is forbidden in live money.
             if self.supports_buy_no_edges(i):
+                trace.append(
+                    EdgeScanTrace(
+                        support_index=i,
+                        bin_label=b.label,
+                        executable=True,
+                        direction="buy_no",
+                        p_posterior=0.0,
+                        p_market=self.buy_no_market_price(i),
+                        raw_edge=None,
+                        ci_lower=None,
+                        ci_upper=None,
+                        p_value=None,
+                        decision="buy_no_independent_no_posterior_missing",
+                        native_quote_available=True,
+                    )
+                )
+                continue
                 # DIRECTION LAW (operator, load-bearing): buy_no ⟺ bin ≠ forecast.
                 # Our forecast bin is argmax(p_posterior) — the single outcome we predict most
                 # likely. A buy_no on THAT bin bets against our own forecast = wrong side by
@@ -713,7 +724,7 @@ class MarketAnalysis:
                             bin_label=b.label,
                             executable=True,
                             direction="buy_no",
-                            p_posterior=1.0 - float(self.p_posterior[i]),
+                            p_posterior=0.0,
                             p_market=self.buy_no_market_price(i),
                             raw_edge=None,
                             ci_lower=None,
@@ -724,9 +735,9 @@ class MarketAnalysis:
                         )
                     )
                     continue  # wrong-side by the direction law — never construct it
-                p_model_no = 1.0 - float(self.p_cal[i])
+                p_model_no = 0.0
                 p_market_no = self.buy_no_market_price(i)
-                p_post_no = 1.0 - float(self.p_posterior[i])
+                p_post_no = 0.0
                 # K2 (PR #348 P0-3): hard-veto NO-side too when EQE reliability
                 # is THIN_BOOK / CROSSED.
                 eqe_no = (
@@ -850,7 +861,7 @@ class MarketAnalysis:
                         bin_label=b.label,
                         executable=True,
                         direction="buy_no",
-                        p_posterior=1.0 - float(self.p_posterior[i]),
+                        p_posterior=0.0,
                         p_market=None if self.p_market_no is None else float(self.p_market_no[i]),
                         raw_edge=None,
                         ci_lower=None,
@@ -1129,7 +1140,7 @@ class MarketAnalysis:
                     c_b = float(np.clip(c_b, P_CLAMP_LOW, P_CLAMP_HIGH))
                 elif eqe is not None:
                     c_b = float(eqe.all_in_entry_price)
-            bootstrap_edges[i] = (1.0 - p_post_yes) - c_b
+            bootstrap_edges[i] = -float("inf")
 
         p_value = float(np.mean(bootstrap_edges <= 0))
         ci_lo = float(np.percentile(bootstrap_edges, 5))
@@ -1152,7 +1163,7 @@ class MarketAnalysis:
         # LOWERS the bound (max with the legacy floor below would be wrong — we take the tighter
         # of the two so the bound is never RAISED above either).
         yes_floor = self._no_certain_yes_floor(bin_idx)
-        q_no_ceiling = min(1.0 - float(self.p_posterior[bin_idx]), 1.0 - yes_floor)
+        q_no_ceiling = 0.0
         point_edge_ceiling = q_no_ceiling - c_b_point
         ci_lo = min(ci_lo, point_edge_ceiling)
         ci_hi = max(ci_hi, ci_lo)

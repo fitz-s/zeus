@@ -240,6 +240,7 @@ def _action_payload() -> dict:
         "condition_id": "condition-1",
         "token_id": "yes-1",
         "direction": "buy_yes",
+        "strategy_key": "center_buy",
         "executable_snapshot_id": "exec-1",
         "q_live": 0.7,
         "q_lcb_5pct": 0.6,

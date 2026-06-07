@@ -17,7 +17,7 @@ REGION_DOWNLOAD_SCRIPT = SCRIPT_DIR / "tigge_download_ecmwf_ens_region.py"
 REGION_EXTRACT_SCRIPT = SCRIPT_DIR / "extract_tigge_region_member_vectors.py"
 REGION_MULTI_DOWNLOAD_SCRIPT = SCRIPT_DIR / "tigge_download_ecmwf_ens_region_multistep.py"
 REGION_MULTI_EXTRACT_SCRIPT = SCRIPT_DIR / "extract_tigge_region_member_vectors_multistep.py"
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = ROOT / "raw"
 MANIFEST_PATH = ROOT / "docs" / "tigge_city_coordinate_manifest_20260330.json"
 

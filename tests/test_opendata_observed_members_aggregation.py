@@ -48,14 +48,17 @@ def _insert_snapshot(
     members_json: str,
     contributes: int,
     attribution_status: str,
+    manifest_hash: str = "a" * 64,
+    coordinate_manifest_sha: str = "m" * 64,
 ) -> None:
+    provenance_json = json.dumps({"manifest_sha256": coordinate_manifest_sha})
     conn.execute(
         """
         INSERT INTO ensemble_snapshots (
             snapshot_id, city, target_date, temperature_metric, physical_quantity,
             observation_field, available_at, fetch_time, lead_hours, members_json,
             model_version, dataset_id, training_allowed, causality_status,
-            boundary_ambiguous, ambiguous_member_count, provenance_json, authority,
+            boundary_ambiguous, ambiguous_member_count, manifest_hash, provenance_json, authority,
             recorded_at, members_unit, step_horizon_hours, local_day_start_utc,
             source_id, source_transport, source_run_id, release_calendar_key,
             source_cycle_time, source_release_time, source_available_at,
@@ -64,7 +67,7 @@ def _insert_snapshot(
             :snapshot_id, :city, :target_date, 'high', 'mx2t3_local_calendar_day_max',
             'high_temp', '2026-05-30T12:00:00+00:00', '2026-05-30T12:00:00+00:00', 120.0, :members_json,
             'ecmwf', :dataset_id, 0, 'OK',
-            0, 0, '{}', 'VERIFIED',
+            0, 0, :manifest_hash, :provenance_json, 'VERIFIED',
             '2026-05-30T12:00:00+00:00', 'degC', 120.0, '2026-05-30T00:00:00+00:00',
             :source_id, :source_transport, :source_run_id, '2026-05-30T12Z',
             '2026-05-30T12:00:00+00:00', '2026-05-30T12:00:00+00:00', '2026-05-30T12:00:00+00:00',
@@ -82,6 +85,8 @@ def _insert_snapshot(
             "source_run_id": source_run_id,
             "contributes": contributes,
             "attribution_status": attribution_status,
+            "manifest_hash": manifest_hash,
+            "provenance_json": provenance_json,
         },
     )
 
@@ -155,6 +160,7 @@ def test_observed_members_ignores_noncontributing_null_rows(forecasts_conn):
     assert (
         row["completeness_status"] == "COMPLETE"
     ), f"all contributing windows full -> COMPLETE; got {row['completeness_status']} ({row['reason_code']})"
+    assert row["manifest_hash"] == "m" * 64
 
 
 def test_genuine_partial_contributing_window_still_drops(forecasts_conn):
@@ -201,3 +207,60 @@ def test_genuine_partial_contributing_window_still_drops(forecasts_conn):
     assert int(row["observed_members"]) == 40
     assert row["completeness_status"] == "PARTIAL"
     assert row["reason_code"] == "MISSING_EXPECTED_MEMBERS"
+
+
+def test_mixed_snapshot_coordinate_manifest_shas_fail_closed(forecasts_conn):
+    """A source_run cannot be LIVE authority if its snapshots came from mixed coordinate manifests."""
+    conn = forecasts_conn
+    source_run_id = "ecmwf_open_data:mx2t6_high:2026-05-30T06Z"
+    full_members = json.dumps([20.0 + i * 0.01 for i in range(51)])
+
+    _insert_snapshot(
+        conn,
+        snapshot_id=20,
+        city="London",
+        target_date="2026-05-31",
+        source_run_id=source_run_id,
+        members_json=full_members,
+        contributes=1,
+        attribution_status="FULLY_INSIDE_TARGET_LOCAL_DAY",
+        manifest_hash="a" * 64,
+        coordinate_manifest_sha="m" * 64,
+    )
+    _insert_snapshot(
+        conn,
+        snapshot_id=21,
+        city="Auckland",
+        target_date="2026-05-31",
+        source_run_id=source_run_id,
+        members_json=full_members,
+        contributes=1,
+        attribution_status="FULLY_INSIDE_TARGET_LOCAL_DAY",
+        manifest_hash="b" * 64,
+        coordinate_manifest_sha="n" * 64,
+    )
+    conn.commit()
+
+    from datetime import datetime, timezone
+
+    cycle = datetime(2026, 5, 30, 6, tzinfo=timezone.utc)
+    _write_source_authority_chain(
+        conn,
+        summary={"written": 2, "errors": 0},
+        status="ok",
+        source_run_id=source_run_id,
+        source_cycle_time=cycle,
+        source_release_time=cycle,
+        release_calendar_key="2026-05-30T06Z",
+        forecast_track="mx2t6_high",
+        data_version=_DATA_VERSION,
+        computed_at=cycle,
+    )
+    conn.commit()
+
+    row = get_source_run(conn, source_run_id)
+    assert row is not None
+    assert row["status"] == "FAILED"
+    assert row["completeness_status"] == "MISSING"
+    assert row["manifest_hash"] is None
+    assert row["reason_code"] == "SNAPSHOT_COORDINATE_MANIFEST_SHA_MISMATCH"

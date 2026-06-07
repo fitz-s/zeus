@@ -518,9 +518,19 @@ def execution_graph(
     final_intent = _cert(
         claims.FINAL_INTENT,
         "final-intent:intent-1",
-        {"final_intent_id": "intent-1", "token_id": "yes-1", "condition_id": "condition-1"},
+        {
+            "event_type": "FORECAST_SNAPSHOT_READY",
+            "final_intent_id": "intent-1",
+            "strategy_key": "center_buy",
+            "token_id": "yes-1",
+            "condition_id": "condition-1",
+        },
     )
-    expressibility = _cert(claims.EXECUTOR_EXPRESSIBILITY, "executor-expressibility:intent-1", {"passed": True})
+    expressibility = _cert(
+        claims.EXECUTOR_EXPRESSIBILITY,
+        "executor-expressibility:intent-1",
+        {"passed": True, "strategy_key": "center_buy"},
+    )
     live_cap = _cert(
         claims.LIVE_CAP,
         "live-cap:cap-1",
@@ -697,6 +707,7 @@ def _actionable_payload() -> dict:
         "condition_id": "condition-1",
         "token_id": "yes-1",
         "direction": "buy_yes",
+        "strategy_key": "center_buy",
         "executable_snapshot_id": "exec-1",
         "q_live": 0.7,
         "q_lcb_5pct": 0.6,
@@ -720,8 +731,10 @@ def _actionable_payload() -> dict:
 def _command_payload(actionable) -> dict:
     return {
         "event_id": "event-1",
+        "event_type": actionable.payload.get("event_type", "FORECAST_SNAPSHOT_READY"),
         "actionable_certificate_hash": actionable.certificate_hash,
         "final_intent_id": "intent-1",
+        "strategy_key": actionable.payload.get("strategy_key", "center_buy"),
         "execution_command_id": "cmd-1",
         "executor_name": "execute_final_intent",
         "order_type": "POST_ONLY_LIMIT",
@@ -750,7 +763,9 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
     command_payload = command_payload or {}
     payload = {
         "event_id": command_payload.get("event_id", final_intent.payload.get("event_id", "event-1")),
+        "event_type": command_payload.get("event_type", final_intent.payload.get("event_type", "FORECAST_SNAPSHOT_READY")),
         "final_intent_id": command_payload.get("final_intent_id", final_intent.payload.get("final_intent_id", "intent-1")),
+        "strategy_key": command_payload.get("strategy_key", final_intent.payload.get("strategy_key", "center_buy")),
         "condition_id": command_payload.get("condition_id", final_intent.payload.get("condition_id", "condition-1")),
         "token_id": command_payload.get("token_id", final_intent.payload.get("token_id", "yes-1")),
         "side": command_payload.get("side", final_intent.payload.get("side", "BUY")),
@@ -801,11 +816,13 @@ def _pre_submit_cert(final_intent, live_cap, command_payload: dict | None = None
 
 
 def _final_intent_payload(actionable) -> dict:
-    payload = _actionable_payload()
+    payload = actionable.payload
     return {
         "event_id": payload["event_id"],
+        "event_type": payload.get("event_type", "FORECAST_SNAPSHOT_READY"),
         "actionable_certificate_hash": actionable.certificate_hash,
         "final_intent_id": payload["final_intent_id"],
+        "strategy_key": payload.get("strategy_key", "center_buy"),
         "family_id": payload["family_id"],
         "candidate_id": payload["candidate_id"],
         "condition_id": payload["condition_id"],
@@ -869,6 +886,7 @@ def _expressibility_payload(final_intent) -> dict:
     return {
         "event_id": payload["event_id"],
         "final_intent_id": payload["final_intent_id"],
+        "strategy_key": payload.get("strategy_key"),
         "executor_name": "execute_final_intent",
         "executor_capability_version": "existing_executor_passive_limit_v1",
         "can_express": True,

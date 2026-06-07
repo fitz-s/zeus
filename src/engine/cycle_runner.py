@@ -12,9 +12,9 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
-from src.config import STATE_DIR, get_mode
+from src.config import STATE_DIR, cities_by_name, get_mode, settings
 from src.control import cutover_guard
-from src.control.control_plane import is_entries_paused
+from src.control.control_plane import has_acknowledged_quarantine_clear, is_entries_paused, is_strategy_enabled
 # 2026-05-04 (live-block antibody — structural fix #4): single source of truth
 # for "why are entries blocked right now?" across all 13 stacked gates.
 # Phase 1 is observational — registry snapshot is logged + emitted into the
@@ -31,11 +31,20 @@ from src.control.block_adapters._base import RegistryDeps
 # Per-cycle freshness consumer wired into run_cycle() top to short-circuit DAY0_CAPTURE
 # and tag OPENING_HUNT degraded_data when source_health.json shows stale upstreams.
 from src.control.freshness_gate import evaluate_freshness_mid_run
+from src.data.market_scanner import (
+    capture_executable_market_snapshot,
+    find_weather_markets,
+    get_last_scan_authority,
+)
+from src.data.observation_client import get_current_observation
 from src.data.polymarket_client import PolymarketClient
 from src.engine import cycle_runtime as _runtime
 from src.engine.discovery_mode import DiscoveryMode
+from src.engine.evaluator import EdgeDecision, MarketCandidate, evaluate_candidate
 from src.execution.command_bus import IdempotencyKey, IntentKind
 from src.execution.executor import (
+    create_execution_intent,
+    execute_intent,
     _persist_pre_submit_envelope,
 )
 from src.riskguard.risk_level import RiskLevel
@@ -44,9 +53,10 @@ from src.state.canonical_write import commit_then_export
 from src.state.db import (
     _zeus_trade_db_path,
     connect_or_degrade,
+    record_token_suppression,
     ZEUS_WORLD_DB_PATH,
 )
-from src.state.lifecycle_manager import TERMINAL_STATES
+from src.state.lifecycle_manager import TERMINAL_STATES, is_terminal_state
 
 # Alias for dependency injection: fill_tracker.py and tests patch deps.get_connection.
 # Default runtime seam must expose trade truth plus shared world truth.
@@ -79,10 +89,12 @@ def get_connection():
     except sqlite3.OperationalError as exc:
         logger.warning("ATTACH world/forecasts failed (non-fatal): %r", exc)
     return conn
-from src.state.decision_chain import CycleArtifact, store_artifact
+from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
+from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact
 from src.state.portfolio import (
     Position,
     PortfolioState,
+    add_position,
     load_portfolio,
     portfolio_heat_for_bankroll,
     save_portfolio,

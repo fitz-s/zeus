@@ -50,6 +50,54 @@ _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
+
+def _pragma_busy_timeout_ms(conn: sqlite3.Connection) -> int | None:
+    try:
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+    except Exception:  # noqa: BLE001 - diagnostic/restore best effort only
+        return None
+    if row is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _set_busy_timeout_ms(conn: sqlite3.Connection, timeout_ms: int | None) -> None:
+    if timeout_ms is None:
+        return
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {max(1, int(timeout_ms))}")
+    except Exception:  # noqa: BLE001 - never mask the capture result
+        return
+
+
+def _snapshot_capture_busy_timeout_ms(remaining_seconds: float) -> int:
+    """Return the per-row SQLite wait budget for background substrate capture.
+
+    The live substrate warmer has its own wall-clock budget.  Letting a single
+    SQLite busy wait inherit the process default (30s) can consume the entire
+    capture window and leave all families without fresh executable snapshots.
+    This short timeout is scoped to background snapshot cache writes only; the
+    real submit/ledger path keeps the normal DB timeout.
+    """
+
+    configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "250"))
+    remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
+    return max(1, min(configured, remaining_ms))
+
+
+def _snapshot_capture_sqlite_lock_retries() -> int:
+    try:
+        return max(0, int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_SQLITE_LOCK_RETRIES", "2")))
+    except ValueError:
+        return 2
+
+
+def _is_sqlite_locked_error(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
+
 # B017: data-provenance types. See also src/data/__init__.py note.
 # Authority literal follows the house pattern established in
 # src/contracts/observation_atom.py::ObservationAtom.authority.
@@ -1075,6 +1123,17 @@ def read_persisted_sibling_outcomes(
         return MarketSnapshot(events=[], authority="NEVER_FETCHED")
 
     try:
+        static_topology = _read_static_market_event_sibling_outcomes(
+            source,
+            market_id,
+            market_events_conn=market_events_conn,
+            market_events_db_path=market_events_db_path,
+        )
+        if static_topology is not None:
+            global _ACTIVE_EVENTS_LAST_STATUS
+            _ACTIVE_EVENTS_LAST_STATUS = static_topology.authority
+            return static_topology
+
         snapshot = read_persisted_weather_markets(
             source,
             now_utc=now_utc,
@@ -1082,7 +1141,6 @@ def read_persisted_sibling_outcomes(
             market_events_conn=market_events_conn,
             market_events_db_path=market_events_db_path,
         )
-        global _ACTIVE_EVENTS_LAST_STATUS
         _ACTIVE_EVENTS_LAST_STATUS = snapshot.authority
         if snapshot.authority != "VERIFIED":
             static_topology = _read_static_market_event_sibling_outcomes(
@@ -1579,6 +1637,13 @@ def _positive_float_env(name: str, default: float) -> float:
     except (TypeError, ValueError):
         logger.warning("Invalid %s=%r; using %s", name, raw, default)
         return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _slug_pattern_max_requests_from_env(max_requests: int | None = None) -> int:
@@ -2596,6 +2661,8 @@ def capture_executable_market_snapshot(
     scan_authority: str,
     execution_side: str = "BUY",
     prefetched_orderbook: dict | None = None,
+    clob_market_info_cache: dict[str, dict] | None = None,
+    fee_details_cache: dict[str, dict[str, Any]] | None = None,
     tolerate_missing_book: bool = False,
 ) -> dict[str, str | bool]:
     """Capture and persist an executable market snapshot.
@@ -2681,19 +2748,44 @@ def capture_executable_market_snapshot(
     if accepting_orders is None:
         accepting_orders = _boolish_market_field(gamma_market_raw, "acceptingOrders", "accepting_orders")
 
-    # Decision (2026-05-27, FT-64): market_info stays a FRESH per-outcome CLOB
-    # read — it is NOT sourced from Gamma and NOT cached.  The fail-closed
-    # tradability guard (_build_executable_tradeability_status) reads
-    # `archived` / `enable_order_book` ONLY from raw_clob_market, and the
-    # invariant test `test_clob_archived_blocks_even_when_gamma_accepts` proves
-    # CLOB must block even when Gamma reports acceptingOrders=True &
-    # enableOrderBook=True.  Gamma's payload carries `archived`, but the system
-    # deliberately treats CLOB /markets as the settlement-authority source and
-    # Gamma as a lagging discovery surface — collapsing them is the data-
-    # provenance failure the reverted TTL cache hit.  Only the ORDERBOOK leg is
-    # batched (see prefetched_orderbook below); the proper full fix that also
-    # removes this per-outcome read is the WS market channel (follow-up).
-    raw_clob_market = _fetch_clob_market_info(clob, condition_id)
+    # Decision (2026-05-27, FT-64): order/submit capture still reads fresh
+    # CLOB /markets authority.  Background substrate enumeration is different:
+    # it is an identity/family-proof producer and the submit path revalidates
+    # executable candidates before any order.  For that tolerate_missing_book
+    # path, use Gamma/topology identity plus the fresh CLOB orderbook instead of
+    # spending one serial /markets HTTP per condition.
+    use_synthetic_clob_market = tolerate_missing_book and _bool_env(
+        "ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO",
+        True,
+    )
+
+    if not use_synthetic_clob_market and clob_market_info_cache is not None and condition_id in clob_market_info_cache:
+        raw_clob_market = clob_market_info_cache[condition_id]
+    elif not use_synthetic_clob_market:
+        raw_clob_market = _fetch_clob_market_info(clob, condition_id)
+        if clob_market_info_cache is not None:
+            clob_market_info_cache[condition_id] = raw_clob_market
+
+    # Orderbook leg: use the event-batched book when the refresh loop prefetched
+    # it (one POST /books for all bins), else fall back to the per-token GET /book.
+    # The prefetched book is byte-identical to the fetched one (same /books vs
+    # /book response shape), so the snapshot hash / depth jsonb are unchanged —
+    # this path is purely additive and back-compatible when prefetched_orderbook
+    # is None.  The same shape validation as the per-token path is applied.
+    if prefetched_orderbook is not None:
+        raw_orderbook = _normalize_prefetched_orderbook(prefetched_orderbook, selected_token)
+    else:
+        raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
+
+    if use_synthetic_clob_market:
+        raw_clob_market = _synthetic_clob_market_info_for_substrate_identity(
+            condition_id=condition_id,
+            yes_token=yes_token,
+            no_token=no_token,
+            accepting_orders=accepting_orders,
+            enable_orderbook=enable_orderbook,
+            raw_orderbook=raw_orderbook,
+        )
     # Fill enable_orderbook from CLOB when Gamma omitted it (slug-discovered
     # markets) or for the persisted-reconstruction path.  CLOB is authoritative.
     clob_orderbook = _boolish_market_field(
@@ -2717,17 +2809,6 @@ def capture_executable_market_snapshot(
             )
         if accepting_orders is not True or enable_orderbook is not True:
             raise ExecutableSnapshotCaptureError("Gamma child market is not currently tradable")
-    # Orderbook leg: use the event-batched book when the refresh loop prefetched
-    # it (one POST /books for all bins), else fall back to the per-token GET /book.
-    # The prefetched book is byte-identical to the fetched one (same /books vs
-    # /book response shape), so the snapshot hash / depth jsonb are unchanged —
-    # this path is purely additive and back-compatible when prefetched_orderbook
-    # is None.  The same shape validation as the per-token path is applied.
-    if prefetched_orderbook is not None:
-        raw_orderbook = _normalize_prefetched_orderbook(prefetched_orderbook, selected_token)
-    else:
-        raw_orderbook = _fetch_orderbook_snapshot(clob, selected_token)
-    fee_details = _fetch_fee_details(clob, selected_token)
     _assert_clob_identity(
         raw_clob_market=raw_clob_market,
         raw_orderbook=raw_orderbook,
@@ -2795,6 +2876,16 @@ def capture_executable_market_snapshot(
             executable_allowed=False,
             reason="clob_no_ask_illiquid",
         )
+        fee_details = canonicalize_fee_details(
+            {"feesEnabled": False},
+            source="not_applicable_illiquid_identity",
+            token_id=selected_token,
+        )
+    else:
+        if tolerate_missing_book:
+            fee_details = _default_substrate_fee_details(selected_token)
+        else:
+            fee_details = _fetch_fee_details(clob, selected_token)
 
     # Validate the caller's boundary timestamp, but do not use it as the
     # executable snapshot's authority time.  The fresh orderbook authority is
@@ -2991,7 +3082,10 @@ def _snapshot_top_ask(snapshot: dict[str, Any] | None) -> float | None:
     value = snapshot.get("orderbook_top_ask")
     if value in (None, ""):
         return None
-    return float(value)
+    text = str(value).strip()
+    if not text or text.upper() == "ABSENT":
+        return None
+    return float(text)
 
 
 def _city_from_name(city_name: str) -> City | str:
@@ -3461,6 +3555,11 @@ def _snapshot_budget_seconds_from_env(budget_seconds: float | None = None) -> fl
     return _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_BUDGET_SECONDS", 130.0)
 
 
+def _snapshot_capture_reserve_seconds_from_env(total_budget_seconds: float) -> float:
+    reserve = _positive_float_env("ZEUS_MARKET_DISCOVERY_SNAPSHOT_CAPTURE_RESERVE_SECONDS", 12.0)
+    return min(reserve, max(0.05, float(total_budget_seconds) - 0.05))
+
+
 def _outcome_market_end_at(market: dict[str, Any], outcome: dict[str, Any]) -> datetime | None:
     return _parse_snapshot_time(
         outcome.get("market_end_at")
@@ -3537,6 +3636,100 @@ def _snapshot_refresh_priority(
     return (2, open_age, time_to_resolution)
 
 
+def _snapshot_condition_refresh_state(
+    conn: Any,
+    condition_id: str,
+    outcome: dict[str, Any],
+    *,
+    captured: datetime,
+) -> tuple[tuple[int, float], set[str]]:
+    """Return refresh priority plus selected tokens already fresh for a condition.
+
+    Tight live budgets should first complete one-sided fresh conditions: the
+    entry gate requires both YES and NO selected tokens fresh for a condition.
+    After partial conditions, rotate to never-captured conditions before
+    revisiting already-known stale bins.
+    """
+
+    cid = str(condition_id or "").strip()
+    if not cid:
+        return (2, float("inf")), set()
+    yes_token = str(outcome.get("token_id") or "").strip()
+    no_token = str(outcome.get("no_token_id") or "").strip()
+    fresh_at = _utc_datetime(captured, field_name="captured")
+    try:
+        rows = conn.execute(
+            """
+            SELECT selected_outcome_token_id, captured_at, freshness_deadline,
+                   yes_token_id, no_token_id, question_id
+            FROM executable_market_snapshots
+            WHERE condition_id = ?
+            ORDER BY captured_at DESC
+            """,
+            (cid,),
+        ).fetchall()
+    except Exception:
+        return (2, float("inf")), set()
+    if not rows:
+        return (1, 0.0), set()
+
+    latest_ts = float("-inf")
+    fresh_tokens: set[str] = set()
+
+    def _row_cell(row: Any, key: str, index: int) -> Any:
+        try:
+            return row[key] if hasattr(row, "keys") else row[index]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    for row in rows:
+        captured_raw = _row_cell(row, "captured_at", 1)
+        captured_dt = _parse_snapshot_time(captured_raw)
+        if captured_dt is not None:
+            latest_ts = max(latest_ts, captured_dt.timestamp())
+        deadline_dt = _parse_snapshot_time(_row_cell(row, "freshness_deadline", 2))
+        selected = str(_row_cell(row, "selected_outcome_token_id", 0) or "").strip()
+        row_yes = str(_row_cell(row, "yes_token_id", 3) or "").strip()
+        row_no = str(_row_cell(row, "no_token_id", 4) or "").strip()
+        row_question = str(_row_cell(row, "question_id", 5) or "").strip()
+        identity_complete = bool(row_yes and row_no and row_question)
+        if yes_token and row_yes and row_yes != yes_token:
+            identity_complete = False
+        if no_token and row_no and row_no != no_token:
+            identity_complete = False
+        if selected and identity_complete and deadline_dt is not None and deadline_dt >= fresh_at:
+            fresh_tokens.add(selected)
+
+    if yes_token and no_token:
+        yes_fresh = yes_token in fresh_tokens
+        no_fresh = no_token in fresh_tokens
+        if yes_fresh ^ no_fresh:
+            return (0, latest_ts), fresh_tokens
+        if yes_fresh and no_fresh:
+            return (3, latest_ts), fresh_tokens
+    if latest_ts == float("-inf"):
+        latest_ts = float("inf")
+    return (2, latest_ts), fresh_tokens
+
+
+def _snapshot_condition_refresh_key(
+    conn: Any,
+    condition_id: str,
+    outcome: dict[str, Any],
+    *,
+    captured: datetime,
+) -> tuple[int, float]:
+    """Prefer partial, never-captured, then oldest-captured conditions."""
+
+    key, _fresh_tokens = _snapshot_condition_refresh_state(
+        conn,
+        condition_id,
+        outcome,
+        captured=captured,
+    )
+    return key
+
+
 def _snapshot_refresh_city_key(market: dict[str, Any]) -> str:
     city = market.get("city")
     name = getattr(city, "name", None)
@@ -3548,7 +3741,11 @@ def _snapshot_refresh_city_key(market: dict[str, Any]) -> str:
     return slug or "_unknown"
 
 
-_BATCH_ORDERBOOK_CHUNK = 50
+# Live CLOB probe 2026-06-06: POST /books accepts 500 token_id rows in one
+# request and returns the full set; 1000 rows returns 400.  Keep the chunk at
+# the proven upper envelope so a 500+ token weather substrate cycle does not
+# degrade back into hundreds of serial GET /book calls.
+_BATCH_ORDERBOOK_CHUNK = 500
 
 
 def _selected_token_for_direction(outcome: dict, direction: str) -> str:
@@ -3567,7 +3764,12 @@ def _selected_token_for_direction(outcome: dict, direction: str) -> str:
     return ""
 
 
-def _prefetch_selected_orderbooks(clob: Any, selected_candidates: list[tuple]) -> dict[str, dict]:
+def _prefetch_selected_orderbooks(
+    clob: Any,
+    selected_candidates: list[tuple],
+    *,
+    deadline: float | None = None,
+) -> dict[str, dict]:
     """Batch-fetch orderbooks for all selected outcomes via POST /books.
 
     Returns a ``{token_id: orderbook_dict}`` map.  Best-effort: if the batch
@@ -3583,7 +3785,7 @@ def _prefetch_selected_orderbooks(clob: Any, selected_candidates: list[tuple]) -
 
     token_ids: list[str] = []
     seen: set[str] = set()
-    for _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates:
+    for _recency, _priority, _ordinal, _market, outcome, _condition_id, direction in selected_candidates:
         tok = _selected_token_for_direction(outcome, direction)
         if tok and tok not in seen:
             seen.add(tok)
@@ -3591,8 +3793,29 @@ def _prefetch_selected_orderbooks(clob: Any, selected_candidates: list[tuple]) -
     if not token_ids:
         return {}
 
+    if deadline is not None:
+        min_prefetch_window = _positive_float_env(
+            "ZEUS_MARKET_DISCOVERY_ORDERBOOK_PREFETCH_MIN_WINDOW_SECONDS",
+            0.75,
+        )
+        remaining_window = deadline - time.monotonic()
+        if remaining_window < min_prefetch_window:
+            logger.info(
+                "Batch orderbook prefetch skipped: window %.3fs below %.3fs minimum",
+                remaining_window,
+                min_prefetch_window,
+            )
+            return {}
+
     books: dict[str, dict] = {}
     for start in range(0, len(token_ids), _BATCH_ORDERBOOK_CHUNK):
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.info(
+                "Batch orderbook prefetch stopped at budget deadline after %d/%d tokens",
+                start,
+                len(token_ids),
+            )
+            break
         chunk = token_ids[start : start + _BATCH_ORDERBOOK_CHUNK]
         try:
             chunk_books = getter(chunk)
@@ -3646,13 +3869,30 @@ def refresh_executable_market_substrate_snapshots(
     candidate_cities: set[str] = set()
     candidate_count = 0
 
-    # Group candidates by city for breadth-first interleaving.
-    # city_candidates: city_key -> sorted list of (priority, ordinal, market, outcome, cid, dir)
-    city_candidates: dict[str, list[tuple]] = {}
+    # Group candidates by city for breadth-first interleaving, except the
+    # max_outcomes=0 pending-family path, where the group key is one market
+    # family.  The family-completion path is budget-driven, not count-capped:
+    # it spends the live tick completing as many full family proofs as possible
+    # instead of spraying one condition across every city and leaving all FDR
+    # proofs blocked.
+    # candidate_groups:
+    #   group_key -> sorted list of
+    #   (recency_key, priority, ordinal, market, outcome, cid, dir)
+    candidate_groups: dict[str, list[tuple]] = {}
     ordinal = 0
 
     for market in markets or []:
         city_key = _snapshot_refresh_city_key(market)
+        group_key = city_key
+        if per_city_limit == 0:
+            group_key = "|".join(
+                (
+                    city_key,
+                    str(market.get("slug") or market.get("event_slug") or ""),
+                    str(market.get("target_date") or ""),
+                    str(market.get("temperature_metric") or ""),
+                )
+            )
         for outcome in market.get("outcomes", []) or []:
             ordinal += 1
             condition_id = str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
@@ -3684,6 +3924,12 @@ def refresh_executable_market_substrate_snapshots(
             if end_at is not None and end_at <= captured:
                 skipped += 1
                 continue
+            refresh_key, fresh_selected_tokens = _snapshot_condition_refresh_state(
+                conn,
+                condition_id,
+                outcome,
+                captured=captured,
+            )
             for direction in ("buy_yes", "buy_no"):
                 snapshot_side = (condition_id, direction)
                 if snapshot_side in seen_snapshot_sides:
@@ -3692,11 +3938,16 @@ def refresh_executable_market_substrate_snapshots(
                 if direction == "buy_no" and not str(outcome.get("no_token_id") or "").strip():
                     skipped += 1
                     continue
+                selected_token = _selected_token_for_direction(outcome, direction)
+                if selected_token and selected_token in fresh_selected_tokens:
+                    skipped += 1
+                    continue
                 seen_snapshot_sides.add(snapshot_side)
                 candidate_count += 1
                 candidate_cities.add(city_key)
-                city_candidates.setdefault(city_key, []).append(
+                candidate_groups.setdefault(group_key, []).append(
                     (
+                        refresh_key,
                         _snapshot_refresh_priority(market, outcome, captured=captured),
                         ordinal,
                         market,
@@ -3708,33 +3959,54 @@ def refresh_executable_market_substrate_snapshots(
 
     # Sort within each city by priority, apply per-city cap, then interleave
     # breadth-first: take slot 0 from each city, then slot 1, etc.
-    per_city_sorted: list[list[tuple]] = []
-    for city_key in sorted(city_candidates):
-        city_list = sorted(city_candidates[city_key], key=lambda item: (item[0], item[1]))
+    per_group_sorted: list[list[tuple]] = []
+    for group_key in sorted(candidate_groups):
+        group_list = sorted(candidate_groups[group_key], key=lambda item: (item[0], item[1], item[2]))
         # per_city_limit == 0 is the UNLIMITED sentinel: capture every family bin.
-        if per_city_limit and len(city_list) > per_city_limit:
-            cap_truncated += len(city_list) - per_city_limit
-            skipped += len(city_list) - per_city_limit
-            city_list = city_list[:per_city_limit]
-        per_city_sorted.append(city_list)
+        if per_city_limit and len(group_list) > per_city_limit:
+            cap_truncated += len(group_list) - per_city_limit
+            skipped += len(group_list) - per_city_limit
+            group_list = group_list[:per_city_limit]
+        per_group_sorted.append(group_list)
+    per_group_sorted.sort(
+        key=lambda group_list: (
+            group_list[0][0] if group_list else (2, float("inf")),
+            _snapshot_refresh_city_key(group_list[0][3]) if group_list else "",
+            str(group_list[0][3].get("slug") or "") if group_list else "",
+        )
+    )
 
-    # Interleave: slot 0 from each city, then slot 1, etc.
+    # Interleave by condition-side pair: slot 0+1 from each city, then slot 2+3,
+    # etc.  Freshness for a condition requires both selected buy sides (YES and
+    # NO).  A pure slot-by-slot interleave refreshes every city's buy_yes before
+    # any buy_no, so a tight live budget can repeatedly refresh a prefix of
+    # one-sided conditions without any condition becoming fresh.
     selected_candidates: list[tuple] = []
-    max_slots = max((len(c) for c in per_city_sorted), default=0)
-    for slot in range(max_slots):
-        for city_list in per_city_sorted:
-            if slot < len(city_list):
-                selected_candidates.append(city_list[slot])
+    if per_city_limit == 0:
+        for group_list in per_group_sorted:
+            selected_candidates.extend(group_list)
+    else:
+        max_slots = max((len(c) for c in per_group_sorted), default=0)
+        for slot in range(0, max_slots, 2):
+            for group_list in per_group_sorted:
+                if slot < len(group_list):
+                    selected_candidates.append(group_list[slot])
+                paired_slot = slot + 1
+                if paired_slot < len(group_list):
+                    selected_candidates.append(group_list[paired_slot])
     selected_cities = {
         _snapshot_refresh_city_key(market)
-        for _priority, _ordinal, market, _outcome, _condition_id, _direction in selected_candidates
+        for _recency, _priority, _ordinal, market, _outcome, _condition_id, _direction in selected_candidates
     }
     inserted_cities: set[str] = set()
     budget_truncated_cities: set[str] = set()
     # Start the wall-clock budget BEFORE the batch prefetch so the batch's own
     # latency is charged against the same envelope (advisor 2026-05-27: a
     # 50-token POST /books can take >1s; charging it keeps the deadline honest).
-    deadline = time.monotonic() + _snapshot_budget_seconds_from_env(budget_seconds)
+    snapshot_budget_seconds = _snapshot_budget_seconds_from_env(budget_seconds)
+    capture_reserve_seconds = _snapshot_capture_reserve_seconds_from_env(snapshot_budget_seconds)
+    deadline = time.monotonic() + snapshot_budget_seconds
+    prefetch_deadline = deadline - capture_reserve_seconds
     budget_exhausted = False
 
     # Batch-prefetch orderbooks for all selected outcomes in ONE POST /books per
@@ -3744,10 +4016,17 @@ def refresh_executable_market_substrate_snapshots(
     # EDGE_INSUFFICIENT).  Per-bin staleness must NOT abort the event: a token
     # missing from the batch map simply falls back / skips that one outcome
     # (operator directive: "market event constant, bin event should not block
-    # freshness").  market_info + fee_details stay fresh per-outcome (see
-    # capture_executable_market_snapshot).
-    prefetched_books = _prefetch_selected_orderbooks(clob, selected_candidates)
-    for index, (_priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
+    # freshness").  market_info is synthetic for background substrate identity;
+    # fee_details are fetched once per family and reused only inside this
+    # substrate refresh.  Order/submit capture keeps fresh CLOB authority.
+    prefetched_books = _prefetch_selected_orderbooks(
+        clob,
+        selected_candidates,
+        deadline=prefetch_deadline,
+    )
+    clob_market_info_cache: dict[str, dict] = {}
+    fee_details_cache: dict[str, dict[str, Any]] = {}
+    for index, (_recency, _priority, _ordinal, market, outcome, condition_id, direction) in enumerate(
         selected_candidates
     ):
         if time.monotonic() >= deadline:
@@ -3756,7 +4035,7 @@ def refresh_executable_market_substrate_snapshots(
             skipped += len(selected_candidates) - index
             budget_truncated_cities = {
                 _snapshot_refresh_city_key(remaining_market)
-                for _priority, _ordinal, remaining_market, _outcome, _condition_id, _direction in selected_candidates[index:]
+                for _recency, _priority, _ordinal, remaining_market, _outcome, _condition_id, _direction in selected_candidates[index:]
             }
             break
         attempted += 1
@@ -3774,53 +4053,74 @@ def refresh_executable_market_substrate_snapshots(
         # falls back to a fresh per-token GET /book — never aborting the event.
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
+        prior_busy_timeout_ms = _pragma_busy_timeout_ms(conn)
+        lock_retry_count = _snapshot_capture_sqlite_lock_retries()
+        capture_attempt = 0
         try:
-            capture_executable_market_snapshot(
-                conn,
-                market=market,
-                decision=decision,
-                clob=clob,
-                captured_at=captured,
-                scan_authority=scan_authority,
-                execution_side="BUY",
-                prefetched_orderbook=prefetched_book,
-                # Substrate enumeration: capture IDENTITY for every active MECE
-                # bin including illiquid (no-ask) tail bins so the FDR full-family
-                # proof can be assembled.  Illiquid bins are persisted non-tradeable.
-                tolerate_missing_book=True,
-            )
-            # EDLI live-canary WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
-            # capture_executable_market_snapshot does per-outcome venue HTTP
-            # (_fetch_clob_market_info + the GET /book fallback + _fetch_fee_details)
-            # BEFORE its insert_snapshot.  With sqlite3 isolation_level="" the first
-            # insert opens an implicit DEFERRED txn that upgrades to the single WAL
-            # *write* lock and — without this commit — held it across EVERY later
-            # iteration's HTTP fetch (the function used to commit only once, trailing,
-            # in the caller).  That starved the other in-process trade-DB writers
-            # (executor submit path, exit lifecycle) past the 30 s busy_timeout →
-            # "database is locked".  Committing the row's write unit HERE releases the
-            # WAL write lock BEFORE the next outcome's HTTP runs, so no write txn ever
-            # spans an HTTP call.  The trailing conn.commit() in the callers is now a
-            # harmless no-op (nothing left open).  INV-37: this conn is the
-            # trades-rooted live connection that OWNS executable_market_snapshots and
-            # book_hash_transitions (db_table_ownership.yaml: both db=trade); committing
-            # per row releases the trade-DB WAL write lock and preserves the
-            # caller-managed single-connection transaction contract (no new connection,
-            # no cross-DB independent write).
-            conn.commit()
-            inserted += 1
-            inserted_cities.add(_snapshot_refresh_city_key(market))
-        except Exception as exc:
-            # Roll back this row's partial write unit so a failed capture never leaves
-            # an open trade-DB write txn holding the WAL write lock across the next
-            # iteration's HTTP (same starvation the per-item commit prevents).
-            try:
-                conn.rollback()
-            except Exception:  # noqa: BLE001 - rollback best-effort; never mask the real failure
-                pass
-            failed += 1
-            if len(failures) < 3:
-                failures.append({"condition_id": condition_id, "error": str(exc)})
+            while True:
+                remaining_seconds = max(0.001, deadline - time.monotonic())
+                _set_busy_timeout_ms(conn, _snapshot_capture_busy_timeout_ms(remaining_seconds))
+                try:
+                    capture_executable_market_snapshot(
+                        conn,
+                        market=market,
+                        decision=decision,
+                        clob=clob,
+                        captured_at=captured,
+                        scan_authority=scan_authority,
+                        execution_side="BUY",
+                        prefetched_orderbook=prefetched_book,
+                        clob_market_info_cache=clob_market_info_cache,
+                        fee_details_cache=fee_details_cache,
+                        # Substrate enumeration: capture IDENTITY for every active MECE
+                        # bin including illiquid (no-ask) tail bins so the FDR full-family
+                        # proof can be assembled.  Illiquid bins are persisted non-tradeable.
+                        tolerate_missing_book=True,
+                    )
+                    # EDLI live-canary WAL-lock fix (2026-05-31): COMMIT-PER-ITEM.
+                    # capture_executable_market_snapshot does per-outcome venue HTTP
+                    # (_fetch_clob_market_info + the GET /book fallback + _fetch_fee_details)
+                    # BEFORE its insert_snapshot.  With sqlite3 isolation_level="" the first
+                    # insert opens an implicit DEFERRED txn that upgrades to the single WAL
+                    # *write* lock and — without this commit — held it across EVERY later
+                    # iteration's HTTP fetch (the function used to commit only once, trailing,
+                    # in the caller).  That starved the other in-process trade-DB writers
+                    # (executor submit path, exit lifecycle) past the 30 s busy_timeout →
+                    # "database is locked".  Committing the row's write unit HERE releases the
+                    # WAL write lock BEFORE the next outcome's HTTP runs, so no write txn ever
+                    # spans an HTTP call.  The trailing conn.commit() in the callers is now a
+                    # harmless no-op (nothing left open).  INV-37: this conn is the
+                    # trades-rooted live connection that OWNS executable_market_snapshots and
+                    # book_hash_transitions (db_table_ownership.yaml: both db=trade); committing
+                    # per row releases the trade-DB WAL write lock and preserves the
+                    # caller-managed single-connection transaction contract (no new connection,
+                    # no cross-DB independent write).
+                    conn.commit()
+                    inserted += 1
+                    inserted_cities.add(_snapshot_refresh_city_key(market))
+                    break
+                except Exception as exc:
+                    # Roll back this row's partial write unit so a failed capture never leaves
+                    # an open trade-DB write txn holding the WAL write lock across the next
+                    # iteration's HTTP (same starvation the per-item commit prevents).
+                    try:
+                        conn.rollback()
+                    except Exception:  # noqa: BLE001 - rollback best-effort; never mask the real failure
+                        pass
+                    if (
+                        _is_sqlite_locked_error(exc)
+                        and capture_attempt < lock_retry_count
+                        and time.monotonic() < deadline
+                    ):
+                        capture_attempt += 1
+                        time.sleep(min(0.05 * capture_attempt, max(0.0, deadline - time.monotonic())))
+                        continue
+                    failed += 1
+                    if len(failures) < 3:
+                        failures.append({"condition_id": condition_id, "error": str(exc)})
+                    break
+        finally:
+            _set_busy_timeout_ms(conn, prior_busy_timeout_ms)
 
     truncated = bool(candidate_count > len(selected_candidates) or cap_truncated > 0 or budget_exhausted)
     if not candidate_count:
@@ -3847,6 +4147,9 @@ def refresh_executable_market_substrate_snapshots(
         "failed": failed,
         "truncated": int(truncated),
         "budget_exhausted": int(budget_exhausted),
+        "snapshot_budget_seconds": snapshot_budget_seconds,
+        "snapshot_capture_reserve_seconds": capture_reserve_seconds,
+        "prefetched_orderbook_count": len(prefetched_books),
     }
     if failures:
         summary["failure_samples"] = failures
@@ -3894,6 +4197,37 @@ def _fetch_clob_market_info(clob: Any, condition_id: str) -> dict:
     if not isinstance(raw, dict) or not raw:
         raise ExecutableSnapshotCaptureError("CLOB market info response is empty or non-object")
     return dict(raw)
+
+
+def _synthetic_clob_market_info_for_substrate_identity(
+    *,
+    condition_id: str,
+    yes_token: str,
+    no_token: str,
+    accepting_orders: bool | None,
+    enable_orderbook: bool | None,
+    raw_orderbook: dict,
+) -> dict[str, Any]:
+    """Build substrate-only CLOB identity facts without /markets HTTP.
+
+    This is only used by ``tolerate_missing_book=True`` background substrate
+    refresh.  It does not change order/submit capture, which still fetches CLOB
+    market authority and revalidates before any real venue command.
+    """
+
+    return {
+        "condition_id": condition_id,
+        "tokens": [{"token_id": yes_token, "outcome": "YES"}, {"token_id": no_token, "outcome": "NO"}],
+        "archived": False,
+        "enable_order_book": bool(enable_orderbook is not False),
+        "accepting_orders": bool(accepting_orders is not False),
+        "tick_size": _first_field(raw_orderbook, "tick_size", "min_tick_size", "minimum_tick_size", "minTickSize")
+        or "0.01",
+        "min_order_size": _first_field(raw_orderbook, "min_order_size", "minimum_order_size", "minOrderSize")
+        or "1",
+        "neg_risk": _first_field(raw_orderbook, "neg_risk", "negRisk", "negative_risk"),
+        "authority": "synthetic_substrate_identity",
+    }
 
 
 def _fetch_orderbook_snapshot(clob: Any, token_id: str) -> dict:
@@ -3951,6 +4285,69 @@ def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
         raise ExecutableSnapshotCaptureError("CLOB fee-rate response is not numeric") from exc
     except Exception as exc:
         raise ExecutableSnapshotCaptureError(f"CLOB fee-rate fetch failed: {exc}") from exc
+
+
+def _default_substrate_fee_details(token_id: str) -> dict[str, Any]:
+    """Use the local weather fee contract for background substrate identity.
+
+    The pending-family substrate refresh is a cache producer, not the submit
+    boundary. Real order/JIT capture still queries the venue fee endpoint before
+    submitting. Using the conservative weather contract here removes hundreds of
+    duplicate /fee-rate calls from every global refresh without underpricing the
+    live entry gate.
+    """
+
+    from src.engine.evaluator import _default_weather_fee_rate
+
+    rate = float(_default_weather_fee_rate())
+    return canonicalize_fee_details(
+        {
+            "fee_rate_fraction": rate,
+            "authority": "local_weather_fee_contract",
+            "submit_boundary_revalidates_fee": True,
+        },
+        source="weather_fee_contract_substrate_identity",
+        token_id=token_id,
+    )
+
+
+def _substrate_fee_cache_key(market: dict[str, Any], condition_id: str) -> str:
+    parts = (
+        str(market.get("event_id") or "").strip(),
+        str(market.get("slug") or market.get("event_slug") or "").strip(),
+        str(market.get("target_date") or "").strip(),
+        str(market.get("temperature_metric") or "").strip(),
+    )
+    key = "|".join(part for part in parts if part)
+    return key or str(condition_id or "").strip()
+
+
+def _fee_details_for_cached_token(cached: dict[str, Any], token_id: str) -> dict[str, Any]:
+    return canonicalize_fee_details(
+        {
+            "fee_rate_fraction": cached["fee_rate_fraction"],
+            "fee_rate_bps": cached["fee_rate_bps"],
+        },
+        source="clob_fee_rate_family_cache",
+        token_id=token_id,
+    )
+
+
+def _fetch_family_cached_fee_details(
+    clob: Any,
+    token_id: str,
+    *,
+    cache_key: str,
+    fee_details_cache: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if cache_key in fee_details_cache:
+        return _fee_details_for_cached_token(fee_details_cache[cache_key], token_id)
+    details = _fetch_fee_details(clob, token_id)
+    fee_details_cache[cache_key] = {
+        "fee_rate_fraction": details["fee_rate_fraction"],
+        "fee_rate_bps": details["fee_rate_bps"],
+    }
+    return details
 
 
 def _assert_clob_identity(

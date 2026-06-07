@@ -7,9 +7,10 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus")
-ZEUS_CITIES = ROOT / "zeus" / "config" / "cities.json"
-DOCS_DIR = ROOT / "51 source data" / "docs"
+SOURCE_DATA_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = SOURCE_DATA_ROOT.parent
+ZEUS_CITIES = PROJECT_ROOT / "config" / "cities.json"
+DOCS_DIR = SOURCE_DATA_ROOT / "docs"
 JSON_OUT = DOCS_DIR / "tigge_city_coordinate_manifest_full_latest.json"
 MD_OUT = DOCS_DIR / "TIGGE_CITY_COORDINATE_MANIFEST_FULL_LATEST.md"
 LEGACY_JSON_OUT = DOCS_DIR / "tigge_city_coordinate_manifest_full_20260330.json"

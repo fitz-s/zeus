@@ -130,15 +130,16 @@ def test_fake_redeem_preserves_r1_command_ledger_boundary():
 
 def test_venue_auth_fallback_logs_greppable_warning(caplog):
     """F92: VENUE_AUTH_FALLBACK_TRIGGERED must appear in logs when
-    create_or_derive_api_key is used (no static api_creds provided).
+    signer-bound L2 API creds are derived (no static api_creds provided).
     Regression: silent fallback means invisible degradation."""
     import logging
     from unittest.mock import MagicMock, patch
+    import src.venue.polymarket_v2_adapter as adapter_mod
     from src.venue.polymarket_v2_adapter import PolymarketV2Adapter
 
     fake_creds = object()
     mock_client = MagicMock()
-    mock_client.create_or_derive_api_key.return_value = fake_creds
+    mock_client.derive_api_key.return_value = fake_creds
 
     with patch.object(
         PolymarketV2Adapter,
@@ -151,7 +152,11 @@ def test_venue_auth_fallback_logs_greppable_warning(caplog):
     adapter = PolymarketV2Adapter.__new__(PolymarketV2Adapter)
 
     with caplog.at_level(logging.WARNING, logger="src.venue.polymarket_v2_adapter"):
-        with patch("py_clob_client_v2.client.ClobClient", return_value=mock_client):
+        with (
+            patch.object(adapter_mod, "_api_creds_from_keychain", return_value=None),
+            patch.object(adapter_mod, "_api_creds_from_env", return_value=None),
+            patch("py_clob_client_v2.client.ClobClient", return_value=mock_client),
+        ):
             adapter._default_client_factory(
                 host="https://clob.polymarket.com",
                 chain_id=137,

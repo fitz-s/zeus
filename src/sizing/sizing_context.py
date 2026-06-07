@@ -1,7 +1,7 @@
 # Created: 2026-06-01
 # Last reused/audited: 2026-06-03
 # Authority basis: ELEVATION S3 (task #111) — variance-required Kelly;
-#   task #107 (portfolio/multi Kelly) — correlation-aware effective-bankroll.
+#   task #107 (portfolio/multi Kelly) — correlation-aware pressure context.
 """Typed sizing context that carries the variance inputs Kelly requires.
 
 ELEVATION S3 (task #103/#111): the live EDLI Kelly path previously sized
@@ -50,22 +50,20 @@ def effective_bankroll(
     *,
     f_cap: float = 1.0,
 ) -> float:
-    """Budget-reduced bankroll to hand to ``kelly_size`` (placement A).
+    """Legacy budget-reduced bankroll helper.
 
     Task #107 (portfolio/multi Kelly), the corr-weighted budget enforcer.
+    Retained for historical tests/back-compat only. The live money path no
+    longer uses this helper as a hard gate: as of 2026-06-07, committed
+    exposure feeds a soft marginal Kelly pressure multiplier instead of
+    subtracting from a global portfolio budget and forcing size to zero.
 
     DESIGN RECONCILIATION (design /tmp/kelly-107-design.md §3a vs §4 invariants):
     the §3a prose formula ``B_eff = B - corr_committed`` with
     ``s = f*·f_cap·B_eff`` guarantees only ``Σ stakes ≤ B`` and leaves a first
-    (uncommitted) bet at full single-Kelly (~22-27% of B) — which VIOLATES the
-    spec's own stated invariants INV-K1 (``Σ ≤ B·f_cap``) and INV-K3 (single
-    ``≤ max_single_position_pct·B``, the named headline RED→GREEN). The
-    invariants are the operator's law (relationship tests); the prose formula
-    is the under-specified approximation. To satisfy BOTH while keeping
-    ``s = f*·f_cap·B_eff`` (so kelly.py is untouched), the budget that
-    committed capital draws down is the fractional-Kelly capital-at-risk
-    ceiling ``f_cap·B`` (== ``max_correlated_pct·B`` in config), expressed back
-    in raw-bankroll space so kelly.py's own ``·f_cap`` reproduces it:
+    (uncommitted) bet at full single-Kelly. This helper is retained only for
+    historical tests/back-compat; the live path now uses continuous marginal
+    pressure in ``evaluate_kelly`` instead of this hard budget subtraction:
 
         B_eff = max(0, f_cap·B - corr_committed) / f_cap
 
@@ -74,11 +72,8 @@ def effective_bankroll(
     ``f_cap·B``. With ``f_cap`` left at its 1.0 default the function reduces to
     the literal §3a ``B - corr_committed`` for callers that want the raw form.
 
-    NOTE: this function alone does NOT enforce the absolute raw-dollar
-    constraint (INV-K1b). ``evaluate_kelly`` applies a SECOND limit using
-    ``effective_bankroll_raw``: the raw deployed capital across all positions
-    (no correlation weighting) must also not exceed ``max_portfolio_heat_pct·B``.
-    The binding limit is min(corr-reduced B_eff, raw-reduced B_eff).
+    NOTE: this function alone does NOT model the current live multi-Kelly
+    sizing law. Use ``SizingContext`` + ``evaluate_kelly`` for live behavior.
 
     NEVER amplifies: ``B_eff ≤ B`` whenever committed ≥ 0 (INV-K8). Clamps to
     0.0 when committed ≥ ``f_cap·B`` (fail-closed → ``kelly_size`` returns 0.0
@@ -100,7 +95,7 @@ def effective_bankroll_raw(
     *,
     f_cap: float = 1.0,
 ) -> float:
-    """Absolute raw-dollar budget enforcer (INV-K1b).
+    """Legacy absolute raw-dollar budget helper.
 
     Task #107 verifier fix: ``effective_bankroll`` (corr-weighted) alone does
     not stop distant-city (corr=0.10) bets from summing past the bankroll. The
@@ -108,13 +103,14 @@ def effective_bankroll_raw(
     corr-reduced B_eff stays near full B and each bet sizes near full K3 cap.
     15 independent $17 bets = $255 — exceeding the bankroll.
 
-    This function enforces the ABSOLUTE floor: total raw cash deployed (no
-    correlation discount) must not exceed ``max_heat_pct·B``:
+    Older live code used this function to enforce an ABSOLUTE floor: total raw
+    cash deployed (no correlation discount) must not exceed ``max_heat_pct·B``:
 
         B_eff_raw = max(0, max_heat_pct·B - raw_committed) / f_cap
 
-    The caller takes ``min(effective_bankroll(...), effective_bankroll_raw(...))``:
-    the binding limit is whichever is tighter.
+    As of 2026-06-07, the live path does NOT take this min as a hard gate.
+    Raw exposure is normalized into soft portfolio pressure and only shrinks
+    the marginal Kelly multiplier.
 
     ``raw_committed_usd``: actual dollars deployed in open + pending + same-cycle
     reserved positions (NOT correlation-weighted). Computed by the reactor as
@@ -143,25 +139,24 @@ class SizingContext:
         lead_days: Forecast lead in days fed to the lead-time haircut.
             Non-negative.
         bankroll_usd: On-chain bankroll truth ``B`` — the SAME value passed
-            to ``kelly_size``. Task #107: when present (> 0) together with
-            ``corr_committed_usd``, the Kelly adapter sizes against
-            ``effective_bankroll(B, corr_committed)`` instead of the full
-            ``B``. Default 0.0 means "no portfolio context" — the adapter
+            to ``kelly_size``. When present (> 0), the Kelly adapter sizes the
+            marginal bet against ``B`` and uses existing portfolio exposure as
+            multiplier pressure, not as an arbitrary hard heat-budget bankroll
+            subtraction. Default 0.0 means "no portfolio context" — the adapter
             then sizes against the raw bankroll exactly as pre-#107 (#103
             callers and tests are unaffected: they construct via the 3-arg
             ``from_candidate_proof`` which leaves these at 0.0).
         corr_committed_usd: ``Σ_i c_i · corr(city_new, city_i)`` over OTHER
             open + pending + same-cycle in-flight positions (computed by
             ``portfolio.correlated_committed_usd``). Non-negative. The
-            correlation-weighted capital already at risk; subtracted from
-            the fractional-Kelly budget. Default 0.0 (no portfolio context).
+            correlation-weighted capital already at risk; normalized into
+            soft marginal Kelly pressure. Default 0.0 (no portfolio context).
         raw_committed_usd: Total RAW dollars deployed across all open +
             pending + same-cycle in-flight positions (NO correlation
             weighting). Computed as ``total_exposure_usd(state) + Σ
-            reservation_usd``. Used by ``evaluate_kelly`` to enforce the
-            absolute ``max_portfolio_heat_pct·B`` floor (INV-K1b): even
-            perfectly uncorrelated distant-city bets cannot collectively
-            exceed the hard cash ceiling. Default 0.0 (no portfolio context).
+            reservation_usd``. Used by ``evaluate_kelly`` as soft raw heat
+            pressure; it must not become a hard total-portfolio cap. Default
+            0.0 (no portfolio context).
     """
 
     ci_width: float
@@ -267,14 +262,10 @@ class SizingContext:
         """Build a portfolio-aware context (task #107).
 
         Identical CI/lead derivation to ``from_candidate_proof`` PLUS the
-        portfolio budget inputs. Sizing then runs against the MINIMUM of:
-
-          - ``effective_bankroll(B, corr_committed)`` — correlation-weighted
-            budget enforcer (INV-K1 corr path).
-          - ``effective_bankroll_raw(B, raw_committed, max_heat_pct)`` —
-            absolute raw-dollar enforcer (INV-K1b). Prevents distant-city
-            (corr floor=0.10) bets from collectively exceeding the cash
-            ceiling regardless of correlation discount.
+        portfolio pressure inputs. Sizing uses the actual bankroll; the
+        corr/raw committed values are normalized by ``evaluate_kelly`` into a
+        soft marginal Kelly heat multiplier. They must not subtract from a
+        global budget and hard-zero positive-edge candidates.
 
         Validates ``bankroll_usd > 0`` (a non-positive bankroll has no
         budget to allocate — fail-closed), ``corr_committed_usd >= 0``, and
@@ -282,8 +273,7 @@ class SizingContext:
         reactor's try/except envelope.
 
         ``raw_committed_usd`` defaults to 0.0 for callers that only supply
-        the corr-weighted input (they get only the corr-budget limit; the
-        absolute floor is inactive). The reactor always supplies both.
+        the corr-weighted input. The reactor always supplies both.
         """
         bankroll = float(bankroll_usd)
         corr_committed = float(corr_committed_usd)

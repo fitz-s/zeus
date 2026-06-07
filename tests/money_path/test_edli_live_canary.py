@@ -1167,6 +1167,14 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
         assert audit["c_fee_adjusted"] == pytest.approx(0.4)
         assert audit["trade_score"] == pytest.approx(0.2)
         assert audit["kelly_size_usd"] == pytest.approx(3.0)
+        assert audit["selected_candidate_id"] == "candidate-1"
+        assert audit["actual_receipt_selected_candidate_id"] == "candidate-1"
+        assert audit["selected_condition_id"] == "condition-1"
+        assert audit["selected_token_id"] == "yes-1"
+        assert audit["selected_direction"] == "buy_yes"
+        assert audit["actual_condition_id"] == "condition-1"
+        assert audit["actual_token_id"] == "yes-1"
+        assert audit["actual_direction"] == "buy_yes"
         assert audit["opportunity_book"] == {
             "selected_candidate_id": "candidate-1",
             "actual_receipt_selected_candidate_id": "candidate-1",
