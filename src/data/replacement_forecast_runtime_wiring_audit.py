@@ -294,10 +294,12 @@ def build_replacement_forecast_runtime_wiring_audit(
     reasons: list[str] = []
     if policy.status not in {SHADOW_VETO_ONLY_STATUS, LIVE_AUTHORITY_STATUS}:
         reasons.append("REPLACEMENT_RUNTIME_WIRING_POLICY_NOT_SWITCHABLE")
+        reasons.extend(policy.reason_codes)
     if not dangerous_authority_flags_false:
         reasons.append("REPLACEMENT_RUNTIME_WIRING_DANGEROUS_AUTHORITY_FLAGS_NOT_FALSE")
     if not dry_run.ok:
         reasons.append("REPLACEMENT_RUNTIME_WIRING_DRY_RUN_NOT_READY")
+        reasons.extend(dry_run.reason_codes)
     if refit_status not in {"READY", "ASSUMED_READY"}:
         reasons.append("REPLACEMENT_RUNTIME_WIRING_REFIT_HANDOFF_NOT_READY")
     if missing_shadow_config:

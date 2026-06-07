@@ -80,6 +80,10 @@ def _write_inputs(tmp_path: Path) -> dict[str, object]:
         ),
         encoding="utf-8",
     )
+    (tmp_path / "aifs_manifest.json").write_text(
+        json.dumps({"identity": "ecmwf_aifs_ens_sampled_2t_grib_identity_valid"}),
+        encoding="utf-8",
+    )
     return {
         "city": "Shanghai",
         "target_date": "2026-06-07",
@@ -95,6 +99,7 @@ def _write_inputs(tmp_path: Path) -> dict[str, object]:
         "openmeteo_source_run_id": "openmeteo-run",
         "openmeteo_source_available_at": "2026-06-06T03:00:00+00:00",
         "aifs_samples_json": "aifs_samples.json",
+        "aifs_manifest_json": "aifs_manifest.json",
         "openmeteo_payload_json": "openmeteo_payload.json",
         "precision_metadata_json": "precision_metadata.json",
         "bins": [

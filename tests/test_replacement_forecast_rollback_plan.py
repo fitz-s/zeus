@@ -112,7 +112,7 @@ def test_rollback_plan_can_describe_live_authority_shutdown_without_authorizing_
         generated_at="2026-06-06T08:00:00+00:00",
     ).as_dict()
 
-    assert plan["current_policy_status"] == "LIVE_AUTHORITY"
+    assert plan["current_policy_status"] == "BLOCKED"
     assert all(value is False for value in plan["feature_flag_updates"].values())
     assert "initiate_replacement_trade" in plan["prohibited_actions"]
 

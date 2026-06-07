@@ -16,7 +16,14 @@ from pathlib import Path
 
 from src.data.replacement_forecast_live_switch_surface import REQUIRED_FORECAST_TABLES, REQUIRED_TRADE_TABLES, REQUIRED_WORLD_TABLES
 from src.data.replacement_forecast_runtime_wiring_audit import build_replacement_forecast_runtime_wiring_audit
-from src.data.replacement_forecast_runtime_policy import DIRECTION_FLIP_FLAG, KELLY_INCREASE_FLAG, SHADOW_FLAG, TRADE_AUTHORITY_FLAG, VETO_FLAG
+from src.data.replacement_forecast_runtime_policy import (
+    DIRECTION_FLIP_FLAG,
+    KELLY_INCREASE_FLAG,
+    PR399_LIVE_AUTHORITY_DISABLED_REASON,
+    SHADOW_FLAG,
+    TRADE_AUTHORITY_FLAG,
+    VETO_FLAG,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -212,7 +219,7 @@ def test_runtime_wiring_audit_ready_with_apply_receipt_assumptions(tmp_path) -> 
     assert all(report.hook_factory_anchor_status.values())
 
 
-def test_runtime_wiring_audit_ready_for_live_authority_with_capital_evidence(tmp_path) -> None:
+def test_runtime_wiring_audit_blocks_live_authority_in_pr399_even_with_capital_evidence(tmp_path) -> None:
     live_root = tmp_path / "live"
     receipt_path = tmp_path / "receipt.json"
     _write_live_root(live_root)
@@ -259,8 +266,9 @@ def test_runtime_wiring_audit_ready_for_live_authority_with_capital_evidence(tmp
         optional_dependencies=("requests",),
     )
 
-    assert report.status == "RUNTIME_WIRING_READY", report.as_dict()
-    assert report.runtime_policy_status == "LIVE_AUTHORITY"
+    assert report.status == "RUNTIME_WIRING_BLOCKED", report.as_dict()
+    assert report.runtime_policy_status == "BLOCKED"
+    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in report.reason_codes
     assert report.live_authority_flags_false is False
     assert report.receipt_status == "LIVE_AUTHORITY_SWITCH_APPLIED"
 

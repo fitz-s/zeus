@@ -88,7 +88,7 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         computed_at="2026-06-06T03:05:00+00:00",
         baseline_source_run_id="b0-run",
         dependency_json={"source_run_ids": ["b0-run", "aifs-run", "om9-run"]},
-        provenance_json={"test": True},
+        provenance_json={"test": True, "bin_topology_hash": "test-topology"},
         trade_authority_status="SHADOW_VETO_ONLY",
     )
 
@@ -490,7 +490,7 @@ def _forecast_conn_with_replacement_rows(*, dependency_source_run_ids: dict[str,
                     "openmeteo_ifs9_anchor": "om9-run",
                 }
             ),
-            json.dumps({"factory_test": True}),
+            json.dumps({"factory_test": True, "bin_topology_hash": "test-topology"}),
             "SHADOW_VETO_ONLY",
             0,
         ),
@@ -732,9 +732,9 @@ def test_db_backed_replacement_hook_fails_safe_for_buy_no_without_directional_lc
     assert result is not None
     assert result.status == "SHADOW_VETO_ONLY"
     assert result.effective_direction == "buy_no:warm"
-    assert result.effective_q_lcb == pytest.approx(0.0)
+    assert result.effective_q_lcb == pytest.approx(0.62)
     assert result.veto_decision is not None
-    assert "SOFT_ANCHOR_LOWER_Q_LCB" in result.veto_decision.reasons
+    assert "SOFT_ANCHOR_LOWER_Q_LCB" not in result.veto_decision.reasons
 
 
 def test_db_backed_replacement_hook_blocks_dependency_source_run_drift() -> None:
@@ -766,23 +766,9 @@ def test_db_backed_replacement_hook_blocks_dependency_source_run_drift() -> None
     assert result.reason_codes == ("REPLACEMENT_DEPENDENCY_SOURCE_RUN_MISMATCH",)
 
 
-def test_reactor_hook_uses_directional_buy_no_lcb_only_when_explicit() -> None:
-    policy = resolve_replacement_forecast_runtime_policy(_flags(shadow=True, veto=True))
-    result = apply_replacement_forecast_reactor_hook(
-        policy=policy,
-        switch_decision=_switch_decision(policy),
-        candidate=_candidate(
-            baseline_direction="buy_no:warm",
-            candidate_direction="buy_no:warm",
-            candidate_q_lcb=0.18,
-        ),
-        replacement_bundle=_bundle_with_directional_no_lcb(),
-        readiness=_readiness(),
-    )
-
-    assert result.status == "SHADOW_VETO_ONLY"
-    assert result.effective_direction == "buy_no:warm"
-    assert result.effective_q_lcb == pytest.approx(0.18)
+def test_reactor_hook_rejects_directional_buy_no_lcb_in_yes_bin_lcb_map() -> None:
+    with pytest.raises(ValueError, match="q_lcb keys"):
+        _bundle_with_directional_no_lcb()
 
 
 def test_db_backed_replacement_hook_degrades_to_baseline_when_shadow_inventory_is_not_explicit() -> None:
@@ -855,7 +841,7 @@ def test_event_adapter_builds_replacement_hook_from_runtime_flags_without_manual
     assert result.effective_q_lcb == pytest.approx(0.55)
 
 
-def test_db_backed_replacement_hook_accepts_capital_objective_live_authority() -> None:
+def test_db_backed_replacement_hook_blocks_capital_objective_live_authority_in_pr399() -> None:
     forecast_conn = _forecast_conn_with_replacement_rows()
     trade_conn = _trade_conn_with_required_tables()
     hook = build_replacement_forecast_event_hook(
@@ -875,15 +861,13 @@ def test_db_backed_replacement_hook_accepts_capital_objective_live_authority() -
     result = hook(_proof(q_lcb=0.62), _event(), _dt(4))
 
     assert result is not None
-    assert result.status == "LIVE_AUTHORITY"
-    assert result.reason_codes == ("REPLACEMENT_LIVE_AUTHORITY_APPLIED",)
+    assert result.status == "SHADOW_ONLY"
     assert result.effective_direction == "buy_yes:warm"
-    assert result.effective_q_posterior == pytest.approx(0.75)
-    assert result.effective_q_lcb == pytest.approx(0.55)
+    assert result.effective_q_lcb == pytest.approx(0.62)
     assert result.effective_kelly_fraction == pytest.approx(0.0)
 
 
-def test_db_backed_live_authority_uses_readiness_baseline_when_baseline_bundle_lookup_misses() -> None:
+def test_db_backed_live_authority_does_not_use_readiness_baseline_for_initiation_in_pr399() -> None:
     forecast_conn = _forecast_conn_with_replacement_rows()
     trade_conn = _trade_conn_with_required_tables()
     hook = build_replacement_forecast_event_hook(
@@ -903,12 +887,9 @@ def test_db_backed_live_authority_uses_readiness_baseline_when_baseline_bundle_l
     result = hook(_proof(q_lcb=0.62), _event(), _dt(4))
 
     assert result is not None
-    assert result.status == "LIVE_AUTHORITY"
-    assert result.reason_codes == ("REPLACEMENT_LIVE_AUTHORITY_APPLIED",)
-    assert result.effective_q_posterior == pytest.approx(0.75)
-    assert result.effective_q_lcb == pytest.approx(0.55)
-    assert result.receipt_provenance is not None
-    assert result.receipt_provenance.payload["dependency_source_run_ids"]["baseline_b0"] == "b0-run"
+    assert result.status == "SHADOW_ONLY"
+    assert result.effective_q_lcb == pytest.approx(0.62)
+    assert result.receipt_provenance is None
 
 
 def test_no_submit_adapter_wires_replacement_switch_inputs_into_real_hook(monkeypatch) -> None:
@@ -1048,8 +1029,9 @@ def test_replacement_promotion_evidence_is_read_from_settings_payload(monkeypatc
     )
 
     assert evidence == _promotion_evidence()
-    assert policy.status == "LIVE_AUTHORITY"
-    assert policy.can_initiate_trade is True
+    assert policy.status == "BLOCKED"
+    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in policy.reason_codes
+    assert policy.can_initiate_trade is False
     assert policy.can_increase_kelly is False
     assert policy.can_flip_direction is False
 
@@ -1080,8 +1062,9 @@ def test_replacement_capital_objective_evidence_is_read_from_settings_payload(mo
     )
 
     assert evidence == _capital_objective_evidence()
-    assert policy.status == "LIVE_AUTHORITY"
-    assert policy.can_initiate_trade is True
+    assert policy.status == "BLOCKED"
+    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in policy.reason_codes
+    assert policy.can_initiate_trade is False
     assert policy.can_increase_kelly is False
     assert policy.can_flip_direction is False
 
@@ -1149,7 +1132,7 @@ def test_reactor_hook_blocks_stale_switch_decision_before_veto_logic() -> None:
     assert result.as_receipt_tag() is None
 
 
-def test_reactor_hook_live_authority_can_apply_same_direction_replacement_q_lcb() -> None:
+def test_reactor_hook_live_authority_is_blocked_in_pr399() -> None:
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
         promotion_evidence=_promotion_evidence(),
@@ -1164,17 +1147,14 @@ def test_reactor_hook_live_authority_can_apply_same_direction_replacement_q_lcb(
         readiness=_readiness(),
     )
 
-    assert result.status == "LIVE_AUTHORITY"
-    assert result.reason_codes == ("REPLACEMENT_LIVE_AUTHORITY_APPLIED",)
+    assert result.status == "BLOCKED"
+    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in result.reason_codes
     assert result.effective_direction == "buy_yes:warm"
-    assert result.effective_q_posterior == pytest.approx(0.75)
-    assert result.effective_q_lcb == pytest.approx(0.95)
+    assert result.effective_q_posterior == pytest.approx(0.7)
+    assert result.effective_q_lcb == pytest.approx(0.62)
     assert result.effective_kelly_fraction == pytest.approx(0.04)
     receipt_tag = result.as_receipt_tag()
-    assert receipt_tag is not None
-    assert receipt_tag["trade_authority_status"] == "LIVE_AUTHORITY"
-    assert receipt_tag["authority_limits"]["can_initiate_trade"] is True
-    assert receipt_tag["settlement_authority_status"] == "NO_SETTLEMENT_AUTHORITY"
+    assert receipt_tag is None
 
 
 def test_reactor_hook_live_authority_blocks_unauthorized_kelly_increase_and_direction_flip() -> None:
@@ -1199,6 +1179,6 @@ def test_reactor_hook_live_authority_blocks_unauthorized_kelly_increase_and_dire
     )
 
     assert kelly.status == "BLOCKED"
-    assert "REPLACEMENT_REACTOR_KELLY_INCREASE_NOT_AUTHORIZED" in kelly.reason_codes
+    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in kelly.reason_codes
     assert flip.status == "BLOCKED"
-    assert "REPLACEMENT_REACTOR_DIRECTION_FLIP_NOT_AUTHORIZED" in flip.reason_codes
+    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in flip.reason_codes

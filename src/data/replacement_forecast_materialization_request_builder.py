@@ -120,6 +120,17 @@ def _bins(rows: object, *, settlement_step_c: float = 1.0) -> list[dict[str, obj
     return out
 
 
+def _settlement_step_c(payload: Mapping[str, object]) -> float:
+    if payload.get("settlement_step_c") is not None:
+        return float(payload["settlement_step_c"])
+    unit = str(payload.get("settlement_unit") or payload.get("temperature_unit") or "C").strip().upper()
+    if unit in {"C", "CELSIUS"}:
+        return 1.0
+    if unit in {"F", "FAHRENHEIT"}:
+        return 5.0 / 9.0
+    raise ValueError("settlement_unit must be C or F")
+
+
 def _precision_ready(path: Path) -> tuple[Mapping[str, object], tuple[str, ...]]:
     metadata_payload = _json_file(path)
     guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
@@ -179,11 +190,18 @@ def build_replacement_forecast_materialization_request(
     if "aifs_samples_json" in payload:
         aifs_input_key = "aifs_samples_json"
         aifs_input_value = _existing_path(payload, "aifs_samples_json", base_dir=base_path)
+        if "aifs_manifest_json" not in payload:
+            return ReplacementForecastMaterializationRequestBuildResult(
+                status="BLOCKED",
+                reason_codes=("REPLACEMENT_AIFS_PREEXTRACTED_SAMPLES_GRIB_IDENTITY_MANIFEST_REQUIRED",),
+                request=None,
+            )
     elif "aifs_grib_path" in payload:
         aifs_input_key = "aifs_grib_path"
         aifs_input_value = _existing_path(payload, "aifs_grib_path", base_dir=base_path)
     else:
         raise ValueError("aifs_samples_json or aifs_grib_path is required")
+    settlement_step_c = _settlement_step_c(payload)
 
     request = {
         "city": city,
@@ -203,8 +221,8 @@ def build_replacement_forecast_materialization_request(
         "openmeteo_source_available_at": openmeteo_available.isoformat(),
         "anchor_weight": float(payload.get("anchor_weight", 0.80)),
         "anchor_sigma_c": float(payload.get("anchor_sigma_c", 3.00)),
-        "settlement_step_c": float(payload.get("settlement_step_c", 1.0)),
-        "bins": _bins(payload.get("bins"), settlement_step_c=float(payload.get("settlement_step_c", 1.0))),
+        "settlement_step_c": settlement_step_c,
+        "bins": _bins(payload.get("bins"), settlement_step_c=settlement_step_c),
         aifs_input_key: aifs_input_value,
         "openmeteo_payload_json": _existing_path(payload, "openmeteo_payload_json", base_dir=base_path),
         "precision_metadata_json": precision_metadata_json,

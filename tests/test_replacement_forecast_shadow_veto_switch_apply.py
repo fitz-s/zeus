@@ -142,38 +142,24 @@ def test_shadow_veto_switch_apply_writes_temp_root_and_receipt(tmp_path) -> None
         optional_dependencies=("requests",),
     )
 
-    assert receipt["status"] == "SHADOW_VETO_SWITCH_APPLIED", json.dumps(receipt["dry_run"], sort_keys=True)
-    assert receipt["live_root_written"] is True
-    assert receipt["dry_run"]["status"] == "DRY_RUN_READY"
-    assert receipt["dry_run"]["live_switch"]["simple_switch_ready"] is True
+    assert receipt["status"] == "SHADOW_VETO_SWITCH_BLOCKED", json.dumps(receipt["dry_run"], sort_keys=True)
+    assert receipt["live_root_written"] is False
+    assert "REPLACEMENT_SWITCH_PRE_APPLY_DRY_RUN_BLOCKED" in receipt["reason_codes"]
+    assert receipt["dry_run"]["status"] == "BLOCKED"
+    assert "REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY" in receipt["dry_run"]["reason_codes"]
+    assert receipt["dry_run"]["live_switch"]["simple_switch_ready"] is False
     assert receipt["runtime_policy_status"] == "SHADOW_VETO_ONLY"
     assert receipt["live_trade_authority"] is False
-    assert set(receipt["applied_steps"]) == {
-        "config_shadow_veto_flags",
-        "shadow_materialization_dirs",
-        "replacement_shadow_schema",
-        "refit_handoff",
-        "current_fact_patch",
-    }
+    assert receipt["applied_steps"] == []
     payload = json.loads((live_root / "config" / "settings.json").read_text(encoding="utf-8"))
-    assert payload["feature_flags"][SHADOW_FLAG] is True
-    assert payload["feature_flags"][VETO_FLAG] is True
-    assert payload["feature_flags"][TRADE_AUTHORITY_FLAG] is False
-    assert payload["feature_flags"][KELLY_INCREASE_FLAG] is False
-    assert payload["feature_flags"][DIRECTION_FLIP_FLAG] is False
-    assert payload["replacement_forecast_shadow"] == TARGET_SHADOW_MATERIALIZATION_CONFIG
-    for key, relative in TARGET_SHADOW_MATERIALIZATION_CONFIG.items():
-        if key.endswith("_dir"):
-            assert (live_root / str(relative)).is_dir()
-            assert receipt["shadow_materialization_dirs"][key] == str(live_root / str(relative))
-    assert "Status: CURRENT_FOR_LIVE" in (live_root / "docs" / "operations" / "current_source_validity.md").read_text(encoding="utf-8")
-    assert (live_root / REFIT_HANDOFF_FILE).exists()
-    assert (backup_dir / "config" / "settings.json").exists()
-    assert (backup_dir / "state" / "zeus-forecasts.db").exists()
-    assert receipt["rollback_commands"]
+    assert payload == {"feature_flags": {}}
+    assert "Status: STALE_FOR_LIVE" in (live_root / "docs" / "operations" / "current_source_validity.md").read_text(encoding="utf-8")
+    assert not (live_root / REFIT_HANDOFF_FILE).exists()
+    assert not (backup_dir / "config" / "settings.json").exists()
+    assert receipt["rollback_commands"] == []
     with sqlite3.connect(live_root / "state" / "zeus-forecasts.db") as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert set(REPLACEMENT_SHADOW_TABLES).issubset(tables)
+    assert set(REPLACEMENT_SHADOW_TABLES).isdisjoint(tables)
 
 
 def test_shadow_veto_switch_cli_writes_receipt_json(tmp_path) -> None:

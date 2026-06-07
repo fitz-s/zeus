@@ -51,6 +51,8 @@ class ReplacementForecastPosteriorBundle:
         _normalize_probability_map(self.q, field_name="q")
         if self.q_lcb is not None:
             _normalize_probability_map(self.q_lcb, field_name="q_lcb", require_sum=False)
+            if set(self.q_lcb) != set(self.q):
+                raise ValueError("q_lcb keys must exactly match q keys")
 
 
 @dataclass(frozen=True)
@@ -234,6 +236,9 @@ def read_replacement_forecast_bundle(
     q = _normalize_probability_map(_json_mapping(row_map["q_json"], field_name="q_json"), field_name="q")
     q_lcb_raw = _json_mapping(row_map["q_lcb_json"], field_name="q_lcb_json") if row_map.get("q_lcb_json") else None
     q_lcb = _normalize_probability_map(q_lcb_raw, field_name="q_lcb", require_sum=False) if q_lcb_raw is not None else None
+    provenance = _json_mapping(row_map["provenance_json"], field_name="provenance_json")
+    if not str(provenance.get("bin_topology_hash") or "").strip():
+        return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_BIN_TOPOLOGY_HASH_MISSING")
     bundle = ReplacementForecastPosteriorBundle(
         posterior_id=int(row_map["posterior_id"]),
         city=str(row_map["city"]),
@@ -250,7 +255,7 @@ def read_replacement_forecast_bundle(
         computed_at=str(row_map["computed_at"]),
         baseline_source_run_id=baseline_run_id,
         dependency_json=dependency_json,
-        provenance_json=_json_mapping(row_map["provenance_json"], field_name="provenance_json"),
+        provenance_json=provenance,
         trade_authority_status=str(row_map["trade_authority_status"]),
     )
     return ReplacementForecastBundleReadResult(READY_STATUS, "REPLACEMENT_POSTERIOR_READY", bundle)

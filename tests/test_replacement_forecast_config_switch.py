@@ -169,45 +169,42 @@ def test_live_authority_config_switch_requires_passing_promotion_evidence() -> N
     assert plan.policy_status_after == "BLOCKED"
 
 
-def test_live_authority_config_switch_accepts_capital_objective_evidence() -> None:
+def test_live_authority_config_switch_rejects_capital_objective_evidence_in_pr399() -> None:
     plan = build_replacement_forecast_live_authority_config_switch_plan(
         _settings(),
         promotion_evidence=_weak_promotion_evidence(),
         capital_objective_evidence=_passing_capital_objective_evidence(),
     )
 
-    assert plan.ok is True
-    assert plan.policy_status_after == "LIVE_AUTHORITY"
-    assert dict(plan.target_flags) == TARGET_LIVE_AUTHORITY_FLAGS
-    assert dict(plan.target_flags)[KELLY_INCREASE_FLAG] is False
-    assert dict(plan.target_flags)[DIRECTION_FLIP_FLAG] is False
+    assert plan.ok is False
+    assert plan.policy_status_after == "BLOCKED"
+    assert "REPLACEMENT_CONFIG_TARGET_NOT_LIVE_AUTHORITY" in plan.reason_codes
+    assert "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED" in plan.reason_codes
 
 
-def test_live_authority_config_switch_targets_trade_authority_without_kelly_or_direction_flip(tmp_path) -> None:
+def test_live_authority_config_switch_does_not_write_trade_authority_in_pr399(tmp_path) -> None:
     settings_path = tmp_path / "settings.json"
     settings_path.write_text(json.dumps(_settings()), encoding="utf-8")
 
-    plan = apply_replacement_forecast_live_authority_config_switch(
-        settings_path,
-        promotion_evidence=_passing_promotion_evidence(),
-    )
+    with pytest.raises(ValueError, match="REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED"):
+        apply_replacement_forecast_live_authority_config_switch(
+            settings_path,
+            promotion_evidence=_passing_promotion_evidence(),
+        )
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     policy = resolve_replacement_forecast_runtime_policy(
         payload["feature_flags"],
         promotion_evidence=_passing_promotion_evidence(),
     )
 
-    assert plan.ok is True
-    assert plan.policy_status_after == "LIVE_AUTHORITY"
-    assert dict(plan.target_flags) == TARGET_LIVE_AUTHORITY_FLAGS
-    assert payload["feature_flags"][SHADOW_FLAG] is True
-    assert payload["feature_flags"][VETO_FLAG] is True
-    assert payload["feature_flags"][TRADE_AUTHORITY_FLAG] is True
+    assert payload["feature_flags"][SHADOW_FLAG] is False
+    assert payload["feature_flags"][VETO_FLAG] is False
+    assert payload["feature_flags"][TRADE_AUTHORITY_FLAG] is False
     assert payload["feature_flags"][KELLY_INCREASE_FLAG] is False
     assert payload["feature_flags"][DIRECTION_FLIP_FLAG] is False
-    assert payload["replacement_forecast_shadow"] == TARGET_SHADOW_MATERIALIZATION_CONFIG
-    assert policy.status == "LIVE_AUTHORITY"
-    assert policy.can_initiate_trade is True
+    assert "replacement_forecast_shadow" not in payload
+    assert policy.status == "DISABLED"
+    assert policy.can_initiate_trade is False
     assert policy.can_increase_kelly is False
     assert policy.can_flip_direction is False
 

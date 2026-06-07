@@ -147,6 +147,22 @@ def apply_replacement_forecast_shadow_veto_switch(
     if any(config_plan.target_flags.get(key) is not False for key in (TRADE_AUTHORITY_FLAG, KELLY_INCREASE_FLAG, DIRECTION_FLIP_FLAG)):
         reasons.append("REPLACEMENT_SWITCH_DANGEROUS_TARGET_FLAG")
 
+    flags_for_dry_run: Mapping[str, object] = config_plan.target_flags if config_plan.ok else {}
+    dry_run = build_replacement_forecast_live_dry_run_report(
+        ReplacementForecastLiveDryRunInput(
+            root=root,
+            runtime_flags=flags_for_dry_run,
+            optional_dependencies=optional_dependencies,
+            source_fact_status_override="CURRENT_FOR_LIVE",
+            data_fact_status_override="CURRENT_FOR_LIVE",
+            assume_replacement_shadow_schema_initialized=not apply,
+            assume_refit_handoff_available=not apply,
+            assume_raw_artifact_lineage_available=True,
+        )
+    )
+    if apply and not dry_run.ok:
+        reasons.append("REPLACEMENT_SWITCH_PRE_APPLY_DRY_RUN_BLOCKED")
+
     backups: dict[str, str] = {}
     applied_steps: list[str] = []
     schema_report: dict[str, object] | None = None
@@ -174,26 +190,16 @@ def apply_replacement_forecast_shadow_veto_switch(
         current_fact_written = True
         applied_steps.append("current_fact_patch")
         _ensure_safe_flags(_load_feature_flags(root))
-
-    flags_for_dry_run: Mapping[str, object]
-    if apply and not reasons:
-        flags_for_dry_run = _load_feature_flags(root)
-    else:
-        flags_for_dry_run = config_plan.target_flags if config_plan.ok else {}
-    dry_run = build_replacement_forecast_live_dry_run_report(
-        ReplacementForecastLiveDryRunInput(
-            root=root,
-            runtime_flags=flags_for_dry_run,
-            optional_dependencies=optional_dependencies,
-            source_fact_status_override=None if apply else "CURRENT_FOR_LIVE",
-            data_fact_status_override=None if apply else "CURRENT_FOR_LIVE",
-            assume_replacement_shadow_schema_initialized=not apply,
-            assume_refit_handoff_available=not apply,
-            assume_raw_artifact_lineage_available=True,
+        dry_run = build_replacement_forecast_live_dry_run_report(
+            ReplacementForecastLiveDryRunInput(
+                root=root,
+                runtime_flags=_load_feature_flags(root),
+                optional_dependencies=optional_dependencies,
+                assume_raw_artifact_lineage_available=True,
+            )
         )
-    )
-    if apply and not dry_run.ok:
-        reasons.append("REPLACEMENT_SWITCH_POST_APPLY_DRY_RUN_BLOCKED")
+        if not dry_run.ok:
+            reasons.append("REPLACEMENT_SWITCH_POST_APPLY_DRY_RUN_BLOCKED")
     status = "SHADOW_VETO_SWITCH_APPLIED" if apply and not reasons else "SHADOW_VETO_SWITCH_READY" if not apply and not reasons else "SHADOW_VETO_SWITCH_BLOCKED"
     live_root_written = bool(apply and applied_steps)
     return {
@@ -205,7 +211,7 @@ def apply_replacement_forecast_shadow_veto_switch(
         "apply_requested": bool(apply),
         "backup_dir": str(effective_backup_dir) if backups or apply else None,
         "backups": backups,
-        "rollback_commands": _rollback_commands(root, effective_backup_dir, backups) if apply else [],
+        "rollback_commands": _rollback_commands(root, effective_backup_dir, backups) if backups or applied_steps else [],
         "applied_steps": applied_steps,
         "strategy": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         "fixed_config": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00",

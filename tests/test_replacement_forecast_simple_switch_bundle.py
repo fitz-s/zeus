@@ -127,7 +127,7 @@ def _fact_evidence_report() -> dict[str, object]:
     }
 
 
-def test_simple_switch_bundle_ready_when_config_schema_facts_and_dry_run_ready(tmp_path) -> None:
+def test_simple_switch_bundle_blocks_when_current_target_coverage_is_absent(tmp_path) -> None:
     _write_files(tmp_path)
     _create_db(tmp_path / "state" / "zeus-forecasts.db", REQUIRED_FORECAST_TABLES)
     _create_db(tmp_path / "state" / "zeus-world.db", REQUIRED_WORLD_TABLES)
@@ -139,11 +139,13 @@ def test_simple_switch_bundle_ready_when_config_schema_facts_and_dry_run_ready(t
         current_fact_evidence=_fact_evidence(),
     )
 
-    assert bundle.ready is True
-    assert bundle.status == "SIMPLE_SWITCH_BUNDLE_READY"
+    assert bundle.ready is False
+    assert bundle.status == "SIMPLE_SWITCH_BUNDLE_BLOCKED"
     assert bundle.config_switch.json_patch == ()
     assert bundle.missing_replacement_shadow_tables == ()
-    assert bundle.dry_run.ok is True
+    assert bundle.dry_run.ok is False
+    assert bundle.dry_run.status == "BLOCKED"
+    assert "REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY" in bundle.reason_codes
 
 
 def test_simple_switch_bundle_accepts_full_evidence_report_payload(tmp_path) -> None:

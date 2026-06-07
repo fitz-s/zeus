@@ -185,6 +185,7 @@ def build_replacement_forecast_simple_switch_bundle(
         )
     if not dry_run.ok:
         reasons.append("REPLACEMENT_SIMPLE_SWITCH_DRY_RUN_NOT_READY")
+        reasons.extend(dry_run.reason_codes)
     commands.append(f"python3 scripts/check_replacement_forecast_live_dry_run.py --root {root_path} --stdout")
 
     status = "SIMPLE_SWITCH_BUNDLE_READY" if not reasons else "SIMPLE_SWITCH_BUNDLE_BLOCKED"

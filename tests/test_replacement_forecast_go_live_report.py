@@ -61,6 +61,7 @@ from src.data.replacement_forecast_rollback_plan import build_replacement_foreca
 from src.data.replacement_forecast_runtime_policy import (
     DIRECTION_FLIP_FLAG,
     KELLY_INCREASE_FLAG,
+    PR399_LIVE_AUTHORITY_DISABLED_REASON,
     SHADOW_FLAG,
     TRADE_AUTHORITY_FLAG,
     VETO_FLAG,
@@ -448,9 +449,11 @@ def test_go_live_report_accepts_observed_promotion_grade_capital_replay() -> Non
         )
     )
 
-    assert report.live_promotion_ready is True
-    assert report.status == "LIVE_PROMOTION_READY"
+    assert report.live_promotion_ready is False
+    assert report.status == "BLOCKED"
     assert "capital_replay" not in report.blockers
+    assert "runtime_policy" in report.blockers
+    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in report.blockers["runtime_policy"]
 
 
 def test_go_live_report_blocks_observed_capital_replay_with_source_availability_violations() -> None:
@@ -494,9 +497,11 @@ def test_go_live_report_requires_operator_approval_for_live_trade_authority() ->
 
     assert report.status == "BLOCKED"
     assert report.live_promotion_ready is False
-    assert "operator_approval" in report.blockers
-    assert "switch_decision" not in report.blockers
-    assert report.switch_can_initiate_trade is True
+    assert "operator_approval" not in report.blockers
+    assert "runtime_policy" in report.blockers
+    assert "switch_decision" in report.blockers
+    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in report.blockers["runtime_policy"]
+    assert report.switch_can_initiate_trade is False
 
 
 def test_go_live_report_reaches_live_promotion_ready_with_all_evidence_and_operator_approval() -> None:
@@ -511,12 +516,13 @@ def test_go_live_report_reaches_live_promotion_ready_with_all_evidence_and_opera
         )
     )
 
-    assert report.status == "LIVE_PROMOTION_READY"
-    assert report.live_promotion_ready is True
-    assert report.switch_can_initiate_trade is True
-    assert report.switch_decision_status == "LIVE_AUTHORITY"
-    assert report.reason_codes == ("REPLACEMENT_GO_LIVE_PROMOTION_READY",)
-    assert report.blockers == {}
+    assert report.status == "BLOCKED"
+    assert report.live_promotion_ready is False
+    assert report.switch_can_initiate_trade is False
+    assert report.switch_decision_status == "BLOCKED"
+    assert "runtime_policy" in report.blockers
+    assert "switch_decision" in report.blockers
+    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in report.blockers["runtime_policy"]
 
 
 def test_go_live_report_rejects_short_alias_in_system_identity_fields() -> None:
@@ -830,10 +836,11 @@ def test_go_live_payload_aligns_explicit_promotion_refit_bit_with_ready_handoff(
 
     report = build_replacement_forecast_go_live_readiness_from_payload(payload)
 
-    assert report.runtime_policy_status == "LIVE_AUTHORITY"
-    assert "runtime_policy" not in report.blockers
+    assert report.runtime_policy_status == "BLOCKED"
+    assert "runtime_policy" in report.blockers
+    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in report.blockers["runtime_policy"]
     assert report.switch_decision_status == "BLOCKED"
-    assert "REPLACEMENT_SWITCH_REFIT_LIVE_PROMOTION_REQUIRED" in report.blockers["switch_decision"]
+    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in report.blockers["switch_decision"]
 
 
 def test_go_live_payload_fails_closed_when_refit_evidence_conflicts_with_handoff() -> None:
@@ -866,11 +873,13 @@ def test_go_live_payload_derives_promotion_evidence_from_report_inputs() -> None
 
     report = build_replacement_forecast_go_live_readiness_from_payload(payload)
 
-    assert report.runtime_policy_status == "LIVE_AUTHORITY"
-    assert report.status == "LIVE_PROMOTION_READY"
-    assert report.switch_decision_status == "LIVE_AUTHORITY"
-    assert report.switch_can_initiate_trade is True
-    assert report.blockers == {}
+    assert report.runtime_policy_status == "BLOCKED"
+    assert report.status == "BLOCKED"
+    assert report.switch_decision_status == "BLOCKED"
+    assert report.switch_can_initiate_trade is False
+    assert "runtime_policy" in report.blockers
+    assert "switch_decision" in report.blockers
+    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in report.blockers["runtime_policy"]
 
 
 def test_go_live_payload_blocks_derived_promotion_evidence_with_low_q_lcb_coverage() -> None:
@@ -1260,10 +1269,10 @@ def test_go_live_report_cli_live_state_root_can_prove_simple_switch_inventory(tm
         stderr=subprocess.PIPE,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
     stdout_payload = json.loads(result.stdout)
-    assert stdout_payload["status"] == "FINE_TUNE_READY"
-    assert stdout_payload["simple_switch_ready"] is True
+    assert stdout_payload["status"] == "BLOCKED"
+    assert stdout_payload["simple_switch_ready"] is False
     assert stdout_payload["switch_decision_status"] == "SHADOW_VETO_ONLY"
     assert stdout_payload["source_fact_status"] == "CURRENT_FOR_LIVE"
     assert stdout_payload["data_fact_status"] == "CURRENT_FOR_LIVE"
@@ -1348,15 +1357,17 @@ def test_go_live_report_cli_live_state_root_uses_derived_promotion_evidence(tmp_
         stderr=subprocess.PIPE,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
     stdout_payload = json.loads(result.stdout)
-    assert stdout_payload["runtime_policy_status"] == "LIVE_AUTHORITY"
+    assert stdout_payload["runtime_policy_status"] == "BLOCKED"
     assert stdout_payload["source_fact_status"] == "CURRENT_FOR_LIVE"
     assert stdout_payload["data_fact_status"] == "CURRENT_FOR_LIVE"
-    assert stdout_payload["status"] == "LIVE_PROMOTION_READY"
-    assert stdout_payload["switch_decision_status"] == "LIVE_AUTHORITY"
-    assert stdout_payload["switch_can_initiate_trade"] is True
-    assert stdout_payload["blockers"] == {}
+    assert stdout_payload["status"] == "BLOCKED"
+    assert stdout_payload["switch_decision_status"] == "BLOCKED"
+    assert stdout_payload["switch_can_initiate_trade"] is False
+    assert "runtime_policy" in stdout_payload["blockers"]
+    assert "switch_decision" in stdout_payload["blockers"]
+    assert PR399_LIVE_AUTHORITY_DISABLED_REASON in stdout_payload["blockers"]["runtime_policy"]
 
 
 def test_go_live_report_cli_live_state_root_uses_refit_handoff(tmp_path) -> None:
@@ -1390,10 +1401,10 @@ def test_go_live_report_cli_live_state_root_uses_refit_handoff(tmp_path) -> None
         stderr=subprocess.PIPE,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
     stdout_payload = json.loads(result.stdout)
-    assert stdout_payload["status"] == "FINE_TUNE_READY"
-    assert stdout_payload["fine_tune_ready"] is True
+    assert stdout_payload["status"] == "BLOCKED"
+    assert stdout_payload["fine_tune_ready"] is False
     assert stdout_payload["source_fact_status"] == "CURRENT_FOR_LIVE"
     assert stdout_payload["data_fact_status"] == "CURRENT_FOR_LIVE"
 
@@ -1434,10 +1445,10 @@ def test_go_live_report_cli_live_state_root_overlays_current_refit_handoff(tmp_p
         stderr=subprocess.PIPE,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode == 1, result.stderr
     stdout_payload = json.loads(result.stdout)
-    assert stdout_payload["status"] == "FINE_TUNE_READY"
-    assert stdout_payload["fine_tune_ready"] is True
+    assert stdout_payload["status"] == "BLOCKED"
+    assert stdout_payload["fine_tune_ready"] is False
     assert "refit" not in stdout_payload["blockers"]
 
 

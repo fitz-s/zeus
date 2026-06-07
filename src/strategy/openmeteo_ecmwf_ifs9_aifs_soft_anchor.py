@@ -12,6 +12,7 @@ PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
 DEFAULT_ANCHOR_WEIGHT = 0.80
 DEFAULT_ANCHOR_SIGMA_C = 3.00
 EPSILON = 1e-15
+DIRICHLET_PRIOR_FLOOR = 1e-6
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 
@@ -148,6 +149,24 @@ def _normalize_probabilities(probabilities: Mapping[str, float]) -> dict[str, fl
     return {key: value / total for key, value in cleaned.items()}
 
 
+def _standard_normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
+
+
+def _anchor_bin_likelihood(bin_spec: ProbabilityBin, *, anchor_c: float, sigma_c: float) -> float:
+    if bin_spec.lower_c is None and bin_spec.upper_c is None:
+        raise ValueError("probability bin requires at least one bound")
+    if bin_spec.lower_c is None:
+        z_upper = (float(bin_spec.upper_c) - anchor_c) / sigma_c
+        return max(EPSILON, _standard_normal_cdf(z_upper))
+    if bin_spec.upper_c is None:
+        z_lower = (float(bin_spec.lower_c) - anchor_c) / sigma_c
+        return max(EPSILON, 1.0 - _standard_normal_cdf(z_lower))
+    z_lower = (float(bin_spec.lower_c) - anchor_c) / sigma_c
+    z_upper = (float(bin_spec.upper_c) - anchor_c) / sigma_c
+    return max(EPSILON, _standard_normal_cdf(z_upper) - _standard_normal_cdf(z_lower))
+
+
 def anchor_sigma_to_celsius(anchor_sigma: float, sigma_unit: str) -> float:
     """Convert a temperature uncertainty sigma into Celsius degrees.
 
@@ -182,7 +201,8 @@ def build_soft_anchor_posterior(
 
     if not math.isfinite(anchor_c):
         raise ValueError("anchor_c must be finite")
-    prior = _normalize_probabilities(aifs_probabilities)
+    raw_prior = _normalize_probabilities(aifs_probabilities)
+    prior = _normalize_probabilities({key: value + DIRICHLET_PRIOR_FLOOR for key, value in raw_prior.items()})
     bin_by_id = {bin_spec.bin_id: bin_spec for bin_spec in bins}
     if set(bin_by_id) != set(prior):
         raise ValueError("bins and aifs_probabilities must cover the same bin ids")
@@ -190,14 +210,10 @@ def build_soft_anchor_posterior(
     likelihood: dict[str, float] = {}
     log_terms: dict[str, float] = {}
     for bin_id, prior_probability in prior.items():
-        center = bin_by_id[bin_id].center()
-        z = (center - anchor_c) / config.anchor_sigma_c
-        log_likelihood = -0.5 * z * z
-        likelihood[bin_id] = math.exp(log_likelihood)
-        if prior_probability <= 0.0:
-            log_terms[bin_id] = -math.inf
-        else:
-            log_terms[bin_id] = math.log(prior_probability) + config.anchor_weight * log_likelihood
+        bin_likelihood = _anchor_bin_likelihood(bin_by_id[bin_id], anchor_c=float(anchor_c), sigma_c=config.anchor_sigma_c)
+        log_likelihood = math.log(bin_likelihood)
+        likelihood[bin_id] = bin_likelihood
+        log_terms[bin_id] = math.log(prior_probability) + config.anchor_weight * log_likelihood
 
     finite_terms = [value for value in log_terms.values() if math.isfinite(value)]
     if not finite_terms:

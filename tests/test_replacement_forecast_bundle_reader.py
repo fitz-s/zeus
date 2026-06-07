@@ -88,7 +88,7 @@ def _insert_posterior(
                     "openmeteo_ifs9_anchor": "om9-run",
                 }
             ),
-            json.dumps({"reader_test": True}),
+            json.dumps({"reader_test": True, "bin_topology_hash": "test-topology"}),
             "SHADOW_VETO_ONLY",
             training_allowed,
         ),

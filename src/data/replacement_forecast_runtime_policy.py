@@ -25,6 +25,7 @@ SHADOW_ONLY_STATUS = "SHADOW_ONLY"
 SHADOW_VETO_ONLY_STATUS = "SHADOW_VETO_ONLY"
 BLOCKED_STATUS = "BLOCKED"
 LIVE_AUTHORITY_STATUS = "LIVE_AUTHORITY"
+PR399_LIVE_AUTHORITY_DISABLED_REASON = "REPLACEMENT_PR399_LIVE_AUTHORITY_DISABLED"
 EXPECTED_ANCHOR_WEIGHT = 0.80
 EXPECTED_ANCHOR_SIGMA_C = 3.00
 MIN_PROMOTION_GUARDRAIL_BUCKET_ROWS = 20
@@ -214,6 +215,7 @@ def resolve_replacement_forecast_runtime_policy(
     if not trade_authority and (kelly_increase or direction_flip):
         reasons.append("REPLACEMENT_TRADE_AUTHORITY_REQUIRED_FOR_DANGEROUS_FLAGS")
     if trade_authority:
+        reasons.append(PR399_LIVE_AUTHORITY_DISABLED_REASON)
         strict_reasons = (
             ("REPLACEMENT_PROMOTION_EVIDENCE_REQUIRED",)
             if promotion_evidence is None
@@ -224,8 +226,9 @@ def resolve_replacement_forecast_runtime_policy(
             if capital_objective_evidence is None
             else capital_objective_evidence.blocking_reason_codes()
         )
-        if strict_reasons and capital_reasons:
+        if strict_reasons:
             reasons.extend(strict_reasons)
+        if capital_reasons:
             reasons.extend(capital_reasons)
     if direction_flip and not kelly_increase:
         reasons.append("REPLACEMENT_DIRECTION_FLIP_REQUIRES_KELLY_AUTHORITY")

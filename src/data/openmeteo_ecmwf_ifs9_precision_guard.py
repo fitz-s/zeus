@@ -80,7 +80,7 @@ class OpenMeteoIfs9PrecisionGuardResult:
 
     @property
     def passable_for_shadow_veto(self) -> bool:
-        return self.status in {PASS_STATUS, SHADOW_ONLY_STATUS}
+        return self.status == PASS_STATUS
 
 
 def _to_utc(value: datetime | str, *, field_name: str) -> datetime:

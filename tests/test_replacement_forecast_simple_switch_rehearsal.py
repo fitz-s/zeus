@@ -118,10 +118,11 @@ def test_rehearsal_applies_switch_on_copy_without_mutating_live_root(tmp_path) -
         optional_dependencies=("requests",),
     )
 
-    assert report["status"] == "REHEARSAL_READY", json.dumps(report["dry_run"], sort_keys=True)
+    assert report["status"] == "REHEARSAL_BLOCKED", json.dumps(report["dry_run"], sort_keys=True)
     assert report["live_root_written"] is False
     assert report["db_copy_mode"] == "schema-stub"
-    assert report["dry_run"]["status"] == "DRY_RUN_READY"
+    assert report["dry_run"]["status"] == "BLOCKED"
+    assert "REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY" in report["dry_run"]["reason_codes"]
     assert report["dry_run"]["refit_handoff_status"] == "READY"
     assert report["dry_run"]["live_switch"]["simple_switch_ready"] is True
     assert report["dry_run"]["live_switch"]["live_trade_authority"] is False
@@ -151,8 +152,10 @@ def test_rehearsal_can_inject_refit_handoff_without_mutating_live_root(tmp_path)
         refit_handoff_json=refit_handoff_path,
     )
 
-    assert report["status"] == "REHEARSAL_READY", json.dumps(report["dry_run"], sort_keys=True)
+    assert report["status"] == "REHEARSAL_BLOCKED", json.dumps(report["dry_run"], sort_keys=True)
     assert REFIT_HANDOFF_FILE in report["copied_live_files"]
+    assert report["dry_run"]["status"] == "BLOCKED"
+    assert "REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY" in report["dry_run"]["reason_codes"]
     assert report["dry_run"]["refit_handoff_status"] == "READY"
     assert not (live_root / REFIT_HANDOFF_FILE).exists()
     assert (rehearsal_root / REFIT_HANDOFF_FILE).exists()
@@ -186,7 +189,8 @@ def test_rehearsal_cli_returns_ready_json(tmp_path) -> None:
         stderr=subprocess.PIPE,
     )
 
-    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.returncode == 1, result.stderr or result.stdout
     payload = json.loads(result.stdout)
-    assert payload["status"] == "REHEARSAL_READY"
-    assert payload["dry_run"]["status"] == "DRY_RUN_READY"
+    assert payload["status"] == "REHEARSAL_BLOCKED"
+    assert payload["dry_run"]["status"] == "BLOCKED"
+    assert "REPLACEMENT_DRY_RUN_CURRENT_TARGET_COVERAGE_NOT_READY" in payload["dry_run"]["reason_codes"]

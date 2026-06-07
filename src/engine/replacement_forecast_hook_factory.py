@@ -218,8 +218,9 @@ def _replacement_q_lcb_for_candidate(
     direction = str(getattr(proof, "direction", "") or "")
     q = getattr(replacement_bundle, "q", {}) or {}
     q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
+    q_ucb = getattr(replacement_bundle, "q_ucb", None) or {}
     if direction.startswith("buy_yes"):
-        raw = q_lcb.get(bin_id, q.get(bin_id))
+        raw = q_lcb.get(bin_id)
     elif direction.startswith("buy_no"):
         raw = None
         for key in (
@@ -232,9 +233,12 @@ def _replacement_q_lcb_for_candidate(
                 raw = q_lcb[key]
                 break
         if raw is None:
-            raw = 0.0
+            for key in (bin_id, f"yes:{bin_id}", f"buy_yes:{bin_id}"):
+                if key in q_ucb:
+                    raw = 1.0 - float(q_ucb[key])
+                    break
     else:
-        raw = q_lcb.get(bin_id, q.get(bin_id))
+        raw = q_lcb.get(bin_id)
     if raw is None:
         return baseline_q_lcb
     replacement_q_lcb = min(max(float(raw), 0.0), 1.0)

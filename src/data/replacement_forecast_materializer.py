@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import hashlib
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Mapping, Sequence
@@ -13,8 +14,11 @@ from src.data.ecmwf_aifs_sampled_2t_localday import (
     LOW_DATA_VERSION as AIFS_LOW_DATA_VERSION,
     PRODUCT_ID as AIFS_PRODUCT_ID,
     SOURCE_ID as AIFS_SOURCE_ID,
+    EXPECTED_AIFS_MEMBER_COUNT,
+    expected_aifs_sample_steps_for_local_day,
     AifsSampledLocalDayExtraction,
 )
+from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
     HIGH_DATA_VERSION as ANCHOR_HIGH_DATA_VERSION,
     LOW_DATA_VERSION as ANCHOR_LOW_DATA_VERSION,
@@ -124,6 +128,32 @@ def _json(value: Mapping[str, object] | Sequence[object]) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _json_hash(value: Mapping[str, object] | Sequence[object]) -> str:
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+
+
+def _bin_topology_payload(bins: Sequence[AifsTemperatureBin], *, settlement_step_c: float) -> list[dict[str, object]]:
+    return [
+        {
+            "bin_id": item.bin_id,
+            "lower_c": item.lower_c,
+            "upper_c": item.upper_c,
+            "center_c": item.center_c,
+            "settlement_step_c": float(settlement_step_c),
+        }
+        for item in bins
+    ]
+
+
+def _expected_om9_hourly_count(*, city_timezone: str, target_date: date | str) -> int:
+    window = compute_target_local_day_window_utc(
+        city_timezone=city_timezone,
+        target_local_date=date.fromisoformat(target_date) if isinstance(target_date, str) else target_date,
+    )
+    seconds = (window.end_utc - window.start_utc).total_seconds()
+    return int(seconds // 3600)
+
+
 def _precision_guard_payload(guard: OpenMeteoIfs9PrecisionGuardResult) -> dict[str, object]:
     return {
         "status": guard.status,
@@ -163,6 +193,32 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         reasons.append("REPLACEMENT_MATERIALIZATION_OPENMETEO_SOURCE_RUN_ID_MISSING")
     if request.baseline_data_version != expected["baseline_b0"].data_version:
         reasons.append("REPLACEMENT_MATERIALIZATION_BASELINE_DATA_VERSION_MISMATCH")
+    if len(request.aifs_extraction.members) != EXPECTED_AIFS_MEMBER_COUNT:
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_MEMBER_COVERAGE_INCOMPLETE")
+    if request.aifs_extraction.source_cycle_time is None:
+        reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_SOURCE_CYCLE_TIME_MISSING")
+    else:
+        expected_steps = expected_aifs_sample_steps_for_local_day(
+            source_cycle_time=request.aifs_extraction.source_cycle_time,
+            city_timezone=request.city_timezone,
+            target_local_date=date.fromisoformat(_date_text(request.target_date)),
+        )
+        for member in request.aifs_extraction.members:
+            observed_steps = tuple(
+                sorted(
+                    int((valid_time - request.aifs_extraction.source_cycle_time).total_seconds() // 3600)
+                    for valid_time in member.contributing_valid_times_utc
+                )
+            )
+            if observed_steps != expected_steps:
+                reasons.append("REPLACEMENT_MATERIALIZATION_AIFS_STEP_COVERAGE_INCOMPLETE")
+                break
+    expected_om9_count = _expected_om9_hourly_count(
+        city_timezone=request.city_timezone,
+        target_date=request.target_date,
+    )
+    if request.openmeteo_anchor.sample_count != expected_om9_count:
+        reasons.append("REPLACEMENT_MATERIALIZATION_OM9_LOCALDAY_HOURLY_COVERAGE_INCOMPLETE")
     if any(source_available_at > computed_at for _, source_available_at in dependency_times):
         reasons.append("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT")
     if request.expires_at is not None and _to_utc(request.expires_at, field_name="expires_at") <= computed_at:
@@ -188,13 +244,7 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
             trade_authority_status, training_allowed
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_id, product_id, data_version, city, target_date, temperature_metric, source_cycle_time)
-        DO UPDATE SET
-            anchor_value_c = excluded.anchor_value_c,
-            source_available_at = excluded.source_available_at,
-            captured_at = excluded.captured_at,
-            artifact_id = excluded.artifact_id,
-            contributing_times_json = excluded.contributing_times_json,
-            provenance_json = excluded.provenance_json
+        DO NOTHING
         """,
         (
             ANCHOR_SOURCE_ID,
@@ -267,6 +317,8 @@ def _insert_posterior(
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     data_version = _data_version(metric)
     q = {key: float(value) for key, value in result.posterior.probabilities.items()}
+    bin_topology_payload = _bin_topology_payload(request.bins, settlement_step_c=float(request.settlement_step_c))
+    bin_topology_hash = _json_hash(bin_topology_payload)
     conn.execute(
         """
         INSERT INTO forecast_posteriors (
@@ -278,17 +330,7 @@ def _insert_posterior(
             trade_authority_status, training_allowed
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_id, product_id, data_version, city, target_date, temperature_metric, source_cycle_time)
-        DO UPDATE SET
-            source_available_at = excluded.source_available_at,
-            computed_at = excluded.computed_at,
-            q_json = excluded.q_json,
-            q_lcb_json = excluded.q_lcb_json,
-            aifs_source_run_id = excluded.aifs_source_run_id,
-            openmeteo_anchor_id = excluded.openmeteo_anchor_id,
-            dependency_source_run_ids_json = excluded.dependency_source_run_ids_json,
-            provenance_json = excluded.provenance_json,
-            trade_authority_status = excluded.trade_authority_status,
-            training_allowed = excluded.training_allowed
+        DO NOTHING
         """,
         (
             SOURCE_ID,
@@ -301,7 +343,7 @@ def _insert_posterior(
             available_at,
             computed_at,
             _json(q),
-            _json(q),
+            None,
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             request.aifs_source_run_id,
             anchor_id,
@@ -322,7 +364,10 @@ def _insert_posterior(
                     "openmeteo_precision_guard": _precision_guard_payload(request.openmeteo_precision_guard),
                     "aifs_probabilities": dict(result.aifs_probabilities.probabilities),
                     "aifs_member_count": len(result.aifs_probabilities.member_values_c),
-                    "q_lcb_json_role": "shadow_point_probability_capped_downstream",
+                    "q_point_json_role": "shadow_point_probability_only",
+                    "q_lcb_json_role": "absent_no_calibrated_lcb_available",
+                    "bin_topology": bin_topology_payload,
+                    "bin_topology_hash": bin_topology_hash,
                     "trade_authority_status": "SHADOW_VETO_ONLY",
                     "training_allowed": False,
                 }

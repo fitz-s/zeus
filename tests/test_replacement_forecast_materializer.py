@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -62,34 +62,38 @@ def _conn() -> sqlite3.Connection:
 
 
 def _aifs_extraction() -> AifsSampledLocalDayExtraction:
+    cycle = _dt(0)
+    steps = (18, 24, 30, 36)
+    times = tuple(cycle + timedelta(hours=step) for step in steps)
     return AifsSampledLocalDayExtraction(
         city_timezone="Asia/Shanghai",
         target_local_date=date(2026, 6, 7),
-        source_cycle_time=_dt(0),
+        source_cycle_time=cycle,
         target_window_start_utc=_dt(16),
         target_window_end_utc=datetime(2026, 6, 7, 16, tzinfo=UTC),
-        members=(
-            AifsMemberLocalDayExtrema("pf-001", high_c=24.0, low_c=18.0, sample_count=4, contributing_valid_times_utc=(_dt(18), _dt(0), _dt(6), _dt(12))),
-            AifsMemberLocalDayExtrema("pf-002", high_c=26.0, low_c=19.0, sample_count=4, contributing_valid_times_utc=(_dt(18), _dt(0), _dt(6), _dt(12))),
-            AifsMemberLocalDayExtrema("pf-003", high_c=32.0, low_c=21.0, sample_count=4, contributing_valid_times_utc=(_dt(18), _dt(0), _dt(6), _dt(12))),
+        members=tuple(
+            AifsMemberLocalDayExtrema(
+                f"m{i:02d}",
+                high_c=24.0 + (i % 9),
+                low_c=18.0 + (i % 5),
+                sample_count=len(times),
+                contributing_valid_times_utc=times,
+            )
+            for i in range(51)
         ),
     )
 
 
 def _anchor() -> OpenMeteoIfs9LocalDayAnchor:
+    utc_times = tuple(_dt(16) + timedelta(hours=i) for i in range(24))
     return OpenMeteoIfs9LocalDayAnchor(
         city_timezone="Asia/Shanghai",
         target_local_date=date(2026, 6, 7),
         high_c=27.0,
         low_c=18.5,
-        sample_count=4,
-        contributing_local_times=(
-            datetime(2026, 6, 7, 0, tzinfo=timezone.utc),
-            datetime(2026, 6, 7, 6, tzinfo=timezone.utc),
-            datetime(2026, 6, 7, 12, tzinfo=timezone.utc),
-            datetime(2026, 6, 7, 18, tzinfo=timezone.utc),
-        ),
-        contributing_valid_times_utc=(_dt(16), _dt(22), datetime(2026, 6, 7, 4, tzinfo=UTC), datetime(2026, 6, 7, 10, tzinfo=UTC)),
+        sample_count=len(utc_times),
+        contributing_local_times=utc_times,
+        contributing_valid_times_utc=utc_times,
         source_cycle_time=_dt(0),
     )
 
@@ -226,11 +230,10 @@ def test_materializer_does_not_fabricate_directional_no_lcb() -> None:
     assert result.ok is True
     posterior_row = conn.execute("SELECT q_json, q_lcb_json, provenance_json FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
     q = json.loads(posterior_row["q_json"])
-    q_lcb = json.loads(posterior_row["q_lcb_json"])
     provenance = json.loads(posterior_row["provenance_json"])
-    assert q_lcb == q
-    assert not any(str(key).startswith(("buy_no:", "no:")) for key in q_lcb)
-    assert provenance["q_lcb_json_role"] == "shadow_point_probability_capped_downstream"
+    assert q
+    assert posterior_row["q_lcb_json"] is None
+    assert provenance["q_lcb_json_role"] == "absent_no_calibrated_lcb_available"
 
 
 def test_materializer_blocks_readiness_when_baseline_identity_is_wrong() -> None:
@@ -272,7 +275,7 @@ def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance
 
     result = materialize_replacement_forecast_shadow(
         conn,
-        _request(openmeteo_precision_guard=_precision_guard(city_class="coastal", land_sea_mask="sea")),
+        _request(openmeteo_precision_guard=_precision_guard(city_class="flat_inland", land_sea_mask="land")),
     )
 
     assert result.ok is True
@@ -280,9 +283,9 @@ def test_materializer_records_precision_guard_in_anchor_and_posterior_provenance
     posterior_row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?", (result.posterior_id,)).fetchone()
     anchor_provenance = json.loads(anchor_row["provenance_json"])
     posterior_provenance = json.loads(posterior_row["provenance_json"])
-    assert anchor_provenance["precision_guard"]["status"] == "SHADOW_ONLY"
-    assert anchor_provenance["precision_guard"]["high_risk_bucket"] == "coastal"
-    assert posterior_provenance["openmeteo_precision_guard"]["reason_codes"] == ["OM9_LAND_SEA_HIGH_RISK_FOR_CITY_CLASS"]
+    assert anchor_provenance["precision_guard"]["status"] == "PASS"
+    assert anchor_provenance["precision_guard"]["high_risk_bucket"] == "standard"
+    assert posterior_provenance["openmeteo_precision_guard"]["reason_codes"] == ["OM9_PRECISION_METADATA_PASS"]
 
 
 def test_materializer_blocks_when_precision_guard_missing_or_blocked() -> None:

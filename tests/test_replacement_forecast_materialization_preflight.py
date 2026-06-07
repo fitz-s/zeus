@@ -218,13 +218,13 @@ def test_materialization_preflight_discovers_seed_from_manifests(tmp_path: Path)
         computed_at="2026-06-06T04:00:00+00:00",
     )
 
-    assert report.status == "MATERIALIZATION_PREFLIGHT_READY", report.as_dict()
+    assert report.status == "MATERIALIZATION_PREFLIGHT_BLOCKED", report.as_dict()
     assert report.manifest_count == 2
     assert report.inventory_status == "PASS"
-    assert report.seed_discovery_status == "DISCOVERED"
-    assert report.discovered_seed_count == 1
-    assert len(report.written_seed_files) == 1
-    assert Path(report.written_seed_files[0]).exists()
+    assert report.seed_discovery_status == "BLOCKED"
+    assert "REPLACEMENT_SEED_DISCOVERY_CURRENT_TARGET_PLAN_REPLACEMENT_CURRENT_TARGET_PLAN_REQUIRED_TABLE_MISSING" in report.reason_codes
+    assert report.discovered_seed_count == 0
+    assert report.written_seed_files == ()
 
 
 def test_materialization_preflight_cli_writes_receipt(tmp_path: Path) -> None:
@@ -257,10 +257,10 @@ def test_materialization_preflight_cli_writes_receipt(tmp_path: Path) -> None:
         stderr=subprocess.PIPE,
     )
 
-    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.returncode == 1
     payload = json.loads(result.stdout)
-    assert payload["status"] == "MATERIALIZATION_PREFLIGHT_READY"
-    assert json.loads(receipt.read_text(encoding="utf-8"))["status"] == "MATERIALIZATION_PREFLIGHT_READY"
+    assert payload["status"] == "MATERIALIZATION_PREFLIGHT_BLOCKED"
+    assert json.loads(receipt.read_text(encoding="utf-8"))["status"] == "MATERIALIZATION_PREFLIGHT_BLOCKED"
 
 
 def test_stage_raw_manifests_writes_replay_target_identity(tmp_path: Path) -> None:

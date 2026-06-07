@@ -2769,7 +2769,13 @@ def capture_executable_market_snapshot(
         child_closed=child_closed,
         require_explicit_clob_tradeability=reconstructed_tradability,
     )
-    if not tradeability_status.executable_allowed:
+    if use_synthetic_clob_market:
+        tradeability_status = replace(
+            tradeability_status,
+            executable_allowed=False,
+            reason="synthetic_clob_market_info_substrate_only",
+        )
+    if not tradeability_status.executable_allowed and not tolerate_missing_book:
         raise ExecutableSnapshotCaptureError(
             f"Gamma/CLOB market is not executable: {tradeability_status.reason}"
         )
@@ -2812,19 +2818,32 @@ def capture_executable_market_snapshot(
     # with the identity facts and an explicitly NON-executable tradeability status
     # so it is never selectable as a trade target and assert_snapshot_executable
     # rejects it at submission.
-    if tolerate_missing_book and selected_side_top is None:
+    if tolerate_missing_book and (selected_side_top is None or use_synthetic_clob_market):
         tradeability_status = replace(
             tradeability_status,
             executable_allowed=False,
-            reason="clob_no_ask_illiquid",
+            reason=(
+                "synthetic_clob_market_info_substrate_only"
+                if use_synthetic_clob_market
+                else "clob_no_ask_illiquid"
+            ),
         )
         fee_details = canonicalize_fee_details(
             {"feesEnabled": False},
-            source="not_applicable_illiquid_identity",
+            source=(
+                "not_applicable_synthetic_substrate_identity"
+                if use_synthetic_clob_market
+                else "not_applicable_illiquid_identity"
+            ),
             token_id=selected_token,
         )
     else:
         if tolerate_missing_book:
+            tradeability_status = replace(
+                tradeability_status,
+                executable_allowed=False,
+                reason="default_substrate_fee_details_not_final_intent_authority",
+            )
             fee_details = _default_substrate_fee_details(selected_token)
         else:
             fee_details = _fetch_fee_details(clob, selected_token)

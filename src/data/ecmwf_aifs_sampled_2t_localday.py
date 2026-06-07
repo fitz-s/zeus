@@ -17,6 +17,7 @@ LOW_DATA_VERSION = "ecmwf_aifs_ens_sampled_2t_6h_local_calendar_day_min"
 PHYSICAL_QUANTITY = "2t_sampled_local_calendar_day"
 AGGREGATION_WINDOW_POLICY = "sampled_2t_6h_local_calendar_day"
 SAMPLE_INTERVAL_HOURS = 6
+EXPECTED_AIFS_MEMBER_COUNT = 51
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
