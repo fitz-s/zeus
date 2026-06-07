@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from src.contracts.probability_arithmetic import one_minus, payout_odds
 from src.strategy.live_inference.live_admission import (
     LIVE_DIRECTION_WIN_RATE_FLOOR,
     live_buy_no_conservative_evidence_rejection_reason,
@@ -56,7 +57,9 @@ class CandidateEvaluation:
         if q_lcb <= self.execution_price:
             return 0.0
         price = float(self.execution_price)
-        denominator = ((1.0 / price) - 1.0) * price
+        # Binary Kelly denominator at price p is (1 - p); de-obfuscated from the
+        # value-identical (1/p - 1) * p that 16c35e7445 wrote (§0.2 / FIX-5a).
+        denominator = one_minus(price)
         return (q_lcb - price) / denominator
 
     @property
@@ -127,7 +130,8 @@ class CandidateEvaluation:
     def max_payout_roi(self) -> float:
         if self.execution_price is None or self.execution_price <= 0.0 or self.execution_price >= 1.0:
             return 0.0
-        return (1.0 / float(self.execution_price)) - 1.0
+        # Genuine payout odds (1 - price)/price, NOT a complement of 1.
+        return payout_odds(float(self.execution_price))
 
     @property
     def admitted(self) -> bool:

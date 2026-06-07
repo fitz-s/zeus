@@ -116,6 +116,11 @@ def evaluate_replacement_forecast_switch_decision(
             readiness_id=None,
         )
 
+    refit = request.refit_decision
+    capital_objective_evidence = request.capital_objective_evidence
+    policy_is_live_authority = policy.status == LIVE_AUTHORITY_STATUS
+    refit_grants_live_promotion = refit is not None and refit.live_promotion_allowed
+
     reasons: list[str] = []
     if policy.status == BLOCKED_STATUS:
         reasons.extend(policy.reason_codes)
@@ -130,6 +135,22 @@ def evaluate_replacement_forecast_switch_decision(
         reasons.append("REPLACEMENT_SWITCH_READINESS_MISSING")
     elif readiness.status != READY_STATUS:
         reasons.extend(readiness.reason_codes)
+
+    # FIX-1 (§0.3 mirror): the refit live-promotion grant and the runtime policy
+    # authority must agree at this consuming boundary, and the LIVE_AUTHORITY
+    # admission folds the capital-objective evidence's own blocking codes. A
+    # refit that grants live-promotion against a non-live policy is an
+    # inconsistency that must block; conversely a live policy must carry an
+    # explicit refit live-promotion grant plus passing capital-objective
+    # evidence before any trade authority is admitted.
+    if refit_grants_live_promotion and not policy_is_live_authority:
+        reasons.append("REPLACEMENT_SWITCH_REFIT_PROMOTION_NOT_ADMITTED")
+    if policy_is_live_authority:
+        if not refit_grants_live_promotion:
+            reasons.append("REPLACEMENT_SWITCH_REFIT_LIVE_PROMOTION_REQUIRED")
+        if capital_objective_evidence is not None:
+            reasons.extend(capital_objective_evidence.blocking_reason_codes())
+
     if reasons:
         return ReplacementForecastSwitchDecision(
             status=SWITCH_BLOCKED,

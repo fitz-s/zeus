@@ -859,6 +859,7 @@ def event_bound_live_adapter_from_trade_conn(
     durable_submit_outbox_enabled: bool = False,
     canary_force_taker_provider: Callable[[], bool] | None = None,
     taker_fok_fak_live_enabled: bool = False,
+    operator_arm: "OperatorArm | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -935,6 +936,22 @@ def event_bound_live_adapter_from_trade_conn(
                 event.event_id,
                 event.causal_snapshot_id,
                 reason="EXECUTOR_BOUNDARY_MISSING",
+                proof_accepted=False,
+            )
+        # FIX-2b (PR_SPEC.md §2) OPERATOR ARM GATE: every real submit on the EDLI
+        # boundary requires the operator-arm capability token, regardless of mode
+        # (canary included). The token is constructible ONLY in main.py via
+        # ``require_operator_arm`` after asserting ``edli_live_operator_authorized is
+        # True``. Absent the token this fails closed BEFORE the live-order build /
+        # executor seam. This is an UPSTREAM guard on the EDLI adapter only; the
+        # mainline convergence node never constructs this adapter, so the 293-order
+        # mainline is unaffected.
+        if real_order_submit_enabled and operator_arm is None:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="OPERATOR_ARM_REQUIRED",
                 proof_accepted=False,
             )
         # OPERATOR LAW (2026-06-04, Rule-4 antibody): mainstream is OBSERVATIONAL /

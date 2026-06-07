@@ -82,6 +82,9 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         data_version=HIGH_DATA_VERSION,
         q={"cool": 0.25, "warm": 0.75},
         q_lcb={"cool": 0.20, "warm": 0.65},
+        q_ucb={"cool": 0.30, "warm": 0.85},
+        bin_topology_hash="bin-topology-hash",
+        family_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         source_cycle_time="2026-06-06T00:00:00+00:00",
         source_available_at="2026-06-06T03:00:00+00:00",
@@ -105,6 +108,9 @@ def _bundle_with_directional_no_lcb() -> ReplacementForecastPosteriorBundle:
         data_version=base.data_version,
         q=base.q,
         q_lcb={**dict(base.q_lcb or {}), "buy_no:warm": 0.18},
+        q_ucb=base.q_ucb,
+        bin_topology_hash=base.bin_topology_hash,
+        family_id=base.family_id,
         posterior_method=base.posterior_method,
         source_cycle_time=base.source_cycle_time,
         source_available_at=base.source_available_at,
@@ -1042,9 +1048,15 @@ def test_replacement_promotion_evidence_is_read_from_settings_payload(monkeypatc
     )
 
     evidence = main_module._replacement_forecast_promotion_evidence_from_settings()
+    # FIX-1 AND (ITEM B): LIVE_AUTHORITY now requires BOTH proofs. This test's load-
+    # bearing subject is that the promotion evidence is READ from settings (the
+    # `evidence == _promotion_evidence()` assertion); resolve with both evidence
+    # objects so the incidental LIVE_AUTHORITY assertion reflects the conjunction law.
+    capital_evidence = main_module._replacement_forecast_capital_objective_evidence_from_settings()
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
         promotion_evidence=evidence,
+        capital_objective_evidence=capital_evidence,
     )
 
     assert evidence == _promotion_evidence()
@@ -1074,8 +1086,14 @@ def test_replacement_capital_objective_evidence_is_read_from_settings_payload(mo
     )
 
     evidence = main_module._replacement_forecast_capital_objective_evidence_from_settings()
+    # FIX-1 AND (ITEM B): this test's load-bearing subject is that the capital-
+    # objective evidence is READ from settings (the `evidence == _capital_objective_
+    # evidence()` assertion); resolve with both evidence objects so the incidental
+    # LIVE_AUTHORITY assertion reflects the conjunction law (single proof => BLOCKED).
+    promotion_evidence = main_module._replacement_forecast_promotion_evidence_from_settings()
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
+        promotion_evidence=promotion_evidence,
         capital_objective_evidence=evidence,
     )
 
@@ -1202,3 +1220,67 @@ def test_reactor_hook_live_authority_blocks_unauthorized_kelly_increase_and_dire
     assert "REPLACEMENT_REACTOR_KELLY_INCREASE_NOT_AUTHORIZED" in kelly.reason_codes
     assert flip.status == "BLOCKED"
     assert "REPLACEMENT_REACTOR_DIRECTION_FLIP_NOT_AUTHORIZED" in flip.reason_codes
+
+
+def test_reactor_hook_live_authority_refuses_direction_law_violating_candidate() -> None:
+    """FIX-3 (§0.5): under LIVE_AUTHORITY the flip site re-derives the lawful
+    direction from the replacement posterior (selected bin vs argmax(q)) and
+    refuses any candidate whose claimed side disagrees, with the typed
+    REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION receipt. The bug this guards
+    against: trusting the upstream candidate_direction string verbatim at the
+    consuming boundary (Fitz #2 cross-module semantic drop).
+
+    Bundle q = {cool: 0.25, warm: 0.75} -> argmax = warm. A candidate on the
+    'cool' bin is lawfully buy_no:cool; claiming buy_yes:cool is unlawful.
+    Both baseline and candidate are buy_yes:cool so the flip-vs-baseline gate is
+    NOT what blocks it -- the posterior-derived law is.
+    """
+
+    policy = resolve_replacement_forecast_runtime_policy(
+        _flags(shadow=True, veto=True, trade=True, kelly=True, flip=True),
+        promotion_evidence=_promotion_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
+    )
+
+    result = apply_replacement_forecast_reactor_hook(
+        policy=policy,
+        switch_decision=_switch_decision(policy, live_promotion=True),
+        candidate=_candidate(
+            baseline_direction="buy_yes:cool",
+            candidate_direction="buy_yes:cool",
+        ),
+        replacement_bundle=_bundle(),
+        readiness=_readiness(),
+    )
+
+    assert result.status == "BLOCKED"
+    assert "REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION" in result.reason_codes
+    # Fail-safe: a law-violating candidate never mutates the baseline.
+    assert result.effective_direction == "buy_yes:cool"
+
+
+def test_reactor_hook_live_authority_admits_direction_law_consistent_candidate() -> None:
+    """FIX-3 positive case: a candidate whose claimed side agrees with the
+    posterior-derived lawful direction (buy_no on a non-argmax bin) is admitted.
+    """
+
+    policy = resolve_replacement_forecast_runtime_policy(
+        _flags(shadow=True, veto=True, trade=True, kelly=True, flip=True),
+        promotion_evidence=_promotion_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
+    )
+
+    result = apply_replacement_forecast_reactor_hook(
+        policy=policy,
+        switch_decision=_switch_decision(policy, live_promotion=True),
+        candidate=_candidate(
+            baseline_direction="buy_no:cool",
+            candidate_direction="buy_no:cool",
+        ),
+        replacement_bundle=_bundle(),
+        readiness=_readiness(),
+    )
+
+    assert result.status == "LIVE_AUTHORITY"
+    assert "REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION" not in result.reason_codes
+    assert result.effective_direction == "buy_no:cool"

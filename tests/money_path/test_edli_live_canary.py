@@ -1083,6 +1083,7 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             taker_fok_fak_live_enabled=True,
@@ -1130,6 +1131,7 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="SUBMITTED",
                 reason_code="OK",
@@ -1262,6 +1264,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="REJECTED",
                 reason_code="VENUE_REJECTED",
@@ -1343,6 +1346,7 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             taker_fok_fak_live_enabled=True,
             executor_submit=_boundary_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
@@ -1409,6 +1413,7 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="TIMEOUT_UNKNOWN",
                 reason_code="SUBMIT_TIMEOUT",
@@ -1472,6 +1477,7 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="POST_SUBMIT_UNKNOWN",
                 reason_code="SDK_EXCEPTION_AFTER_SEND",
@@ -2148,6 +2154,16 @@ def _cap_transition_status(receipt):
 
 def _cap_transition_projection_status(receipt):
     return _cap_transition_cert(receipt).payload["projection_status"]
+
+
+def _operator_arm():
+    # FIX-2b (PR_SPEC.md §2): the EDLI live submit adapter now requires the operator-
+    # arm capability token for ANY real submit. Tests that exercise the executor path
+    # mint the token exactly as main.py does (require_operator_arm with the operator
+    # flag True), so they continue to reach the executor seam under the new gate.
+    from src.main import require_operator_arm
+
+    return require_operator_arm({"edli_live_operator_authorized": True})
 
 
 def _forecast_event():

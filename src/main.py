@@ -600,6 +600,40 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
         raise RuntimeError(verified.reason)
 
 
+@dataclass(frozen=True)
+class OperatorArm:
+    """FIX-2b (PR_SPEC.md §2) operator-arm token for the EDLI live-submit boundary.
+
+    A capability token that is constructible ONLY through ``require_operator_arm``
+    after asserting ``edli_live_operator_authorized is True``. The EDLI live submit
+    adapter requires this token (regardless of mode — canary included) before any
+    real venue submit. Absent the token, the live adapter's submit guard fails closed
+    with ``OPERATOR_ARM_REQUIRED`` and main.py selects the no-submit adapter.
+
+    Frozen + presence-typed so "armed without operator authorization" is
+    unconstructable rather than merely flag-OFF. The token is applied EXACTLY at the
+    EDLI boundary; the mainline executor (execute_final_intent / _live_order) never
+    constructs this adapter and so is untouched by this gate.
+    """
+
+    authorized: bool = True
+
+
+def require_operator_arm(edli_cfg: dict) -> "OperatorArm | None":
+    """Mint an ``OperatorArm`` token IFF the operator has explicitly authorized live.
+
+    Mirrors the strict assert pattern at ``_assert_edli_live_promotion_artifact``
+    (main.py:567): only the literal ``True`` for ``edli_live_operator_authorized``
+    authorizes — any other value (missing, False, truthy-non-bool) returns ``None``.
+    Returning ``None`` (rather than raising) lets the live-builder selector degrade to
+    the no-submit adapter fail-closed instead of crashing the daemon boot.
+    """
+
+    if edli_cfg.get("edli_live_operator_authorized") is True:
+        return OperatorArm(authorized=True)
+    return None
+
+
 def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
     """PR-2 (A) / F1 Option C: bind full live ARM to settlement-grounded evidence.
 
@@ -5172,6 +5206,12 @@ def _edli_event_reactor_cycle() -> None:
 
         replacement_forecast_source_fact_status = _current_live_fact_status(CURRENT_SOURCE_FACT_FILE)
         replacement_forecast_data_fact_status = _current_live_fact_status(CURRENT_DATA_FACT_FILE)
+        # FIX-2b (PR_SPEC.md §2): mint the operator-arm token IFF edli_live_operator_authorized
+        # is True. The live submit adapter is selected ONLY when (live_submit_effective AND
+        # operator_arm is not None); otherwise the no-submit adapter is chosen. This gates
+        # EVERY real submit (canary included) at the EDLI boundary by TYPE. The mainline
+        # executor never constructs this adapter, so the 293-order mainline is untouched.
+        operator_arm = require_operator_arm(edli_cfg)
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5216,8 +5256,9 @@ def _edli_event_reactor_cycle() -> None:
                     snapshot_conn=trade_conn,
                     decision_time=process_pending_decision_time,
                 ),
+                operator_arm=operator_arm,
             )
-            if live_submit_effective
+            if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(
                 trade_conn,
                 forecast_conn=forecasts_conn,

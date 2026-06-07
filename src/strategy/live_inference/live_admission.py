@@ -16,11 +16,14 @@ LIVE_DIRECTION_WIN_RATE_FLOOR = 0.51
 
 # A buy-NO on a single settlement bin is not a generic "not this exact value"
 # lottery when the model itself assigns material YES mass to that bin. The
-# production-safe proof is a NO-side conservative bound, ideally derived from
-# YES_UCB. Until that is first-class everywhere, material-bin buy-NO must show a
-# stronger LCB provenance than plain forecast bootstrap.
+# production-safe proof is a NO-side conservative bound from an allowed native NO
+# calibration source. FIX-4 (§2): the allow-list must be a subset of the q_lcb
+# carrier vocabulary (CALIBRATION_SOURCES) so every admitted source is one the
+# QlcbByDirection carrier can honestly provenance. YES_UCB_DERIVED was removed
+# because it is not a CalibrationSource — a value the carrier cannot express must
+# never gate a live buy-NO.
 LIVE_BUY_NO_MATERIAL_YES_POSTERIOR = 0.20
-LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES = frozenset({"EMOS_ANALYTIC", "SETTLEMENT_ISOTONIC", "YES_UCB_DERIVED"})
+LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES = frozenset({"EMOS_ANALYTIC", "SETTLEMENT_ISOTONIC"})
 
 
 def live_win_rate_floor_rejection_reason(
@@ -150,15 +153,14 @@ def live_buy_no_conservative_evidence_rejection_reason(
     if yes_posterior >= material_floor:
         source = str(q_lcb_calibration_source or "").strip()
         if source not in allowed_lcb_sources:
-            conservative_edge = q_lcb_value - price
-            confidence_gap = max(0.0, q_value - q_lcb_value)
-            if conservative_edge > confidence_gap:
-                return None
+            # FIX-4 (§2): the conservative_edge>confidence_gap waiver is DELETED.
+            # It admitted a material-YES buy_no on a self-referential test of the
+            # SAME un-provenanced q_lcb. Material-YES buy_no now requires an allowed
+            # native NO source UNCONDITIONALLY — no edge-vs-gap escape hatch.
             return (
                 "ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:"
                 f"yes_posterior={yes_posterior:.6f}:max={material_floor:.6f}:"
                 f"no_q_lcb={q_lcb_value:.6f}:price={price:.6f}:"
-                f"conservative_edge={conservative_edge:.6f}:confidence_gap={confidence_gap:.6f}:"
                 f"source={source or 'missing'}"
             )
     return None

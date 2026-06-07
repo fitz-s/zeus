@@ -110,17 +110,23 @@ def _write_promotion_evidence(root: Path) -> None:
     path.write_text(
         json.dumps(
             {
+                # FIX-1 AND (ITEM B): LIVE_AUTHORITY now requires BOTH a passing
+                # promotion evidence AND a passing capital-objective evidence. This
+                # promotion block is PASSING (official_days>=5, official_rows>=250,
+                # after_cost_pnl>0, scored_rows>=official_rows) so the wiring audit can
+                # reach LIVE_AUTHORITY under the conjunction law; the single-proof
+                # (capital-only) path no longer reaches LIVE_AUTHORITY.
                 "promotion_evidence": {
-                    "official_days": 3,
-                    "official_rows": 28,
-                    "after_cost_pnl": -1.0,
+                    "official_days": 5,
+                    "official_rows": 250,
+                    "after_cost_pnl": 1.0,
                     "q_lcb_coverage": 0.95,
                     "anti_lookahead_violations": 0,
                     "source_availability_violations": 0,
                     "unresolved_regression_clusters": 0,
                     "same_clob_replay_passed": True,
                     "nested_walk_forward_passed": True,
-                    "same_clob_replay_scored_rows": 28,
+                    "same_clob_replay_scored_rows": 250,
                     "same_clob_replay_blocked_rows": 0,
                     "fee_depth_fill_evidence_passed": True,
                     "unit_pnl_only": False,

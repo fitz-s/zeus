@@ -215,10 +215,55 @@ def resolve_replacement_forecast_runtime_policy(
         reasons.append("REPLACEMENT_TRADE_AUTHORITY_REQUIRED_FOR_DANGEROUS_FLAGS")
     if direction_flip and not kelly_increase:
         reasons.append("REPLACEMENT_DIRECTION_FLIP_REQUIRES_KELLY_AUTHORITY")
-    if reasons:
+
+    # FIX-1 (§0.3) tightened OR -> AND (ITEM B, 2026-06-07): evidence must be
+    # LOAD-BEARING, and BOTH proofs are required for real money. When the flag ladder
+    # would otherwise grant LIVE_AUTHORITY (trade_authority on, no flag-order errors),
+    # the runtime authority is admitted ONLY if BOTH evidence objects pass their own
+    # blocking-code gate by TYPE:
+    #   promotion_evidence is not None AND promotion_evidence.promotion_allowed()
+    #   AND capital_objective_evidence is not None AND .capital_objective_allowed()
+    # Rationale: overconfidence = ruin. Promotion evidence (statistical validation:
+    # nested walk-forward, coverage, anti-lookahead) and capital-objective evidence
+    # (empirical winner + after-cost EV on the same-CLOB replay) are DIFFERENT proofs;
+    # a single passing proof is necessary but NOT sufficient to risk capital.
+    #
+    # When the conjunction is NOT satisfied the path does NOT reach LIVE_AUTHORITY.
+    # It is capped at SHADOW_VETO_ONLY (when the safe flag ladder holds) carrying the
+    # REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE reason plus the UNION of blocking
+    # codes (absent evidence => *_EVIDENCE_REQUIRED; present-but-failing evidence =>
+    # its own blocking codes verbatim). This makes "alert but do not block" theater
+    # AND "one proof is enough" both unconstructable: the resolver cannot reach
+    # LIVE_AUTHORITY from flags alone, nor from a single passing evidence object.
+    promotion_live_authority = promotion_evidence is not None and promotion_evidence.promotion_allowed()
+    capital_live_authority = capital_objective_evidence is not None and capital_objective_evidence.capital_objective_allowed()
+    both_evidence_live_authority = promotion_live_authority and capital_live_authority
+    evidence_reasons: list[str] = []
+    if trade_authority and not both_evidence_live_authority:
+        evidence_reasons.append("REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE")
+        if promotion_evidence is None:
+            evidence_reasons.append("REPLACEMENT_PROMOTION_EVIDENCE_REQUIRED")
+        else:
+            evidence_reasons.extend(promotion_evidence.blocking_reason_codes())
+        if capital_objective_evidence is None:
+            evidence_reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED")
+        else:
+            evidence_reasons.extend(capital_objective_evidence.blocking_reason_codes())
+
+    # FIX-1 AND posture (strictly-more-restrictive, never weaken an existing guard):
+    # whenever trade_authority is armed but the BOTH-evidence conjunction is unmet,
+    # the path is a hard BLOCKED (NOT SHADOW_VETO_ONLY). BLOCKED is strictly more
+    # restrictive than SHADOW_VETO_ONLY — it also withholds the shadow/veto read — and
+    # the pre-existing §0.3 antibody suite already encodes BLOCKED for the no-evidence
+    # case; degrading it to SHADOW_VETO_ONLY would loosen a live-money guard, which the
+    # hard rules forbid. The brief's reason-code contract is honored: the
+    # REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE sentinel plus the union of blocking
+    # codes are surfaced verbatim so the evidence gate is load-bearing by type. Every
+    # input that previously reached LIVE_AUTHORITY with a SINGLE proof is now BLOCKED.
+    if reasons or evidence_reasons:
         return ReplacementForecastRuntimePolicy(
             status=BLOCKED_STATUS,
-            reason_codes=tuple(reasons),
+            reason_codes=tuple(reasons + evidence_reasons),
             shadow_enabled=shadow,
             veto_enabled=veto,
             trade_authority_enabled=False,
@@ -235,8 +280,12 @@ def resolve_replacement_forecast_runtime_policy(
         status = SHADOW_VETO_ONLY_STATUS
         reason_codes = ("REPLACEMENT_SHADOW_VETO_ONLY",)
     else:
+        # Reachable ONLY when trade_authority AND both_evidence_live_authority (any
+        # evidence shortfall returned SHADOW_VETO_ONLY above), so by construction BOTH
+        # the promotion (statistical-validation) and capital-objective (empirical-winner
+        # + after-cost-EV) proofs passed. The reason code names the conjunction.
         status = LIVE_AUTHORITY_STATUS
-        reason_codes = ("REPLACEMENT_NEW_DATA_LIVE_AUTHORITY",)
+        reason_codes = ("REPLACEMENT_PROMOTED_WITH_EVIDENCE",)
     return ReplacementForecastRuntimePolicy(
         status=status,
         reason_codes=reason_codes,

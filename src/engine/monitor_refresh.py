@@ -35,6 +35,7 @@ from src.contracts import (
 )
 from src.contracts.day0_observation_context import BoundClassification, classify_bound
 from src.contracts.exceptions import ObservationUnavailableError
+from src.contracts.probability_arithmetic import one_minus
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.executable_forecast_reader import read_executable_forecast
@@ -1183,9 +1184,11 @@ def _refresh_ens_member_counting(
     )
     if anomaly_discount < 1.0:
         alpha *= anomaly_discount
+        # Fraction of alpha removed is (1 - anomaly_discount); de-obfuscated from
+        # the value-identical (1/x - 1) * x that 16c35e7445 wrote (§0.2 / FIX-5a).
         anomaly_removed = (
             1.0 if anomaly_discount <= 0.0
-            else ((1.0 / anomaly_discount) - 1.0) * anomaly_discount
+            else one_minus(anomaly_discount)
         )
         applied.append("persistence_anomaly_discount")
         logger.info(
@@ -1898,7 +1901,9 @@ def _check_persistence_anomaly(
                 return 1.0  # Too few samples to trust the frequency estimate
             # Scale discount: 10% at n=30, grows linearly to 30% at n>=100
             discount_magnitude = min(0.30, 0.10 + 0.20 * (n - 30) / 70.0)
-            return (1.0 / discount_magnitude - 1.0) * discount_magnitude
+            # Remaining multiplier after the discount is (1 - discount_magnitude);
+            # de-obfuscated from the value-identical (1/x - 1) * x (§0.2 / FIX-5a).
+            return one_minus(discount_magnitude)
         else:
             logger.debug(
                 "PERSISTENCE_NO_DATA: world.temp_persistence has no row for %s/%s/bucket=%s — returning 1.0 (no discount)",
