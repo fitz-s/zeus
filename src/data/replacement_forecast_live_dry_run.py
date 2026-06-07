@@ -298,17 +298,30 @@ def _latest_readiness_artifact_inventory(
             city = str(latest_posterior.get("city") or "")
             target_date = str(latest_posterior.get("target_date") or "")
             metric = str(latest_posterior.get("temperature_metric") or "")
-            row = conn.execute(
+            selected = None
+            if {"city", "target_local_date", "temperature_metric"}.issubset(readiness_columns):
+                selected = conn.execute(
+                    """
+                    SELECT dependency_json, provenance_json
+                    FROM readiness_state
+                    WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
+                      AND city = ?
+                      AND target_local_date = ?
+                      AND temperature_metric = ?
+                    ORDER BY computed_at DESC, recorded_at DESC
+                    LIMIT 1
+                    """,
+                    (city, target_date, metric),
+                ).fetchone()
+            rows = [] if selected is not None else conn.execute(
                 """
                 SELECT dependency_json, provenance_json
                 FROM readiness_state
                 WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
                 ORDER BY computed_at DESC, recorded_at DESC
-                LIMIT 10
                 """
             ).fetchall()
-            selected = None
-            for candidate in row:
+            for candidate in rows:
                 provenance = json.loads(str(candidate["provenance_json"] or "{}"))
                 if not isinstance(provenance, Mapping):
                     continue

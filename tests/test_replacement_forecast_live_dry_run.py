@@ -279,6 +279,9 @@ def _create_forecast_db_with_replacement_inventory(path) -> None:
                     CREATE TABLE readiness_state (
                         readiness_id TEXT PRIMARY KEY,
                         strategy_key TEXT NOT NULL,
+                        city TEXT,
+                        target_local_date TEXT,
+                        temperature_metric TEXT,
                         source_id TEXT NOT NULL,
                         data_version TEXT NOT NULL,
                         status TEXT NOT NULL,
@@ -413,13 +416,16 @@ def _create_forecast_db_with_replacement_inventory(path) -> None:
         conn.execute(
             """
             INSERT INTO readiness_state (
-                readiness_id, strategy_key, source_id, data_version, status,
+                readiness_id, strategy_key, city, target_local_date, temperature_metric, source_id, data_version, status,
                 reason_codes_json, dependency_json, provenance_json, computed_at, recorded_at, expires_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "replacement_readiness:test",
                 SOURCE_ID,
+                "NYC",
+                "2026-06-07",
+                "high",
                 SOURCE_ID,
                 HIGH_DATA_VERSION,
                 "SHADOW_ONLY",
@@ -598,6 +604,62 @@ def test_live_dry_run_reports_materialized_posterior_and_shadow_decision_invento
     assert report.shadow_decision_count == 1
     assert report.latest_materialized_posterior["city"] == "NYC"
     assert report.latest_shadow_decision["allowed_direction"] == "buy_yes:warm"
+    assert report.latest_readiness_artifact_status == "READY"
+    assert report.latest_readiness_artifact_counts["aifs_sampled_2t"] == 1
+    assert report.latest_readiness_artifact_counts["openmeteo_ifs9_anchor"] == 1
+
+
+def test_live_dry_run_matches_latest_posterior_readiness_by_target_not_global_limit(tmp_path) -> None:
+    _write_current_files(tmp_path)
+    _write_refit_handoff(tmp_path)
+    forecast_db = tmp_path / "state" / "zeus-forecasts.db"
+    _create_forecast_db_with_replacement_inventory(forecast_db)
+    with sqlite3.connect(forecast_db) as conn:
+        for index in range(11):
+            city = f"Other{index}"
+            computed_at = f"2026-06-06T05:{index:02d}:00+00:00"
+            conn.execute(
+                """
+                INSERT INTO readiness_state (
+                    readiness_id, strategy_key, city, target_local_date, temperature_metric,
+                    source_id, data_version, status, reason_codes_json, dependency_json,
+                    provenance_json, computed_at, recorded_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"replacement_readiness:other:{index}",
+                    SOURCE_ID,
+                    city,
+                    "2026-06-07",
+                    "high",
+                    SOURCE_ID,
+                    HIGH_DATA_VERSION,
+                    "SHADOW_ONLY",
+                    "[]",
+                    json.dumps({"dependencies": []}),
+                    json.dumps(
+                        {
+                            "city": city,
+                            "target_date": "2026-06-07",
+                            "temperature_metric": "high",
+                            "computed_at": computed_at,
+                        }
+                    ),
+                    computed_at,
+                    computed_at,
+                    None,
+                ),
+            )
+        conn.commit()
+    _create_db(tmp_path / "state" / "zeus-world.db", REQUIRED_WORLD_TABLES)
+    _create_db(tmp_path / "state" / "zeus_trades.db", REQUIRED_TRADE_TABLES)
+
+    report = build_replacement_forecast_live_dry_run_report(
+        ReplacementForecastLiveDryRunInput(root=tmp_path, runtime_flags=_flags(), optional_dependencies=("requests",))
+    )
+
+    assert report.ok is True
+    assert report.latest_materialized_posterior["city"] == "NYC"
     assert report.latest_readiness_artifact_status == "READY"
     assert report.latest_readiness_artifact_counts["aifs_sampled_2t"] == 1
     assert report.latest_readiness_artifact_counts["openmeteo_ifs9_anchor"] == 1
