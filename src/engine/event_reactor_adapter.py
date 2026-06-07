@@ -1471,7 +1471,7 @@ def build_event_bound_no_submit_receipt(
             family_complete=True,
         )
     replacement_forecast_receipt_tag: dict[str, Any] | None = None
-    if replacement_forecast_hook is not None:
+    if replacement_forecast_hook is not None and not _replacement_primary_authority_already_applied(proof):
         replacement_hook_result = replacement_forecast_hook(proof, event, decision_time)
         if replacement_hook_result is not None:
             if replacement_hook_result.status == "BLOCKED":
@@ -5222,6 +5222,10 @@ def _replacement_live_authority_proof_for_direction(
             continue
         return proof
     return None
+
+
+def _replacement_primary_authority_already_applied(proof: _CandidateProof) -> bool:
+    return str(getattr(proof, "q_source", "") or "") == "replacement_0_1"
 
 
 def _locked_candidate_no_price_improvement_reason(

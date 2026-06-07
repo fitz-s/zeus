@@ -102,3 +102,11 @@ def test_replacement_0_1_authority_uses_yes_posterior_and_blocks_no_without_nati
     assert _qlcb_float(lcb_by_direction[("cond-28", "buy_no")]) == 0.0
     assert p_values[("cond-28", "buy_no")] == 1.0
     assert prefilter[("cond-28", "buy_no")] is False
+
+
+def test_replacement_0_1_primary_authority_skips_legacy_replacement_hook() -> None:
+    replacement_proof = SimpleNamespace(q_source="replacement_0_1")
+    baseline_proof = SimpleNamespace(q_source="emos")
+
+    assert adapter._replacement_primary_authority_already_applied(replacement_proof) is True
+    assert adapter._replacement_primary_authority_already_applied(baseline_proof) is False
