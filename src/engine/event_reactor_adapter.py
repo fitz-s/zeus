@@ -133,6 +133,13 @@ class _CandidateProof:
     q_source: str | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
+    # H2_E2E (REAUDIT_0_1.md §2/§4): carry the bundle posterior_id +
+    # probability_authority from the evidence dict
+    # (_replacement_authority_probability_and_fdr_proof :5752-5754) through to the
+    # receipt so the fill->posterior link is reconstructable in SQL. None on the
+    # canonical path. Observability only — never gates selection.
+    posterior_id: int | None = None
+    probability_authority: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2008,6 +2015,9 @@ def build_event_bound_no_submit_receipt(
             "q_lcb_5pct": proof.q_lcb_5pct,
             "q_lcb_calibration_source": proof.q_lcb_calibration_source,
             "q_source": proof.q_source,  # #120 calibrator provenance
+            # H2_E2E: typed posterior link carried to the receipt (None on canonical).
+            "posterior_id": proof.posterior_id,
+            "probability_authority": proof.probability_authority,
             "c_fee_adjusted": execution_price.value,
             "c_cost_95pct": proof.c_cost_95pct,
             "p_fill_lcb": proof.p_fill_lcb,
@@ -2160,6 +2170,8 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
         q_lcb_calibration_source=raw_receipt.get("q_lcb_calibration_source"),
+        posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
+        probability_authority=raw_receipt.get("probability_authority"),  # H2_E2E
         strategy_key=raw_receipt.get("strategy_key"),
         opportunity_book=raw_receipt.get("opportunity_book"),
         replacement_forecast=raw_receipt.get("replacement_forecast"),
@@ -2800,6 +2812,12 @@ def _live_decision_audit_payload(
         "unit": receipt.unit,
         "strategy_key": receipt.strategy_key,
         "q_source": receipt.q_source,
+        # H2_E2E: make the live-order aggregate self-contained — the fill->posterior
+        # link is reconstructable from the aggregate payload without JSON_EXTRACT on
+        # the receipt blob. None on canonical orders.
+        "posterior_id": receipt.posterior_id,
+        "probability_authority": receipt.probability_authority,
+        "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -5147,6 +5165,13 @@ def _generate_candidate_proofs(
                     # payload instance (#149 fix), so this is the actual q_source.
                     q_source=payload.get("_edli_q_source"),
                     same_bin_yes_posterior=yes_q,
+                    # H2_E2E: carry posterior_id + probability_authority from the
+                    # probability evidence dict. Present only on the replacement_0_1
+                    # path; None (absent key) on canonical. posterior_id is emitted
+                    # as a string by the authority builder — coerce to int for the
+                    # typed column / FK to forecast_posteriors(posterior_id).
+                    posterior_id=_optional_int(probability_evidence.get("posterior_id")),
+                    probability_authority=probability_evidence.get("probability_authority"),
                 )
             )
     return tuple(proofs)
@@ -8758,6 +8783,18 @@ def _optional_float(value: object) -> float | None:
 def _float_or_default(value: object, default: float) -> float:
     parsed = _optional_float(value)
     return default if parsed is None else parsed
+
+
+def _optional_int(value: object) -> int | None:
+    # H2_E2E: coerce posterior_id (emitted as a string by the authority builder)
+    # to int for the typed column / FK. None on absent/blank/unparseable so the
+    # canonical path leaves the column NULL (observability only — never gates).
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _required_bound_tick_size(snap_for_depth, executable_snapshot_payload) -> str:

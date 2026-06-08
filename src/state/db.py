@@ -4241,7 +4241,12 @@ CREATE TABLE IF NOT EXISTS execution_fact (
     latency_seconds REAL,
     venue_status TEXT,
     terminal_exec_status TEXT,
-    command_id TEXT
+    command_id TEXT,
+    -- H2_E2E (REAUDIT_0_1.md §2/§4): fill->posterior link. Nullable, no DEFAULT;
+    -- populated in FILL reconciliation by joining edli_no_submit_receipts on
+    -- final_intent_id (replacement_0_1 orders only). NULL on every other order so
+    -- this never alters mainline/canonical execution facts (observability only).
+    posterior_id INTEGER
 );
 
 -- trade_decisions (from src/state/db.py:init_schema executescript block)
@@ -4663,6 +4668,16 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     _ensure_decision_integrity_quarantine_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
+    except sqlite3.OperationalError:
+        pass
+
+    # H2_E2E (REAUDIT_0_1.md §2/§4): execution_fact gains the fill->posterior link.
+    # Fresh DBs get it from _TRADE_CLASS_DDL above; legacy live DBs need this ALTER.
+    # Nullable, no DEFAULT — preserves every existing execution_fact row unchanged
+    # (observability only; never alters mainline/canonical fills). Duplicate-column
+    # OperationalError is the expected fresh-DB no-op path.
+    try:
+        conn.execute("ALTER TABLE execution_fact ADD COLUMN posterior_id INTEGER;")
     except sqlite3.OperationalError:
         pass
 
@@ -8143,6 +8158,7 @@ def log_execution_fact(
     venue_status: str | None = None,
     terminal_exec_status: str | None = None,
     clear_fill_fields: bool = False,
+    posterior_id: int | None = None,
 ) -> dict:
     if conn is None:
         logger.info("Execution fact write skipped: no connection")
@@ -8153,6 +8169,12 @@ def log_execution_fact(
 
     if order_role not in {"entry", "exit"}:
         raise ValueError(f"execution_fact order_role must be entry/exit, got {order_role!r}")
+
+    # H2_E2E: posterior_id is an additive column; legacy DBs that have not yet run
+    # the ALTER may lack it. Guard so the write stays robust either way (when the
+    # column is absent the posterior link simply is not persisted — fail-soft).
+    _exec_fact_cols = {row[1] for row in conn.execute("PRAGMA table_info(execution_fact)").fetchall()}
+    _has_posterior_id = "posterior_id" in _exec_fact_cols
 
     current = conn.execute(
         """
@@ -8196,62 +8218,77 @@ def log_execution_fact(
                 latency_seconds = max(0.0, (filled_dt - posted_dt).total_seconds())
         stored_latency_seconds = latency_seconds if latency_seconds is not None else (current["latency_seconds"] if current else None)
 
-    conn.execute(
-        """
-        INSERT INTO execution_fact (
-            intent_id,
-            position_id,
-            decision_id,
-            order_role,
-            strategy_key,
-            posted_at,
-            filled_at,
-            voided_at,
-            submitted_price,
-            fill_price,
-            shares,
-            fill_quality,
-            latency_seconds,
-            venue_status,
-            terminal_exec_status,
-            command_id
+    _base_columns = [
+        "intent_id",
+        "position_id",
+        "decision_id",
+        "order_role",
+        "strategy_key",
+        "posted_at",
+        "filled_at",
+        "voided_at",
+        "submitted_price",
+        "fill_price",
+        "shares",
+        "fill_quality",
+        "latency_seconds",
+        "venue_status",
+        "terminal_exec_status",
+        "command_id",
+    ]
+    _base_values = [
+        intent_id,
+        position_id,
+        stored_decision_id,
+        order_role,
+        stored_strategy_key,
+        stored_posted_at,
+        stored_filled_at,
+        stored_voided_at,
+        stored_submitted_price,
+        stored_fill_price,
+        stored_shares,
+        stored_fill_quality,
+        stored_latency_seconds,
+        stored_venue_status,
+        stored_terminal_status,
+        stored_command_id,
+    ]
+    _update_clauses = [
+        "position_id=excluded.position_id",
+        "decision_id=excluded.decision_id",
+        "order_role=excluded.order_role",
+        "strategy_key=excluded.strategy_key",
+        "posted_at=excluded.posted_at",
+        "filled_at=excluded.filled_at",
+        "voided_at=excluded.voided_at",
+        "submitted_price=excluded.submitted_price",
+        "fill_price=excluded.fill_price",
+        "shares=excluded.shares",
+        "fill_quality=excluded.fill_quality",
+        "latency_seconds=excluded.latency_seconds",
+        "venue_status=excluded.venue_status",
+        "terminal_exec_status=excluded.terminal_exec_status",
+        "command_id=COALESCE(excluded.command_id, execution_fact.command_id)",
+    ]
+    if _has_posterior_id:
+        # H2_E2E: persist the fill->posterior link when the column exists. COALESCE
+        # so a later reconcile pass that does not carry posterior_id never NULLs an
+        # already-recorded link. NULL on every non-replacement order.
+        _base_columns.append("posterior_id")
+        _base_values.append(posterior_id)
+        _update_clauses.append(
+            "posterior_id=COALESCE(excluded.posterior_id, execution_fact.posterior_id)"
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    _placeholders = ", ".join("?" for _ in _base_columns)
+    conn.execute(
+        f"""
+        INSERT INTO execution_fact ({", ".join(_base_columns)})
+        VALUES ({_placeholders})
         ON CONFLICT(intent_id) DO UPDATE SET
-            position_id=excluded.position_id,
-            decision_id=excluded.decision_id,
-            order_role=excluded.order_role,
-            strategy_key=excluded.strategy_key,
-            posted_at=excluded.posted_at,
-            filled_at=excluded.filled_at,
-            voided_at=excluded.voided_at,
-            submitted_price=excluded.submitted_price,
-            fill_price=excluded.fill_price,
-            shares=excluded.shares,
-            fill_quality=excluded.fill_quality,
-            latency_seconds=excluded.latency_seconds,
-            venue_status=excluded.venue_status,
-            terminal_exec_status=excluded.terminal_exec_status,
-            command_id=COALESCE(excluded.command_id, execution_fact.command_id)
+            {", ".join(_update_clauses)}
         """,
-        (
-            intent_id,
-            position_id,
-            stored_decision_id,
-            order_role,
-            stored_strategy_key,
-            stored_posted_at,
-            stored_filled_at,
-            stored_voided_at,
-            stored_submitted_price,
-            stored_fill_price,
-            stored_shares,
-            stored_fill_quality,
-            stored_latency_seconds,
-            stored_venue_status,
-            stored_terminal_status,
-            stored_command_id,
-        ),
+        tuple(_base_values),
     )
     return {"status": "written", "table": "execution_fact"}
 

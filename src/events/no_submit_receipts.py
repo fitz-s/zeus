@@ -85,7 +85,8 @@ class EdliNoSubmitReceiptLedger:
                 mainstream_agreement_pass, mainstream_agreement_fail_reason,
                 mainstream_point, mainstream_delta, mainstream_bin_label,
                 mainstream_source, mainstream_fetched_at_utc,
-                alpha_gap
+                alpha_gap,
+                posterior_id, probability_authority, q_lcb_calibration_source
             ) VALUES (
                 :receipt_id, :event_id, :causal_snapshot_id, :decision_time,
                 :family_id, :candidate_id, :condition_id, :token_id, :direction,
@@ -97,7 +98,8 @@ class EdliNoSubmitReceiptLedger:
                 :mainstream_agreement_pass, :mainstream_agreement_fail_reason,
                 :mainstream_point, :mainstream_delta, :mainstream_bin_label,
                 :mainstream_source, :mainstream_fetched_at_utc,
-                :alpha_gap
+                :alpha_gap,
+                :posterior_id, :probability_authority, :q_lcb_calibration_source
             )
             """,
             {
@@ -158,6 +160,11 @@ class EdliNoSubmitReceiptLedger:
                         else None
                     )
                 ),
+                # H2_E2E (REAUDIT_0_1.md §2/§4): typed posterior trace. None on the
+                # canonical path (column stays NULL — observability only, never gates).
+                "posterior_id": receipt.posterior_id,
+                "probability_authority": receipt.probability_authority,
+                "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
             },
         )
         return receipt_id
@@ -226,6 +233,14 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload.pop("opportunity_book", None)
     if payload.get("replacement_forecast") is None:
         payload.pop("replacement_forecast", None)
+    # H2_E2E: omit the new typed posterior-trace fields when None so legacy /
+    # canonical receipts keep byte-identical receipt_json (and therefore
+    # receipt_hash). Present (set) only on replacement_0_1 receipts, where they are
+    # persisted so the posterior link is recoverable from the blob too.
+    if payload.get("posterior_id") is None:
+        payload.pop("posterior_id", None)
+    if payload.get("probability_authority") is None:
+        payload.pop("probability_authority", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

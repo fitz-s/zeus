@@ -63,7 +63,13 @@ CREATE TABLE IF NOT EXISTS edli_live_order_projection (
     pending_reconcile INTEGER NOT NULL CHECK (pending_reconcile IN (0,1)),
     venue_order_id TEXT,
     updated_at TEXT NOT NULL,
-    schema_version INTEGER NOT NULL CHECK (schema_version >= 1)
+    schema_version INTEGER NOT NULL CHECK (schema_version >= 1),
+    -- H2_E2E (REAUDIT_0_1.md §2/§4): typed posterior trace on the live-order
+    -- projection so the live-order aggregate is itself SQL-reconstructable to the
+    -- driving posterior WITHOUT JSON_EXTRACT. Nullable; NULL on non-replacement
+    -- orders (observability only — never changes order state).
+    posterior_id INTEGER,
+    probability_authority TEXT
 )
 """
 
@@ -157,9 +163,20 @@ END
 """
 
 
+def _ensure_projection_column(conn: sqlite3.Connection, column_name: str, column_sql: str) -> None:
+    # H2_E2E: additive, idempotent. Legacy live DBs predate the posterior-trace
+    # columns; ALTER them in without data loss. Nullable, no DEFAULT — every
+    # existing projection row is left unchanged.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(edli_live_order_projection)").fetchall()}
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE edli_live_order_projection ADD COLUMN {column_name} {column_sql}")
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_EVENTS_SQL)
     conn.execute(CREATE_PROJECTION_SQL)
+    _ensure_projection_column(conn, "posterior_id", "INTEGER")
+    _ensure_projection_column(conn, "probability_authority", "TEXT")
     conn.execute(CREATE_USER_MESSAGE_DEDUP_SQL)
     conn.execute(CREATE_USER_CHANNEL_INBOX_SQL)
     conn.execute(CREATE_INDEX_SQL)

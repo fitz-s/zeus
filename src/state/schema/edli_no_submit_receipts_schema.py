@@ -53,6 +53,14 @@ CREATE INDEX IF NOT EXISTS idx_edli_no_submit_receipts_decision_time
     ON edli_no_submit_receipts(decision_time)
 """
 
+# H2_E2E (REAUDIT_0_1.md §4): partial index so "all replacement_0_1 orders today"
+# is an indexed scan, not a full-table scan over the ~60k shadow receipts.
+CREATE_PROBABILITY_AUTHORITY_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_edli_no_submit_receipts_probability_authority
+    ON edli_no_submit_receipts(probability_authority)
+    WHERE probability_authority IS NOT NULL
+"""
+
 
 def ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(CREATE_TABLE_SQL)
@@ -74,8 +82,18 @@ def ensure_table(conn: sqlite3.Connection) -> None:
     # Added via _ensure_column so existing live DBs are migrated on next boot.
     _ensure_column(conn, "alpha_gap", "REAL")
     _backfill_alpha_gap(conn)
+    # H2_E2E (REAUDIT_0_1.md §2/§4): typed posterior-trace columns. Nullable, no
+    # NOT NULL / no DEFAULT so existing-row hash stability is preserved (the
+    # receipt_hash never includes these on legacy rows). FK to forecast_posteriors
+    # is logical only (cross-DB; not enforced as a SQLite REFERENCES because
+    # forecast_posteriors lives on zeus-forecasts.db post-K1). q_lcb_calibration_source
+    # promotes the M3 JSON_EXTRACT-only field to a typed column in the same batch.
+    _ensure_column(conn, "posterior_id", "INTEGER")
+    _ensure_column(conn, "probability_authority", "TEXT")
+    _ensure_column(conn, "q_lcb_calibration_source", "TEXT")
     conn.execute(CREATE_EVENT_INDEX_SQL)
     conn.execute(CREATE_DECISION_TIME_INDEX_SQL)
+    conn.execute(CREATE_PROBABILITY_AUTHORITY_INDEX_SQL)
 
 
 def _ensure_column(conn: sqlite3.Connection, column_name: str, column_sql: str) -> None:
