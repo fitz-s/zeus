@@ -61,7 +61,7 @@ def _open_position_settlement_keys(trade_conn, portfolio) -> set[tuple[str, str,
             """
             SELECT DISTINCT city, target_date, COALESCE(temperature_metric, 'high') AS temperature_metric
             FROM position_current
-            WHERE phase IN ('active', 'day0_window', 'pending_exit')
+            WHERE phase IN ('active', 'day0_window', 'pending_exit', 'economically_closed')
             """
         ).fetchall()
         for row in rows:
