@@ -696,16 +696,28 @@ def test_market_discovery_defers_while_edli_pending_backlog(monkeypatch):
     main_mod._market_discovery_cycle()
 
 
-def test_market_discovery_with_pending_runs_topology_only_not_substrate_capture(monkeypatch):
-    """Pending backlog may refresh market topology but must not steal substrate capture."""
+def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkeypatch):
+    """ANTIBODY (2026-06-08): executable-substrate capture is NOT gated by the EDLI pending
+    backlog — only by substrate STALENESS.
+
+    This test REPLACES the prior test_market_discovery_with_pending_runs_topology_only_not_
+    substrate_capture, which enshrined the regression: it asserted that a pending backlog must
+    make market_discovery do topology-only and SKIP snapshot capture. That coupling is exactly
+    what collapsed coverage when the pending working set grew (channel-event flood with the
+    prune off) — capture was skipped forever, families went uncaptured, FSR events dead-lettered,
+    and the system silently stopped trading. The correct invariant: with a pending backlog AND a
+    STALE substrate (last full capture older than the fairness window), market_discovery still
+    runs the FULL executable-substrate capture."""
     import src.main as main_mod
     import src.data.market_scanner as scanner_mod
 
     calls: list[dict] = []
+    captured: list[dict] = []
     monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
     monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
+    # STALE substrate: last full capture 400s ago (> 300s fairness window).
     monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", 100.0)
     monkeypatch.setattr(main_mod.time, "monotonic", lambda: 500.0)
 
@@ -714,17 +726,49 @@ def test_market_discovery_with_pending_runs_topology_only_not_substrate_capture(
         return []
 
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
+
+    def _capture(conn, *, markets, clob, captured_at, scan_authority):
+        captured.append({"scan_authority": scan_authority})
+        return {"attempted": 0, "inserted": 0, "skipped": 0, "failed": 0, "truncated": 0, "budget_exhausted": 0}
+
     monkeypatch.setattr(
-        "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
-        lambda *args, **kwargs: pytest.fail(
-            "pending EDLI backlog must not let market_discovery steal executable substrate capture"
-        ),
+        "src.data.market_scanner.refresh_executable_market_substrate_snapshots", _capture
     )
-    with patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls:
+    mock_conn = MagicMock()
+    with (
+        patch("src.data.polymarket_client.PolymarketClient") as mock_clob_cls,
+        patch("src.state.db.get_trade_connection", return_value=mock_conn),
+    ):
+        mock_clob_cls.return_value.__enter__ = lambda s: MagicMock()
+        mock_clob_cls.return_value.__exit__ = MagicMock(return_value=False)
         main_mod._market_discovery_cycle()
 
+    # Decoupled from the backlog: full executable-substrate capture ran despite pending=650.
     assert calls
-    assert mock_clob_cls.call_count == 0
+    assert captured, "stale substrate + pending backlog MUST still run full executable-substrate capture"
+    assert mock_clob_cls.call_count > 0
+
+
+def test_market_discovery_defers_when_substrate_fresh_regardless_of_pending(monkeypatch):
+    """The ONLY legitimate defer is the fairness floor, keyed on substrate FRESHNESS (not queue
+    depth): when a full capture happened within the fairness window, skip redundant re-capture.
+    With pending>0 AND a FRESH substrate (last capture within the window), market_discovery
+    defers without re-capturing."""
+    import src.main as main_mod
+
+    monkeypatch.setattr(main_mod, "_edli_pending_opportunity_count", lambda: 650)
+    monkeypatch.setattr(main_mod, "_settings_section", lambda name, default=None: {"enabled": True} if name == "edli_v1" else (default or {}))
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
+    monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
+    # FRESH substrate: last full capture 100s ago (< 300s fairness window).
+    monkeypatch.setattr(main_mod, "_market_discovery_last_completed_monotonic", 400.0)
+    monkeypatch.setattr(main_mod.time, "monotonic", lambda: 500.0)
+    monkeypatch.setattr(
+        "src.data.market_scanner.refresh_executable_market_substrate_snapshots",
+        lambda *args, **kwargs: pytest.fail("a FRESH substrate must not be re-captured"),
+    )
+    # Defers at the fairness early-return; no capture, no exception.
+    main_mod._market_discovery_cycle()
 
 
 def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):

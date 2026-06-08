@@ -3666,24 +3666,17 @@ def _market_discovery_cycle() -> None:
     if not acquired:
         logger.warning("market_discovery skipped: previous market_discovery still running")
         return
-    if pending_count > 0 and defer_when_pending and edli_cfg.get("enabled"):
-        try:
-            from src.data.market_scanner import find_weather_markets_or_raise
-
-            events = find_weather_markets_or_raise(
-                min_hours_to_resolution=0.0,
-                include_slug_pattern=True,
-            )
-            logger.info(
-                "market_discovery: topology-only refresh for %d weather events while "
-                "%d EDLI pending events keep executable substrate priority",
-                len(events),
-                pending_count,
-            )
-            _market_discovery_last_completed_monotonic = time.monotonic()
-            return
-        finally:
-            _market_discovery_lock.release()
+    # ANTIBODY (2026-06-08, operator directive — kill the regression CATEGORY, not the instance):
+    # executable-substrate capture is NEVER gated by the EDLI pending backlog. The old
+    # "pending>0 -> topology-only (skip snapshot capture)" branch here was the coverage-collapse
+    # regression: a growing pending working set (e.g. the channel-event flood when the prune
+    # flag is off) kept market_discovery doing topology-only FOREVER, so families went
+    # uncaptured, FSR events dead-lettered on the snapshot gate, and the system silently stopped
+    # trading — with nothing connecting cause (a backlog) to effect (no coverage). Substrate
+    # capture is gated ONLY by substrate STALENESS (the fairness early-return above, keyed on
+    # _market_discovery_last_completed_monotonic), never by queue depth. Reaching here means the
+    # substrate is stale (the fresh case already returned at the fairness check), so capture the
+    # universe regardless of how many events are pending.
     substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
     if not substrate_acquired:
         _market_discovery_lock.release()
