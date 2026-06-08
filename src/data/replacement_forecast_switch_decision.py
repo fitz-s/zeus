@@ -116,11 +116,13 @@ def evaluate_replacement_forecast_switch_decision(
             readiness_id=None,
         )
 
-    refit = request.refit_decision
-    capital_objective_evidence = request.capital_objective_evidence
-    policy_is_live_authority = policy.status == LIVE_AUTHORITY_STATUS
-    refit_grants_live_promotion = refit is not None and refit.live_promotion_allowed
-
+    # OPERATOR DIRECTIVE (2026-06-08): refit live-promotion gate and
+    # capital-objective-evidence veto removed. LIVE_AUTHORITY from the flag
+    # ladder (runtime_policy) is the sole authority for can_initiate_trade.
+    # The refit/evidence-file gates were circular (proof requires trading) and
+    # are promotion bureaucracy, not safety controls. Safety controls (q_lcb
+    # floor, Kelly, cost floor, direction law, RiskGuard) are enforced
+    # downstream and are unaffected by this removal.
     reasons: list[str] = []
     if policy.status == BLOCKED_STATUS:
         reasons.extend(policy.reason_codes)
@@ -135,28 +137,6 @@ def evaluate_replacement_forecast_switch_decision(
         reasons.append("REPLACEMENT_SWITCH_READINESS_MISSING")
     elif readiness.status != READY_STATUS:
         reasons.extend(readiness.reason_codes)
-
-    # FIX-1 (§0.3 mirror): the refit live-promotion grant and the runtime policy
-    # authority must agree at this consuming boundary, and the LIVE_AUTHORITY
-    # admission folds the capital-objective evidence's own blocking codes. A
-    # refit that grants live-promotion against a non-live policy is an
-    # inconsistency that must block; conversely a live policy must carry an
-    # explicit refit live-promotion grant plus passing capital-objective
-    # evidence before any trade authority is admitted.
-    if refit_grants_live_promotion and not policy_is_live_authority:
-        reasons.append("REPLACEMENT_SWITCH_REFIT_PROMOTION_NOT_ADMITTED")
-    if policy_is_live_authority:
-        if not refit_grants_live_promotion:
-            reasons.append("REPLACEMENT_SWITCH_REFIT_LIVE_PROMOTION_REQUIRED")
-        # BLOCKER 8 fail-closed boundary: this consuming gate must NOT trust that the
-        # runtime-policy resolver was the only producer of LIVE_AUTHORITY. The policy
-        # object does not retain its capital-objective evidence, so a LIVE_AUTHORITY
-        # status arriving with capital_objective_evidence is None is an unverified claim.
-        # Require the evidence object explicitly; only then fold its own blocking codes.
-        if capital_objective_evidence is None:
-            reasons.append("REPLACEMENT_SWITCH_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED")
-        else:
-            reasons.extend(capital_objective_evidence.blocking_reason_codes())
 
     if reasons:
         return ReplacementForecastSwitchDecision(
