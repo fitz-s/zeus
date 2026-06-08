@@ -4719,14 +4719,22 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
         }
 
 
-def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
-    from src.data.replacement_forecast_runtime_policy import REQUIRED_FLAGS
-
-    try:
-        flags = settings["feature_flags"]
-    except Exception:
-        flags = {}
-    return {key: bool(flags.get(key, False)) for key in REQUIRED_FLAGS}
+# WIRING FIX (operator Point-1 directive 2026-06-08): the U0R/replacement forecast
+# PRODUCTION functions (raw-input download + light shadow materialization) were moved
+# VERBATIM to src/data/replacement_forecast_production.py and are now SCHEDULED on the
+# forecast-live (data) daemon, NOT here. The ~365MB AIFS ensemble fetch must never run
+# inside the live-trading process (it monopolized disk I/O -> DATA_DEGRADED flap). They
+# are imported back into this module ONLY so the in-cycle runtime-flags read below and
+# existing by-name references (tests, runtime-wiring-audit anchors) keep resolving — the
+# live-trading scheduler no longer registers the download/materialize jobs.
+from src.data.replacement_forecast_production import (  # noqa: E402
+    _download_replacement_forecast_current_targets_if_needed,
+    _download_u0r_extra_raw_inputs_if_needed,
+    _replacement_forecast_download_cycle,
+    _replacement_forecast_runtime_flags_from_settings,
+    _replacement_forecast_shadow_materialization_queue_config,
+    _replacement_forecast_shadow_materialize_cycle,
+)
 
 
 def _replacement_forecast_refit_decision_from_settings():
@@ -4811,148 +4819,6 @@ def _replacement_forecast_capital_objective_evidence_from_settings():
         return None
 
 
-def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, object]:
-    from src.config import PROJECT_ROOT
-
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_shadow"
-    raw_manifest_dir = cfg.get("raw_manifest_dir")
-    forecast_db = cfg.get("forecast_db")
-
-    def _rooted_path(value, fallback: Path | None = None) -> Path | None:
-        raw = value if value not in (None, "") else fallback
-        if raw in (None, ""):
-            return None
-        path = Path(str(raw))
-        return path if path.is_absolute() else PROJECT_ROOT / path
-
-    return {
-        "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),
-        "seed_processed_dir": _rooted_path(cfg.get("seed_processed_dir"), base_dir / "seed_processed"),
-        "seed_failed_dir": _rooted_path(cfg.get("seed_failed_dir"), base_dir / "seed_failed"),
-        "forecast_db": _rooted_path(forecast_db),
-        "raw_manifest_dir": _rooted_path(raw_manifest_dir),
-        "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
-        "request_dir": _rooted_path(cfg.get("request_dir"), base_dir / "requests"),
-        "processed_dir": _rooted_path(cfg.get("processed_dir"), base_dir / "processed"),
-        "failed_dir": _rooted_path(cfg.get("failed_dir"), base_dir / "failed"),
-        "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
-        "limit": int(cfg.get("materialization_limit_per_cycle") or 10),
-        "download_current_targets_enabled": bool(cfg.get("download_current_targets_enabled", False)),
-        "download_output_dir": _rooted_path(cfg.get("download_output_dir"), _rooted_path(raw_manifest_dir, base_dir / "raw_manifests")),
-        "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
-        "download_release_lag_hours": float(cfg.get("download_release_lag_hours") or 14.0),
-        "download_anchor_sigma_c": float(cfg.get("download_anchor_sigma_c") or 3.0),
-        "download_aifs_retries": int(cfg.get("download_aifs_retries") or 4),
-    }
-
-
-def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    if not bool(cfg.get("download_current_targets_enabled", False)):
-        return None
-    forecast_db = cfg.get("forecast_db")
-    output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
-    if forecast_db is None or output_dir is None:
-        raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
-    from scripts.download_replacement_forecast_current_targets import (
-        _parse_cycle,
-        download_current_target_raw_inputs,
-    )
-    from src.data.replacement_forecast_current_target_plan import (
-        build_replacement_forecast_current_target_plan,
-    )
-
-    plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-    if plan.ready:
-        return {
-            "status": "CURRENT_TARGETS_ALREADY_COVERED",
-            "coverage": plan.as_dict(),
-        }
-    if plan.missing_aifs_manifest_count <= 0 and plan.missing_openmeteo_manifest_count <= 0:
-        return {
-            "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
-            "coverage": plan.as_dict(),
-        }
-    release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-    cycle = _parse_cycle(None, now=datetime.now(timezone.utc), release_lag_hours=release_lag_hours)
-    return download_current_target_raw_inputs(
-        forecast_db=Path(str(forecast_db)),
-        output_dir=Path(str(output_dir)),
-        cycle=cycle,
-        limit=int(cfg.get("download_limit") or 10),
-        write_db=True,
-        skip_aifs=False,
-        skip_openmeteo=False,
-        release_lag_hours=release_lag_hours,
-        anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-        aifs_retries=int(cfg.get("download_aifs_retries") or 4),
-    )
-
-
-def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    """THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (CONTINUITY_AND_WIRING.md §4 step 2,
-    U0R_BAYES_SPEC.md §6 F1). Gated by the NEW capture flag
-    ``settings['edli_v1']['replacement_0_1_u0r_multimodel_capture_enabled']`` (default FALSE),
-    SEPARATE from replacement_0_1_u0r_fusion_enabled: when ON it downloads + persists the 8 extra
-    OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
-    zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
-    center/spread/order -> the money path is byte-identical whether or not this runs. Forward,
-    daily, fail-soft (it NEVER raises into the shadow cycle). Returns None when the flag is OFF or
-    there is no forecast_db / no targets."""
-    try:
-        if not bool(settings["edli_v1"].get("replacement_0_1_u0r_multimodel_capture_enabled", False)):
-            return None
-    except Exception:
-        return None
-    forecast_db = cfg.get("forecast_db")
-    if forecast_db is None:
-        return None
-    try:
-        from datetime import date, datetime as _dt, timezone as _tz  # noqa: PLC0415
-
-        from scripts.download_replacement_forecast_current_targets import _parse_cycle  # noqa: PLC0415
-        from src.config import cities_by_name  # noqa: PLC0415
-        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
-            build_replacement_forecast_current_target_plan,
-        )
-        from src.data.u0r_multimodel_download import (  # noqa: PLC0415
-            U0RDownloadTarget,
-            download_u0r_extra_raw_inputs,
-        )
-
-        release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-        cycle = _parse_cycle(None, now=_dt.now(_tz.utc), release_lag_hours=release_lag_hours)
-
-        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-        targets: list[U0RDownloadTarget] = []
-        for row in plan.rows:
-            if row.covered:
-                continue
-            city_cfg = cities_by_name.get(row.city)
-            if city_cfg is None:
-                continue
-            try:
-                lead_days = max(0, (date.fromisoformat(row.target_date) - cycle.date()).days)
-            except Exception:
-                lead_days = 0
-            targets.append(U0RDownloadTarget(
-                city=row.city, metric=row.temperature_metric, target_date=row.target_date,
-                lead_days=lead_days, latitude=float(city_cfg.lat), longitude=float(city_cfg.lon),
-                timezone_name=str(city_cfg.timezone),
-            ))
-        if not targets:
-            return {"status": "U0R_EXTRA_NO_TARGETS"}
-        return download_u0r_extra_raw_inputs(
-            forecast_db=Path(str(forecast_db)),
-            cycle=cycle,
-            targets=targets,
-            release_lag_hours=release_lag_hours,
-        )
-    except Exception as exc:  # noqa: BLE001 - fail-soft: shadow accrual never breaks the cycle
-        logger.warning("U0R extra-model shadow capture skipped (fail-soft): %s", exc)
-        return {"status": "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
-
-
 def _sqlite_table_names(conn) -> tuple[str, ...]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
     names: list[str] = []
@@ -4978,70 +4844,12 @@ def _current_live_fact_status(relative_path: str) -> str:
     return "STALE_FOR_LIVE"
 
 
-@_scheduler_job("replacement_forecast_shadow_materialize")
-def _replacement_forecast_download_cycle() -> None:
-    """Proactive raw-input PRE-FETCH for the U0R/replacement soft-anchor forecast.
-
-    Operator directive 2026-06-08 (WIRING FIX): the 150-300MB AIFS-ensemble +
-    OpenMeteo raw-input downloads MUST NOT run inside the 5-min seed->materialize
-    cycle. At ~500kB/s a single AIFS-ensemble fetch takes 5-10 min, so when it ran
-    inline the materialize job overran its 5-min interval and apscheduler SKIPPED
-    every subsequent cycle ("maximum number of running instances reached") — seeds
-    never got produced and readiness went permanently stale. Raw inputs are DATA
-    and must be fetched ahead of need on a slower, independent lane; the trade-
-    producing materialize cycle then only consumes already-downloaded manifests.
-
-    Runs on the default executor (20-worker pool) on its own long interval, so it
-    overlaps the fast materialize cycle on a separate thread without blocking it.
-    Fail-soft and idempotent (skips already-downloaded manifests)."""
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
-        return
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
-    download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
-    if download_report is not None and download_report.get("status") not in {
-        "CURRENT_TARGETS_ALREADY_COVERED",
-        "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
-    }:
-        logger.info("replacement forecast current-target download report: %s", download_report)
-    # THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (forward + fixed-lead), gated by the
-    # SEPARATE replacement_0_1_u0r_multimodel_capture_enabled flag. Pure side-effect on
-    # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
-    u0r_capture_report = _download_u0r_extra_raw_inputs_if_needed(cfg)
-    if u0r_capture_report is not None and u0r_capture_report.get("status") not in {
-        "U0R_EXTRA_NO_TARGETS",
-    }:
-        logger.info("U0R extra-model shadow capture report: %s", u0r_capture_report)
-
-
-def _replacement_forecast_shadow_materialize_cycle() -> None:
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
-        return
-    from src.data.replacement_forecast_shadow_materialization_queue import (
-        process_replacement_forecast_shadow_materialization_queue,
-    )
-
-    # Raw-input download is now a SEPARATE job (_replacement_forecast_download_cycle)
-    # so it can never block this seed->materialize cycle (see that function's note).
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
-    report = process_replacement_forecast_shadow_materialization_queue(
-        request_dir=cfg["request_dir"],
-        processed_dir=cfg["processed_dir"],
-        failed_dir=cfg["failed_dir"],
-        seed_dir=cfg["seed_dir"],
-        seed_processed_dir=cfg["seed_processed_dir"],
-        seed_failed_dir=cfg["seed_failed_dir"],
-        forecast_db=cfg["forecast_db"],
-        raw_manifest_dir=cfg["raw_manifest_dir"],
-        seed_discovery_limit=int(cfg["seed_discovery_limit"]),
-        seed_limit=int(cfg["seed_limit"]),
-        limit=int(cfg["limit"]),
-    )
-    if report.failed_count:
-        logger.warning("replacement forecast shadow materialization queue failures: %s", report.as_dict())
-    elif report.processed_count:
-        logger.info("replacement forecast shadow materialization queue processed: %s", report.as_dict())
+# WIRING FIX (operator Point-1 directive 2026-06-08): _replacement_forecast_download_cycle
+# and _replacement_forecast_shadow_materialize_cycle were MOVED VERBATIM to
+# src/data/replacement_forecast_production.py and are now SCHEDULED on the forecast-live
+# (data) daemon (src/ingest/forecast_live_daemon.py). They are imported back into this
+# module (top of file) for by-name resolution only; the live-trading scheduler no longer
+# registers them.
 
 
 @_scheduler_job("edli_event_reactor")
@@ -7917,31 +7725,14 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        scheduler.add_job(
-            _replacement_forecast_shadow_materialize_cycle,
-            "interval",
-            minutes=int((_settings_section("replacement_forecast_shadow", {}) or {}).get("materialization_interval_min") or 5),
-            id="replacement_forecast_shadow_materialize",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 95.0),
-            max_instances=1,
-            coalesce=True,
-        )
-        # WIRING FIX (operator 2026-06-08): raw-input PRE-FETCH on its own slower lane,
-        # decoupled from the 5-min materialize cycle above. The 150-300MB AIFS-ensemble
-        # downloads (5-10 min each at ~500kB/s) overran the materialize interval when
-        # they ran inline, so apscheduler skipped every materialize cycle and readiness
-        # went stale. This job runs on the default 20-worker pool on a separate thread,
-        # fetching ahead of need; the materialize cycle now only consumes downloaded
-        # manifests. max_instances=1 + coalesce so a slow fetch never piles up.
-        scheduler.add_job(
-            _replacement_forecast_download_cycle,
-            "interval",
-            minutes=int((_settings_section("replacement_forecast_shadow", {}) or {}).get("download_interval_min") or 15),
-            id="replacement_forecast_download",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 30.0),
-            max_instances=1,
-            coalesce=True,
-        )
+        # WIRING FIX (operator Point-1 directive 2026-06-08): the replacement-forecast
+        # download + shadow-materialize jobs were REMOVED from this live-trading scheduler
+        # and moved to the forecast-live (data) daemon. The ~365MB AIFS ensemble fetch
+        # (~11.5 min) monopolized disk I/O on the trading process, starving the reactor +
+        # market_scanner and locking riskguard dependency reads -> DATA_DEGRADED flap that
+        # blocked all trades. They now run on the forecast-live daemon's lane, download
+        # cron-driven at publish time (00Z/12Z + release_lag) — see
+        # src/ingest/forecast_live_daemon.py and src/data/replacement_forecast_production.py.
         # IRON-RULE-4 ANTIBODY (2026-06-04): AUTO-RE-EMIT the settlement-grounded
         # ARM-gate artifact (state/edli_arm_gate_artifact.json). The producer/consumer
         # loop existed but was never AUTOMATED — nothing RAN the producer, so the
