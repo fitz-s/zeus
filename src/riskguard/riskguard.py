@@ -1268,7 +1268,17 @@ def tick() -> RiskLevel:
         for row in settlement_rows:
             authority_level = str(row.get("authority_level", "unknown"))
             settlement_authority_levels[authority_level] = settlement_authority_levels.get(authority_level, 0) + 1
-            if row.get("is_degraded", False):
+            # Settlement QUALITY gates on settlement TRUTH, not learning-lineage
+            # completeness. A row whose canonical settlement payload is complete
+            # (outcome + value recorded) is truth-sound even if it carries a
+            # learning-attribution gap such as missing_decision_snapshot_id — that
+            # gap correctly excludes it from LEARNING (learning_snapshot_ready=False)
+            # but must NOT flip settlement_quality_level to YELLOW and block ALL new
+            # entries on the GREEN-only reactor gate. Operator directive 2026-06-08:
+            # only genuine settlement-TRUTH degradation (incomplete canonical payload)
+            # may gate trading; a single learning-lineage gap on one settled position
+            # (e.g. Warsaw 2026-06-07) is not a trade-blocking settlement defect.
+            if row.get("is_degraded", False) and not row.get("canonical_payload_complete", False):
                 degraded_rows += 1
             if row.get("learning_snapshot_ready", False):
                 learning_snapshot_ready_count += 1
