@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-07
+# Purpose: H4 antibody — settlement_unit/rounding_rule must be part of topology-core equivalence so mismatched settlement semantics never share a market via hash-mismatch fallback.
+# Reuse: Run with pytest; update if _topology_core or topology equivalence logic in replacement_forecast_bundle_reader changes.
 # Created: 2026-06-07
 # Last reused or audited: 2026-06-07
 # Authority basis: REAUDIT_0_1.md §2 H4 (topology-core drops settlement_unit/rounding_rule) + §4.

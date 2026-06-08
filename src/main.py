@@ -4882,7 +4882,7 @@ def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str
     if forecast_db is None:
         return None
     try:
-        from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+        from datetime import date, datetime as _dt, timezone as _tz  # noqa: PLC0415
 
         from scripts.download_replacement_forecast_current_targets import _parse_cycle  # noqa: PLC0415
         from src.config import cities_by_name  # noqa: PLC0415

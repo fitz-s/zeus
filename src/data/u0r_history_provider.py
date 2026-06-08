@@ -111,12 +111,17 @@ class U0RHistoryProvider:
             )
             return {}
 
-        # Group aligned (forecast, settlement-in-C) pairs per model, ordered by target_date.
+        # Group aligned (target_date, forecast, settlement-in-C) triples per model, ordered by
+        # target_date. BLOCKER 2: the target_date is carried into ModelHistory.target_dates so
+        # the fusion can align the covariance by date (NOT by positional index). The SQL ORDER BY
+        # r.model, r.target_date keeps each model's series date-sorted.
         per_model_fc: dict[str, list[float]] = {}
         per_model_settle_c: dict[str, list[float]] = {}
+        per_model_dates: dict[str, list[str]] = {}
         for row in rows:
             try:
                 model = row["model"]
+                target_date = str(row["target_date"])
                 fc = float(row["forecast_value_c"])
                 settle_c = _settlement_to_celsius(
                     row["settlement_value"], row["settlement_unit"]
@@ -125,15 +130,18 @@ class U0RHistoryProvider:
                 continue
             per_model_fc.setdefault(model, []).append(fc)
             per_model_settle_c.setdefault(model, []).append(settle_c)
+            per_model_dates.setdefault(model, []).append(target_date)
 
         out: dict[str, ModelHistory] = {}
         for model, fcs in per_model_fc.items():
             settles = per_model_settle_c.get(model, [])
-            if not fcs or len(fcs) != len(settles):
+            dates = per_model_dates.get(model, [])
+            if not fcs or len(fcs) != len(settles) or len(fcs) != len(dates):
                 continue
             out[model] = ModelHistory(
                 model=model,
                 forecast_values=tuple(fcs),
                 settlement_values=tuple(settles),
+                target_dates=tuple(dates),
             )
         return out

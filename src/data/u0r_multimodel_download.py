@@ -30,13 +30,19 @@ money path is byte-identical whether or not this job runs (gated by the SEPARATE
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from src.data.u0r_multimodel_capture import OPENMETEO_MODEL_IDS, _default_live_fetch
+from src.data.u0r_multimodel_capture import (
+    OPENMETEO_MODEL_IDS,
+    OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
+    _default_live_fetch,
+)
 from src.forecast.model_selection import (
     ANCHOR_MODEL,
     GLOBAL_LIKELIHOOD_MODELS,
@@ -47,6 +53,168 @@ _LOG = logging.getLogger("zeus.u0r_multimodel_download")
 
 # SPEC §5: ~6 months retention on the shadow capture table.
 RETENTION_DAYS = 180
+
+
+class RawModelForecastRequestConflict(RuntimeError):
+    """BLOCKER 4 (operator-sharpened) — a same-logical-key insert arrived with a DIFFERENT
+    physical request identity (a corrected request: changed timezone / cell_selection / elevation
+    / product_id / request_url_hash).
+
+    The pre-fix UNIQUE(model,city,target_date,metric,source_cycle_time,endpoint) + INSERT OR
+    IGNORE SILENTLY discarded such a Run-2, leaving a STALE forecast_value_c to contaminate
+    bias/MAE/sigma/covariance/q in the walk-forward history JOIN (u0r_history_provider keys on
+    model/city/metric/lead/endpoint/target_date — NOT on the request hash, so a stale row poisons
+    the residual series). This exception replaces the silent drop with a LOUD, attributable fault:
+    the persist writes an audit row to raw_model_forecast_request_conflicts and raises, so an
+    operator re-pins the request identity rather than a wrong value silently training a live-money
+    posterior. The logical key cannot bind two physical requests."""
+
+
+# The logical-key columns that, together, identified a row under the PRE-fix UNIQUE. Two rows that
+# match on ALL of these but DIFFER on (product_id, request_url_hash) are a request conflict.
+_RMF_LOGICAL_KEY_COLUMNS = (
+    "model", "city", "target_date", "metric", "source_cycle_time", "endpoint",
+)
+
+# BLOCKER 4 (product identity): the provider + per-endpoint physical-product constants that the
+# download stamps onto every raw_model_forecasts row so a stored forecast_value_c is
+# reconstructable to its exact Open-Meteo product. cell_selection / elevation / downscaling are
+# the OM grid choices the U0R fetchers use (the single-runs anchor pattern: nearest gridpoint,
+# requested elevation, no extra downscaling). endpoint_mode is the physical endpoint family.
+OPENMETEO_PROVIDER = "open-meteo"
+SINGLE_RUNS_SOURCE_FAMILY = "openmeteo_single_runs"
+PREVIOUS_RUNS_SOURCE_FAMILY = "openmeteo_previous_runs"
+U0R_CELL_SELECTION = "nearest"          # OM default cell pick (nearest gridpoint to requested).
+U0R_ELEVATION_PARAM = "requested"       # OM elevation = requested point (no override).
+U0R_DOWNSCALING_POLICY = "none"         # no statistical downscaling applied to the raw value.
+
+# Per-model OM previous-runs source_id (the WHICH-feed identity). Keyed by STORED model identity.
+# The anchor is stored model='ecmwf_ifs' but its OM previous-runs source is ecmwf_previous_runs
+# serving model_name='ecmwf_ifs025' (0.25 product) — see OPENMETEO_PREVIOUS_RUNS_MODEL_IDS below
+# and BLOCKER 3 (the ifs025->ifs9 bridge). Falls back to '<model>_previous_runs'.
+OPENMETEO_PREVIOUS_RUNS_SOURCE_ID: dict[str, str] = {
+    ANCHOR_MODEL: "ecmwf_previous_runs",
+    "gfs_global": "gfs_previous_runs",
+    "icon_global": "icon_previous_runs",
+    "icon_eu": "icon_previous_runs",
+    "gem_global": "gem_previous_runs",
+    "jma_seamless": "jma_previous_runs",
+    "icon_d2": "icon_d2_previous_runs",
+    "meteofrance_arome_france_hd": "arome_previous_runs",
+    "icon_seamless": "icon_d2_previous_runs",
+}
+
+
+def _model_domain_hash(
+    *,
+    provider: str,
+    model_name: str,
+    cell_selection: str,
+    elevation_param: str,
+    downscaling_policy: str,
+    endpoint_mode: str,
+) -> str:
+    """BLOCKER 4 — fingerprint binding the physical-product identity of a captured value.
+
+    Two captures that differ in ANY of (provider, model_name, cell_selection, elevation_param,
+    downscaling_policy, endpoint_mode) are DIFFERENT physical products and get different hashes,
+    so a residual history can never silently mix two cells / two model resolutions under one id.
+    """
+    payload = json.dumps(
+        {
+            "provider": provider,
+            "model_name": model_name,
+            "cell_selection": cell_selection,
+            "elevation_param": elevation_param,
+            "downscaling_policy": downscaling_policy,
+            "endpoint_mode": endpoint_mode,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget") -> dict:
+    """BLOCKER 4 — the full product-identity payload for one (model, endpoint, target) capture.
+
+    Resolves the OM model id actually addressed (model_name), the source_id/source_family/
+    product_id/provider, the requested coordinates+timezone, the cell/elevation/downscaling
+    choices, the endpoint_mode, the request params (the reconstructable request) + its url hash,
+    and the model_domain_hash. The anchor's model_name is the OM previous-runs id 'ecmwf_ifs025'
+    even though the stored `model` column stays the fusion identity 'ecmwf_ifs' (BLOCKER 3).
+    """
+    if endpoint == "previous_runs":
+        from src.data.openmeteo_client import PREVIOUS_RUNS_URL  # noqa: PLC0415
+
+        model_name = OPENMETEO_PREVIOUS_RUNS_MODEL_IDS.get(
+            model, OPENMETEO_MODEL_IDS.get(model, model)
+        )
+        source_family = PREVIOUS_RUNS_SOURCE_FAMILY
+        source_id = OPENMETEO_PREVIOUS_RUNS_SOURCE_ID.get(model, f"{model}_previous_runs")
+        base_url = PREVIOUS_RUNS_URL
+        lead = max(0, int(target.lead_days))
+        hourly_var = "temperature_2m" if lead == 0 else f"temperature_2m_previous_day{lead}"
+        request_params = {
+            "latitude": target.latitude,
+            "longitude": target.longitude,
+            "start_date": target.target_date,
+            "end_date": target.target_date,
+            "hourly": hourly_var,
+            "models": model_name,
+            "temperature_unit": "celsius",
+            "timezone": target.timezone_name,
+            "cell_selection": U0R_CELL_SELECTION,
+        }
+    else:  # single_runs
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+            SINGLE_RUNS_FORECAST_URL,
+        )
+
+        model_name = OPENMETEO_MODEL_IDS.get(model, model)
+        source_family = SINGLE_RUNS_SOURCE_FAMILY
+        source_id = f"{model}_single_runs"
+        base_url = SINGLE_RUNS_FORECAST_URL
+        request_params = {
+            "latitude": target.latitude,
+            "longitude": target.longitude,
+            "hourly": "temperature_2m",
+            "models": model_name,
+            "temperature_unit": "celsius",
+            "timezone": target.timezone_name,
+            "cell_selection": U0R_CELL_SELECTION,
+        }
+    request_params_json = json.dumps(request_params, sort_keys=True, separators=(",", ":"))
+    request_url_hash = hashlib.sha256(
+        f"{base_url}?{request_params_json}".encode("utf-8")
+    ).hexdigest()
+    product_id = f"{model_name}::{endpoint}"
+    model_domain_hash = _model_domain_hash(
+        provider=OPENMETEO_PROVIDER,
+        model_name=model_name,
+        cell_selection=U0R_CELL_SELECTION,
+        elevation_param=U0R_ELEVATION_PARAM,
+        downscaling_policy=U0R_DOWNSCALING_POLICY,
+        endpoint_mode=endpoint,
+    )
+    return {
+        "source_id": source_id,
+        "source_family": source_family,
+        "product_id": product_id,
+        "provider": OPENMETEO_PROVIDER,
+        "model_name": model_name,
+        "request_params_json": request_params_json,
+        "request_url_hash": request_url_hash,
+        "latitude_requested": float(target.latitude),
+        "longitude_requested": float(target.longitude),
+        "timezone_requested": target.timezone_name,
+        "cell_selection": U0R_CELL_SELECTION,
+        "elevation_param": U0R_ELEVATION_PARAM,
+        "downscaling_policy": U0R_DOWNSCALING_POLICY,
+        "endpoint_mode": endpoint,
+        "model_domain_hash": model_domain_hash,
+        "coverage_status": "COVERED",
+    }
 
 # FIX 1 (live-money correctness): the ANCHOR (ecmwf_ifs) MUST be captured alongside the
 # likelihood instruments. Without it, raw_model_forecasts NEVER accrues anchor previous_runs
@@ -73,7 +241,11 @@ U0R_EXTRA_MODELS: tuple[str, ...] = (
 # fetch translates store-id -> OM-previous-runs-id here; the stored `model` column is ALWAYS the
 # fusion identity. Non-anchor models fall back to OPENMETEO_MODEL_IDS (their OM id == store id).
 OPENMETEO_PREVIOUS_RUNS_MODEL_IDS: dict[str, str] = {
-    ANCHOR_MODEL: "ecmwf_ifs025",  # OM previous-runs ECMWF id; stored model col stays "ecmwf_ifs"
+    # OM previous-runs ECMWF id; stored model col stays "ecmwf_ifs" (the fusion identity). The
+    # value is the SINGLE source of truth in u0r_multimodel_capture (BLOCKER 3 bridge gate reads
+    # the same constant) so the download and the bridge can never drift on which product served
+    # the anchor history.
+    ANCHOR_MODEL: OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
 }
 
 # A single-runs (forward) fetch: today's local-day extremum (degC) for the metric, or None.
@@ -162,20 +334,156 @@ def _extract_localday_extremum_c(payload: object, hourly_var: str, metric: str) 
     return max(nums) if metric == "high" else min(nums)
 
 
+# BLOCKER 4: the persisted column order for one raw_model_forecasts row. The first 10 are the
+# original capture columns; the rest are the product-identity columns the download stamps.
+_RMF_INSERT_COLUMNS = (
+    "model", "city", "target_date", "metric", "source_cycle_time", "source_available_at",
+    "captured_at", "lead_days", "forecast_value_c", "endpoint",
+    "source_id", "source_family", "product_id", "provider", "model_name",
+    "request_params_json", "request_url_hash", "latitude_requested", "longitude_requested",
+    "timezone_requested", "cell_selection", "elevation_param", "downscaling_policy",
+    "endpoint_mode", "model_domain_hash", "coverage_status",
+)
+
+
+def _detect_request_conflict(conn, row: dict) -> dict | None:
+    """BLOCKER 4 — return the EXISTING row's identity if *row* shares the logical key of a stored
+    row but carries a DIFFERENT physical request identity (product_id OR request_url_hash);
+    else None.
+
+    This is the antibody for the operator-sharpened B4: the logical key
+    (model,city,target_date,metric,source_cycle_time,endpoint) must bind EXACTLY ONE physical
+    request. A same-logical-key/different-request insert is a corrected request that the pre-fix
+    INSERT OR IGNORE would have silently dropped, leaving a stale value to contaminate the history.
+    """
+    where = " AND ".join(f"{c} = ?" for c in _RMF_LOGICAL_KEY_COLUMNS)
+    existing = conn.execute(
+        f"""SELECT product_id, request_url_hash, forecast_value_c, cell_selection
+            FROM raw_model_forecasts WHERE {where}""",
+        tuple(row[c] for c in _RMF_LOGICAL_KEY_COLUMNS),
+    ).fetchone()
+    if existing is None:
+        return None
+    existing_product_id, existing_hash, existing_value, existing_cell = existing
+    # Same logical key + same physical request identity == the normal idempotent re-run: not a
+    # conflict (INSERT OR IGNORE will collapse it). Only a CHANGED request identity is a conflict.
+    if (existing_product_id == row.get("product_id")
+            and existing_hash == row.get("request_url_hash")):
+        return None
+    return {
+        "existing_product_id": existing_product_id,
+        "existing_request_url_hash": existing_hash,
+        "existing_forecast_value_c": existing_value,
+        "existing_cell_selection": existing_cell,
+    }
+
+
+def _write_request_conflict_audit(conn, row: dict, existing: dict) -> None:
+    """Persist one raw_model_forecast_request_conflicts row recording BOTH the existing and the
+    incoming request identity (operator directive: 'write an audit row'). Forensically
+    attributable: an operator can see exactly which request changed and the two values in play."""
+    conn.execute(
+        """INSERT INTO raw_model_forecast_request_conflicts
+               (model, city, target_date, metric, source_cycle_time, endpoint,
+                existing_product_id, incoming_product_id,
+                existing_request_url_hash, incoming_request_url_hash,
+                existing_forecast_value_c, incoming_forecast_value_c,
+                existing_cell_selection, incoming_cell_selection)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            row["model"], row["city"], row["target_date"], row["metric"],
+            row["source_cycle_time"], row["endpoint"],
+            existing["existing_product_id"], row.get("product_id"),
+            existing["existing_request_url_hash"], row.get("request_url_hash"),
+            existing["existing_forecast_value_c"], row.get("forecast_value_c"),
+            existing["existing_cell_selection"], row.get("cell_selection"),
+        ),
+    )
+
+
+def _request_conflict_error(row: dict, conflict: dict) -> "RawModelForecastRequestConflict":
+    """Build the RawModelForecastRequestConflict for a same-logical-key/different-request row."""
+    return RawModelForecastRequestConflict(
+        "raw_model_forecasts request conflict: logical key "
+        f"({'/'.join(str(row[c]) for c in _RMF_LOGICAL_KEY_COLUMNS)}) already bound to "
+        f"product_id={conflict['existing_product_id']!r} "
+        f"request_url_hash={conflict['existing_request_url_hash']!r}; incoming "
+        f"product_id={row.get('product_id')!r} "
+        f"request_url_hash={row.get('request_url_hash')!r} differs. A corrected request "
+        "must NOT silently overwrite/ignore the stored value (B4 contamination guard)."
+    )
+
+
+def _scan_and_audit_request_conflicts(conn, rows: Sequence[dict]) -> None:
+    """BLOCKER 4 production pre-scan — detect same-logical-key/different-request conflicts and
+    DURABLY write their audit rows on autocommit BEFORE the caller opens its insert transaction.
+
+    download_u0r_extra_raw_inputs wraps the insert in a BEGIN it ROLLS BACK on any error. If the
+    conflict audit were written inside that BEGIN it would be rolled back along with everything
+    else — the operator would lose the forensic trail of the silent-drop-that-wasn't. So the
+    production path calls THIS first, with NO open transaction. If ANY conflict is found the audit
+    rows are written and EXPLICITLY COMMITTED here (the connection uses sqlite3's default
+    isolation_level="", so a DML opens an implicit deferred transaction — we commit it so the
+    audit is durable even though the cycle's BEGIN below will be rolled back), then
+    RawModelForecastRequestConflict is raised before BEGIN: the cycle's capture rows are never
+    inserted (the corrected request must be operator-resolved)."""
+    if conn.in_transaction:
+        raise RuntimeError(
+            "_scan_and_audit_request_conflicts must run with no open transaction so its audit "
+            "rows can be committed independently of a caller's later ROLLBACK; an open "
+            "transaction was found."
+        )
+    first_conflict: tuple[dict, dict] | None = None
+    for row in rows:
+        conflict = _detect_request_conflict(conn, row)
+        if conflict is not None:
+            _write_request_conflict_audit(conn, row, conflict)
+            if first_conflict is None:
+                first_conflict = (row, conflict)
+    if first_conflict is not None:
+        conn.commit()  # DURABLE: survives the caller's later ROLLBACK of the cycle BEGIN
+        raise _request_conflict_error(*first_conflict)
+
+
 def _persist_rows(
     conn,
-    rows: Sequence[tuple],
+    rows: Sequence[dict],
 ) -> int:
-    """INSERT OR IGNORE the captured rows (UNIQUE-idempotent). Returns rows actually written."""
+    """Persist the captured rows, idempotent on the FULL identity (logical key + product_id +
+    request_url_hash). Returns rows actually written.
+
+    BLOCKER 4 (operator-sharpened): BEFORE inserting, each row is checked against any stored row
+    sharing its logical key. If a stored row exists with the SAME logical key but a DIFFERENT
+    physical request identity (product_id or request_url_hash changed), this is a corrected
+    request the pre-fix INSERT OR IGNORE would have SILENTLY dropped — leaving a stale value to
+    contaminate bias/MAE/sigma. Instead an audit row is written (on THIS connection's current
+    transaction state) and RawModelForecastRequestConflict is raised; no capture row is inserted.
+    A same-logical-key + same-request re-run is the normal idempotent case and is INSERT-OR-IGNORE
+    collapsed (the widened UNIQUE makes a genuinely changed request a NEW row when its logical key
+    already differs).
+
+    AUDIT DURABILITY CONTRACT: this function writes the audit row and raises, but does NOT itself
+    guarantee the audit survives a caller's surrounding ROLLBACK. Callers that wrap this in a
+    transaction they roll back on error (e.g. download_u0r_extra_raw_inputs) MUST pre-scan with
+    _scan_and_audit_request_conflicts on autocommit BEFORE opening that transaction, so the audit
+    is already durable. When called directly on an autocommit connection (the operator-named test
+    API), each statement self-commits and the audit is durable on its own.
+
+    Each row is a dict keyed by _RMF_INSERT_COLUMNS (capture columns + BLOCKER 4 product
+    identity). raw_sha256 / artifact_id stay NULL here (capture precedes artifact persistence)."""
+    # Conflict pass FIRST — a single conflicting row fails the whole batch (the corrected request
+    # must be resolved by an operator, not partially applied).
+    for row in rows:
+        conflict = _detect_request_conflict(conn, row)
+        if conflict is not None:
+            _write_request_conflict_audit(conn, row, conflict)
+            raise _request_conflict_error(row, conflict)
     before = conn.total_changes
+    placeholders = ",".join("?" for _ in _RMF_INSERT_COLUMNS)
+    cols = ",".join(_RMF_INSERT_COLUMNS)
     conn.executemany(
-        """
-        INSERT OR IGNORE INTO raw_model_forecasts
-            (model, city, target_date, metric, source_cycle_time, source_available_at,
-             captured_at, lead_days, forecast_value_c, endpoint)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
+        f"INSERT OR IGNORE INTO raw_model_forecasts ({cols}) VALUES ({placeholders})",
+        [tuple(row[c] for c in _RMF_INSERT_COLUMNS) for row in rows],
     )
     return conn.total_changes - before
 
@@ -234,11 +542,14 @@ def download_u0r_extra_raw_inputs(
             if sv is None:
                 dropped.append(f"{model}:single_runs")
             else:
-                rows.append((
-                    model, t.city, t.target_date, t.metric, cycle_iso,
-                    source_available_iso, captured_iso, int(t.lead_days),
-                    float(sv), "single_runs",
-                ))
+                rows.append({
+                    "model": model, "city": t.city, "target_date": t.target_date,
+                    "metric": t.metric, "source_cycle_time": cycle_iso,
+                    "source_available_at": source_available_iso, "captured_at": captured_iso,
+                    "lead_days": int(t.lead_days), "forecast_value_c": float(sv),
+                    "endpoint": "single_runs",
+                    **_u0r_product_identity(model, "single_runs", t),
+                })
 
             # (2) fixed-lead previous_runs (walk-forward train).
             try:
@@ -253,11 +564,14 @@ def download_u0r_extra_raw_inputs(
             if pv is None:
                 dropped.append(f"{model}:previous_runs")
             else:
-                rows.append((
-                    model, t.city, t.target_date, t.metric, cycle_iso,
-                    source_available_iso, captured_iso, int(t.lead_days),
-                    float(pv), "previous_runs",
-                ))
+                rows.append({
+                    "model": model, "city": t.city, "target_date": t.target_date,
+                    "metric": t.metric, "source_cycle_time": cycle_iso,
+                    "source_available_at": source_available_iso, "captured_at": captured_iso,
+                    "lead_days": int(t.lead_days), "forecast_value_c": float(pv),
+                    "endpoint": "previous_runs",
+                    **_u0r_product_identity(model, "previous_runs", t),
+                })
 
     # ---- single-connection / single-DB persist + prune (INV-37) ----
     from src.state.db import _connect  # noqa: PLC0415
@@ -270,6 +584,13 @@ def download_u0r_extra_raw_inputs(
     conn = _connect(Path(forecast_db), write_class="live")
     try:
         ensure_replacement_forecast_shadow_schema(conn)
+        # BLOCKER 4 — DURABLE conflict audit BEFORE the rollback-on-error BEGIN. A corrected
+        # request (same logical key, different product_id/request_url_hash) writes its audit row
+        # on autocommit here and raises, so the forensic trail survives even though the capture
+        # rows are never inserted. Running this inside the BEGIN below would let the ROLLBACK
+        # erase the audit — the very silent-drop the operator demanded we make loud.
+        if rows:
+            _scan_and_audit_request_conflicts(conn, rows)
         conn.execute("BEGIN")
         try:
             if rows:

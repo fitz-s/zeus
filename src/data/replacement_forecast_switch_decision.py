@@ -148,7 +148,14 @@ def evaluate_replacement_forecast_switch_decision(
     if policy_is_live_authority:
         if not refit_grants_live_promotion:
             reasons.append("REPLACEMENT_SWITCH_REFIT_LIVE_PROMOTION_REQUIRED")
-        if capital_objective_evidence is not None:
+        # BLOCKER 8 fail-closed boundary: this consuming gate must NOT trust that the
+        # runtime-policy resolver was the only producer of LIVE_AUTHORITY. The policy
+        # object does not retain its capital-objective evidence, so a LIVE_AUTHORITY
+        # status arriving with capital_objective_evidence is None is an unverified claim.
+        # Require the evidence object explicitly; only then fold its own blocking codes.
+        if capital_objective_evidence is None:
+            reasons.append("REPLACEMENT_SWITCH_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED")
+        else:
             reasons.extend(capital_objective_evidence.blocking_reason_codes())
 
     if reasons:

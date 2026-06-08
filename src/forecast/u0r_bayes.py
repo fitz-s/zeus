@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -54,6 +54,7 @@ SIGMA_FLOOR = 0.8    # degC floor on per-source obs std (OM grid->station residu
 LOWN_INFLATE = 1.5   # sigma multiplier for thin (n<MIN_TRAIN) sources.
 DISAGREE_W = 0.5     # weight on cross-source spread added into fusion sigma^2.
 TAU0_FLOOR = 0.8     # floor on prior std tau0.
+COMMON_DATES_MIN = 5  # >=5 date-aligned common rows before Ledoit-Wolf shrink; else diagonal C0.
 
 # Source identities (spec §3) — the production anchor + decorrelated globals + regionals.
 ANCHOR_MODEL = "ecmwf_ifs"                       # universal 0.1 anchor = prior mean.
@@ -221,17 +222,56 @@ class ModelInstrument:
 
     ``model``: model identity (e.g. gfs_global, icon_d2). ``z``: today's bias-corrected
     value x_s - b_hat_s (degC). ``train_residuals``: walk-forward (x_s - b_hat_s - Y)
-    over the COMMON estimation window (used to estimate Sigma). ``is_regional``: True for
-    in-domain regional experts (icon_d2/arome) — kept for provenance only; the gate that
-    decided eligibility lives in model_selection.py (out-of-domain regionals never reach
-    here). ``n_train``: count of walk-forward residuals (drives low-n inflation).
+    over this model's own history (used for the equal-weight per-model std and low-n inflation).
+    ``residuals_by_date``: BLOCKER 2 — the SAME residuals keyed by target_date (ISO 'YYYY-MM-DD').
+    THIS is what the covariance estimator aligns on: the cross-model covariance matrix M is built
+    ONLY over the INTERSECTION of target_dates across the selected instruments, so residuals from
+    different target_dates can NEVER land in the same covariance row (equal length is NOT equal
+    meaning — see U0R_BAYES_SPEC §2/§4). ``is_regional``: True for in-domain regional experts
+    (icon_d2/arome) — provenance only; eligibility is gated in model_selection.py. ``n_train``:
+    count of walk-forward residuals (drives low-n inflation).
     """
 
     model: str
     z: float
     train_residuals: tuple[float, ...]
     n_train: int
+    residuals_by_date: Mapping[str, float] = field(default_factory=dict)
     is_regional: bool = False
+
+
+def _common_window_residual_matrix(
+    instruments: Sequence[ModelInstrument],
+) -> np.ndarray | None:
+    """BLOCKER 2 — build the (n_common_dates, p) residual matrix aligned by target_date.
+
+    DATE-ALIGNED path (every instrument carries residuals_by_date): the rows are the
+    INTERSECTION of the instruments' target_date sets, sorted; column j is instrument j's
+    residual on each common date. Residuals from different target_dates can never share a row.
+    Returns None (-> diagonal Sigma) when the common window is empty or a single date (a
+    covariance needs >=2 rows; the shrink-vs-diag threshold is applied by the caller).
+
+    LEGACY path (any instrument lacks residuals_by_date): preserve the proven proof-port
+    behaviour exactly — the equal-length positional stack. The real production wiring always
+    threads residuals_by_date, so the legacy path runs only for callers that already pass
+    pre-aligned train_residuals (the port-fidelity tests).
+    """
+    have_dates = all(bool(ins.residuals_by_date) for ins in instruments)
+    if have_dates:
+        date_sets = [set(ins.residuals_by_date) for ins in instruments]
+        common_dates = sorted(set.intersection(*date_sets)) if date_sets else []
+        if len(common_dates) < 2:
+            return None
+        return np.array(
+            [[ins.residuals_by_date[d] for ins in instruments] for d in common_dates],
+            dtype=float,
+        )
+    # Legacy positional stack: equal length across instruments, >=3 rows (proof rule).
+    resid_lengths = {len(ins.train_residuals) for ins in instruments}
+    common_n = min(resid_lengths) if resid_lengths else 0
+    if common_n >= 3 and len(resid_lengths) == 1:
+        return np.array([list(ins.train_residuals) for ins in instruments], dtype=float).T
+    return None
 
 
 def fuse_u0r_posterior(
@@ -302,17 +342,19 @@ def fuse_u0r_posterior(
     # ---- T2 Bayesian fusion (C1 covariance-shrink, or C0 diagonal) ----
     z_lik = np.array([ins.z for ins in instruments], dtype=float)
     lown = [ins.n_train < MIN_TRAIN for ins in instruments]
-    # Common estimation window: rows where EVERY instrument has a residual. The proof builds
-    # the residual matrix over dates where all selected models are present; the caller passes
-    # per-instrument aligned residual vectors of equal length (the common window).
-    resid_lengths = {len(ins.train_residuals) for ins in instruments}
-    common_n = min(resid_lengths) if resid_lengths else 0
-    if common_n >= 3 and len(resid_lengths) == 1:
-        M = np.array([list(ins.train_residuals) for ins in instruments], dtype=float).T
-    else:
-        M = None
+    # BLOCKER 2 — the covariance residual matrix M MUST be aligned by target_date, not by
+    # positional index. The proof builds the residual matrix over the dates where ALL selected
+    # models are present (the COMMON window). The old code's only check was equal vector length,
+    # which let residuals from DIFFERENT target_dates share a covariance row (a fabricated
+    # covariance -> wrong Sigma^-1 fusion weights).
+    #
+    # When every instrument carries residuals_by_date, build M over the INTERSECTION of their
+    # target_date sets (sorted for determinism). When residuals_by_date is absent on any
+    # instrument, fall back to the legacy equal-length positional stack — this preserves the
+    # byte-identical proof-port path for callers that pass only train_residuals already aligned.
+    M = _common_window_residual_matrix(instruments)
 
-    if M is not None and use_covariance and M.shape[0] >= 5:
+    if M is not None and use_covariance and M.shape[0] >= COMMON_DATES_MIN:
         Sigma = shrink_cov(M)
     elif M is not None:
         Sigma = diag_cov(M, lown)

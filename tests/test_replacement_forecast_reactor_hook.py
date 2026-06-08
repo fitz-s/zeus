@@ -361,12 +361,20 @@ def _promotion_evidence_payload_dict() -> dict[str, object]:
 
 
 def _switch_decision(policy, *, readiness=None, current: bool = True, live_promotion: bool = False):
+    # BLOCKER 8 fail-closed boundary: a LIVE_AUTHORITY policy must thread its capital-objective
+    # evidence OBJECT to the switch input -- the consuming gate now requires it explicitly
+    # (REPLACEMENT_SWITCH_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED on None) rather than trusting the
+    # resolver. Non-live policies leave it None (the boundary never reads it).
+    capital_objective_evidence = (
+        _capital_objective_evidence() if policy.status == "LIVE_AUTHORITY" else None
+    )
     return evaluate_replacement_forecast_switch_decision(
         ReplacementForecastSwitchDecisionInput(
             runtime_policy=policy,
             live_switch_report=_live_switch(policy, current=current),
             readiness=_readiness() if readiness is None else readiness,
             refit_decision=_refit(live_promotion=live_promotion),
+            capital_objective_evidence=capital_objective_evidence,
         )
     )
 

@@ -4,6 +4,11 @@
 # 2026-06-08 audit: re-authored live-authority test to FIX-1 AND-gate invariant
 #   (LIVE_AUTHORITY requires BOTH promotion + capital-objective evidence, not promotion
 #   alone). OBSOLETE_INVARIANT re-authored, not relaxed. See runtime_policy.py:286.
+# 2026-06-08 (BLOCKER 8): _decision helper now threads the capital-objective evidence OBJECT
+#   to the switch input for LIVE_AUTHORITY policies. The fail-closed boundary in
+#   switch_decision.py requires the object explicitly (REPLACEMENT_SWITCH_CAPITAL_OBJECTIVE_
+#   EVIDENCE_REQUIRED on None), so a genuine LIVE admission must supply it. See
+#   tests/test_switch_decision_live_policy_requires_capital_evidence_object.py.
 # Purpose: Prove replacement forecast runtime switch admission composes policy, live-state, readiness, and refit gates.
 # Reuse: Run before wiring replacement forecast switch decisions into daemon or event reactor.
 # Authority basis: Operator-directed replacement forecast worktree integration; simple switch must be safe and reversible.
@@ -205,14 +210,21 @@ def _refit(*, live_promotion: bool = False):
 _DEFAULT = object()
 
 
-def _decision(policy=None, live_switch=None, readiness=_DEFAULT, refit=_DEFAULT):
+def _decision(policy=None, live_switch=None, readiness=_DEFAULT, refit=_DEFAULT, capital=_DEFAULT):
+    # BLOCKER 8 fail-closed boundary: a LIVE_AUTHORITY policy must thread its capital-objective
+    # evidence OBJECT to the switch input -- the consuming gate no longer trusts the resolver
+    # was the only producer. For LIVE policies, default to the passing evidence object so a
+    # genuine admission composes; non-live policies leave it None (the boundary never reads it).
     policy = policy or _policy()
+    if capital is _DEFAULT:
+        capital = _capital_objective_evidence() if policy.status == "LIVE_AUTHORITY" else None
     return evaluate_replacement_forecast_switch_decision(
         ReplacementForecastSwitchDecisionInput(
             runtime_policy=policy,
             live_switch_report=live_switch or _live_switch(policy),
             readiness=_readiness() if readiness is _DEFAULT else readiness,
             refit_decision=_refit() if refit is _DEFAULT else refit,
+            capital_objective_evidence=capital,
         )
     )
 
