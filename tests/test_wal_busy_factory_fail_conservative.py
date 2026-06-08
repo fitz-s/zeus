@@ -264,12 +264,17 @@ def _patch_locked_tick(monkeypatch, risk_db: Path):
                         _raise_locked)
 
 
-def test_lock_does_not_restamp_fail_open_green(tmp_path, monkeypatch):
-    """RELATIONSHIP (iron #6): a fresh GREEN full row + a dependency DB lock must
-    NOT yield a persisted GREEN. Under degraded truth RiskGuard fails CONSERVATIVE.
+def test_lock_preserves_fresh_green_through_transient_lock(tmp_path, monkeypatch):
+    """RELATIONSHIP: a fresh (<5 min) GREEN full row + a TRANSIENT dependency lock
+    PRESERVES GREEN — it does NOT floor to DATA_DEGRADED.
 
-    The persisted level must block new entries (>= DATA_DEGRADED). It must NOT be
-    GREEN.
+    A momentary lock does not make risk unknowable: the GREEN was computed within
+    the 5-min freshness window and risk (daily-loss/settlement-quality/Brier) is
+    slow-moving. Flooring every transient lock blocked all trading on the
+    GREEN-only entry gate (operator-reported regression 2026-06-08). Safety is
+    upheld by the freshness window: a STALE (>5 min) full row degrades
+    (test_lock_with_no_fresh_full_row_degrades) and a stronger halt is never
+    weakened (test_lock_preserves_red_never_weakens).
     """
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(risk_db)
@@ -281,15 +286,17 @@ def test_lock_does_not_restamp_fail_open_green(tmp_path, monkeypatch):
     _patch_locked_tick(monkeypatch, risk_db)
     level = riskguard_module.tick()
 
-    assert level != RiskLevel.GREEN, (
-        "FAIL-OPEN: lock-under-fresh-GREEN persisted GREEN; must fail conservative"
+    assert level == RiskLevel.GREEN, (
+        "transient lock over a fresh GREEN must preserve GREEN, not floor"
     )
     persisted = get_connection(risk_db).execute(
         "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
     ).fetchone()
-    assert persisted["level"] != RiskLevel.GREEN.value
+    assert persisted["level"] == RiskLevel.GREEN.value
     details = json.loads(persisted["details_json"])
     assert details.get("riskguard_degraded_reason") == "dependency_db_locked"
+    assert details.get("status") == "dependency_db_locked_previous_risk_level_preserved"
+    assert details.get("conservative_floor_applied") is False
 
 
 def test_lock_preserves_red_never_weakens(tmp_path, monkeypatch):
@@ -344,14 +351,17 @@ def _green_lock_attestation_details() -> dict:
     }
 
 
-def test_get_current_level_does_not_surface_degraded_row_as_green(tmp_path, monkeypatch):
-    """RELATIONSHIP (iron #4): a degraded lock-attestation row stamped GREEN must
-    NOT be surfaced by get_current_level() as a clean GREEN.
+def test_get_current_level_surfaces_transient_lock_green_but_floors_other_degraded(tmp_path, monkeypatch):
+    """RELATIONSHIP (iron #4, single authority): get_current_level distinguishes a
+    TRANSIENT dependency-lock attestation (which already preserved a FRESH, valid
+    level) from a GENUINE metric/truth degradation.
 
-    get_current_level() is the SINGLE authority both the entry gate and the
-    status block read. If it returns GREEN for a degraded row, the entry gate
-    would admit trades while RiskGuard could not actually compute risk —
-    fail-open via the read path.
+    - A fresh dependency_db_locked attestation stamped GREEN surfaces as GREEN: the
+      attestation only preserves GREEN when a full row was fresh (<5 min), and the
+      R4 staleness floor (>5 min -> RED) catches stale ones, so this is a valid
+      recent GREEN, not a fail-open. (Reverts the 2026-06-08 over-floor regression.)
+    - ANY OTHER degraded reason still floors to >= DATA_DEGRADED — the split-brain
+      read-side guard for genuine degradation is preserved.
     """
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(risk_db)
@@ -368,20 +378,35 @@ def test_get_current_level_does_not_surface_degraded_row_as_green(tmp_path, monk
     monkeypatch.setattr(riskguard_module, "get_connection",
                         lambda path=None, **_k: get_connection(risk_db))
 
-    level = riskguard_module.get_current_level()
-    assert level != RiskLevel.GREEN, (
-        "SPLIT-BRAIN: get_current_level surfaced a degraded lock-attestation "
-        "row as a clean GREEN"
+    # Transient lock with a preserved fresh GREEN -> surfaces GREEN.
+    assert riskguard_module.get_current_level() == RiskLevel.GREEN
+
+    # A GENUINE (non-lock) degradation reason on a GREEN-stamped row still floors.
+    conn2 = get_connection(risk_db)
+    other = dict(_green_lock_attestation_details())
+    other["riskguard_degraded_reason"] = "settlement_truth_unavailable"
+    other["status"] = "metrics_degraded"
+    conn2.execute(
+        "INSERT INTO risk_state (level, brier, accuracy, win_rate, details_json, "
+        "checked_at, force_exit_review) VALUES (?,NULL,NULL,NULL,?,?,0)",
+        ("GREEN", json.dumps(other), datetime.now(timezone.utc).isoformat()),
     )
-    # Degraded read floor must still block entries.
-    assert level in (RiskLevel.DATA_DEGRADED, RiskLevel.YELLOW,
-                     RiskLevel.ORANGE, RiskLevel.RED)
+    conn2.commit()
+    conn2.close()
+    floored = riskguard_module.get_current_level()
+    assert floored != RiskLevel.GREEN, (
+        "SPLIT-BRAIN: a genuine (non-lock) degraded GREEN must still floor"
+    )
+    assert floored in (RiskLevel.DATA_DEGRADED, RiskLevel.YELLOW,
+                       RiskLevel.ORANGE, RiskLevel.RED)
 
 
 def test_entry_gate_and_status_agree_on_degraded_row(tmp_path, monkeypatch):
-    """RELATIONSHIP (iron #4): the daemon entry gate and the status risk block
-    read the SAME authority. On a degraded GREEN-stamped row, BOTH must refuse to
-    treat it as clean GREEN — no divergence (status GREEN vs gate-block).
+    """RELATIONSHIP (iron #4): the daemon entry gate and the status risk block read
+    the SAME authority — no divergence. On a TRANSIENT dependency-lock attestation
+    that preserved a fresh GREEN, the authority is GREEN, so BOTH agree the gate
+    ADMITS (the preserved fresh GREEN is valid). The single-authority property —
+    gate decision is a pure function of get_current_level — is what this pins.
     """
     risk_db = tmp_path / "risk_state.db"
     conn = get_connection(risk_db)
@@ -412,10 +437,12 @@ def test_entry_gate_and_status_agree_on_degraded_row(tmp_path, monkeypatch):
 
     # Single-authority: the gate decision is a pure function of the authority.
     assert gate_allows is (authoritative_level == RiskLevel.GREEN)
-    # And because the authority is NOT clean GREEN on a degraded row, the gate
-    # must block — same truth the status block surfaces.
-    assert gate_allows is False, (
-        "entry gate admitted entries on a degraded risk row (split-brain)"
+    # The preserved fresh GREEN is valid, so the authority is GREEN and the gate
+    # ADMITS — status and gate agree (no split-brain divergence).
+    assert authoritative_level == RiskLevel.GREEN
+    assert gate_allows is True, (
+        "entry gate must admit on a transient-lock attestation that preserved a "
+        "fresh GREEN (authority == GREEN)"
     )
 
 

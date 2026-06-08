@@ -650,18 +650,25 @@ class TestRiskGuardSettlementSource:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        # FAIL CONSERVATIVE: GREEN floored to DATA_DEGRADED, never re-stamped GREEN.
-        assert level == RiskLevel.DATA_DEGRADED
-        assert row["level"] == RiskLevel.DATA_DEGRADED.value
-        assert details["status"] == "dependency_db_locked_clamped_conservative"
+        # REGRESSION REVERTED (2026-06-08): a TRANSIENT dependency lock over a FRESH
+        # (<5 min) GREEN full row PRESERVES GREEN — it does NOT floor to
+        # DATA_DEGRADED. Risk (daily-loss/settlement-quality/Brier) is slow-moving
+        # and unchanged within the 5-min freshness window, so a momentary lock must
+        # not block the GREEN-only entry gate (the weeks-stable behavior). The earlier
+        # max(prev, DATA_DEGRADED) floor downgraded every transient lock and blocked
+        # all trading. Persistent locks (no fresh full row) still degrade — covered by
+        # the no-fresh-row test; stronger halts (RED/ORANGE/YELLOW) carry forward via
+        # test_wal_busy_factory_fail_conservative.py.
+        assert level == RiskLevel.GREEN
+        assert row["level"] == RiskLevel.GREEN.value
+        assert details["status"] == "dependency_db_locked_previous_risk_level_preserved"
         assert details["riskguard_degraded_reason"] == "dependency_db_locked"
-        assert details["full_metrics_status"] == "locked_previous_green_floored_to_data_degraded"
-        assert details["conservative_floor_applied"] is True
-        # The previous level is still recorded for audit, but is NOT surfaced.
+        assert details["full_metrics_status"] == "locked_previous_fresh_level_preserved"
+        assert details["conservative_floor_applied"] is False
         assert details["previous_full_risk_level"] == RiskLevel.GREEN.value
         assert details["bankroll_truth_source"] == "polymarket_wallet"
-        # Single-authority read also reports DATA_DEGRADED — no clean GREEN leaks.
-        assert riskguard_module.get_current_level() == RiskLevel.DATA_DEGRADED
+        # Single-authority read surfaces the preserved fresh GREEN to the entry gate.
+        assert riskguard_module.get_current_level() == RiskLevel.GREEN
         assert trade_conn.rollback_called is True
         assert trade_conn.close_called is True
 

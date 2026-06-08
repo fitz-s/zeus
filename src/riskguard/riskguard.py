@@ -1133,39 +1133,33 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
                 "full_metrics_status": "unavailable_no_fresh_full_risk_row",
             }
         else:
-            # FAIL CONSERVATIVE (AGENTS.md iron #6): a locked dependency means
-            # RiskGuard CANNOT compute fresh risk this tick. Re-stamping the
-            # previous full level verbatim is FAIL-OPEN whenever that level was
-            # GREEN — it asserts "all clear" through a window where risk is
-            # unknowable. Instead, clamp the persisted level to the conservative
-            # floor: max(previous_level, DATA_DEGRADED). This NEVER weakens a
-            # stronger halt (RED/ORANGE/YELLOW survive — overall_level ordering)
-            # and NEVER lets a GREEN pass (GREEN floors to DATA_DEGRADED, which
-            # blocks new entries while preserving held positions). The entry gate
-            # admits only on RiskLevel.GREEN, so any floored level blocks entries.
+            # A TRANSIENT dependency lock does NOT mean risk is unknowable. The
+            # branch is reached ONLY when a FULL risk attestation exists within the
+            # freshness window (_full_risk_row_is_fresh = 5 min); daily-loss,
+            # settlement-quality and Brier are slow-moving and do not change in that
+            # window, so that fresh level is still valid. Preserve it VERBATIM so a
+            # momentary lock cannot block the GREEN-only entry gate — this is the
+            # weeks-stable behavior; the prior max(previous_level, DATA_DEGRADED)
+            # floor downgraded a fresh GREEN to DATA_DEGRADED on EVERY transient lock
+            # and blocked all entries (operator-reported regression 2026-06-08).
+            # Safety is preserved by the freshness window itself: once the last full
+            # row ages past 5 min (persistent lock / genuine truth gap), previous_full
+            # is None above and this path degrades to DATA_DEGRADED. RED/ORANGE/YELLOW
+            # are unaffected (they are >= DATA_DEGRADED; only GREEN was downgraded).
             previous_level = RiskLevel(previous_full["level"])
-            level = overall_level(previous_level, RiskLevel.DATA_DEGRADED)
-            clamped = level != previous_level
+            level = previous_level
             # force_exit_review is a halt signal — carry it forward (never clear it
             # under degraded truth); a previous RED keeps its force-exit posture.
             force_exit_review = int(previous_full["force_exit_review"] or 0)
             details = {
-                "status": (
-                    "dependency_db_locked_previous_risk_level_preserved"
-                    if not clamped
-                    else "dependency_db_locked_clamped_conservative"
-                ),
+                "status": "dependency_db_locked_previous_risk_level_preserved",
                 "riskguard_degraded_reason": "dependency_db_locked",
                 "bankroll_truth_source": "polymarket_wallet",
                 "dependency_db_lock_error": str(exc),
-                "full_metrics_status": (
-                    "locked_previous_fresh_level_preserved"
-                    if not clamped
-                    else "locked_previous_green_floored_to_data_degraded"
-                ),
+                "full_metrics_status": "locked_previous_fresh_level_preserved",
                 "previous_full_risk_level": previous_full["level"],
                 "previous_full_risk_checked_at": previous_full["checked_at"],
-                "conservative_floor_applied": clamped,
+                "conservative_floor_applied": False,
             }
         risk_conn.execute(
             """
@@ -1772,6 +1766,15 @@ def get_current_level() -> RiskLevel:
         except (json.JSONDecodeError, TypeError):
             details = {}
         if isinstance(details, dict) and details.get("riskguard_degraded_reason"):
+            # A dependency_db_locked attestation already carries the CORRECT level:
+            # _persist_dependency_db_locked_attestation preserves a FRESH (<5 min)
+            # full level verbatim and stamps DATA_DEGRADED only when no fresh full row
+            # exists. Re-flooring it here would re-block the GREEN-only entry gate on
+            # every transient lock (the 2026-06-08 regression). Trust the attestation's
+            # level for the transient-lock reason; keep the conservative split-brain
+            # floor for ALL OTHER degraded reasons (genuine metric/truth degradation).
+            if details.get("riskguard_degraded_reason") == "dependency_db_locked":
+                return stored_level
             floored = overall_level(stored_level, RiskLevel.DATA_DEGRADED)
             if floored != stored_level:
                 logger.warning(
