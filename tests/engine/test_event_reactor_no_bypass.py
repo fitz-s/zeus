@@ -2658,54 +2658,14 @@ def test_family_selector_keeps_stale_sibling_price_for_pre_submit_comparison(mon
         assert not reason.startswith("EXECUTABLE_SNAPSHOT_STALE")
 
 
-def test_opportunity_book_selector_settings_false_fails_closed(monkeypatch):
-    from src.config import settings
-    from src.contracts.execution_price import ExecutionPrice
-    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
-
-    monkeypatch.delenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", raising=False)
-    edli = dict(settings._data["edli_v1"])
-    edli["opportunity_book_selector_enabled"] = "false"
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
-
-    requested_bin = _CandidateProof(
-        candidate=SimpleNamespace(condition_id="requested"),
-        token_id="requested-token",
-        direction="buy_no",
-        row={"condition_id": "requested"},
-        executable_snapshot_id="requested-snapshot",
-        execution_price=ExecutionPrice(
-            0.70,
-            "ask",
-            fee_deducted=True,
-            currency="probability_units",
-        ),
-        q_posterior=0.80,
-        q_lcb_5pct=0.72,
-        c_cost_95pct=0.71,
-        p_fill_lcb=0.90,
-        trade_score=0.020,
-        p_value=0.01,
-        passed_prefilter=True,
-        native_quote_available=True,
-        p_cal_vector_hash="pcal",
-        p_live_vector_hash="plive",
-    )
-    better_sibling = replace(
-        requested_bin,
-        candidate=SimpleNamespace(condition_id="sibling"),
-        token_id="sibling-token",
-        row={"condition_id": "sibling"},
-        executable_snapshot_id="sibling-snapshot",
-        trade_score=0.050,
-    )
-
-    selected = _selected_candidate_proof(
-        {"token_id": "requested-token", "condition_id": "requested"},
-        (requested_bin, better_sibling),
-    )
-
-    assert selected is None
+# REMOVED 2026-06-08 (operator directive; "bin selection.md" §14.7/§14.8): the
+# former test_opportunity_book_selector_settings_false_fails_closed asserted the
+# OFF behavior of the family-selector toggle (edli_v1.opportunity_book_selector_
+# enabled="false" -> _selected_candidate_proof returns None). That off-able gate
+# is ABOLISHED — the bin-selection ΔU ranker is the unconditional single live
+# decision surface, there is no disable path. A test pinning a forbidden toggle's
+# off-state is dead; it is removed rather than kept as a green proof of a gate the
+# directive forbids.
 
 
 def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypatch):

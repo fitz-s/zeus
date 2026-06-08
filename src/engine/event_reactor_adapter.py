@@ -43,6 +43,22 @@
 #   shadow branch. (The CandidateEvaluation scalar-Kelly ranker / opportunity_book
 #   selector remains the ranking surface until S4 replaces it with the
 #   marginal-utility ranker.)
+#   S3-fix (2026-06-08, "bin selection.md" §6/§7/§13/§14.7/§14.8 + verifier REJECT
+#   for single_path + operator directive 2026-06-08): the materialized
+#   NativeSideCandidate is no longer DISCARDED. _selected_candidate_proof now makes
+#   the SINGLE live decision via _select_proof_by_robust_marginal_utility, which
+#   ranks the materialized candidates by robust marginal expected LOG utility (ΔU)
+#   using the §7 utility_ranker (FamilyPayoffMatrix over bins+OUTSIDE Hidden #5,
+#   robust_probabilities from per-bin YES q_lcb, rank_candidates) and applies the
+#   §13 "robust marginal expected log utility <= 0" no-trade gate ON THE LIVE PATH.
+#   The legacy scalar-Kelly surfaces (build_family_opportunity_book ->
+#   select_best_family_candidate, and the max(executable, key=(trade_score,q_lcb))
+#   fallback) are RETIRED as the decision; build_family_opportunity_book now RECORDS
+#   the ΔU decision (decided_candidate_id) and uses select_best_family_candidate only
+#   for display ranks/loser reasons. The off-able ZEUS_OPPORTUNITY_BOOK_SELECTOR /
+#   edli_v1.opportunity_book_selector_enabled gate is REMOVED (the ranker is
+#   unconditional). q_lcb > q_point is a §13/Hidden #2 Q_LCB_INVALID no-trade. One
+#   ranking surface, one decision, one truth. No flag, no shadow branch.
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -57,7 +73,7 @@ import math
 import os
 import sqlite3
 from dataclasses import dataclass, replace as dataclass_replace
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from collections.abc import Mapping
 from typing import Any, Callable
@@ -134,6 +150,11 @@ from src.strategy.live_inference.live_admission import (
     live_capital_efficiency_rejection_reason,
 )
 from src.strategy import market_phase_evidence as _market_phase_evidence
+# The §7 robust marginal-expected-log-utility ranker IS the single live decision
+# surface (operator directive 2026-06-08; spec §6/§14.7/§14.8). _selected_candidate_proof
+# ranks the materialized NativeSideCandidates by ΔU and applies the §13
+# "robust marginal expected log utility <= 0" no-trade gate on the LIVE path.
+from src.strategy import utility_ranker
 from src.types.market import Bin
 # QLCB_HONESTY.md FIX-C — the EXISTING settlement σ-floor (state/settlement_sigma_floor.json,
 # 232 cells, median 3.18C realized residual) + its WMO-aware settlement-preimage bin
@@ -4668,19 +4689,13 @@ def _env_flag_enabled(name: str) -> bool:
     return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _opportunity_book_selector_enabled() -> bool:
-    """Family selector is live-default; env/settings may only explicitly disable it."""
-
-    raw = os.environ.get("ZEUS_OPPORTUNITY_BOOK_SELECTOR")
-    if raw is not None:
-        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
-    try:
-        configured = settings["edli_v1"].get("opportunity_book_selector_enabled", True)
-    except Exception:
-        return True
-    if isinstance(configured, str):
-        return configured.strip().lower() not in {"0", "false", "no", "off"}
-    return bool(configured)
+# REMOVED 2026-06-08 (operator directive; "bin selection.md" §14.7/§14.8 single-
+# primary-live): the family-selector on/off gate (ZEUS_OPPORTUNITY_BOOK_SELECTOR /
+# edli_v1.opportunity_book_selector_enabled) is GONE. The bin-selection robust
+# marginal-log-utility ranker is the UNCONDITIONAL single live decision surface —
+# there is no disable path to silently flip. A scattered off-able gate is the
+# regression disease the directive abolishes; correctness is enforced by types +
+# relationship tests + the ff-branch review, never a runtime flag.
 
 
 def _market_disagreement_demotes_buy_no(
@@ -4853,6 +4868,78 @@ def _proof_probability_uncertainty(
     )
 
 
+def _native_side_cost_curve_from_execution_price(
+    *,
+    proof: _CandidateProof,
+    side: str,
+    token_id: str,
+    market_snapshot_id: str,
+) -> "ExecutableCostCurve | None":
+    """Single-level fallback cost curve from the proof's OWN-side all-in price.
+
+    Used ONLY when the snapshot row's native ask ladder cannot be rebuilt into a
+    full ExecutableCostCurve (no depth json) but the proof IS genuinely priced.
+    The proof's ``execution_price`` is its OWN native side's depth-walked all-in
+    cost (S1, fee-deducted, probability_units). A single-level curve at that price
+    reproduces the same scalar cost-of-entry the proof was priced at, so the ΔU
+    ranker (the single live decision surface) can rank it instead of spuriously
+    no-trading a priced candidate.
+
+    §4 separation is preserved: the level price is the proof's OWN-side all-in
+    cost and the curve is tagged with the proof's OWN ``side`` — it is NEVER a
+    ``1 - p_exec(other side)`` complement. ``fee_rate=0`` so the curve's
+    ``all_in_price`` reproduces the already-fee-deducted scalar verbatim (no
+    double fee). ``min_tick`` is chosen to land the price on grid; depth is the
+    proof's executable share count when known, else a unit of depth at min order.
+
+    Returns ``None`` when the proof carries no usable own-side executable price
+    (the candidate then stays a NATIVE_QUOTE_MISSING no-trade — fail closed).
+    """
+    if side not in ("YES", "NO"):
+        return None
+    execution_price = getattr(proof, "execution_price", None)
+    price_value = _optional_float(getattr(execution_price, "value", None))
+    if price_value is None or not (0.0 < price_value < 1.0):
+        return None
+    if not bool(getattr(proof, "native_quote_available", False)):
+        return None
+
+    # Land the all-in price on a tick grid fine enough to represent it exactly.
+    price = Decimal(str(price_value)).quantize(Decimal("0.0001"))
+    if not (Decimal("0") < price < Decimal("1")):
+        return None
+    min_tick = Decimal("0.0001")
+
+    row = proof.row or {}
+    min_order = _optional_float(row.get("min_order_size"))
+    min_order_size = Decimal(str(min_order)) if (min_order and min_order > 0) else Decimal("1")
+
+    shares = _candidate_max_executable_shares(proof)
+    depth_shares = (
+        Decimal(str(shares)) if (shares is not None and shares > 0) else None
+    )
+    # Depth must cover at least one min order; default to a deep single level so
+    # the ΔU stake sweep is not artificially depth-capped when share count is
+    # unknown (the scalar all-in price is the only executable fact available).
+    if depth_shares is None or depth_shares < min_order_size:
+        depth_shares = max(min_order_size, Decimal("1000000"))
+
+    try:
+        return ExecutableCostCurve(
+            token_id=str(token_id),
+            side=side,  # type: ignore[arg-type]
+            snapshot_id=str(market_snapshot_id or ""),
+            book_hash=str(row.get("book_hash") or row.get("snapshot_hash") or ""),
+            levels=(BookLevel(price=price, size=depth_shares),),
+            fee_model=FeeModel(fee_rate=Decimal("0")),
+            min_tick=min_tick,
+            min_order_size=min_order_size,
+            quote_ttl=timedelta(seconds=1),
+        )
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def _native_side_candidate_from_proof(
     *,
     family_key: str,
@@ -4939,12 +5026,48 @@ def _native_side_candidate_from_proof(
 
     # Rebuild this side's OWN executable cost curve from its native ask ladder
     # (S1 builder, side-tagged). A book that cannot build a curve (empty/off-grid)
-    # is a NATIVE_QUOTE_MISSING no-trade — fail closed, never fabricate a price.
+    # falls back to the proof's OWN-side scalar all-in cost (execution_price): a
+    # single-level curve at the price the proof was ALREADY priced at (S1). This
+    # keeps a genuinely-priced proof rankable by the ΔU ranker (the single decision
+    # surface) instead of spuriously no-trading it, WITHOUT fabricating a complement
+    # — the fallback curve uses the proof's own native side and its own all-in
+    # price (§4: never 1 - p_exec(other side)). Only a proof with no own-side
+    # executable price at all stays a NATIVE_QUOTE_MISSING no-trade.
     try:
         curve = _native_side_cost_curve_from_snapshot_row(
             row, side=side, token_id=token_id
         )
     except (ValueError, KeyError, TypeError):
+        curve = _native_side_cost_curve_from_execution_price(
+            proof=proof,
+            side=side,
+            token_id=token_id,
+            market_snapshot_id=market_snapshot_id,
+        )
+        if curve is None:
+            return NativeSideCandidate.no_trade(
+                family_key=family_key,
+                bin_id=bin_id,
+                side=side,
+                token_id=token_id,
+                condition_id=condition_id,
+                forecast_snapshot_id=forecast_snapshot_id,
+                market_snapshot_id=market_snapshot_id,
+                reason=CandidateNoTradeReason.NATIVE_QUOTE_MISSING,
+                hypothesis_id=hypothesis_id,
+            )
+
+    q_point = float(proof.q_posterior)
+    q_lcb = float(proof.q_lcb_5pct)
+
+    # §13 / Hidden #2 live no-trade gate: q_lcb is INVALID when it is out of
+    # [0, 1] or EXCEEDS q_point (a lower-confidence bound above the point estimate
+    # is the "edge_ci_lower masquerading as q_lcb" corruption). A corrupt q_lcb
+    # must NOT size a trade — record a Q_LCB_INVALID no-trade candidate rather than
+    # clamping it into a tradeable one (clamping would hide the corruption and let
+    # a low-win-rate candidate trade on a fabricated lower bound). On the real path
+    # S2 guarantees q_lcb <= q_point per side, so this only fires on corrupt input.
+    if not (0.0 <= q_lcb <= 1.0) or not (0.0 <= q_point <= 1.0) or q_lcb > q_point:
         return NativeSideCandidate.no_trade(
             family_key=family_key,
             bin_id=bin_id,
@@ -4953,12 +5076,10 @@ def _native_side_candidate_from_proof(
             condition_id=condition_id,
             forecast_snapshot_id=forecast_snapshot_id,
             market_snapshot_id=market_snapshot_id,
-            reason=CandidateNoTradeReason.NATIVE_QUOTE_MISSING,
+            reason=CandidateNoTradeReason.Q_LCB_INVALID,
             hypothesis_id=hypothesis_id,
         )
 
-    q_point = float(proof.q_posterior)
-    q_lcb = float(proof.q_lcb_5pct)
     probability_uncertainty = _proof_probability_uncertainty(
         q_point=q_point, q_lcb=q_lcb
     )
@@ -5252,20 +5373,34 @@ def _opportunity_book_from_proofs(
             locked_opportunity_conn=locked_opportunity_conn,
         )
     )
+    # The live decision is the ΔU ranker's pick (selected_proof). The book RECORDS
+    # it as the single selected_candidate_id (operator directive 2026-06-08;
+    # §14.7/§14.8) rather than re-deciding via legacy scalar-Kelly. selector_enabled
+    # is fixed True: the bin-selection ranker is unconditional (no off-able gate),
+    # so the receipt's selected_candidate_id is always the ΔU decision.
+    #
+    # A NON-executable selected_proof (execution_price None) is the best-belief
+    # fallback surfaced for the EXECUTABLE_NATIVE_ASK_MISSING receipt, NOT a real
+    # ΔU trade decision — it must NOT be recorded as the book's selected candidate
+    # (else the receipt would claim a non-tradeable leg was selected). Record a
+    # selection only for a genuinely-priced ΔU winner.
+    decided_candidate_id = (
+        _candidate_evaluation_id(selected_proof)
+        if selected_proof is not None
+        and getattr(selected_proof, "execution_price", None) is not None
+        else None
+    )
     return build_family_opportunity_book(
         family_id=family_id,
         evaluations=evaluations,
         event_id=event_id,
+        decided_candidate_id=decided_candidate_id,
         cache_summary={
             "belief_cache": "source_run_bound",
             "price_cache": "snapshot_rows_refreshed_for_family",
             "selector_shadow": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SHADOW"),
-            "selector_enabled": _opportunity_book_selector_enabled(),
-            "actual_receipt_selected_candidate_id": (
-                _candidate_evaluation_id(selected_proof)
-                if selected_proof is not None
-                else None
-            ),
+            "selector_enabled": True,
+            "actual_receipt_selected_candidate_id": decided_candidate_id,
         },
     )
 
@@ -5485,6 +5620,132 @@ def _generate_candidate_proofs(
     return tuple(proofs)
 
 
+def _per_bin_yes_q_lcb(
+    proofs: tuple[_CandidateProof, ...],
+) -> dict[str, float]:
+    """Robust YES q_lcb for each bin in the family (spec §14.7 / §3 π_y^rob).
+
+    The :func:`utility_ranker.robust_probabilities` outcome vector ``π_y^rob`` is
+    built from each bin's ROBUST YES lower bound ``q_lcb_yes_i`` (NOT q_point —
+    Hidden #2). A ``buy_yes`` proof carries that value directly in its
+    ``q_lcb_5pct`` (YES probability space); a ``buy_no`` proof's ``q_lcb_5pct`` is
+    NO-space (``1 - q_ucb_yes``) and must NOT be read as a YES q_lcb — so the map
+    is sourced ONLY from YES proofs. A bin with no YES proof is absent from the
+    map; ``robust_probabilities`` then assigns it ``q_lcb=0`` win-mass (the
+    outcome still exists, so NO candidates still win on it — Hidden #5), which is
+    the conservative treatment.
+
+    Keyed by the same ``_candidate_bin_id`` the materialized NativeSideCandidate
+    uses, so the per-bin q_lcb and the candidates share one bin index.
+    """
+    by_bin: dict[str, float] = {}
+    for proof in proofs:
+        if str(getattr(proof, "direction", None) or "") != "buy_yes":
+            continue
+        bin_id = _candidate_bin_id(proof)
+        q_lcb = float(min(max(float(proof.q_lcb_5pct), 0.0), 1.0))
+        # If multiple YES proofs map to the same bin (should not happen on the
+        # real path), keep the most conservative (lowest) robust lower bound.
+        prior = by_bin.get(bin_id)
+        by_bin[bin_id] = q_lcb if prior is None else min(prior, q_lcb)
+    return by_bin
+
+
+def _robust_marginal_utility_baseline_usd() -> Decimal:
+    """Flat per-outcome wealth baseline ``A_y`` for the ΔU optimizer (spec §3).
+
+    The marginal log utility ``ΔU = Σ_y π_y [log(A_y + R_y) − log(A_y)]`` needs a
+    positive wealth-by-outcome baseline. With a FLAT baseline (no modelled
+    existing per-outcome exposure yet — that is the §11 Phase-4 exposure-aware
+    extension) the optimizer reduces to the spec §5.1 scalar cost-fraction Kelly
+    for a single bin, which is exactly the conservative single-primary objective
+    the directive mandates today. The baseline is the runtime bankroll when it is
+    cheaply available; otherwise a positive constant (the optimum stake FRACTION
+    is invariant to the baseline scale under the flat baseline, so this only sets
+    the ΔU units, never the ranking).
+    """
+    try:
+        bankroll = _runtime_bankroll_usd(cached_only=True)
+    except (TypeError, ValueError):
+        bankroll = 0.0
+    if bankroll and bankroll > 0.0:
+        return Decimal(str(bankroll))
+    return Decimal("1000")
+
+
+def _select_proof_by_robust_marginal_utility(
+    *,
+    executable: list[_CandidateProof],
+    family_key: str,
+    per_bin_yes_q_lcb: Mapping[str, float],
+) -> _CandidateProof | None:
+    """THE single live selection decision (spec §6 / §14.7 / §13).
+
+    Materialize each executable proof as its unified ``NativeSideCandidate`` (the
+    ONE materialization path, :func:`_native_side_candidate_from_proof`), build
+    the family payoff matrix over every bin PLUS the OUTSIDE outcome (Hidden #5),
+    and pick the candidate that maximizes robust marginal expected LOG utility
+    ``ΔU`` (:func:`utility_ranker.rank_candidates`). The §13 no-trade gate
+    ("robust marginal expected log utility <= 0") fires HERE, on the live path:
+    if no candidate has positive ΔU the family no-trades (returns ``None``).
+
+    This REPLACES the legacy scalar-Kelly ranking surfaces
+    (``build_family_opportunity_book`` -> ``select_best_family_candidate`` and the
+    ``max(executable, key=(trade_score, q_lcb_5pct))`` fallback). There is exactly
+    ONE ranking surface now — the bin-selection §7 ranker — so the materialized
+    candidate is no longer discarded; it IS the decision (operator directive
+    2026-06-08; spec §14.8 single-primary-live).
+
+    Native-NO conservatism (Hidden #3) and the OUTSIDE outcome (Hidden #5) are
+    enforced inside the ranker: a NO candidate is scored with its OWN robust NO
+    ``q_lcb = 1 - q_ucb_yes`` (its ``candidate.q_lcb``), never the looser
+    ``1 - q_lcb_yes`` implied by the shared YES π.
+    """
+    # Materialize the ONE candidate object per executable proof, keyed by the
+    # proof's hypothesis id so the ΔU winner maps back to its proof.
+    candidate_by_proof: list[tuple[NativeSideCandidate, _CandidateProof]] = [
+        (
+            _native_side_candidate_from_proof(family_key=family_key, proof=proof),
+            proof,
+        )
+        for proof in executable
+    ]
+    proof_by_hypothesis: dict[str, _CandidateProof] = {
+        cand.hypothesis_id: proof for cand, proof in candidate_by_proof
+    }
+    # Only TRADEABLE candidates (native token + executable curve + q authority)
+    # can be ranked; a no-trade candidate carries no curve and must never reach
+    # the payoff/scoring stage (the ranker would score it 0). Recorded no-trade
+    # candidates already surfaced their missing-quote diagnostic at materialization.
+    tradeable = [cand for cand, _ in candidate_by_proof if cand.is_tradeable]
+    if not tradeable:
+        return None
+
+    # Family outcome set = every distinct bin among the candidates, plus OUTSIDE
+    # (the matrix appends it; Hidden #5). The per-bin YES q_lcb gives π_y^rob.
+    bin_ids = list(dict.fromkeys(cand.bin_id for cand in tradeable))
+    matrix = utility_ranker.FamilyPayoffMatrix.over_bins(bin_ids)
+    pi = utility_ranker.robust_probabilities(
+        matrix,
+        per_bin_q_lcb={
+            bin_id: float(per_bin_yes_q_lcb.get(bin_id, 0.0)) for bin_id in bin_ids
+        },
+    )
+    exposure = utility_ranker.PortfolioExposureVector.flat(
+        matrix, baseline=_robust_marginal_utility_baseline_usd()
+    )
+
+    scored = utility_ranker.rank_candidates(tradeable, matrix, pi, exposure)
+    for score in scored:
+        # §13 live no-trade gate: skip any non-positive-ΔU candidate. rank_candidates
+        # sorts ΔU-descending, so the first positive-ΔU score is the family primary.
+        if score.is_no_trade:
+            continue
+        return proof_by_hypothesis.get(score.candidate.hypothesis_id)
+    # Every candidate's robust marginal expected log utility was <= 0 -> no-trade.
+    return None
+
+
 def _selected_candidate_proof(
     payload: dict[str, object],
     proofs: tuple[_CandidateProof, ...],
@@ -5492,37 +5753,37 @@ def _selected_candidate_proof(
     locked_opportunity_conn: sqlite3.Connection | None = None,
     candidate_kelly_size_usd_by_id: Mapping[str, float] | None = None,
 ) -> _CandidateProof | None:
-    selector_enabled = _opportunity_book_selector_enabled()
-    requested_token = _nonnull(payload.get("token_id"))
-    requested_condition = _nonnull(payload.get("condition_id"))
-    if (
-        requested_token
-        and not selector_enabled
-        and os.environ.get("ZEUS_OPPORTUNITY_BOOK_SELECTOR") is not None
-    ):
-        return next(
-            (
-                proof
-                for proof in proofs
-                if proof.token_id == requested_token
-                and (
-                    not requested_condition
-                    or str(proof.candidate.condition_id or "") == requested_condition
-                )
-            ),
-            None,
-        )
-    if requested_token and not selector_enabled:
-        return None
+    """Pick the single live primary leg via the bin-selection ΔU ranker (§14.7).
+
+    ONE decision path (operator directive 2026-06-08; spec §14.8): every priced
+    proof is materialized as a ``NativeSideCandidate`` and the family primary is
+    the robust-marginal-expected-log-utility winner
+    (:func:`_select_proof_by_robust_marginal_utility`). The legacy scalar-Kelly
+    surfaces (``select_best_family_candidate`` / the ``(trade_score, q_lcb_5pct)``
+    tuple) and the off-able ``ZEUS_OPPORTUNITY_BOOK_SELECTOR`` runtime gate are
+    GONE — the ranker is unconditional, so the materialized candidate is the
+    decision, never discarded.
+
+    ``candidate_kelly_size_usd_by_id`` is retained for signature compatibility
+    with the receipt path; the ΔU ranker computes its own optimal stake from the
+    cost curve (spec §5.3), so the precomputed scalar Kelly size does not gate
+    selection.
+    """
+    family_key = str(payload.get("family_id") or payload.get("event_id") or "family")
+    per_bin_yes_q_lcb = _per_bin_yes_q_lcb(proofs)
+
+    # A ``token_id`` in the payload is a continuous-redecision REFRESH SCOPE (it
+    # tells the upstream proof-generation which leg to re-capture), NOT a forced
+    # selection: the family selector still ranks the WHOLE family and picks the
+    # best sibling by ΔU. (Contract: test_token_redecision_refresh_scope_does_not_
+    # force_requested_token / test_opportunity_book_selector_is_default_on_for_
+    # requested_token.) So there is no requested-token branch here — one ranking
+    # surface for every decision.
+
     # REFERENCE-ONLY GATE (operator directive 2026-06-03). The mainstream-agreement
-    # verdict (#135 + #135-B) is computed and recorded on the receipt to inform the
-    # ARM decision — it lets the operator see whether the forecast's top candidate
-    # agrees with an independent mainstream. It takes NO part in production selection:
-    # we trade on the FORECAST. Production picks the forecast's best candidate by
-    # (trade_score, q_lcb); the gate can never exclude a candidate. (The selector used
-    # to drop gate-failed proofs; that exclusion is removed so the forecast's true
-    # pick always reaches the receipt with its verdict annotated. The only reason
-    # these are no_submit is shadow/arm=False, not the mainstream gate.)
+    # verdict (#135 + #135-B) is recorded on the receipt to inform the ARM decision;
+    # it takes NO part in production selection — we trade on the FORECAST. The gate
+    # can never exclude a candidate from the ΔU ranking below.
     executable = list(
         _selection_scoped_proofs(
             proofs=proofs,
@@ -5530,41 +5791,24 @@ def _selected_candidate_proof(
         )
     )
     if not executable:
-        return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
-    if selector_enabled:
-        family_id = str(payload.get("family_id") or payload.get("event_id") or "family")
-        evaluations_by_id = {
-            _candidate_evaluation_id(proof): proof
-            for proof in executable
-        }
-        book = build_family_opportunity_book(
-            family_id=family_id,
-            evaluations=tuple(
-                _candidate_evaluation_from_proof(family_id=family_id, proof=proof)
-                if not candidate_kelly_size_usd_by_id
-                else _candidate_evaluation_from_proof(
-                    family_id=family_id,
-                    proof=proof,
-                    kelly_size_usd=candidate_kelly_size_usd_by_id.get(
-                        _candidate_evaluation_id(proof),
-                        0.0,
-                    ),
-                )
-                for proof in executable
-            ),
-            event_id=str(payload.get("event_id") or "event"),
-        )
-        if book.selected_candidate_id is not None:
-            selected = evaluations_by_id.get(book.selected_candidate_id)
-            if selected is not None:
-                return selected
-        return None
-    return max(
-        executable,
-        key=lambda proof: (
-            proof.trade_score,
-            proof.q_lcb_5pct,
-        ),
+        # Nothing executable survived scoping. Surface the best-belief NON-executable
+        # proof (execution_price None) so the EXECUTABLE_NATIVE_ASK_MISSING receipt
+        # (era :1562) can explain the no-native-ask no-trade rather than vanishing
+        # silently. A proof that IS executable but was scoped OUT (e.g. locked with
+        # no price improvement) must NOT be re-surfaced as the decision — that would
+        # trade a locked leg. So the fallback is restricted to non-executable proofs;
+        # if there is none, the family no-trades (returns None).
+        non_executable = [
+            proof for proof in proofs if proof.execution_price is None
+        ]
+        if not non_executable:
+            return None
+        return max(non_executable, key=lambda proof: proof.q_lcb_5pct)
+
+    return _select_proof_by_robust_marginal_utility(
+        executable=executable,
+        family_key=family_key,
+        per_bin_yes_q_lcb=per_bin_yes_q_lcb,
     )
 
 

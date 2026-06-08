@@ -328,6 +328,13 @@ def test_selector_rejects_buy_no_on_own_forecast_modal_bin():
 
 
 def test_opportunity_book_receipt_contains_ranks_and_loser_reasons():
+    # SINGLE-PATH update 2026-06-08 (operator directive; "bin selection.md"
+    # §14.7/§14.8): the book no longer SELF-SELECTS via the legacy scalar-Kelly
+    # select_best_family_candidate. The DECISION is the bin-selection ΔU ranker
+    # upstream; the book RECORDS it via decided_candidate_id. select_best_family_
+    # candidate is retained ONLY for the receipt's display ranks + loser reasons
+    # (provenance), which this test still verifies. We pass the decided id ("selected")
+    # so the book records the ΔU decision rather than re-deriving it.
     selected = _evaluation(candidate_id="selected", execution_price=0.2, trade_score=0.02)
     loser = _evaluation(candidate_id="loser", execution_price=0.80, trade_score=0.02)
 
@@ -335,12 +342,19 @@ def test_opportunity_book_receipt_contains_ranks_and_loser_reasons():
         family_id="family-1",
         evaluations=(loser, selected),
         event_id="event-1",
-        cache_summary={"price_cache": "snapshot_rows_refreshed_for_family"},
+        decided_candidate_id="selected",
+        cache_summary={
+            "price_cache": "snapshot_rows_refreshed_for_family",
+            "selector_enabled": True,
+        },
     )
     receipt = book.to_receipt_dict()
 
-    assert receipt["selected_candidate_id"] is None
+    # The book records the upstream ΔU decision verbatim (no second selection surface).
+    assert receipt["selected_candidate_id"] == "selected"
     assert receipt["proposed_selected_candidate_id"] == "selected"
+    # Display ranks + loser reasons still come from select_best_family_candidate
+    # (provenance only, not the decision).
     assert receipt["family_rank"]["selected"] == 1
     assert receipt["loser_reasons"]["loser"].startswith("FAMILY_RANK_LOST:")
     assert "robust_kelly_growth_score" in receipt["loser_reasons"]["loser"]

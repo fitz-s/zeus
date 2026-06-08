@@ -1,3 +1,10 @@
+# Last reused or audited: 2026-06-08
+# Authority basis: "bin selection.md" §14.7 (rank by robust marginal utility) +
+#   §14.8 (single-primary-live) + operator directive 2026-06-08. S3-fix:
+#   build_family_opportunity_book RECORDS the upstream ΔU decision
+#   (decided_candidate_id) instead of self-selecting via select_best_family_candidate;
+#   that legacy scalar-Kelly selector now produces ONLY display ranks + loser reasons
+#   (provenance), never the live selection. One decision surface, one truth.
 """In-memory opportunity book receipt evidence."""
 
 from __future__ import annotations
@@ -70,16 +77,36 @@ def build_family_opportunity_book(
     evaluations: tuple[CandidateEvaluation, ...] | list[CandidateEvaluation],
     event_id: str,
     cache_summary: dict[str, Any] | None = None,
+    decided_candidate_id: str | None = None,
 ) -> OpportunityBook:
+    """Serialize the family's candidate evaluations into a receipt book.
+
+    SINGLE DECISION SURFACE (operator directive 2026-06-08; "bin selection.md"
+    §14.7/§14.8). When ``decided_candidate_id`` is provided it is the ALREADY-MADE
+    live decision — the robust-marginal-expected-log-utility (ΔU) winner chosen by
+    ``event_reactor_adapter._select_proof_by_robust_marginal_utility``. The book
+    then RECORDS that decision verbatim as ``selected_candidate_id``; it does NOT
+    re-decide via the legacy scalar-Kelly ``select_best_family_candidate``. That
+    keeps exactly ONE ranking surface: the ΔU ranker decides, the book serializes.
+    ``select_best_family_candidate`` is used ONLY to produce display ordering and
+    loser-reason annotations for the receipt (provenance), never the selection.
+
+    When ``decided_candidate_id`` is None (no live decision — e.g. a no-trade
+    family, or a legacy/test caller), the book records no selection rather than
+    minting a second selection authority.
+    """
     material = tuple(evaluations)
+    # select_best_family_candidate is retained for DISPLAY ordering + loser
+    # reasons only (provenance); it is NOT the selection authority.
     selection = select_best_family_candidate(material)
     ranked_ids = [evaluation.candidate_id for evaluation in selection.ranked]
+    selected_candidate_id = decided_candidate_id
     book_id = "opportunity_book:" + stable_hash(
         {
             "event_id": event_id,
             "family_id": family_id,
             "candidate_ids": [evaluation.candidate_id for evaluation in material],
-            "selected_candidate_id": selection.selected.candidate_id if selection.selected else None,
+            "selected_candidate_id": selected_candidate_id,
         }
     )
     ranks = {candidate_id: rank for rank, candidate_id in enumerate(ranked_ids, start=1)}
@@ -88,7 +115,7 @@ def build_family_opportunity_book(
         book_version=1,
         family_id=family_id,
         evaluations=material,
-        selected_candidate_id=selection.selected.candidate_id if selection.selected else None,
+        selected_candidate_id=selected_candidate_id,
         family_rank=ranks,
         global_rank=ranks,
         loser_reasons=selection.loser_reasons,
