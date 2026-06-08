@@ -7388,6 +7388,29 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                 )
                 summary["chain_sync_error"] = str(exc)
 
+            # WAL WRITE-LOCK RELEASE (2026-06-08 riskguard-flaps structural fix):
+            # Phase 1 (chain sync) opened an implicit DEFERRED txn on the first DML
+            # (chain_shares / chain_state updates) which upgrades to the exclusive WAL
+            # write lock on zeus_trades.db. With a single trailing commit the lock was
+            # held across ALL of Phase 2's per-position HTTP monitor calls — up to 5+
+            # minutes — starving riskguard.tick() (30s busy_timeout → DATA_DEGRADED),
+            # CollateralLedger heartbeat, and market_scanner snapshot inserts.
+            # Fix: commit chain-sync writes HERE, before Phase 2 HTTP calls begin, so
+            # the WAL write lock is released between the two phases. The world_write_lock
+            # docstring (db.py:295) establishes the same invariant: MUST NOT hold a DB
+            # write lock across blocking network/HTTP calls.
+            # INV-17 / DT#1 is preserved: chain-sync state is committed atomically
+            # before monitoring state, and the final commit_then_export below commits
+            # monitoring state before JSON export. The two phases are logically
+            # independent — chain_state is ground-truth from the REST API and does not
+            # need to be co-transactional with the monitoring state transitions.
+            try:
+                conn.commit()
+            except Exception as exc:
+                logger.warning(
+                    "chain_sync_and_exit_monitor: chain-sync interim commit failed (non-fatal): %s", exc
+                )
+
             # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
             # checks pending exit fills, runs monitor refresh for active positions.
             # exit_order_submit_enabled=False in shadow/no-submit modes: state
@@ -7412,10 +7435,10 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                 )
                 summary["monitoring_error"] = str(exc)
 
-        # INV-17 / DT#1: commit the DB transaction (chain-sync + monitoring state
-        # transitions) FIRST, then export the derived portfolio/tracker JSON with the
-        # committed artifact id — so canonical_write.detect_stale_portfolio's marker
-        # stays valid and JSON can never lead the DB.
+        # INV-17 / DT#1: commit the DB transaction (monitoring state transitions) FIRST,
+        # then export the derived portfolio/tracker JSON with the committed artifact id —
+        # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can
+        # never lead the DB. (Chain-sync writes were already committed above.)
         from src.state.canonical_write import commit_then_export
         from src.state.decision_chain import store_artifact
         _aid_box: list = [None]
