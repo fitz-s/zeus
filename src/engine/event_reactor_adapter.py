@@ -826,22 +826,39 @@ def event_bound_no_submit_adapter_from_trade_conn(
     )
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
-        return build_event_bound_no_submit_receipt(
-            event,
-            trade_conn=trade_conn,
-            decision_time=decision_time,
-            forecast_conn=forecast_conn,
-            topology_conn=topology_conn,
-            calibration_conn=calibration_conn,
-            get_current_level=get_current_level,
-            bankroll_usd_provider=bankroll_usd_provider,
-            portfolio_state_provider=portfolio_state_provider,
-            portfolio_reservation=portfolio_reservation,
-            locked_opportunity_conn=live_cap_conn or trade_conn,
-            replacement_forecast_hook=resolved_replacement_forecast_hook,
-            replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
-            replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
-        )
+        # CATEGORY ANTIBODY (2026-06-08, "database is locked" HOLDER-side kill):
+        # same trade-DB lock-hold disease as the live adapter — the reactor's single
+        # per-cycle trade_conn is read/written here via build_event_bound_no_submit_
+        # receipt and committed NOWHERE in process_pending (only closed at cycle end),
+        # so the implicit transaction pins the trade-DB WAL lock / read-mark across
+        # the whole multi-event cycle and starves concurrent trade-DB writers
+        # (substrate warm, log_trade_exit, CollateralLedger heartbeat). Commit
+        # trade_conn per event in a finally to release the lock and end the WAL-floor-
+        # pinning read txn each event (mirrors the live adapter + reactor world-DB
+        # per-event windows). In-memory reservation ledger is unaffected; no gate or
+        # decision semantics change — this only bounds the lock-hold.
+        try:
+            return build_event_bound_no_submit_receipt(
+                event,
+                trade_conn=trade_conn,
+                decision_time=decision_time,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                calibration_conn=calibration_conn,
+                get_current_level=get_current_level,
+                bankroll_usd_provider=bankroll_usd_provider,
+                portfolio_state_provider=portfolio_state_provider,
+                portfolio_reservation=portfolio_reservation,
+                locked_opportunity_conn=live_cap_conn or trade_conn,
+                replacement_forecast_hook=resolved_replacement_forecast_hook,
+                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+            )
+        finally:
+            try:
+                trade_conn.commit()
+            except Exception:  # noqa: BLE001 - commit is a lock-release boundary; never mask the real result/raise
+                pass
 
     # Expose the per-cycle ledger so the reactor can commit/rollback provisional
     # reservations in its post-submit phase (FIX B). The reactor reads this
@@ -916,7 +933,7 @@ def event_bound_live_adapter_from_trade_conn(
         trade_conn=trade_conn,
     )
 
-    def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
+    def _submit_inner(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         no_submit_receipt = build_event_bound_no_submit_receipt(
             event,
             trade_conn=trade_conn,
@@ -1145,6 +1162,39 @@ def event_bound_live_adapter_from_trade_conn(
             replacement_forecast=no_submit_receipt.replacement_forecast,
             unit=no_submit_receipt.unit,
         )
+
+    def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
+        # CATEGORY ANTIBODY (2026-06-08, "database is locked" HOLDER-side kill):
+        # the reactor opens ONE trade connection per cycle (main.py:5231) and hands
+        # it here; sqlite3 isolation_level="" makes the first read/write inside
+        # _submit_inner open an implicit transaction that takes the trade-DB WAL
+        # write lock (on the live-order build INSERTs) / pins the WAL read-mark, and
+        # NOTHING in process_pending commits trade_conn until cycle-end close().
+        # Across a multi-event cycle (each event doing a venue HTTP POST inside the
+        # executor) that lock is held continuously, so the substrate-warm cycle,
+        # log_trade_exit, and the CollateralLedger heartbeat all block out their
+        # busy_timeout and record "database is locked" (live 2026-06-08 09:43-09:52).
+        #
+        # Fix (mirrors the reactor's WORLD-DB per-event commit windows in
+        # events/reactor.py and the harvester per-event commit in
+        # ingest/harvester_truth_writer): commit trade_conn at the END of EVERY
+        # _submit — accept, gate-reject, or raise — in a finally. This releases the
+        # trade-DB write lock AND ends the WAL-floor-pinning read transaction per
+        # event, so concurrent trade-DB writers get a write window each event and
+        # the WAL can checkpoint. The executor already commits its own venue-command
+        # write units durably; this commits the remaining adapter-level trade_conn
+        # writes (durable, intended) + closes the read txn. The provisional
+        # PortfolioReservationLedger is IN-MEMORY (sizing/portfolio_reservation.py),
+        # so the reactor's post-submit commit/rollback of reservations is unaffected
+        # by a trade_conn.commit() here. No gate is weakened: the commit only
+        # bounds the lock-hold; it changes no decision, gate, or submit semantics.
+        try:
+            return _submit_inner(event, decision_time)
+        finally:
+            try:
+                trade_conn.commit()
+            except Exception:  # noqa: BLE001 - commit is a lock-release boundary; never mask the real result/raise
+                pass
 
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
     # provisional reservations in its post-submit phase.
