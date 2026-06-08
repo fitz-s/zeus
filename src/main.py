@@ -5749,8 +5749,15 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
 
     global _EDLI_LAST_PRUNE_MONOTONIC
     edli_cfg = _settings_section("edli_v1", {})
-    if not bool(edli_cfg.get("reactor_prune_enabled", False)):
-        return
+    # ANTIBODY (2026-06-08, operator directive): the working-set prune is NON-OPTIONAL.
+    # It is the ONLY drain of the pending opportunity_event_processing set (archive_expired_
+    # candidates + archive_superseded_channel_events). Gating it behind an off-able flag
+    # (reactor_prune_enabled, default off) is exactly what let the working set grow unbounded
+    # when the flag was off — slowing fetch_pending and (before the market_discovery
+    # decoupling) silently collapsing executable-substrate coverage -> zero trades, with
+    # nothing connecting cause to effect. A necessary maintenance sweep must not be silently
+    # switchable off. It now ALWAYS runs, bounded only by its own interval/batch limits below;
+    # the legacy reactor_prune_enabled flag is ignored.
     interval_s = _edli_prune_interval_seconds(edli_cfg)
     now_mono = time.monotonic()
     if (
