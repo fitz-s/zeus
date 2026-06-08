@@ -594,6 +594,100 @@ def _trailing_loss_snapshot(
     }
 
 
+def _realized_window_loss_snapshot(
+    realized_exits: list[dict] | None,
+    *,
+    now: str,
+    lookback: timedelta,
+    initial_bankroll: float,
+    threshold_pct: float,
+    degraded: bool,
+    source: str,
+) -> dict:
+    """Daily/weekly loss breaker on REALIZED SETTLED PnL within the window.
+
+    Operator directive 2026-06-08 ("settlement = only truth", iron rule #3):
+    the loss circuit-breaker must fire on realized settled losses, NOT on a
+    mark-to-market `effective_bankroll` delta. The retired delta breaker
+    conflated three economically-distinct moves into "loss":
+      (a) capital deployment            wallet cash -> open-position equity,
+      (b) projection-pipeline reshuffle unprojected entry fill -> projected,
+      (c) mark-to-market swings         of open prediction-market positions.
+    None of those is a realized loss; on 2026-06-08 (b) alone (the transient
+    `unprojected_entry_fill_equity` bucket reconciling 61->37) produced a
+    phantom -19.25 "daily loss" that held the daemon RED while realized PnL was
+    flat and total PnL had IMPROVED — halting 100% of trading (iron rule #1).
+
+    STRUCTURAL antibody (Fitz: make the wrong code unwritable): this function
+    accepts NO equity / effective_bankroll argument, so mark-to-market is
+    *unconstructable* as an input. The loss is `max(0, -sum(pnl))` over exits
+    whose settlement timestamp lies inside [now - lookback, now].
+
+    Fail-conservative: when realized settlement truth is `degraded`, return
+    DATA_DEGRADED (block new entries, preserve held positions) — never a silent
+    GREEN over an unmeasurable loss, never RED without an attested breach.
+    """
+    if degraded:
+        return {
+            "loss": None,
+            "level": RiskLevel.DATA_DEGRADED,
+            "degraded": True,
+            "status": "degraded:realized_settlement_unavailable",
+            "source": source,
+            "reference": None,
+        }
+
+    now_dt = datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    cutoff_dt = now_dt - lookback
+
+    windowed_pnl = 0.0
+    counted = 0
+    skipped_unparseable = 0
+    for exit_row in realized_exits or []:
+        ts = str(exit_row.get("exited_at") or "")
+        if not ts:
+            skipped_unparseable += 1
+            continue
+        try:
+            exit_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            skipped_unparseable += 1
+            continue
+        if exit_dt.tzinfo is None:
+            exit_dt = exit_dt.replace(tzinfo=timezone.utc)
+        if cutoff_dt <= exit_dt <= now_dt:
+            pnl = _coerce_finite_float(exit_row.get("pnl"))
+            if pnl is None:
+                skipped_unparseable += 1
+                continue
+            windowed_pnl += float(pnl)
+            counted += 1
+
+    loss = round(max(0.0, -windowed_pnl), 2)
+    level = (
+        RiskLevel.RED
+        if loss > float(initial_bankroll) * float(threshold_pct)
+        else RiskLevel.GREEN
+    )
+    return {
+        "loss": loss,
+        "level": level,
+        "degraded": False,
+        "status": "ok" if counted else "no_settlements_in_window",
+        "source": source,
+        "reference": {
+            "basis": "realized_settled_pnl",
+            "window_start": cutoff_dt.isoformat(),
+            "window_end": now_dt.isoformat(),
+            "settlement_count": counted,
+            "realized_pnl_window": round(windowed_pnl, 2),
+            "skipped_unparseable": skipped_unparseable,
+        },
+    }
+
+
 def _append_reason(bucket: dict[str, list[str]], key: str, reason: str) -> None:
     reasons = bucket.setdefault(key, [])
     if reason not in reasons:
@@ -1293,21 +1387,31 @@ def tick() -> RiskLevel:
             portfolio=portfolio,
         )
         current_total_value = account_equity["effective_equity_usd"]
-        daily_loss_snapshot = _trailing_loss_snapshot(
-            risk_conn,
+        # Loss breaker fires on REALIZED settled PnL in the window, NOT on a
+        # mark-to-market effective_bankroll delta (operator directive
+        # 2026-06-08, "settlement = only truth"). `current_total_value` /
+        # effective_bankroll are still recorded below for observability, but the
+        # LOSS LEVEL decision must not read them — see
+        # `_realized_window_loss_snapshot` for the full rationale and the
+        # 2026-06-08 phantom-RED root cause.
+        loss_source = f"realized_settlement_window:{realized_truth_source}"
+        daily_loss_snapshot = _realized_window_loss_snapshot(
+            realized_exits,
             now=now,
             lookback=timedelta(hours=24),
-            current_equity=current_total_value,
             initial_bankroll=current_bankroll_usd,
             threshold_pct=float(thresholds["max_daily_loss_pct"]),
+            degraded=realized_degraded,
+            source=loss_source,
         )
-        weekly_loss_snapshot = _trailing_loss_snapshot(
-            risk_conn,
+        weekly_loss_snapshot = _realized_window_loss_snapshot(
+            realized_exits,
             now=now,
             lookback=timedelta(days=7),
-            current_equity=current_total_value,
             initial_bankroll=current_bankroll_usd,
             threshold_pct=float(thresholds["max_weekly_loss_pct"]),
+            degraded=realized_degraded,
+            source=loss_source,
         )
         daily_loss = daily_loss_snapshot["loss"]
         weekly_loss = weekly_loss_snapshot["loss"]
@@ -1447,18 +1551,30 @@ def tick() -> RiskLevel:
                         "detail": f"storage_source={settlement_storage_source}",
                     })
                 if daily_loss_level == RiskLevel.RED:
+                    _dref = daily_loss_snapshot.get("reference") or {}
                     failed_rules.append({
                         "name": "daily_loss_pct",
                         "value": round(float(daily_loss or 0.0), 4),
                         "threshold": thresholds["max_daily_loss_pct"],
-                        "detail": f"effective_bankroll={current_total_value:.2f}",
+                        "detail": (
+                            "realized_settled_loss_24h="
+                            f"{float(daily_loss or 0.0):.2f} "
+                            f"(n={_dref.get('settlement_count', 0)}, "
+                            f"window_pnl={_dref.get('realized_pnl_window', 0.0)})"
+                        ),
                     })
                 if weekly_loss_level == RiskLevel.RED:
+                    _wref = weekly_loss_snapshot.get("reference") or {}
                     failed_rules.append({
                         "name": "weekly_loss_pct",
                         "value": round(float(weekly_loss or 0.0), 4),
                         "threshold": thresholds["max_weekly_loss_pct"],
-                        "detail": f"effective_bankroll={current_total_value:.2f}",
+                        "detail": (
+                            "realized_settled_loss_7d="
+                            f"{float(weekly_loss or 0.0):.2f} "
+                            f"(n={_wref.get('settlement_count', 0)}, "
+                            f"window_pnl={_wref.get('realized_pnl_window', 0.0)})"
+                        ),
                     })
                 alert_halt(failed_rules or [{
                     "name": "riskguard",
@@ -1555,21 +1671,32 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
         )["effective_equity_usd"]
         initial_bankroll = current_bankroll_usd
 
-        daily_loss_snapshot = _trailing_loss_snapshot(
-            risk_conn,
+        # Realized-settled-PnL loss breaker (operator directive 2026-06-08) —
+        # same basis as tick(). Mark-to-market `current_equity` is computed above
+        # for the degraded-path equity attestation but must NOT decide the loss
+        # level (see `_realized_window_loss_snapshot`).
+        realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
+            zeus_conn,
+            settlement_rows=settlement_rows,
+        )
+        loss_source = f"realized_settlement_window:{realized_truth_source}"
+        daily_loss_snapshot = _realized_window_loss_snapshot(
+            realized_exits,
             now=now,
             lookback=timedelta(hours=24),
-            current_equity=current_equity,
             initial_bankroll=initial_bankroll,
             threshold_pct=float(thresholds["max_daily_loss_pct"]),
+            degraded=realized_degraded,
+            source=loss_source,
         )
-        weekly_loss_snapshot = _trailing_loss_snapshot(
-            risk_conn,
+        weekly_loss_snapshot = _realized_window_loss_snapshot(
+            realized_exits,
             now=now,
             lookback=timedelta(days=7),
-            current_equity=current_equity,
             initial_bankroll=initial_bankroll,
             threshold_pct=float(thresholds["max_weekly_loss_pct"]),
+            degraded=realized_degraded,
+            source=loss_source,
         )
 
         daily_loss_level = daily_loss_snapshot["level"]
