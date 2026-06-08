@@ -1,6 +1,16 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-05-24
+# Last reused/audited: 2026-06-08
 # Authority basis: docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md R8/R9 proof.
+#   2026-06-08 audit (thepath/audit-realign): STALE_TEST fix. Commit 014408394f
+#   tightened the FSR pre-submit window-authority gate (reactor.py:647-666) to
+#   require coverage_completeness_status=="COMPLETE" AND
+#   coverage_readiness_status=="LIVE_ELIGIBLE" (the live-eligible authority value
+#   enumerated in src/state/readiness_repo.py:17 and required by
+#   event_store.py fetch_pending). The _event() fixture lagged this with the
+#   placeholder "READY", so the fixture event was dead-lettered at SOURCE_TRUTH
+#   before reaching the post-submit classifier. Fixture brought to LIVE_ELIGIBLE;
+#   the FDR/KELLY/EXECUTOR_EXPRESSIBILITY classification invariants under test are
+#   unchanged and verified intact.
 
 import inspect
 
@@ -42,7 +52,7 @@ def _event():
         source_run_status="COMMITTED",
         source_run_completeness_status="COMPLETE",
         coverage_completeness_status="COMPLETE",
-        coverage_readiness_status="READY",
+        coverage_readiness_status="LIVE_ELIGIBLE",
     )
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
