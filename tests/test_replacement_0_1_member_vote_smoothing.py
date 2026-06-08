@@ -132,20 +132,29 @@ def test_composed_result_smoothing_off_is_byte_identical() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_zero_vote_bin_is_impossible_with_smoothing_off() -> None:
-    """Baseline of the defect: with smoothing OFF the 0-vote 'c_anchor_zero' bin is un-hittable."""
+def test_zero_vote_bin_raw_prior_is_zero_but_posterior_is_floored_not_unhittable() -> None:
+    """With smoothing OFF the 0-vote 'c_anchor_zero' RAW PRIOR is exactly 0.0, but the structural
+    floor (Fault A fix) keeps its POSTERIOR strictly positive (never literal-zero / -inf). The
+    floor mass is negligible -- the un-hittable CATEGORY is gone unconditionally, while the
+    MEANINGFUL trade mass still requires the flag-gated alpha (the next test)."""
     bins = _zero_vote_within_anchor_bins()
     raw = build_aifs_sampled_2t_bin_probabilities(_extraction(), metric="high", bins=bins)
-    # 'c_anchor_zero' (19-20) gets ZERO member votes -> prior 0.0.
+    # 'c_anchor_zero' (19-20) gets ZERO member votes -> raw prior exactly 0.0 (prior builder
+    # unchanged; smoothing is the only thing that lifts the prior itself).
     assert raw.probabilities["c_anchor_zero"] == 0.0
-    # And the anchor at 19.5C (inside that bin) STILL cannot mass it -> the veto fires.
+    # The anchor at 19.5C sits inside that bin. With smoothing OFF the POSTERIOR is no longer
+    # forced to 0.0 by the old -inf veto -- it is floored to a strictly-positive but negligible
+    # value (normalizable, hittable), NOT the trade-relevant mass the alpha supplies.
     off = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=_extraction(),
         openmeteo_anchor=_anchor(high_c=19.5),
         metric="high",
         bins=bins,
     )
-    assert off.posterior.probabilities["c_anchor_zero"] == 0.0  # structurally un-hittable
+    floored = off.posterior.probabilities["c_anchor_zero"]
+    assert floored > 0.0  # the un-hittable category is structurally impossible
+    assert floored < 1e-9  # but negligible -- not the flag-gated trading mass (iron rule #2/#6)
+    assert sum(off.posterior.probabilities.values()) == pytest.approx(1.0)
 
 
 def test_zero_vote_bin_within_anchor_mass_gets_positive_posterior_when_smoothed() -> None:
@@ -219,11 +228,15 @@ def test_alpha_is_a_small_dirichlet_pseudocount_well_below_one_vote() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_impossible_settling_bin_now_has_nonzero_mass() -> None:
-    """The category killer: a bin that gets 0 votes but is where settlement lands now has mass.
+def test_impossible_settling_bin_floor_vs_meaningful_alpha_mass() -> None:
+    """The category killer, in TWO regimes (one mechanism). A bin that gets 0 votes but is where
+    settlement lands is never literal-zero / un-hittable anymore.
 
-    Settlement at 19.5C falls in 'c_anchor_zero' (19-20). With smoothing OFF that bin is 0.0 ->
-    guaranteed miss + a manufactured 'impossible' bet. With smoothing ON the bin is hittable.
+    Settlement at 19.5C falls in 'c_anchor_zero' (19-20). With smoothing OFF the structural floor
+    already removes the un-hittable category, but with only NEGLIGIBLE mass (a normalizability
+    guarantee, not a bet). With smoothing ON the flag-gated alpha lifts the SAME bin to MEANINGFUL,
+    trade-relevant mass (orders of magnitude larger). This asserts the floor/alpha separation, not
+    the old bug-as-law `off == 0.0`.
     """
     bins = _zero_vote_within_anchor_bins()
     settled_bin_id = "c_anchor_zero"
@@ -241,5 +254,11 @@ def test_impossible_settling_bin_now_has_nonzero_mass() -> None:
         bins=bins,
         member_vote_smoothing_alpha=MEMBER_VOTE_SMOOTHING_ALPHA,
     )
-    assert off.posterior.probabilities[settled_bin_id] == 0.0  # the defect
-    assert on.posterior.probabilities[settled_bin_id] > 0.0  # the category is gone
+    off_mass = off.posterior.probabilities[settled_bin_id]
+    on_mass = on.posterior.probabilities[settled_bin_id]
+    # Floor-OFF: strictly positive (category gone) but negligible (structural floor only).
+    assert off_mass > 0.0
+    assert off_mass < 1e-9
+    # Flag-ON: meaningful trade-relevant mass, many orders of magnitude above the floor.
+    assert on_mass > 1e-9
+    assert on_mass > off_mass * 1e6  # alpha supplies the economic mass, not the floor

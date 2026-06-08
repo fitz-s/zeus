@@ -158,9 +158,13 @@ def test_flag_on_materialized_posterior_matches_smoothed_construction(monkeypatc
     posterior_id = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     got = _materialized_q(conn, posterior_id)
     assert got == pytest.approx(_expected_q(alpha=MEMBER_VOTE_SMOOTHING_ALPHA))
-    # The 0-vote 'cool' bin is un-hittable (0.0) raw, but strictly positive when smoothed.
-    assert _expected_q(alpha=None)["cool"] == 0.0
-    assert got["cool"] > 0.0
+    # The 0-vote 'cool' bin: flag-OFF carries only the negligible structural floor (Fault A fix,
+    # never literal-zero / un-hittable), while flag-ON carries MEANINGFUL smoothed mass. The
+    # materialized flag-ON q must be that meaningful mass, orders of magnitude above the floor.
+    off_cool = _expected_q(alpha=None)["cool"]
+    assert 0.0 < off_cool < 1e-9  # structural floor only -- negligible, not a trade
+    assert got["cool"] > 1e-9  # flag-ON: the meaningful trade-relevant smoothed mass
+    assert got["cool"] > off_cool * 1e6
 
 
 def test_resolver_default_config_flag_is_off_returns_none() -> None:

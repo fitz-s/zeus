@@ -12,6 +12,29 @@ PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
 DEFAULT_ANCHOR_WEIGHT = 0.80
 DEFAULT_ANCHOR_SIGMA_C = 3.00
 EPSILON = 1e-15
+# Unconditional STRUCTURAL prior floor (Fault A, soft_anchor.py zero-prior -inf veto fix).
+# Why this exists: a market bin whose AIFS member-vote prior is exactly 0.0 (zero votes) was
+# given log_term = -inf, which forces its normalized posterior to 0.0 -> the bin is STRUCTURALLY
+# un-hittable. Real settlement landing there is a guaranteed miss, and a cheap buy_no on a "0%"
+# bin looks like free EV but LOSES when settlement lands in it. This floor makes the literal-zero
+# / -inf category numerically impossible (Fitz #4: kill the category, not the instance): every
+# bin in support keeps a strictly-positive, finite log_term so the posterior is always
+# normalizable with no -inf and no NaN.
+#
+# Magnitude discipline (iron rule #2/#6): the floor is 1e-12 -- roughly NINE orders of magnitude
+# below the flag-gated member-vote smoothing pseudo-count (alpha=0.05 places ~1e-3 of meaningful
+# mass on a 0-vote bin). At flag-OFF the floor surfaces at most ~5e-5 of total posterior mass, and
+# only in the degenerate configuration where the anchor Gaussian is centered ON the floored bin
+# while every voted bin sits many sigma away (a posterior that is itself ~1.0 on a single far bin).
+# It NEVER raises any q_lcb and NEVER manufactures confidence -- it only ADDS a tiny mass to a
+# previously-zero bin, lowering (not raising) confidence on the formerly-un-hittable category. It
+# is therefore a structural normalizability guarantee, NOT the trading-mass change. The MEANINGFUL
+# economic mass remains the single flag-gated alpha knob (member_vote_smoothing_alpha, default-OFF,
+# on the shadow->prove->promote ladder): the floor and the alpha compose as ONE mechanism through
+# this same normalized prior -- the floor guarantees >0 / normalizable for every bin unconditionally;
+# the alpha, when proven and promoted, lands the trade-relevant mass through the SAME path. No
+# parallel smoothing or posterior path is created (iron rule #4).
+STRUCTURAL_PRIOR_FLOOR = 1e-12
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 
@@ -194,10 +217,15 @@ def build_soft_anchor_posterior(
         z = (center - anchor_c) / config.anchor_sigma_c
         log_likelihood = -0.5 * z * z
         likelihood[bin_id] = math.exp(log_likelihood)
-        if prior_probability <= 0.0:
-            log_terms[bin_id] = -math.inf
-        else:
-            log_terms[bin_id] = math.log(prior_probability) + config.anchor_weight * log_likelihood
+        # Unconditional structural floor: a zero-vote prior bin keeps a strictly-positive, finite
+        # log_term (never -inf) so it can never be made structurally un-hittable. One uniform path
+        # for every bin -- the floor only binds when the raw prior is <= the floor; otherwise the
+        # term is byte-identical to math.log(prior_probability) + weight*log_likelihood. The
+        # MEANINGFUL trade mass still arrives only via the flag-gated member_vote_smoothing_alpha
+        # upstream (which lifts the raw prior well above this floor); this floor adds only the
+        # negligible structural mass that removes the literal-zero / -inf pathology.
+        floored_prior = prior_probability if prior_probability > STRUCTURAL_PRIOR_FLOOR else STRUCTURAL_PRIOR_FLOOR
+        log_terms[bin_id] = math.log(floored_prior) + config.anchor_weight * log_likelihood
 
     finite_terms = [value for value in log_terms.values() if math.isfinite(value)]
     if not finite_terms:

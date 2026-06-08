@@ -73,7 +73,13 @@ def test_soft_anchor_sigma_unit_conversion_is_explicit_for_temperature_deltas() 
         anchor_sigma_to_celsius(3.0, "rankine")
 
 
-def test_soft_anchor_cannot_create_mass_for_zero_prior_bin() -> None:
+def test_soft_anchor_floors_zero_prior_bin_to_negligible_not_meaningful_mass() -> None:
+    # Structural invariant (Fault A fix): a zero-prior bin is NEVER literal-zero / un-hittable --
+    # the unconditional structural floor keeps it strictly positive and normalizable. But the floor
+    # adds only NEGLIGIBLE mass: the soft anchor (alone, smoothing OFF) does NOT manufacture
+    # trade-relevant mass on a 0-vote bin. The MEANINGFUL economic mass arrives only through the
+    # flag-gated member_vote_smoothing_alpha (covered by the smoothing suite). This asserts the
+    # floor/alpha SEPARATION -- one mechanism, two regimes -- not the old bug-as-law `== 0.0`.
     posterior = build_soft_anchor_posterior(
         aifs_probabilities={"cold": 0.50, "middle": 0.50, "warm": 0.0},
         bins=_bins(),
@@ -81,7 +87,13 @@ def test_soft_anchor_cannot_create_mass_for_zero_prior_bin() -> None:
     )
 
     assert posterior.anchor_likelihood["warm"] == pytest.approx(1.0)
-    assert posterior.probabilities["warm"] == 0.0
+    # Strictly positive (never structurally un-hittable) ...
+    assert posterior.probabilities["warm"] > 0.0
+    # ... but negligible: orders of magnitude below the flag-gated smoothing mass (~1e-3+), so the
+    # floor is a normalizability guarantee, NOT a trading-behavior change (iron rule #2/#6).
+    assert posterior.probabilities["warm"] < 1e-9
+    # The posterior remains a proper distribution.
+    assert sum(posterior.probabilities.values()) == pytest.approx(1.0)
 
 
 def test_source_disagreement_widens_anchor_sigma_instead_of_tightening_confidence() -> None:
