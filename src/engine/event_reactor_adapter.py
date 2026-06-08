@@ -1,8 +1,13 @@
-# Last reused or audited: 2026-06-05
+# Last reused or audited: 2026-06-08
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset;
 #   P1 ZERO-SUBMIT FIX B (2026-06-05, iron-rule-1, co-cause) — per-cycle in-flight reservation
 #   made rollback-aware (PortfolioReservationLedger): provisional reserve on Kelly+RiskGuard pass,
 #   reactor commits on emit / rolls back on downstream reject. Exposed via _submit.reservation_ledger.
+#   S1 (2026-06-08, "bin selection.md" §5.3/§5.4/§4/§9 Hidden #6/#16/§13/§14.3 +
+#   operator directive 2026-06-08): _execution_price_from_snapshot now prices each
+#   native side with its OWN side-tagged ExecutableCostCurve (depth-walked convex
+#   curve) built from the same snapshot row's native ask ladder — replacing the
+#   scalar VWMP cost-kernel pricing. One pricing object, no flag, no shadow branch.
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -26,6 +31,11 @@ import numpy as np
 
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice
+from src.contracts.executable_cost_curve import (
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import DecisionCertificate, build_certificate
@@ -8608,14 +8618,166 @@ def _execution_price_from_snapshot(
         raise ValueError("EDLI executable snapshot selected token mismatch")
     if _nonnull(row.get("selected_outcome_token_id")) == selected_token_id and not _snapshot_outcome_matches_selected_token(row, selected_token_id):
         raise ValueError("EDLI executable snapshot outcome label mismatch")
-    from src.strategy.live_inference import executable_cost as cost_kernel
 
+    # S1 (bin selection.md §5.3 cost-curve Kelly, §5.4 fees/slippage/depth,
+    # §9 Hidden #6 "scalar VWMP hides the convex cost curve", §4 executable-space
+    # separation, operator directive 2026-06-08): the native side is priced by
+    # its OWN ExecutableCostCurve — the depth-walked, fee-adjusted convex curve —
+    # NOT a single scalar VWMP at min_order_size shares. The curve is built from
+    # the SAME executable snapshot row's native ask ladder (yes_asks for buy_yes,
+    # no_asks for buy_no), side-tagged so a YES curve can never price a NO side
+    # (the contract raises on a curve_side mismatch). avg_cost(stake) emits the
+    # typed ExecutionPrice cost-of-entry at the chosen stake — the single live
+    # pricing object on this path. The scalar executable_cost VWMP kernel is no
+    # longer the pricing authority here.
+    side = _native_curve_side_for_direction(direction)
+    if side is None:
+        raise ValueError(f"unsupported direction for native cost curve: {direction}")
+
+    # The depth-coverage fill-LCB still walks the native quote book; we build it
+    # once and reuse its ladder for the curve so both read the SAME row depth.
     book = _native_quote_book_from_snapshot_row(row)
     shares = book.min_order_size
-    execution_price = cost_kernel.executable_cost(book, direction=direction, shares=shares)  # type: ignore[arg-type]
+    curve = _native_side_cost_curve_from_snapshot_row(
+        row, side=side, token_id=selected_token_id, book=book
+    )
+
+    # The chosen-stake cost-of-entry on the convex curve. The proof path sizes
+    # the candidate at the venue min-order notional (the smallest executable
+    # taker order); the curve's avg_cost is non-decreasing in stake (Hidden #6),
+    # so this is the cheapest executable all-in cost. ExecutableCostCurve.avg_cost
+    # raises (depth-exhausted / off-grid / empty / below-min-order) exactly where
+    # the §13 no-trade gates require fail-closed — the caller routes a ValueError
+    # to the EXECUTABLE_NATIVE_ASK_MISSING / NATIVE_QUOTE_MISSING no-trade path.
+    min_notional = _min_order_notional_usd(curve)
+    execution_price = curve.avg_cost(min_notional)
+
     p_fill_lcb = _p_fill_lcb_for_direction(book, direction=direction, shares=shares)
     c_cost_95pct = min(0.999999, execution_price.value + float(book.min_tick_size))
     return execution_price, p_fill_lcb, c_cost_95pct
+
+
+def _native_curve_side_for_direction(direction: str) -> str | None:
+    """Map a BUY direction to the native executable side the curve prices.
+
+    buy_yes -> "YES" (walks yes_asks); buy_no -> "NO" (walks no_asks). Sell
+    directions and anything else return None: the cost curve prices a BUY only
+    (spec §5.4 "walk asks for BUY"), and the candidate proof path only ever
+    prices buy_yes / buy_no.
+    """
+    if direction == "buy_yes":
+        return "YES"
+    if direction == "buy_no":
+        return "NO"
+    return None
+
+
+def _min_order_notional_usd(curve: "ExecutableCostCurve") -> Decimal:
+    """Smallest executable all-in stake (USD) that buys ``min_order_size`` shares.
+
+    The proof path sizes the candidate at the venue min-order quantity — the
+    smallest executable taker order. ``ExecutableCostCurve`` is parameterized by
+    a USD stake, so we convert ``min_order_size`` shares into the all-in USD
+    notional at the cheapest (top) level. Using the top level's all-in price is
+    a strict LOWER bound on the notional needed for that share count (deeper
+    shares cost more), so the resulting avg_cost is the cheapest executable
+    all-in cost and the curve's depth/min-order/off-grid guards still fire when
+    the book cannot actually fill it (§13 fail-closed).
+    """
+    top = curve.levels[0]
+    all_in_top = curve.fee_model.all_in_price(top.price)
+    return curve.min_order_size * all_in_top
+
+
+def _native_side_cost_curve_from_snapshot_row(
+    row: dict[str, Any],
+    *,
+    side: str,
+    token_id: str,
+    book: Any | None = None,
+) -> "ExecutableCostCurve":
+    """Build the native side's ExecutableCostCurve from a snapshot row (S1).
+
+    Spec §14.3 + §5.3/§5.4 + §4 + Hidden #6/#16. The curve is constructed from
+    the SAME executable snapshot row's native ask ladder as the rest of the proof
+    path: ``yes_asks`` for ``side=="YES"``, ``no_asks`` for ``side=="NO"``. The
+    curve carries ``side`` so the bin-selection contract makes pricing a NO side
+    from the YES book UNCONSTRUCTABLE (it raises on a curve_side mismatch).
+
+    Fail-closed (§13): an empty native ask ladder, an off-min-tick-grid price, or
+    an invalid tick/min-order raises ValueError, which the proof path routes to
+    NATIVE_QUOTE_MISSING (execution_price=None, native_quote_available=False) —
+    never a fabricated price.
+
+    ``book`` may be passed to reuse an already-built NativeQuoteBook (the proof
+    path builds it once for the fill-LCB); otherwise it is built here.
+    """
+    if side not in ("YES", "NO"):
+        raise ValueError(f"native cost curve side must be 'YES' or 'NO', got {side!r}")
+    if book is None:
+        book = _native_quote_book_from_snapshot_row(row)
+
+    asks = book.yes_asks if side == "YES" else book.no_asks
+    if not asks:
+        # §13 no-trade gate: a BUY side with no native ask depth is not tradeable.
+        # Surface the missing-quote condition rather than fabricate a price.
+        raise ValueError(
+            f"native {side} ask ladder is empty on token {token_id!r}; "
+            "fail closed (NATIVE_QUOTE_MISSING) rather than fabricate a price"
+        )
+
+    # ExecutableCostCurve owns its own grid/range validation (each BookLevel must
+    # be in (0, 1); every level must lie on min_tick; Hidden #16). We map the
+    # native QuoteLevel ladder onto BookLevel and let the contract enforce.
+    levels = tuple(BookLevel(price=lvl.price, size=lvl.size) for lvl in asks)
+    fee_model = FeeModel(fee_rate=Decimal(str(book.fee_rate)))
+    return ExecutableCostCurve(
+        token_id=str(token_id),
+        side=side,  # type: ignore[arg-type]
+        snapshot_id=_nonnull(row.get("snapshot_id")),
+        book_hash=_nonnull(
+            row.get("book_hash")
+            or row.get("executable_book_hash")
+            or row.get("snapshot_hash")
+            or row.get("raw_orderbook_hash")
+        ),
+        levels=levels,
+        fee_model=fee_model,
+        min_tick=book.min_tick_size,
+        min_order_size=book.min_order_size,
+        quote_ttl=_native_quote_ttl_from_row(row),
+    )
+
+
+def _native_quote_ttl_from_row(row: dict[str, Any]) -> "timedelta":
+    """Resolve a positive quote TTL for the curve from the snapshot row.
+
+    ExecutableCostCurve requires a strictly-positive ``quote_ttl`` (it carries the
+    freshness budget for the cache / submit-recapture layer; it does NOT itself
+    enforce expiry — that is the runtime's job at recapture). The proof-layer
+    pricing on this path does not gate on TTL (price TTL must not shrink the
+    family selector; the selected leg is re-authorized against a JIT book at
+    submit). We derive a positive budget from freshness_deadline - captured_at
+    when both are present, else fall back to a small positive default.
+    """
+    from datetime import timedelta as _td
+
+    captured = _parse_iso_optional(row.get("captured_at"))
+    deadline = _parse_iso_optional(row.get("freshness_deadline"))
+    if captured is not None and deadline is not None:
+        delta = deadline - captured
+        if delta > _td(0):
+            return delta
+    return _td(seconds=1)
+
+
+def _parse_iso_optional(value: object) -> "datetime | None":
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _native_quote_book_from_snapshot_row(row: dict[str, Any]):
