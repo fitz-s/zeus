@@ -575,8 +575,12 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
     # scale-out knob. Renamed so the name matches the control it actually performs.
     if not bool(edli_cfg.get("edli_live_operator_authorized", False)):
         raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED")
+    # OPERATOR DIRECTIVE (2026-06-08): promotion-artifact/canary gate is
+    # promotion bureaucracy. When edli_live_promotion_artifact_required is
+    # False, bypass the rest of this function (artifact file + canary checks).
+    # edli_live_operator_authorized above is the operator ARM switch — kept.
     if not bool(edli_cfg.get("edli_live_promotion_artifact_required", True)):
-        raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT_REQUIRED")
+        return
 
     artifact_path = str(edli_cfg.get("edli_live_promotion_artifact_path") or "").strip()
     if not artifact_path:
@@ -4975,14 +4979,24 @@ def _current_live_fact_status(relative_path: str) -> str:
 
 
 @_scheduler_job("replacement_forecast_shadow_materialize")
-def _replacement_forecast_shadow_materialize_cycle() -> None:
+def _replacement_forecast_download_cycle() -> None:
+    """Proactive raw-input PRE-FETCH for the U0R/replacement soft-anchor forecast.
+
+    Operator directive 2026-06-08 (WIRING FIX): the 150-300MB AIFS-ensemble +
+    OpenMeteo raw-input downloads MUST NOT run inside the 5-min seed->materialize
+    cycle. At ~500kB/s a single AIFS-ensemble fetch takes 5-10 min, so when it ran
+    inline the materialize job overran its 5-min interval and apscheduler SKIPPED
+    every subsequent cycle ("maximum number of running instances reached") — seeds
+    never got produced and readiness went permanently stale. Raw inputs are DATA
+    and must be fetched ahead of need on a slower, independent lane; the trade-
+    producing materialize cycle then only consumes already-downloaded manifests.
+
+    Runs on the default executor (20-worker pool) on its own long interval, so it
+    overlaps the fast materialize cycle on a separate thread without blocking it.
+    Fail-soft and idempotent (skips already-downloaded manifests)."""
     flags = _replacement_forecast_runtime_flags_from_settings()
     if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
         return
-    from src.data.replacement_forecast_shadow_materialization_queue import (
-        process_replacement_forecast_shadow_materialization_queue,
-    )
-
     cfg = _replacement_forecast_shadow_materialization_queue_config()
     download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
     if download_report is not None and download_report.get("status") not in {
@@ -4998,6 +5012,19 @@ def _replacement_forecast_shadow_materialize_cycle() -> None:
         "U0R_EXTRA_NO_TARGETS",
     }:
         logger.info("U0R extra-model shadow capture report: %s", u0r_capture_report)
+
+
+def _replacement_forecast_shadow_materialize_cycle() -> None:
+    flags = _replacement_forecast_runtime_flags_from_settings()
+    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+        return
+    from src.data.replacement_forecast_shadow_materialization_queue import (
+        process_replacement_forecast_shadow_materialization_queue,
+    )
+
+    # Raw-input download is now a SEPARATE job (_replacement_forecast_download_cycle)
+    # so it can never block this seed->materialize cycle (see that function's note).
+    cfg = _replacement_forecast_shadow_materialization_queue_config()
     report = process_replacement_forecast_shadow_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
@@ -7896,6 +7923,22 @@ def main():
             minutes=int((_settings_section("replacement_forecast_shadow", {}) or {}).get("materialization_interval_min") or 5),
             id="replacement_forecast_shadow_materialize",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 95.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # WIRING FIX (operator 2026-06-08): raw-input PRE-FETCH on its own slower lane,
+        # decoupled from the 5-min materialize cycle above. The 150-300MB AIFS-ensemble
+        # downloads (5-10 min each at ~500kB/s) overran the materialize interval when
+        # they ran inline, so apscheduler skipped every materialize cycle and readiness
+        # went stale. This job runs on the default 20-worker pool on a separate thread,
+        # fetching ahead of need; the materialize cycle now only consumes downloaded
+        # manifests. max_instances=1 + coalesce so a slow fetch never piles up.
+        scheduler.add_job(
+            _replacement_forecast_download_cycle,
+            "interval",
+            minutes=int((_settings_section("replacement_forecast_shadow", {}) or {}).get("download_interval_min") or 15),
+            id="replacement_forecast_download",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 30.0),
             max_instances=1,
             coalesce=True,
         )
