@@ -348,8 +348,21 @@ def build_openmeteo_ifs9_aifs_soft_anchor_result(
     settlement_step_c: float = 1.0,
     bias_shift_c: float | None = None,
     member_vote_smoothing_alpha: float | None = None,
+    anchor_value_override_c: float | None = None,
+    anchor_sigma_override_c: float | None = None,
 ) -> OpenMeteoIfs9AifsSoftAnchorResearchResult:
     """Build the fixed research posterior from raw AIFS and Open-Meteo anchors.
+
+    ``anchor_value_override_c`` / ``anchor_sigma_override_c`` (U0R-Bayes fusion, 2026-06-08):
+    flag-gated REPLACEMENT of the single OM9 9km deterministic anchor center / spread with the
+    U0R multi-model Bayesian posterior mu* / sqrt(V*). When set, the soft-anchor Gaussian
+    likelihood is centered on the FUSED center with the FUSED sigma instead of the lone OM9
+    anchor (the AIFS member-vote prior, the EB bias shift, and the member-vote smoothing are
+    UNCHANGED — the fusion replaces ONLY the anchor center/spread, per U0R_BAYES_SPEC.md §6
+    integration). The override center is used AS-IS (the U0R z values are already EB-bias-
+    corrected by the fusion; the per-city ``bias_shift_c`` continues to correct the AIFS votes
+    only). ``None`` for BOTH is byte-identical to today (default-OFF). Authority:
+    src/forecast/u0r_bayes.py (the ported proof C1 fusion).
 
     ``member_vote_smoothing_alpha`` (THE_PATH member-vote smoothing, 2026-06-07): flag-gated
     additive Laplace/Dirichlet pseudo-count on the AIFS member votes (forwarded to
@@ -388,11 +401,29 @@ def build_openmeteo_ifs9_aifs_soft_anchor_result(
     raw_anchor_value_c = openmeteo_anchor.high_c if normalized_metric == "high" else openmeteo_anchor.low_c
     # Shift the anchor center consistently with the member votes (corrected = raw - bias).
     anchor_value_c = raw_anchor_value_c - shift
+    fusion_config = config
+    if anchor_value_override_c is not None:
+        # U0R fusion (flag-ON): the multi-model posterior mu* REPLACES the OM9 single-anchor
+        # center. The U0R z values are already EB-bias-corrected inside the fusion, so the
+        # override is used AS-IS (no extra `shift`). The AIFS member-vote prior + bias_shift_c
+        # member correction + smoothing remain exactly as constructed above.
+        override_center = float(anchor_value_override_c)
+        if not math.isfinite(override_center):
+            raise ValueError("anchor_value_override_c must be finite")
+        anchor_value_c = override_center
+    if anchor_sigma_override_c is not None:
+        override_sigma = float(anchor_sigma_override_c)
+        if not (math.isfinite(override_sigma) and override_sigma > 0.0):
+            raise ValueError("anchor_sigma_override_c must be positive and finite")
+        fusion_config = SoftAnchorConfig(
+            anchor_weight=config.anchor_weight,
+            anchor_sigma_c=override_sigma,
+        )
     posterior = build_soft_anchor_posterior(
         aifs_probabilities=aifs_probabilities.probabilities,
         bins=aifs_probabilities.soft_anchor_bins,
         anchor_c=anchor_value_c,
-        config=config,
+        config=fusion_config,
     )
     return OpenMeteoIfs9AifsSoftAnchorResearchResult(
         metric=normalized_metric,

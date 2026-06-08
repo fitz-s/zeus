@@ -522,6 +522,128 @@ def _replacement_member_vote_smoothing_alpha() -> float | None:
         return None
 
 
+@dataclass(frozen=True)
+class _U0RFusionOverride:
+    """The U0R fused center/spread that replace the single-anchor in the soft-anchor build,
+    plus the F6 EMOS identity components (model_set_hash, resolution_mix_hash, lead_bucket)
+    and provenance for the fused product."""
+
+    anchor_value_c: float
+    anchor_sigma_c: float
+    method: str
+    used_models: tuple[str, ...]
+    model_set_hash: str
+    resolution_mix_hash: str
+    lead_bucket: str
+    dropped_models: tuple[str, ...]
+    excluded_regionals: tuple[str, ...]
+    dropped_aliases: tuple[str, ...]
+
+
+def _u0r_lead_bucket(lead_days: int) -> str:
+    """F6 lead_bucket for the fused EMOS cell. Regional expert is lead<=1; group leads."""
+    if lead_days <= 1:
+        return "L1"
+    if lead_days <= 3:
+        return "L2_3"
+    return "L4P"
+
+
+def _replacement_u0r_fusion_override(
+    request: "ReplacementForecastMaterializeRequest",
+    *,
+    metric: str,
+    anchor_value_corrected_c: float,
+) -> _U0RFusionOverride | None:
+    """Flag-gated U0R-Bayes multi-model fusion override (the_path replacement_0_1_u0r_fusion).
+
+    Returns the fused (anchor_value_c, anchor_sigma_c) that REPLACE the single OM9 9km anchor
+    center/spread in the soft-anchor construction, ONLY when ``replacement_0_1_u0r_fusion_enabled``
+    is true AND at least one decorrelated extra survives the fail-soft capture. Returns None when
+    the flag is OFF (default) OR all extras are absent -> the existing single-anchor path runs
+    BYTE-IDENTICALLY. This is the ONE place the flag is read; the fusion itself is the ported
+    proof C1 (src/forecast/u0r_bayes.py — no parallel fusion).
+
+    LAYERING (U0R_BAYES_SPEC.md §6 integration): the override is computed from the ALREADY
+    EB-bias-corrected anchor center (so it composes AFTER the EB bias layer); it replaces only
+    the anchor center/spread; the AIFS member-vote prior + member-vote smoothing + the downstream
+    q_lcb settlement floor + EMOS + bin integration are all UNCHANGED. FAIL-SOFT / FAIL-CLOSED:
+    any error, missing config, or zero surviving extras -> None (never raises, never blocks).
+    """
+    try:
+        from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
+
+        edli_cfg = settings["edli_v1"]
+        if not bool(edli_cfg.get("replacement_0_1_u0r_fusion_enabled", False)):
+            return None
+
+        city_obj = runtime_cities_by_name().get(request.city)
+        if city_obj is None:
+            return None
+        lat = float(getattr(city_obj, "lat"))
+        lon = float(getattr(city_obj, "lon"))
+        tz_name = str(getattr(city_obj, "timezone", request.city_timezone))
+
+        target_date = _date_text(request.target_date)
+        target_local_date = date.fromisoformat(target_date)
+        computed_at = _to_utc(request.computed_at, field_name="computed_at")
+        lead_days = max(0, (target_local_date - computed_at.date()).days)
+
+        from src.data.u0r_multimodel_capture import capture_u0r_instruments  # noqa: PLC0415
+        from src.forecast.u0r_bayes import fuse_u0r_posterior  # noqa: PLC0415
+
+        # Optional injected seams (live wiring / tests). Defaults are fail-soft no-ops.
+        history_provider = getattr(_replacement_u0r_fusion_override, "_history_provider", None)
+        live_fetch = getattr(_replacement_u0r_fusion_override, "_live_fetch", None)
+
+        capture = capture_u0r_instruments(
+            city=request.city, metric=metric, latitude=lat, longitude=lon,
+            timezone_name=tz_name,
+            run=_to_utc(request.source_cycle_time, field_name="source_cycle_time"),
+            target_local_date=target_local_date, lead_days=lead_days,
+            anchor_z_corrected=float(anchor_value_corrected_c),
+            history_provider=history_provider, live_fetch=live_fetch,
+        )
+        if not capture.has_extras:
+            # All extras absent -> keep the existing single-anchor posterior (byte-identical).
+            return None
+
+        fused = fuse_u0r_posterior(
+            anchor_z=capture.anchor_z, anchor_tau0=capture.anchor_tau0,
+            likelihood=capture.likelihood, disagree_var=capture.disagree_var,
+            use_covariance=True,
+        )
+
+        used_models = tuple(fused.used_models)
+        model_set_hash = _json_hash(sorted(used_models))
+        # resolution_mix_hash captures which native grid resolutions entered the fused product
+        # (anchor 0.1, globals ~0.25/seamless, regional 2km). Keyed by the deduped model set.
+        resolution_mix_hash = _json_hash(
+            {"models": sorted(used_models), "regional": sorted(fused.regional_models)}
+        )
+        return _U0RFusionOverride(
+            anchor_value_c=float(fused.mu),
+            anchor_sigma_c=float(fused.sd),
+            method=fused.method,
+            used_models=used_models,
+            model_set_hash=model_set_hash,
+            resolution_mix_hash=resolution_mix_hash,
+            lead_bucket=_u0r_lead_bucket(lead_days),
+            dropped_models=capture.dropped_models,
+            excluded_regionals=capture.selection.excluded_regionals,
+            dropped_aliases=capture.selection.dropped_aliases,
+        )
+    except Exception as exc:  # fail-soft: never break shadow materialization
+        try:
+            import logging  # noqa: PLC0415
+            logging.getLogger("zeus.replacement_u0r_fusion").warning(
+                "replacement_0_1 U0R fusion wiring skipped (fail-soft): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
 def _insert_posterior(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -537,6 +659,15 @@ def _insert_posterior(
     # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
     # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
     member_vote_smoothing_alpha = _replacement_member_vote_smoothing_alpha()
+    # U0R-Bayes fusion (flag-gated, default-OFF): replace the single OM9 9km anchor center/spread
+    # with the multi-model Bayesian posterior. Computed from the EB-corrected anchor center so it
+    # composes AFTER the EB bias layer; member-vote smoothing stays applied to the AIFS prior; the
+    # downstream q_lcb floor + EMOS + bin integration are unchanged. None -> byte-identical path.
+    raw_anchor_value_c = request.openmeteo_anchor.high_c if metric == "high" else request.openmeteo_anchor.low_c
+    anchor_value_corrected_c = float(raw_anchor_value_c) - (0.0 if bias_shift_c is None else float(bias_shift_c))
+    u0r_override = _replacement_u0r_fusion_override(
+        request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c
+    )
     result = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=request.aifs_extraction,
         openmeteo_anchor=request.openmeteo_anchor,
@@ -546,6 +677,8 @@ def _insert_posterior(
         settlement_step_c=float(request.settlement_step_c),
         bias_shift_c=bias_shift_c,
         member_vote_smoothing_alpha=member_vote_smoothing_alpha,
+        anchor_value_override_c=(u0r_override.anchor_value_c if u0r_override is not None else None),
+        anchor_sigma_override_c=(u0r_override.anchor_sigma_c if u0r_override is not None else None),
     )
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
@@ -571,6 +704,23 @@ def _insert_posterior(
         "anchor_sigma_c": float(request.anchor_sigma_c),
         "settlement_step_c": float(request.settlement_step_c),
     }
+    if u0r_override is not None:
+        # F6: the FUSED product gets its OWN EMOS cell identity (product + resolution_mix_hash +
+        # model_set_hash + lead_bucket) so it never reuses the single-anchor EMOS cell. The fused
+        # center/spread REPLACE the OM9 anchor, so posterior_config_hash diverges from the
+        # single-anchor cell by construction.
+        posterior_config.update(
+            {
+                "posterior_method": "the_path_u0r_fusion",
+                "u0r_fusion_method": u0r_override.method,
+                "u0r_product_id": "the_path_u0r_fusion_v1",
+                "u0r_model_set_hash": u0r_override.model_set_hash,
+                "u0r_resolution_mix_hash": u0r_override.resolution_mix_hash,
+                "u0r_lead_bucket": u0r_override.lead_bucket,
+                "u0r_anchor_value_c": float(u0r_override.anchor_value_c),
+                "u0r_anchor_sigma_c": float(u0r_override.anchor_sigma_c),
+            }
+        )
     posterior_config_hash = _json_hash(posterior_config)
     family_id = f"{request.city}:{target_date}:{metric}:{bin_topology_hash}"
     provenance_payload = {
@@ -605,6 +755,20 @@ def _insert_posterior(
         "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
+    if u0r_override is not None:
+        provenance_payload["u0r_fusion"] = {
+            "method": u0r_override.method,
+            "used_models": list(u0r_override.used_models),
+            "model_set_hash": u0r_override.model_set_hash,
+            "resolution_mix_hash": u0r_override.resolution_mix_hash,
+            "lead_bucket": u0r_override.lead_bucket,
+            "anchor_value_c": float(u0r_override.anchor_value_c),
+            "anchor_sigma_c": float(u0r_override.anchor_sigma_c),
+            "dropped_models": list(u0r_override.dropped_models),
+            "excluded_regionals": list(u0r_override.excluded_regionals),
+            "dropped_aliases": list(u0r_override.dropped_aliases),
+            "fusion_authority": "SHADOW_ONLY",
+        }
     posterior_identity_hash = _json_hash(
         {
             "source_id": SOURCE_ID,
