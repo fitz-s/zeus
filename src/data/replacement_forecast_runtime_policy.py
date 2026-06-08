@@ -255,69 +255,24 @@ def resolve_replacement_forecast_runtime_policy(
     if direction_flip and not kelly_increase:
         reasons.append("REPLACEMENT_DIRECTION_FLIP_REQUIRES_KELLY_AUTHORITY")
 
-    # FIX-1 (§0.3) tightened OR -> AND (ITEM B, 2026-06-07): evidence must be
-    # LOAD-BEARING, and BOTH proofs are required for real money. When the flag ladder
-    # would otherwise grant LIVE_AUTHORITY (trade_authority on, no flag-order errors),
-    # the runtime authority is admitted ONLY if BOTH evidence objects pass their own
-    # blocking-code gate by TYPE:
-    #   promotion_evidence is not None AND promotion_evidence.promotion_allowed()
-    #   AND capital_objective_evidence is not None AND .capital_objective_allowed()
-    # Rationale: overconfidence = ruin. Promotion evidence (statistical validation:
-    # nested walk-forward, coverage, anti-lookahead) and capital-objective evidence
-    # (empirical winner + after-cost EV on the same-CLOB replay) are DIFFERENT proofs;
-    # a single passing proof is necessary but NOT sufficient to risk capital.
+    # OPERATOR DIRECTIVE 2026-06-08 — the promotion / capital-objective EVIDENCE GATE
+    # is REMOVED permanently. It was a circular pre-trade bureaucracy: it demanded
+    # after-cost-PnL / same-CLOB-replay / nested-walk-forward proof BEFORE any live
+    # trade, but after-cost proof can only be earned by trading. LIVE_AUTHORITY is now
+    # granted from the strict flag ladder alone (shadow -> veto -> trade_authority).
     #
-    # When the conjunction is NOT satisfied the path does NOT reach LIVE_AUTHORITY.
-    # It is capped at SHADOW_VETO_ONLY (when the safe flag ladder holds) carrying the
-    # REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE reason plus the UNION of blocking
-    # codes (absent evidence => *_EVIDENCE_REQUIRED; present-but-failing evidence =>
-    # its own blocking codes verbatim). This makes "alert but do not block" theater
-    # AND "one proof is enough" both unconstructable: the resolver cannot reach
-    # LIVE_AUTHORITY from flags alone, nor from a single passing evidence object.
-    #
-    # FIX-1 re-point (REAUDIT_0_1.md §1.4 Insertion B): the boolean verdict is now
-    # owned by the SINGLE shared gate ``replacement_live_authority_evidence_gate`` so
-    # the live 0.1 path (event_reactor_adapter) and this legacy resolver cannot drift
-    # — one gate, one truth (iron rule #4). The legacy-specific *_EVIDENCE_REQUIRED
-    # reason codes and the per-evidence blocking codes are still surfaced verbatim
-    # here so the established §0.3 antibody contract (and its tests) hold unchanged;
-    # the gate's own require-codes are folded in via ``gate_codes`` so the SAME
-    # verdict the 0.1 path sees is also recorded on the resolver receipt.
-    both_evidence_live_authority, gate_codes = replacement_live_authority_evidence_gate(
-        promotion_evidence,
-        capital_objective_evidence,
-    )
-    evidence_reasons: list[str] = []
-    if trade_authority and not both_evidence_live_authority:
-        evidence_reasons.append("REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE")
-        if promotion_evidence is None:
-            evidence_reasons.append("REPLACEMENT_PROMOTION_EVIDENCE_REQUIRED")
-        else:
-            evidence_reasons.extend(promotion_evidence.blocking_reason_codes())
-        if capital_objective_evidence is None:
-            evidence_reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED")
-        else:
-            evidence_reasons.extend(capital_objective_evidence.blocking_reason_codes())
-        # Fold the shared gate's own codes (single-owner proof: the resolver records
-        # the EXACT verdict the live 0.1 path observed) without duplicating any code.
-        for code in gate_codes:
-            if code not in evidence_reasons:
-                evidence_reasons.append(code)
-
-    # FIX-1 AND posture (strictly-more-restrictive, never weaken an existing guard):
-    # whenever trade_authority is armed but the BOTH-evidence conjunction is unmet,
-    # the path is a hard BLOCKED (NOT SHADOW_VETO_ONLY). BLOCKED is strictly more
-    # restrictive than SHADOW_VETO_ONLY — it also withholds the shadow/veto read — and
-    # the pre-existing §0.3 antibody suite already encodes BLOCKED for the no-evidence
-    # case; degrading it to SHADOW_VETO_ONLY would loosen a live-money guard, which the
-    # hard rules forbid. The brief's reason-code contract is honored: the
-    # REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE sentinel plus the union of blocking
-    # codes are surfaced verbatim so the evidence gate is load-bearing by type. Every
-    # input that previously reached LIVE_AUTHORITY with a SINGLE proof is now BLOCKED.
-    if reasons or evidence_reasons:
+    # The REAL risk controls are NOT here and are untouched: runtime q_lcb (the
+    # settlement-sigma conservative lower bound used in sizing), fractional Kelly, the
+    # after-cost cost floor, the direction law (buy_yes <=> bin≈forecast, never
+    # inverted), and RiskGuard all remain enforced downstream in the economic/sizing
+    # gate. Overconfidence is bounded FORWARD by q_lcb + fractional Kelly and judged by
+    # SETTLEMENT (the only truth), not by a pre-trade evidence checklist. The evidence
+    # dataclasses + replacement_live_authority_evidence_gate remain defined for shadow
+    # observability/receipts but no longer gate live authority.
+    if reasons:
         return ReplacementForecastRuntimePolicy(
             status=BLOCKED_STATUS,
-            reason_codes=tuple(reasons + evidence_reasons),
+            reason_codes=tuple(reasons),
             shadow_enabled=shadow,
             veto_enabled=veto,
             trade_authority_enabled=False,

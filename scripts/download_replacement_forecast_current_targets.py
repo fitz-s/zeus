@@ -157,8 +157,14 @@ def download_current_target_raw_inputs(
     anchor_sigma_c: float,
     aifs_retries: int,
 ) -> dict[str, object]:
-    plan = build_replacement_forecast_current_target_plan(forecast_db, limit=limit)
-    targets = [row for row in plan.rows if not row.covered]
+    # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
+    # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
+    # to uncovered rows only — otherwise a limit of 10 on an alphabetically-ordered
+    # result that happens to start with 10 covered cities returns an empty target
+    # list and the downloader silently produces zero manifests every cycle.
+    plan = build_replacement_forecast_current_target_plan(forecast_db)
+    _uncovered = [row for row in plan.rows if not row.covered]
+    targets = _uncovered[:limit] if limit else _uncovered
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)

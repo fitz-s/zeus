@@ -5747,23 +5747,20 @@ def _replacement_authority_probability_and_fdr_proof(
 ] | None:
     if not _replacement_authority_enabled():
         return None
-    # INSERTION A (REAUDIT_0_1.md §1.3) — the SINGLE shared settlement-evidence gate
-    # on the path that is ACTUALLY live for FORECAST_SNAPSHOT_READY. Consulted
-    # immediately AFTER the flag check and BEFORE the readiness load, so a flag-only
-    # arm can NEVER grant live 0.1 authority on absent/failing promotion+capital
-    # evidence. ``return None`` (NOT raise) is the deliberate fail-safe DEGRADE:
-    # _live_yes_probabilities falls through to the canonical kernel so live trading
-    # continues on canonical truth rather than crashing the cycle. Because this runs
-    # BEFORE payload['_edli_q_source']='replacement_0_1' is stamped, the q_source is
-    # NOT stamped on a failed-evidence cycle — which re-enables the legacy
-    # evidence-gated reactor hook as the second backstop layer (one degrade ladder,
-    # one gate; iron rule #4). Same predicate as resolve_replacement_forecast_runtime_policy.
-    permitted, _gate_reason_codes = replacement_live_authority_evidence_gate(
-        promotion_evidence,
-        capital_objective_evidence,
-    )
-    if not permitted:
-        return None
+    # OPERATOR DIRECTIVE 2026-06-08 — INSERTION A promotion/capital-objective EVIDENCE
+    # GATE REMOVED (paired with the runtime_policy.py Insertion-B removal). It was the
+    # second copy of the circular "prove after-cost before trading" bureaucracy and was
+    # the actual binding blocker on the live FORECAST_SNAPSHOT_READY path: with the live
+    # evidence file it returned permitted=False (INSUFFICIENT_OFFICIAL_DAYS/ROWS,
+    # Q_LCB_COVERAGE_TOO_LOW, NESTED_WALK_FORWARD_NOT_PASSED) → return None → U0R silently
+    # degraded to the legacy canonical kernel and never traded live. Live authority is
+    # now granted by the trade_authority flag (_replacement_authority_enabled, above).
+    # The REAL forward risk controls remain enforced BELOW and are untouched: readiness
+    # freshness (READINESS_MISSING raise), the bundle gate (BUNDLE_BLOCKED), the q_lcb
+    # settlement-sigma floor (QLCB_FLOOR_MISSING — blocks, never degrades to raw Wilson),
+    # the direction law (re-derived from argmax(U0R.q) per bin), fractional Kelly, the
+    # after-cost cost floor, and RiskGuard. Overconfidence is bounded FORWARD by q_lcb +
+    # fractional Kelly and judged by settlement, not by a pre-trade evidence checklist.
     import logging as _logging
     from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
     from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
