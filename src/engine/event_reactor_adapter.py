@@ -16,6 +16,18 @@
 #   Dead helper _min_order_notional_usd removed. Byte-identical to the legacy
 #   share-parameterized VWMP all-in for all books (zero-fee/single-level); the
 #   per-level fee on multi-level walks is the curve being more correct.
+#   S2 (2026-06-08, "bin selection.md" §4/§5.6/§9 Hidden #2/#3/#4/§12.B/§14.4 +
+#   operator directive 2026-06-08): the q-construction builders now derive q_lcb
+#   from the per-bin YES *probability* samples (market_analysis.bin_yes_probability_
+#   samples) via ProbabilityUncertainty — REPLACING the "q_lcb = edge_ci_lower + cost"
+#   restore (Hidden #2) in _canonical_probability_and_fdr_proof. The native-NO leg
+#   carries its OWN robust q_lcb_no = 1 - q_ucb_yes (canonical via the per-sample
+#   complement no_side_samples; replacement_0_1 via the bundle q_ucb map in
+#   _replacement_no_lcb_for_bin), NOT 1 - q_lcb_yes (Hidden #3). _generate_candidate_
+#   proofs now gives buy_no a real q_no = 1 - q_yes point + native q_lcb_no, retiring
+#   the ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING hardcode (Hidden #4) and the
+#   dead "q_lcb > q_value" boundary clamp (the invariant is now structural in the seam).
+#   One seam helper (_side_q_lcb_from_yes_samples), no flag, no shadow branch.
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -5069,37 +5081,25 @@ def _generate_candidate_proofs(
         from src.calibration.qlcb_provenance import _qlcb_raw_float
         yes_lcb = _qlcb_raw_float(yes_lcb_entry)
         no_lcb = _qlcb_raw_float(no_lcb_entry)
+        # bin-selection S2 (Hidden #3/#4, §4): the buy_no leg now carries a REAL native-NO
+        # belief authority, not the disabled placeholder. The NO point is the per-sample
+        # YES complement 1 - yes_q (valid in belief space, §4); the NO q_lcb is no_lcb —
+        # the native-NO robust lower bound 1 - q_ucb_yes from the q-construction seam
+        # (canonical: _side_q_lcb_from_yes_samples; replacement: _replacement_no_lcb_for_bin).
+        # The old ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING hardcode (which forced
+        # q_no=0 so buy_no never scored) is retired: the native NO authority IS the posterior.
+        no_q = float(min(max(1.0 - float(yes_q), 0.0), 1.0))
         for token_id, direction, q_value, q_lcb, independent_no_missing_reason in (
             (str(candidate.yes_token_id or ""), "buy_yes", yes_q, yes_lcb, None),
-            (
-                str(candidate.no_token_id or ""),
-                "buy_no",
-                0.0,
-                0.0,
-                "ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING",
-            ),
+            (str(candidate.no_token_id or ""), "buy_no", no_q, no_lcb, None),
         ):
             row = rows_by_direction.get((condition_id, direction))
-            # R5/#176 boundary antibody (2026-06-04): a recorded lower bound can
-            # never exceed its own recorded point. q_value is the inference-engine
-            # native direction point; q_lcb is the market_analysis bootstrap
-            # lower bound, clamped only against market_analysis's OWN
-            # p_posterior (the BUG #129 within-module clamp). When the two modules'
-            # normalizations diverge (sum(P)<1) the raw q_lcb can land ABOVE
-            # q_value (43% of live buy_no on 2026-06-03, worst gap 0.79) — a
-            # definitionally-impossible lower bound. Enforce q_lcb <= q_value at the
-            # single boundary where both legs are present, making the recorded
-            # inversion unconstructable regardless of which estimator's domain
-            # drifts. The decision path's trade_score already min()'d internally;
-            # this also fixes the recorded receipt/telemetry value the spine grades.
-            if q_lcb > q_value:
-                import logging  # module uses lazy per-fn logging imports
-                logging.getLogger("zeus.qlcb_restore").debug(
-                    "qlcb_restore_inversion_clamped condition=%s direction=%s "
-                    "q_lcb=%.6f q_value=%.6f gap=%.6f",
-                    condition_id, direction, q_lcb, q_value, q_lcb - q_value,
-                )
-                q_lcb = q_value
+            # bin-selection S2: q_lcb <= q_point is now an UPSTREAM structural guarantee
+            # (ProbabilityUncertainty for YES, the 1 - q_ucb_yes complement clamped under
+            # 1 - q_yes for NO — both in the q-construction seam). The old here-at-boundary
+            # "q_lcb > q_value -> clamp" patch existed only because the edge_ci_lower +
+            # cost restore (Hidden #2) could manufacture a lower bound above the point;
+            # that restore is gone, so the patch is dead and removed (no redundant gate).
             execution_price: ExecutionPrice | None = None
             c_cost_95pct: float | None = None
             p_fill_lcb = 0.0
@@ -5746,6 +5746,37 @@ def _replacement_yes_lcb_for_bin(
     return 0.0
 
 
+def _replacement_no_lcb_for_bin(
+    replacement_bundle: object,
+    *,
+    bin_id: str,
+    q_yes: float,
+) -> float:
+    """Native-NO robust q_lcb for ``bin_id`` on the replacement_0_1 path (Hidden #3).
+
+    bin-selection §4 (lines 154-166) / §9 Hidden #3: the NO robust lower bound is the
+    lower tail of the per-sample complement ``1 - q_yes``, which equals ``1 - q_ucb_yes``
+    — NOT ``1 - q_lcb_yes``. The replacement bundle exposes a per-bin ``q_ucb`` map, and
+    the complement identity is exact, so ``q_lcb_no = 1 - q_ucb_yes`` directly. Clamp into
+    ``[0, 1 - q_yes]`` so the NO lower bound never exceeds the NO point ``1 - q_yes``
+    (the ProbabilityUncertainty / NativeSideCandidate invariant, Hidden #2 on the NO leg).
+
+    Absent a bundle ``q_ucb`` there is no native NO authority — return ``0.0``
+    (fail-closed). It is NEVER derived from the YES q_lcb (the point-complement the spec
+    forbids).
+    """
+    q_ucb = getattr(replacement_bundle, "q_ucb", None) or {}
+    q_point_no = float(min(max(1.0 - float(q_yes), 0.0), 1.0))
+    if isinstance(q_ucb, Mapping) and bin_id in q_ucb:
+        try:
+            q_ucb_yes = float(min(max(float(q_ucb[bin_id]), 0.0), 1.0))
+        except (TypeError, ValueError):
+            return 0.0
+        q_lcb_no = 1.0 - q_ucb_yes
+        return float(min(max(q_lcb_no, 0.0), q_point_no))
+    return 0.0
+
+
 def _replacement_authority_probability_and_fdr_proof(
     *,
     event: OpportunityEvent,
@@ -5895,10 +5926,21 @@ def _replacement_authority_probability_and_fdr_proof(
             yes_lcb,
             source="FORECAST_BOOTSTRAP",
         )
+        # bin-selection S2 native-NO authority (Hidden #3, §4 lines 154-166): the NO
+        # robust lower bound is the lower tail of the per-sample complement 1 - q_yes,
+        # which equals 1 - q_ucb_yes. The replacement_0_1 bundle does not expose the YES
+        # sample array (it reads a precomputed posterior), but it DOES carry the per-bin
+        # q_ucb map — and the complement identity is exact, so q_lcb_no = 1 - q_ucb_yes
+        # directly, NEVER 1 - q_lcb_yes (the point-complement the spec forbids). Clamp
+        # under the NO point (1 - q_yes) so q_lcb_no <= q_point_no. Absent a bundle q_ucb
+        # there is no native NO authority -> 0.0 (fail-closed; never a YES-complement).
+        no_lcb = _replacement_no_lcb_for_bin(
+            replacement_bundle, bin_id=bin_id, q_yes=q_yes
+        )
         _set_qlcb_provenance(
             lcb_by_direction,
             (condition_id, "buy_no"),
-            0.0,
+            no_lcb,
             source="FORECAST_BOOTSTRAP",
         )
         yes_price = native_costs.get((condition_id, "buy_yes"), (None, None, 0.0, None, None))[1]
@@ -5983,6 +6025,59 @@ def _forecast_snapshot_probability_and_fdr_proof(
     return q_by_condition, q_lcb_by_direction, generated_p_values, generated_prefilter, probability_evidence
 
 
+# ── bin-selection S2 q_lcb seam (Created 2026-06-08; Authority: "bin selection.md"
+#    §4 belief/executable/portfolio spaces + §5.6 recommended q_lcb formula +
+#    §9 Hidden #2/#3/#4 + §14.4 split-probability-from-edge + operator directive
+#    2026-06-08 single-primary-live) ──────────────────────────────────────────────
+# THE single computation that turns a bin's YES probability samples into the robust
+# per-side q_lcb authority. It REPLACES the "q_lcb = edge_ci_lower + cost" restore
+# (Hidden #2) and the "q_lcb_no = 1 - q_lcb_yes" point-complement (Hidden #3). Both
+# q-construction builders (canonical bootstrap path AND replacement_0_1 bundle path)
+# route their q_lcb through this ONE seam so there is one truth, not two parallel ones.
+def _side_q_lcb_from_yes_samples(
+    yes_samples,  # noqa: ANN001 - np.ndarray | sequence of YES probability samples
+    *,
+    q_yes_point: float,
+) -> tuple[float, float]:
+    """Return ``(q_lcb_yes, q_lcb_no)`` from ONE bin's YES probability samples.
+
+    bin-selection §5.6 / §14.4::
+
+        q_lcb_yes = lower_quantile(q_yes_samples)              # probability-only, Hidden #2
+        q_lcb_no  = lower_quantile(1 - q_yes_samples)          # = 1 - q_ucb_yes, Hidden #3
+                  = 1 - upper_quantile(q_yes_samples)
+
+    ``q_lcb_no`` is the lower tail of the per-sample complement ``1 - q_yes`` — the
+    native-NO robust lower bound (the bin's LOSE-outcome probability for a NO holder).
+    It is emphatically NOT ``1 - q_lcb_yes`` (the point-complement intuition the spec
+    forbids). The complement is taken via the blessed :func:`no_side_samples` so no
+    independent NO forecast is ever rebuilt.
+
+    Both bounds are clamped at the proof boundary so ``q_lcb_side <= q_point_side``
+    (the NativeSideCandidate / ProbabilityUncertainty invariant): ``q_lcb_yes`` is
+    floored under ``q_yes_point`` (the live inference point authority), and
+    ``q_lcb_no`` under the point complement ``1 - q_yes_point``. This makes a
+    probability lower bound that exceeds its own point — the edge_ci_lower-as-q_lcb
+    signature (Hidden #2) — unconstructable on BOTH sides.
+    """
+    from src.strategy.probability_uncertainty import (
+        lower_quantile,
+        no_side_samples,
+        probability_uncertainty_from_samples,
+    )
+
+    # YES authority: q_lcb is a pure function of the probability samples (never cost).
+    pu_yes = probability_uncertainty_from_samples(yes_samples)
+    q_point_yes = float(min(max(q_yes_point, 0.0), 1.0))
+    q_lcb_yes = float(min(pu_yes.q_lcb, q_point_yes))
+
+    # NO authority (Hidden #3): lower tail of (1 - q_yes_samples) == 1 - q_ucb_yes.
+    q_lcb_no_raw = lower_quantile(no_side_samples(yes_samples))
+    q_point_no = float(min(max(1.0 - q_yes_point, 0.0), 1.0))
+    q_lcb_no = float(min(max(q_lcb_no_raw, 0.0), q_point_no))
+    return q_lcb_yes, q_lcb_no
+
+
 def _canonical_probability_and_fdr_proof(
     *,
     event: OpportunityEvent,
@@ -6045,8 +6140,10 @@ def _canonical_probability_and_fdr_proof(
     # keyed by (range_label, direction). Each hypothesis carries p_posterior (calibrated
     # forecast probability), bootstrap p_value, ci_lower, and prefilter. We read those
     # directly — no DB selection-fact round-trip — fail-closed if any bin/direction is absent.
-    p_market_yes_vec = np.asarray(analysis.p_market, dtype=float)
-    p_market_no_vec = np.asarray(analysis.p_market_no, dtype=float)
+    # bin-selection S2: the executable cost vectors that the OLD "q_lcb = ci_lower +
+    # cost" restore added back are no longer read here — q_lcb is now a probability-only
+    # bound (the cost lives only in the FDR edge engine and the trade-score). Removed
+    # p_market_yes_vec / p_market_no_vec with the restore (no dead code).
     p_posterior_vec = np.asarray(analysis.p_posterior, dtype=float)
     for index, candidate in enumerate(family.candidates):
         condition_id = str(candidate.condition_id or "")
@@ -6055,32 +6152,62 @@ def _canonical_probability_and_fdr_proof(
         # so the full MECE family prior is always complete even for bins with no executable quote.
         yes_posterior = float(p_posterior_vec[index])
         q_by_condition[condition_id] = yes_posterior
-        # The hypothesis bootstrap returns the EDGE CI (percentile of p_posterior - c_b). The
-        # robust trade score consumes q's LOWER bound in probability space (it subtracts the cost
-        # itself). Because c_b is fixed in the bootstrap, percentile(p_post - c_b) =
-        # percentile(p_post) - c_b, so q_lcb = edge_lcb + c_b. Restore probability space here; the
-        # FDR keeps using edge-space p_value + prefilter (which already encode edge_lcb>0).
-        cost_by_direction = {
-            "buy_yes": float(p_market_yes_vec[index]),
-            "buy_no": float(p_market_no_vec[index]),
-        }
-        for direction in ("buy_yes", "buy_no"):
-            hyp = hypothesis_by_label_direction.get((range_label, direction))
-            if hyp is not None and hyp.p_value is not None and hyp.ci_lower is not None:
-                p_values[(condition_id, direction)] = float(hyp.p_value)
-                _set_qlcb_provenance(
-                    lcb_by_direction,
-                    (condition_id, direction),
-                    float(hyp.ci_lower) + cost_by_direction[direction],
-                    source="FORECAST_BOOTSTRAP",
-                )
-                prefilter[(condition_id, direction)] = bool(hyp.passed_prefilter)
+        # bin-selection S2 (§5.6 / §14.4 / Hidden #2/#3): q_lcb is the lower quantile of
+        # the per-bin YES *probability* samples q_yes^(b) ALONE — the SAME samples the
+        # FDR edge CI draws (analysis.bin_yes_probability_samples), BEFORE the executable
+        # cost is subtracted. This REPLACES the old "q_lcb = edge_ci_lower + cost" restore
+        # (which was edge_ci_lower masquerading as a probability bound — Hidden #2). The
+        # native-NO authority (Hidden #3) is q_lcb_no = lower_quantile(1 - q_yes^(b)) =
+        # 1 - q_ucb_yes, NOT 1 - q_lcb_yes — computed in the ONE seam helper below.
+        # FDR p_value / prefilter stay edge-space (read from hyp), unchanged: the q_lcb
+        # split (§14.4) leaves the FDR inference gate on the proven MC edge engine.
+        yes_hyp = hypothesis_by_label_direction.get((range_label, "buy_yes"))
+        no_hyp = hypothesis_by_label_direction.get((range_label, "buy_no"))
+        yes_executable = (
+            yes_hyp is not None
+            and yes_hyp.p_value is not None
+            and yes_hyp.ci_lower is not None
+        )
+        if yes_executable:
+            # ONE sample-producing path (market_analysis owns it); both q_lcb sides and
+            # the FDR edge CI consume the same q_yes^(b) array. NO is the per-sample
+            # complement of YES — a native NO authority, never an independent forecast.
+            yes_samples = analysis.bin_yes_probability_samples(index, edge_n_bootstrap())
+            q_lcb_yes, q_lcb_no = _side_q_lcb_from_yes_samples(
+                yes_samples, q_yes_point=yes_posterior
+            )
+            p_values[(condition_id, "buy_yes")] = float(yes_hyp.p_value)
+            _set_qlcb_provenance(
+                lcb_by_direction,
+                (condition_id, "buy_yes"),
+                q_lcb_yes,
+                source="FORECAST_BOOTSTRAP",
+            )
+            prefilter[(condition_id, "buy_yes")] = bool(yes_hyp.passed_prefilter)
+            # NO direction: q_lcb_no is the native-NO robust lower bound (1 - q_ucb_yes).
+            # FDR for NO follows the NO hypothesis when the NO side is executable; absent
+            # a NO hypothesis the NO direction is recorded non-actionable (rejected
+            # downstream by the missing native NO ask, never a complement price).
+            _set_qlcb_provenance(
+                lcb_by_direction,
+                (condition_id, "buy_no"),
+                q_lcb_no,
+                source="FORECAST_BOOTSTRAP",
+            )
+            if no_hyp is not None and no_hyp.p_value is not None:
+                p_values[(condition_id, "buy_no")] = float(no_hyp.p_value)
+                prefilter[(condition_id, "buy_no")] = bool(no_hyp.passed_prefilter)
             else:
-                # scan_full_hypothesis_family omits a direction when that side has no executable
-                # market (bin skipped entirely if YES non-executable; buy_no omitted if NO side
-                # non-executable). Emit neutral, non-actionable values: the direction is then
-                # rejected downstream by the missing native execution price
-                # (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed raise.
+                p_values[(condition_id, "buy_no")] = 1.0
+                prefilter[(condition_id, "buy_no")] = False
+        else:
+            # scan_full_hypothesis_family skips a bin entirely when its YES side has no
+            # executable market. Emit neutral, non-actionable values for BOTH directions:
+            # the directions are then rejected downstream by the missing native execution
+            # price (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed
+            # raise. q_lcb_no is 0.0 here (no samples => no native NO authority), never a
+            # YES-complement (Hidden #4: native NO needs native evidence).
+            for direction in ("buy_yes", "buy_no"):
                 q_point = yes_posterior if direction == "buy_yes" else 0.0
                 p_values[(condition_id, direction)] = 1.0
                 _set_qlcb_provenance(
@@ -6135,6 +6262,25 @@ def _canonical_probability_and_fdr_proof(
         condition_id = str(candidate.condition_id or "")
         q_value = float(live_state.probabilities[str(index)])
         q_by_condition[condition_id] = q_value
+        # bin-selection S2 / #176 structural re-grounding: q_lcb above was computed from
+        # the bootstrap samples and clamped under the analysis p_posterior. evaluate_live_bins
+        # renormalises the point (prior -> live), and that renormalisation is the OTHER
+        # source of a q_lcb > q_point inversion (the two modules normalise differently —
+        # the documented #176 root). Re-ground each side's q_lcb under the FINAL live point
+        # it will be RECORDED against, so q_lcb_side <= q_point_side holds at the proof
+        # boundary BY CONSTRUCTION — not by a downstream per-proof clamp (which is removed).
+        # Only ever LOWERS the q_lcb; never raises it.
+        yes_lcb_entry = lcb_by_direction.get((condition_id, "buy_yes"))
+        no_lcb_entry = lcb_by_direction.get((condition_id, "buy_no"))
+        if yes_lcb_entry is not None and float(yes_lcb_entry.q_lcb) > q_value:
+            _set_qlcb_provenance(
+                lcb_by_direction, (condition_id, "buy_yes"), q_value, source="FORECAST_BOOTSTRAP"
+            )
+        no_point = max(0.0, min(1.0, 1.0 - q_value))
+        if no_lcb_entry is not None and float(no_lcb_entry.q_lcb) > no_point:
+            _set_qlcb_provenance(
+                lcb_by_direction, (condition_id, "buy_no"), no_point, source="FORECAST_BOOTSTRAP"
+            )
     probability_evidence = {
         "p_cal_vector_hash": _probability_vector_hash(float(value) for value in analysis.p_cal),
         "p_live_vector_hash": _probability_vector_hash(

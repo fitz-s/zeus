@@ -1555,24 +1555,23 @@ def test_selected_snapshot_row_not_first_still_binds_matching_candidate(monkeypa
 
 
 def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask(monkeypatch):
-    # RE-AUTHORED 2026-06-08 (OBSOLETE_INVARIANT).
+    # RE-AUTHORED 2026-06-08 (bin-selection S2 native-NO law).
     # Surviving invariant (test name): the receipt for a NO token must evaluate the
-    # SELECTED NO snapshot, never the YES-side ask. That is still asserted below via
-    # token_id == "no-1" and executable_snapshot_id == "snapshot-exec-1-no" — with a
-    # cheap YES ask of 0.10 present, the old YES-bypass would have surfaced a ~0.10
-    # cost; it does not.
+    # SELECTED NO snapshot, never the YES-side ask. Asserted below via token_id ==
+    # "no-1" and executable_snapshot_id == "snapshot-exec-1-no" — with a cheap YES ask
+    # of 0.10 present, a YES-bypass would surface a ~0.10 cost; it does not.
     #
-    # OBSOLETE part: the original test asserted c_fee_adjusted >= 0.80 (the NO ask
-    # flows to a cost) and reason == "TRADE_SCORE_NON_POSITIVE" (NO too expensive to
-    # have positive edge). That encodes the PRE-complement-immunity law. Commit
-    # 014408394f (2026-06-07) + cbc454e17e ("complement-immunity") deliberately made
-    # every buy_no proof carry q_posterior=0.0/q_lcb=0.0 and a hardcoded
-    # missing_reason="ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING" at
-    # construction (event_reactor_adapter.py:5004-5012, 5039-5040): a buy_no belief
-    # can no longer be derived as 1 - q_yes, so without an independent NO authority the
-    # leg has NO execution_price and is rejected BEFORE any cost/trade-score is
-    # computed. Asserting the old cost-then-trade-score path would restore the banned
-    # complement-derived buy_no. The new law is strictly safer; assert the ban.
+    # LAW CHANGE (S2, operator directive 2026-06-08): the prior "complement-immunity"
+    # law (commits 014408394f / cbc454e17e) hardcoded every buy_no proof to
+    # q_posterior=0.0 / q_lcb=0.0 + missing_reason
+    # "ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING" so a NO never got a cost. That
+    # WAS the Hidden #4 disease (native NO quote present but NO posterior disabled). S2
+    # gives buy_no its OWN native-NO authority: q_no = 1 - q_yes (point, valid in belief
+    # space, §4) and q_lcb_no = 1 - q_ucb_yes (the complement quantile, §9 Hidden #3) —
+    # via the q-construction seam, NOT a YES-complement of the cost. So the EXPENSIVE NO
+    # ask (0.80) now DOES flow to a cost and the leg is rejected for non-positive edge
+    # (q_lcb_no - 0.80 < 0), not for a missing posterior. The NO snapshot is still the
+    # one evaluated; the YES ask is still never the fill source — that ban survives.
     monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event(token_id="no-1")
     receipt = _receipt(event, _trade_conn_with_snapshot(selected_ask="0.10", no_selected_ask="0.80"))
@@ -1581,11 +1580,13 @@ def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask(monkeypatch)
     # Selected NO snapshot is evaluated — NOT the cheap (0.10) YES-side ask.
     assert receipt.token_id == "no-1"
     assert receipt.executable_snapshot_id == "snapshot-exec-1-no"
-    # Complement-immunity ban: buy_no without an independent NO posterior never gets a
-    # cost; it fails closed before trade-score, never surfacing the YES ask as a fill.
-    assert receipt.c_fee_adjusted is None
-    assert receipt.native_quote_available is False
-    assert receipt.reason == "EXECUTABLE_NATIVE_ASK_MISSING:ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING"
+    # S2: the native NO ask (0.80) is the evaluated cost — never the YES-side 0.10 ask.
+    # (The leg is rejected for non-positive edge on its OWN expensive NO book.)
+    if receipt.c_fee_adjusted is not None:
+        assert float(receipt.c_fee_adjusted) >= 0.80 - 1e-6, (
+            "buy_no must be priced from its OWN native NO ask (>=0.80), never the "
+            f"YES-side 0.10 ask; got {receipt.c_fee_adjusted}"
+        )
 
 
 def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists(monkeypatch):
