@@ -52,6 +52,16 @@ REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
 REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_shadow_materialize"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
+# SEPARATE lane for the heavy download (publish-time cron + boot catch-up). The download
+# runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
+# 400-retries on short-range models). On a SHARED max_workers=1 lane it serialized AHEAD of
+# the 5-min materialize, starving readiness production for the whole download (observed
+# 2026-06-08: a 75-min download blocked the materialize so U0R readiness aged out -> the
+# replacement-forecast hook BLOCKED every live FSR event -> zero trades). A dedicated
+# download lane makes "a long download starves the materialize" structurally impossible:
+# the materialize keeps its own worker and refreshes readiness every interval regardless of
+# download duration.
+REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE = "replacement_download"
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
@@ -981,7 +991,7 @@ def _register_replacement_forecast_production_jobs(
         hour=cron_hours,
         minute=10,
         id=REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID,
-        executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
+        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,
@@ -993,7 +1003,7 @@ def _register_replacement_forecast_production_jobs(
         "date",
         run_date=startup_at + timedelta(seconds=90),
         id=REPLACEMENT_FORECAST_STARTUP_JOB_ID,
-        executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
+        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
         max_instances=1,
         coalesce=True,
         misfire_grace_time=None,
@@ -1042,7 +1052,13 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
     # AIFS ensemble download never contends with the heartbeat or OpenData lanes. The
     # replacement jobs are registered (after each branch builds its scheduler) on this lane.
     def _replacement_production_executor() -> dict[str, object]:
-        return {REPLACEMENT_FORECAST_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1)}
+        # Two SEPARATE single-worker lanes: the heavy download must never serialize ahead of
+        # (and starve) the light materialize that refreshes readiness — see
+        # REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE.
+        return {
+            REPLACEMENT_FORECAST_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
+            REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
+        }
 
     if _opendata_jobs_disabled_by_replacement_cutover():
         scheduler = BlockingScheduler(
