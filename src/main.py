@@ -73,6 +73,15 @@ _market_discovery_lock = threading.Lock()
 _market_substrate_refresh_lock = threading.Lock()
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+# Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
+# APScheduler interval. The refresh wall-clock budget
+# (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS, _refresh_pending_family_snapshots) MUST be
+# strictly less than this so a cycle finishes before its next trigger; otherwise
+# max_instances=1 skips every overlapping run ("maximum number of running instances
+# reached"), the executable substrate is never refreshed, and the armed daemon is
+# starved of candidates. The interval also stays within the 30s executable-price
+# freshness window. The invariant is asserted at job registration.
+_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
     "edli_shadow_no_submit",
@@ -3093,9 +3102,22 @@ def _refresh_pending_family_snapshots(
     if not families:
         return {"status": "no_pending_families"}
 
+    # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
+    # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
+    # INTERVAL_SECONDS, 20s) and MUST stay within the 30s executable-price freshness
+    # window. The prior 29.0 default predated the reactor→warm-cycle split (blame
+    # 014408394f, sized for the old 1-min reactor interval) and was never re-aligned:
+    # a 29s budget on a 20s interval guarantees the cycle overruns its own trigger,
+    # so every subsequent run is "skipped: maximum number of running instances
+    # reached (1)" (zeus-live.err 2026-06-08) and the universe-wide executable
+    # substrate is never refreshed — coverage NONE, daemon starved of candidates.
+    # The default now fits inside the interval with headroom for scheduler dispatch
+    # and connection teardown; the internal capture reserve (snapshot_reserve_s) and
+    # Gamma slice scale down off this budget below. Env-overridable, but the
+    # interval-fit invariant is asserted at job registration (see add_job below).
     refresh_budget_s = max(
         5.0,
-        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "29.0")),
+        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
     )
     refresh_deadline = time.monotonic() + refresh_budget_s
     snapshot_reserve_s = min(
@@ -7799,10 +7821,27 @@ def main():
         # rejects as EXECUTABLE_SNAPSHOT_STALE. The refresh is scoped to pending families
         # (not a global weather scan) and max_instances=1/coalesce prevents stacked venue
         # I/O. Data-only (no orders); fail-soft.
+        # Fitz #5 interval-fit invariant: the refresh budget MUST be strictly less
+        # than the interval so the cycle cannot overrun its own trigger (the live
+        # "skipped: maximum number of running instances reached" starvation). Asserted
+        # here at registration so a future env/default drift that re-breaks the
+        # relationship fails LOUDLY at boot instead of silently re-starving coverage.
+        _warm_refresh_budget_s = max(
+            5.0,
+            float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
+        )
+        if _warm_refresh_budget_s >= _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS:
+            raise RuntimeError(
+                "EDLI market-substrate warm budget-vs-interval misconfiguration: "
+                f"ZEUS_REACTOR_REFRESH_BUDGET_SECONDS={_warm_refresh_budget_s}s must be "
+                f"STRICTLY LESS than the {_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS}s warm "
+                "interval, else every overlapping cycle is skipped and the executable "
+                "substrate is never refreshed (coverage NONE, daemon starved)."
+            )
         scheduler.add_job(
             _edli_market_substrate_warm_cycle,
             "interval",
-            seconds=20,
+            seconds=_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS,
             id="edli_market_substrate_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 1.0),
             max_instances=1,
