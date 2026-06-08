@@ -408,6 +408,35 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
         (anchor_identity_hash,),
     ).fetchone()
     if row is None:
+        # The INSERT OR IGNORE above can be a no-op when an anchor for the same
+        # UNIQUE natural key (source_id, product_id, data_version, city,
+        # target_date, temperature_metric, source_cycle_time) already exists from
+        # a prior run. The identity hash, however, folds in the per-run captured_at
+        # (computed_at), so a re-run produces a different hash and the hash lookup
+        # above misses. Fall back to the natural key to return the existing anchor
+        # idempotently instead of crashing the whole materialization.
+        row = conn.execute(
+            """
+            SELECT anchor_id FROM deterministic_forecast_anchors
+            WHERE source_id = ?
+              AND product_id = ?
+              AND data_version = ?
+              AND city = ?
+              AND target_date = ?
+              AND temperature_metric = ?
+              AND source_cycle_time = ?
+            """,
+            (
+                ANCHOR_SOURCE_ID,
+                ANCHOR_PRODUCT_ID,
+                _anchor_data_version(metric),
+                request.city,
+                target_date,
+                metric,
+                source_cycle_time,
+            ),
+        ).fetchone()
+    if row is None:
         raise RuntimeError("replacement anchor materialization failed")
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["anchor_id"])
 

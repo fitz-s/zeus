@@ -183,12 +183,22 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         readiness_status_clause = ""
         if "status" in readiness_columns:
             readiness_status_clause = "AND status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'READY')"
+        # Only a readiness row whose expires_at is still in the future counts as
+        # live coverage. An expired row must NOT mark the seed already-covered,
+        # otherwise the queue skips it forever and fresh readiness can never be
+        # produced (the stale row both blocks the request and never refreshes).
+        readiness_freshness_clause = ""
+        if "expires_at" in readiness_columns:
+            readiness_freshness_clause = (
+                "AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))"
+            )
         readiness = conn.execute(
             f"""
             SELECT 1
             FROM readiness_state
             WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
               {readiness_status_clause}
+              {readiness_freshness_clause}
               AND json_extract(provenance_json, '$.city') = ?
               AND json_extract(provenance_json, '$.target_date') = ?
               AND json_extract(provenance_json, '$.temperature_metric') = ?
