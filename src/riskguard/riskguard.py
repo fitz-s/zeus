@@ -27,6 +27,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -1063,6 +1064,43 @@ def _is_sqlite_database_locked(exc: BaseException) -> bool:
     return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
 
 
+def _riskguard_dependency_lock_retries() -> int:
+    """Within-tick retry budget for a transient dependency-DB lock.
+
+    Fitz #5 lock-CATEGORY kill (2026-06-08): the metrics read on zeus_trades +
+    ATTACHed world/forecasts (all WAL, written concurrently by live-trading and
+    the forecast/data-ingest daemons) loses a transient WAL/checkpoint window on
+    ~half of ticks even with the 30s busy_timeout (a bulk forecast write can hold
+    the single WAL write lock past the wait). Giving up on the FIRST lock made the
+    daemon fail ~half its ticks, so genuine fresh full_risk rows aged past the
+    5-min freshness window and get_current_level flapped to DATA_DEGRADED — the
+    GREEN-only entry gate then blocked ALL new entries (operator zero-trade
+    2026-06-08). Retrying the read within the same tick recovers a genuine fresh
+    row on nearly every tick. Default 3 (4 attempts); 0 restores the pre-fix
+    single-attempt behavior.
+    """
+    try:
+        return max(0, int(os.environ.get("ZEUS_RISKGUARD_DEP_LOCK_RETRIES", "3")))
+    except ValueError:
+        return 3
+
+
+def _riskguard_dependency_lock_backoff_seconds(attempt: int) -> float:
+    """Backoff before re-attempting a lock-failed tick read (attempt is 0-based).
+
+    Linear 1.5s, 3.0s, 4.5s ... capped at 8s. Total worst-case wait across the
+    default 3 retries is ~9s — well inside the 60s tick cadence — so a contended
+    tick still completes long before the next one is due.
+    """
+    try:
+        base = float(os.environ.get("ZEUS_RISKGUARD_DEP_LOCK_BACKOFF_BASE_S", "1.5"))
+    except ValueError:
+        base = 1.5
+    if base < 0.0:
+        base = 1.5
+    return min(base * (attempt + 1), 8.0)
+
+
 def _close_conn(conn: sqlite3.Connection | None) -> None:
     if conn is None:
         return
@@ -1184,11 +1222,18 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
     return level
 
 
-def tick() -> RiskLevel:
-    """Run one RiskGuard evaluation tick. Spec §7: 60-second cycle.
+def _tick_once() -> RiskLevel:
+    """Run one RiskGuard evaluation attempt. Spec §7: 60-second cycle.
 
     Reads recent trade data from zeus.db, computes metrics,
     determines risk level, writes to risk_state.db.
+
+    RAISES ``sqlite3.OperationalError('database is locked')`` on a transient
+    dependency-DB lock instead of degrading inline — the ``tick()`` wrapper
+    retries this within the same tick (see ``_riskguard_dependency_lock_retries``)
+    and only persists the lock-attestation after the retries exhaust. This keeps
+    the lock-degrade decision in ONE place while letting a momentary lock be
+    waited out rather than immediately flipping the GREEN-only entry gate.
 
     Connection discipline (2026-05-10 leak fix): zeus_conn and risk_conn are
     opened once and closed in a finally block. Prior to this fix, any
@@ -1618,14 +1663,53 @@ def tick() -> RiskLevel:
     except sqlite3.OperationalError as exc:
         if not _is_sqlite_database_locked(exc):
             raise
+        # Roll back + close BEFORE re-raising so a failed attempt never leaves an
+        # open read txn / dangling WAL reader handle across the tick() retry sleep
+        # (the 2026-05-10 leak that accumulated 51+ reader handles). The tick()
+        # wrapper owns the retry/lock-attestation decision.
         _rollback_and_close(risk_conn)
         risk_conn = None
         _rollback_and_close(zeus_conn)
         zeus_conn = None
-        return _persist_dependency_db_locked_attestation(exc)
+        raise
     finally:
         _close_conn(zeus_conn)
         _close_conn(risk_conn)
+
+
+def tick() -> RiskLevel:
+    """Run one RiskGuard tick, retrying a transient dependency-DB lock.
+
+    Wrapper around ``_tick_once`` (the actual evaluation). A locked dependency
+    surface (zeus_trades + ATTACHed world/forecasts, all WAL) is RETRIED within
+    this same tick before the daemon gives up: ~half of single reads lose a
+    transient WAL/checkpoint window, so retrying recovers a GENUINE fresh
+    full_risk row on nearly every tick and the 5-min freshness window that
+    get_current_level depends on never lapses. Only after the retries exhaust
+    does ``_persist_dependency_db_locked_attestation`` run (preserve a fresh
+    <5min level, else DATA_DEGRADED) — so a PERSISTENT lock still degrades and no
+    safety boundary is weakened. ``tick()`` is the public daemon entry; its API
+    is unchanged.
+    """
+    retries = _riskguard_dependency_lock_retries()
+    last_exc: sqlite3.OperationalError | None = None
+    for attempt in range(retries + 1):
+        try:
+            return _tick_once()
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_database_locked(exc):
+                raise
+            last_exc = exc
+            if attempt >= retries:
+                break
+            logger.warning(
+                "RiskGuard tick dependency lock (attempt %d/%d); retrying read after backoff",
+                attempt + 1,
+                retries + 1,
+            )
+            time.sleep(_riskguard_dependency_lock_backoff_seconds(attempt))
+    assert last_exc is not None  # only reached via the locked break above
+    return _persist_dependency_db_locked_attestation(last_exc)
 
 
 def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
