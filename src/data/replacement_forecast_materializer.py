@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import hashlib
 from dataclasses import asdict, dataclass
@@ -485,6 +486,42 @@ def _replacement_eb_bias_shift_c(
         return None
 
 
+def _replacement_member_vote_smoothing_alpha() -> float | None:
+    """Flag-gated additive (Laplace/Dirichlet) smoothing alpha for the AIFS member-vote prior.
+
+    THE_PATH member-vote smoothing. Returns the configured alpha (degC-free Dirichlet
+    pseudo-count) ONLY when ``replacement_0_1_member_vote_smoothing_enabled`` is true, else
+    None. None makes build_openmeteo_ifs9_aifs_soft_anchor_result reproduce the raw count/total
+    member prior BYTE-IDENTICALLY (default-OFF). FAIL-CLOSED: any config error / missing key /
+    non-positive or non-finite alpha -> None (no smoothing, construction proceeds with raw
+    inputs). Never raises. This is the ONE place the flag is read; the smoothing itself reuses
+    the existing soft-anchor fusion (no parallel posterior path).
+    """
+    try:
+        from src.config import settings  # noqa: PLC0415
+        from src.strategy.ecmwf_aifs_sampled_2t_probabilities import (  # noqa: PLC0415
+            MEMBER_VOTE_SMOOTHING_ALPHA,
+        )
+
+        edli_cfg = settings["edli_v1"]
+        if not bool(edli_cfg.get("replacement_0_1_member_vote_smoothing_enabled", False)):
+            return None
+        raw_alpha = edli_cfg.get("replacement_0_1_member_vote_smoothing_alpha", MEMBER_VOTE_SMOOTHING_ALPHA)
+        alpha = float(raw_alpha)
+        if not math.isfinite(alpha) or alpha <= 0.0:
+            return None
+        return alpha
+    except Exception as exc:  # fail-closed: never break shadow materialization
+        try:
+            import logging  # noqa: PLC0415
+            logging.getLogger("zeus.replacement_member_vote_smoothing").warning(
+                "replacement_0_1 member-vote smoothing wiring skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
 def _insert_posterior(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -496,6 +533,10 @@ def _insert_posterior(
     # BEFORE the soft-anchor zero-prior veto (inside build_openmeteo_ifs9_aifs_soft_anchor_result).
     # None when flag OFF or no VERIFIED row -> byte-identical to today.
     bias_shift_c = _replacement_eb_bias_shift_c(request, metric=metric)
+    # THE_PATH member-vote smoothing: flag-gated additive Laplace/Dirichlet alpha so the AIFS
+    # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
+    # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
+    member_vote_smoothing_alpha = _replacement_member_vote_smoothing_alpha()
     result = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=request.aifs_extraction,
         openmeteo_anchor=request.openmeteo_anchor,
@@ -504,6 +545,7 @@ def _insert_posterior(
         config=SoftAnchorConfig(anchor_weight=request.anchor_weight, anchor_sigma_c=request.anchor_sigma_c),
         settlement_step_c=float(request.settlement_step_c),
         bias_shift_c=bias_shift_c,
+        member_vote_smoothing_alpha=member_vote_smoothing_alpha,
     )
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()

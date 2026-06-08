@@ -27,6 +27,23 @@ from src.strategy.openmeteo_ecmwf_ifs9_aifs_soft_anchor import (
 Metric = Literal["high", "low"]
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
+# Additive (Laplace/Dirichlet) symmetric pseudo-count for the AIFS member-vote prior.
+# THE_PATH member-vote smoothing (2026-06-07): a small Dirichlet(alpha) pseudo-count added to
+# every market bin BEFORE normalisation, so prior_k = (votes_k + alpha) / (total + K*alpha) is
+# strictly positive for EVERY bin. This lifts the soft_anchor.py:197-198 prior<=0 -> -inf veto
+# that otherwise makes a 0-vote bin structurally un-hittable (Fitz #5: kill the category).
+#
+# alpha = 0.05 is deliberately gentle and NOT overfit to any city:
+#   * It is << 1 vote, so it never competes with a single real member vote (a Dirichlet
+#     pseudo-count of 0.05 is 1/20th of one ensemble member).
+#   * With the live 51-member ensemble it gives a 0-vote bin a prior floor of ~0.001 (alpha/
+#     (51+K*alpha)) — enough to make the veto term finite so the 0.80-weight anchor Gaussian
+#     can place the REAL mass, while the bin's own prior mass stays negligible.
+#   * A modal/high-vote bin barely moves (e.g. 40/51 -> within ~1 pp for typical K), so the
+#     soft anchor still dominates exactly as before.
+# Applied ONLY when explicitly requested (flag-gated upstream); the default path is unchanged.
+MEMBER_VOTE_SMOOTHING_ALPHA = 0.05
+
 
 @dataclass(frozen=True)
 class AifsTemperatureBin:
@@ -241,6 +258,7 @@ def build_aifs_sampled_2t_bin_probabilities(
     bins: Sequence[AifsTemperatureBin],
     settlement_step_c: float = 1.0,
     bias_shift_c: float | None = None,
+    member_vote_smoothing_alpha: float | None = None,
 ) -> AifsBinProbabilityResult:
     """Convert AIFS member local-day extrema into uncalibrated bin probabilities.
 
@@ -248,6 +266,16 @@ def build_aifs_sampled_2t_bin_probabilities(
     family. The output is the AIFS sampled-2t prior used by the Open-Meteo ECMWF
     IFS 9km deterministic soft-anchor posterior; it is not B0 calibration,
     EMOS, raw-honest fallback, or trade authority.
+
+    ``member_vote_smoothing_alpha`` (THE_PATH member-vote smoothing, 2026-06-07): flag-gated
+    additive Laplace/Dirichlet pseudo-count. When set (>0), the per-bin prior becomes
+    ``prior_k = (votes_k + alpha) / (total + K*alpha)`` over the K market bins, so EVERY bin
+    is strictly positive and the soft_anchor.py:197-198 ``prior<=0 -> -inf`` veto can never
+    fire — letting the 0.80-weight anchor Gaussian place mass in formerly-0-vote bins (the
+    soft anchor becomes soft) and killing the structurally-un-hittable-bin category. The
+    smoothed prior STILL sums to 1 (mass-preserving). ``None`` or ``0.0`` reproduces the raw
+    ``count/total`` frequency BYTE-IDENTICALLY (default-OFF). Use ``MEMBER_VOTE_SMOOTHING_ALPHA``
+    for the gentle, non-overfit value.
 
     ``bias_shift_c`` (P2_BLEND.md §3,§4): per-city Empirical-Bayes forecast bias in
     degC, sign convention ``bias = forecast - actual`` (negative = cold). When set,
@@ -274,6 +302,10 @@ def build_aifs_sampled_2t_bin_probabilities(
     if not math.isfinite(shift):
         raise ValueError("bias_shift_c must be finite")
 
+    alpha = 0.0 if member_vote_smoothing_alpha is None else float(member_vote_smoothing_alpha)
+    if not math.isfinite(alpha) or alpha < 0.0:
+        raise ValueError("member_vote_smoothing_alpha must be a non-negative finite number")
+
     counts = {bin_spec.bin_id: 0 for bin_spec in bins}
     assignments: dict[str, str] = {}
     member_values: dict[str, float] = {}
@@ -288,7 +320,14 @@ def build_aifs_sampled_2t_bin_probabilities(
     total_members = len(extraction.members)
     if total_members <= 0:
         raise ValueError("AIFS probability bridge requires at least one member")
-    probabilities = {bin_id: count / total_members for bin_id, count in counts.items()}
+    if alpha == 0.0:
+        # Default-OFF path: raw count/total frequency, byte-identical to pre-smoothing.
+        probabilities = {bin_id: count / total_members for bin_id, count in counts.items()}
+    else:
+        # Additive Laplace/Dirichlet smoothing: every bin strictly positive, still sums to 1.
+        # prior_k = (votes_k + alpha) / (total + K*alpha); K = number of market bins.
+        smoothed_denominator = total_members + len(counts) * alpha
+        probabilities = {bin_id: (count + alpha) / smoothed_denominator for bin_id, count in counts.items()}
     return AifsBinProbabilityResult(
         metric=normalized_metric,
         probabilities=probabilities,
@@ -308,8 +347,19 @@ def build_openmeteo_ifs9_aifs_soft_anchor_result(
     config: SoftAnchorConfig = SoftAnchorConfig(),
     settlement_step_c: float = 1.0,
     bias_shift_c: float | None = None,
+    member_vote_smoothing_alpha: float | None = None,
 ) -> OpenMeteoIfs9AifsSoftAnchorResearchResult:
     """Build the fixed research posterior from raw AIFS and Open-Meteo anchors.
+
+    ``member_vote_smoothing_alpha`` (THE_PATH member-vote smoothing, 2026-06-07): flag-gated
+    additive Laplace/Dirichlet pseudo-count on the AIFS member votes (forwarded to
+    build_aifs_sampled_2t_bin_probabilities). When set (>0) every market bin gets a strictly
+    positive prior, so the soft_anchor.py:197-198 zero-prior ``-inf`` veto never fires and the
+    0.80-weight anchor Gaussian can mass formerly-0-vote bins WITHIN its support. The smoothing
+    only WIDENS the point q (the anchor reaches more bins) and feeds the SHIPPED q_lcb settlement
+    sigma floor unchanged downstream: that floor still grounds q_lcb at the realized residual on
+    the (now slightly wider) point q, so NO overconfidence is introduced on the newly-massed bins
+    (iron rule #6). ``None`` / ``0.0`` is byte-identical to today (default-OFF).
 
     ``bias_shift_c`` (P2_BLEND.md §3,§4,§5): per-city EB forecast bias (degC, sign
     ``forecast - actual``). When set, BOTH the AIFS member votes (via
@@ -333,6 +383,7 @@ def build_openmeteo_ifs9_aifs_soft_anchor_result(
         bins=bins,
         settlement_step_c=settlement_step_c,
         bias_shift_c=bias_shift_c,
+        member_vote_smoothing_alpha=member_vote_smoothing_alpha,
     )
     raw_anchor_value_c = openmeteo_anchor.high_c if normalized_metric == "high" else openmeteo_anchor.low_c
     # Shift the anchor center consistently with the member votes (corrected = raw - bias).

@@ -332,6 +332,7 @@ _WLA_RESIDUAL_ALLOWLIST = frozenset({
     "scripts/probe_full_live_path_to_submit.py", # pending_track_a6: standalone live-path probe script; operator diagnostic tool, not daemon src/
     "scripts/ops/health_probe.py",  # read_only liveness probe: connects mode=ro + PRAGMA query_only=ON, ZERO writes — cannot violate write-atomicity; standalone ops/cron diagnostic, not daemon src/ (authority: feedback_liveness_first_health_antibody)
     "scripts/ops/orderable_bias_pass_candidates.py",  # pending_track_a6: read-only arm-review observability query (order-able ∩ bias-pass); standalone ops script, not daemon src/
+    "scripts/validate_member_vote_smoothing_3way.py",  # read_only: standalone 3-way U0R smoothing settlement-validation diagnostic; mode=ro connections only, no writes; not daemon src/
 })
 
 # Effective allowlist: canonical infra + residual (Track A.6 daemon sites only;
