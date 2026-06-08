@@ -4863,6 +4863,70 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     )
 
 
+def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+    """THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (CONTINUITY_AND_WIRING.md §4 step 2,
+    U0R_BAYES_SPEC.md §6 F1). Gated by the NEW capture flag
+    ``settings['edli_v1']['replacement_0_1_u0r_multimodel_capture_enabled']`` (default FALSE),
+    SEPARATE from replacement_0_1_u0r_fusion_enabled: when ON it downloads + persists the 8 extra
+    OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
+    zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
+    center/spread/order -> the money path is byte-identical whether or not this runs. Forward,
+    daily, fail-soft (it NEVER raises into the shadow cycle). Returns None when the flag is OFF or
+    there is no forecast_db / no targets."""
+    try:
+        if not bool(settings["edli_v1"].get("replacement_0_1_u0r_multimodel_capture_enabled", False)):
+            return None
+    except Exception:
+        return None
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return None
+    try:
+        from datetime import datetime as _dt, timezone as _tz  # noqa: PLC0415
+
+        from scripts.download_replacement_forecast_current_targets import _parse_cycle  # noqa: PLC0415
+        from src.config import cities_by_name  # noqa: PLC0415
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            build_replacement_forecast_current_target_plan,
+        )
+        from src.data.u0r_multimodel_download import (  # noqa: PLC0415
+            U0RDownloadTarget,
+            download_u0r_extra_raw_inputs,
+        )
+
+        release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
+        cycle = _parse_cycle(None, now=_dt.now(_tz.utc), release_lag_hours=release_lag_hours)
+
+        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        targets: list[U0RDownloadTarget] = []
+        for row in plan.rows:
+            if row.covered:
+                continue
+            city_cfg = cities_by_name.get(row.city)
+            if city_cfg is None:
+                continue
+            try:
+                lead_days = max(0, (date.fromisoformat(row.target_date) - cycle.date()).days)
+            except Exception:
+                lead_days = 0
+            targets.append(U0RDownloadTarget(
+                city=row.city, metric=row.temperature_metric, target_date=row.target_date,
+                lead_days=lead_days, latitude=float(city_cfg.lat), longitude=float(city_cfg.lon),
+                timezone_name=str(city_cfg.timezone),
+            ))
+        if not targets:
+            return {"status": "U0R_EXTRA_NO_TARGETS"}
+        return download_u0r_extra_raw_inputs(
+            forecast_db=Path(str(forecast_db)),
+            cycle=cycle,
+            targets=targets,
+            release_lag_hours=release_lag_hours,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-soft: shadow accrual never breaks the cycle
+        logger.warning("U0R extra-model shadow capture skipped (fail-soft): %s", exc)
+        return {"status": "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
+
+
 def _sqlite_table_names(conn) -> tuple[str, ...]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
     names: list[str] = []
@@ -4904,6 +4968,14 @@ def _replacement_forecast_shadow_materialize_cycle() -> None:
         "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
     }:
         logger.info("replacement forecast current-target download report: %s", download_report)
+    # THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (forward + fixed-lead), gated by the
+    # SEPARATE replacement_0_1_u0r_multimodel_capture_enabled flag. Pure side-effect on
+    # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
+    u0r_capture_report = _download_u0r_extra_raw_inputs_if_needed(cfg)
+    if u0r_capture_report is not None and u0r_capture_report.get("status") not in {
+        "U0R_EXTRA_NO_TARGETS",
+    }:
+        logger.info("U0R extra-model shadow capture report: %s", u0r_capture_report)
     report = process_replacement_forecast_shadow_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],

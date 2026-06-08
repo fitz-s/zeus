@@ -429,6 +429,52 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             ON replacement_shadow_decisions(condition_id, token_id, decision_time)
     """)
 
+    # ------------------------------------------------------------------------
+    # raw_model_forecasts  (U0R_BAYES_SPEC.md §6 F1 raw capture)
+    # ------------------------------------------------------------------------
+    # The spec-named SHADOW-ONLY multi-model walk-forward capture table. One row per
+    # (model, city, target_date, metric, source_cycle_time, endpoint): the decorrelated
+    # globals (gfs_global/icon_global/gem_global/jma_seamless/icon_eu) + in-domain regionals
+    # (icon_d2/arome) fetched ALONGSIDE the single ECMWF anchor. forecast_value_c is ALWAYS
+    # degC (SPEC §7 "C/F unit mix" antibody — the residual against settlement is taken in C).
+    # endpoint distinguishes single_runs (live capture, variable-lead, replay) from
+    # previous_runs (fixed-lead, the ONLY rows that train walk-forward history; SPEC §3
+    # causality run_time != source_available_at). SHADOW_ONLY + training_allowed=0 are
+    # CHECK-pinned exactly like raw_forecast_artifacts: this is a research-accrual surface,
+    # NEVER an order/training truth table. Lives ONLY on zeus-forecasts.db (FORECAST_CLASS,
+    # INV-37 single-DB). The walk-forward history JOIN (src/data/u0r_history_provider.py)
+    # reads endpoint='previous_runs' rows JOINed to settlement_outcomes (same DB) with
+    # target_date < decision_date and authority='VERIFIED' (no-leak, IRON RULE #3).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL CHECK (metric IN ('high', 'low')),
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            lead_days INTEGER NOT NULL CHECK (lead_days >= 0),
+            forecast_value_c REAL NOT NULL,
+            endpoint TEXT NOT NULL CHECK (endpoint IN ('single_runs', 'previous_runs')),
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            training_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (training_allowed = 0),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(model, city, target_date, metric, source_cycle_time, endpoint)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_history_join
+            ON raw_model_forecasts(city, metric, lead_days, endpoint, model, target_date)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_captured_at
+            ON raw_model_forecasts(captured_at)
+    """)
+
 
 def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
     """Create calibration_pairs table + indexes + ALTERs. Idempotent.

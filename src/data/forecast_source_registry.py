@@ -157,6 +157,14 @@ OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP: dict[str, str] = {
     "ecmwf_ifs025": "ecmwf_previous_runs",
     "icon_global": "icon_previous_runs",
     "ukmo_global_deterministic_10km": "ukmo_previous_runs",
+    # U0R-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6).
+    # OM previous-runs API supports these model ids; the U0R fixed-lead walk-forward train
+    # reads them via the temperature_2m_previous_dayN hourly var. icon_eu has NO previous-runs
+    # entry: it is dedup-folded to icon_d2 in-EU / icon_global out (SPEC §3 alias dedup).
+    "gem_global": "gem_previous_runs",
+    "jma_seamless": "jma_previous_runs",
+    "icon_d2": "icon_d2_previous_runs",
+    "meteofrance_arome_france_hd": "arome_previous_runs",
 }
 
 # Phase 3 routing fix (2026-05-04): training/serving alignment.
@@ -207,6 +215,37 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         tier="secondary",
         kind="forecast_table",
         model_name="icon_global",
+        allowed_roles=("diagnostic",),
+    ),
+    # U0R-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6 F0/F1).
+    # diagnostic-only (SHADOW capture train): these feed the fixed-lead walk-forward history
+    # for u0r_bayes fusion, never a live serve path on their own.
+    "gem_previous_runs": ForecastSourceSpec(
+        source_id="gem_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="gem_global",
+        allowed_roles=("diagnostic",),
+    ),
+    "jma_previous_runs": ForecastSourceSpec(
+        source_id="jma_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="jma_seamless",
+        allowed_roles=("diagnostic",),
+    ),
+    "icon_d2_previous_runs": ForecastSourceSpec(
+        source_id="icon_d2_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="icon_d2",
+        allowed_roles=("diagnostic",),
+    ),
+    "arome_previous_runs": ForecastSourceSpec(
+        source_id="arome_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="meteofrance_arome_france_hd",
         allowed_roles=("diagnostic",),
     ),
     "ukmo_previous_runs": ForecastSourceSpec(

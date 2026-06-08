@@ -554,6 +554,7 @@ def _replacement_u0r_fusion_override(
     *,
     metric: str,
     anchor_value_corrected_c: float,
+    conn: "sqlite3.Connection | None" = None,
 ) -> _U0RFusionOverride | None:
     """Flag-gated U0R-Bayes multi-model fusion override (the_path replacement_0_1_u0r_fusion).
 
@@ -592,8 +593,19 @@ def _replacement_u0r_fusion_override(
         from src.data.u0r_multimodel_capture import capture_u0r_instruments  # noqa: PLC0415
         from src.forecast.u0r_bayes import fuse_u0r_posterior  # noqa: PLC0415
 
-        # Optional injected seams (live wiring / tests). Defaults are fail-soft no-ops.
+        # Optional injected seams (live wiring / tests). An explicitly-assigned
+        # _history_provider attribute wins (tests inject a fixture). When none is assigned AND
+        # the materialization connection is available, the LIVE default is the real walk-forward
+        # history provider reading the PERSISTED previous-runs raw_model_forecasts JOINed to
+        # VERIFIED settlement on the SAME zeus-forecasts.db connection (intra-DB, INV-37; no-leak
+        # target_date<decision, IRON RULE #3). This assignment is THE switch that lets
+        # fuse_u0r_posterior reach T2_BAYES once n_train>=MIN_TRAIN (else EQUAL_WEIGHT). Fail-soft:
+        # the provider NEVER raises (returns {} on any error) -> anchor fallback / equal-weight.
         history_provider = getattr(_replacement_u0r_fusion_override, "_history_provider", None)
+        if history_provider is None and conn is not None:
+            from src.data.u0r_history_provider import U0RHistoryProvider  # noqa: PLC0415
+
+            history_provider = U0RHistoryProvider(conn)
         live_fetch = getattr(_replacement_u0r_fusion_override, "_live_fetch", None)
 
         capture = capture_u0r_instruments(
@@ -666,7 +678,7 @@ def _insert_posterior(
     raw_anchor_value_c = request.openmeteo_anchor.high_c if metric == "high" else request.openmeteo_anchor.low_c
     anchor_value_corrected_c = float(raw_anchor_value_c) - (0.0 if bias_shift_c is None else float(bias_shift_c))
     u0r_override = _replacement_u0r_fusion_override(
-        request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c
+        request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c, conn=conn
     )
     result = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=request.aifs_extraction,
