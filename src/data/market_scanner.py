@@ -76,16 +76,39 @@ def _set_busy_timeout_ms(conn: sqlite3.Connection, timeout_ms: int | None) -> No
 def _snapshot_capture_busy_timeout_ms(remaining_seconds: float) -> int:
     """Return the per-row SQLite wait budget for background substrate capture.
 
-    The live substrate warmer has its own wall-clock budget.  Letting a single
-    SQLite busy wait inherit the process default (30s) can consume the entire
-    capture window and leave all families without fresh executable snapshots.
-    This short timeout is scoped to background snapshot cache writes only; the
-    real submit/ledger path keeps the normal DB timeout.
+    Fitz #5 lock-CATEGORY kill (2026-06-08): this is the load-bearing budget that
+    decides whether a contended snapshot insert WAITS out a transient trade-DB
+    write lock or fails fast as "database is locked".  The trade DB
+    (executable_market_snapshots, db=trade) is written concurrently IN-PROCESS by
+    the executor submit path, the exit lifecycle, and the CollateralLedger
+    heartbeat — each on an independent connection, so the in-process write mutex
+    does not serialize them.  A WAL write lock therefore changes hands constantly.
+
+    The prior design clamped this to min(250 ms, remaining_per_cycle_ms).  Live
+    (zeus-live.err 2026-06-08 09:27:50) showed that under contention every insert
+    fail-fasted inside 250 ms → inserted=0 → executable_substrate_coverage=NONE →
+    the armed daemon had zero executable candidates and could not trade.  Worse,
+    as the per-cycle budget shrank the clamp collapsed toward a few milliseconds,
+    failing the LATE-cycle inserts the warmer most needs.
+
+    Fix: a DURABLE FLOOR (``ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS``,
+    default 1000 ms) that the shrinking per-cycle budget can NEVER pull below, so
+    a lock held briefly (<1 s) by another in-process writer is WAITED out instead
+    of raising.  The wait is still bounded by ``ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS``
+    (default 2000 ms) so one busy wait cannot consume the whole multi-row capture
+    window — the original budget-protection intent is preserved, just floored
+    above the fail-fast threshold.  The wall-clock per-cycle deadline (checked at
+    the top of the capture loop) remains the true outer bound on the cycle.
     """
 
-    configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "250"))
+    configured = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_MS", "2000"))
+    floor_ms = int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "1000"))
+    # The per-cycle remaining budget may TIGHTEN the wait toward the configured
+    # ceiling, but it must never drop the wait below the durable floor: a contended
+    # insert that waits only a few ms is the exact failure that starved coverage.
     remaining_ms = int(max(1.0, remaining_seconds * 1000.0))
-    return max(1, min(configured, remaining_ms))
+    capped = min(configured, max(floor_ms, remaining_ms))
+    return max(floor_ms, capped)
 
 
 def _snapshot_capture_sqlite_lock_retries() -> int:
