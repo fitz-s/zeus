@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 2 — equal-length but fully date-misaligned histories must NOT produce a learned off-diagonal covariance; the covariance must be rejected, not estimated.
+# Reuse: Run with pytest; update if date-alignment or covariance rejection logic in fuse_u0r_posterior changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §2/§4 (covariance over the COMMON estimation window).

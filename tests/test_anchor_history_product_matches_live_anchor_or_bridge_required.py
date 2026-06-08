@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 3 — anchor prior must match the live 9km product or go through an explicit bridge; raw 025 history must not be used as-if it were 9km.
+# Reuse: Run with pytest; update if anchor product identity or bridge logic in u0r_bayes/materializer changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §3 (the anchor prior = the LIVE 9km/0.1 ecmwf_ifs product)

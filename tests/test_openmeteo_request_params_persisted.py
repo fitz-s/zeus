@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 4 — the U0R download writer must persist Open-Meteo request params (lat/lon, timezone, model, endpoint, request_params_json, url_hash) so every stored forecast is reconstructable.
+# Reuse: Run with pytest; update if raw_model_forecasts schema or download writer changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §6 F1 raw capture; Fitz Constraint #4 (data provenance:

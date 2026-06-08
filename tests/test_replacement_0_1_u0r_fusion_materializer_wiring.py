@@ -1,3 +1,5 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Reuse: Run with pytest; update if u0r_bayes fusion, materializer wiring, or flag-gate semantics change.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Purpose: Protect the replacement_forecast_materializer wiring of the flag-gated U0R-Bayes

@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 5 — the U0R fusion override must read persisted current single_runs rows from the DB, never network-fetch inside the q path.
+# Reuse: Run with pytest; update if the current-rows consumption path or network-fetch prohibition in the U0R override changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §6 F1 (the download job persists raw_model_forecasts;

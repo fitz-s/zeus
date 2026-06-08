@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 5 — the fused posterior must record the raw_model_forecast_ids it consumed so the q is reconstructable to exact persisted inputs.
+# Reuse: Run with pytest; update if posterior provenance fields or raw_model_forecast_ids recording in the fusion path changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: Fitz Constraint #4 (a traded q must carry the provenance of its inputs);

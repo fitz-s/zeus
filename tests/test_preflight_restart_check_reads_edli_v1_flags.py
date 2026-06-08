@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 1 — preflight_restart_check.py must read flag values from their correct scope (edli_v1 for capture/fusion/arm; feature_flags for soft_anchor) not the top-level cfg dict.
+# Reuse: Run with pytest; update if flag scopes or scope-routing in preflight_restart_check.py changes.
 """
 tests/test_preflight_restart_check_reads_edli_v1_flags.py
 

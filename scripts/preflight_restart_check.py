@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: Read-only JSON preflight check (no DB/network/writes) that answers two questions: is the current flag posture coherent, and what is the single next flag to flip?
+# Reuse: Run anytime against any deployment root; safe to run on live. Inspect config/settings.json and promotion_evidence.json before relying on its output.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: docs/the_path/RESTART_RUNBOOK.md + CONTINUITY_AND_WIRING.md (flag ladder),

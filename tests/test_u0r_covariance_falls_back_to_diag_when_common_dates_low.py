@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 2 — when the date-intersection window is too short, fuse_u0r_posterior must collapse to diagonal C0 rather than attempt Ledoit-Wolf on an unreliable short window.
+# Reuse: Run with pytest; update if the covariance-reliability threshold or diagonal-collapse logic in fuse_u0r_posterior changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §2/§4 PARSIMONY rule (covariance-aware ONLY where Sigma

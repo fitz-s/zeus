@@ -138,7 +138,6 @@ PYTHONPATH=$PWD python3 -m pytest \
   tests/engine/test_replacement_0_1_qlcb_k3_and_shadowlog.py \
   tests/engine/test_replacement_0_1_live_authority_probability.py \
   tests/money_path/test_operator_arm_gates_edli_submit.py \
-  tests/money_path/test_tiny_live_caps_enabled.py \
   -q --no-header
 ```
 

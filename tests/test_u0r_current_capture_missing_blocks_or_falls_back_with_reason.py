@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 5 — a missing persisted current capture must produce a logged reason and single-anchor path, never a silent network fetch inside the q path.
+# Reuse: Run with pytest; update if the missing-capture handling or logging contract in the U0R fusion override changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: BLOCKER 5 — if the persisted CURRENT capture is missing, the q path must NOT

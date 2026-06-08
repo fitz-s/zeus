@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 4 — raw_model_forecasts must carry product-identity columns; a forecast value that cannot prove its physical product must not silently train a live-money posterior.
+# Reuse: Run with pytest; update if raw_model_forecasts schema or the product-identity column set changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §6 F1 raw capture + Fitz Constraint #4 (data provenance:

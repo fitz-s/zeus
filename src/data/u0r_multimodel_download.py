@@ -54,6 +54,28 @@ _LOG = logging.getLogger("zeus.u0r_multimodel_download")
 # SPEC §5: ~6 months retention on the shadow capture table.
 RETENTION_DAYS = 180
 
+
+class RawModelForecastRequestConflict(RuntimeError):
+    """BLOCKER 4 (operator-sharpened) — a same-logical-key insert arrived with a DIFFERENT
+    physical request identity (a corrected request: changed timezone / cell_selection / elevation
+    / product_id / request_url_hash).
+
+    The pre-fix UNIQUE(model,city,target_date,metric,source_cycle_time,endpoint) + INSERT OR
+    IGNORE SILENTLY discarded such a Run-2, leaving a STALE forecast_value_c to contaminate
+    bias/MAE/sigma/covariance/q in the walk-forward history JOIN (u0r_history_provider keys on
+    model/city/metric/lead/endpoint/target_date — NOT on the request hash, so a stale row poisons
+    the residual series). This exception replaces the silent drop with a LOUD, attributable fault:
+    the persist writes an audit row to raw_model_forecast_request_conflicts and raises, so an
+    operator re-pins the request identity rather than a wrong value silently training a live-money
+    posterior. The logical key cannot bind two physical requests."""
+
+
+# The logical-key columns that, together, identified a row under the PRE-fix UNIQUE. Two rows that
+# match on ALL of these but DIFFER on (product_id, request_url_hash) are a request conflict.
+_RMF_LOGICAL_KEY_COLUMNS = (
+    "model", "city", "target_date", "metric", "source_cycle_time", "endpoint",
+)
+
 # BLOCKER 4 (product identity): the provider + per-endpoint physical-product constants that the
 # download stamps onto every raw_model_forecasts row so a stored forecast_value_c is
 # reconstructable to its exact Open-Meteo product. cell_selection / elevation / downscaling are
@@ -324,14 +346,138 @@ _RMF_INSERT_COLUMNS = (
 )
 
 
+def _detect_request_conflict(conn, row: dict) -> dict | None:
+    """BLOCKER 4 — return the EXISTING row's identity if *row* shares the logical key of a stored
+    row but carries a DIFFERENT physical request identity (product_id OR request_url_hash);
+    else None.
+
+    This is the antibody for the operator-sharpened B4: the logical key
+    (model,city,target_date,metric,source_cycle_time,endpoint) must bind EXACTLY ONE physical
+    request. A same-logical-key/different-request insert is a corrected request that the pre-fix
+    INSERT OR IGNORE would have silently dropped, leaving a stale value to contaminate the history.
+    """
+    where = " AND ".join(f"{c} = ?" for c in _RMF_LOGICAL_KEY_COLUMNS)
+    existing = conn.execute(
+        f"""SELECT product_id, request_url_hash, forecast_value_c, cell_selection
+            FROM raw_model_forecasts WHERE {where}""",
+        tuple(row[c] for c in _RMF_LOGICAL_KEY_COLUMNS),
+    ).fetchone()
+    if existing is None:
+        return None
+    existing_product_id, existing_hash, existing_value, existing_cell = existing
+    # Same logical key + same physical request identity == the normal idempotent re-run: not a
+    # conflict (INSERT OR IGNORE will collapse it). Only a CHANGED request identity is a conflict.
+    if (existing_product_id == row.get("product_id")
+            and existing_hash == row.get("request_url_hash")):
+        return None
+    return {
+        "existing_product_id": existing_product_id,
+        "existing_request_url_hash": existing_hash,
+        "existing_forecast_value_c": existing_value,
+        "existing_cell_selection": existing_cell,
+    }
+
+
+def _write_request_conflict_audit(conn, row: dict, existing: dict) -> None:
+    """Persist one raw_model_forecast_request_conflicts row recording BOTH the existing and the
+    incoming request identity (operator directive: 'write an audit row'). Forensically
+    attributable: an operator can see exactly which request changed and the two values in play."""
+    conn.execute(
+        """INSERT INTO raw_model_forecast_request_conflicts
+               (model, city, target_date, metric, source_cycle_time, endpoint,
+                existing_product_id, incoming_product_id,
+                existing_request_url_hash, incoming_request_url_hash,
+                existing_forecast_value_c, incoming_forecast_value_c,
+                existing_cell_selection, incoming_cell_selection)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            row["model"], row["city"], row["target_date"], row["metric"],
+            row["source_cycle_time"], row["endpoint"],
+            existing["existing_product_id"], row.get("product_id"),
+            existing["existing_request_url_hash"], row.get("request_url_hash"),
+            existing["existing_forecast_value_c"], row.get("forecast_value_c"),
+            existing["existing_cell_selection"], row.get("cell_selection"),
+        ),
+    )
+
+
+def _request_conflict_error(row: dict, conflict: dict) -> "RawModelForecastRequestConflict":
+    """Build the RawModelForecastRequestConflict for a same-logical-key/different-request row."""
+    return RawModelForecastRequestConflict(
+        "raw_model_forecasts request conflict: logical key "
+        f"({'/'.join(str(row[c]) for c in _RMF_LOGICAL_KEY_COLUMNS)}) already bound to "
+        f"product_id={conflict['existing_product_id']!r} "
+        f"request_url_hash={conflict['existing_request_url_hash']!r}; incoming "
+        f"product_id={row.get('product_id')!r} "
+        f"request_url_hash={row.get('request_url_hash')!r} differs. A corrected request "
+        "must NOT silently overwrite/ignore the stored value (B4 contamination guard)."
+    )
+
+
+def _scan_and_audit_request_conflicts(conn, rows: Sequence[dict]) -> None:
+    """BLOCKER 4 production pre-scan — detect same-logical-key/different-request conflicts and
+    DURABLY write their audit rows on autocommit BEFORE the caller opens its insert transaction.
+
+    download_u0r_extra_raw_inputs wraps the insert in a BEGIN it ROLLS BACK on any error. If the
+    conflict audit were written inside that BEGIN it would be rolled back along with everything
+    else — the operator would lose the forensic trail of the silent-drop-that-wasn't. So the
+    production path calls THIS first, with NO open transaction. If ANY conflict is found the audit
+    rows are written and EXPLICITLY COMMITTED here (the connection uses sqlite3's default
+    isolation_level="", so a DML opens an implicit deferred transaction — we commit it so the
+    audit is durable even though the cycle's BEGIN below will be rolled back), then
+    RawModelForecastRequestConflict is raised before BEGIN: the cycle's capture rows are never
+    inserted (the corrected request must be operator-resolved)."""
+    if conn.in_transaction:
+        raise RuntimeError(
+            "_scan_and_audit_request_conflicts must run with no open transaction so its audit "
+            "rows can be committed independently of a caller's later ROLLBACK; an open "
+            "transaction was found."
+        )
+    first_conflict: tuple[dict, dict] | None = None
+    for row in rows:
+        conflict = _detect_request_conflict(conn, row)
+        if conflict is not None:
+            _write_request_conflict_audit(conn, row, conflict)
+            if first_conflict is None:
+                first_conflict = (row, conflict)
+    if first_conflict is not None:
+        conn.commit()  # DURABLE: survives the caller's later ROLLBACK of the cycle BEGIN
+        raise _request_conflict_error(*first_conflict)
+
+
 def _persist_rows(
     conn,
     rows: Sequence[dict],
 ) -> int:
-    """INSERT OR IGNORE the captured rows (UNIQUE-idempotent). Returns rows actually written.
+    """Persist the captured rows, idempotent on the FULL identity (logical key + product_id +
+    request_url_hash). Returns rows actually written.
+
+    BLOCKER 4 (operator-sharpened): BEFORE inserting, each row is checked against any stored row
+    sharing its logical key. If a stored row exists with the SAME logical key but a DIFFERENT
+    physical request identity (product_id or request_url_hash changed), this is a corrected
+    request the pre-fix INSERT OR IGNORE would have SILENTLY dropped — leaving a stale value to
+    contaminate bias/MAE/sigma. Instead an audit row is written (on THIS connection's current
+    transaction state) and RawModelForecastRequestConflict is raised; no capture row is inserted.
+    A same-logical-key + same-request re-run is the normal idempotent case and is INSERT-OR-IGNORE
+    collapsed (the widened UNIQUE makes a genuinely changed request a NEW row when its logical key
+    already differs).
+
+    AUDIT DURABILITY CONTRACT: this function writes the audit row and raises, but does NOT itself
+    guarantee the audit survives a caller's surrounding ROLLBACK. Callers that wrap this in a
+    transaction they roll back on error (e.g. download_u0r_extra_raw_inputs) MUST pre-scan with
+    _scan_and_audit_request_conflicts on autocommit BEFORE opening that transaction, so the audit
+    is already durable. When called directly on an autocommit connection (the operator-named test
+    API), each statement self-commits and the audit is durable on its own.
 
     Each row is a dict keyed by _RMF_INSERT_COLUMNS (capture columns + BLOCKER 4 product
     identity). raw_sha256 / artifact_id stay NULL here (capture precedes artifact persistence)."""
+    # Conflict pass FIRST — a single conflicting row fails the whole batch (the corrected request
+    # must be resolved by an operator, not partially applied).
+    for row in rows:
+        conflict = _detect_request_conflict(conn, row)
+        if conflict is not None:
+            _write_request_conflict_audit(conn, row, conflict)
+            raise _request_conflict_error(row, conflict)
     before = conn.total_changes
     placeholders = ",".join("?" for _ in _RMF_INSERT_COLUMNS)
     cols = ",".join(_RMF_INSERT_COLUMNS)
@@ -438,6 +584,13 @@ def download_u0r_extra_raw_inputs(
     conn = _connect(Path(forecast_db), write_class="live")
     try:
         ensure_replacement_forecast_shadow_schema(conn)
+        # BLOCKER 4 — DURABLE conflict audit BEFORE the rollback-on-error BEGIN. A corrected
+        # request (same logical key, different product_id/request_url_hash) writes its audit row
+        # on autocommit here and raises, so the forensic trail survives even though the capture
+        # rows are never inserted. Running this inside the BEGIN below would let the ROLLBACK
+        # erase the audit — the very silent-drop the operator demanded we make loud.
+        if rows:
+            _scan_and_audit_request_conflicts(conn, rows)
         conn.execute("BEGIN")
         try:
             if rows:

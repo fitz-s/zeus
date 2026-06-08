@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 2 — covariance rows must be aligned by target_date (not positional index); fuse_u0r_posterior must use the date-aligned common window, not equal-length same-index assumption.
+# Reuse: Run with pytest; update if residual matrix date-alignment logic in fuse_u0r_posterior changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §2 T2 fusion (covariance estimated over the COMMON

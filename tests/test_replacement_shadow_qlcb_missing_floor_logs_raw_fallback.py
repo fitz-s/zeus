@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 7 SHADOW half — when the sigma floor is enabled but a floor input is missing, SHADOW must log the raw fallback and return the raw bound (not block).
+# Reuse: Run with pytest; update if SHADOW missing-floor behavior or mode-split logging in replacement_0_1 changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: PR#400 the_path audit BLOCKER 7 (q_lcb floor unsafe live fallback).

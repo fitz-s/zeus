@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-07
+# Purpose: FIX-2b OperatorArm gate — modes x operator_authorized matrix for the EDLI live-submit boundary; mainline executor remains unaffected.
+# Reuse: Run with pytest; update if OperatorArm, EDLI submit guard, or mode definitions change.
 # Created: 2026-06-07
 # Last reused/audited: 2026-06-07
 # Authority basis: PR_SPEC.md §2 FIX-2b (operator arm must gate every real submit, by TYPE)

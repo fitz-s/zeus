@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: End-to-end wiring — real U0RHistoryProvider assigned at the materializer seam; persisted previous_runs + VERIFIED settlement yields T2_BAYES on the real forecasts DB connection.
+# Reuse: Run with pytest; update if U0RHistoryProvider, materializer seam, or T2_BAYES promotion logic changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §6 F1 integration + §4 (T2 fusion reached once n_train>=

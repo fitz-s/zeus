@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: F4 regional polygon gate + alias dedup — icon_d2 in-polygon ENTERS; out-of-polygon cities ABSENT; arome France-only; dedup drops icon_seamless; lead>1 excludes regional.
+# Reuse: Run with pytest; update if domain polygons, alias map, or regional eligibility logic in model_selection change.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §3 (DEDUP icon_seamless==icon_d2), §4 selection,

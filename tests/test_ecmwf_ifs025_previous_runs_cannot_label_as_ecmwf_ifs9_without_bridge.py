@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 3 — 025 previous-runs history must be bridged (ifs025->ifs9 widening) before becoming the 9km anchor prior; un-bridged use is forbidden.
+# Reuse: Run with pytest; update if ifs025->ifs9 bridge logic or anchor_tau0 computation changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §3 anchor + Fitz Constraint #4. The capture forms the

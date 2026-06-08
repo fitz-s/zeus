@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: Seed raw_model_forecasts (endpoint=previous_runs, SHADOW_ONLY) from the proven B0 fixed-lead multi-model dataset so U0RHistoryProvider has walk-forward history immediately.
+# Reuse: --b0 and --db are both REQUIRED; --b0 must point at B0_multilead_dataset.json; --db must point at target zeus-forecasts.db. Use --dry-run first. Never run against live DB without operator intent.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: docs/the_path/BACKFILL_NOW.md + U0R_BAYES_SPEC.md §3/§5/§6 F1.
@@ -74,7 +77,7 @@ VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Seed raw_model_forecasts from B0 (previous_runs).")
-    ap.add_argument("--b0", default="/Users/leofitz/zeus/.omc/research/polyweather_eval/B0_multilead_dataset.json")
+    ap.add_argument("--b0", required=True, help="path to B0_multilead_dataset.json (REQUIRED; no default to avoid pointing at the wrong deployment)")
     ap.add_argument("--db", required=True, help="target zeus-forecasts.db (REQUIRED; never the live path unless you intend to seed live)")
     ap.add_argument("--dry-run", action="store_true", help="count rows, write nothing")
     args = ap.parse_args()

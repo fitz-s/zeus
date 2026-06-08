@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 6 — lead_days must be computed against the city-local date, not UTC; UTC date is off-by-one in cross-timezone cases (Tokyo example).
+# Reuse: Run with pytest; update if lead_days computation or timezone handling in the materializer override changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: U0R_BAYES_SPEC.md §3 (lead is fixed-lead in the CITY-LOCAL calendar; the

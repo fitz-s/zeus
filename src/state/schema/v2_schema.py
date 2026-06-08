@@ -497,7 +497,21 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             training_allowed INTEGER NOT NULL DEFAULT 0
                 CHECK (training_allowed = 0),
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(model, city, target_date, metric, source_cycle_time, endpoint)
+            -- BLOCKER 4 (operator-sharpened): the uniqueness MUST include the physical request
+            -- identity (product_id, request_url_hash). The pre-fix UNIQUE keyed ONLY on the
+            -- logical (model,city,target_date,metric,source_cycle_time,endpoint) tuple, so a Run-2
+            -- with the SAME logical key but a DIFFERENT request (changed timezone/cell_selection/
+            -- elevation/product_id) collided with the stale row and -- under INSERT OR IGNORE --
+            -- was silently discarded, leaving a wrong forecast_value_c to contaminate
+            -- bias/MAE/sigma/covariance/q in the walk-forward history JOIN. Including
+            -- product_id + request_url_hash makes a changed request a NEW row, never an ignore.
+            -- The persist layer additionally REJECTS a same-logical-key/different-request_hash
+            -- insert (RawModelForecastRequestConflict + an audit row) so a corrected request is a
+            -- LOUD, attributable event rather than two silently-coexisting rows the history JOIN
+            -- (which keys on model/city/metric/lead/endpoint/target_date, NOT on the hash) would
+            -- conflate. See src/data/u0r_multimodel_download.py::_persist_rows.
+            UNIQUE(model, product_id, request_url_hash, city, target_date, metric,
+                   source_cycle_time, endpoint)
         )
     """)
     # Idempotent forward-only migration for pre-existing DBs created before the product-identity
@@ -540,6 +554,52 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_product_identity
             ON raw_model_forecasts(city, metric, lead_days, endpoint, model_domain_hash, target_date)
+    """)
+    # BLOCKER 4 (operator-sharpened) — forward-only widened uniqueness for PRE-EXISTING DBs.
+    # SQLite cannot ALTER the table-level UNIQUE constraint of an already-created table without a
+    # full table rebuild; a CREATE UNIQUE INDEX IF NOT EXISTS adds the SAME widened uniqueness
+    # (logical key + product_id + request_url_hash) forward-only, no DROP/rebuild. On a fresh DB
+    # this is redundant with the table-level UNIQUE above (both pin the identical column set); on
+    # a legacy DB it is the only way the widened key reaches the physical table. The persist layer
+    # (src/data/u0r_multimodel_download.py::_persist_rows) is the PRIMARY antibody — it REJECTS a
+    # same-logical-key/different-request-hash insert before it is attempted — and this index is
+    # defense-in-depth for any write path that bypasses _persist_rows.
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_model_forecasts_logical_plus_request
+            ON raw_model_forecasts(model, product_id, request_url_hash, city, target_date,
+                                   metric, source_cycle_time, endpoint)
+    """)
+    # BLOCKER 4 audit lane — the conflict ledger. When a same-logical-key insert arrives with a
+    # DIFFERENT physical request identity (a corrected request: changed timezone / cell_selection
+    # / elevation / product_id / request_url_hash), the persist layer raises
+    # RawModelForecastRequestConflict AND writes one row here, recording BOTH the existing and the
+    # incoming request identity. This converts the pre-fix SILENT INSERT-OR-IGNORE drop into a
+    # loud, forensically-attributable event (Fitz Constraint #3 immune system: an antibody, not an
+    # alert). SHADOW research surface only — never an order/training truth table.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_model_forecast_request_conflicts (
+            conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            existing_product_id TEXT,
+            incoming_product_id TEXT,
+            existing_request_url_hash TEXT,
+            incoming_request_url_hash TEXT,
+            existing_forecast_value_c REAL,
+            incoming_forecast_value_c REAL,
+            existing_cell_selection TEXT,
+            incoming_cell_selection TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_rmf_request_conflicts_logical_key
+            ON raw_model_forecast_request_conflicts(model, city, target_date, metric,
+                                                    source_cycle_time, endpoint)
     """)
 
 

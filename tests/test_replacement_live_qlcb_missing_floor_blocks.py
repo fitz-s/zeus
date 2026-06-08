@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Purpose: BLOCKER 7 LIVE half — when the sigma floor is enabled but a floor input is missing, the LIVE/authority path must block (not degrade to raw Wilson); fail-soft-to-raw is unsafe on the money path.
+# Reuse: Run with pytest; update if q_lcb floor logic or LIVE/SHADOW mode-split in replacement_0_1 changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: PR#400 the_path audit BLOCKER 7 (q_lcb floor unsafe live fallback).
