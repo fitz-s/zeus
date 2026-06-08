@@ -196,7 +196,21 @@ tables:
       and in-domain regionals (icon_d2/arome) captured alongside the ECMWF anchor.
       forecast_value_c is ALWAYS degC (no C/F mix). endpoint distinguishes
       single_runs (live capture) from previous_runs (fixed-lead walk-forward train).
-      Created via _create_replacement_forecast_shadow_tables (the shadow-schema
+      PRODUCT-IDENTITY columns (2026-06-08, U0R PR#400 BLOCKER 4, Fitz Constraint #4
+      data provenance): source_id, source_family, product_id, provider, model_name,
+      request_params_json, request_url_hash, raw_sha256 (nullable), latitude_requested,
+      longitude_requested, timezone_requested, cell_selection, elevation_param,
+      downscaling_policy, endpoint_mode, model_domain_hash, coverage_status,
+      artifact_id (nullable, REFERENCES raw_forecast_artifacts). These make a stored
+      forecast_value_c reconstructable to its exact physical Open-Meteo product (which
+      endpoint/model id, cell, elevation, requested coordinates, timezone) so a
+      live-money posterior never trains on a value whose product cannot be proven.
+      The anchor (model='ecmwf_ifs', the fusion identity) is stored with
+      model_name='ecmwf_ifs025' because OM's previous-runs API serves only the 0.25
+      ECMWF product (BLOCKER 3 ifs025->ifs9 bridge in src/forecast/u0r_anchor_bridge.py).
+      Added via an idempotent forward-only ALTER guard in
+      _create_replacement_forecast_shadow_tables (column-existence checked before ADD;
+      no DROP). Created via _create_replacement_forecast_shadow_tables (the shadow-schema
       helper invoked by both ensure_replacement_forecast_shadow_schema and
       apply_canonical_schema forecast_tables=True). Lives ONLY on
       zeus-forecasts.db (INV-37 single-DB); the history JOIN to settlement_outcomes

@@ -207,6 +207,30 @@ def _install_live_fetch(monkeypatch, values):
     mod._replacement_u0r_fusion_override._live_fetch = _fetch
 
 
+def _seed_current_single_runs(conn, *, values, request=None, anchor_value=27.0):
+    """BLOCKER 5: persist the CURRENT single_runs rows the download job would have written for
+    THIS cycle. Post-B5 the q path reads these PERSISTED rows (never a network fetch), so the
+    wiring tests must seed them (replacing the old _install_live_fetch network seam). The anchor
+    (ecmwf_ifs) current row is seeded too so the fusion has the full present set."""
+    req = request if request is not None else _request()
+    target_date = mod._date_text(req.target_date)
+    cyc = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat()
+    lead = mod._u0r_city_local_lead_days(
+        computed_at=mod._to_utc(req.computed_at, field_name="computed_at"),
+        target_local_date=date.fromisoformat(target_date), tz_name="Europe/Paris",
+    )
+    all_vals = {"ecmwf_ifs": anchor_value, **values}
+    for m, v in all_vals.items():
+        conn.execute(
+            """INSERT INTO raw_model_forecasts
+               (model, city, target_date, metric, source_cycle_time, source_available_at,
+                captured_at, lead_days, forecast_value_c, endpoint, model_name, source_family)
+               VALUES (?, 'Paris', ?, 'high', ?, 'avail', 'cap', ?, ?, 'single_runs', ?,
+                       'openmeteo_single_runs')""",
+            (m, target_date, cyc, lead, v, m),
+        )
+
+
 # =====================================================================================
 # (d) REAL provider reaches T2_BAYES on a >=25-row VERIFIED previous_runs fixture
 # =====================================================================================
@@ -216,8 +240,9 @@ def test_real_provider_reaches_t2_bayes(monkeypatch) -> None:
     conn = _conn()
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
     _seed_history(conn, decision=date(2026, 6, 7), models=models, leak=True)
-    # Only inject the live forward fetch; the HISTORY provider is the REAL default (built on conn).
-    _install_live_fetch(monkeypatch, _live_values())
+    # BLOCKER 5: the q path reads PERSISTED current single_runs rows (no network). Seed them.
+    # The HISTORY provider is the REAL default (built on conn).
+    _seed_current_single_runs(conn, values=_live_values())
 
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
@@ -236,7 +261,7 @@ def test_real_provider_equal_weight_below_min_train(monkeypatch) -> None:
     conn = _conn()
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
     _seed_history(conn, decision=date(2026, 6, 7), models=models, n=10)  # < MIN_TRAIN
-    _install_live_fetch(monkeypatch, _live_values())
+    _seed_current_single_runs(conn, values=_live_values())
 
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
@@ -253,7 +278,7 @@ def test_real_provider_no_leak_future_rows_ignored(monkeypatch) -> None:
     conn = _conn()
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
     _seed_history(conn, decision=date(2026, 6, 7), models=models, leak=True)
-    _install_live_fetch(monkeypatch, _live_values())
+    _seed_current_single_runs(conn, values=_live_values())
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
     # If the 99.0 leak rows had contributed, the EB bias would be ~-77 and the center would blow

@@ -30,13 +30,19 @@ money path is byte-identical whether or not this job runs (gated by the SEPARATE
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from src.data.u0r_multimodel_capture import OPENMETEO_MODEL_IDS, _default_live_fetch
+from src.data.u0r_multimodel_capture import (
+    OPENMETEO_MODEL_IDS,
+    OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
+    _default_live_fetch,
+)
 from src.forecast.model_selection import (
     ANCHOR_MODEL,
     GLOBAL_LIKELIHOOD_MODELS,
@@ -47,6 +53,146 @@ _LOG = logging.getLogger("zeus.u0r_multimodel_download")
 
 # SPEC §5: ~6 months retention on the shadow capture table.
 RETENTION_DAYS = 180
+
+# BLOCKER 4 (product identity): the provider + per-endpoint physical-product constants that the
+# download stamps onto every raw_model_forecasts row so a stored forecast_value_c is
+# reconstructable to its exact Open-Meteo product. cell_selection / elevation / downscaling are
+# the OM grid choices the U0R fetchers use (the single-runs anchor pattern: nearest gridpoint,
+# requested elevation, no extra downscaling). endpoint_mode is the physical endpoint family.
+OPENMETEO_PROVIDER = "open-meteo"
+SINGLE_RUNS_SOURCE_FAMILY = "openmeteo_single_runs"
+PREVIOUS_RUNS_SOURCE_FAMILY = "openmeteo_previous_runs"
+U0R_CELL_SELECTION = "nearest"          # OM default cell pick (nearest gridpoint to requested).
+U0R_ELEVATION_PARAM = "requested"       # OM elevation = requested point (no override).
+U0R_DOWNSCALING_POLICY = "none"         # no statistical downscaling applied to the raw value.
+
+# Per-model OM previous-runs source_id (the WHICH-feed identity). Keyed by STORED model identity.
+# The anchor is stored model='ecmwf_ifs' but its OM previous-runs source is ecmwf_previous_runs
+# serving model_name='ecmwf_ifs025' (0.25 product) — see OPENMETEO_PREVIOUS_RUNS_MODEL_IDS below
+# and BLOCKER 3 (the ifs025->ifs9 bridge). Falls back to '<model>_previous_runs'.
+OPENMETEO_PREVIOUS_RUNS_SOURCE_ID: dict[str, str] = {
+    ANCHOR_MODEL: "ecmwf_previous_runs",
+    "gfs_global": "gfs_previous_runs",
+    "icon_global": "icon_previous_runs",
+    "icon_eu": "icon_previous_runs",
+    "gem_global": "gem_previous_runs",
+    "jma_seamless": "jma_previous_runs",
+    "icon_d2": "icon_d2_previous_runs",
+    "meteofrance_arome_france_hd": "arome_previous_runs",
+    "icon_seamless": "icon_d2_previous_runs",
+}
+
+
+def _model_domain_hash(
+    *,
+    provider: str,
+    model_name: str,
+    cell_selection: str,
+    elevation_param: str,
+    downscaling_policy: str,
+    endpoint_mode: str,
+) -> str:
+    """BLOCKER 4 — fingerprint binding the physical-product identity of a captured value.
+
+    Two captures that differ in ANY of (provider, model_name, cell_selection, elevation_param,
+    downscaling_policy, endpoint_mode) are DIFFERENT physical products and get different hashes,
+    so a residual history can never silently mix two cells / two model resolutions under one id.
+    """
+    payload = json.dumps(
+        {
+            "provider": provider,
+            "model_name": model_name,
+            "cell_selection": cell_selection,
+            "elevation_param": elevation_param,
+            "downscaling_policy": downscaling_policy,
+            "endpoint_mode": endpoint_mode,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget") -> dict:
+    """BLOCKER 4 — the full product-identity payload for one (model, endpoint, target) capture.
+
+    Resolves the OM model id actually addressed (model_name), the source_id/source_family/
+    product_id/provider, the requested coordinates+timezone, the cell/elevation/downscaling
+    choices, the endpoint_mode, the request params (the reconstructable request) + its url hash,
+    and the model_domain_hash. The anchor's model_name is the OM previous-runs id 'ecmwf_ifs025'
+    even though the stored `model` column stays the fusion identity 'ecmwf_ifs' (BLOCKER 3).
+    """
+    if endpoint == "previous_runs":
+        from src.data.openmeteo_client import PREVIOUS_RUNS_URL  # noqa: PLC0415
+
+        model_name = OPENMETEO_PREVIOUS_RUNS_MODEL_IDS.get(
+            model, OPENMETEO_MODEL_IDS.get(model, model)
+        )
+        source_family = PREVIOUS_RUNS_SOURCE_FAMILY
+        source_id = OPENMETEO_PREVIOUS_RUNS_SOURCE_ID.get(model, f"{model}_previous_runs")
+        base_url = PREVIOUS_RUNS_URL
+        lead = max(0, int(target.lead_days))
+        hourly_var = "temperature_2m" if lead == 0 else f"temperature_2m_previous_day{lead}"
+        request_params = {
+            "latitude": target.latitude,
+            "longitude": target.longitude,
+            "start_date": target.target_date,
+            "end_date": target.target_date,
+            "hourly": hourly_var,
+            "models": model_name,
+            "temperature_unit": "celsius",
+            "timezone": target.timezone_name,
+            "cell_selection": U0R_CELL_SELECTION,
+        }
+    else:  # single_runs
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+            SINGLE_RUNS_FORECAST_URL,
+        )
+
+        model_name = OPENMETEO_MODEL_IDS.get(model, model)
+        source_family = SINGLE_RUNS_SOURCE_FAMILY
+        source_id = f"{model}_single_runs"
+        base_url = SINGLE_RUNS_FORECAST_URL
+        request_params = {
+            "latitude": target.latitude,
+            "longitude": target.longitude,
+            "hourly": "temperature_2m",
+            "models": model_name,
+            "temperature_unit": "celsius",
+            "timezone": target.timezone_name,
+            "cell_selection": U0R_CELL_SELECTION,
+        }
+    request_params_json = json.dumps(request_params, sort_keys=True, separators=(",", ":"))
+    request_url_hash = hashlib.sha256(
+        f"{base_url}?{request_params_json}".encode("utf-8")
+    ).hexdigest()
+    product_id = f"{model_name}::{endpoint}"
+    model_domain_hash = _model_domain_hash(
+        provider=OPENMETEO_PROVIDER,
+        model_name=model_name,
+        cell_selection=U0R_CELL_SELECTION,
+        elevation_param=U0R_ELEVATION_PARAM,
+        downscaling_policy=U0R_DOWNSCALING_POLICY,
+        endpoint_mode=endpoint,
+    )
+    return {
+        "source_id": source_id,
+        "source_family": source_family,
+        "product_id": product_id,
+        "provider": OPENMETEO_PROVIDER,
+        "model_name": model_name,
+        "request_params_json": request_params_json,
+        "request_url_hash": request_url_hash,
+        "latitude_requested": float(target.latitude),
+        "longitude_requested": float(target.longitude),
+        "timezone_requested": target.timezone_name,
+        "cell_selection": U0R_CELL_SELECTION,
+        "elevation_param": U0R_ELEVATION_PARAM,
+        "downscaling_policy": U0R_DOWNSCALING_POLICY,
+        "endpoint_mode": endpoint,
+        "model_domain_hash": model_domain_hash,
+        "coverage_status": "COVERED",
+    }
 
 # FIX 1 (live-money correctness): the ANCHOR (ecmwf_ifs) MUST be captured alongside the
 # likelihood instruments. Without it, raw_model_forecasts NEVER accrues anchor previous_runs
@@ -73,7 +219,11 @@ U0R_EXTRA_MODELS: tuple[str, ...] = (
 # fetch translates store-id -> OM-previous-runs-id here; the stored `model` column is ALWAYS the
 # fusion identity. Non-anchor models fall back to OPENMETEO_MODEL_IDS (their OM id == store id).
 OPENMETEO_PREVIOUS_RUNS_MODEL_IDS: dict[str, str] = {
-    ANCHOR_MODEL: "ecmwf_ifs025",  # OM previous-runs ECMWF id; stored model col stays "ecmwf_ifs"
+    # OM previous-runs ECMWF id; stored model col stays "ecmwf_ifs" (the fusion identity). The
+    # value is the SINGLE source of truth in u0r_multimodel_capture (BLOCKER 3 bridge gate reads
+    # the same constant) so the download and the bridge can never drift on which product served
+    # the anchor history.
+    ANCHOR_MODEL: OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
 }
 
 # A single-runs (forward) fetch: today's local-day extremum (degC) for the metric, or None.
@@ -162,20 +312,32 @@ def _extract_localday_extremum_c(payload: object, hourly_var: str, metric: str) 
     return max(nums) if metric == "high" else min(nums)
 
 
+# BLOCKER 4: the persisted column order for one raw_model_forecasts row. The first 10 are the
+# original capture columns; the rest are the product-identity columns the download stamps.
+_RMF_INSERT_COLUMNS = (
+    "model", "city", "target_date", "metric", "source_cycle_time", "source_available_at",
+    "captured_at", "lead_days", "forecast_value_c", "endpoint",
+    "source_id", "source_family", "product_id", "provider", "model_name",
+    "request_params_json", "request_url_hash", "latitude_requested", "longitude_requested",
+    "timezone_requested", "cell_selection", "elevation_param", "downscaling_policy",
+    "endpoint_mode", "model_domain_hash", "coverage_status",
+)
+
+
 def _persist_rows(
     conn,
-    rows: Sequence[tuple],
+    rows: Sequence[dict],
 ) -> int:
-    """INSERT OR IGNORE the captured rows (UNIQUE-idempotent). Returns rows actually written."""
+    """INSERT OR IGNORE the captured rows (UNIQUE-idempotent). Returns rows actually written.
+
+    Each row is a dict keyed by _RMF_INSERT_COLUMNS (capture columns + BLOCKER 4 product
+    identity). raw_sha256 / artifact_id stay NULL here (capture precedes artifact persistence)."""
     before = conn.total_changes
+    placeholders = ",".join("?" for _ in _RMF_INSERT_COLUMNS)
+    cols = ",".join(_RMF_INSERT_COLUMNS)
     conn.executemany(
-        """
-        INSERT OR IGNORE INTO raw_model_forecasts
-            (model, city, target_date, metric, source_cycle_time, source_available_at,
-             captured_at, lead_days, forecast_value_c, endpoint)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows,
+        f"INSERT OR IGNORE INTO raw_model_forecasts ({cols}) VALUES ({placeholders})",
+        [tuple(row[c] for c in _RMF_INSERT_COLUMNS) for row in rows],
     )
     return conn.total_changes - before
 
@@ -234,11 +396,14 @@ def download_u0r_extra_raw_inputs(
             if sv is None:
                 dropped.append(f"{model}:single_runs")
             else:
-                rows.append((
-                    model, t.city, t.target_date, t.metric, cycle_iso,
-                    source_available_iso, captured_iso, int(t.lead_days),
-                    float(sv), "single_runs",
-                ))
+                rows.append({
+                    "model": model, "city": t.city, "target_date": t.target_date,
+                    "metric": t.metric, "source_cycle_time": cycle_iso,
+                    "source_available_at": source_available_iso, "captured_at": captured_iso,
+                    "lead_days": int(t.lead_days), "forecast_value_c": float(sv),
+                    "endpoint": "single_runs",
+                    **_u0r_product_identity(model, "single_runs", t),
+                })
 
             # (2) fixed-lead previous_runs (walk-forward train).
             try:
@@ -253,11 +418,14 @@ def download_u0r_extra_raw_inputs(
             if pv is None:
                 dropped.append(f"{model}:previous_runs")
             else:
-                rows.append((
-                    model, t.city, t.target_date, t.metric, cycle_iso,
-                    source_available_iso, captured_iso, int(t.lead_days),
-                    float(pv), "previous_runs",
-                ))
+                rows.append({
+                    "model": model, "city": t.city, "target_date": t.target_date,
+                    "metric": t.metric, "source_cycle_time": cycle_iso,
+                    "source_available_at": source_available_iso, "captured_at": captured_iso,
+                    "lead_days": int(t.lead_days), "forecast_value_c": float(pv),
+                    "endpoint": "previous_runs",
+                    **_u0r_product_identity(model, "previous_runs", t),
+                })
 
     # ---- single-connection / single-DB persist + prune (INV-37) ----
     from src.state.db import _connect  # noqa: PLC0415

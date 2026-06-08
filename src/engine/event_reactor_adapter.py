@@ -5469,6 +5469,77 @@ def _replacement_settlement_grounded_lcb(
     return float(min(max(grounded, 0.0), 1.0))
 
 
+# QLCB_HONESTY.md FIX-C honest reason code: a missing floor input on the LIVE replacement
+# q_lcb path. Surfaced as a ValueError so it propagates through _live_yes_probabilities ->
+# _generate_candidate_proofs, where the existing `except ValueError` (era.py:1388) converts
+# it into a LIVE_INFERENCE_INPUTS_MISSING no-submit receipt — i.e. the candidate is BLOCKED,
+# no order is placed. Module-level constant so the reason code is the single source of truth
+# for the production raiser AND its antibody tests.
+REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK = "REPLACEMENT_0_1_LIVE_AUTHORITY_QLCB_FLOOR_MISSING"
+
+
+def _resolve_replacement_settlement_floor_lcb(
+    *,
+    live_authority: bool,
+    city: str,
+    condition_id: str,
+    bin_id: str,
+    anchor_mu_c: float | None,
+    sigma_floor_c: float | None,
+    bounds: tuple[float | None, float | None] | None,
+) -> float | None:
+    """The per-bin settlement-grounded q_lcb ceiling, with the BLOCKER 7 mode split.
+
+    QLCB_HONESTY.md FIX-C exists because the raw Wilson q_lcb over the 51 AIFS votes ignores
+    the ~3.2x settlement underdispersion — it is an OVERCONFIDENT lower bound. The floor caps
+    it at the realized-settlement residual. When the floor is ENABLED (the caller only invokes
+    this helper in that case) but a floor input is MISSING — no anchor μ, no σ-floor cell, or
+    no bin topology — there is no settlement-grounded ceiling to compute. The mode then decides
+    the SEMANTICS of that miss (PR#400 the_path audit BLOCKER 7):
+
+      - ``live_authority=True`` (LIVE / authority / capital): degrading to the raw Wilson value
+        re-emits the exact overconfident bound the floor exists to fix, and that bound would
+        size real capital. That is UNSAFE. Raise ``ValueError`` so the candidate is BLOCKED
+        (the caller's ValueError handler turns it into a no-submit receipt). NEVER pass raw.
+
+      - ``live_authority=False`` (SHADOW / observation only, no capital at risk): keep the
+        current fail-soft behavior — emit a queryable raw-fallback log record and return
+        ``None`` so the caller keeps the raw bound for measurement.
+
+    Returns the grounded ceiling (a YES-bin probability in [0,1]) when all inputs are present,
+    in BOTH modes — the floor still floors; only the MISSING case is mode-dependent. ``None``
+    is returned ONLY in shadow mode on a missing input (live mode raises instead).
+    """
+    import logging as _logging  # module uses lazy per-fn logging imports
+    if anchor_mu_c is None or sigma_floor_c is None or bounds is None:
+        missing = (
+            "anchor_mu" if anchor_mu_c is None
+            else "sigma_floor_cell" if sigma_floor_c is None
+            else "bin_topology"
+        )
+        if live_authority:
+            # Iron rule #6 + BLOCKER 7: a missing floor on the live path BLOCKS the candidate;
+            # it must never leak the raw overconfident Wilson bound to capital sizing.
+            raise ValueError(
+                f"{REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK}:{condition_id}:bin={bin_id}:missing={missing}"
+            )
+        _logging.getLogger("zeus.replacement_qlcb_shadow").warning(
+            "replacement q_lcb floor missing (shadow: raw fallback kept) city=%s cond=%s "
+            "bin=%s missing=%s",
+            city, condition_id, bin_id, missing,
+        )
+        return None
+    return _replacement_settlement_grounded_lcb(
+        mu_c=float(anchor_mu_c),
+        sigma_floor_c=float(sigma_floor_c),
+        # AIFS member std is not carried in provenance (vote frequencies only); None → the
+        # floor IS the effective σ (not the tight, underdispersed member spread).
+        sigma_model_c=None,
+        lower_c=bounds[0],
+        upper_c=bounds[1],
+    )
+
+
 def _wilson_lower_bound(successes: float, trials: float, *, z: float = 1.645) -> float:
     if trials <= 0.0:
         return 0.0
@@ -5676,10 +5747,18 @@ def _replacement_authority_probability_and_fdr_proof(
     q_map = replacement_bundle.q
     # QLCB_HONESTY.md FIX-C — settlement σ-floor inputs, resolved ONCE per family (flag
     # ON only). μ is the soft-anchor point (°C); σ-floor is the per-(city,season,metric)
-    # realized-residual cell. Resolved fail-soft: any miss → floor_enabled stays True but
-    # the per-bin grounded ceiling is skipped, so the q_lcb degrades to the raw Wilson
-    # value (NEVER a crash, NEVER an optimistic widen).
+    # realized-residual cell.
+    #
+    # PR#400 the_path audit BLOCKER 7 — this function is the LIVE replacement_0_1 authority
+    # builder: it is reached ONLY after `_replacement_authority_enabled()` (TRADE_AUTHORITY
+    # flag, :5627) AND `replacement_live_authority_evidence_gate` (:5640) both pass, and the
+    # q_lcb it returns is stamped probability_authority="replacement_0_1" and sizes REAL
+    # capital. So the missing-floor mode here is unconditionally live/authority/capital.
+    # A missing floor input must therefore BLOCK (never degrade to the raw, overconfident
+    # Wilson bound) — both at family-setup time and per-bin. The block raises a ValueError
+    # that the caller (_generate_candidate_proofs :1388) converts to a no-submit receipt.
     floor_enabled = _replacement_qlcb_settlement_sigma_floor_enabled()
+    live_authority = True  # structural: see BLOCKER 7 note above (this is the live path).
     anchor_mu_c: float | None = None
     sigma_floor_c: float | None = None
     if floor_enabled:
@@ -5693,33 +5772,37 @@ def _replacement_authority_probability_and_fdr_proof(
             sigma_floor_c = settlement_sigma_floor(
                 str(family.city), season, str(family.metric).lower()
             )
-        except Exception as _floor_exc:  # noqa: BLE001 — fail-soft: no floor, keep raw lcb
+        except Exception as _floor_exc:  # noqa: BLE001
+            # BLOCKER 7: setup failure on the LIVE path is NOT fail-soft-to-raw — keeping the
+            # raw bound for every bin would size capital on the overconfident value the floor
+            # exists to fix. Block the whole family (no submit) via the floor-missing code.
             _logging.getLogger("zeus.replacement_qlcb_shadow").warning(
-                "replacement q_lcb floor setup failed (non-fatal, raw lcb kept): %s",
+                "replacement q_lcb floor setup failed on LIVE path (blocking, not raw): %s",
                 _floor_exc,
             )
-            anchor_mu_c = None
-            sigma_floor_c = None
+            raise ValueError(
+                f"{REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK}:setup:{family.city}:{_floor_exc}"
+            ) from _floor_exc
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
         if not bin_id or bin_id not in q_map:
             raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BIN_BINDING_MISSING:{condition_id}")
         q_yes = min(max(float(q_map[bin_id]), 0.0), 1.0)
-        # FIX-C: the settlement-grounded ceiling for THIS bin (flag ON + inputs resolved).
+        # FIX-C + BLOCKER 7: the settlement-grounded ceiling for THIS bin (flag ON only). The
+        # mode-aware resolver RAISES on a missing floor input when live_authority=True (here,
+        # always — block the candidate, never raw); it would log+return None only in shadow.
         settlement_floor_lcb: float | None = None
-        if floor_enabled and anchor_mu_c is not None and sigma_floor_c is not None:
-            bounds = _replacement_bin_bounds_c(replacement_bundle, bin_id)
-            if bounds is not None:
-                settlement_floor_lcb = _replacement_settlement_grounded_lcb(
-                    mu_c=anchor_mu_c,
-                    sigma_floor_c=sigma_floor_c,
-                    # AIFS member std is not carried in provenance (vote frequencies only);
-                    # None → the floor IS the effective σ (not the tight member spread).
-                    sigma_model_c=None,
-                    lower_c=bounds[0],
-                    upper_c=bounds[1],
-                )
+        if floor_enabled:
+            settlement_floor_lcb = _resolve_replacement_settlement_floor_lcb(
+                live_authority=live_authority,
+                city=str(family.city),
+                condition_id=condition_id,
+                bin_id=bin_id,
+                anchor_mu_c=anchor_mu_c,
+                sigma_floor_c=sigma_floor_c,
+                bounds=_replacement_bin_bounds_c(replacement_bundle, bin_id),
+            )
         claimed_yes_lcb = _replacement_yes_lcb_for_bin(
             replacement_bundle, bin_id=bin_id, q_yes=q_yes, settlement_floor_lcb=None
         )

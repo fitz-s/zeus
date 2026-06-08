@@ -445,6 +445,22 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     # INV-37 single-DB). The walk-forward history JOIN (src/data/u0r_history_provider.py)
     # reads endpoint='previous_runs' rows JOINed to settlement_outcomes (same DB) with
     # target_date < decision_date and authority='VERIFIED' (no-leak, IRON RULE #3).
+    # BLOCKER 4 (live-money data provenance, Fitz Constraint #4): the original capture columns
+    # could NOT prove the PHYSICAL product behind forecast_value_c. The product-identity columns
+    # below make a stored value reconstructable to its exact Open-Meteo product:
+    #   source_id/source_family/product_id/provider/model_name — WHICH feed/model id served it
+    #     (e.g. anchor stored model='ecmwf_ifs' but model_name='ecmwf_ifs025' is the OM product);
+    #   request_params_json/request_url_hash — the exact request that produced the value;
+    #   latitude_requested/longitude_requested/timezone_requested — requested point (city vs
+    #     station) and the tz the local-day window was taken in;
+    #   cell_selection/elevation_param/downscaling_policy — OM grid-cell + elevation/downscaling
+    #     choices that change the returned 2m temperature (a different cell = a different product);
+    #   endpoint_mode — daily vs hourly-agg / single_runs vs previous_runs physical endpoint;
+    #   model_domain_hash — fingerprint binding (provider, model_name, cell_selection,
+    #     elevation_param, downscaling_policy, endpoint_mode) so two physical cells never conflate;
+    #   coverage_status — whether the requested point was actually covered by the product;
+    #   raw_sha256 / artifact_id (both NULLABLE) — link to the immutable raw artifact when present
+    #     (capture may precede artifact persistence).
     conn.execute("""
         CREATE TABLE IF NOT EXISTS raw_model_forecasts (
             raw_model_forecast_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -458,6 +474,24 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             lead_days INTEGER NOT NULL CHECK (lead_days >= 0),
             forecast_value_c REAL NOT NULL,
             endpoint TEXT NOT NULL CHECK (endpoint IN ('single_runs', 'previous_runs')),
+            source_id TEXT,
+            source_family TEXT,
+            product_id TEXT,
+            provider TEXT,
+            model_name TEXT,
+            request_params_json TEXT NOT NULL DEFAULT '{}',
+            request_url_hash TEXT,
+            raw_sha256 TEXT,
+            latitude_requested REAL,
+            longitude_requested REAL,
+            timezone_requested TEXT,
+            cell_selection TEXT,
+            elevation_param TEXT,
+            downscaling_policy TEXT,
+            endpoint_mode TEXT,
+            model_domain_hash TEXT,
+            coverage_status TEXT,
+            artifact_id INTEGER REFERENCES raw_forecast_artifacts(artifact_id),
             trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
                 CHECK (trade_authority_status IN ('SHADOW_ONLY')),
             training_allowed INTEGER NOT NULL DEFAULT 0
@@ -466,6 +500,35 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             UNIQUE(model, city, target_date, metric, source_cycle_time, endpoint)
         )
     """)
+    # Idempotent forward-only migration for pre-existing DBs created before the product-identity
+    # extension: ADD each column only if absent (guards on PRAGMA table_info). Forward-only, no
+    # DROP. New columns are nullable (or DEFAULT '{}') so existing rows remain valid.
+    _existing_rmf_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(raw_model_forecasts)").fetchall()
+    }
+    _rmf_product_identity_alters = (
+        ("source_id", "TEXT"),
+        ("source_family", "TEXT"),
+        ("product_id", "TEXT"),
+        ("provider", "TEXT"),
+        ("model_name", "TEXT"),
+        ("request_params_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("request_url_hash", "TEXT"),
+        ("raw_sha256", "TEXT"),
+        ("latitude_requested", "REAL"),
+        ("longitude_requested", "REAL"),
+        ("timezone_requested", "TEXT"),
+        ("cell_selection", "TEXT"),
+        ("elevation_param", "TEXT"),
+        ("downscaling_policy", "TEXT"),
+        ("endpoint_mode", "TEXT"),
+        ("model_domain_hash", "TEXT"),
+        ("coverage_status", "TEXT"),
+        ("artifact_id", "INTEGER"),
+    )
+    for _col, _decl in _rmf_product_identity_alters:
+        if _col not in _existing_rmf_cols:
+            conn.execute(f"ALTER TABLE raw_model_forecasts ADD COLUMN {_col} {_decl}")
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_history_join
             ON raw_model_forecasts(city, metric, lead_days, endpoint, model, target_date)
@@ -473,6 +536,10 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_captured_at
             ON raw_model_forecasts(captured_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_product_identity
+            ON raw_model_forecasts(city, metric, lead_days, endpoint, model_domain_hash, target_date)
     """)
 
 

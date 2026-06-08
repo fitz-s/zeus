@@ -157,6 +157,32 @@ def _install_seams(monkeypatch, *, live_values: dict[str, float], history_models
     monkeypatch.setattr(mod._replacement_u0r_fusion_override, "_history_provider", _provider, raising=False)
 
 
+def _seed_current_single_runs(conn, *, live_values: dict[str, float], request=None,
+                              anchor_value: float = 27.0):
+    """BLOCKER 5: the q path reads PERSISTED current single_runs rows (never a network fetch), so
+    these flag-ON fusion tests must persist the current values the download job would have written
+    for THIS cycle. The anchor (ecmwf_ifs) current row is seeded too so the present set is full."""
+    from datetime import date as _date
+    req = request if request is not None else _request()
+    target_date = mod._date_text(req.target_date)
+    cyc = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat()
+    tz = req.city_timezone
+    lead = mod._u0r_city_local_lead_days(
+        computed_at=mod._to_utc(req.computed_at, field_name="computed_at"),
+        target_local_date=_date.fromisoformat(target_date), tz_name=tz,
+    )
+    all_vals = {"ecmwf_ifs": anchor_value, **live_values}
+    for m, v in all_vals.items():
+        conn.execute(
+            """INSERT INTO raw_model_forecasts
+               (model, city, target_date, metric, source_cycle_time, source_available_at,
+                captured_at, lead_days, forecast_value_c, endpoint, model_name, source_family)
+               VALUES (?, ?, ?, 'high', ?, 'avail', 'cap', ?, ?, 'single_runs', ?,
+                       'openmeteo_single_runs')""",
+            (m, req.city, target_date, cyc, lead, v, m),
+        )
+
+
 def _enable_flag(monkeypatch):
     import src.config as cfg
     monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_u0r_fusion_enabled", True)
@@ -208,6 +234,8 @@ def test_flag_on_fusion_changes_posterior_and_writes_emos_identity(monkeypatch) 
                                              "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2},
                    history_models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"])
     conn_on = _conn()
+    _seed_current_single_runs(conn_on, live_values={"gfs_global": 23.0, "icon_global": 23.5,
+                                                    "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2})
     pid_on = mod._insert_posterior(conn_on, _request(), metric="high", anchor_id=1)
     row_on = _row(conn_on, pid_on)
     q_on = row_on["q_json"]
@@ -218,7 +246,13 @@ def test_flag_on_fusion_changes_posterior_and_writes_emos_identity(monkeypatch) 
     fusion = prov["u0r_fusion"]
     assert fusion["method"] == "T2_BAYES"
     assert fusion["used_models"][0] == "ecmwf_ifs"
-    assert set(fusion["used_models"][1:]) >= {"gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"}
+    # BLOCKER 9 / spec §4(2): one representative per provider family. Paris is in the Central-EU
+    # box at lead 1, so the DWD/ICON family rep is icon_eu (the in-EU nest); icon_global is the
+    # suppressed provider duplicate. The non-ICON decorrelated globals all stay.
+    used = set(fusion["used_models"][1:])
+    assert used >= {"gfs_global", "gem_global", "jma_seamless"}
+    icon_family = used & {"icon_global", "icon_eu", "icon_d2"}
+    assert icon_family == {"icon_eu"}, f"exactly one DWD-ICON rep (icon_eu in-EU), got {icon_family}"
     # F6 identity components present.
     cfg = mod  # for clarity
     pc = conn_on.execute(
@@ -239,6 +273,10 @@ def test_flag_on_dropped_global_fuses_with_remaining(monkeypatch) -> None:
                                              "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2},
                    history_models=["ecmwf_ifs", "gfs_global", "gem_global", "jma_seamless", "icon_eu"])
     conn = _conn()
+    # icon_global has NO persisted current row -> it is dropped (the q path never network-fetches
+    # it). The rest are persisted and fuse.
+    _seed_current_single_runs(conn, live_values={"gfs_global": 23.0,
+                                                 "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
     assert "icon_global" in prov["dropped_models"]
@@ -293,6 +331,8 @@ def test_flag_on_icon_d2_enters_in_paris_polygon(monkeypatch) -> None:
                                              "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1},
                    history_models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu", "icon_d2"])
     conn = _conn()
+    _seed_current_single_runs(conn, live_values={"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
+                                                 "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
     assert "icon_d2" in prov["used_models"]
@@ -314,7 +354,11 @@ def test_flag_on_icon_d2_absent_in_moscow_zero_leak(monkeypatch) -> None:
                                              "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1},
                    history_models=["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu", "icon_d2"])
     conn = _conn()
-    pid = mod._insert_posterior(conn, _request(city="Moscow", tz="Europe/Moscow"), metric="high", anchor_id=1)
+    moscow_req = _request(city="Moscow", tz="Europe/Moscow")
+    _seed_current_single_runs(conn, request=moscow_req,
+                              live_values={"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
+                                           "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1})
+    pid = mod._insert_posterior(conn, moscow_req, metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
     assert "icon_d2" not in prov["used_models"], "Moscow out-of-polygon: icon_d2 must be ABSENT (zero-leak)"
     assert "icon_d2" in prov["excluded_regionals"]
@@ -341,6 +385,8 @@ def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
 
     monkeypatch.setattr(mod._replacement_u0r_fusion_override, "_history_provider", _provider, raising=False)
     conn = _conn()
+    _seed_current_single_runs(conn, live_values={"gfs_global": 23.0, "icon_eu": 23.2,
+                                                 "icon_d2": 23.1, "icon_seamless": 23.1})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
     prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
     assert "icon_seamless" in prov["dropped_aliases"]

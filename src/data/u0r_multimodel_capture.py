@@ -63,6 +63,14 @@ OPENMETEO_MODEL_IDS: dict[str, str] = {
     "icon_seamless": "icon_seamless",
 }
 
+# BLOCKER 3: the OM product that actually serves the ANCHOR walk-forward history via the
+# previous-runs API. The stored raw_model_forecasts.model column is the fusion identity
+# ('ecmwf_ifs', the 9km live anchor) but the OM previous-runs feed serves only the 0.25 product
+# 'ecmwf_ifs025'. This constant is the single source of truth the capture consults to decide
+# whether the anchor history needs the ifs025->ifs9 bridge. It MUST equal the download's
+# OPENMETEO_PREVIOUS_RUNS_MODEL_IDS[ANCHOR_MODEL].
+OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME = "ecmwf_ifs025"
+
 
 @dataclass(frozen=True)
 class ModelHistory:
@@ -71,15 +79,35 @@ class ModelHistory:
     ``forecast_values`` and ``settlement_values`` are aligned, ordered strictly BEFORE the
     target date (no same-day leak). ``residuals`` = forecast - settlement. Empty -> the model
     gets bias=0 and is excluded from the covariance window (low-n inflation applies downstream).
+
+    ``target_dates`` (BLOCKER 2): the ISO target_date of each (forecast, settlement) pair, in
+    the SAME order as the value tuples. ``residual_by_target_date`` maps each date to its
+    residual. The fusion's covariance is built ONLY over the INTERSECTION of these dates across
+    the selected models, so residuals from different target_dates can never share a covariance
+    row (equal length is NOT equal meaning — U0R_BAYES_SPEC §2/§4). ``target_dates`` defaults
+    to empty for legacy callers that supply only the value tuples (date-less -> the covariance
+    aligner falls back to the proven positional stack for that caller only).
     """
 
     model: str
     forecast_values: tuple[float, ...]
     settlement_values: tuple[float, ...]
+    target_dates: tuple[str, ...] = ()
 
     @property
     def residuals(self) -> tuple[float, ...]:
         return tuple(f - y for f, y in zip(self.forecast_values, self.settlement_values))
+
+    @property
+    def residual_by_target_date(self) -> dict[str, float]:
+        """BLOCKER 2 — residual keyed by ISO target_date. The covariance aligner consumes THIS;
+        an empty map (legacy date-less history) signals the positional-stack fallback."""
+        return {
+            d: f - y
+            for d, f, y in zip(
+                self.target_dates, self.forecast_values, self.settlement_values
+            )
+        }
 
     @property
     def n_train(self) -> int:
@@ -293,31 +321,56 @@ def capture_u0r_instruments(
     )
 
     # ---- EB-correct + build instruments for the SELECTED set (globals then regionals) ----
+    # BLOCKER 2: each instrument carries residuals_by_target_date so the fusion aligns the
+    # covariance by date (the cross-model Sigma is estimated only over the common target_dates).
     instruments: list[ModelInstrument] = []
     for m in selection.likelihood_globals:
         z, n = _eb_corrected(m, present_values[m], histories.get(m), parent_bias)
+        h = histories.get(m)
         instruments.append(ModelInstrument(
-            model=m, z=z, train_residuals=tuple(histories.get(m).residuals) if histories.get(m) else (),
+            model=m, z=z, train_residuals=tuple(h.residuals) if h else (),
+            residuals_by_date=h.residual_by_target_date if h else {},
             n_train=n, is_regional=False,
         ))
     for m in selection.regional_experts:
         z, n = _eb_corrected(m, present_values[m], histories.get(m), parent_bias)
+        h = histories.get(m)
         instruments.append(ModelInstrument(
-            model=m, z=z, train_residuals=tuple(histories.get(m).residuals) if histories.get(m) else (),
+            model=m, z=z, train_residuals=tuple(h.residuals) if h else (),
+            residuals_by_date=h.residual_by_target_date if h else {},
             n_train=n, is_regional=True,
         ))
 
     # ---- anchor prior (EB-corrected center + walk-forward residual std) ----
+    # BLOCKER 3: the anchor history's PHYSICAL product is ecmwf_ifs025 (0.25), the only ECMWF
+    # feed Open-Meteo's previous-runs API serves — NOT the live 9km ecmwf_ifs anchor. The raw
+    # 025 residual std must therefore be reconciled to the 9km frame via the declared
+    # ifs025->ifs9 bridge BEFORE it becomes the anchor prior tau0 (the bridge widens, never
+    # narrows). Without this the anchor sigma + q_lcb would silently inherit a 0.25 product's
+    # uncertainty as if it were the 9km anchor's.
+    from src.forecast.u0r_anchor_bridge import (  # noqa: PLC0415
+        anchor_history_requires_bridge,
+        bridge_anchor_tau0,
+    )
+
+    # The stored anchor history product (model_name actually served by the OM prev-runs feed).
+    anchor_stored_model_name = OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME
     anchor_hist = histories.get(ANCHOR_MODEL)
     if anchor_hist and anchor_hist.n_train >= MIN_TRAIN:
         import statistics  # noqa: PLC0415
 
         try:
-            tau0 = statistics.stdev(anchor_hist.residuals)
+            raw_tau0 = statistics.stdev(anchor_hist.residuals)
         except statistics.StatisticsError:
-            tau0 = None
+            raw_tau0 = None
         anchor_z: float | None = float(anchor_z_corrected)
-        anchor_tau0: float | None = float(tau0) if tau0 is not None else None
+        if raw_tau0 is None:
+            anchor_tau0: float | None = None
+        elif anchor_history_requires_bridge(stored_model_name=anchor_stored_model_name):
+            # 025 history -> bridge to the 9km frame (widen tau0).
+            anchor_tau0 = float(bridge_anchor_tau0(float(raw_tau0)))
+        else:
+            anchor_tau0 = float(raw_tau0)
     else:
         # No trusted anchor history -> still use the anchor center as the prior mean, with a
         # conservative None tau0 only when there is truly no history; the fusion floors tau0.

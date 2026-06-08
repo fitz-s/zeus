@@ -65,9 +65,62 @@ def test_select_models_paris_in_domain_enters_both_regionals() -> None:
     }
     sel = select_models(present_models=present, lat=PARIS[0], lon=PARIS[1], lead_days=1)
     assert sel.anchor_present is True
-    assert sel.likelihood_globals == ("gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu")
+    # BLOCKER 9 / spec §4(2): one representative per provider family. icon_d2 is the in-domain
+    # DWD-ICON rep here, so icon_global AND icon_eu are BOTH suppressed from the globals — the
+    # DWD/ICON family contributes exactly one instrument (icon_d2 as the regional expert).
+    assert sel.likelihood_globals == ("gfs_global", "gem_global", "jma_seamless")
     assert set(sel.regional_experts) == {"icon_d2", "meteofrance_arome_france_hd"}
     assert sel.excluded_regionals == ()
+    assert set(sel.dropped_provider_dups) == {"icon_global", "icon_eu"}
+
+
+def test_dwd_provider_uses_one_representative_by_default() -> None:
+    # OUT of every regional polygon (Moscow): icon_d2 cannot enter. Of the two remaining
+    # DWD-ICON globals (icon_global, icon_eu), exactly ONE survives as the family rep. Without
+    # explicit in-EU evidence the conservative default rep is the global-scope icon_global;
+    # icon_eu is suppressed so the DWD/ICON family is never double-counted in one fusion.
+    present = {
+        "ecmwf_ifs": 4.7, "gfs_global": 5.1, "icon_global": 3.7, "gem_global": 5.0,
+        "jma_seamless": 3.8, "icon_eu": 4.1,
+    }
+    sel = select_models(present_models=present, lat=MOSCOW[0], lon=MOSCOW[1], lead_days=1)
+    icon_family = [m for m in sel.used_models if m in {"icon_global", "icon_eu", "icon_d2"}]
+    assert icon_family == ["icon_global"]          # exactly one DWD-ICON representative
+    assert "icon_eu" not in sel.used_models
+    assert "icon_eu" in sel.dropped_provider_dups
+    assert "icon_d2" not in sel.used_models        # out of polygon -> regional absent
+
+
+def test_icon_d2_replaces_icon_global_inside_domain() -> None:
+    # Inside the Central-EU polygon (Paris), icon_d2 is the highest-resolution DWD-ICON expert
+    # and becomes the family representative. It REPLACES icon_global (and icon_eu): neither
+    # global ICON instrument enters used_models, so the family is represented once, by icon_d2.
+    present = {
+        "ecmwf_ifs": 4.7, "gfs_global": 5.1, "icon_global": 3.7, "gem_global": 5.0,
+        "jma_seamless": 3.8, "icon_eu": 4.1, "icon_d2": 4.2,
+    }
+    sel = select_models(present_models=present, lat=PARIS[0], lon=PARIS[1], lead_days=1)
+    icon_family = [m for m in sel.used_models if m in {"icon_global", "icon_eu", "icon_d2"}]
+    assert icon_family == ["icon_d2"]              # icon_d2 is the sole DWD-ICON rep in-domain
+    assert "icon_global" not in sel.used_models
+    assert "icon_eu" not in sel.used_models
+    assert {"icon_global", "icon_eu"} <= set(sel.dropped_provider_dups)
+
+
+def test_icon_eu_not_selected_with_icon_global_without_explicit_evidence() -> None:
+    # Both DWD globals present, NO icon_d2, OUT of every regional polygon (Moscow). icon_eu must
+    # NOT join icon_global in the same fusion: without explicit in-EU evidence (an eligible
+    # regional / in-domain city) the family collapses to the single global-scope rep.
+    present = {
+        "ecmwf_ifs": 4.7, "gfs_global": 5.1, "icon_global": 3.7, "gem_global": 5.0,
+        "jma_seamless": 3.8, "icon_eu": 4.1,
+    }
+    sel = select_models(present_models=present, lat=MOSCOW[0], lon=MOSCOW[1], lead_days=1)
+    assert "icon_global" in sel.likelihood_globals
+    assert "icon_eu" not in sel.likelihood_globals
+    assert "icon_eu" not in sel.used_models
+    # The two ICON globals never coexist in the selected set.
+    assert not ({"icon_global", "icon_eu"} <= set(sel.used_models))
 
 
 def test_select_models_moscow_out_of_domain_no_regional() -> None:

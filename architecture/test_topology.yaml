@@ -724,6 +724,8 @@ test_trust_policy:
     tests/money_path/test_day0_shadow_scope.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P1 RT: day0_shadow edli_live_scope admits day0 + structural no-submit (scope ⊥ arm axis); forecast_only stays byte-identical"}
     tests/engine/test_day0_mask_consolidation.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P2 RT: collapse to ONE absorbing mask — hardened inline _edli_day0_mask_for_analysis truth table (zero behavioral delta), dark module deleted"}
     tests/engine/test_day0_mask_runtime_gate.py: {created: "2026-06-05", last_used: "2026-06-05", note: "P3 RT: runtime DAY0_MASK_CONTRADICTS_OBSERVATION fail-closed gate — surviving bin contradicting rounded_value raises; future inversion fails CLOSED"}
+    tests/test_replacement_live_qlcb_missing_floor_blocks.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 7 RT: LIVE replacement_0_1 q_lcb path BLOCKS on a missing settlement sigma-floor input (anchor/cell/topology/setup) — never degrades to the raw overconfident Wilson bound; antibody verified to fail on revert"}
+    tests/test_replacement_shadow_qlcb_missing_floor_logs_raw_fallback.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 7 RT: SHADOW half of the mode split — missing floor input logs raw-fallback + returns None (keep raw); live_authority=True on same input raises"}
 
 categories:
   core_law_antibody:

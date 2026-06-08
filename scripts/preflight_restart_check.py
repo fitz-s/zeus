@@ -76,20 +76,28 @@ def main() -> int:
     pe_doc = json.load(open(pe_p)) if os.path.exists(pe_p) else {}
     pe = (pe_doc.get("promotion_evidence") or {}) if isinstance(pe_doc, dict) else {}
 
-    def f(name, default=False):
-        return bool(cfg.get(name, default))
+    # Each flag group lives in its own config sub-object — NOT at the top level.
+    # Reading from cfg.get(name) always returns None (wrong posture/next-flip).
+    edli = cfg.get("edli_v1", {})
+    feature_flags = cfg.get("feature_flags", {})
 
-    capture = f("replacement_0_1_u0r_multimodel_capture_enabled")
-    fusion = f("replacement_0_1_u0r_fusion_enabled")
-    eb = f("replacement_0_1_eb_bias_correction_enabled")
-    smooth = f("replacement_0_1_member_vote_smoothing_enabled")
-    qlcb = f("replacement_qlcb_settlement_sigma_floor_enabled")
-    auth = f("openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled")
-    kelly = f("openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled")
-    flip = f("openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled")
-    arm = f("edli_live_operator_authorized")
-    cap_notional = f("tiny_live_notional_cap_enabled")
-    cap_daily = f("tiny_live_daily_order_cap_enabled")
+    def f_edli(name, default=False):
+        return bool(edli.get(name, default))
+
+    def f_ff(name, default=False):
+        return bool(feature_flags.get(name, default))
+
+    capture = f_edli("replacement_0_1_u0r_multimodel_capture_enabled")
+    fusion = f_edli("replacement_0_1_u0r_fusion_enabled")
+    eb = f_edli("replacement_0_1_eb_bias_correction_enabled")
+    smooth = f_edli("replacement_0_1_member_vote_smoothing_enabled")
+    qlcb = f_edli("replacement_qlcb_settlement_sigma_floor_enabled")
+    auth = f_ff("openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled")
+    kelly = f_ff("openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled")
+    flip = f_ff("openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled")
+    arm = f_edli("edli_live_operator_authorized")
+    cap_notional = f_edli("tiny_live_notional_cap_enabled")
+    cap_daily = f_edli("tiny_live_daily_order_cap_enabled")
 
     ev_blockers = _evidence_blockers(pe)
     ev_ok = not ev_blockers
