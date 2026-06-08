@@ -1101,6 +1101,27 @@ def _riskguard_dependency_lock_backoff_seconds(attempt: int) -> float:
     return min(base * (attempt + 1), 8.0)
 
 
+def _riskguard_dependency_busy_timeout_ms() -> int:
+    """Short per-attempt busy_timeout for the metrics dependency read.
+
+    Fitz #5 follow-up (2026-06-08): the within-tick retry fixed the lock-DEGRADE
+    flap, but combined with the global 30s busy_timeout a locked tick waited up to
+    ~2 min (30s x retries) before producing ANY risk_state row. That pushed the
+    inter-row gap past the 5-min get_current_level staleness floor and created a
+    SECOND flap (stale row -> RISK_GUARD_BLOCKED on the entry gate). A SHORT
+    per-attempt wait makes a contended attempt FAIL FAST so the retry loop — or the
+    fast preserve-GREEN attestation — completes in seconds, keeping risk_state rows
+    well inside the freshness window. A genuine read between WAL spikes needs only a
+    brief uncontended lock window (sub-second when uncontended), so genuine GREEN
+    rows still land; sustained spikes fall to the preserve-GREEN attestation, which
+    is the correct conservative behaviour. Default 4000ms; floored at 500ms.
+    """
+    try:
+        return max(500, int(os.environ.get("ZEUS_RISKGUARD_DEP_BUSY_TIMEOUT_MS", "4000")))
+    except ValueError:
+        return 4000
+
+
 def _close_conn(conn: sqlite3.Connection | None) -> None:
     if conn is None:
         return
@@ -1245,6 +1266,13 @@ def _tick_once() -> RiskLevel:
     risk_conn: sqlite3.Connection | None = None
     try:
         zeus_conn = _get_runtime_trade_connection()
+        # Short per-attempt wait so a contended metrics read FAILS FAST and the
+        # tick() retry loop (or the fast preserve-GREEN attestation) keeps risk_state
+        # rows inside the 5-min staleness floor — see _riskguard_dependency_busy_timeout_ms.
+        try:
+            zeus_conn.execute("PRAGMA busy_timeout = %d" % _riskguard_dependency_busy_timeout_ms())
+        except Exception:  # noqa: BLE001 — best-effort PRAGMA; a stub conn in tests may lack it
+            pass
         risk_conn = get_connection(RISK_DB_PATH, write_class="live")
         init_risk_db(risk_conn)
 
