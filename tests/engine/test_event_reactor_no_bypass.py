@@ -3,8 +3,12 @@
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
-#   admission API (cbc454e17e); xfail(strict) test_non_executable_snapshot_with_depth_cannot_create_fillable_quote as
-#   PRODUCTION_BUG ZEUS-NOBYPASS-1 (executable_allowed=False guard dropped from proof-pricing path by integration merge).
+#   admission API (cbc454e17e).
+#   2026-06-08 FIX ZEUS-NOBYPASS-1: re-added the executable_allowed=False fail-closed guard to
+#   _execution_price_from_snapshot (orig 4f7d963606); flipped test_non_executable_snapshot_with_depth_cannot_create_fillable_quote
+#   from xfail(strict) to a normal passing test; added no-over-block companions
+#   test_executable_allowed_true_snapshot_with_depth_still_creates_fillable_quote and
+#   test_absent_tradeability_status_snapshot_with_depth_is_byte_identical_fillable.
 from __future__ import annotations
 
 import ast
@@ -2945,28 +2949,13 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     assert receipt.native_quote_available is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "PRODUCTION_BUG ZEUS-NOBYPASS-1 (Tier 0 no-bypass regression). The no-submit "
-        "proof-pricing path ignores tradeability_status_json.executable_allowed=False. "
-        "_execution_price_from_snapshot / _native_quote_book_from_snapshot_row "
-        "(src/engine/event_reactor_adapter.py:8458, 8478) build a fillable quote purely "
-        "from orderbook depth and never read tradeability_status. A substrate-only, "
-        "non-executable snapshot (reason synthetic_clob_market_info_substrate_only) "
-        "yields proof_accepted=True, native_quote_available=True, c_fee_adjusted=0.40. "
-        "Commit 4f7d963606 ('Keep substrate identity out of executable proofs', directive: "
-        "'proof pricing must require tradeability_status_json.executable_allowed=true when "
-        "present') added exactly this guard, but a later integration merge "
-        "(544c5030fc/5fa31f243e) on thepath/audit-realign dropped it while keeping this "
-        "test. The submit-time gate assert_snapshot_executable "
-        "(src/contracts/executable_market_snapshot.py:392) still fails closed, proving the "
-        "invariant is still live — it is just unenforced at the proof/receipt/opportunity-"
-        "book layer. DO NOT weaken: re-add the executable_allowed guard to "
-        "_execution_price_from_snapshot, then remove this xfail."
-    ),
-)
 def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
+    # No-bypass invariant: a substrate-only snapshot whose
+    # tradeability_status_json.executable_allowed is EXPLICITLY False must NOT
+    # become a fillable quote, even when orderbook depth is present. The
+    # proof-pricing path (_execution_price_from_snapshot) fail-closes to the
+    # EXECUTABLE_NATIVE_ASK_MISSING path carrying the substrate reason, mirroring
+    # the submit-time backstop assert_snapshot_executable.
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(
         selected_ask="0.40",
@@ -2982,6 +2971,50 @@ def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
     assert "synthetic_clob_market_info_substrate_only" in receipt.reason
     assert receipt.proof_accepted is False
     assert receipt.native_quote_available is False
+
+
+def test_executable_allowed_true_snapshot_with_depth_still_creates_fillable_quote():
+    # No-over-block companion to ZEUS-NOBYPASS-1: the fail-closed guard must
+    # ONLY block executable_allowed EXPLICITLY False. A snapshot with the SAME
+    # depth that is explicitly executable_allowed=True still produces a fillable
+    # native quote and an accepted proof — proving the guard does not regress any
+    # legitimate executable quote.
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(
+        selected_ask="0.40",
+        tradeability_status_json=json.dumps(
+            {
+                "executable_allowed": True,
+                "accepting_orders": True,
+                "clob_archived": False,
+                "clob_enable_order_book": True,
+                "reason": "clob_market_info_executable",
+            }
+        ),
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.native_quote_available is True
+    assert receipt.c_fee_adjusted is not None
+    assert not receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
+
+
+def test_absent_tradeability_status_snapshot_with_depth_is_byte_identical_fillable():
+    # No-over-block companion to ZEUS-NOBYPASS-1: when executable_allowed is
+    # ABSENT/None (the default substrate-free fixture), behavior must be
+    # byte-identical to pre-guard — the guard is strictly-more-restrictive and
+    # must NOT touch snapshots that lack the field.
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(selected_ask="0.40")  # tradeability_status_json="{}" -> field absent
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.native_quote_available is True
+    assert receipt.c_fee_adjusted is not None
+    assert not receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
 
 
 @pytest.mark.xfail(reason="depth_at_best_ask column fallback for empty orderbook_depth_json is unimplemented in the native quote book (EXECUTABLE_NATIVE_ASK_MISSING:NO_DEPTH). Separate from the q/FDR kernel — tracked as its own quote-book feature.", strict=False)

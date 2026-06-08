@@ -8461,6 +8461,19 @@ def _execution_price_from_snapshot(
     selected_token_id: str,
     direction: str,
 ) -> tuple[ExecutionPrice, float, float]:
+    # ZEUS-NOBYPASS-1 fail-closed guard (re-added; orig 4f7d963606). Strictly
+    # more restrictive: only block when tradeability_status_json.executable_allowed
+    # is EXPLICITLY False. Absent/None/True -> byte-identical to pre-guard behavior
+    # (do not block snapshots that lack the field). A non-executable substrate row
+    # can never actually fill (submit-time assert_snapshot_executable already
+    # fail-closes); this removes only the phantom tradeable candidate from the
+    # proof/receipt/opportunity-book layer. Raising ValueError routes to the
+    # caller's EXECUTABLE_NATIVE_ASK_MISSING path (execution_price=None,
+    # native_quote_available=False) carrying the substrate reason.
+    tradeability_status = _json_object(row.get("tradeability_status_json") or row.get("tradeability_status") or {})
+    if tradeability_status.get("executable_allowed") is False:
+        reason = _nonnull(tradeability_status.get("reason") or "not_executable")
+        raise ValueError(f"EDLI executable snapshot marked non-executable: {reason}")
     if selected_token_id not in {str(row.get("yes_token_id") or ""), str(row.get("no_token_id") or "")}:
         raise ValueError("EDLI executable snapshot selected token mismatch")
     if _nonnull(row.get("selected_outcome_token_id")) == selected_token_id and not _snapshot_outcome_matches_selected_token(row, selected_token_id):
