@@ -470,6 +470,9 @@ def _replacement_eb_bias_shift_c(
                 metric=metric,
                 live_data_version=str(bias_ldv),
                 settlement_unit=settlement_unit,
+                # ITEM 2 anti-lookahead self-gate: the resolver serves the row only if its
+                # training_cutoff is STRICTLY BEFORE this target_date (no external gate).
+                target_date=target_date,
             )
     except Exception as exc:  # fail-closed: never break shadow materialization
         try:

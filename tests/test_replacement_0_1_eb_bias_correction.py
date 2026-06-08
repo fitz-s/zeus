@@ -229,13 +229,21 @@ def test_resolver_fail_closed_on_staging_authority() -> None:
 
 
 def test_resolver_returns_degc_bias_for_c_settled_city() -> None:
+    # 2026-06-07 ITEM 1: the resolver now passes the raw effective_bias_c through the
+    # structural over-correction guard (bound_eb_bias_shift) using the row's n_live +
+    # residual_sd_c. The fixture row has eff_c=-1.5, n_live=40, residual_sd_c=2.0, so the
+    # served shift is the GUARDED value, not the raw -1.5 (the guard only ever makes the
+    # correction more conservative). The unit contract (degC, no *1.8) is unchanged.
+    from src.calibration.replacement_eb_bias import bound_eb_bias_shift
+
     conn = _world_conn()
     _write_verified_bias(conn, city="Tokyo", season="JJA", month=6, metric="high", ldv="dv1", eff_c=-1.5)
     shift = resolve_replacement_eb_bias_shift_c(
         conn, city="Tokyo", season="JJA", month=6, metric="high",
         live_data_version="dv1", settlement_unit="C",
     )
-    assert shift == pytest.approx(-1.5)
+    assert shift == pytest.approx(bound_eb_bias_shift(-1.5, 40, 2.0))
+    assert abs(shift) <= 1.5 + 1e-9, "guard is only-more-conservative (never larger than raw)"
 
 
 def test_resolver_keeps_degc_for_f_settled_city_in_degc_cells() -> None:
@@ -243,13 +251,19 @@ def test_resolver_keeps_degc_for_f_settled_city_in_degc_cells() -> None:
     # an F-settled city. effective_bias_c is degC; the shift applied to degC cells is
     # degC directly. NO *1.8 here (that contaminates the degC construction). The *1.8
     # belongs to the legacy edli path where members carry the city's settlement unit.
+    # 2026-06-07 ITEM 1: the served value is the GUARDED degC shift — IDENTICAL for a C and
+    # an F settled city (the guard never scales by 1.8), which is exactly the unit-safety
+    # property this test protects.
+    from src.calibration.replacement_eb_bias import bound_eb_bias_shift
+
     conn = _world_conn()
     _write_verified_bias(conn, city="San Francisco", season="JJA", month=6, metric="high", ldv="dv1", eff_c=-1.5)
     shift = resolve_replacement_eb_bias_shift_c(
         conn, city="San Francisco", season="JJA", month=6, metric="high",
         live_data_version="dv1", settlement_unit="F",
     )
-    assert shift == pytest.approx(-1.5)
+    # Same guarded value as the C-settled city above (no *1.8 for the F city).
+    assert shift == pytest.approx(bound_eb_bias_shift(-1.5, 40, 2.0))
 
 
 def test_resolver_fail_closed_when_weight_live_zero() -> None:
