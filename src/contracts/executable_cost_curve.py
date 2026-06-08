@@ -1,7 +1,7 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: "bin selection.md" §14.3 + §5.3 + §5.4 + §3 + Hidden #6/#15/#16
-#                  + operator directive 2026-06-08
+#                  + §13 (min-order gate) + operator directive 2026-06-08
 """ExecutableCostCurve — size-dependent all-in cost of a native BUY side.
 
 Spec Phase 3 (§11), §14.3, §5.3-5.4, Hidden issues #6/#15/#16.
@@ -17,14 +17,24 @@ WHY THIS OBJECT EXISTS (Hidden #6 — "scalar VWMP hides the convex cost curve")
                          ``s`` USD, returned as a TYPED ExecutionPrice in
                          probability_units (the scalar Kelly boundary at the
                          chosen stake — spec §5.3).
+      avg_cost_for_shares(n)
+                       — depth-weighted all-in cost per share to buy exactly
+                         ``n`` SHARES (the §13 min-order quantity the candidate-
+                         proof path actually asks for). Walks shares directly so
+                         a SHARE -> USD-at-top-price -> SHARE round-trip never
+                         underfills a thin top level and FALSE-no-trades a
+                         fillable side (spec §5.3/§5.4/§13).
       marginal_cost(s) — all-in cost per share of the next marginal dollar at
                          stake ``s`` (prices against the deepest level touched).
       max_fillable(p)  — total stake (USD) fillable at all-in cost <= ``p``.
 
-DEFAULT-OFF / SHADOW (operator directive 2026-06-08):
-  This module is a pure value object plus helper math. Importing it changes NO
-  live trading behavior; it is NOT wired into the live decision path. That is a
-  later phase. No existing gate is weakened by its presence.
+LIVE PRICING OBJECT (S1, operator directive 2026-06-08):
+  As of S1 this curve IS the single live pricing object on the candidate-proof
+  path (src/engine/event_reactor_adapter.py _execution_price_from_snapshot):
+  avg_cost_for_shares(min_order_size) emits the typed cost-of-entry that replaces
+  the scalar VWMP kernel. There is no flag and no shadow branch — one path, one
+  pricing object. (The USD-stake avg_cost / marginal_cost / max_fillable remain
+  for the future §5.3 USD-parameterized ELG optimizer.)
 
 MONOTONICITY (the relationship this object guarantees, spec §5.3, Hidden #6):
   Levels are sorted ascending by price and walked cheapest-first. The all-in
@@ -268,6 +278,90 @@ class ExecutableCostCurve:
             )
 
         return shares_filled, usd_spent, last_all_in_price
+
+    def _walk_for_shares(self, shares: Decimal) -> tuple[Decimal, Decimal]:
+        """Walk asks buying exactly ``shares`` shares. Cheapest-first.
+
+        Returns ``(shares_filled, all_in_usd_spent)``. Unlike ``_walk_for_stake``
+        (which spends a USD budget), this fills an exact SHARE count — the
+        question the candidate-proof path actually asks (§13 sizes the candidate
+        at ``min_order_size`` shares, the smallest executable taker order).
+
+        WHY A SEPARATE SHARE-PARAMETERIZED WALK EXISTS (share<->USD boundary,
+        spec §5.3/§5.4):
+          ``avg_cost(stake_usd)`` is USD-stake-parameterized (the form the §5.3
+          ELG optimizer differentiates). Converting a SHARE count to a USD stake
+          at the TOP level's price UNDERFILLS whenever the top level's depth is
+          smaller than the requested shares: the USD budget computed at the cheap
+          top price buys fewer than the requested shares once the walk crosses
+          into costlier deeper levels, tripping the §13 min-order gate as a FALSE
+          no-trade for a side the depth-walk can in fact fill. The fix is to walk
+          SHARES directly — never round-trip shares -> USD -> shares. This also
+          restores byte-identical parity with the legacy share-parameterized VWMP
+          kernel (``executable_cost._book_walk_average``) for ALL books, not only
+          single-sufficient-level ones.
+
+        Raises ValueError (fail closed, spec §13) when:
+          * shares <= 0,
+          * shares < min_order_size (the §13 min-order gate),
+          * the book cannot fill ``shares`` (depth exhausted).
+        """
+        if shares <= Decimal("0"):
+            raise ValueError(f"shares must be > 0, got {shares}")
+        if shares < self.min_order_size - _DEPTH_EPS:
+            raise ValueError(
+                f"requested {shares} shares is below min_order_size "
+                f"{self.min_order_size} (§13 no-trade gate)"
+            )
+
+        remaining = shares
+        usd_spent = Decimal("0")
+        for lvl in self.levels:
+            if remaining <= _DEPTH_EPS:
+                break
+            all_in_p = self.fee_model.all_in_price(lvl.price)
+            take = min(lvl.size, remaining)
+            usd_spent += take * all_in_p
+            remaining -= take
+
+        # Depth exhaustion: the ladder could not supply the full share count.
+        # Fail closed (§13: "Optimal stake above allowed depth") rather than
+        # average over a partial fill and fabricate a cheaper-than-real price.
+        if remaining > _DEPTH_EPS:
+            total_depth = sum((lvl.size for lvl in self.levels), Decimal("0"))
+            raise ValueError(
+                f"requested {shares} shares exceeds executable depth on token "
+                f"{self.token_id!r} (total ask depth {total_depth} shares); "
+                "fail closed rather than fabricate a fill price"
+            )
+
+        return shares, usd_spent
+
+    def avg_cost_for_shares(self, shares: Decimal) -> ExecutionPrice:
+        """Depth-weighted all-in cost per share to buy exactly ``shares`` shares.
+
+        Spec §5.3 typed scalar boundary, but parameterized by an exact SHARE
+        count instead of a USD stake. This is the entry point the candidate-proof
+        path uses to price the venue min-order quantity (§13) without the lossy
+        shares -> USD -> shares conversion that ``avg_cost`` + a top-price notional
+        would incur on a thin top level. Byte-identical to the legacy
+        share-parameterized VWMP kernel's all-in result for the same book.
+
+        Returns a fee-adjusted / fee_deducted ExecutionPrice in probability_units
+        (passes ``assert_kelly_safe``; the fee is ALREADY in the value, so the
+        caller must NOT re-apply ``with_taker_fee``).
+
+        Monotone NON-DECREASING in ``shares`` for a BUY (Hidden #6): more shares
+        walk into higher-priced levels whose all-in g(p) is strictly larger.
+        """
+        shares_filled, usd_spent = self._walk_for_shares(Decimal(shares))
+        all_in_per_share = usd_spent / shares_filled
+        return ExecutionPrice(
+            value=float(all_in_per_share),
+            price_type="fee_adjusted",
+            fee_deducted=True,
+            currency="probability_units",
+        )
 
     def avg_cost(self, stake_usd: Decimal) -> ExecutionPrice:
         """Depth-weighted all-in cost per share for ``stake_usd``, as ExecutionPrice.

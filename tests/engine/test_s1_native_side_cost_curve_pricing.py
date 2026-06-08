@@ -48,6 +48,7 @@ import pytest
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.execution_price import ExecutionPrice
 from src.engine import event_reactor_adapter as era
+from src.strategy.live_inference.executable_cost import executable_cost
 
 
 # --------------------------------------------------------------------------
@@ -242,3 +243,159 @@ def test_fee_raises_all_in_cost_through_the_curve():
     assert float(ep_fee) > float(ep_nofee)
     # fee at p=0.50 = 0.05 * 0.5 * 0.5 = 0.0125
     assert float(ep_fee) == pytest.approx(0.50 + 0.0125, abs=1e-9)
+
+
+# --------------------------------------------------------------------------
+# §13 min-order gate — top-of-book depth BELOW min_order_size shares.
+#
+# REGRESSION (adversarial verifier, S1): the proof path must size the candidate
+# by exact SHARE count (min_order_size shares), NOT by converting shares to a USD
+# stake at the top level's price. The buggy conversion underfilled whenever the
+# top ask level's depth < min_order_size shares — the USD budget computed at the
+# cheap top price bought fewer than min_order_size shares once the walk crossed
+# into costlier deeper levels — and FALSE-no-traded a side the depth walk fills
+# (and that the legacy share-parameterized VWMP kernel priced fine).
+#
+# These fixtures EXERCISE that case (top depth strictly < min_order=5 shares).
+# The earlier monotonicity test used THIN_NO top depth=8 >= min_order=5, so it
+# landed in the parity case and never tripped this gate.
+# --------------------------------------------------------------------------
+
+def test_buy_yes_top_depth_below_min_order_does_not_false_no_trade():
+    """buy_yes top=2sh < min_order=5: prices the depth-walked value, not a no-trade.
+
+    Walking exactly 5 shares: 2 @ 0.40 + 3 @ 0.42 = (0.80 + 1.26)/5 = 0.412.
+    The old top-price->USD conversion bought only ~4.857 shares and tripped the
+    §13 min-order gate as a false no-trade. The share-parameterized walk fills the
+    full 5 shares and prices it.
+    """
+    row = _row(yes_asks=(("0.40", "2"), ("0.42", "1000")), no_asks=(("0.55", "1000"),))
+    ep, _p_fill, _c95 = era._execution_price_from_snapshot(
+        row, selected_token_id="yes-1", direction="buy_yes"
+    )
+    assert isinstance(ep, ExecutionPrice)
+    ep.assert_kelly_safe()
+    # (2*0.40 + 3*0.42) / 5 = 0.412  (fee_rate_fraction=0 so all-in == raw).
+    assert float(ep) == pytest.approx(0.412, abs=1e-9)
+
+
+def test_buy_no_top_depth_below_min_order_does_not_false_no_trade():
+    """buy_no top=3sh < min_order=5: prices the depth-walked NO value, not a no-trade.
+
+    Walking exactly 5 shares on the NO book: 3 @ 0.60 + 2 @ 0.62 =
+    (1.80 + 1.24)/5 = 0.608. The buggy conversion no-traded this NO side.
+    """
+    row = _row(yes_asks=(("0.40", "1000"),), no_asks=(("0.60", "3"), ("0.62", "1000")))
+    ep, _p_fill, _c95 = era._execution_price_from_snapshot(
+        row, selected_token_id="no-1", direction="buy_no"
+    )
+    assert isinstance(ep, ExecutionPrice)
+    ep.assert_kelly_safe()
+    # (3*0.60 + 2*0.62) / 5 = 0.608.
+    assert float(ep) == pytest.approx(0.608, abs=1e-9)
+
+
+def test_thin_top_depth_zero_fee_byte_identical_parity_yes_and_no():
+    """Byte-identical parity with the legacy share-walk kernel — multi-level, zero fee.
+
+    The commit's "byte-identical value parity for YES and NO" claim held only when
+    the top level alone filled min_order. This pins parity for the top-depth <
+    min_order MULTI-LEVEL walk too, for BOTH native sides, with fee_rate=0 (so the
+    only variable under test is the depth walk, not the fee model). The
+    share-parameterized curve walk reproduces the legacy ``executable_cost``
+    (also share-parameterized) all-in result exactly.
+    """
+    row = _row(
+        yes_asks=(("0.40", "2"), ("0.42", "1000")),
+        no_asks=(("0.60", "3"), ("0.62", "1000")),
+        fee_rate_fraction=0.0,
+    )
+    book = era._native_quote_book_from_snapshot_row(row)
+
+    for token_id, direction in (("yes-1", "buy_yes"), ("no-1", "buy_no")):
+        ep_new, _pf, _c95 = era._execution_price_from_snapshot(
+            row, selected_token_id=token_id, direction=direction
+        )
+        ep_old = executable_cost(book, direction=direction, shares=book.min_order_size)
+        assert float(ep_new) == pytest.approx(float(ep_old), abs=1e-12), (
+            f"{direction}: curve {float(ep_new)} != legacy kernel {float(ep_old)}"
+        )
+
+
+def test_single_level_fill_byte_identical_parity_even_with_fee():
+    """Parity with the legacy kernel on a SINGLE-level fill holds even with a fee.
+
+    When the top level alone fills min_order_size shares, the per-level all-in fee
+    (the curve) and the fee-on-blended-average (legacy) coincide because there is
+    only one price in the blend — so the value is byte-identical with a nonzero
+    fee. (This is the only fee case where the two are guaranteed equal; see
+    test_multi_level_fee_curve_uses_correct_per_level_fee for the multi-level case.)
+    """
+    row = _row(
+        yes_asks=(("0.40", "1000"),),
+        no_asks=(("0.60", "1000"),),
+        fee_rate_fraction=0.05,
+    )
+    book = era._native_quote_book_from_snapshot_row(row)
+    for token_id, direction in (("yes-1", "buy_yes"), ("no-1", "buy_no")):
+        ep_new, _pf, _c95 = era._execution_price_from_snapshot(
+            row, selected_token_id=token_id, direction=direction
+        )
+        ep_old = executable_cost(book, direction=direction, shares=book.min_order_size)
+        assert float(ep_new) == pytest.approx(float(ep_old), abs=1e-12)
+
+
+def test_multi_level_fee_curve_uses_correct_per_level_fee():
+    """Multi-level + nonzero fee: the curve charges the fee PER LEVEL (more correct).
+
+    The legacy kernel computed one fee on the blended-average price; the
+    ExecutableCostCurve computes the all-in g(p)=p+r*p*(1-p) at EACH level's price
+    and then blends — which is the physically correct taker model (each fill pays
+    the fee on the price it fills at, spec §5.4 "walking asks ... adding fees").
+    Because the fee is nonlinear in p, mean(fee(p_i)) != fee(mean(p_i)), so the two
+    diverge by a tiny, well-understood amount. This test PINS that the curve uses
+    the per-level fee (not the blended-average fee) so a future regression that
+    re-blends-then-fees is caught. It is NOT a parity assertion — the divergence is
+    the curve being more correct than the legacy approximation.
+    """
+    from decimal import Decimal as _D
+
+    row = _row(
+        yes_asks=(("0.40", "2"), ("0.42", "1000")),
+        no_asks=(("0.55", "1000"),),
+        fee_rate_fraction=0.05,
+    )
+    fee_rate = _D("0.05")
+
+    def _fee(p: _D) -> _D:
+        return fee_rate * p * (_D("1") - p)
+
+    # Per-level all-in (curve semantics), walking 5 shares: 2 @ 0.40, 3 @ 0.42.
+    p1, p2 = _D("0.40"), _D("0.42")
+    expected_per_level = (
+        _D("2") * (p1 + _fee(p1)) + _D("3") * (p2 + _fee(p2))
+    ) / _D("5")
+    # Fee-on-blended-average (legacy semantics) — what the curve must NOT produce.
+    raw_avg = (_D("2") * p1 + _D("3") * p2) / _D("5")
+    blended_avg = raw_avg + _fee(raw_avg)
+    assert expected_per_level != blended_avg  # the two models genuinely differ
+
+    ep_new, _pf, _c95 = era._execution_price_from_snapshot(
+        row, selected_token_id="yes-1", direction="buy_yes"
+    )
+    assert float(ep_new) == pytest.approx(float(expected_per_level), abs=1e-12)
+    assert float(ep_new) != pytest.approx(float(blended_avg), abs=1e-9)
+
+
+def test_genuine_depth_exhaustion_below_min_order_still_fails_closed():
+    """A book whose TOTAL ask depth < min_order_size shares still no-trades (§13).
+
+    The fix must not paper over real un-fillable books: 4 total shares across the
+    whole NO ladder cannot fill a 5-share min order, so the share walk fails closed
+    (depth exhausted) — a true §13 no-trade, not a fabricated price.
+    """
+    row = _row(yes_asks=(("0.40", "1000"),), no_asks=(("0.60", "2"), ("0.62", "2")))
+    with pytest.raises(ValueError):
+        era._execution_price_from_snapshot(
+            row, selected_token_id="no-1", direction="buy_no"
+        )

@@ -8,6 +8,14 @@
 #   native side with its OWN side-tagged ExecutableCostCurve (depth-walked convex
 #   curve) built from the same snapshot row's native ask ladder — replacing the
 #   scalar VWMP cost-kernel pricing. One pricing object, no flag, no shadow branch.
+#   S1-fix (2026-06-08, "bin selection.md" §5.3/§5.4/§13 + verifier REJECT):
+#   the proof path now sizes the candidate by exact SHARE count via
+#   ExecutableCostCurve.avg_cost_for_shares(min_order_size), NOT by converting
+#   min_order_size shares to a USD stake at the top price (which UNDERFILLED a
+#   thin top level and FALSE-no-traded buy_yes/buy_no the legacy kernel priced).
+#   Dead helper _min_order_notional_usd removed. Byte-identical to the legacy
+#   share-parameterized VWMP all-in for all books (zero-fee/single-level); the
+#   per-level fee on multi-level walks is the curve being more correct.
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -8642,15 +8650,23 @@ def _execution_price_from_snapshot(
         row, side=side, token_id=selected_token_id, book=book
     )
 
-    # The chosen-stake cost-of-entry on the convex curve. The proof path sizes
-    # the candidate at the venue min-order notional (the smallest executable
-    # taker order); the curve's avg_cost is non-decreasing in stake (Hidden #6),
-    # so this is the cheapest executable all-in cost. ExecutableCostCurve.avg_cost
-    # raises (depth-exhausted / off-grid / empty / below-min-order) exactly where
-    # the §13 no-trade gates require fail-closed — the caller routes a ValueError
-    # to the EXECUTABLE_NATIVE_ASK_MISSING / NATIVE_QUOTE_MISSING no-trade path.
-    min_notional = _min_order_notional_usd(curve)
-    execution_price = curve.avg_cost(min_notional)
+    # The cost-of-entry on the convex curve at the venue min-order QUANTITY (the
+    # smallest executable taker order, in SHARES — §13). We price by exact share
+    # count, NOT by converting min_order_size shares to a USD stake at the top
+    # price: that conversion underfills whenever the top ask level's depth is
+    # below min_order_size shares (the USD budget computed at the cheap top price
+    # buys fewer than min_order_size shares once the walk crosses into costlier
+    # deeper levels), which would FALSE-no-trade a side the depth-walk in fact
+    # fills (and which the legacy share-parameterized VWMP kernel priced fine).
+    # avg_cost_for_shares walks SHARES directly (spec §5.3/§5.4), so the share/USD
+    # round-trip — and its loss — never happens; this is byte-identical to the
+    # legacy kernel's all-in result for ALL books, not only single-level ones.
+    # It raises (depth-exhausted / off-grid / empty / below-min-order) exactly
+    # where the §13 no-trade gates require fail-closed — the caller routes a
+    # ValueError to the EXECUTABLE_NATIVE_ASK_MISSING / NATIVE_QUOTE_MISSING
+    # no-trade path. avg_cost(stake_usd) remains for the future §5.3 USD-stake ELG
+    # optimizer; this path asks the share-parameterized question.
+    execution_price = curve.avg_cost_for_shares(shares)
 
     p_fill_lcb = _p_fill_lcb_for_direction(book, direction=direction, shares=shares)
     c_cost_95pct = min(0.999999, execution_price.value + float(book.min_tick_size))
@@ -8670,23 +8686,6 @@ def _native_curve_side_for_direction(direction: str) -> str | None:
     if direction == "buy_no":
         return "NO"
     return None
-
-
-def _min_order_notional_usd(curve: "ExecutableCostCurve") -> Decimal:
-    """Smallest executable all-in stake (USD) that buys ``min_order_size`` shares.
-
-    The proof path sizes the candidate at the venue min-order quantity — the
-    smallest executable taker order. ``ExecutableCostCurve`` is parameterized by
-    a USD stake, so we convert ``min_order_size`` shares into the all-in USD
-    notional at the cheapest (top) level. Using the top level's all-in price is
-    a strict LOWER bound on the notional needed for that share count (deeper
-    shares cost more), so the resulting avg_cost is the cheapest executable
-    all-in cost and the curve's depth/min-order/off-grid guards still fire when
-    the book cannot actually fill it (§13 fail-closed).
-    """
-    top = curve.levels[0]
-    all_in_top = curve.fee_model.all_in_price(top.price)
-    return curve.min_order_size * all_in_top
 
 
 def _native_side_cost_curve_from_snapshot_row(

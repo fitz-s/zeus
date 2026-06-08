@@ -145,6 +145,96 @@ def test_marginal_cost_at_least_avg_cost_on_convex_book():
 
 
 # --------------------------------------------------------------------------
+# Share-parameterized pricing — avg_cost_for_shares (S1 share<->USD fix).
+#
+# The candidate-proof path prices the venue min-order QUANTITY (in shares), not a
+# USD stake. avg_cost_for_shares walks an exact share count so the buggy
+# shares -> USD (at top price) -> shares round-trip never underfills a thin top
+# level. These pin the share-walk math and its divergence from the USD path.
+# --------------------------------------------------------------------------
+
+# Top level holds only 2 shares; min_order_size will be set to 5, so a 5-share
+# order must walk into the deeper 0.42 level.
+THIN_TOP_BOOK = [("0.40", "2"), ("0.42", "1000")]
+
+
+def _curve_min_order(levels, *, min_order, fee_rate="0"):
+    return ExecutableCostCurve(
+        token_id="tok-yes",
+        side="YES",
+        snapshot_id="snap-1",
+        book_hash="hash-1",
+        levels=tuple(BookLevel(price=Decimal(p), size=Decimal(s)) for p, s in levels),
+        fee_model=FeeModel(fee_rate=Decimal(fee_rate)),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal(min_order),
+        quote_ttl=timedelta(seconds=2),
+    )
+
+
+def test_avg_cost_for_shares_walks_exact_share_count_through_thin_top():
+    """Pricing 5 shares when the top level holds only 2 walks into the deeper level.
+
+    (2*0.40 + 3*0.42) / 5 = 0.412. The share walk fills the FULL 5 shares; it does
+    not underfill the way a top-price USD-notional conversion would.
+    """
+    curve = _curve_min_order(THIN_TOP_BOOK, min_order="5", fee_rate="0")
+    price = curve.avg_cost_for_shares(Decimal("5"))
+    assert isinstance(price, ExecutionPrice)
+    price.assert_kelly_safe()
+    assert float(price.value) == pytest.approx(0.412, abs=1e-12)
+
+
+def test_top_price_usd_notional_would_underfill_but_share_walk_does_not():
+    """The OLD shares->USD-at-top-price conversion underfills; the share walk fixes it.
+
+    Reproduces the bug's mechanism directly at the contract level: a USD stake set
+    to (min_order_size shares * top all-in price) buys FEWER than min_order_size
+    shares on a thin top level and trips the §13 min-order gate; the same min-order
+    quantity priced by avg_cost_for_shares fills exactly and prices cleanly.
+    """
+    curve = _curve_min_order(THIN_TOP_BOOK, min_order="5", fee_rate="0")
+
+    # The buggy notional: 5 shares * top all-in price (0.40) = 2.00 USD.
+    top_all_in = curve.fee_model.all_in_price(curve.levels[0].price)
+    buggy_notional = curve.min_order_size * top_all_in
+    assert buggy_notional == Decimal("2.00")
+    # avg_cost(2.00 USD) underfills (buys ~4.857 shares < 5) and fails closed.
+    with pytest.raises(ValueError):
+        curve.avg_cost(buggy_notional)
+
+    # The share-parameterized walk fills the full 5 shares and prices it.
+    price = curve.avg_cost_for_shares(curve.min_order_size)
+    assert float(price.value) == pytest.approx(0.412, abs=1e-12)
+
+
+def test_avg_cost_for_shares_monotone_non_decreasing():
+    """avg_cost_for_shares(n) is non-decreasing in share count for a BUY (Hidden #6)."""
+    curve = _curve_min_order(THIN_TOP_BOOK, min_order="1", fee_rate="0")
+    counts = [Decimal(n) for n in ("1", "2", "3", "5", "10", "50", "200")]
+    prev = Decimal("-1")
+    for n in counts:
+        c = Decimal(str(curve.avg_cost_for_shares(n).value))
+        assert c >= prev, f"avg_cost_for_shares decreased at shares={n}: {c} < {prev}"
+        prev = c
+
+
+def test_avg_cost_for_shares_below_min_order_fails_closed():
+    """Requesting fewer than min_order_size shares fails closed (§13)."""
+    curve = _curve_min_order(THIN_TOP_BOOK, min_order="5", fee_rate="0")
+    with pytest.raises(ValueError):
+        curve.avg_cost_for_shares(Decimal("4"))
+
+
+def test_avg_cost_for_shares_above_total_depth_fails_closed():
+    """Requesting more shares than total ask depth fails closed (depth exhausted, §13)."""
+    # Total depth = 2 + 4 = 6 shares; ask for 10.
+    curve = _curve_min_order([("0.40", "2"), ("0.42", "4")], min_order="1", fee_rate="0")
+    with pytest.raises(ValueError):
+        curve.avg_cost_for_shares(Decimal("10"))
+
+
+# --------------------------------------------------------------------------
 # C.2 — fee raises c, lowering Kelly.
 # --------------------------------------------------------------------------
 
