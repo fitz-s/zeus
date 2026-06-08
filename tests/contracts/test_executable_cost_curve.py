@@ -1,0 +1,289 @@
+# Created: 2026-06-08
+# Last reused or audited: 2026-06-08
+# Authority basis: "bin selection.md" §12.C + §5.3 + §5.4 + §14.3 + Hidden #6/#15/#16
+#                  + operator directive 2026-06-08
+"""Relationship tests for ExecutableCostCurve (spec Phase 3, §14.3).
+
+These are RELATIONSHIP tests, not function tests: they assert cross-module /
+cross-boundary properties that must hold when a depth-walked cost curve flows
+into the Kelly sizing boundary.
+
+The properties under test (spec §12.C + Hidden #6/#15/#16):
+
+  C.2 test_fee_adjusted_price_lowers_kelly
+        Adding the Polymarket p(1-p) fee RAISES the all-in cost c, which
+        LOWERS the Kelly stake fraction (q - c)/(1 - c). Encodes the
+        relationship: fee_model -> avg_cost -> ExecutionPrice -> kelly_size.
+
+  C.3 test_depth_curve_worse_price_lowers_size (monotonicity, Hidden #6):
+        A thinner / worse second level makes avg_cost at a LARGER stake
+        strictly higher than at a small stake, and marginal_cost is
+        non-decreasing in stake. The scalar top-of-book VWMP hides this
+        convex curve; the curve must expose it so Kelly does not overbet
+        into thin depth.
+
+  TYPED-BOUNDARY (spec keeps ExecutionPrice as the scalar Kelly boundary):
+        avg_cost emits a TYPED, fee-adjusted, Kelly-safe ExecutionPrice in
+        probability_units — never a raw float. This is the antibody that
+        makes "raw float reaches Kelly" unconstructable through this path.
+"""
+from __future__ import annotations
+
+from datetime import timedelta
+from decimal import Decimal
+
+import pytest
+
+from src.contracts.executable_cost_curve import (
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
+from src.contracts.execution_price import ExecutionPrice
+from src.strategy.kelly import kelly_size
+
+
+# --------------------------------------------------------------------------
+# Fixtures: two books that share an identical top level but differ in depth.
+# --------------------------------------------------------------------------
+
+def _curve(levels, *, fee_rate="0.05", token_id="tok-yes"):
+    """Build a BUY-side YES cost curve from (price, size) decimal-string pairs."""
+    return ExecutableCostCurve(
+        token_id=token_id,
+        side="YES",
+        snapshot_id="snap-1",
+        book_hash="hash-1",
+        levels=tuple(
+            BookLevel(price=Decimal(p), size=Decimal(s)) for p, s in levels
+        ),
+        fee_model=FeeModel(fee_rate=Decimal(fee_rate)),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=2),
+    )
+
+
+# Deep book: top level holds plenty of depth.
+DEEP_BOOK = [("0.40", "1000"), ("0.41", "1000")]
+
+# Thin book: identical top price, but the top level is shallow so a larger
+# stake must walk into the worse 0.55 level.
+THIN_BOOK = [("0.40", "10"), ("0.55", "1000")]
+
+
+# --------------------------------------------------------------------------
+# C.3 — Hidden #6: depth/monotonicity relationship.
+# --------------------------------------------------------------------------
+
+def test_depth_curve_worse_price_lowers_size():
+    """A thinner second level makes avg_cost at a larger size strictly higher.
+
+    Relationship: the same nominal top-of-book price (0.40) yields a HIGHER
+    realised all-in cost on the thin book once stake outgrows the top level,
+    so the Kelly stake fraction at that size is strictly lower. This is the
+    convex curve the scalar VWMP hides (Hidden #6).
+    """
+    thin = _curve(THIN_BOOK, fee_rate="0")  # isolate depth effect from fee
+    deep = _curve(DEEP_BOOK, fee_rate="0")
+
+    small_stake = Decimal("2")    # fits inside the 10-share top level on thin book
+    large_stake = Decimal("100")  # must walk into the 0.55 level on thin book
+
+    thin_small = Decimal(str(thin.avg_cost(small_stake).value))
+    thin_large = Decimal(str(thin.avg_cost(large_stake).value))
+    deep_large = Decimal(str(deep.avg_cost(large_stake).value))
+
+    # On the thin book, walking deeper strictly raises the average cost.
+    assert thin_large > thin_small
+    # The deep book never crosses into a worse level, so its large-stake cost
+    # stays at the top price while the thin book's does not.
+    assert thin_large > deep_large
+
+    # And the higher cost lowers the Kelly stake fraction for a fixed belief.
+    q = 0.70
+    f_thin = kelly_size(q, thin.avg_cost(large_stake), bankroll=1000.0, kelly_mult=1.0)
+    f_deep = kelly_size(q, deep.avg_cost(large_stake), bankroll=1000.0, kelly_mult=1.0)
+    assert f_thin < f_deep
+
+
+def test_avg_cost_monotone_non_decreasing_in_stake():
+    """avg_cost(s) is monotone non-decreasing in stake for BUY (Hidden #6)."""
+    curve = _curve(THIN_BOOK, fee_rate="0")
+    stakes = [Decimal(s) for s in ("1", "2", "4", "8", "16", "32", "64", "128")]
+    prev = Decimal("-1")
+    for s in stakes:
+        c = Decimal(str(curve.avg_cost(s).value))
+        assert c >= prev, f"avg_cost decreased at stake={s}: {c} < {prev}"
+        prev = c
+
+
+def test_marginal_cost_monotone_non_decreasing_in_stake():
+    """marginal_cost(s) is monotone non-decreasing in stake for BUY (Hidden #6)."""
+    curve = _curve(THIN_BOOK, fee_rate="0")
+    stakes = [Decimal(s) for s in ("1", "2", "4", "8", "16", "32", "64", "128")]
+    prev = Decimal("-1")
+    for s in stakes:
+        m = curve.marginal_cost(s)
+        assert m >= prev, f"marginal_cost decreased at stake={s}: {m} < {prev}"
+        prev = m
+
+
+def test_marginal_cost_at_least_avg_cost_on_convex_book():
+    """On a strictly convex book, marginal_cost(s) >= avg_cost(s).
+
+    The marginal (next-dollar) cost prices against the deepest level touched,
+    while avg_cost blends in the cheaper earlier levels — so marginal must
+    weakly dominate the average once depth is walked. This is the property
+    that makes overbetting into thin depth visible to the optimizer.
+    """
+    curve = _curve(THIN_BOOK, fee_rate="0")
+    large_stake = Decimal("100")
+    avg = Decimal(str(curve.avg_cost(large_stake).value))
+    marg = curve.marginal_cost(large_stake)
+    assert marg >= avg
+
+
+# --------------------------------------------------------------------------
+# C.2 — fee raises c, lowering Kelly.
+# --------------------------------------------------------------------------
+
+def test_fee_adjusted_price_lowers_kelly():
+    """The p(1-p) fee raises the all-in cost and lowers the Kelly stake.
+
+    Relationship: fee_model -> avg_cost -> ExecutionPrice -> kelly_size.
+    Same belief q, same book; the only difference is fee_rate. A nonzero fee
+    must produce a STRICTLY higher all-in cost and a STRICTLY smaller Kelly
+    stake (Hidden #15 — fee drift must move the cost monotonically).
+    """
+    no_fee = _curve(DEEP_BOOK, fee_rate="0")
+    with_fee = _curve(DEEP_BOOK, fee_rate="0.05")
+
+    stake = Decimal("50")
+    c_no_fee = no_fee.avg_cost(stake)
+    c_with_fee = with_fee.avg_cost(stake)
+
+    assert float(c_with_fee.value) > float(c_no_fee.value)
+
+    q = 0.70
+    f_no_fee = kelly_size(q, c_no_fee, bankroll=1000.0, kelly_mult=1.0)
+    f_with_fee = kelly_size(q, c_with_fee, bankroll=1000.0, kelly_mult=1.0)
+    assert f_with_fee < f_no_fee
+    assert f_with_fee > 0.0  # still a positive-edge trade, just smaller
+
+
+# --------------------------------------------------------------------------
+# Typed boundary: avg_cost emits a Kelly-safe ExecutionPrice, never a float.
+# --------------------------------------------------------------------------
+
+def test_avg_cost_emits_typed_kelly_safe_execution_price():
+    """avg_cost returns a typed, fee-adjusted, Kelly-safe ExecutionPrice.
+
+    Spec keeps ExecutionPrice as the scalar Kelly boundary at the chosen
+    stake. The returned object must pass assert_kelly_safe() so a raw float
+    can never enter Kelly through the cost-curve path (the antibody).
+    """
+    curve = _curve(DEEP_BOOK, fee_rate="0.05")
+    price = curve.avg_cost(Decimal("50"))
+    assert isinstance(price, ExecutionPrice)
+    assert price.price_type == "fee_adjusted"
+    assert price.fee_deducted is True
+    assert price.currency == "probability_units"
+    # Must not raise — this is the relationship that lets kelly_size accept it.
+    price.assert_kelly_safe()
+    kelly_size(0.70, price, bankroll=1000.0, kelly_mult=1.0)  # accepted, no raise
+
+
+def test_zero_fee_curve_is_not_double_fee_adjusted():
+    """A fee_rate=0 curve still emits a fee_adjusted/fee_deducted price.
+
+    The all-in cost simply has a zero fee component; the typed boundary still
+    declares fee_deducted=True so Kelly does not re-apply a fee downstream
+    (which would understate size — the inverse of Hidden #15).
+    """
+    curve = _curve(DEEP_BOOK, fee_rate="0")
+    price = curve.avg_cost(Decimal("10"))
+    assert price.fee_deducted is True
+    assert price.price_type == "fee_adjusted"
+
+
+# --------------------------------------------------------------------------
+# max_fillable: how much stake fills at or below a limit price (Hidden #16).
+# --------------------------------------------------------------------------
+
+def test_max_fillable_respects_limit_price():
+    """max_fillable(limit) returns stake fillable at all-in cost <= limit.
+
+    On the thin book, a limit just above the top all-in price admits only the
+    shallow top level; raising the limit above the 0.55 level admits the deep
+    level too. The relationship: limit price gates executable stake.
+    """
+    curve = _curve(THIN_BOOK, fee_rate="0")
+    # Limit between 0.40 and 0.55: only the 10-share top level is fillable.
+    tight = curve.max_fillable(Decimal("0.45"))
+    # Limit above 0.55: both levels fillable.
+    loose = curve.max_fillable(Decimal("0.60"))
+    assert loose > tight
+    assert tight > Decimal("0")
+
+
+def test_max_fillable_below_best_ask_is_zero():
+    """A limit below the best all-in ask fills nothing."""
+    curve = _curve(THIN_BOOK, fee_rate="0")
+    assert curve.max_fillable(Decimal("0.30")) == Decimal("0")
+
+
+# --------------------------------------------------------------------------
+# Construction / fail-closed guards.
+# --------------------------------------------------------------------------
+
+def test_avg_cost_above_depth_fails_closed():
+    """Requesting more stake than the book can fill raises (no silent VWMP).
+
+    Hidden #6 / §13 no-trade gate: "Optimal stake above allowed depth" must
+    fail closed rather than fabricate a fill price from exhausted depth.
+    """
+    curve = _curve(THIN_BOOK, fee_rate="0")
+    # Thin book holds 10 sh @0.40 + 1000 sh @0.55 = max ~554 USD notional.
+    with pytest.raises(ValueError):
+        curve.avg_cost(Decimal("100000"))
+
+
+def test_below_min_order_size_fails_closed():
+    """A stake whose share count is below min_order_size fails closed."""
+    curve = _curve(DEEP_BOOK, fee_rate="0")  # min_order_size=1 share
+    # 0.0001 USD at 0.40 = 0.00025 shares < 1 share min order.
+    with pytest.raises(ValueError):
+        curve.avg_cost(Decimal("0.0001"))
+
+
+def test_levels_must_be_tick_aligned():
+    """A level price off the min_tick grid fails construction (Hidden #16)."""
+    with pytest.raises(ValueError):
+        ExecutableCostCurve(
+            token_id="tok",
+            side="YES",
+            snapshot_id="s",
+            book_hash="h",
+            levels=(BookLevel(price=Decimal("0.405"), size=Decimal("100")),),
+            fee_model=FeeModel(fee_rate=Decimal("0.05")),
+            min_tick=Decimal("0.01"),
+            min_order_size=Decimal("1"),
+            quote_ttl=timedelta(seconds=2),
+        )
+
+
+def test_empty_book_fails_closed():
+    """An empty levels tuple cannot construct a curve (no executable ask)."""
+    with pytest.raises(ValueError):
+        ExecutableCostCurve(
+            token_id="tok",
+            side="YES",
+            snapshot_id="s",
+            book_hash="h",
+            levels=(),
+            fee_model=FeeModel(fee_rate=Decimal("0.05")),
+            min_tick=Decimal("0.01"),
+            min_order_size=Decimal("1"),
+            quote_ttl=timedelta(seconds=2),
+        )
