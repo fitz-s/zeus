@@ -365,6 +365,16 @@ def _detect_request_conflict(conn, row: dict) -> dict | None:
     if existing is None:
         return None
     existing_product_id, existing_hash, existing_value, existing_cell = existing
+    # LANDMINE #1 (operator-flagged, the_path PR review 2026-06-08): a STORED row whose
+    # request_url_hash IS NULL is a PRE-IDENTITY / legacy-backfill row (it was seeded before the
+    # product-identity columns existed). It carries NO physical request to conflict WITH, so a
+    # live populated-identity insert on the same logical key is ENRICHABLE (update-in-place), NOT a
+    # corrected-request conflict. Treating it as a conflict would make the FIRST live download after
+    # ANY legacy backfill falsely raise. A genuine conflict requires a POPULATED stored hash that
+    # DIFFERS from a populated incoming hash (handled below). NOTE: the up-to-date backfill stamps
+    # full identity, so this path only fires for rows seeded by an OLD identity-less backfill.
+    if existing_hash is None:
+        return None
     # Same logical key + same physical request identity == the normal idempotent re-run: not a
     # conflict (INSERT OR IGNORE will collapse it). Only a CHANGED request identity is a conflict.
     if (existing_product_id == row.get("product_id")

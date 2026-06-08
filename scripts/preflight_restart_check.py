@@ -177,7 +177,11 @@ def main() -> int:
         nxt = ("edli_live_operator_authorized = TRUE  (FINAL ARM — operator only)",
                "open the real money path. Confirm shadow candidates match internal + mainstream forecast first.")
     else:
-        nxt = ("(none)", "fully armed. Monitor settlement win-rate >51% after cost.")
+        nxt = ("(none)",
+               "fully armed. Monitor after-cost EV/PnL/log-growth, q_lcb coverage, "
+               "drawdown, fill quality, and price-bucketed win-rate. "
+               "Raw win-rate alone is not the capital objective for prediction-market tokens "
+               "(a 0.90 token at 60% win = -0.30 EV; a 0.20 token at 40% win = +0.20 EV).")
     print("NEXT FLIP: %s" % nxt[0])
     print("           %s" % nxt[1])
     print("=" * 72)
