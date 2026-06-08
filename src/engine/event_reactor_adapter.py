@@ -28,6 +28,21 @@
 #   the ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING hardcode (Hidden #4) and the
 #   dead "q_lcb > q_value" boundary clamp (the invariant is now structural in the seam).
 #   One seam helper (_side_q_lcb_from_yes_samples), no flag, no shadow branch.
+#   S3 (2026-06-08, "bin selection.md" §14.2/§6 pseudocode/§4/§9 Hidden #1+#4/
+#   §11 Phase 1/§12.A native-side economics + operator directive 2026-06-08): each
+#   priced _CandidateProof now MATERIALIZES as the unified bin-selection
+#   NativeSideCandidate (YES/NO unified candidate shape) on the live selection
+#   path. _candidate_evaluation_from_proof builds the canonical NativeSideCandidate
+#   FIRST (_native_side_candidate_from_proof: direction->side DIRECTION-LAW map,
+#   q_point=q_posterior, q_lcb=q_lcb_5pct robust lower bound, ProbabilityUncertainty
+#   from the proof's S2 authority, ExecutableCostCurve rebuilt from the proof's
+#   snapshot row via the S1 builder), then DERIVES the legacy CandidateEvaluation
+#   receipt FROM that candidate — one materialization path, one candidate object.
+#   A missing native token/quote downgrades to a NATIVE_TOKEN_MISSING /
+#   NATIVE_QUOTE_MISSING no-trade candidate (no complement pricing). No flag, no
+#   shadow branch. (The CandidateEvaluation scalar-Kelly ranker / opportunity_book
+#   selector remains the ranking surface until S4 replaces it with the
+#   marginal-utility ranker.)
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -55,6 +70,10 @@ from src.contracts.executable_cost_curve import (
     BookLevel,
     ExecutableCostCurve,
     FeeModel,
+)
+from src.contracts.native_side_candidate import (
+    CandidateNoTradeReason,
+    NativeSideCandidate,
 )
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -4776,24 +4795,237 @@ def _candidate_max_executable_shares(proof: _CandidateProof) -> float | None:
         return None
 
 
+def _candidate_bin_id(proof: _CandidateProof) -> str:
+    """Stable per-bin id for a proof's NativeSideCandidate (spec §14.2 bin_id).
+
+    The bin id keys a bin WITHIN a family; the YES and NO sides of one bin share
+    it (so the two native side candidates are recognisably the same bin), while
+    distinct bins differ. Derived from the bin's settlement-defining geometry
+    (low/high/unit/label) plus the condition id, never the side or token — those
+    are what distinguish the two SIDES of the same bin.
+    """
+    candidate = proof.candidate
+    bin_obj = getattr(candidate, "bin", None)
+    return stable_hash(
+        {
+            "condition_id": str(getattr(candidate, "condition_id", "") or ""),
+            "bin_low": getattr(bin_obj, "low", None),
+            "bin_high": getattr(bin_obj, "high", None),
+            "bin_unit": getattr(bin_obj, "unit", None),
+            "bin_label": getattr(bin_obj, "label", None),
+        }
+    )
+
+
+def _proof_probability_uncertainty(
+    *, q_point: float, q_lcb: float
+) -> "ProbabilityUncertainty":
+    """Wrap the proof's scalar S2 q authority as a ProbabilityUncertainty (§14.4).
+
+    The proof carries the per-side robust authority as SCALARS already computed by
+    S2 (``q_posterior`` -> q_point, ``q_lcb_5pct`` -> q_lcb). For the YES side
+    ``q_lcb_5pct`` is ``q_lcb_yes`` (lower tail of the YES probability samples);
+    for the NO side it is ``q_lcb_no = 1 - q_ucb_yes`` (lower tail of the per-sample
+    complement, Hidden #3) — NOT ``1 - q_lcb_yes``. This function only TRANSPORTS
+    that authority; it never recomputes or complements it, so the §4 belief-space
+    separation the S2 seam established is preserved verbatim.
+
+    The probability bootstrap sample VECTOR is not threaded to this materialization
+    layer (the proof carries only the scalars), so q_ucb is set to q_point here:
+    the candidate object uses q_lcb as its sizing authority, and the
+    ProbabilityUncertainty invariant only requires ``q_lcb <= q_point <= q_ucb``.
+    A future phase that threads the sample vector can populate the real q_ucb /
+    q_samples_hash without changing this contract.
+    """
+    from src.strategy.probability_uncertainty import ProbabilityUncertainty as _PU
+
+    qp = float(min(max(q_point, 0.0), 1.0))
+    ql = float(min(max(q_lcb, 0.0), 1.0))
+    # Structural guard: q_lcb must not exceed q_point (edge_ci_lower-as-q_lcb is
+    # Hidden #2). S2 already enforces this at the proof boundary; clamp defensively
+    # so a degenerate scalar can never raise inside the constructor.
+    ql = min(ql, qp)
+    return _PU(
+        q_point=qp,
+        q_samples_hash="",
+        q_lcb=ql,
+        q_ucb=qp,
+    )
+
+
+def _native_side_candidate_from_proof(
+    *,
+    family_key: str,
+    proof: _CandidateProof,
+) -> NativeSideCandidate:
+    """Materialize a priced ``_CandidateProof`` as a unified NativeSideCandidate.
+
+    S3 (spec §14.2 / §6 pseudocode / §11 Phase 1). This is the ONE materialization
+    path: every priced YES/NO proof on the live selection path becomes a single
+    ``NativeSideCandidate`` object — the unified candidate shape the ranker/selector
+    consumes. There is no flag, no shadow branch, and no alternate candidate shape.
+
+    DIRECTION LAW (money-path iron law, spec §4/§6): ``buy_yes`` -> ``side="YES"``
+    (the proof's own bin is the WIN outcome); ``buy_no`` -> ``side="NO"`` (the own
+    bin is the LOSE outcome). The mapping is ``_native_curve_side_for_direction``
+    and is NEVER inverted here. A direction that is neither buy_yes nor buy_no has
+    no native BUY side to price -> NATIVE_QUOTE_MISSING no-trade.
+
+    ROBUST LOWER BOUND (spec §5.6 / Hidden #2): the candidate's ``q_lcb`` is the
+    proof's ``q_lcb_5pct`` (the S2 robust probability lower bound) — never
+    ``q_posterior`` and never ``edge_ci_lower``. ``q_point`` is ``q_posterior``.
+    The constructor enforces ``q_lcb <= q_point``.
+
+    NATIVE EXECUTABLE SEPARATION (spec §4 / Hidden #1): the executable cost curve
+    is rebuilt from the proof's OWN snapshot-row native ask ladder, side-tagged
+    with the proof's side (the S1 ``_native_side_cost_curve_from_snapshot_row``
+    builder). A NO candidate therefore walks the NO ask book; the contract raises
+    if a side-mismatched curve is ever fed in (``p_exec(NO) != 1 - p_exec(YES)``).
+
+    MISSING TOKEN/QUOTE -> NO-TRADE (spec §13 / Hidden #4): a missing native token
+    id, an unpriced side (``execution_price is None`` /
+    ``native_quote_available`` False), or a side with no executable ask ladder
+    downgrades to a recorded ``NATIVE_TOKEN_MISSING`` / ``NATIVE_QUOTE_MISSING``
+    no-trade candidate. The no-trade candidate carries NO executable curve and NO
+    probability authority — there is nothing to complement-substitute from. It is
+    RECORDED (not omitted) so the family hypothesis set / FDR denominator and the
+    learning layer see the tested-and-untradeable side (Hidden #1).
+    """
+    candidate = proof.candidate
+    condition_id = str(getattr(candidate, "condition_id", "") or "")
+    token_id = str(proof.token_id or "")
+    bin_id = _candidate_bin_id(proof)
+    forecast_snapshot_id = str(getattr(proof, "executable_snapshot_id", "") or "")
+    row = proof.row or {}
+    market_snapshot_id = str(row.get("snapshot_id") or forecast_snapshot_id or "")
+    hypothesis_id = _candidate_evaluation_id(proof)
+
+    side = _native_curve_side_for_direction(str(proof.direction or ""))
+
+    # Missing native token id -> NATIVE_TOKEN_MISSING (no native identity to trade).
+    if not token_id:
+        return NativeSideCandidate.no_trade(
+            family_key=family_key,
+            bin_id=bin_id,
+            side=side or "YES",
+            token_id=token_id,
+            condition_id=condition_id,
+            forecast_snapshot_id=forecast_snapshot_id,
+            market_snapshot_id=market_snapshot_id,
+            reason=CandidateNoTradeReason.NATIVE_TOKEN_MISSING,
+            hypothesis_id=hypothesis_id,
+        )
+
+    # No native BUY side for this direction, or the proof was not priced
+    # (execution_price missing / native quote unavailable) -> NATIVE_QUOTE_MISSING.
+    # No complement substitution: a side with no executable ask is recorded as a
+    # no-trade diagnostic, never a YES-derived price.
+    if (
+        side is None
+        or proof.execution_price is None
+        or not bool(proof.native_quote_available)
+    ):
+        return NativeSideCandidate.no_trade(
+            family_key=family_key,
+            bin_id=bin_id,
+            side=side or ("NO" if str(proof.direction or "") == "buy_no" else "YES"),
+            token_id=token_id,
+            condition_id=condition_id,
+            forecast_snapshot_id=forecast_snapshot_id,
+            market_snapshot_id=market_snapshot_id,
+            reason=CandidateNoTradeReason.NATIVE_QUOTE_MISSING,
+            hypothesis_id=hypothesis_id,
+        )
+
+    # Rebuild this side's OWN executable cost curve from its native ask ladder
+    # (S1 builder, side-tagged). A book that cannot build a curve (empty/off-grid)
+    # is a NATIVE_QUOTE_MISSING no-trade — fail closed, never fabricate a price.
+    try:
+        curve = _native_side_cost_curve_from_snapshot_row(
+            row, side=side, token_id=token_id
+        )
+    except (ValueError, KeyError, TypeError):
+        return NativeSideCandidate.no_trade(
+            family_key=family_key,
+            bin_id=bin_id,
+            side=side,
+            token_id=token_id,
+            condition_id=condition_id,
+            forecast_snapshot_id=forecast_snapshot_id,
+            market_snapshot_id=market_snapshot_id,
+            reason=CandidateNoTradeReason.NATIVE_QUOTE_MISSING,
+            hypothesis_id=hypothesis_id,
+        )
+
+    q_point = float(proof.q_posterior)
+    q_lcb = float(proof.q_lcb_5pct)
+    probability_uncertainty = _proof_probability_uncertainty(
+        q_point=q_point, q_lcb=q_lcb
+    )
+
+    return NativeSideCandidate.tradeable(
+        family_key=family_key,
+        bin_id=bin_id,
+        side=side,
+        token_id=token_id,
+        condition_id=condition_id,
+        q_point=q_point,
+        q_lcb=q_lcb,
+        probability_uncertainty=probability_uncertainty,
+        executable_cost_curve=curve,
+        forecast_snapshot_id=forecast_snapshot_id,
+        market_snapshot_id=market_snapshot_id,
+        hypothesis_id=hypothesis_id,
+    )
+
+
 def _candidate_evaluation_from_proof(
     *,
     family_id: str,
     proof: _CandidateProof,
     kelly_size_usd: float = 0.0,
 ) -> CandidateEvaluation:
+    """Derive the legacy CandidateEvaluation RECEIPT from the materialized candidate.
+
+    S3 (operator directive 2026-06-08): the priced proof is materialized as the
+    canonical ``NativeSideCandidate`` FIRST (``_native_side_candidate_from_proof``
+    — the one candidate object), then this function derives the legacy
+    ``CandidateEvaluation`` receipt shape FROM that candidate so the existing
+    opportunity_book ranking/serialization surface keeps working unchanged. There
+    is ONE materialization path producing ONE candidate object; the receipt is a
+    projection of it, not a parallel re-derivation off the proof.
+
+    The receipt-only / ranking fields that the NativeSideCandidate does not model
+    (trade_score, p_value, p_fill_lcb, c_cost_95pct, kelly_size_usd,
+    max_executable_shares, low_volume_usd, calibration source, same-bin posterior,
+    and the legacy ranker's native_quote_available / missing_reason admission
+    inputs) are read from the proof — they are scalar-Kelly ranking inputs that S4
+    retires when the marginal-utility ranker replaces this surface. The IDENTITY
+    fields (candidate_id, condition_id, token_id) are sourced from the materialized
+    NativeSideCandidate so the receipt and the candidate cannot drift on identity.
+    """
+    native_candidate = _native_side_candidate_from_proof(
+        family_key=family_id, proof=proof
+    )
     execution_price = _optional_float(getattr(getattr(proof, "execution_price", None), "value", None))
     row = proof.row or {}
     candidate = proof.candidate
     bin_obj = getattr(candidate, "bin", None)
     return CandidateEvaluation(
-        candidate_id=_candidate_evaluation_id(proof),
+        # Identity sourced from the materialized NativeSideCandidate (single
+        # candidate object) so the receipt and the candidate cannot drift.
+        candidate_id=native_candidate.hypothesis_id,
         family_id=family_id,
-        condition_id=str(getattr(candidate, "condition_id", "") or ""),
-        token_id=str(proof.token_id or ""),
+        condition_id=native_candidate.condition_id,
+        token_id=native_candidate.token_id,
         direction=str(proof.direction or ""),
         bin_label=getattr(bin_obj, "label", None),
         execution_price=execution_price,
+        # Diagnostic q fields record what the proof TESTED on this side (the S2
+        # robust authority). A no-trade NativeSideCandidate carries no q authority
+        # (q_point/q_lcb None) precisely because there is nothing to size — the
+        # receipt still reports the tested scalars so the family/FDR/learning layer
+        # sees the side was tested-and-untradeable (Hidden #1).
         q_posterior=float(proof.q_posterior),
         q_lcb_5pct=float(proof.q_lcb_5pct),
         q_lcb_calibration_source=proof.q_lcb_calibration_source,
@@ -4803,6 +5035,14 @@ def _candidate_evaluation_from_proof(
         trade_score=float(proof.trade_score),
         p_value=float(proof.p_value),
         passed_prefilter=bool(proof.passed_prefilter),
+        # The receipt's native_quote_available / missing_reason are the LEGACY
+        # selector's ranking-admission inputs; they remain sourced from the proof
+        # so S3 does not change which proofs the legacy ranker admits (that is S4's
+        # job when the marginal-utility ranker replaces this surface). On the real
+        # path a priced proof's row always carries the native ask ladder it was
+        # priced from, so the materialized NativeSideCandidate is tradeable
+        # whenever the proof is — they agree; this preserves byte-identical legacy
+        # ranking while the candidate object becomes the canonical materialization.
         native_quote_available=bool(proof.native_quote_available),
         missing_reason=proof.missing_reason,
         kelly_size_usd=max(0.0, float(kelly_size_usd)),
