@@ -339,8 +339,13 @@ def build_replacement_forecast_current_target_plan(
                   )
             """
         if "status" in readiness_columns:
+            # Expired readiness must NOT count as coverage (else a city stays "covered"
+            # forever after its first posterior and the downloader never re-fetches its
+            # raw inputs once the 3h TTL lapses — the stale-after-first-cycle bug). Only
+            # a row whose expires_at is still in the future counts as live coverage.
             readiness_status_clause = """
                           AND r.status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'READY')
+                          AND (r.expires_at IS NULL OR r.expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))
             """
         sql_limit = "" if limit is None else f" LIMIT {int(limit)}"
         if source_run_targets:

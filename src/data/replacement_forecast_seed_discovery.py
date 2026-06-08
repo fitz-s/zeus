@@ -221,6 +221,11 @@ def _candidate_targets(
                     AND json_extract(r.provenance_json, '$.city') = c.city
                     AND json_extract(r.provenance_json, '$.target_date') = c.target_local_date
                     AND json_extract(r.provenance_json, '$.temperature_metric') = c.temperature_metric
+                    -- An EXPIRED readiness row must NOT count as coverage, else a city is
+                    -- "covered" forever after its first posterior and never re-seeds once
+                    -- its 3h TTL lapses (the stale-after-first-cycle bug). Only a row whose
+                    -- expires_at is still in the future counts as live coverage.
+                    AND (r.expires_at IS NULL OR r.expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))
                     AND EXISTS (
                         SELECT 1
                         FROM json_each(r.dependency_json, '$.dependencies')
