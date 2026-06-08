@@ -1,3 +1,10 @@
+# Created: (pre-audit)
+# Last reused or audited: 2026-06-08
+# Authority basis: thepath/audit-realign Fitz #5 — the risk-block read path
+#   (_get_risk_details) used a bare no-timeout sqlite3.connect (a WAL lock-loser
+#   on the read that surfaces the risk block). It now carries the configured
+#   busy_timeout. The risk level/details surfaced here are the SAME single
+#   authority (get_current_level) the entry gate reads — no parallel risk lane.
 """Status summary: written every cycle. Zeus is not a black box.
 
 Blueprint v2 §10: 5-section health snapshot.
@@ -422,9 +429,21 @@ def _get_risk_level() -> str:
 
 def _get_risk_details() -> dict:
     try:
+        import os
         import sqlite3
 
-        conn = sqlite3.connect(str(state_path("risk_state.db")))
+        # CATEGORY ANTIBODY (Fitz #5): this risk-block read path used a bare
+        # sqlite3.connect() with no timeout, giving it the bare-connect default
+        # wait budget (0 ms on builds where it is unset) — a guaranteed lock-loser
+        # on the read that surfaces the risk block. Route it through the SAME
+        # configured busy_timeout (ZEUS_DB_BUSY_TIMEOUT_MS, default 30 s) as the
+        # canonical factory so a transient WAL writer makes this read WAIT, not
+        # raise. Read-only single-DB query — no INV-37 / txn-semantic change.
+        _busy_ms = int(os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
+        conn = sqlite3.connect(
+            str(state_path("risk_state.db")), timeout=_busy_ms / 1000.0
+        )
+        conn.execute("PRAGMA busy_timeout = %d" % _busy_ms)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT details_json FROM risk_state ORDER BY checked_at DESC LIMIT 1"

@@ -595,8 +595,19 @@ class TestRiskEvaluation:
 
 
 class TestRiskGuardSettlementSource:
-    def test_tick_preserves_previous_fresh_level_when_dependency_db_metrics_lock(self, monkeypatch, tmp_path):
-        """Relationship: metric DB lock must not erase a fresh full risk attestation."""
+    def test_tick_floors_fresh_green_to_data_degraded_when_dependency_db_metrics_lock(self, monkeypatch, tmp_path):
+        """Relationship (AGENTS.md iron #6 — FAIL CONSERVATIVE): a metric DB lock
+        over a fresh GREEN full row must NOT re-stamp GREEN.
+
+        LAW CHANGE (2026-06-08 live fail-open remediation): the previous behavior
+        preserved the prior fresh level verbatim, which re-stamped GREEN through a
+        window where RiskGuard could not compute risk — a fail-open. The
+        conservative floor is now max(previous_level, DATA_DEGRADED): a fresh GREEN
+        floors to DATA_DEGRADED (blocks new entries, preserves positions) while the
+        previous level is still recorded in details for audit. The previous_level
+        carry-forward of a STRONGER halt (RED/ORANGE/YELLOW) is covered by the
+        dedicated tests in test_wal_busy_factory_fail_conservative.py.
+        """
         risk_db = tmp_path / "risk_state.db"
         risk_conn = get_connection(risk_db)
         riskguard_module.init_risk_db(risk_conn)
@@ -639,14 +650,18 @@ class TestRiskGuardSettlementSource:
         ).fetchone()
         details = json.loads(row["details_json"])
 
-        assert level == RiskLevel.GREEN
-        assert row["level"] == RiskLevel.GREEN.value
-        assert details["status"] == "dependency_db_locked_previous_risk_level_preserved"
+        # FAIL CONSERVATIVE: GREEN floored to DATA_DEGRADED, never re-stamped GREEN.
+        assert level == RiskLevel.DATA_DEGRADED
+        assert row["level"] == RiskLevel.DATA_DEGRADED.value
+        assert details["status"] == "dependency_db_locked_clamped_conservative"
         assert details["riskguard_degraded_reason"] == "dependency_db_locked"
-        assert details["full_metrics_status"] == "locked_previous_fresh_level_preserved"
+        assert details["full_metrics_status"] == "locked_previous_green_floored_to_data_degraded"
+        assert details["conservative_floor_applied"] is True
+        # The previous level is still recorded for audit, but is NOT surfaced.
         assert details["previous_full_risk_level"] == RiskLevel.GREEN.value
         assert details["bankroll_truth_source"] == "polymarket_wallet"
-        assert riskguard_module.get_current_level() == RiskLevel.GREEN
+        # Single-authority read also reports DATA_DEGRADED — no clean GREEN leaks.
+        assert riskguard_module.get_current_level() == RiskLevel.DATA_DEGRADED
         assert trade_conn.rollback_called is True
         assert trade_conn.close_called is True
 

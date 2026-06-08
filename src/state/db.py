@@ -1,6 +1,11 @@
 # Created: prior to 2026-04-26
-# Last reused or audited: 2026-06-04
+# Last reused or audited: 2026-06-08
 # Authority basis: Zeus DB schema + world_write_mutex CATEGORY ANTIBODY.
+#   2026-06-08 thepath/audit-realign Fitz #5 lock-CATEGORY kill: _apply_busy_timeout
+#   helper + SQL-level PRAGMA busy_timeout in _connect()/get_connection() so a
+#   factory handle's wait budget is durable (un-strippable by executescript) — a
+#   writer that loses the WAL write lock WAITS, not raises "database is locked".
+#   Connection PRAGMA only; INV-37 ATTACH+SAVEPOINT + txn semantics unchanged.
 #   2026-06-04 Phase 1: thread-local held depth (_GuardedWorldMutex) — eliminates
 #   cross-thread false positives that caused background venue I/O to trip the guard
 #   (283× advisory/2min in prod → WAL re-bloat). Phase 2: guard armed fatal (always
@@ -111,6 +116,38 @@ def _db_busy_timeout_s() -> float:
     return ms / 1000.0
 
 
+def _db_busy_timeout_ms() -> int:
+    """Return the configured busy-timeout in MILLISECONDS for PRAGMA busy_timeout.
+
+    Mirrors ``_db_busy_timeout_s`` (same env var, same default, same negative-value
+    rejection) but in the unit PRAGMA busy_timeout expects. Kept as the single
+    integer-ms source so the factory's SQL-level wait budget can never drift from
+    the connect-time ``timeout=`` seconds value.
+    """
+    return int(round(_db_busy_timeout_s() * 1000.0))
+
+
+def _apply_busy_timeout(conn: sqlite3.Connection) -> None:
+    """Set ``PRAGMA busy_timeout`` at the SQL level on ``conn``.
+
+    CATEGORY ANTIBODY (Fitz #5 — make "database is locked" unconstructable):
+    ``sqlite3.connect(timeout=N)`` installs only a C-level busy handler, which
+    some Python/SQLite builds NULL on the first ``executescript()`` (init_schema,
+    init_risk_db, any schema-ensure), dropping the wait budget to 0 ms so the
+    next write fails INSTANTLY with "database is locked" instead of waiting. The
+    only durable fix is to set the budget at the SQL level here AND re-apply it
+    after every executescript that hands the connection back. The value is
+    normalized to int before interpolation (PRAGMA forbids bound parameters), so
+    no untrusted text can enter the statement.
+
+    Behavior-preserving: this only WIDENS the wait budget; it never changes
+    transaction semantics, write ordering, or the ATTACH+SAVEPOINT cross-DB path
+    (INV-37). It is a pure connection PRAGMA.
+    """
+    busy_ms = _db_busy_timeout_ms()
+    conn.execute("PRAGMA busy_timeout = %d" % busy_ms)
+
+
 def _zeus_trade_db_path() -> Path:
     """Physical path for the trade database."""
     return STATE_DIR / "zeus_trades.db"
@@ -184,6 +221,12 @@ def _connect(
     mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
     conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
     _install_connection_functions(conn)
+    # CATEGORY ANTIBODY (Fitz #5): set the SQL-level wait budget so a writer that
+    # loses the WAL write lock WAITS up to busy_timeout instead of raising
+    # "database is locked" instantly. sqlite3.connect(timeout=) alone only sets a
+    # C-level handler that executescript() can null; this PRAGMA is the durable
+    # budget. Connection PRAGMA only — INV-37 / txn semantics unchanged.
+    _apply_busy_timeout(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
@@ -1195,6 +1238,11 @@ def get_connection(
     mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
     conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
     _install_connection_functions(conn)
+    # CATEGORY ANTIBODY (Fitz #5): same SQL-level wait budget as _connect(). Every
+    # get_connection() handle (riskguard reads/writes, schema-ensure callers) now
+    # carries the busy_timeout so transient WAL contention WAITS instead of raising
+    # "database is locked". Connection PRAGMA only — INV-37 / txn semantics intact.
+    _apply_busy_timeout(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_get_connection_{resolved.value}_total")
