@@ -777,7 +777,21 @@ def _replacement_u0r_fusion_override(
             history_provider=history_provider, live_fetch=_persisted_then_injected_fetch,
         )
         if not capture.has_extras:
-            # All extras absent -> keep the existing single-anchor posterior (byte-identical).
+            # K3 ANTIBODY (2026-06-09): all multi-model extras absent. We only reach here when
+            # replacement_0_1_u0r_fusion_enabled is True, so ZERO extras is a WIRING failure (e.g.
+            # the lead-calendar mismatch that silently reverted ALL fusion to cold soft-anchor for
+            # ~30h) — NOT a benign inert path. Make it LOUD so a repeat can never hide as a
+            # transient drop. (Behaviour unchanged: still single-anchor fallback.)
+            try:
+                import logging  # noqa: PLC0415
+                logging.getLogger("zeus.replacement_u0r_fusion").warning(
+                    "replacement_0_1 U0R fusion fired with ZERO multi-model extras (flag ON) -> "
+                    "single-anchor fallback for %s %s %s cycle=%s. Check the single_runs capture "
+                    "+ natural-key match.", request.city, metric, target_date,
+                    _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat(),
+                )
+            except Exception:
+                pass
             return None
 
         fused = fuse_u0r_posterior(
@@ -787,6 +801,32 @@ def _replacement_u0r_fusion_override(
         )
 
         used_models = tuple(fused.used_models)
+        # K3 ANTIBODY (2026-06-09): surface a STRUCTURALLY-incomplete decorrelated set LOUDLY. The
+        # 4 declared decorrelated PROVIDERS are NOAA(gfs) / DWD-ICON(one of icon_d2|icon_eu|
+        # icon_global) / CMC(gem) / JMA(jma). gem_global's single_runs is unavailable at 06z/18z
+        # cycles (12h cadence) so the ensemble silently ran as 3 -> a permanently-unservable model
+        # must never masquerade as a transient drop. Log expected-vs-served providers per cell.
+        _missing_providers = []
+        if "gfs_global" not in used_models:
+            _missing_providers.append("NOAA/gfs_global")
+        if not any(m in used_models for m in ("icon_d2", "icon_eu", "icon_global")):
+            _missing_providers.append("DWD/icon")
+        if "gem_global" not in used_models:
+            _missing_providers.append("CMC/gem_global")
+        if "jma_seamless" not in used_models:
+            _missing_providers.append("JMA/jma_seamless")
+        if _missing_providers:
+            try:
+                import logging  # noqa: PLC0415
+                logging.getLogger("zeus.replacement_u0r_fusion").warning(
+                    "replacement_0_1 U0R fusion decorrelated-provider INCOMPLETE for %s %s: served "
+                    "%d/4, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
+                    "cadence single_runs) must be resolved explicitly, not silently dropped.",
+                    request.city, metric, 4 - len(_missing_providers), _missing_providers,
+                    list(used_models),
+                )
+            except Exception:
+                pass
         model_set_hash = _json_hash(sorted(used_models))
         # resolution_mix_hash captures which native grid resolutions entered the fused product
         # (anchor 0.1, globals ~0.25/seamless, regional 2km). Keyed by the deduped model set.
