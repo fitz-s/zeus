@@ -1,4 +1,14 @@
-"""EDLI live-cap usage schema owner."""
+"""EDLI live-cap usage schema owner.
+
+2026-06-08: the tiny_live notional + order-count caps are DELETED. The
+``edli_live_cap_usage`` table is retained as the durable exactly-once reservation
+record (UNIQUE(event_id, cap_scope) is the idempotency key for the cert chain);
+its ``max_notional_usd`` / ``max_orders_per_day`` / ``order_count`` columns are now
+inert provenance fields, NOT caps. The ``edli_live_cap_day_slots`` and
+``edli_live_cap_rate_window`` tables are no longer written to (they implemented the
+deleted per-day / per-window order-count caps); they remain defined only so legacy
+rows and the recovery/cleanup paths in command_recovery keep resolving.
+"""
 
 from __future__ import annotations
 
@@ -49,12 +59,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_edli_live_cap_day_slots_event
     ON edli_live_cap_day_slots(event_id, cap_scope)
 """
 
-# BUG #99 antibody: order-emission RATE limiter, structurally DECOUPLED from the
-# notional cap and from max_orders_per_day. This is a SECOND, independent slot
-# pool keyed by a time-window bucket; its pool size (max_orders_per_window) is a
-# separate config knob from tiny_live_max_notional_usd. Raising the notional cap
-# can no longer silently erase the order-frequency bound — the two controls live
-# in different tables and are reserved independently.
+# 2026-06-08: DELETED order-emission rate limiter table. Retained as a no-longer-
+# written CREATE so legacy rows + command_recovery cleanup DELETEs keep resolving.
+# It implemented the per-window order-count cap, which is gone.
 CREATE_RATE_WINDOW_SQL = """
 CREATE TABLE IF NOT EXISTS edli_live_cap_rate_window (
     cap_scope TEXT NOT NULL,

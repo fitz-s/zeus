@@ -1,8 +1,10 @@
 # Created: 2026-06-05
-# Last reused/audited: 2026-06-05
-# Authority basis: operator directive 2026-06-05 "no caps, no trade-count limits".
-#   BUG #4 keeps the enabled flood-guard as a real 60s fixed window, not a hidden date cap.
-"""no-caps directive: disabled daily cap means no hidden count cap."""
+# Last reused/audited: 2026-06-08
+# Authority basis: 2026-06-08 operator directive "completely delete the tiny_live
+#   mechanism — no notional cap, no order-count caps, no cap-enabled flags".
+#   The reservation records the uncapped Kelly notional and dedupes by event_id.
+"""no-caps directive: the LiveCapLedger caps nothing — no notional cap, no per-day
+or per-window order-count cap, and no cap-enabled flag path exists."""
 from __future__ import annotations
 
 import sqlite3
@@ -17,37 +19,29 @@ def _ledger():
     return LiveCapLedger(sqlite3.connect(":memory:"))
 
 
-def _t(hour=0):
-    return datetime(2026, 6, 5, hour, 0, 0, tzinfo=timezone.utc)
+def _t(hour=0, second=0):
+    return datetime(2026, 6, 5, hour, 0, second, tzinfo=timezone.utc)
 
 
-def test_disabled_notional_cap_does_not_reject_at_configured_soft_cap():
+def test_reserve_does_not_reject_large_notional():
     big = 1000.0
     r = _ledger().reserve(
         event_id="e1", decision_time=_t(), cap_scope="s",
-        requested_notional_usd=big, max_notional_usd=5.0,
-        max_orders_per_day=1000, max_orders_per_window=1,
-        notional_cap_enabled=False, daily_order_cap_enabled=False,
+        requested_notional_usd=big,
     )
-    assert r.reserved_notional_usd == big, "notional cap disabled ⇒ no configured soft-cap rejection"
+    assert r.reserved_notional_usd == big, "no notional cap ⇒ no rejection at any size"
 
 
-def test_disabled_notional_cap_does_not_apply_legacy_250_review_ceiling():
-    # Regression antibody for the stale review finding: the no-cap path must not
-    # clamp Kelly $800 to a hidden $250 hard ceiling before or inside the ledger.
+def test_reserve_does_not_apply_any_hidden_notional_ceiling():
+    # Regression antibody: the no-cap path must not clamp Kelly $800 to any hidden
+    # ceiling ($250 review finding, the old $5 cap, etc.) before or inside the ledger.
     r = _ledger().reserve(
         event_id="e-hard-ceiling-review",
         decision_time=_t(),
         cap_scope="s",
         requested_notional_usd=800.0,
-        max_notional_usd=5.0,
-        max_orders_per_day=1,
-        max_orders_per_window=1,
-        notional_cap_enabled=False,
-        daily_order_cap_enabled=False,
     )
     assert r.reserved_notional_usd == 800.0
-    assert r.max_notional_usd == 800.0
 
 
 def test_historical_cap_audits_are_superseded_by_no_cap_authority():
@@ -68,51 +62,40 @@ def test_historical_cap_audits_are_superseded_by_no_cap_authority():
         assert "Historical" in body or "Supersession" in body
 
 
-def test_disabled_daily_cap_allows_multiple_orders_same_60s_window():
+def test_no_per_day_count_cap_allows_many_orders_same_day():
     led = _ledger()
-    led.reserve(
-        event_id="e0", decision_time=_t(), cap_scope="s",
-        requested_notional_usd=10.0, max_notional_usd=1e12,
-        max_orders_per_day=1, max_orders_per_window=1,
-        notional_cap_enabled=False, daily_order_cap_enabled=False,
-    )
-    led.reserve(
-        event_id="e1", decision_time=_t().replace(second=30), cap_scope="s",
-        requested_notional_usd=10.0, max_notional_usd=1e12,
-        max_orders_per_day=1, max_orders_per_window=1,
-        notional_cap_enabled=False, daily_order_cap_enabled=False,
-    )
-
-
-def test_enabled_count_cap_still_limits_same_60s_window():
-    led = _ledger()
-    led.reserve(
-        event_id="e0", decision_time=_t(), cap_scope="s",
-        requested_notional_usd=10.0, max_notional_usd=1e12,
-        max_orders_per_day=1000, max_orders_per_window=1,
-        notional_cap_enabled=False, daily_order_cap_enabled=True,
-    )
-    with pytest.raises(LiveCapError, match="rate"):
+    for n in range(8):
         led.reserve(
-            event_id="e1", decision_time=_t().replace(second=30), cap_scope="s",
-            requested_notional_usd=10.0, max_notional_usd=1e12,
-            max_orders_per_day=1000, max_orders_per_window=1,
-            notional_cap_enabled=False, daily_order_cap_enabled=True,
+            event_id=f"e{n}", decision_time=_t(second=n), cap_scope="s",
+            requested_notional_usd=10.0,
         )
+    assert (
+        led.conn.execute("SELECT COUNT(*) FROM edli_live_cap_usage").fetchone()[0] == 8
+    )
 
 
-def test_enabled_daily_cap_still_limits_per_day():
+def test_no_rate_window_count_cap_allows_multiple_orders_same_60s_window():
     led = _ledger()
     led.reserve(
         event_id="e0", decision_time=_t(), cap_scope="s",
-        requested_notional_usd=10.0, max_notional_usd=1e12,
-        max_orders_per_day=1, max_orders_per_window=1,
-        notional_cap_enabled=False, daily_order_cap_enabled=True,
+        requested_notional_usd=10.0,
     )
-    with pytest.raises(LiveCapError):
+    second = led.reserve(
+        event_id="e1", decision_time=_t(second=30), cap_scope="s",
+        requested_notional_usd=10.0,
+    )
+    assert second.reservation_status == "RESERVED"
+
+
+def test_drift_still_detected_on_same_event_changed_notional():
+    # Exactly-once + drift is PRESERVED even though caps are gone.
+    led = _ledger()
+    led.reserve(
+        event_id="e0", decision_time=_t(), cap_scope="s",
+        requested_notional_usd=10.0,
+    )
+    with pytest.raises(LiveCapError, match="drift"):
         led.reserve(
-            event_id="e1", decision_time=_t(), cap_scope="s",
-            requested_notional_usd=10.0, max_notional_usd=1e12,
-            max_orders_per_day=1, max_orders_per_window=1,
-            notional_cap_enabled=False, daily_order_cap_enabled=True,
-        )  # cap enabled ⇒ second same-day order rejected (regression: caps still work when ON)
+            event_id="e0", decision_time=_t(), cap_scope="s",
+            requested_notional_usd=11.0,
+        )

@@ -5149,7 +5149,6 @@ def _edli_event_reactor_cycle() -> None:
                 # Real submit/canary still requires the explicit config flag.
                 taker_fok_fak_live_enabled=taker_fok_fak_effective,
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
-                tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
                 replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
                 replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
@@ -5214,9 +5213,6 @@ def _edli_event_reactor_cycle() -> None:
                 reactor_mode=reactor_mode,
                 real_order_submit_enabled=real_order_submit_enabled,
                 taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
-                tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
-                tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),
-                tiny_live_max_orders_per_window=int(edli_cfg.get("tiny_live_max_orders_per_window", 1)),
                 # Task #102 book-wide edge-zone admission. Absent key => default
                 # False => byte-identical legacy money-path (the operator owns
                 # config/settings.json; this reads it without writing it).

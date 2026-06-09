@@ -192,10 +192,6 @@ class ReactorConfig:
     reactor_mode: str = "live_no_submit"
     real_order_submit_enabled: bool = False
     taker_fok_fak_live_enabled: bool = False
-    tiny_live_max_notional_usd: float = 5.0
-    tiny_live_max_orders_per_day: int = 1
-    # BUG #99 antibody: order-emission rate limit, independent of the notional cap.
-    tiny_live_max_orders_per_window: int = 1
     # Task #102 (BEST-ORDER SELECTION): book-wide edge-zone admission gate, the
     # LAST step in the money-path. DEFAULT FALSE => byte-identical to today (the
     # gate is computed only when this flag is True). When True, a candidate is

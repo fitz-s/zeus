@@ -76,13 +76,15 @@ class EdliLiveCapLedger:
         notional_usd: float,
     ) -> None:
         try:
+            # 2026-06-08: the underlying LiveCapLedger.reserve no longer takes any
+            # notional/order-count cap args (tiny_live caps deleted). This facade's
+            # own day0 cap accounting lives in check_day0; the reserve here only
+            # records the exactly-once reservation of the requested notional.
             self._ledger.reserve(
                 event_id=event_id,
                 decision_time=decision_time,
                 cap_scope="day0_hard_fact",
                 requested_notional_usd=float(notional_usd),
-                max_notional_usd=float(notional_usd),
-                max_orders_per_day=1,
             )
         except LiveCapError:
             return

@@ -1,8 +1,26 @@
-"""EDLI live canary cap reservation ledger."""
+"""EDLI live-order reservation ledger.
+
+2026-06-08 operator directive: the ``tiny_live`` mechanism — a $5 special-case
+per-order notional cap plus per-day / per-window order-count caps — is DELETED.
+Order size is governed SOLELY by the structural multi-layer fractional-Kelly
+sizing in ``src/events/money_path_adapters.py::evaluate_kelly``. This ledger no
+longer rejects or clamps based on any ``max_notional_usd`` or order-count limit.
+
+What REMAINS load-bearing and is preserved:
+  - Exactly-once reservation keyed by ``(event_id, cap_scope)`` via the
+    ``edli_live_cap_usage`` UNIQUE index + the existing-row return below. A
+    re-reserve of the same event returns the same row; it never creates a second
+    reservation, so a live order can never be double-submitted.
+  - Reserved-notional drift detection: a second reserve for the same event with a
+    different reserved notional (or final_intent_id / execution_command_id) raises
+    ``LiveCapError`` rather than silently overwriting.
+  - The LIVE_CAP certificate record that chains the execution-command cert.
+
+The ledger records the (uncapped) Kelly notional; it caps NOTHING.
+"""
 
 from __future__ import annotations
 
-import contextlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,56 +28,11 @@ from datetime import datetime, timezone
 from src.decision_kernel.canonicalization import stable_hash
 from src.state.schema.edli_live_cap_usage_schema import ensure_table
 
-# Conservative default for the explicit order-count path. It is only used when
-# daily_order_cap_enabled is true; the no-cap path bypasses day and window slots.
-DEFAULT_MAX_ORDERS_PER_WINDOW = 1
-DEFAULT_RATE_WINDOW_SECONDS = 60
-
-def cap_explicitly_disabled(value: object) -> bool:
-    """Return True ONLY when ``value`` is the explicit-disable sentinel.
-
-    2026-06-03 operator directive: the artificial notional + per-day caps may be
-    removed, but unbounded must be DELIBERATE. The disable signal is the literal
-    JSON boolean ``false`` (Python ``False``) and NOTHING else.
-
-    FAIL-SAFE INVARIANT: a missing key (``None``), a malformed string
-    (``"false"``, ``"0"``, ``"no"``), a number, an empty container, or any
-    truthy value is NOT the sentinel and therefore does NOT disable the cap. The
-    caller treats a non-disable result as "cap stays enabled" (fail closed). A
-    config typo can never silently uncap — it can only leave the cap ON.
-
-    Note we deliberately do NOT coerce strings here (unlike a permissive
-    ``_coerce_bool``): a config that wrote the string ``"false"`` instead of the
-    JSON literal ``false`` is treated as malformed and the cap stays enabled.
-    Disabling a live risk-sizing limit must be unambiguous.
-    """
-    return value is False
-
-
-@dataclass(frozen=True)
-class LiveCapRequest:
-    requested_notional_usd: float
-    recorded_max_notional_usd: float
-
-
-def normalize_live_cap_request(
-    *,
-    requested_notional_usd: float,
-    max_notional_usd: float,
-    notional_cap_enabled: bool = True,
-) -> LiveCapRequest:
-    """Normalize live-cap notional before any certificate or ledger row exists."""
-    requested = float(requested_notional_usd)
-    max_notional = float(max_notional_usd)
-    if requested <= 0:
-        raise LiveCapError("requested_notional_usd must be positive")
-    if notional_cap_enabled and requested > max_notional:
-        raise LiveCapError("requested_notional_usd exceeds max_notional_usd")
-    recorded_max = max_notional if notional_cap_enabled else requested
-    return LiveCapRequest(
-        requested_notional_usd=float(requested),
-        recorded_max_notional_usd=float(recorded_max),
-    )
+# Inert provenance constants written into the durable row so the legacy schema's
+# CHECK (max_orders_per_day > 0) / (max_notional_usd >= 0) constraints are still
+# satisfied. They are NOT caps — nothing reads them as a limit anymore.
+_RECORDED_ORDER_COUNT = 1
+_RECORDED_MAX_ORDERS_PER_DAY = 1
 
 
 @dataclass(frozen=True)
@@ -68,26 +41,25 @@ class LiveCapReservation:
     event_id: str
     decision_time: datetime
     cap_scope: str
-    max_notional_usd: float
-    max_orders_per_day: int
     reserved_notional_usd: float
-    order_count: int
     reservation_status: str
     final_intent_id: str | None = None
     execution_command_id: str | None = None
-    notional_cap_enabled: bool = True
 
     def certificate_payload(self) -> dict:
+        # ``max_notional_usd`` mirrors the reserved Kelly notional purely as a
+        # durable record (and to keep the column non-null); it is NOT a cap and
+        # nothing compares an order against it. ``order_count`` /
+        # ``max_orders_per_day`` are inert provenance constants.
         return {
             "usage_id": self.usage_id,
             "event_id": self.event_id,
             "decision_time": _dt(self.decision_time),
             "cap_scope": self.cap_scope,
-            "max_notional_usd": self.max_notional_usd,
-            "max_orders_per_day": self.max_orders_per_day,
+            "max_notional_usd": self.reserved_notional_usd,
+            "max_orders_per_day": _RECORDED_MAX_ORDERS_PER_DAY,
             "reserved_notional_usd": self.reserved_notional_usd,
-            "notional_cap_enabled": self.notional_cap_enabled,
-            "order_count": self.order_count,
+            "order_count": _RECORDED_ORDER_COUNT,
             "reservation_status": self.reservation_status,
             "final_intent_id": self.final_intent_id,
             "execution_command_id": self.execution_command_id,
@@ -110,25 +82,19 @@ class LiveCapLedger:
         decision_time: datetime,
         cap_scope: str,
         requested_notional_usd: float,
-        max_notional_usd: float,
-        max_orders_per_day: int,
-        max_orders_per_window: int = DEFAULT_MAX_ORDERS_PER_WINDOW,
-        notional_cap_enabled: bool = True,
-        daily_order_cap_enabled: bool = True,
         final_intent_id: str | None = None,
         execution_command_id: str | None = None,
     ) -> LiveCapReservation:
-        normalized = normalize_live_cap_request(
-            requested_notional_usd=float(requested_notional_usd),
-            max_notional_usd=float(max_notional_usd),
-            notional_cap_enabled=bool(notional_cap_enabled),
-        )
-        requested_notional_usd = normalized.requested_notional_usd
-        recorded_max_notional_usd = normalized.recorded_max_notional_usd
-        if max_orders_per_day <= 0:
-            raise LiveCapError("max_orders_per_day must be positive")
-        if max_orders_per_window <= 0:
-            raise LiveCapError("max_orders_per_window must be positive")
+        """Record an exactly-once reservation of the Kelly-sized notional.
+
+        This caps NOTHING. It records the requested (Kelly) notional, dedupes by
+        ``(event_id, cap_scope)`` so the same event reserves at most once, and
+        raises on reserved-notional drift. The only rejection is the basic sanity
+        floor: a non-positive notional (a real order can never be <= 0).
+        """
+        requested = float(requested_notional_usd)
+        if requested <= 0:
+            raise LiveCapError("requested_notional_usd must be positive")
         usage_id = self._usage_id(event_id, cap_scope)
         created_at = _dt(datetime.now(timezone.utc))
         decision_text = _dt(decision_time)
@@ -141,100 +107,52 @@ class LiveCapLedger:
             (event_id, cap_scope),
         ).fetchone()
         if existing is not None:
+            # Exactly-once: a re-reserve of the same event returns the SAME row.
+            # Drift guard: a changed reserved notional / final_intent_id /
+            # execution_command_id for the same event is a defect, not a silent
+            # overwrite.
             reservation = _reservation_from_row(existing)
             if (
-                reservation.max_notional_usd != recorded_max_notional_usd
-                or reservation.max_orders_per_day != int(max_orders_per_day)
-                or reservation.reserved_notional_usd != float(requested_notional_usd)
+                reservation.reserved_notional_usd != requested
                 or (final_intent_id is not None and reservation.final_intent_id != final_intent_id)
                 or (execution_command_id is not None and reservation.execution_command_id != execution_command_id)
             ):
                 raise LiveCapError("live cap reservation drift for event/cap_scope")
             return reservation
-        cap_date = decision_text[:10]
-        # Per-day cap: when EXPLICITLY disabled the day-slot pool is bypassed so
-        # an unbounded number of orders may be placed per day. The day-slot
-        # table's unique (event_id, cap_scope) index still provides per-event
-        # idempotency — that is not a cap, so it is preserved. When enabled (the
-        # default) the bounded slot pool caps per-day exactly as before.
-        if daily_order_cap_enabled:
-            slot = self._reserve_day_slot(
-                usage_id=usage_id,
-                event_id=event_id,
-                cap_scope=cap_scope,
-                cap_date=cap_date,
-                max_orders_per_day=max_orders_per_day,
-                created_at=created_at,
-            )
-        else:
-            slot = self._reserve_uncapped_day_slot(
-                usage_id=usage_id,
-                event_id=event_id,
-                cap_scope=cap_scope,
-                cap_date=cap_date,
-                created_at=created_at,
-            )
-        # Count-cap switch: when the explicit daily cap is disabled, there must
-        # be no hidden order-count cap. When enabled, the flood guard is a real
-        # fixed 60s window, not the old calendar-date key that acted like a
-        # second daily cap.
-        if daily_order_cap_enabled:
-            try:
-                self._reserve_window_slot(
-                    usage_id=usage_id,
-                    event_id=event_id,
-                    cap_scope=cap_scope,
-                    window_key=_rate_window_key(decision_time),
-                    max_orders_per_window=max_orders_per_window,
-                    created_at=created_at,
-                )
-            except Exception:
-                with contextlib.suppress(Exception):
-                    self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
-                raise
-        try:
-            self.conn.execute(
-                """
-                INSERT INTO edli_live_cap_usage (
-                    usage_id, event_id, decision_time, cap_scope,
-                    max_notional_usd, max_orders_per_day, reserved_notional_usd,
-                    order_count, reservation_status, final_intent_id,
-                    execution_command_id, created_at, schema_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, 1)
-                """,
-                (
-                    usage_id,
-                    event_id,
-                    decision_text,
-                    cap_scope,
-                    recorded_max_notional_usd,
-                    int(max_orders_per_day),
-                    float(requested_notional_usd),
-                    int(slot),
-                    final_intent_id,
-                    execution_command_id,
-                    created_at,
-                ),
-            )
-        except Exception:
-            with contextlib.suppress(Exception):
-                self.conn.execute("DELETE FROM edli_live_cap_day_slots WHERE usage_id = ?", (usage_id,))
-            with contextlib.suppress(Exception):
-                self.conn.execute("DELETE FROM edli_live_cap_rate_window WHERE usage_id = ?", (usage_id,))
-            raise
+        self.conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope,
+                max_notional_usd, max_orders_per_day, reserved_notional_usd,
+                order_count, reservation_status, final_intent_id,
+                execution_command_id, created_at, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RESERVED', ?, ?, ?, 1)
+            """,
+            (
+                usage_id,
+                event_id,
+                decision_text,
+                cap_scope,
+                # max_notional_usd mirrors the reserved notional as a durable
+                # record only (keeps the legacy column non-null); not a cap.
+                requested,
+                _RECORDED_MAX_ORDERS_PER_DAY,
+                requested,
+                _RECORDED_ORDER_COUNT,
+                final_intent_id,
+                execution_command_id,
+                created_at,
+            ),
+        )
         return LiveCapReservation(
             usage_id=usage_id,
             event_id=event_id,
             decision_time=decision_time,
             cap_scope=cap_scope,
-            max_notional_usd=recorded_max_notional_usd,
-            max_orders_per_day=int(max_orders_per_day),
-            reserved_notional_usd=float(requested_notional_usd),
-            order_count=int(slot),
+            reserved_notional_usd=requested,
             reservation_status="RESERVED",
             final_intent_id=final_intent_id,
             execution_command_id=execution_command_id,
-            notional_cap_enabled=bool(notional_cap_enabled),
         )
 
     def release(self, usage_id: str, reason: str | None = None) -> None:
@@ -293,137 +211,6 @@ class LiveCapLedger:
     def _usage_id(event_id: str, cap_scope: str) -> str:
         return "edli_live_cap:" + stable_hash({"event_id": event_id, "cap_scope": cap_scope})[:32]
 
-    def _reserve_day_slot(
-        self,
-        *,
-        usage_id: str,
-        event_id: str,
-        cap_scope: str,
-        cap_date: str,
-        max_orders_per_day: int,
-        created_at: str,
-    ) -> int:
-        existing = self.conn.execute(
-            """
-            SELECT slot, usage_id
-            FROM edli_live_cap_day_slots
-            WHERE event_id = ? AND cap_scope = ?
-            """,
-            (event_id, cap_scope),
-        ).fetchone()
-        if existing is not None:
-            slot = int(existing["slot"] if isinstance(existing, sqlite3.Row) else existing[0])
-            existing_usage_id = str(existing["usage_id"] if isinstance(existing, sqlite3.Row) else existing[1])
-            if existing_usage_id != usage_id:
-                raise LiveCapError("live cap day slot drift for event/cap_scope")
-            return slot
-        for slot in range(1, int(max_orders_per_day) + 1):
-            try:
-                self.conn.execute(
-                    """
-                    INSERT INTO edli_live_cap_day_slots (
-                        cap_scope, cap_date, slot, usage_id, event_id, created_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, 1)
-                    """,
-                    (cap_scope, cap_date, slot, usage_id, event_id, created_at),
-                )
-                return slot
-            except sqlite3.IntegrityError:
-                continue
-        raise LiveCapError("live cap max_orders_per_day exhausted")
-
-    def _reserve_uncapped_day_slot(
-        self,
-        *,
-        usage_id: str,
-        event_id: str,
-        cap_scope: str,
-        cap_date: str,
-        created_at: str,
-    ) -> int:
-        """Reserve a day slot with NO per-day count limit (2026-06-03 directive).
-
-        Used only when the per-day cap is EXPLICITLY disabled. Unlike
-        ``_reserve_day_slot`` there is no ``max_orders_per_day`` bound: a fresh
-        slot is allocated by walking past collisions until a free integer is
-        found, so the pool grows without limit. The unique (event_id, cap_scope)
-        index is still honoured for per-event idempotency (NOT a cap).
-
-        The flood-guard rate window is also bypassed by the caller on this path.
-        That keeps ``daily_order_cap_enabled=False`` free of hidden count caps.
-        """
-        existing = self.conn.execute(
-            """
-            SELECT slot, usage_id
-            FROM edli_live_cap_day_slots
-            WHERE event_id = ? AND cap_scope = ?
-            """,
-            (event_id, cap_scope),
-        ).fetchone()
-        if existing is not None:
-            slot = int(existing["slot"] if isinstance(existing, sqlite3.Row) else existing[0])
-            existing_usage_id = str(existing["usage_id"] if isinstance(existing, sqlite3.Row) else existing[1])
-            if existing_usage_id != usage_id:
-                raise LiveCapError("live cap day slot drift for event/cap_scope")
-            return slot
-        row = self.conn.execute(
-            "SELECT COALESCE(MAX(slot), 0) FROM edli_live_cap_day_slots WHERE cap_scope = ? AND cap_date = ?",
-            (cap_scope, cap_date),
-        ).fetchone()
-        slot = int(row[0]) + 1
-        while True:
-            try:
-                self.conn.execute(
-                    """
-                    INSERT INTO edli_live_cap_day_slots (
-                        cap_scope, cap_date, slot, usage_id, event_id, created_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, 1)
-                    """,
-                    (cap_scope, cap_date, slot, usage_id, event_id, created_at),
-                )
-                return slot
-            except sqlite3.IntegrityError:
-                slot += 1
-
-    def _reserve_window_slot(
-        self,
-        *,
-        usage_id: str,
-        event_id: str,
-        cap_scope: str,
-        window_key: str,
-        max_orders_per_window: int,
-        created_at: str,
-    ) -> int:
-        existing = self.conn.execute(
-            """
-            SELECT slot, usage_id
-            FROM edli_live_cap_rate_window
-            WHERE event_id = ? AND cap_scope = ? AND window_key = ?
-            """,
-            (event_id, cap_scope, window_key),
-        ).fetchone()
-        if existing is not None:
-            slot = int(existing["slot"] if isinstance(existing, sqlite3.Row) else existing[0])
-            existing_usage_id = str(existing["usage_id"] if isinstance(existing, sqlite3.Row) else existing[1])
-            if existing_usage_id != usage_id:
-                raise LiveCapError("live cap rate window slot drift for event/cap_scope")
-            return slot
-        for slot in range(1, int(max_orders_per_window) + 1):
-            try:
-                self.conn.execute(
-                    """
-                    INSERT INTO edli_live_cap_rate_window (
-                        cap_scope, window_key, slot, usage_id, event_id, created_at, schema_version
-                    ) VALUES (?, ?, ?, ?, ?, ?, 1)
-                    """,
-                    (cap_scope, window_key, slot, usage_id, event_id, created_at),
-                )
-                return slot
-            except sqlite3.IntegrityError:
-                continue
-        raise LiveCapError("live cap order-emission rate limit exhausted (max_orders_per_window)")
-
 
 def _reservation_from_row(row) -> LiveCapReservation:
     getter = row.__getitem__
@@ -432,10 +219,7 @@ def _reservation_from_row(row) -> LiveCapReservation:
         event_id=str(getter("event_id") if isinstance(row, sqlite3.Row) else row[1]),
         decision_time=datetime.fromisoformat(str(getter("decision_time") if isinstance(row, sqlite3.Row) else row[2])),
         cap_scope=str(getter("cap_scope") if isinstance(row, sqlite3.Row) else row[3]),
-        max_notional_usd=float(getter("max_notional_usd") if isinstance(row, sqlite3.Row) else row[4]),
-        max_orders_per_day=int(getter("max_orders_per_day") if isinstance(row, sqlite3.Row) else row[5]),
         reserved_notional_usd=float(getter("reserved_notional_usd") if isinstance(row, sqlite3.Row) else row[6]),
-        order_count=int(getter("order_count") if isinstance(row, sqlite3.Row) else row[7]),
         reservation_status=str(getter("reservation_status") if isinstance(row, sqlite3.Row) else row[8]),
         final_intent_id=getter("final_intent_id") if isinstance(row, sqlite3.Row) else row[9],
         execution_command_id=getter("execution_command_id") if isinstance(row, sqlite3.Row) else row[10],
@@ -446,11 +230,3 @@ def _dt(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
-
-
-def _rate_window_key(value: datetime) -> str:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    epoch_seconds = int(value.astimezone(timezone.utc).timestamp())
-    window_start = epoch_seconds - (epoch_seconds % DEFAULT_RATE_WINDOW_SECONDS)
-    return f"{DEFAULT_RATE_WINDOW_SECONDS}s:{window_start}"

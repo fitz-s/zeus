@@ -99,8 +99,6 @@ def main() -> int:
     kelly = f_ff("openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled")
     flip = f_ff("openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled")
     arm = f_edli("edli_live_operator_authorized")
-    cap_notional = f_edli("tiny_live_notional_cap_enabled")
-    cap_daily = f_edli("tiny_live_daily_order_cap_enabled")
 
     ev_blockers = _evidence_blockers(pe)
     ev_ok = not ev_blockers
@@ -139,9 +137,6 @@ def main() -> int:
     if (auth or arm) and not fusion:
         issues.append(("WARN", "authority/arm ON but fusion OFF — you would trade the single-anchor path, "
                                "not the proven U0R fusion."))
-    if not cap_notional or not cap_daily:
-        issues.append(("WARN", "tiny_live caps not both ON — enable tiny_live_notional_cap_enabled + "
-                               "tiny_live_daily_order_cap_enabled (tightening)."))
 
     print("-" * 72)
     if issues:

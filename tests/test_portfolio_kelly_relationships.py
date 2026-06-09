@@ -49,11 +49,15 @@ from src.state.portfolio import (
     total_exposure_usd,
 )
 
-# ── Config truth (read from settings, not hardcoded) ─────────────────────────
+# ── Config truth (read from settings, NOT hardcoded) ─────────────────────────
+# These invariants must hold for ANY live tuning of the two sizing knobs, so the
+# constants track config rather than pinning a snapshot value. (Pre-2026-06-08
+# they were hardcoded 0.25 / 0.10; the live values are now 0.125 / 0.05.)
+from src.config import settings as _settings, sizing_defaults as _sizing_defaults
 
-F_CAP = 0.25  # fractional-Kelly cap = kelly_multiplier (config/settings.json)
-MAX_SINGLE_POSITION_PCT = 0.10  # max_single_position_pct (config)
-BANKROLL = 170.0  # representative live bankroll (matches the ~$43=25% receipt)
+F_CAP = float(_settings["sizing"]["kelly_multiplier"])  # live fractional-Kelly cap
+MAX_SINGLE_POSITION_PCT = float(_sizing_defaults()["max_single_position_pct"])  # concentration ceiling
+BANKROLL = 1000.0  # representative live proving-phase wallet (~$1k)
 
 # Two cities chosen for KNOWN correlation behaviour via correlation.get_correlation:
 #   - same city  → corr 1.0 (MECE / self)
@@ -320,12 +324,19 @@ def test_K4_size_monotone_decreasing_in_committed():
 
 def test_K5_correlated_position_reduces_more_than_uncorrelated():
     """For equal committed capital, a held position in a highly-correlated city
-    reduces the new bet MORE than one in an uncorrelated city."""
+    reduces the new bet MORE than one in an uncorrelated city.
+
+    Edge is deliberately MODEST (p=0.60) so both sized stakes sit BELOW the
+    single-position concentration ceiling — the correlation-weighting signal
+    (near < far) lives in the heat-attenuation term and would be masked if both
+    bets pinned at the cap. (Pre-2026-06-08 this used the default p=0.85; at the
+    tightened ceiling 0.05·B that strong edge caps both sides at the ceiling.)
+    """
     committed = 40.0
     near = _held_position(city=NEAR_CITY, committed_usd=committed, tid="n1")
     far = _held_position(city=FAR_CITY, committed_usd=committed, tid="f1")
-    size_with_far = _size(new_city=NEAR_CITY, held=[far])
-    size_with_near = _size(new_city=NEAR_CITY, held=[near])
+    size_with_far = _size(new_city=NEAR_CITY, held=[far], p_posterior=0.60)
+    size_with_near = _size(new_city=NEAR_CITY, held=[near], p_posterior=0.60)
     assert size_with_far > size_with_near, (
         f"correlation weighting absent: far={size_with_far:.4f} "
         f"!> near={size_with_near:.4f}"

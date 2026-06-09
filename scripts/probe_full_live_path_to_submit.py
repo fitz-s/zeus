@@ -309,12 +309,11 @@ def _probe_candidate(cand: dict, world_conn, trade_conn, forecast_conn) -> dict:
     # FAITHFUL provider: tick/min_order read from final_intent.payload (live parity).
     _pre_submit_provider = _faithful_pre_submit_provider(snap, trade_conn=trade_conn)
 
-    # NON-DESTRUCTIVE + PER-CANDIDATE FRESH CAP: the cert chain reserves a live_cap
-    # day-slot and appends aggregate-ledger events (real writes on the ATTACHed world
-    # DB). Wrap the whole build in a SAVEPOINT and ROLL IT BACK so (a) the probe leaves
-    # zero persisted state (HARD RULE) and (b) each candidate sees a fresh single-slot
-    # cap (tiny_live_max_orders_per_day=1) instead of being starved by a sibling
-    # candidate's uncommitted reservation earlier in this same run.
+    # NON-DESTRUCTIVE: the cert chain reserves a live_cap usage row and appends
+    # aggregate-ledger events (real writes on the ATTACHed world DB). Wrap the
+    # whole build in a SAVEPOINT and ROLL IT BACK so the probe leaves zero
+    # persisted state (HARD RULE). The reservation no longer applies any notional
+    # or order-count cap (2026-06-08 directive); size comes from fractional Kelly.
     _sp = "probe_candidate_sp"
     trade_conn.execute(f"SAVEPOINT {_sp}")
     try:
@@ -322,7 +321,6 @@ def _probe_candidate(cand: dict, world_conn, trade_conn, forecast_conn) -> dict:
             event=event,
             receipt=no_submit_receipt,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=trade_conn,       # live_cap reads from trade DB (K1 world-class tables)
             pre_submit_authority_provider=_pre_submit_provider,
             canary_force_taker=True,
@@ -463,7 +461,6 @@ def _probe_verifier(cand: dict, world_conn, trade_conn, forecast_conn) -> dict:
             event=event,
             receipt=no_submit_receipt,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=trade_conn,
             pre_submit_authority_provider=_provider,
             canary_force_taker=True,

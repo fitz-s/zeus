@@ -889,7 +889,6 @@ def event_bound_live_adapter_from_trade_conn(
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
     real_order_submit_enabled: bool = False,
     live_canary_enabled: bool = False,
-    tiny_live_max_notional_usd: float = 5.0,
     executor_submit: Callable[[DecisionCertificate, DecisionCertificate], EventBoundExecutorSubmitResult] | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
     durable_submit_outbox_enabled: bool = False,
@@ -1022,7 +1021,6 @@ def event_bound_live_adapter_from_trade_conn(
                         event=event,
                         receipt=no_submit_receipt,
                         decision_time=decision_time.astimezone(UTC),
-                        tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                         live_cap_conn=build_conn,
                         trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
@@ -1081,7 +1079,6 @@ def event_bound_live_adapter_from_trade_conn(
                         event=event,
                         receipt=no_submit_receipt,
                         decision_time=decision_time.astimezone(UTC),
-                        tiny_live_max_notional_usd=tiny_live_max_notional_usd,
                         live_cap_conn=build_conn,
                         trade_conn=trade_conn,
                         pre_submit_authority_provider=pre_submit_authority_provider,
@@ -2234,7 +2231,6 @@ def _build_submit_disabled_live_certificates(
     event: OpportunityEvent,
     receipt: EventSubmissionReceipt,
     decision_time: datetime,
-    tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
@@ -2245,7 +2241,6 @@ def _build_submit_disabled_live_certificates(
         event=event,
         receipt=receipt,
         decision_time=decision_time,
-        tiny_live_max_notional_usd=tiny_live_max_notional_usd,
         live_cap_conn=live_cap_conn,
         trade_conn=trade_conn,
         pre_submit_authority_provider=pre_submit_authority_provider,
@@ -2273,7 +2268,6 @@ def _build_live_execution_command_certificates(
     event: OpportunityEvent,
     receipt: EventSubmissionReceipt,
     decision_time: datetime,
-    tiny_live_max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None = None,
     trade_conn: sqlite3.Connection | None = None,
     pre_submit_authority_provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None = None,
@@ -2321,7 +2315,6 @@ def _build_live_execution_command_certificates(
         event=event,
         receipt=receipt,
         decision_time=decision_time,
-        max_notional_usd=tiny_live_max_notional_usd,
         live_cap_conn=live_cap_conn,
         persist=False,
     )
@@ -2728,29 +2721,19 @@ def _build_live_execution_command_certificates(
             pre_submit_revalidation_cert=pre_submit,
             decision_time=decision_time,
         )
-        from src.events.live_cap import LiveCapLedger, cap_explicitly_disabled
+        from src.events.live_cap import LiveCapLedger
 
-        # This is the durable re-reservation of the notional already computed by
-        # _build_live_cap_certificate_from_ledger above; it MUST honour the same
-        # explicit cap-disable sentinel, else an uncapped Kelly size would be
-        # rejected here as "exceeds". Fail-safe: missing/malformed sentinel keeps
-        # the configured limit enabled (cap_explicitly_disabled returns True only
-        # for literal false).
-        _edli_cfg = settings["edli_v1"]
+        # Durable re-reservation of the Kelly notional already computed by
+        # _build_live_cap_certificate_from_ledger above (which built the cert with
+        # persist=False). This is the EXACTLY-ONCE + DRIFT-DETECT write: it dedupes
+        # by (event_id, cap_scope) and raises if the reserved notional drifted.
+        # 2026-06-08: no notional/order-count cap args — the reservation caps
+        # nothing; it only records and dedupes.
         reserve_result = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
             decision_time=decision_time,
             cap_scope="tiny_live_canary",
             requested_notional_usd=float(live_cap.payload["reserved_notional_usd"]),
-            max_notional_usd=float(tiny_live_max_notional_usd),
-            max_orders_per_day=int(_edli_cfg.get("tiny_live_max_orders_per_day", 1)),
-            max_orders_per_window=int(_edli_cfg.get("tiny_live_max_orders_per_window", 1)),
-            notional_cap_enabled=not cap_explicitly_disabled(
-                _edli_cfg.get("tiny_live_notional_cap_enabled")
-            ),
-            daily_order_cap_enabled=not cap_explicitly_disabled(
-                _edli_cfg.get("tiny_live_daily_order_cap_enabled")
-            ),
             final_intent_id=str(final_intent.payload["final_intent_id"]),
             execution_command_id=execution_command_id,
         )
@@ -2758,8 +2741,6 @@ def _build_live_execution_command_certificates(
             raise ValueError("live cap reservation drift for provisional certificate")
         if float(reserve_result.reserved_notional_usd) != float(live_cap.payload["reserved_notional_usd"]):
             raise ValueError("LIVE_CAP_RESERVED_NOTIONAL_DRIFT")
-        if float(reserve_result.max_notional_usd) != float(live_cap.payload["max_notional_usd"]):
-            raise ValueError("LIVE_CAP_MAX_NOTIONAL_DRIFT")
     except Exception:
         raise
     return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
@@ -2801,7 +2782,6 @@ def _actionable_payload_from_receipt(
         "risk_decision_id": receipt.risk_decision_id,
         "live_cap_usage_id": live_cap_cert.payload["usage_id"],
         "live_cap_reserved_notional_usd": reserved_notional,
-        "live_cap_notional_cap_enabled": bool(live_cap_cert.payload.get("notional_cap_enabled", True)),
         "final_intent_id": receipt.final_intent_id,
         "neg_risk": receipt.neg_risk,
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
@@ -3156,61 +3136,29 @@ def _build_live_cap_certificate_from_ledger(
     event: OpportunityEvent,
     receipt: EventSubmissionReceipt,
     decision_time: datetime,
-    max_notional_usd: float,
     live_cap_conn: sqlite3.Connection | None,
     persist: bool = True,
 ) -> DecisionCertificate:
     if live_cap_conn is None:
         raise ValueError("LIVE_CAP_LEDGER_CONNECTION_REQUIRED")
-    from src.events.live_cap import LiveCapLedger, cap_explicitly_disabled, normalize_live_cap_request
+    from src.events.live_cap import LiveCapLedger
 
-    # 2026-06-03 operator directive: the artificial $5 notional + 1/day caps may
-    # be EXPLICITLY disabled (config sentinel == literal false) so fractional
-    # Kelly is the sole notional-sizing constraint. FAIL-SAFE: a missing or
-    # malformed sentinel leaves the configured limit ENABLED
-    # (cap_explicitly_disabled returns True only for the literal Python False).
-    _edli_cfg = settings["edli_v1"]
-    notional_cap_enabled = not cap_explicitly_disabled(
-        _edli_cfg.get("tiny_live_notional_cap_enabled")
-    )
-    daily_order_cap_enabled = not cap_explicitly_disabled(
-        _edli_cfg.get("tiny_live_daily_order_cap_enabled")
-    )
+    # 2026-06-08 operator directive: the tiny_live $5 notional + per-day/window
+    # order-count caps are DELETED. Order size is governed SOLELY by the
+    # structural fractional-Kelly sizing upstream (money_path_adapters.evaluate_kelly).
+    # The reservation records the (uncapped) Kelly notional; it clamps NOTHING.
+    # A one-tick floor still guards against a sub-tick request.
     price = _float_or_default(receipt.c_fee_adjusted, 0.01)
     kelly_usd = float(receipt.kelly_size_usd or 0.0)
-    if notional_cap_enabled:
-        # Configured limit ON: bound Kelly by max_notional_usd exactly as before.
-        min_order_notional = min(max_notional_usd, max(price, 0.01))
-        requested_notional = max(min(kelly_usd, max_notional_usd), min_order_notional)
-    else:
-        # Cap explicitly OFF: drop the min(kelly, max_notional) clamp so the full
-        # Kelly size passes through. The min-order floor (one tick) still guards
-        # against a sub-tick request; nothing above it is clamped.
-        min_order_notional = max(price, 0.01)
-        requested_notional = max(kelly_usd, min_order_notional)
-    normalized = normalize_live_cap_request(
-        requested_notional_usd=float(requested_notional),
-        max_notional_usd=float(max_notional_usd),
-        notional_cap_enabled=notional_cap_enabled,
-    )
-    requested_notional = normalized.requested_notional_usd
+    min_order_notional = max(price, 0.01)
+    requested_notional = max(kelly_usd, min_order_notional)
     usage_id = LiveCapLedger._usage_id(event.event_id, "tiny_live_canary")
-    recorded_max_notional_usd = normalized.recorded_max_notional_usd
     if persist:
         reservation = LiveCapLedger(live_cap_conn).reserve(
             event_id=event.event_id,
             decision_time=decision_time,
             cap_scope="tiny_live_canary",
             requested_notional_usd=float(requested_notional),
-            max_notional_usd=float(max_notional_usd),
-            max_orders_per_day=int(_edli_cfg.get("tiny_live_max_orders_per_day", 1)),
-            # PR-2 (C): pass the configured flood-guard window here too. This first
-            # reservation previously omitted it (falling to the fail-closed default
-            # of 1) while the re-reservation in build_event_bound_submit honoured the
-            # config value — an inconsistency. Both now read the same config key.
-            max_orders_per_window=int(_edli_cfg.get("tiny_live_max_orders_per_window", 1)),
-            notional_cap_enabled=notional_cap_enabled,
-            daily_order_cap_enabled=daily_order_cap_enabled,
             final_intent_id=receipt.final_intent_id,
         )
     else:
@@ -3221,13 +3169,9 @@ def _build_live_cap_certificate_from_ledger(
             event_id=event.event_id,
             decision_time=decision_time,
             cap_scope="tiny_live_canary",
-            max_notional_usd=recorded_max_notional_usd,
-            max_orders_per_day=int(_edli_cfg.get("tiny_live_max_orders_per_day", 1)),
             reserved_notional_usd=float(requested_notional),
-            order_count=1,
             reservation_status="RESERVED",
             final_intent_id=receipt.final_intent_id,
-            notional_cap_enabled=notional_cap_enabled,
         )
     payload = reservation.certificate_payload()
     return build_certificate(

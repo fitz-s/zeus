@@ -102,8 +102,6 @@ def _run_preflight(settings: dict, promotion_evidence: dict | None = None) -> di
 
 def _settings(*, capture: bool, fusion: bool,
                arm: bool = False,
-               cap_notional: bool = True,
-               cap_daily: bool = True,
                qlcb: bool = False,
                auth: bool = False, kelly: bool = False, flip: bool = False) -> dict:
     return {
@@ -112,8 +110,6 @@ def _settings(*, capture: bool, fusion: bool,
             "replacement_0_1_u0r_fusion_enabled": fusion,
             "replacement_qlcb_settlement_sigma_floor_enabled": qlcb,
             "edli_live_operator_authorized": arm,
-            "tiny_live_notional_cap_enabled": cap_notional,
-            "tiny_live_daily_order_cap_enabled": cap_daily,
         },
         "feature_flags": {
             "openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled": auth,
@@ -188,18 +184,6 @@ def test_arm_flag_reads_from_edli_v1():
     assert "ARMED" in result["stage"], (
         f"Expected ARMED but got: {result['stage']!r}\n"
         f"Full output:\n{result['stdout']}"
-    )
-
-
-def test_cap_flags_read_from_edli_v1_coherence_warn_when_off():
-    """
-    tiny_live caps off in edli_v1 -> COHERENCE section must emit a WARN
-    about tiny_live caps not both ON.
-    """
-    result = _run_preflight(_settings(capture=False, fusion=False,
-                                       cap_notional=False, cap_daily=False))
-    assert "tiny_live" in result["stdout"], (
-        f"Expected tiny_live cap WARN in output but got:\n{result['stdout']}"
     )
 
 

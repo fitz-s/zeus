@@ -70,9 +70,19 @@ def test_kelly_without_portfolio_context_uses_fractional_kelly_not_single_cap():
 
 
 def test_kelly_open_exposure_is_soft_heat_not_cash_solvency_cut():
+    """Heavy open exposure is SOFT heat, not a solvency zero.
+
+    Fixture operates BELOW the restored INV-K3 single-position ceiling (0.05×90=$4.50)
+    for BOTH calls so the heat difference (result < no_heat) is visible without either
+    hitting the ceiling. raw_committed=90 is KEPT (mirrors the 100%-of-bankroll symptom).
+    With p=0.50 and price~0.412 (0.40+fee): f*≈0.149, heat_result=2.0 (raw_pressure
+    dominates), effective_mult_result≈0.083, size_result≈$1.12 < $4.50. No-heat path:
+    heat=0, effective_mult=0.25, size_noheat≈$3.37 < $4.50. Result < no_heat isolates
+    the soft-haircut signal; binding_constraint=='sized_ok' for both.
+    """
     context = SizingContext.from_candidate_proof_with_portfolio(
-        q_posterior=0.99,
-        q_lcb_5pct=0.97,
+        q_posterior=0.50,
+        q_lcb_5pct=0.48,
         lead_days=0.5,
         bankroll_usd=90.0,
         corr_committed_usd=10.0,
@@ -81,20 +91,20 @@ def test_kelly_open_exposure_is_soft_heat_not_cash_solvency_cut():
 
     result = evaluate_kelly(
         kelly_decision_id="kelly-portfolio-heat",
-        p_posterior=0.99,
-        execution_price=ExecutionPrice(0.50, "ask", fee_deducted=False, currency="probability_units").with_taker_fee(),
+        p_posterior=0.50,
+        execution_price=ExecutionPrice(0.40, "ask", fee_deducted=False, currency="probability_units").with_taker_fee(),
         bankroll_usd=90.0,
         sizing_context=context,
     )
 
     no_heat = evaluate_kelly(
         kelly_decision_id="kelly-no-portfolio-heat",
-        p_posterior=0.99,
-        execution_price=ExecutionPrice(0.50, "ask", fee_deducted=False, currency="probability_units").with_taker_fee(),
+        p_posterior=0.50,
+        execution_price=ExecutionPrice(0.40, "ask", fee_deducted=False, currency="probability_units").with_taker_fee(),
         bankroll_usd=90.0,
         sizing_context=SizingContext.from_candidate_proof_with_portfolio(
-            q_posterior=0.99,
-            q_lcb_5pct=0.97,
+            q_posterior=0.50,
+            q_lcb_5pct=0.48,
             lead_days=0.5,
             bankroll_usd=90.0,
             corr_committed_usd=0.0,

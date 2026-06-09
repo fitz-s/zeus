@@ -267,7 +267,6 @@ def test_live_cap_certificate_is_backed_by_usage_row():
             final_intent_id="intent-1",
         ),
         decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
-        max_notional_usd=5.0,
         live_cap_conn=conn,
     )
 
@@ -288,16 +287,13 @@ def test_live_cap_certificate_is_backed_by_usage_row():
     assert row["final_intent_id"] == "intent-1"
 
 
-def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypatch):
-    from copy import deepcopy
-
+def test_live_cap_provisional_and_durable_share_uncapped_notional(monkeypatch):
+    # 2026-06-08: the tiny_live cap is DELETED. The provisional (persist=False)
+    # and durable (persist=True) certificates record the SAME full Kelly notional
+    # with no clamp and no notional-cap flag — proving the order size flows from
+    # fractional Kelly, not from any $5 cap.
     from src.engine import event_reactor_adapter as adapter
     from src.events.reactor import EventSubmissionReceipt
-
-    settings_copy = deepcopy(adapter.settings)
-    settings_copy["edli_v1"]["tiny_live_notional_cap_enabled"] = False
-    settings_copy["edli_v1"]["tiny_live_daily_order_cap_enabled"] = False
-    monkeypatch.setattr(adapter, "settings", settings_copy)
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -315,7 +311,6 @@ def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypat
         event=event,
         receipt=receipt,
         decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
-        max_notional_usd=5.0,
         live_cap_conn=conn,
     )
 
@@ -325,9 +320,11 @@ def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypat
     assert provisional.payload["reserved_notional_usd"] == 800.0
     assert durable.payload["reserved_notional_usd"] == 800.0
     assert durable.payload["reserved_notional_usd"] == provisional.payload["reserved_notional_usd"]
+    # max_notional_usd is now an inert mirror of the reserved notional, not a cap.
     assert durable.payload["max_notional_usd"] == provisional.payload["max_notional_usd"] == 800.0
-    assert provisional.payload["notional_cap_enabled"] is False
-    assert durable.payload["notional_cap_enabled"] is False
+    # No notional-cap flag exists in the payload anymore.
+    assert "notional_cap_enabled" not in provisional.payload
+    assert "notional_cap_enabled" not in durable.payload
 
 
 def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
@@ -386,7 +383,6 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
         event=event,
         receipt=accepted,
         decision_time=decision_time,
-        tiny_live_max_notional_usd=5.0,
         live_cap_conn=conn,
         pre_submit_authority_provider=_pre_submit_authority_provider,
         taker_fok_fak_live_enabled=True,
@@ -730,7 +726,6 @@ def test_live_execution_command_build_fails_without_pre_submit_authority_witness
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             taker_fok_fak_live_enabled=True,
         )
@@ -766,7 +761,6 @@ def test_live_execution_command_blocks_identity_fallback_calibration():
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             taker_fok_fak_live_enabled=True,
@@ -789,7 +783,6 @@ def test_live_execution_command_requires_q_source_provenance():
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             taker_fok_fak_live_enabled=True,
@@ -851,7 +844,6 @@ def test_live_execution_command_requires_opportunity_book_selection_match():
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             taker_fok_fak_live_enabled=True,
@@ -890,7 +882,6 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(current_best_ask=0.39),
         )
@@ -929,7 +920,6 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
         event=event,
         receipt=accepted,
         decision_time=decision_time,
-        tiny_live_max_notional_usd=5.0,
         live_cap_conn=conn,
         pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
             current_best_bid=0.39,
@@ -987,7 +977,6 @@ def test_live_command_reuses_single_pre_submit_authority_witness():
         event=event,
         receipt=accepted,
         decision_time=decision_time,
-        tiny_live_max_notional_usd=5.0,
         live_cap_conn=conn,
         pre_submit_authority_provider=_provider,
         taker_fok_fak_live_enabled=True,
@@ -2006,7 +1995,6 @@ def _command_bundle_with_real_cap(**kwargs):
         event=kwargs["event"],
         receipt=kwargs["receipt"],
         decision_time=kwargs["decision_time"],
-        max_notional_usd=kwargs["tiny_live_max_notional_usd"],
         live_cap_conn=kwargs["live_cap_conn"],
     )
     actionable, final_intent, expressibility, _old_live_cap, command = _command_cert_bundle()
