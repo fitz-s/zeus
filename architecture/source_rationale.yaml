@@ -152,6 +152,14 @@ providers:
     role: forecast_infrastructure
     client: src/data/forecast_source_registry.py
     why: Internal forecast infrastructure module — registry, ingest protocol, extrema authority, DB fetcher. Not an external truth source; coordinates routing between ecmwf_open_data and tigge providers. (PR #359)
+  polymarket_gamma:
+    role: internal_probe
+    client: src/data/station_migration_probe.py
+    why: >
+      Polymarket gamma API probe for station-migration drift detection only.
+      Compares Polymarket market resolution URLs against config/cities.json::wu_station;
+      writes alerts when they diverge.  Operator-only tooling — not on any live daemon
+      hot-path and never a forecast/settlement/calibration source.  Added 2026-05-01. (PR #399)
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel

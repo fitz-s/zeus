@@ -709,6 +709,36 @@ state_machines:
       - NO_SUBMIT_EXCEPTION
       - PRE_VENUE_DEPTH_INSUFFICIENT_NEVER_SUBMITTED
 
+  venue_order_fact_cancel_states:
+    owner: src/state/db.py
+    description: >
+      Cancel-state labels in the venue_order_facts.state CHECK constraint. These
+      are order-fact states on the CLOB orderbook, distinct from the venue_command
+      lifecycle. CANCEL_UNKNOWN is the fail-safe state when the cancel-confirmation
+      WS message is lost (order truth reducer sets this). Not emitted on the happy
+      path. Added by PR #399.
+    states:
+      - CANCEL_UNKNOWN
+
+  entry_proof_skip_reason:
+    owner: src/engine/cycle_runtime.py
+    description: >
+      Reason tag written into MonitorResult.exit_reason when a blocking review
+      fact is found for a position. Not a lifecycle state; used exclusively for
+      monitor-skip telemetry. Added by PR #399.
+    states:
+      - REVIEW_REQUIRED_INVALID_ENTRY_PROOF
+
+  calibration_identity_fallback:
+    owner: src/state/portfolio.py
+    description: >
+      Fallback-mode label returned by the EDLI entry calibration identity
+      resolver when no matching calibration identity can be found for the
+      current position. Used only for diagnostic telemetry, never for
+      trade decisions. Added by PR #399.
+    states:
+      - EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED
