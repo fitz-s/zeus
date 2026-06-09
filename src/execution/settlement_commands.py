@@ -572,6 +572,99 @@ def request_redeem(
             conn.close()
 
 
+def _maybe_terminal_already_redeemed_or_empty(
+    conn: sqlite3.Connection,
+    command_id: str,
+    row: sqlite3.Row,
+    adapter: Any,
+) -> SettlementResult | None:
+    """Pre-flight: terminate confirmed-empty negRisk redeems via chain truth.
+
+    Returns a terminal ``REDEEM_CONFIRMED`` SettlementResult (with chain
+    provenance in the event payload) when the market is confirmed-negRisk AND
+    the winning position's live ERC1155 balance is 0. Returns None in every
+    other case (unknown neg_risk, nonzero balance, probe failure, missing
+    winning_index_set, adapter without the probe seam) so the normal
+    submit_redeem body proceeds untouched.
+
+    Honesty contract: only a CONFIRMED-negRisk market with a CONFIRMED-zero
+    balance terminates here. A probe failure or unknown market type never
+    fabricates a terminal — it falls through to the normal (gated) path.
+    """
+    probe_fn = getattr(adapter, "get_negrisk_winning_position_balance", None)
+    if not callable(probe_fn):
+        return None
+    raw_idx = row["winning_index_set"]
+    if not raw_idx:
+        return None
+    try:
+        decoded = json.loads(raw_idx)
+        if not isinstance(decoded, list) or not decoded:
+            return None
+        winning_slot = int(decoded[0])
+    except Exception:
+        return None
+    if winning_slot not in (1, 2):
+        return None
+
+    # Confirm neg_risk before trusting a negRisk-derived positionId. A standard
+    # CTF market would derive a different token and could read 0 spuriously.
+    try:
+        is_neg_risk = _lookup_market_neg_risk_authoritative(conn, str(row["condition_id"]))
+    except Exception:
+        is_neg_risk = None
+    if is_neg_risk is not True:
+        return None
+
+    try:
+        probe = probe_fn(str(row["condition_id"]), winning_slot)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[REDEEM_BALANCE_PROBE_EXCEPTION] command_id=%s exc=%s", command_id, exc
+        )
+        return None
+    if not isinstance(probe, dict) or not probe.get("ok"):
+        return None
+    if int(probe.get("balance_micro") or 0) > 0:
+        return None  # there IS something to redeem — normal gated path handles it.
+
+    chain_evidence = {
+        "errorCode": "REDEEM_ALREADY_REDEEMED_OR_EMPTY",
+        "redeem_terminal_no_tx": True,
+        "condition_id": str(row["condition_id"]),
+        "winning_index_set": [winning_slot],
+        "position_id": str(probe.get("position_id")),
+        "live_balance_micro": 0,
+        "recorded_pusd_amount_micro": row["pusd_amount_micro"],
+        "wcol": probe.get("wcol"),
+        "holder": probe.get("holder"),
+        "chain_evidence": "negRisk_winning_position_balance==0",
+        "resolved_neg_risk": True,
+    }
+    logger.info(
+        "[REDEEM_CONFIRMED_ALREADY_REDEEMED_OR_EMPTY] command_id=%s condition_id=%s "
+        "position_id=%s live_balance_micro=0 recorded_micro=%s action=terminal_no_operator",
+        command_id, row["condition_id"], probe.get("position_id"),
+        row["pusd_amount_micro"],
+    )
+    with _savepoint(conn):
+        _transition(
+            conn,
+            command_id,
+            SettlementState.REDEEM_CONFIRMED,
+            payload=chain_evidence,
+            error_payload=None,
+            terminal=True,
+            recorded_at=_coerce_time(None),
+        )
+    conn.commit()
+    return SettlementResult(
+        command_id,
+        SettlementState.REDEEM_CONFIRMED,
+        raw_response=chain_evidence,
+    )
+
+
 @capability("on_chain_mutation", lease=True)
 def submit_redeem(
     command_id: str,
@@ -622,6 +715,25 @@ def submit_redeem(
         state = SettlementState(row["state"])
         if state not in _SUBMITTABLE_STATES:
             raise SettlementCommandStateError(f"command {command_id} is not submittable from {state.value}")
+
+        # ── Chain-truth "nothing to redeem" pre-flight (2026-06-09) ──────────
+        # STRUCTURAL FIX (operator redeem directive): a redeem whose winning
+        # position has ZERO live on-chain balance moves zero collateral — there
+        # is nothing to burn and no FX value to classify. Such a command is
+        # ALREADY-REDEEMED / EMPTY: terminal-with-provenance, NOT a force-retry
+        # (retrying always GS013) and NOT operator purgatory. This pre-flight
+        # runs BEFORE the pUSD FX-classification and cutover gates precisely
+        # because those gates guard pUSD VALUE MOVEMENT, and a zero-balance
+        # redeem moves no value. The gates remain in force for any redeem that
+        # actually burns tokens (live balance > 0). Confirmed-negRisk only:
+        # the negRisk-derived positionId is meaningful exclusively for negRisk
+        # markets, so a standard-CTF market never false-terminates here.
+        _terminal = _maybe_terminal_already_redeemed_or_empty(
+            conn, command_id, row, adapter
+        )
+        if _terminal is not None:
+            return _terminal
+
         selected_fx_classification: FXClassification | None = None
         if row["payout_asset"] == "pUSD":
             selected_fx_classification = require_pusd_redemption_allowed(fx_classification)
@@ -817,6 +929,52 @@ def submit_redeem(
                             "[REDEEM_NEGRISK_AMOUNT_PARSE_FAILED] command_id=%s exc=%s",
                             command_id, amt_exc,
                         )
+                # ── Chain-truth amount self-heal (2026-06-09) ────────────────
+                # STRUCTURAL FIX (operator redeem directive): the redeem amount
+                # MUST come from chain truth at submit time, not the recorded
+                # token_amounts_json snapshot. A recorded amount that exceeds the
+                # Safe's live ERC1155 balance makes the inner negRisk
+                # redeemPositions burn revert → Safe execTransaction GS013.
+                #
+                # The ZERO-balance case (nothing to redeem) is already terminated
+                # upstream by _maybe_terminal_already_redeemed_or_empty BEFORE the
+                # FX/cutover gates. Here we only handle the live balance > 0 case:
+                # if the live balance differs from the recorded amount, redeem the
+                # LIVE balance (self-heal). Probe failure is fail-soft — proceed
+                # with the recorded amount (pre-fix behavior); never fabricates.
+                if is_neg_risk and parsed_index_sets:
+                    _probe_fn = getattr(
+                        adapter, "get_negrisk_winning_position_balance", None
+                    )
+                    if callable(_probe_fn):
+                        try:
+                            _probe = _probe_fn(
+                                row["condition_id"], int(parsed_index_sets[0])
+                            )
+                        except Exception as _probe_exc:  # noqa: BLE001
+                            logger.warning(
+                                "[REDEEM_BALANCE_PROBE_EXCEPTION] command_id=%s exc=%s",
+                                command_id, _probe_exc,
+                            )
+                            _probe = None
+                        if isinstance(_probe, dict) and _probe.get("ok"):
+                            _live_micro = int(_probe.get("balance_micro") or 0)
+                            if _live_micro > 0 and _live_micro != amount_per_slot:
+                                logger.warning(
+                                    "[REDEEM_AMOUNT_SELF_HEAL] command_id=%s "
+                                    "condition_id=%s recorded_micro=%s live_micro=%s "
+                                    "action=use_live_balance",
+                                    command_id, row["condition_id"],
+                                    amount_per_slot, _live_micro,
+                                )
+                                amount_per_slot = _live_micro
+                        elif isinstance(_probe, dict):
+                            logger.warning(
+                                "[REDEEM_BALANCE_PROBE_FAILED] command_id=%s "
+                                "errorCode=%s msg=%s action=proceed_with_recorded_amount",
+                                command_id, _probe.get("errorCode"),
+                                _probe.get("errorMessage"),
+                            )
                 logger.debug(
                     "[REDEEM_NEGRISK_CTX] command_id=%s is_neg_risk=%s amount_per_slot=%s",
                     command_id, is_neg_risk, amount_per_slot,
