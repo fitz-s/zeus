@@ -715,7 +715,8 @@ state_machines:
       Cancel-state labels in the venue_order_facts.state CHECK constraint. These
       are order-fact states on the CLOB orderbook, distinct from the venue_command
       lifecycle. CANCEL_UNKNOWN is the fail-safe state when the cancel-confirmation
-      WS message is lost. Added by PR #400.
+      WS message is lost (order truth reducer sets this). Not emitted on the happy
+      path.
     states:
       - CANCEL_UNKNOWN
 
@@ -723,17 +724,18 @@ state_machines:
     owner: src/engine/cycle_runtime.py
     description: >
       Reason tag written into MonitorResult.exit_reason when a blocking review
-      fact is found for a position. Not a lifecycle state; monitor-skip telemetry
-      only. Added by PR #400.
+      fact is found for a position. Not a lifecycle state; used exclusively for
+      monitor-skip telemetry.
     states:
       - REVIEW_REQUIRED_INVALID_ENTRY_PROOF
 
   calibration_identity_fallback:
     owner: src/state/portfolio.py
     description: >
-      Fallback-mode label returned by the EDLI entry calibration identity resolver
-      when no matching calibration identity can be found. Diagnostic telemetry only,
-      never used for trade decisions. Added by PR #400.
+      Fallback-mode label returned by the EDLI entry calibration identity
+      resolver when no matching calibration identity can be found for the
+      current position. Used only for diagnostic telemetry, never for
+      trade decisions.
     states:
       - EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK
 
@@ -742,7 +744,6 @@ state_machines:
     description: >
       U0R-Bayes fusion-method labels. ANCHOR_FALLBACK means all extra models are
       absent so the posterior is the anchor prior. Not venue command states.
-      Added by PR #400.
     states:
       - ANCHOR_FALLBACK
 
@@ -751,7 +752,6 @@ state_machines:
     description: >
       Status labels written to the backfill output manifest. Script-only, never on
       the live daemon path. Registered to prevent ACK-prefix false positives.
-      Added by PR #400.
     states:
       - U0R_BACKFILL_DRY_RUN
       - U0R_BACKFILL_SEEDED

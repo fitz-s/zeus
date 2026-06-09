@@ -120,6 +120,7 @@ def _seed_identity(conn: sqlite3.Connection, aggregate_id: str) -> None:
         "market_id": CONDITION_ID,
         "q_live": 0.55,
         "executable_snapshot_id": "exec-snap-mf2",
+        "strategy_key": "opening_inertia",
     }
     _insert_edli_event(conn, aggregate_id=aggregate_id, sequence=1, event_type="PreSubmitRevalidated", payload=pre_submit)
     _insert_edli_event(
@@ -190,6 +191,7 @@ def test_bridge_rejects_fill_materialization_without_market_unit(conn):
             "market_id": CONDITION_ID,
             "q_live": 0.55,
             "executable_snapshot_id": "exec-snap-mf2",
+            "strategy_key": "opening_inertia",
         },
     )
     _insert_edli_event(
