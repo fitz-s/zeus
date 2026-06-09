@@ -1,4 +1,7 @@
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-08 (S4: marginal-utility ranker is the SOLE size
+#   authority via RobustCandidateScore.optimal_stake_usd on robust q_lcb + exposure;
+#   removed scalar market-disagreement / pre-selection scalar-Kelly gates —
+#   "bin selection.md" §3/§5.2/§5.3/§6/§14.7 + operator directive 2026-06-08)
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset;
 #   P1 ZERO-SUBMIT FIX B (2026-06-05, iron-rule-1, co-cause) — per-cycle in-flight reservation
 #   made rollback-aware (PortfolioReservationLedger): provisional reserve on Kelly+RiskGuard pass,
@@ -1518,19 +1521,17 @@ def build_event_bound_no_submit_receipt(
             source_status="MATCH",
             family_complete=True,
         )
-    candidate_kelly_size_usd_by_id = _candidate_selection_kelly_size_usd_by_id(
-        payload=payload,
-        family=family,
-        proofs=proofs,
-        bankroll_usd_provider=bankroll_usd_provider,
-        portfolio_state_provider=portfolio_state_provider,
-        portfolio_reservation=portfolio_reservation,
-    )
+    # S4 (operator directive 2026-06-08): the pre-selection scalar-Kelly sizing
+    # (_candidate_selection_kelly_size_usd_by_id) is RETIRED. Exposure-aware sizing
+    # now comes from RobustCandidateScore.optimal_stake_usd inside the marginal-
+    # utility ranker (the size authority, computed post-selection on the WINNING
+    # leg with the family payoff matrix + existing exposure). The opportunity_book
+    # per-candidate kelly_size_usd is a display field only; it is no longer fed by a
+    # parallel scalar-Kelly pass (one sizing surface, no shadow).
     proof = _selected_candidate_proof(
         payload,
         proofs,
         locked_opportunity_conn=locked_opportunity_conn,
-        candidate_kelly_size_usd_by_id=candidate_kelly_size_usd_by_id,
     )
     opportunity_book = _opportunity_book_from_proofs(
         event_id=event.event_id,
@@ -1538,7 +1539,6 @@ def build_event_bound_no_submit_receipt(
         proofs=proofs,
         selected_proof=proof,
         locked_opportunity_conn=locked_opportunity_conn,
-        candidate_kelly_size_usd_by_id=candidate_kelly_size_usd_by_id,
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
@@ -1748,7 +1748,6 @@ def build_event_bound_no_submit_receipt(
                     proofs=proofs,
                     selected_proof=proof,
                     locked_opportunity_conn=locked_opportunity_conn,
-                    candidate_kelly_size_usd_by_id=candidate_kelly_size_usd_by_id,
                 )
                 if execution_price is None or row is None:
                     return EventSubmissionReceipt(
@@ -1988,6 +1987,41 @@ def build_event_bound_no_submit_receipt(
             bankroll_usd=bankroll_usd,
             sizing_context=sizing_context,
             kelly_multiplier=kelly_multiplier,
+        )
+        # ROBUST-LOWER-BOUND SIZING (S4; spec §3/§5.2/§5.3, money-path iron law).
+        # ``evaluate_kelly`` is NO LONGER the size authority: it sizes on
+        # ``p_posterior`` (q_point) via the scalar binary-Kelly formula. The
+        # bin-selection size authority is the marginal-utility ranker's
+        # ``RobustCandidateScore.optimal_stake_usd`` — the log-optimal stake on the
+        # candidate's OWN robust q_lcb-based π against the family payoff matrix AND
+        # the EXISTING per-outcome exposure (Hidden #10), scaled by the FRACTIONAL-
+        # Kelly haircut ``evaluate_kelly`` already derived (CI-width / lead /
+        # portfolio-heat — variance is NOT dropped). We keep ``evaluate_kelly`` for
+        # the typed-price assert, the receipt fields, and that haircut multiplier;
+        # we OVERRIDE only the size with the q_lcb-grounded ΔU stake.
+        _fractional_kelly_mult = float(
+            kelly.effective_multiplier
+            if kelly.effective_multiplier is not None
+            else kelly_multiplier
+        )
+        _robust_stake_usd = _robust_marginal_utility_optimal_stake_usd(
+            family_key=str(family.family_id or ""),
+            selected_proof=proof,
+            all_proofs=proofs,
+            extra_exposure_by_bin_id=_family_existing_exposure_by_bin_id(
+                proofs=proofs,
+                selected_proof=proof,
+                portfolio_state_provider=portfolio_state_provider,
+                portfolio_reservation=portfolio_reservation,
+                family=family,
+            ),
+            bankroll_usd=float(bankroll_usd),
+            kelly_multiplier=_fractional_kelly_mult,
+        )
+        kelly = dataclass_replace(
+            kelly,
+            size_usd=float(_robust_stake_usd),
+            passed=float(_robust_stake_usd) > 0.0,
         )
     except (TypeError, ValueError) as exc:
         return EventSubmissionReceipt(
@@ -4660,28 +4694,6 @@ def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
     return None
 
 
-# ── Market-disagreement guard (settlement-grounded, 2026-06-04) ──────────────
-# Default thresholds. Overridable via settings["edli_v1"] WITHOUT touching the
-# operator-owned config file (safe .get defaults): the guard is ACTIVE by default
-# (conservative posture — it only ever DEMOTES a contrarian bet, never creates one).
-#
-# q_lcb SEMANTICS (the seam the 2026-06-05 review caught — DIRECTION LAW / Fitz
-# #4): for direction="buy_no", q_lcb_5pct is the conservative lower bound of
-# native NO evidence: "the bin will NOT settle here." So "OVERWHELMING
-# settlement-licensed evidence the bin won't settle" means q_lcb_5pct is HIGH
-# (→1), not low. The original guard read the escape in YES-space (low q_lcb),
-# which inverted it: it demoted exactly the high-conviction contrarian
-# (high NO-lower-bound) and waved through the weakest one. Corrected below
-# to NO-space.
-#
-#   market_disagree_no_price_max  — a NO token cheaper than this means the market
-#     prices the bin as LIKELY to settle (YES expensive). Buying NO here is betting
-#     AGAINST a confident multi-center market. Default 0.15.
-#   market_disagree_qlcb_min_escape  — the ONLY licence to override the market: a
-#     HIGH, independently-grounded NO-space q_lcb (the settlement-licensed lower
-#     bound on p(NO) says the bin overwhelmingly will NOT settle). Default 0.95.
-_MARKET_DISAGREE_NO_PRICE_MAX = 0.15
-_MARKET_DISAGREE_QLCB_MIN_ESCAPE = 0.95
 _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.0
 
 
@@ -4696,53 +4708,14 @@ def _env_flag_enabled(name: str) -> bool:
 # there is no disable path to silently flip. A scattered off-able gate is the
 # regression disease the directive abolishes; correctness is enforced by types +
 # relationship tests + the ff-branch review, never a runtime flag.
-
-
-def _market_disagreement_demotes_buy_no(
-    *,
-    direction: str,
-    market_no_price: float | None,
-    q_lcb_5pct: float,
-    no_price_max: float = _MARKET_DISAGREE_NO_PRICE_MAX,
-    qlcb_min_escape: float = _MARKET_DISAGREE_QLCB_MIN_ESCAPE,
-) -> bool:
-    """Settlement-grounded market-disagreement antibody.
-
-    ROOT (settled outcomes, NOT shadow homework): the dominant capital bleed is
-    buy_no on CHEAP bins — the market prices YES>0.8 / NO<0.2 (confident the bin
-    settles there), the system buys NO on a miscalibrated overconfident q tail
-    (assigns ~0 mass to a bin the market+reality say is likely), and the bin
-    settles there. buy_no at NO-price<0.2 went 0/12 (-71%). The market is right;
-    the q tail is overconfident (Fitz #4 / iron-rule-5).
-
-    Structural principle (NOT the thin n=12 number): you cannot out-predict a
-    confident multi-center market without OVERWHELMING settlement-licensed
-    evidence. So a buy_no candidate on a bin the market prices as likely
-    (market_no_price <= no_price_max) is UNCONSTRUCTABLE as a tradeable proof
-    UNLESS its NO-space lower bound is overwhelming — q_lcb_5pct >= qlcb_min_escape
-    (an independent conservative lower bound on p(NO), not the point estimate,
-    saying the bin truly won't settle). q_lcb_5pct here is in NO-probability space
-    for buy_no (see module note above), so the escape is a HIGH q_lcb, not a low
-    one — a wide/overconfident tail whose honest lower bound is NOT near 1 is
-    exactly the miscalibration we distrust against a confident market.
-
-    Returns True iff the candidate must be DEMOTED (cheap-NO AND the NO-space lower
-    bound is NOT overwhelming). The guard is a CONJUNCTION: it never touches
-    buy_yes, never touches a buy_no whose NO price is not cheap, and never touches
-    a buy_no whose q_lcb is overwhelmingly high (legitimate, settlement-licensed
-    high-conviction disagreement survives).
-    """
-    if direction != "buy_no":
-        return False
-    if market_no_price is None:
-        # No executable price → the proof is already non-tradeable upstream
-        # (missing_reason set); leave the demotion decision to that path.
-        return False
-    if market_no_price > no_price_max:
-        return False
-    # Cheap NO. Only an overwhelming, independently-grounded NO-space q_lcb
-    # licences the bet against a confident market.
-    return q_lcb_5pct < qlcb_min_escape
+#
+# REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13): the scalar
+# market-disagreement buy_no demotion (_market_disagreement_demotes_buy_no + its
+# _MARKET_DISAGREE_* thresholds) is GONE. The marginal-utility ranker subsumes it:
+# a cheap NO scored with its OWN honest robust NO q_lcb (1 - q_ucb_yes) against the
+# cheap NO all-in cost yields a negative robust edge -> ΔU <= 0 -> §13 no-trade,
+# whenever the market is confident YES. One ranking surface, no scalar side-gate.
+# Antibody: tests/engine/test_s4_subsumed_gates.py.
 
 
 def _capital_efficiency_untradeable_reason(
@@ -5173,105 +5146,14 @@ def _candidate_evaluation_from_proof(
     )
 
 
-def _candidate_selection_kelly_size_usd_by_id(
-    *,
-    payload: dict[str, object],
-    family,
-    proofs: tuple[_CandidateProof, ...],
-    bankroll_usd_provider: Callable[[], float | None] | None = None,
-    portfolio_state_provider: "Callable[[], Any] | None" = None,
-    portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
-) -> dict[str, float]:
-    """Estimate marginal Kelly size for each sibling candidate before selection.
-
-    Sibling candidates are alternatives, not cumulative orders. Each candidate is
-    therefore evaluated against the same current portfolio snapshot and
-    reservation state; the chosen candidate is reserved later by the existing
-    money path.
-    """
-
-    try:
-        bankroll_usd = (
-            _bankroll_usd_from_provider(bankroll_usd_provider)
-            if bankroll_usd_provider is not None
-            else _runtime_bankroll_usd(cached_only=True)
-        )
-    except (TypeError, ValueError):
-        return {}
-    if bankroll_usd <= 0.0:
-        return {}
-
-    _portfolio_state = None
-    _reservation_items: list[tuple[str, float]] = []
-    if portfolio_reservation is not None:
-        try:
-            _reservation_items = [(str(city), float(usd)) for city, usd in portfolio_reservation]
-        except Exception:
-            _reservation_items = []
-    if portfolio_state_provider is not None:
-        try:
-            _portfolio_state = portfolio_state_provider()
-        except Exception:
-            _portfolio_state = None
-
-    sizes: dict[str, float] = {}
-    for proof in proofs:
-        if proof.execution_price is None:
-            continue
-        try:
-            kelly_multiplier = _runtime_kelly_multiplier()
-            (
-                kelly_multiplier,
-                _bias_decay_applied,
-                _bias_decay_native,
-                _bias_decay_reason,
-            ) = _maybe_bias_decay_kelly_haircut(
-                kelly_multiplier,
-                family=family,
-                q_source=proof.q_source,
-            )
-            lead_days = _snapshot_lead_days(
-                snapshot=proof.row or {},
-                family=family,
-                payload=payload,
-            )
-            if _portfolio_state is not None:
-                from src.state.portfolio import correlated_committed_usd, total_exposure_usd
-
-                corr_committed_usd = correlated_committed_usd(
-                    _portfolio_state,
-                    new_city=family.city,
-                    extra_reserved=_reservation_items,
-                )
-                raw_committed_usd = total_exposure_usd(_portfolio_state) + sum(
-                    float(usd) for _, usd in _reservation_items
-                )
-                sizing_context = SizingContext.from_candidate_proof_with_portfolio(
-                    q_posterior=proof.q_posterior,
-                    q_lcb_5pct=proof.q_lcb_5pct,
-                    lead_days=lead_days,
-                    bankroll_usd=bankroll_usd,
-                    corr_committed_usd=corr_committed_usd,
-                    raw_committed_usd=raw_committed_usd,
-                )
-            else:
-                sizing_context = SizingContext.from_candidate_proof(
-                    q_posterior=proof.q_posterior,
-                    q_lcb_5pct=proof.q_lcb_5pct,
-                    lead_days=lead_days,
-                )
-            kelly = evaluate_kelly(
-                kelly_decision_id=f"edli_selection_kelly:{proof.token_id}",
-                p_posterior=proof.q_posterior,
-                execution_price=proof.execution_price,
-                bankroll_usd=bankroll_usd,
-                sizing_context=sizing_context,
-                kelly_multiplier=kelly_multiplier,
-            )
-            sizes[_candidate_evaluation_id(proof)] = max(0.0, float(kelly.size_usd))
-        except (TypeError, ValueError):
-            sizes[_candidate_evaluation_id(proof)] = 0.0
-    return sizes
+# REMOVED 2026-06-08 (S4; operator directive; "bin selection.md" §3/§5.2/§5.3):
+# _candidate_selection_kelly_size_usd_by_id — the pre-selection scalar binary-Kelly
+# sizing pass over every sibling candidate (sized on q_point via evaluate_kelly).
+# Exposure-aware sizing is now the marginal-utility ranker's
+# RobustCandidateScore.optimal_stake_usd, computed POST-selection on the WINNING leg
+# (_robust_marginal_utility_optimal_stake_usd) against the family payoff matrix +
+# existing per-outcome exposure (Hidden #10). One sizing surface, sized on the robust
+# q_lcb (not q_point), no parallel pre-selection scalar Kelly.
 
 
 def _selection_scoped_proofs(
@@ -5358,15 +5240,15 @@ def _opportunity_book_from_proofs(
     proofs: tuple[_CandidateProof, ...],
     selected_proof: _CandidateProof | None = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
-    candidate_kelly_size_usd_by_id: Mapping[str, float] | None = None,
 ) -> OpportunityBook:
+    # The per-candidate kelly_size_usd is a DISPLAY field only (S4): the pre-
+    # selection scalar-Kelly pass that used to populate it is retired; the live
+    # stake is the marginal-utility ranker's optimal_stake_usd on the winning leg.
+    # The receipt's display kelly_size_usd defaults to 0.0 for non-winning siblings.
     evaluations = tuple(
         _candidate_evaluation_from_proof(
             family_id=family_id,
             proof=proof,
-            kelly_size_usd=(
-                candidate_kelly_size_usd_by_id or {}
-            ).get(_candidate_evaluation_id(proof), 0.0),
         )
         for proof in _opportunity_book_proofs_with_selection_rejections(
             proofs=proofs,
@@ -5503,46 +5385,21 @@ def _generate_candidate_proofs(
                 c_cost_95pct=c_cost_95pct,
                 p_fill_lcb=p_fill_lcb,
             )
-            # ── Market-disagreement antibody (settlement-grounded, 2026-06-04) ──
-            # Make the dominant capital-bleed pattern UNCONSTRUCTABLE: a buy_no
-            # candidate on a bin the market prices as LIKELY to settle (cheap NO,
-            # i.e. confident YES) cannot become tradeable unless its q_lcb is
-            # extreme (independent settlement-licensed evidence the bin truly will
-            # NOT settle). The thresholds are .get-overridable from edli_v1 WITHOUT
-            # touching the operator-owned config (active-by-default = conservative).
-            # This demotes (score→0) the contrarian bet that lost 0/12 (-71%); it
-            # never creates a trade (iron-rule-2) and never touches buy_yes or
-            # high-conviction disagreement (the NO-space high-q_lcb escape).
-            market_no_price = execution_price.value if execution_price is not None else None
-            try:
-                _md_cfg = settings["edli_v1"]
-                _md_no_max = float(_md_cfg.get("market_disagree_no_price_max", _MARKET_DISAGREE_NO_PRICE_MAX))
-                # New canonical key (NO-space, high q_lcb = overwhelming evidence);
-                # fall back to the legacy key name only if the new one is absent.
-                _md_qlcb = float(
-                    _md_cfg.get(
-                        "market_disagree_qlcb_min_escape",
-                        _md_cfg.get("market_disagree_qlcb_extreme", _MARKET_DISAGREE_QLCB_MIN_ESCAPE),
-                    )
-                )
-            except Exception:
-                _md_no_max = _MARKET_DISAGREE_NO_PRICE_MAX
-                _md_qlcb = _MARKET_DISAGREE_QLCB_MIN_ESCAPE
-            _market_disagreement_demoted = _market_disagreement_demotes_buy_no(
-                direction=direction,
-                market_no_price=market_no_price,
-                q_lcb_5pct=q_lcb,
-                no_price_max=_md_no_max,
-                qlcb_min_escape=_md_qlcb,
-            )
-            if _market_disagreement_demoted:
-                score = 0.0
-                if missing_reason is None:
-                    missing_reason = (
-                        "MARKET_DISAGREEMENT_BUY_NO_DEMOTED:"
-                        f"no_price={market_no_price:.4f}<={_md_no_max:.4f} "
-                        f"q_lcb={q_lcb:.4f}<{_md_qlcb:.4f}"
-                    )
+            # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13 +
+            # operator directive): the scalar market-disagreement buy_no demotion
+            # (cheap-NO-overconfidence -> score=0) is GONE. It is SUBSUMED by the
+            # marginal-utility ranker: a cheap NO means a low NO all-in cost, and
+            # the candidate is scored with its OWN honest robust NO q_lcb
+            # (1 - q_ucb_yes). When the market is confident YES (cheap NO) that
+            # honest q_lcb_no is low, so q_lcb_no < cost -> negative robust edge ->
+            # ΔU <= 0 -> the §13 no-trade gate fires inside the ranker. The cheap-NO
+            # loser is UNCONSTRUCTABLE without a separate scalar gate, and where the
+            # two differed the ranker is the settlement-correct one (it trades a
+            # cheap NO whose HONEST robust q_lcb genuinely covers the cost, instead
+            # of hard-blocking everything below a 0.95 cutoff). Antibody:
+            # tests/engine/test_s4_subsumed_gates.py::
+            # test_cheap_no_overconfidence_loser_is_delta_u_no_trade. Scattered
+            # on/off gates ARE the regression disease the directive abolishes.
             capital_efficiency_reason = _capital_efficiency_untradeable_reason(
                 execution_price=execution_price,
                 q_lcb_5pct=q_lcb,
@@ -5571,12 +5428,13 @@ def _generate_candidate_proofs(
                     missing_reason = buy_no_conservative_evidence_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
-            # A demoted contrarian buy_no must not enter the FDR family as a
-            # "passed" hypothesis — it is structurally non-tradeable, not merely
-            # low-scoring. Force prefilter False so it can never be selected.
+            # A structurally non-tradeable candidate must not enter the FDR family
+            # as a "passed" hypothesis. Force prefilter False so it can never be
+            # selected. (The S4-removed market-disagreement scalar demotion is no
+            # longer one of these triggers — the marginal-utility ranker's §13
+            # ΔU<=0 gate subsumes the cheap-NO-overconfidence demotion.)
             if (
-                _market_disagreement_demoted
-                or capital_efficiency_reason is not None
+                capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
             ):
                 passed_prefilter = False
@@ -5655,14 +5513,12 @@ def _robust_marginal_utility_baseline_usd() -> Decimal:
     """Flat per-outcome wealth baseline ``A_y`` for the ΔU optimizer (spec §3).
 
     The marginal log utility ``ΔU = Σ_y π_y [log(A_y + R_y) − log(A_y)]`` needs a
-    positive wealth-by-outcome baseline. With a FLAT baseline (no modelled
-    existing per-outcome exposure yet — that is the §11 Phase-4 exposure-aware
-    extension) the optimizer reduces to the spec §5.1 scalar cost-fraction Kelly
-    for a single bin, which is exactly the conservative single-primary objective
-    the directive mandates today. The baseline is the runtime bankroll when it is
-    cheaply available; otherwise a positive constant (the optimum stake FRACTION
-    is invariant to the baseline scale under the flat baseline, so this only sets
-    the ΔU units, never the ranking).
+    positive wealth-by-outcome baseline. The baseline is the runtime bankroll when
+    it is cheaply available; otherwise a positive constant (the optimum stake
+    FRACTION is invariant to the baseline scale under a FLAT baseline, so this only
+    sets the ΔU units, never the ranking). Existing per-outcome exposure is layered
+    ON TOP of this baseline by :func:`_robust_marginal_utility_exposure` (S4 / §11
+    Phase 4), which is what makes existing exposure shrink ΔU (Hidden #10).
     """
     try:
         bankroll = _runtime_bankroll_usd(cached_only=True)
@@ -5673,11 +5529,110 @@ def _robust_marginal_utility_baseline_usd() -> Decimal:
     return Decimal("1000")
 
 
+def _robust_marginal_utility_exposure(
+    matrix: "utility_ranker.FamilyPayoffMatrix",
+    *,
+    baseline_usd: Decimal,
+    extra_exposure_by_bin_id: Mapping[str, float] | None = None,
+) -> "utility_ranker.PortfolioExposureVector":
+    """Per-outcome wealth ``A_y`` = flat baseline + EXISTING family exposure (S4, §11 Phase 4).
+
+    The ΔU objective measures the marginal log utility of a NEW leg against the
+    wealth the book WOULD hold if Y settled each outcome, given everything ALREADY
+    on/pending in this family. ``extra_exposure_by_bin_id[bin_id]`` is the extra
+    wealth realized if Y settles that bin (e.g. an existing/pending long on that
+    bin's YES). Because log is concave, a new candidate that wins where ``A_y`` is
+    already large has LOWER marginal value — so existing exposure shrinks the
+    optimal stake or forces a no-trade (spec §6 "too correlated with existing
+    exposure"; §11 Phase 4 acceptance; Hidden #10). With NO existing exposure this
+    is exactly :meth:`PortfolioExposureVector.flat` (the conservative single-primary
+    baseline), so an empty mapping reproduces the prior behavior byte-for-byte.
+
+    Exposure is keyed by the SAME ``_candidate_bin_id`` the candidates use, so an
+    existing-position bin and a new candidate on that bin share one outcome index.
+    An exposure key that is not a family outcome is ignored (the outcome set is the
+    family the ranker is scoring; foreign-family exposure does not enter THIS
+    family's payoff geometry).
+    """
+    extra = {
+        bin_id: Decimal(str(usd))
+        for bin_id, usd in (extra_exposure_by_bin_id or {}).items()
+        if bin_id in matrix.outcomes and float(usd) > 0.0
+    }
+    if not extra:
+        return utility_ranker.PortfolioExposureVector.flat(
+            matrix, baseline=baseline_usd
+        )
+    return utility_ranker.PortfolioExposureVector.from_outcome_wealth(
+        matrix, baseline=baseline_usd, extra_by_outcome=extra
+    )
+
+
+def _score_family_candidates_by_robust_marginal_utility(
+    *,
+    executable: list[_CandidateProof],
+    family_key: str,
+    per_bin_yes_q_lcb: Mapping[str, float],
+    extra_exposure_by_bin_id: Mapping[str, float] | None = None,
+    max_stake_usd: Decimal | None = None,
+    baseline_usd: Decimal | None = None,
+) -> tuple[
+    list["utility_ranker.RobustCandidateScore"],
+    dict[str, _CandidateProof],
+]:
+    """Materialize + ΔU-score the family's executable proofs (spec §6 / §14.7).
+
+    The ONE scoring kernel both the live selection (:func:`_select_proof_by_robust_
+    marginal_utility`) and the exposure-aware sizing (:func:`_robust_marginal_
+    utility_optimal_stake_usd`) share, so the rank and the size are computed on the
+    SAME FamilyPayoffMatrix (bins + OUTSIDE, Hidden #5), the SAME robust YES-q_lcb
+    π, and the SAME exposure vector — they cannot drift. Returns the ΔU-descending
+    scores and a hypothesis_id -> proof index for mapping a winning candidate back
+    to its proof.
+    """
+    candidate_by_proof: list[tuple[NativeSideCandidate, _CandidateProof]] = [
+        (
+            _native_side_candidate_from_proof(family_key=family_key, proof=proof),
+            proof,
+        )
+        for proof in executable
+    ]
+    proof_by_hypothesis: dict[str, _CandidateProof] = {
+        cand.hypothesis_id: proof for cand, proof in candidate_by_proof
+    }
+    tradeable = [cand for cand, _ in candidate_by_proof if cand.is_tradeable]
+    if not tradeable:
+        return [], proof_by_hypothesis
+
+    bin_ids = list(dict.fromkeys(cand.bin_id for cand in tradeable))
+    matrix = utility_ranker.FamilyPayoffMatrix.over_bins(bin_ids)
+    pi = utility_ranker.robust_probabilities(
+        matrix,
+        per_bin_q_lcb={
+            bin_id: float(per_bin_yes_q_lcb.get(bin_id, 0.0)) for bin_id in bin_ids
+        },
+    )
+    exposure = _robust_marginal_utility_exposure(
+        matrix,
+        baseline_usd=(
+            baseline_usd
+            if baseline_usd is not None
+            else _robust_marginal_utility_baseline_usd()
+        ),
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+    )
+    scored = utility_ranker.rank_candidates(
+        tradeable, matrix, pi, exposure, max_stake_usd=max_stake_usd
+    )
+    return scored, proof_by_hypothesis
+
+
 def _select_proof_by_robust_marginal_utility(
     *,
     executable: list[_CandidateProof],
     family_key: str,
     per_bin_yes_q_lcb: Mapping[str, float],
+    extra_exposure_by_bin_id: Mapping[str, float] | None = None,
 ) -> _CandidateProof | None:
     """THE single live selection decision (spec §6 / §14.7 / §13).
 
@@ -5700,42 +5655,19 @@ def _select_proof_by_robust_marginal_utility(
     enforced inside the ranker: a NO candidate is scored with its OWN robust NO
     ``q_lcb = 1 - q_ucb_yes`` (its ``candidate.q_lcb``), never the looser
     ``1 - q_lcb_yes`` implied by the shared YES π.
+
+    EXISTING EXPOSURE (S4 / §11 Phase 4 / Hidden #10): ``extra_exposure_by_bin_id``
+    layers current/pending family exposure onto the per-outcome wealth baseline, so
+    a candidate that wins where the book is already heavily committed scores LOWER
+    ΔU (concavity of log) — can flip to no-trade. With no existing exposure (empty
+    mapping) this is the conservative flat-baseline single-primary objective.
     """
-    # Materialize the ONE candidate object per executable proof, keyed by the
-    # proof's hypothesis id so the ΔU winner maps back to its proof.
-    candidate_by_proof: list[tuple[NativeSideCandidate, _CandidateProof]] = [
-        (
-            _native_side_candidate_from_proof(family_key=family_key, proof=proof),
-            proof,
-        )
-        for proof in executable
-    ]
-    proof_by_hypothesis: dict[str, _CandidateProof] = {
-        cand.hypothesis_id: proof for cand, proof in candidate_by_proof
-    }
-    # Only TRADEABLE candidates (native token + executable curve + q authority)
-    # can be ranked; a no-trade candidate carries no curve and must never reach
-    # the payoff/scoring stage (the ranker would score it 0). Recorded no-trade
-    # candidates already surfaced their missing-quote diagnostic at materialization.
-    tradeable = [cand for cand, _ in candidate_by_proof if cand.is_tradeable]
-    if not tradeable:
-        return None
-
-    # Family outcome set = every distinct bin among the candidates, plus OUTSIDE
-    # (the matrix appends it; Hidden #5). The per-bin YES q_lcb gives π_y^rob.
-    bin_ids = list(dict.fromkeys(cand.bin_id for cand in tradeable))
-    matrix = utility_ranker.FamilyPayoffMatrix.over_bins(bin_ids)
-    pi = utility_ranker.robust_probabilities(
-        matrix,
-        per_bin_q_lcb={
-            bin_id: float(per_bin_yes_q_lcb.get(bin_id, 0.0)) for bin_id in bin_ids
-        },
+    scored, proof_by_hypothesis = _score_family_candidates_by_robust_marginal_utility(
+        executable=executable,
+        family_key=family_key,
+        per_bin_yes_q_lcb=per_bin_yes_q_lcb,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
     )
-    exposure = utility_ranker.PortfolioExposureVector.flat(
-        matrix, baseline=_robust_marginal_utility_baseline_usd()
-    )
-
-    scored = utility_ranker.rank_candidates(tradeable, matrix, pi, exposure)
     for score in scored:
         # §13 live no-trade gate: skip any non-positive-ΔU candidate. rank_candidates
         # sorts ΔU-descending, so the first positive-ΔU score is the family primary.
@@ -5746,12 +5678,137 @@ def _select_proof_by_robust_marginal_utility(
     return None
 
 
+def _robust_marginal_utility_optimal_stake_usd(
+    *,
+    family_key: str,
+    selected_proof: _CandidateProof,
+    all_proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
+    extra_exposure_by_bin_id: Mapping[str, float] | None,
+    bankroll_usd: float,
+    kelly_multiplier: float,
+) -> float:
+    """Exposure-aware FRACTIONAL-Kelly stake for the selected leg (spec §3 / §5.2 / §5.3).
+
+    The size authority for the live intent (S4): the ΔU optimizer
+    (:meth:`utility_ranker.score_candidate`) returns ``optimal_stake_usd`` — the
+    LOG-OPTIMAL (full-Kelly) stake on the candidate's OWN robust q_lcb-based π,
+    scored against the family payoff matrix and the EXISTING per-outcome exposure
+    (so existing exposure already shrinks it — Hidden #10). This is then scaled by
+    the FRACTIONAL-Kelly multiplier ``kelly_multiplier`` (the CI-width / lead /
+    portfolio-heat haircut, spec §5.2 ``x_final = x_raw · f_kelly · h_*``) so a
+    wider-CI edge sizes strictly smaller — variance is never silently dropped.
+
+    ROBUST-LOWER-BOUND SIZING (money-path iron law): the stake derives from
+    ``q_lcb`` (via the q_lcb-based π inside ``score_candidate``), NEVER from
+    ``q_point``. Two proofs with equal q_lcb but different q_posterior size
+    identically — the legacy ``evaluate_kelly`` (which sized on ``p_posterior =
+    q_posterior``) is no longer the size authority.
+
+    Returns the stake in USD (``0.0`` when no positive-ΔU stake clears min order /
+    depth, i.e. a no-trade). The selected proof is scored within the WHOLE family
+    so the π / exposure / OUTSIDE geometry matches the ranking decision exactly.
+    """
+    if bankroll_usd <= 0.0 or selected_proof.execution_price is None:
+        return 0.0
+    mult = float(kelly_multiplier)
+    if not (mult > 0.0):
+        return 0.0
+
+    per_bin_yes_q_lcb = _per_bin_yes_q_lcb(tuple(all_proofs))
+    selected_hypothesis_id = _candidate_evaluation_id(selected_proof)
+
+    # Score the WHOLE family (so π / exposure / OUTSIDE match the ranking), then
+    # read the selected leg's full-Kelly optimum. The feasible stake ceiling is the
+    # FRACTIONAL-Kelly cap (mult × bankroll): the ΔU optimizer never bets above the
+    # fractional-Kelly budget, which is how the variance haircut bounds the size.
+    max_stake = Decimal(str(mult)) * Decimal(str(bankroll_usd))
+    scored, proof_by_hypothesis = _score_family_candidates_by_robust_marginal_utility(
+        executable=list(all_proofs),
+        family_key=family_key,
+        per_bin_yes_q_lcb=per_bin_yes_q_lcb,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+        baseline_usd=Decimal(str(bankroll_usd)),
+    )
+    for score in scored:
+        if _candidate_evaluation_id(
+            proof_by_hypothesis.get(score.candidate.hypothesis_id, selected_proof)
+        ) != selected_hypothesis_id:
+            continue
+        if score.is_no_trade:
+            return 0.0
+        # full-Kelly log-optimal stake on robust q_lcb-based π, scaled to fractional
+        # Kelly by the haircut multiplier (spec §5.2). Bounded by the fractional cap.
+        full_kelly_stake = float(score.optimal_stake_usd)
+        fractional = full_kelly_stake * mult
+        return float(min(Decimal(str(fractional)), max_stake))
+    return 0.0
+
+
+def _family_existing_exposure_by_bin_id(
+    *,
+    proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
+    selected_proof: _CandidateProof,
+    portfolio_state_provider: "Callable[[], Any] | None",
+    portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None",
+    family,
+) -> dict[str, float]:
+    """Existing/pending per-outcome family exposure for the ΔU sizing vector (§11 Phase 4).
+
+    Maps the family's ALREADY-committed and same-cycle-RESERVED capital onto the
+    win OUTCOME it backs, so the marginal-utility optimizer measures the new leg's
+    stake against a wealth-by-outcome baseline that already reflects that exposure
+    (Hidden #10: a new leg correlated with existing exposure sizes smaller / can
+    no-trade). Keyed by ``_candidate_bin_id`` so it lines up with the candidates'
+    bins.
+
+    Provenance scope (what we can attribute at THIS phase): the portfolio state
+    tracks committed capital by CITY, and the same-cycle reservation ledger by
+    city, not yet by bin/outcome. The selected leg's own bin is the only outcome
+    whose direction we know here, so SAME-CITY committed + same-cycle reserved
+    capital is attributed to the selected proof's bin (the conservative, no-double-
+    count choice — it shrinks the marginal stake on the bin the book is already
+    leaning into). Returns ``{}`` (flat baseline, no exposure) when no provider /
+    reservation is wired or no same-city exposure exists, reproducing the prior
+    behavior exactly.
+    """
+    selected_bin_id = _candidate_bin_id(selected_proof)
+    city = str(getattr(family, "city", "") or "")
+    exposure_usd = 0.0
+
+    # Same-cycle reservations for this family's city (already-emitted-but-unfilled
+    # stakes this cycle). PortfolioReservationLedger and a plain list both iterate
+    # as (city, usd) pairs.
+    if portfolio_reservation is not None:
+        try:
+            for res_city, usd in portfolio_reservation:
+                if str(res_city) == city:
+                    exposure_usd += float(usd)
+        except (TypeError, ValueError):
+            pass
+
+    # Committed capital already on the book for this city (open positions).
+    if portfolio_state_provider is not None:
+        try:
+            from src.state.portfolio import correlated_committed_usd
+
+            state = portfolio_state_provider()
+            if state is not None:
+                exposure_usd += float(
+                    correlated_committed_usd(state, new_city=city, extra_reserved=None)
+                )
+        except (TypeError, ValueError, ImportError):
+            pass
+
+    if exposure_usd <= 0.0:
+        return {}
+    return {selected_bin_id: exposure_usd}
+
+
 def _selected_candidate_proof(
     payload: dict[str, object],
     proofs: tuple[_CandidateProof, ...],
     *,
     locked_opportunity_conn: sqlite3.Connection | None = None,
-    candidate_kelly_size_usd_by_id: Mapping[str, float] | None = None,
 ) -> _CandidateProof | None:
     """Pick the single live primary leg via the bin-selection ΔU ranker (§14.7).
 
@@ -5764,10 +5821,10 @@ def _selected_candidate_proof(
     GONE — the ranker is unconditional, so the materialized candidate is the
     decision, never discarded.
 
-    ``candidate_kelly_size_usd_by_id`` is retained for signature compatibility
-    with the receipt path; the ΔU ranker computes its own optimal stake from the
-    cost curve (spec §5.3), so the precomputed scalar Kelly size does not gate
-    selection.
+    Sizing is computed POST-selection on the winning leg by
+    :func:`_robust_marginal_utility_optimal_stake_usd` (the ΔU optimizer's
+    ``optimal_stake_usd`` on the candidate's robust q_lcb — spec §3/§5.3); there is
+    no pre-selection scalar-Kelly size threaded here.
     """
     family_key = str(payload.get("family_id") or payload.get("event_id") or "family")
     per_bin_yes_q_lcb = _per_bin_yes_q_lcb(proofs)

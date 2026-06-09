@@ -1,5 +1,6 @@
 # Created: 2026-06-04
-# Last reused or audited: 2026-06-04
+# Last reused or audited: 2026-06-08 (S4: doc-sync — the cheap-NO market-disagreement
+#   scalar gate it referenced is removed; "bin selection.md" §6/§13 + operator directive)
 # Authority basis: Task #102 (BEST-ORDER SELECTION) CRITIC REVISE (aab33d99);
 #   docs/operations/BEST_ORDER_SELECTION_ROOT_2026-06-01.md §4.1/§4.3;
 #   operator GOAL 2026-06-04 (settlement-grounded edge lives ONLY in the
@@ -52,8 +53,7 @@ Three deliberate, adversarial design choices:
      system that is producing zero trades: a wrong-but-tight gate produces zero
      trades (the status quo), never a fabricated wrong-side trade (iron-rule-2).
 
-Coordination with the two tail demotions (review 2026-06-05 — they target
-DIFFERENT failure modes; do NOT delete one assuming the other covers it):
+Coordination with the cheap-NO loser demotion:
 
   1. THIS gate (edge_zone_admits) — the EV-PER-DOLLAR floor. Demotes the
      low-information-density tail: a confident-favorite at cost 0.92 has
@@ -62,16 +62,19 @@ DIFFERENT failure modes; do NOT delete one assuming the other covers it):
      This is the ONE place the EV-per-dollar tail penalty lives — do NOT stack a
      second independent EV-per-dollar penalty that double-counts the SAME demotion.
 
-  2. _market_disagreement_demotes_buy_no (src/engine/event_reactor_adapter.py) —
-     the MARKET-DISAGREEMENT antibody. Demotes a SPECIFIC, direction-asymmetric,
-     settlement-grounded loser: buy_no on a bin the MARKET prices as likely
-     (cheap NO) without an overwhelming NO-space q_lcb. It keys on the market's
-     confidence vs the candidate's NO-space lower bound, NOT on EV-per-dollar.
+  2. The cheap-NO-overconfidence loser (buy_no on a bin the MARKET prices as
+     likely / cheap NO) is now killed STRUCTURALLY by the marginal-utility ranker,
+     NOT a separate scalar gate. REMOVED 2026-06-08 (S4; "bin selection.md"
+     §6/§9 Hidden #3/#10/§13): the standalone ``_market_disagreement_demotes_buy_no``
+     antibody is gone. A NO candidate is scored with its OWN honest robust NO
+     q_lcb = 1 - q_ucb_yes; when the market is confident YES (cheap NO) that honest
+     q_lcb_no is low, so q_lcb_no < the cheap NO all-in cost -> negative robust
+     edge -> ΔU <= 0 -> the §13 no-trade gate fires inside the ranker. The cheap-NO
+     loser is UNCONSTRUCTABLE without a separate scalar gate.
 
-These are orthogonal: a cheap-NO contrarian can clear the EV-per-dollar floor
-(its q_lcb-based EV-per-dollar may look fine) yet still be the structural loser
-the market-disagreement guard exists to kill, and vice versa. Both are active;
-neither subsumes the other.
+These two remain orthogonal: THIS EV-per-dollar floor keys on a candidate's OWN
+after-cost economics; the cheap-NO loser is now handled by the ΔU ranker's robust
+edge. A redundant scalar gate is the regression disease the directive abolishes.
 """
 
 from __future__ import annotations
