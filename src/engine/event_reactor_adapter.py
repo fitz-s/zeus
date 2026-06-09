@@ -76,6 +76,23 @@
 #   second scalar Kelly. New seam: _robust_marginal_utility_stake_and_price (returns
 #   stake + chosen-stake price) + _chosen_stake_execution_price; the float-only
 #   _robust_marginal_utility_optimal_stake_usd wraps the kernel. No flag, no shadow.
+#   S6 (2026-06-08, "bin selection.md" §5 submit pseudocode (recompute-not-validate)/
+#   §7 re-decision+reversal state machine/§9 Hidden #7/#14/#17/§13/§14.9/§14.10/§12.E +
+#   operator directive 2026-06-08): the live decision body now routes the submit
+#   recapture boundary through the ONE fail-closed RedecisionEngine.evaluate_submit_
+#   recapture state machine (src/strategy/redecision.py). _evaluate_submit_recapture_
+#   for_selected RECOMPUTES (not validates) on the FRESH books: the selected leg's own
+#   ExecutableCostCurve, the chosen fractional-Kelly stake+price (S5 kernel), the
+#   robust q_lcb, and the family rank (_family_rank_reversed_at_recapture re-runs the
+#   single ΔU selection on fresh curves), then routes them through ONE
+#   evaluate_submit_recapture. The intent is built ONLY when may_submit is True; the
+#   three abort branches are first-class lifecycle states mapped to no-submit receipt
+#   reasons (SUBMIT_ABORTED_PRICE_MOVED / _EDGE_REVERSED / _FAMILY_REVERSED) — REPLACING
+#   the former scattered inline `not kelly.passed` size re-gate (the implicit submit
+#   eligibility check). Stale/failed recapture (no fresh curve) and a zero-ΔU stake
+#   fail closed (price-moved / edge-reversed). A family-rank reversal aborts and defers
+#   to a full re-rank (the engine never switches inline; a WATCH fallback cannot
+#   auto-submit, Hidden #7). One state machine, one abort taxonomy. No flag, no shadow.
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -172,6 +189,14 @@ from src.strategy import market_phase_evidence as _market_phase_evidence
 # ranks the materialized NativeSideCandidates by ΔU and applies the §13
 # "robust marginal expected log utility <= 0" no-trade gate on the LIVE path.
 from src.strategy import utility_ranker
+from src.strategy.redecision import (
+    CandidateLifecycleState,
+    RecaptureInputs,
+    RedecisionEngine,
+    ReversalReason,
+    SubmitRecaptureDecision,
+    SUBMIT_ABORT_STATES,
+)
 from src.types.market import Bin
 # QLCB_HONESTY.md FIX-C — the EXISTING settlement σ-floor (state/settlement_sigma_floor.json,
 # 232 cells, median 3.18C realized residual) + its WMO-aware settlement-preimage bin
@@ -2029,32 +2054,51 @@ def build_event_bound_no_submit_receipt(
             if kelly.effective_multiplier is not None
             else kelly_multiplier
         )
-        _robust_stake_usd, _chosen_stake_price = _robust_marginal_utility_stake_and_price(
-            family_key=str(family.family_id or ""),
+        # S6 (operator directive 2026-06-08; spec §5 submit pseudocode / §7 / §14.9 /
+        # §14.10). THE single fail-closed submit-recapture gate — recompute, not
+        # validate, at the no-submit receipt boundary. This call RECOMPUTES the
+        # selected leg's fresh ExecutableCostCurve, the chosen fractional-Kelly stake
+        # + chosen-stake price on that fresh curve (the S5 kernel, internally), the
+        # robust q_lcb, and the family rank, then routes ALL of it through ONE
+        # RedecisionEngine.evaluate_submit_recapture. It REPLACES the former scattered
+        # inline re-gate (the ``not kelly.passed`` size check that implicitly decided
+        # submit eligibility): the three abort branches (price-through-max, edge<=0 /
+        # forecast-stale, family-rank reversed) are now first-class lifecycle states.
+        # The intent is built ONLY when ``_recapture.may_submit`` is True — no parallel
+        # branch, no flag, no shadow.
+        _recapture_exposure = _family_existing_exposure_by_bin_id(
+            proofs=proofs,
             selected_proof=proof,
-            all_proofs=proofs,
-            extra_exposure_by_bin_id=_family_existing_exposure_by_bin_id(
-                proofs=proofs,
+            portfolio_state_provider=portfolio_state_provider,
+            portfolio_reservation=portfolio_reservation,
+            family=family,
+        )
+        _recapture, _robust_stake_usd, _chosen_stake_price = (
+            _evaluate_submit_recapture_for_selected(
+                family_key=str(family.family_id or ""),
                 selected_proof=proof,
-                portfolio_state_provider=portfolio_state_provider,
-                portfolio_reservation=portfolio_reservation,
-                family=family,
-            ),
-            bankroll_usd=float(bankroll_usd),
-            kelly_multiplier=_fractional_kelly_mult,
+                all_proofs=proofs,
+                extra_exposure_by_bin_id=_recapture_exposure,
+                bankroll_usd=float(bankroll_usd),
+                kelly_multiplier=_fractional_kelly_mult,
+                # On this synchronous path the forecast snapshot was validated by the
+                # decision engine and (if present) the replacement-forecast hook, both
+                # of which already returned a no-submit receipt on any flip/block
+                # above — so the proof carried here is forecast-current at recapture.
+                forecast_still_current=True,
+            )
         )
         kelly = dataclass_replace(
             kelly,
             size_usd=float(_robust_stake_usd),
-            passed=float(_robust_stake_usd) > 0.0,
+            passed=bool(_recapture.may_submit),
         )
-        # Rebind the Kelly cost-of-entry to the chosen-stake boundary when sizing
-        # cleared (so the intent's ``execution_price`` / the receipt's
-        # ``c_fee_adjusted`` / the executor limit reflect the depth walk). When the
-        # ΔU stake is a no-trade (no chosen-stake price) we leave ``execution_price``
-        # as the S1 boundary — the not-passed receipt below reports it for audit and
-        # builds no intent.
-        if float(_robust_stake_usd) > 0.0 and _chosen_stake_price is not None:
+        # Rebind the Kelly cost-of-entry to the chosen-stake boundary when the
+        # recapture cleared (so the intent's ``execution_price`` / the receipt's
+        # ``c_fee_adjusted`` / the executor limit reflect the depth walk). On any abort
+        # the stake is 0.0 / price is None and we leave ``execution_price`` as the S1
+        # boundary — the abort receipt below reports it for audit and builds no intent.
+        if _recapture.may_submit and _chosen_stake_price is not None:
             execution_price = _chosen_stake_price
     except (TypeError, ValueError) as exc:
         return EventSubmissionReceipt(
@@ -2081,25 +2125,25 @@ def build_event_bound_no_submit_receipt(
             source_status="MATCH",
             family_complete=True,
         )
-    if not kelly.passed:
-        _kr_reason = (
-            f"KELLY_REJECTED"
-            f":{kelly.binding_constraint or 'unknown'}"
-            f":size={kelly.size_usd:.4f}"
-            f":sb={kelly.sizing_bankroll}"
-            f":effcorr={kelly.eff_corr_bankroll}"
-            f":effraw={kelly.eff_raw_bankroll}"
-            f":corrcom={kelly.corr_committed_usd}"
-            f":rawcom={kelly.raw_committed_usd}"
-            f":mult={kelly.effective_multiplier}"
-            f":ci={kelly.ci_width}"
-            f":lead={kelly.lead_days}"
+    if not _recapture.may_submit:
+        # S6: the submit recapture aborted. The receipt reason is DERIVED from the
+        # engine's terminal lifecycle state (SUBMIT_ABORTED_PRICE_MOVED /
+        # _EDGE_REVERSED / _FAMILY_REVERSED) — one taxonomy, never set independently of
+        # the state machine. ``detail`` carries the human-readable trigger; the abort
+        # state is in SUBMIT_ABORT_STATES (assertable). No intent is built (fail-closed,
+        # spec §5/§7/§13: price-through-max, edge<=0/forecast-stale, or rank reversed
+        # without a full re-rank).
+        assert _recapture.state in SUBMIT_ABORT_STATES, (
+            f"recapture aborted but state {_recapture.state} is not a submit-abort "
+            f"state — the gate must land in a first-class abort state (§7)"
         )
+        _abort_reason = _SUBMIT_ABORT_RECEIPT_REASON[_recapture.state]
+        _abort_detail = _recapture.detail or _abort_reason
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason=_kr_reason,
+            reason=f"{_abort_reason}:{_abort_detail}",
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
@@ -5834,6 +5878,238 @@ def _robust_marginal_utility_stake_and_price(
             return 0.0, None
         return float(chosen), price
     return 0.0, None
+
+
+# The ONE submit-recapture state machine. Module-level singleton (the engine is a
+# pure, stateless, frozen dataclass — no DB, no clock, no mutable state), so the
+# recapture boundary always routes through the SAME RedecisionEngine. Default
+# HysteresisPolicy: the inline submit gate aborts-and-defers on a family-rank
+# reversal (it never switches inline, §5 AbortOrSwitchOnlyAfterFullRerank), so the
+# η_switch / T_no_churn anti-churn policy is exercised only by the WATCH re-rank
+# path, not by this gate.
+_SUBMIT_RECAPTURE_ENGINE = RedecisionEngine()
+
+
+# Map the engine's submit-abort lifecycle state to the no-submit receipt reason the
+# decision body emits. The single source of truth for the abort-reason taxonomy —
+# the receipt reason is DERIVED from the state machine's terminal state, never set
+# independently (so the receipt and the lifecycle state can never disagree, §7/§14.9).
+_SUBMIT_ABORT_RECEIPT_REASON: dict[CandidateLifecycleState, str] = {
+    CandidateLifecycleState.SUBMIT_ABORTED_PRICE_MOVED: "SUBMIT_ABORTED_PRICE_MOVED",
+    CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED: "SUBMIT_ABORTED_EDGE_REVERSED",
+    CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED: "SUBMIT_ABORTED_FAMILY_REVERSED",
+}
+
+
+def _family_rank_reversed_at_recapture(
+    *,
+    family_key: str,
+    selected_proof: _CandidateProof,
+    all_proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
+    extra_exposure_by_bin_id: Mapping[str, float] | None,
+) -> bool:
+    """True iff the FRESH-curve re-rank no longer makes ``selected_proof`` primary.
+
+    S6 (spec §5 submit pseudocode ``family_rank_reversed`` / §7 family-rank row /
+    Hidden #7). The submit recapture must RECOMPUTE — not just validate — the family
+    rank on the recaptured books: re-run the SAME single ΔU selection
+    (:func:`_select_proof_by_robust_marginal_utility`, the one ranking surface) over
+    the fresh-curve candidates and ask whether a DIFFERENT candidate is now the family
+    primary. If a sibling now out-ranks the selected proof (price/forecast moved the
+    order), the rank reversed and the inline submit must ABORT and defer to a full
+    re-rank (the engine never switches inline; a WATCH fallback cannot auto-submit,
+    Hidden #7).
+
+    ``True`` ONLY when a DIFFERENT proof is the fresh ΔU primary. ``False`` when the
+    selected proof is still the winner OR when the WHOLE family now no-trades (the
+    fresh primary is None): a family-wide no-trade is NOT a rank *reversal* — for the
+    selected leg it is its own edge reversal (utility <= 0), which the EDGE gate owns.
+    Conflating the two would mislabel a plain edge collapse as a family switch.
+    """
+    per_bin_yes_q_lcb = _per_bin_yes_q_lcb(tuple(all_proofs))
+    fresh_primary = _select_proof_by_robust_marginal_utility(
+        executable=list(all_proofs),
+        family_key=family_key,
+        per_bin_yes_q_lcb=per_bin_yes_q_lcb,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+    )
+    if fresh_primary is None:
+        # Whole family no-trades on the fresh curves -> not a rank reversal; the
+        # selected leg's own EDGE gate handles its nonpositive utility.
+        return False
+    return _candidate_evaluation_id(fresh_primary) != _candidate_evaluation_id(
+        selected_proof
+    )
+
+
+def _evaluate_submit_recapture_for_selected(
+    *,
+    family_key: str,
+    selected_proof: _CandidateProof,
+    all_proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
+    extra_exposure_by_bin_id: Mapping[str, float] | None,
+    bankroll_usd: float,
+    kelly_multiplier: float,
+    forecast_still_current: bool,
+) -> tuple[SubmitRecaptureDecision, float, ExecutionPrice | None]:
+    """THE single fail-closed submit-recapture gate (spec §5 / §7 / §14.9 / §14.10).
+
+    S6 (operator directive 2026-06-08). RECOMPUTE-NOT-VALIDATE at the no-submit
+    receipt boundary. This REPLACES the scattered inline submit-time re-gates (the
+    ``trade_score <= 0`` / Kelly-not-passed checks that implicitly decided whether the
+    recaptured leg could submit) with ONE pass through
+    :meth:`RedecisionEngine.evaluate_submit_recapture`. There is no parallel branch
+    and no flag: the receipt is built ONLY when ``decision.may_submit`` is True.
+
+    What it recomputes (not validates) on the FRESH books:
+
+      * the selected leg's OWN fresh ``ExecutableCostCurve`` — materialized via the
+        ONE candidate path (:func:`_native_side_candidate_from_proof`); the engine
+        walks it for the depth-walked all-in cost at the chosen stake (Hidden #6);
+      * the chosen FRACTIONAL-Kelly stake + chosen-stake price on that curve (the S5
+        kernel :func:`_robust_marginal_utility_stake_and_price`);
+      * the family rank (:func:`_family_rank_reversed_at_recapture`) — does the
+        selected proof remain the ΔU primary on the fresh curves?
+      * the robust q_lcb (the candidate's OWN ``q_lcb`` — NO-side already in NO-space
+        as ``1 - q_ucb_yes``; never the YES complement).
+
+    Abort taxonomy (each a first-class fail-closed state, §7), in precedence order:
+
+      1. no fresh curve (stale / failed recapture) -> the engine's missing-recapture
+         branch, SUBMIT_ABORTED_PRICE_MOVED (no executable price re-established, §13);
+      2. family rank reversed (selected leg no longer the ΔU primary on fresh curves)
+         -> FAMILY_REVERSED (abort + defer to full re-rank; a non-primary leg never
+         price/edge-checks — Hidden #7 / §5 AbortOrSwitchOnlyAfterFullRerank);
+      3. stake <= 0 (no positive-utility stake on the fresh curve) -> EDGE_REVERSED
+         (utility nonpositive, §5 ``if utility <= 0: Abort``);
+      4. recaptured all-in cost > ``max_acceptable_price`` -> PRICE_MOVED;
+      5. ``edge_lcb = q_lcb - all_in_cost <= 0`` or forecast not current -> EDGE_REVERSED.
+
+    Gates 4-5 are resolved by the engine (price -> edge -> forecast). Family rank is
+    checked here at top precedence so a no-longer-primary leg reports the governing
+    reason, not an incidental own-leg edge/price softening.
+
+    ``max_acceptable_price`` is the leg's DECISION-TIME admitted price (the proof's S1
+    ``execution_price.value``): a fresh recapture that prices STRICTLY WORSE than the
+    price the candidate was admitted at is a price move through the band (§7 price row).
+
+    Returns ``(decision, chosen_stake_usd, chosen_stake_price)``. On a clean recapture
+    the stake/price are the S5 chosen-stake size+boundary the intent must carry; on any
+    abort the stake is 0.0 / price is None and the decision's ``state`` is in
+    :data:`SUBMIT_ABORT_STATES` with the triggering ``reversal_reason``.
+    """
+    engine = _SUBMIT_RECAPTURE_ENGINE
+    candidate = _native_side_candidate_from_proof(
+        family_key=family_key, proof=selected_proof
+    )
+
+    # GATE 1 (stale / failed recapture, §13). A no-trade materialization (missing
+    # native token / quote / invalid q_lcb) means there is NO fresh executable curve
+    # to recapture -> route to the engine's missing-recapture branch by passing
+    # recaptured_cost_curve=None (SUBMIT_ABORTED_PRICE_MOVED: no executable price could
+    # be re-established; "Snapshot stale and recapture fails"). Never submit from the
+    # decision-time snapshot. This is checked FIRST: a missing curve cannot price, rank,
+    # or edge-check.
+    if not candidate.is_tradeable:
+        decision = engine.evaluate_submit_recapture(
+            candidate,
+            RecaptureInputs(
+                recaptured_cost_curve=None,
+                stake_usd=Decimal("0"),
+                max_acceptable_price=Decimal("0"),
+                recaptured_q_lcb=0.0,
+                forecast_still_current=bool(forecast_still_current),
+                family_rank_reversed=False,
+            ),
+        )
+        return decision, 0.0, None
+    fresh_curve = candidate.executable_cost_curve
+
+    # GATE 2 (family rank reversed, §5 AbortOrSwitchOnlyAfterFullRerank / §7 family-rank
+    # row / Hidden #7). HIGHEST-PRECEDENCE present-curve abort: if the selected proof is
+    # no longer the family ΔU primary on the FRESH curves, it has lost submit authority
+    # — it must NOT even price/edge-check, and a sibling that now out-ranks it is a
+    # WATCH-only fallback that can only submit via a FULL re-rank (never inline). Checked
+    # BEFORE the zero-stake/edge gates so a no-longer-primary leg reports the governing
+    # reason (family reversed), not an incidental own-leg edge softening.
+    if _family_rank_reversed_at_recapture(
+        family_key=family_key,
+        selected_proof=selected_proof,
+        all_proofs=all_proofs,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+    ):
+        return (
+            SubmitRecaptureDecision(
+                state=CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED,
+                may_submit=False,
+                reversal_reason=ReversalReason.FAMILY_RANK,
+                detail=(
+                    "family rank reversed at recapture: selected leg is no longer the "
+                    "ΔU primary on the fresh curves; abort and defer to a full re-rank "
+                    "(no inline switch; a WATCH fallback cannot auto-submit, Hidden #7)"
+                ),
+            ),
+            0.0,
+            None,
+        )
+
+    # Recompute the chosen fractional-Kelly stake + chosen-stake price on the FRESH
+    # curve (the S5 kernel — same scored candidate, same curve, no drift).
+    chosen_stake_usd, chosen_price = _robust_marginal_utility_stake_and_price(
+        family_key=family_key,
+        selected_proof=selected_proof,
+        all_proofs=all_proofs,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+        bankroll_usd=bankroll_usd,
+        kelly_multiplier=kelly_multiplier,
+    )
+
+    # GATE 3 (edge reversed, §5 'utility <= 0: Abort' / §7 edge row). A zero chosen
+    # stake on a PRESENT fresh curve is an edge reversal: the recompute found no
+    # positive-utility stake (q_lcb fell, cost rose, or exposure concavity killed it).
+    # Surface it as EDGE_REVERSED directly — feeding stake_usd=0 to the engine would
+    # make avg_cost(0) raise (below min order) and mis-map to PRICE_MOVED.
+    if chosen_stake_usd <= 0.0:
+        return (
+            SubmitRecaptureDecision(
+                state=CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED,
+                may_submit=False,
+                reversal_reason=ReversalReason.EDGE,
+                detail=(
+                    "recaptured robust marginal utility nonpositive: no positive-ΔU "
+                    "stake clears min order / depth on the fresh curve (§5 'utility "
+                    "<= 0: Abort'; §7 edge row)"
+                ),
+            ),
+            0.0,
+            None,
+        )
+
+    # GATE 4 + 5 (price moved / edge<=0 / forecast stale). The decision-time admitted
+    # price is the band ceiling: a fresh recapture pricing strictly worse than what the
+    # candidate was admitted at is a price move (§7 price row). family_rank_reversed is
+    # False here (gate 2 already passed), so the engine resolves the remaining price /
+    # edge / forecast-currency gates.
+    decision_time_price = selected_proof.execution_price
+    max_acceptable_price = (
+        Decimal(str(decision_time_price.value))
+        if decision_time_price is not None
+        else Decimal("0")
+    )
+    decision = engine.evaluate_submit_recapture(
+        candidate,
+        RecaptureInputs(
+            recaptured_cost_curve=fresh_curve,
+            stake_usd=Decimal(str(chosen_stake_usd)),
+            max_acceptable_price=max_acceptable_price,
+            recaptured_q_lcb=float(candidate.q_lcb),
+            forecast_still_current=bool(forecast_still_current),
+            family_rank_reversed=False,
+        ),
+    )
+    if decision.may_submit:
+        return decision, float(chosen_stake_usd), chosen_price
+    return decision, 0.0, None
 
 
 def _robust_marginal_utility_optimal_stake_usd(
