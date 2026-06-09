@@ -160,7 +160,6 @@ from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReac
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
-from src.data.replacement_forecast_runtime_policy import replacement_live_authority_evidence_gate
 from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.candidate_evaluation import CandidateEvaluation
@@ -6798,9 +6797,11 @@ def _replacement_authority_probability_and_fdr_proof(
     # realized-residual cell.
     #
     # PR#400 the_path audit BLOCKER 7 — this function is the LIVE replacement_0_1 authority
-    # builder: it is reached ONLY after `_replacement_authority_enabled()` (TRADE_AUTHORITY
-    # flag, :5627) AND `replacement_live_authority_evidence_gate` (:5640) both pass, and the
-    # q_lcb it returns is stamped probability_authority="replacement_0_1" and sizes REAL
+    # builder: it is reached after `_replacement_authority_enabled()` (TRADE_AUTHORITY flag)
+    # ALONE. NOTE (operator directive 2026-06-08): the settlement-evidence promotion gate
+    # `replacement_live_authority_evidence_gate` was REMOVED and NO LONGER gates this path
+    # (zero call-sites; flag-only LIVE_AUTHORITY — see replacement_forecast_runtime_policy).
+    # The q_lcb it returns is stamped probability_authority="replacement_0_1" and sizes REAL
     # capital. So the missing-floor mode here is unconditionally live/authority/capital.
     # A missing floor input must therefore BLOCK (never degrade to the raw, overconfident
     # Wilson bound) — both at family-setup time and per-bin. The block raises a ValueError

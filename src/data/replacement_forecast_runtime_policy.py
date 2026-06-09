@@ -289,10 +289,15 @@ def resolve_replacement_forecast_runtime_policy(
         status = SHADOW_VETO_ONLY_STATUS
         reason_codes = ("REPLACEMENT_SHADOW_VETO_ONLY",)
     else:
-        # Reachable ONLY when trade_authority AND both_evidence_live_authority (any
-        # evidence shortfall returned SHADOW_VETO_ONLY above), so by construction BOTH
-        # the promotion (statistical-validation) and capital-objective (empirical-winner
-        # + after-cost-EV) proofs passed. The reason code names the conjunction.
+        # Reachable when the flag ladder shadow->veto->trade_authority is fully ON.
+        # NOTE (operator directive 2026-06-08): the settlement-evidence promotion gate
+        # `replacement_live_authority_evidence_gate` was REMOVED and is NO LONGER a
+        # precondition here — LIVE_AUTHORITY is now FLAG-ONLY. There is NO promotion /
+        # capital-objective proof guarding this branch; forward real-capital risk is
+        # bounded ONLY by the downstream q_lcb settlement-σ floor + fractional Kelly +
+        # RiskGuard, NOT by an evidence proof. The reason_code string below is a LEGACY
+        # name retained for consumer stability and no longer implies an evidence proof.
+        # (Pinned: tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py.)
         status = LIVE_AUTHORITY_STATUS
         reason_codes = ("REPLACEMENT_PROMOTED_WITH_EVIDENCE",)
     return ReplacementForecastRuntimePolicy(
