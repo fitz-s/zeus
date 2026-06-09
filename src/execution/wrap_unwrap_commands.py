@@ -605,3 +605,226 @@ def _append_event(conn: sqlite3.Connection, command_id: str, event_type: str, pa
         """,
         (command_id, event_type, json.dumps(payload, sort_keys=True)),
     )
+
+
+# ---------------------------------------------------------------------------
+# Same-tick proceeds-driven wrap (2026-06-09, operator directive)
+# ---------------------------------------------------------------------------
+
+def _read_usdce_balance_via_adapter(adapter: Any, safe_address: str) -> int:
+    """ERC-20 balanceOf(safe) on USDC.e via the adapter's urllib JSON-RPC seam.
+
+    Same read as _read_usdce_balance but without a web3 instance — the redeem
+    submitter/reconciler ticks already hold a PolymarketV2Adapter and must not
+    construct a second RPC stack just for one balance call.
+    """
+    from src.venue.polymarket_v2_adapter import POLYGON_USDCE_ADDRESS
+
+    addr_padded = str(safe_address).lower().removeprefix("0x").zfill(64)
+    data = "0x70a08231" + addr_padded
+    raw = adapter._rpc_call(
+        adapter.polygon_rpc_url,
+        "eth_call",
+        [{"to": POLYGON_USDCE_ADDRESS, "data": data}, "latest"],
+    )
+    return int(str(raw or "0x0"), 16)
+
+
+def wrap_proceeds_now(
+    conn: sqlite3.Connection,
+    adapter: Any,
+    safe_address: str,
+    signer_eoa: str,
+    *,
+    threshold_micro: int | None = None,
+    mined_timeout_s: float = 120.0,
+    poll_interval_s: float = 3.0,
+    max_steps: int = 6,
+) -> dict[str, Any]:
+    """Proceeds-driven wrap: enqueue AND drive to terminal in the SAME tick.
+
+    STRUCTURAL FIX (operator directive 2026-06-09): the periodic wrap state
+    machine advanced one step per 5-minute tick (intent → approve → approve
+    confirm → wrap → wrap confirm), leaving fresh redemption proceeds sitting
+    as unwrapped USDC.e across up to ~25 minutes ("Confirm pending deposit" in
+    the UI). The antibody contract is: after a confirmed-redemption batch, the
+    SAME tick that observed it leaves ZERO USDC.e unwrapped (above threshold).
+
+    Behavior (synchronous, bounded):
+      1. Read live USDC.e balance via the adapter RPC seam.
+      2. If above threshold and no pending wrap row exists, insert
+         WRAP_REQUESTED (same idempotency gate as the periodic intent creator).
+      3. Drive ALL pending wrap rows step-by-step to terminal:
+         WRAP_REQUESTED -> APPROVE tx -> wait mined -> WRAP_APPROVED ->
+         WRAP tx -> wait mined -> WRAP_CONFIRMED (+ CLOB balance refresh).
+      4. Fail-soft everywhere: a reverted tx marks WRAP_FAILED; a transient
+         RPC error or mined-wait timeout leaves the row mid-state for the
+         periodic wrap_submitter/wrap_reconciler to resume — no new failure
+         mode, no raise into the calling scheduler tick.
+
+    Returns {"enqueued": str|None, "confirmed": [ids], "failed": [ids],
+             "pending": [ids], "balance_micro_before": int}.
+    """
+    import logging
+    import time as _time
+
+    logger = logging.getLogger(__name__)
+    init_wrap_unwrap_schema(conn)
+
+    if threshold_micro is None:
+        threshold_micro = int(
+            os.environ.get("AUTO_WRAP_THRESHOLD_MICRO", str(_DEFAULT_WRAP_THRESHOLD_MICRO))
+        )
+
+    out: dict[str, Any] = {
+        "enqueued": None, "confirmed": [], "failed": [], "pending": [],
+        "balance_micro_before": -1,
+    }
+
+    try:
+        balance_micro = _read_usdce_balance_via_adapter(adapter, safe_address)
+    except Exception as exc:  # noqa: BLE001 — fail-soft; periodic poller resumes
+        logger.warning("[WRAP_PROCEEDS_BALANCE_READ_FAILED] %s", exc)
+        return out
+    out["balance_micro_before"] = balance_micro
+
+    # Enqueue if needed (same idempotency gate as the periodic intent creator:
+    # any non-terminal WRAP row blocks a new intent).
+    pending = list_pending_wrap_commands(conn)
+    if not pending and balance_micro > threshold_micro:
+        command_id = uuid.uuid4().hex
+        requested_at = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO wrap_unwrap_commands (
+              command_id, state, direction, amount_micro, requested_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (command_id, WrapUnwrapState.WRAP_REQUESTED.value, "WRAP",
+             int(balance_micro), requested_at),
+        )
+        _append_event(conn, command_id, WrapUnwrapState.WRAP_REQUESTED.value, {
+            "balance_micro": int(balance_micro),
+            "threshold_micro": int(threshold_micro),
+            "trigger": "proceeds_driven_same_tick",
+        })
+        conn.commit()
+        out["enqueued"] = command_id
+        logger.info(
+            "[WRAP_PROCEEDS_ENQUEUED] command_id=%s balance_micro=%d",
+            command_id, balance_micro,
+        )
+
+    def _wait_mined(tx_hash: str) -> Optional[dict[str, Any]]:
+        t0 = _time.monotonic()
+        while _time.monotonic() - t0 < mined_timeout_s:
+            try:
+                rcpt = adapter._rpc_call(
+                    adapter.polygon_rpc_url, "eth_getTransactionReceipt", [tx_hash]
+                )
+            except Exception:  # noqa: BLE001 — transient; keep polling
+                rcpt = None
+            if rcpt:
+                return rcpt
+            _time.sleep(poll_interval_s)
+        return None
+
+    # Drive every pending row to terminal, bounded by max_steps per call.
+    for _ in range(max_steps):
+        pending = list_pending_wrap_commands(conn)
+        actionable = [
+            r for r in pending
+            if r["state"] in (
+                WrapUnwrapState.WRAP_REQUESTED.value,
+                WrapUnwrapState.WRAP_APPROVED.value,
+            )
+        ]
+        if not actionable:
+            break
+        row = actionable[0]
+        command_id = row["command_id"]
+        tx_kind = (
+            "APPROVE"
+            if row["state"] == WrapUnwrapState.WRAP_REQUESTED.value
+            else "WRAP"
+        )
+        try:
+            result = adapter._wrap_via_safe(
+                safe_address=safe_address,
+                amount_micro=row["amount_micro"],
+                tx_kind=tx_kind,
+                signer_eoa=signer_eoa,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-soft; poller resumes
+            logger.warning(
+                "[WRAP_PROCEEDS_STEP_EXCEPTION] command_id=%s tx_kind=%s exc=%s",
+                command_id, tx_kind, exc,
+            )
+            break
+        if result.get("errorCode") == "WRAP_DRY_RUN_LOGGED":
+            logger.info(
+                "[WRAP_PROCEEDS_DRY_RUN] command_id=%s tx_kind=%s", command_id, tx_kind,
+            )
+            break
+        if not result.get("success"):
+            logger.warning(
+                "[WRAP_PROCEEDS_STEP_FAILED] command_id=%s tx_kind=%s errorCode=%s msg=%s",
+                command_id, tx_kind, result.get("errorCode"), result.get("errorMessage"),
+            )
+            break  # leave row mid-state for the periodic poller (fail-soft)
+        tx_hash = str(result["tx_hash"])
+        if tx_kind == "APPROVE":
+            mark_wrap_approve_tx_hashed(command_id, tx_hash, conn=conn)
+        else:
+            mark_wrap_tx_hashed(command_id, tx_hash, conn=conn)
+        conn.commit()
+        rcpt = _wait_mined(tx_hash)
+        if rcpt is None:
+            logger.warning(
+                "[WRAP_PROCEEDS_MINED_TIMEOUT] command_id=%s tx_kind=%s tx=%s "
+                "— periodic wrap_reconciler will resume",
+                command_id, tx_kind, tx_hash,
+            )
+            out["pending"].append(command_id)
+            return out
+        status = rcpt.get("status")
+        if str(status).lower() not in ("0x1", "1"):
+            fail_wrap(
+                command_id,
+                error_payload={"reason": "tx_reverted", "tx_hash": tx_hash, "tx_kind": tx_kind},
+                conn=conn,
+            )
+            conn.commit()
+            out["failed"].append(command_id)
+            logger.warning(
+                "[WRAP_PROCEEDS_TX_REVERTED] command_id=%s tx_kind=%s tx=%s",
+                command_id, tx_kind, tx_hash,
+            )
+            continue
+        if tx_kind == "APPROVE":
+            mark_wrap_approved(command_id, conn=conn)
+            conn.commit()
+        else:
+            block_num = None
+            try:
+                _bn = rcpt.get("blockNumber")
+                block_num = int(str(_bn), 16) if isinstance(_bn, str) else int(_bn)
+            except Exception:  # noqa: BLE001
+                block_num = None
+            confirm_wrap(command_id, confirmation_count=1, block_number=block_num, conn=conn)
+            conn.commit()
+            out["confirmed"].append(command_id)
+            logger.info(
+                "[WRAP_PROCEEDS_CONFIRMED] command_id=%s tx=%s block=%s",
+                command_id, tx_hash, block_num,
+            )
+            try:
+                _refresh_collateral_after_wrap_confirmation(adapter)
+            except Exception as refresh_exc:  # noqa: BLE001 — best-effort
+                logger.warning(
+                    "[WRAP_PROCEEDS_BALANCE_REFRESH_FAILED] command_id=%s exc=%s",
+                    command_id, refresh_exc,
+                )
+
+    out["pending"] = [r["command_id"] for r in list_pending_wrap_commands(conn)]
+    return out

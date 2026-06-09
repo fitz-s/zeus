@@ -1380,6 +1380,54 @@ def _wu_daily_dispatch() -> None:
 #   WRAP_APPROVE_TX_HASHED → WRAP_APPROVED and WRAP_TX_HASHED → WRAP_CONFIRMED;
 #   on WRAP_CONFIRMED calls adapter.update_balance_allowance() to refresh CLOB ledger.
 
+def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
+    """Proceeds-driven wrap: leave ZERO unwrapped USDC.e after this tick.
+
+    STRUCTURAL FIX (operator directive 2026-06-09): redemption proceeds land as
+    USDC.e at the Safe, but the periodic wrap state machine (intent creator /
+    submitter / reconciler, 5-min ticks) advanced one step per tick — fresh
+    proceeds sat unwrapped for up to ~25 minutes ("Confirm pending deposit").
+    This helper is called from the SAME redeem ticks that broadcast/confirm
+    redemptions and synchronously drives the full APPROVE→WRAP chain via
+    wrap_proceeds_now. Fail-soft: any failure logs and defers to the periodic
+    wrap jobs (which remain as the resume/backstop path).
+
+    Takes the wrap_submitter dual-run lock so it can never double-submit a Safe
+    tx against the periodic _wrap_submitter_cycle.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from src.execution.wrap_unwrap_commands import wrap_proceeds_now
+    from src.state.db import get_world_connection
+
+    try:
+        from eth_account import Account as _Account
+        signer_eoa = _Account.from_key(creds["private_key"]).address
+    except Exception as exc:  # noqa: BLE001 — fail-soft
+        logger.warning("wrap_proceeds_same_tick: signer derivation failed: %s", exc)
+        return
+    with acquire_lock("wrap_submitter") as acquired:
+        if not acquired:
+            logger.info("wrap_proceeds_same_tick skipped_lock_held")
+            return
+        wconn = get_world_connection()
+        try:
+            summary = wrap_proceeds_now(
+                wconn, adapter, creds["funder_address"], signer_eoa,
+            )
+            if summary.get("enqueued") or summary.get("confirmed") or summary.get("failed"):
+                logger.info(
+                    "wrap_proceeds_same_tick: balance_before=%s enqueued=%s "
+                    "confirmed=%s failed=%s pending=%s",
+                    summary.get("balance_micro_before"), summary.get("enqueued"),
+                    summary.get("confirmed"), summary.get("failed"),
+                    summary.get("pending"),
+                )
+        except Exception as exc:  # noqa: BLE001 — fail-soft, periodic jobs resume
+            logger.warning("wrap_proceeds_same_tick failed (fail-soft): %s", exc)
+        finally:
+            wconn.close()
+
+
 @_scheduler_job("redeem_submitter")
 def _redeem_submitter_cycle() -> None:
     """Poll settlement_commands for ALL _SUBMITTABLE_STATES rows + submit_redeem.
@@ -1509,6 +1557,11 @@ def _redeem_submitter_cycle() -> None:
                             "redeem_submitter: inventory sweep enqueued/active %d command(s)",
                             len(swept),
                         )
+                    # Proceeds-driven wrap (same tick): any USDC.e already
+                    # sitting at the Safe from earlier confirmed redemptions is
+                    # wrapped to pUSD NOW, not left for the slow periodic
+                    # balance poll. Fail-soft inside.
+                    _wrap_proceeds_same_tick(creds, adapter)
             # Poll ALL submittable states (INTENT_CREATED + RETRYING).
             placeholders = ",".join("?" * len(_SUBMITTABLE_STATES))
             state_values = tuple(s.value for s in _SUBMITTABLE_STATES)
@@ -1623,6 +1676,39 @@ def _redeem_reconciler_cycle() -> None:
                     "redeem_reconciler: reconciled=%d states=%s",
                     len(results), [r.state.value for r in results],
                 )
+                # Proceeds-driven wrap (same tick): a REDEEM_CONFIRMED batch
+                # means USDC.e proceeds just became chain-final at the Safe.
+                # Wrap them NOW in this tick instead of waiting for the
+                # periodic balance poll. Fail-soft: credential/adapter issues
+                # log and defer to the periodic wrap jobs.
+                if any(
+                    r.state == SettlementState.REDEEM_CONFIRMED for r in results
+                ):
+                    try:
+                        from src.data.polymarket_client import (
+                            resolve_polymarket_credentials as _resolve_creds,
+                            _resolve_clob_v2_signature_type as _sig_type,
+                        )
+                        from src.venue.polymarket_v2_adapter import (
+                            DEFAULT_V2_HOST as _V2_HOST,
+                            PolymarketV2Adapter as _V2Adapter,
+                        )
+                        _creds = _resolve_creds()
+                        _adapter = _V2Adapter(
+                            host=os.environ.get("POLYMARKET_CLOB_V2_HOST", _V2_HOST),
+                            funder_address=_creds["funder_address"],
+                            signer_key=_creds["private_key"],
+                            chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+                            signature_type=_sig_type(),
+                            polygon_rpc_url=polygon_rpc_url,
+                            api_creds=_creds.get("api_creds"),
+                        )
+                        _wrap_proceeds_same_tick(_creds, _adapter)
+                    except Exception as _wrap_exc:  # noqa: BLE001 — fail-soft
+                        logger.warning(
+                            "redeem_reconciler: same-tick wrap skipped: %s",
+                            _wrap_exc,
+                        )
             except Exception as exc:
                 try:
                     conn.rollback()
