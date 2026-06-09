@@ -236,6 +236,12 @@ def test_wider_fractional_kelly_haircut_sizes_strictly_smaller():
     haircut still bounds the stake (as the fractional-Kelly multiplier ceiling into
     the ΔU sizing), so a smaller multiplier sizes strictly smaller — variance is
     never silently dropped on the way to size.
+
+    Both multipliers are SMALL (0.05 / 0.0125) so the fractional stakes sit BELOW
+    the single-position concentration ceiling (max_single_position_pct·B = $500 at
+    B=$10k); the haircut signal lives in the unclamped region. At full Kelly this
+    edge clamps to the ceiling at BOTH multipliers and the strict-smaller signal
+    would be masked (the ceiling bounds magnitude, not the fractional-Kelly ordering).
     """
     bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
     row = _row(condition_id="cond-X", yes_asks=(("0.40", "100000"),), snapshot_id="snap-X")
@@ -244,11 +250,15 @@ def test_wider_fractional_kelly_haircut_sizes_strictly_smaller():
 
     full = era._robust_marginal_utility_optimal_stake_usd(
         family_key="fam", selected_proof=proof, all_proofs=(proof,),
-        extra_exposure_by_bin_id={}, bankroll_usd=10000.0, kelly_multiplier=1.0,
+        extra_exposure_by_bin_id={}, bankroll_usd=10000.0, kelly_multiplier=0.05,
     )
     haircut = era._robust_marginal_utility_optimal_stake_usd(
         family_key="fam", selected_proof=proof, all_proofs=(proof,),
-        extra_exposure_by_bin_id={}, bankroll_usd=10000.0, kelly_multiplier=0.25,
+        extra_exposure_by_bin_id={}, bankroll_usd=10000.0, kelly_multiplier=0.0125,
+    )
+    assert full < 10000.0 * 0.05, (
+        "fixture sanity: both stakes must sit below the concentration ceiling so the "
+        "fractional-Kelly haircut signal is not masked by the magnitude clamp"
     )
     assert 0.0 < haircut < full, (
         "a smaller fractional-Kelly multiplier (the CI-width/lead/heat haircut) "

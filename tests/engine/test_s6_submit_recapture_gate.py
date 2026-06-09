@@ -440,6 +440,13 @@ def test_every_abort_branch_is_a_first_class_no_submit_state():
 def test_recapture_stake_derives_from_q_lcb_not_q_point():
     """Hold the curve fixed; vary q_point with q_lcb fixed -> identical chosen stake
     (size is on q_lcb, not q_point). Then lower q_lcb -> strictly smaller stake.
+
+    Sized with a SMALL fractional-Kelly multiplier (0.02) so both stakes sit BELOW
+    the single-position concentration ceiling (max_single_position_pct·B = $500 at
+    B=$10k). The q_lcb monotonicity signal lives in the UNCLAMPED region: were the
+    edges sized at full Kelly both would clamp to the ceiling and the strict-smaller
+    signal would be masked (the ceiling bounds magnitude, not the q_lcb ordering —
+    the same conditionality the K2/K5/K7 portfolio-Kelly tests document).
     """
     row = _snapshot_row(yes_asks=(("0.40", "1000000"),))
 
@@ -448,9 +455,11 @@ def test_recapture_stake_derives_from_q_lcb_not_q_point():
                                  q_posterior=0.72, q_lcb_5pct=0.70, bin_obj=_BIN_X)
     p_hi_point = _proof_from_row(direction="buy_yes", row=row, token_id="yes-1",
                                  q_posterior=0.90, q_lcb_5pct=0.70, bin_obj=_BIN_X)
-    _, stake_lo_point, _ = _recapture(p_lo_point, (p_lo_point,))
-    _, stake_hi_point, _ = _recapture(p_hi_point, (p_hi_point,))
+    _, stake_lo_point, _ = _recapture(p_lo_point, (p_lo_point,), kelly_mult=0.02)
+    _, stake_hi_point, _ = _recapture(p_hi_point, (p_hi_point,), kelly_mult=0.02)
     assert stake_lo_point > 0.0 and stake_hi_point > 0.0
+    # Both below the ceiling (so q_point-invariance is tested in the unclamped region).
+    assert stake_lo_point < 10000.0 * 0.05
     assert abs(stake_lo_point - stake_hi_point) < 1e-9, (
         "equal q_lcb must recapture to equal stake regardless of q_point — sizing is "
         "on the robust lower bound, not the point estimate (money-path iron law)"
@@ -459,7 +468,7 @@ def test_recapture_stake_derives_from_q_lcb_not_q_point():
     # Lower q_lcb -> strictly smaller recapture stake (monotone in the robust bound).
     p_low_lcb = _proof_from_row(direction="buy_yes", row=row, token_id="yes-1",
                                 q_posterior=0.72, q_lcb_5pct=0.60, bin_obj=_BIN_X)
-    _, stake_low_lcb, _ = _recapture(p_low_lcb, (p_low_lcb,))
+    _, stake_low_lcb, _ = _recapture(p_low_lcb, (p_low_lcb,), kelly_mult=0.02)
     assert 0.0 < stake_low_lcb < stake_lo_point
 
 

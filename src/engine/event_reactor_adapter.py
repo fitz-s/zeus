@@ -5850,9 +5850,46 @@ def _robust_marginal_utility_stake_and_price(
 
     # Score the WHOLE family (so π / exposure / OUTSIDE match the ranking), then
     # read the selected leg's full-Kelly optimum. The feasible stake ceiling is the
-    # FRACTIONAL-Kelly cap (mult × bankroll): the ΔU optimizer never bets above the
-    # fractional-Kelly budget, which is how the variance haircut bounds the size.
-    max_stake = Decimal(str(mult)) * Decimal(str(bankroll_usd))
+    # SMALLER of two pure UPPER BOUNDS on the chosen stake (the ONE clamp, applied at
+    # the single ``min(...)`` choke point below — NOT a second, parallel cap):
+    #
+    #   1. the FRACTIONAL-Kelly budget ``mult × bankroll`` — the ΔU optimizer never
+    #      bets above the fractional-Kelly cap, which is how the variance haircut
+    #      bounds the size; AND
+    #   2. the SINGLE-POSITION CONCENTRATION CEILING ``max_single_position_pct ×
+    #      bankroll`` (operator concentration law, restored to the LIVE bin-selection
+    #      sizing path). Without this the S5 ``optimal_stake_usd`` path bypassed the
+    #      concentration ceiling that ``money_path_adapters.evaluate_kelly`` restored:
+    #      the live decision body OVERRIDES ``evaluate_kelly.size_usd`` with this
+    #      function's q_lcb-grounded ΔU stake (event_reactor_adapter ~L2095), so the
+    #      ceiling living only inside ``evaluate_kelly`` protected nothing live — a
+    #      strong-edge candidate sized at ~10% of a $1k wallet at the live
+    #      kelly_multiplier=0.125 (and 83% at full Kelly). The ceiling is reconciled
+    #      HERE, at the single live sizing choke point.
+    #
+    # Both are #107-safe UPPER bounds (``min`` on an already-positive ΔU stake can
+    # never zero a positive edge — both bounds are pct·bankroll > 0 whenever the
+    # wallet has cash): they clamp only the strong-edge TAIL; weak/modest edges sit
+    # below both and keep their full ΔU-proportional stake. The base is the SIZING
+    # bankroll (``bankroll_usd`` = free spendable cash; see _runtime_bankroll_usd's
+    # spendable_cash), which scales the ceiling with wealth ($50 at $1k, $500 at $10k)
+    # — a structural concentration limit, not a fixed-dollar clamp. It bounds the
+    # STAKE MAGNITUDE only: the ΔU RANK (which side/bin is primary) is decided by
+    # _select_proof_by_robust_marginal_utility BEFORE this sizing call, so clamping
+    # the winner's stake cannot change which candidate is the winner (ranking
+    # invariance). ``max_single_position_pct == 0`` disables the ceiling (only the
+    # fractional-Kelly cap binds), matching the no-concentration-cap directive surface.
+    from src.config import sizing_defaults
+
+    _single_pos_pct = float(sizing_defaults()["max_single_position_pct"])
+    _fractional_cap = Decimal(str(mult)) * Decimal(str(bankroll_usd))
+    if _single_pos_pct > 0.0:
+        _concentration_ceiling = Decimal(str(_single_pos_pct)) * Decimal(
+            str(bankroll_usd)
+        )
+        max_stake = min(_fractional_cap, _concentration_ceiling)
+    else:
+        max_stake = _fractional_cap
     scored, proof_by_hypothesis = _score_family_candidates_by_robust_marginal_utility(
         executable=list(all_proofs),
         family_key=family_key,
@@ -5868,7 +5905,9 @@ def _robust_marginal_utility_stake_and_price(
         if score.is_no_trade:
             return 0.0, None
         # full-Kelly log-optimal stake on robust q_lcb-based π, scaled to fractional
-        # Kelly by the haircut multiplier (spec §5.2). Bounded by the fractional cap.
+        # Kelly by the haircut multiplier (spec §5.2). Bounded by ``max_stake`` = the
+        # tighter of the fractional-Kelly budget and the single-position concentration
+        # ceiling (the ONE clamp computed above). Both are pure #107-safe upper bounds.
         full_kelly_stake = float(score.optimal_stake_usd)
         fractional = full_kelly_stake * mult
         chosen = Decimal(str(min(Decimal(str(fractional)), max_stake)))
