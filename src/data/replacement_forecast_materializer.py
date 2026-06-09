@@ -585,22 +585,33 @@ def _read_persisted_current_capture(
     """BLOCKER 5 — read the PERSISTED current single_runs rows for this cycle.
 
     Returns {model: (forecast_value_c, raw_model_forecast_id)} for the single_runs rows the
-    download job persisted for THIS exact (city, metric, target_date, lead, source_cycle_time).
-    The q path consumes THESE rows (never a network fetch), so the traded q is reconstructable to
-    the exact persisted inputs (model, params, url hash, source_available_at). Empty dict ->
-    the current capture is missing for this cycle (the caller blocks / falls back with a reason).
+    download job persisted for THIS (city, metric, target_date, source_cycle_time). The q path
+    consumes THESE rows (never a network fetch), so the traded q is reconstructable to the exact
+    persisted inputs (model, params, url hash, source_available_at). Empty dict -> the current
+    capture is missing for this cycle (the caller blocks / falls back with a reason).
     Fail-soft: any DB error -> empty dict (treated as missing capture, never raises).
+
+    LEAD_DAYS IS NOT A FILTER (2026-06-09 fix): (city, metric, target_date, source_cycle_time)
+    already uniquely identifies the forecast, and lead_days is a DERIVED field = target - cycle.
+    The download persists lead_days on the cycle/UTC calendar; this reader previously re-derived
+    it from ``computed_at`` on the CITY-LOCAL calendar (BLOCKER 6) — a different reference time
+    AND a different calendar — so the leads disagreed (e.g. Wuhan: download lead=2 from cycle
+    06-08, reader lead=1 from computed_at 06-09 local) and this read returned EMPTY for ~all live
+    cells, silently disabling the ENTIRE multi-model fusion (0/598 posteriors fused -> cold
+    soft-anchor fallback). Matching on the natural key (no lead filter) makes that
+    download/materialize lead-calendar mismatch unconstructable. ``lead_days`` is retained as a
+    parameter for call-site compatibility but is no longer used to filter.
     """
     try:
         rows = conn.execute(
             """
             SELECT raw_model_forecast_id, model, forecast_value_c
             FROM raw_model_forecasts
-            WHERE city = ? AND metric = ? AND target_date = ? AND lead_days = ?
+            WHERE city = ? AND metric = ? AND target_date = ?
               AND source_cycle_time = ? AND endpoint = 'single_runs'
-            ORDER BY model, raw_model_forecast_id
+            ORDER BY model, lead_days, raw_model_forecast_id
             """,
-            (city, metric, target_date, int(lead_days), source_cycle_time_iso),
+            (city, metric, target_date, source_cycle_time_iso),
         ).fetchall()
     except Exception:
         return {}
