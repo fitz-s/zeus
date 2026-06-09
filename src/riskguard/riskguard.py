@@ -1589,6 +1589,12 @@ def _tick_once() -> RiskLevel:
                     "fetched_at": bankroll_of_record.fetched_at,
                     "staleness_seconds": round(float(bankroll_of_record.staleness_seconds), 3),
                     "cached": bool(bankroll_of_record.cached),
+                    # Positions-blip guard provenance (2026-06-09): "blip_held"
+                    # means the equity base is defending against an empty
+                    # /positions read that contradicted recent verified holdings.
+                    "positions_read_verdict": str(
+                        getattr(bankroll_of_record, "positions_read_verdict", "unknown")
+                    ),
                 },
                 "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
                 "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),
@@ -1763,7 +1769,10 @@ def _tick_once() -> RiskLevel:
             "daily_loss": (
                 f"realized_24h_loss={float(daily_loss or 0.0):.2f} "
                 f"threshold={round(current_bankroll_usd * float(thresholds['max_daily_loss_pct']), 2)} "
-                f"(8%%x${round(current_bankroll_usd, 2)}) status={daily_loss_snapshot['status']} "
+                f"({round(float(thresholds['max_daily_loss_pct']) * 100, 1)}%x"
+                f"${round(current_bankroll_usd, 2)} "
+                f"base_verdict={getattr(bankroll_of_record, 'positions_read_verdict', 'unknown')}) "
+                f"status={daily_loss_snapshot['status']} "
                 f"n={(daily_loss_snapshot.get('reference') or {}).get('settlement_count', 0)}"
             ),
             "weekly_loss": (
