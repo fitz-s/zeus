@@ -616,6 +616,33 @@ def download_u0r_extra_raw_inputs(
     dropped: list[str] = []
     domain_excluded: list[str] = []
 
+    # ROW-LEVEL SKIP (2026-06-09, K-root instance #5 resolution): preload the logical keys
+    # already persisted for THIS cycle so a re-run only fetches what is MISSING. This replaces
+    # the production wrapper's covered-target filter — coverage ("a posterior exists") said
+    # nothing about cycle currency, so covered targets never received new-cycle extras (Madrid
+    # 06-10 fused with icon_global because its icon_eu row existed only at the stale cycle).
+    # With per-row existence as the only skip, the extras job is self-healing per cycle and
+    # the steady-state cost is only-missing fetches. Fail-open: any read error -> empty set ->
+    # fetch everything (the persist layer is UNIQUE-idempotent anyway).
+    persisted_keys: set[tuple] = set()
+    try:
+        from src.state.db import _connect as _ro_connect  # noqa: PLC0415
+
+        _ro = _ro_connect(Path(forecast_db))
+        try:
+            persisted_keys = {
+                tuple(r)
+                for r in _ro.execute(
+                    "SELECT model, city, target_date, metric, endpoint"
+                    " FROM raw_model_forecasts WHERE source_cycle_time = ?",
+                    (cycle_iso,),
+                )
+            }
+        finally:
+            _ro.close()
+    except Exception:
+        persisted_keys = set()
+
     for t in target_list:
         target_local_date = date.fromisoformat(t.target_date)
         for model in U0R_EXTRA_MODELS + U0R_CANDIDATE_ACCRUAL_MODELS:
@@ -643,6 +670,8 @@ def download_u0r_extra_raw_inputs(
             if model in SINGLE_RUNS_UNSERVABLE_MODELS:
                 dropped.append(f"{model}:single_runs_unservable")
                 sv = None
+            elif (model, t.city, t.target_date, t.metric, "single_runs") in persisted_keys:
+                sv = None  # already persisted for this cycle — only-missing fetches
             else:
                 try:
                     sv = single_fetch(
@@ -667,18 +696,21 @@ def download_u0r_extra_raw_inputs(
                 })
 
             # (2) fixed-lead previous_runs (walk-forward train).
-            try:
-                pv = prev_fetch(
-                    model=model, latitude=t.latitude, longitude=t.longitude,
-                    timezone_name=t.timezone_name, target_date=t.target_date,
-                    lead_days=int(t.lead_days), metric=t.metric,
-                )
-            except Exception as exc:
-                _LOG.warning("U0R previous_runs dropped %s (fail-soft): %s", model, exc)
-                pv = None
-            if pv is None:
-                dropped.append(f"{model}:previous_runs")
+            if (model, t.city, t.target_date, t.metric, "previous_runs") in persisted_keys:
+                pv = None  # already persisted for this cycle — only-missing fetches
             else:
+                try:
+                    pv = prev_fetch(
+                        model=model, latitude=t.latitude, longitude=t.longitude,
+                        timezone_name=t.timezone_name, target_date=t.target_date,
+                        lead_days=int(t.lead_days), metric=t.metric,
+                    )
+                except Exception as exc:
+                    _LOG.warning("U0R previous_runs dropped %s (fail-soft): %s", model, exc)
+                    pv = None
+                if pv is None:
+                    dropped.append(f"{model}:previous_runs")
+            if pv is not None:
                 rows.append({
                     "model": model, "city": t.city, "target_date": t.target_date,
                     "metric": t.metric, "source_cycle_time": cycle_iso,

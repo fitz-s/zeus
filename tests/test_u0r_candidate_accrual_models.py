@@ -140,3 +140,46 @@ def test_download_fetches_promoted_models_domain_gated(tmp_path) -> None:
     # each model fetched exactly once per target (no candidate-lane double-iteration)
     assert single_calls.count(NBM_MODEL) == 1
     assert single_calls.count(UKMO_GLOBAL_MODEL) == 1
+
+
+def test_download_row_level_skip_only_missing_fetches(tmp_path) -> None:
+    # K-ROOT INSTANCE #5 RESOLUTION (2026-06-09): the extras job previously skipped COVERED
+    # TARGETS, so a covered target never received the new cycle's extras (Madrid 06-10 fused
+    # with icon_global because its icon_eu row existed only at the stale cycle). The skip now
+    # lives at ROW level: a (model, city, target, metric, cycle, endpoint) combo already
+    # persisted is not re-fetched; anything missing IS fetched regardless of coverage.
+    from datetime import UTC, datetime
+
+    from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
+
+    db = tmp_path / "zeus-forecasts.db"
+    conn = sqlite3.connect(str(db))
+    ensure_replacement_forecast_shadow_schema(conn)
+    cycle_iso = "2026-06-09T00:00:00+00:00"
+    # Pre-persist gfs single_runs for this exact cell+cycle.
+    conn.execute(
+        "INSERT INTO raw_model_forecasts (model, city, target_date, metric, source_cycle_time,"
+        " source_available_at, captured_at, lead_days, forecast_value_c, endpoint)"
+        " VALUES ('gfs_global','Atlanta','2026-06-10','high',?,?,?,1,20.0,'single_runs')",
+        (cycle_iso, cycle_iso, cycle_iso),
+    )
+    conn.commit()
+    conn.close()
+
+    single_calls: list[str] = []
+
+    def _single(*, model, **_kw):
+        single_calls.append(model)
+        return 20.0
+
+    target = U0RDownloadTarget(
+        city="Atlanta", latitude=ATLANTA[0], longitude=ATLANTA[1],
+        timezone_name="America/New_York", target_date="2026-06-10", lead_days=1, metric="high",
+    )
+    download_u0r_extra_raw_inputs(
+        forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC), targets=[target],
+        single_runs_fetch=_single, previous_runs_fetch=lambda **k: 19.5,
+    )
+    assert "gfs_global" not in single_calls, "already-persisted row must not be re-fetched"
+    assert "icon_global" in single_calls  # missing rows ARE fetched (self-healing)
+    assert NBM_MODEL in single_calls

@@ -257,11 +257,18 @@ def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str
         release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
         cycle = _parse_cycle(None, now=_dt.now(_tz.utc), release_lag_hours=release_lag_hours)
 
+        # CYCLE-CURRENCY (2026-06-09, K-root instance #5 — same structural decision as the
+        # anchor downloader's include_covered): plan 'covered' has NO cycle-awareness, so
+        # skipping covered rows meant a covered target NEVER received the new cycle's extras
+        # (observed live: Madrid 06-10 fused with icon_global because its icon_eu row only
+        # existed at the stale 06-08T12 cycle — the 00z extras run had skipped Madrid 06-10 as
+        # covered). The coverage filter is REMOVED: the extras job now feeds ALL current
+        # targets, and the downloader itself skips per-ROW (model, city, target, metric,
+        # cycle, endpoint) combos that are already persisted, so the steady-state cost is
+        # only-missing fetches (self-healing per cycle, no covered/freshness conflation).
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
         targets: list[U0RDownloadTarget] = []
         for row in plan.rows:
-            if row.covered:
-                continue
             city_cfg = cities_by_name.get(row.city)
             if city_cfg is None:
                 continue
