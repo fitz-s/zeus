@@ -105,20 +105,28 @@ def test_aifs_ens_retrieve_uses_injected_client_factory(tmp_path) -> None:
     request = build_aifs_ens_open_data_request(forecast_date="2026-06-06", cycle_hour=12, target_path=target, steps=(0, 6))
     calls = []
 
+    from pathlib import Path as _Path
+
     class FakeClient:
         def __init__(self, **kwargs):
             calls.append(("client", kwargs))
 
         def retrieve(self, **kwargs):
             calls.append(("retrieve", kwargs))
+            # A real retrieve writes the artifact; the atomic wrapper only commits a non-empty file.
+            _Path(kwargs["target"]).write_bytes(b"GRIB")
 
     returned = retrieve_aifs_ens_open_data_request(request, client_factory=FakeClient)
 
     assert returned == target
-    assert calls[0] == ("client", {"source": "aws", "model": "aifs-ens"})
+    # Atomic commit: the artifact lands at the FINAL path (moved off the .partial temp).
+    assert target.exists() and target.read_bytes() == b"GRIB"
+    # Default source is now azure (off the throttled AWS mirror).
+    assert calls[0] == ("client", {"source": "azure", "model": "aifs-ens"})
     assert calls[1][0] == "retrieve"
     assert "class" not in calls[1][1]
     assert calls[1][1]["model"] == "aifs-ens"
     assert calls[1][1]["time"] == 12
     assert calls[1][1]["step"] == [0, 6]
-    assert calls[1][1]["target"] == str(target)
+    # Retrieve writes to a sibling .partial temp; the wrapper atomically moves it onto target.
+    assert calls[1][1]["target"] == str(target) + ".partial"
