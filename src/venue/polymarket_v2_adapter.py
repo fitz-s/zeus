@@ -1213,13 +1213,28 @@ class PolymarketV2Adapter:
         exceeds the live balance, so the inner negRisk ``redeemPositions`` burn
         reverts → Safe execTransaction GS013.
 
+        index_set uses the ZEUS convention (the same one stored in
+        settlement_commands.winning_index_set and consumed by
+        _build_negrisk_redeem_calldata): 2 = YES (slot 0), 1 = NO (slot 1).
+
+        CONVENTION ANTIBODY (2026-06-09): the CTF contract's indexSet is a
+        BITMASK over outcome slots — indexSet = 1 << slot, i.e. slot0/YES → 1,
+        slot1/NO → 2 — the EXACT INVERSE of the Zeus binary labels. Passing the
+        Zeus number straight into getCollectionId derives the OPPOSITE
+        outcome's position. Verified on-chain 2026-06-09: the Safe's 7 real
+        unredeemed winners (data-api positions) matched the derived positionId
+        ONLY under ctf_index_set = 1 << outcome_slot; the pass-through version
+        derived the losing token (balance 0) for every one of them. The mapping
+        below is explicit and must never be "simplified" into a pass-through.
+
         Derivation (no web3 lib — uses self._rpc_call, the same urllib JSON-RPC
         seam every other on-chain read in this adapter uses):
           1. wcol = NegRiskAdapter.wcol()  (wrapped collateral; negRisk position
              ERC1155 ids derive from WCOL, NOT pUSD).
-          2. collectionId = CTF.getCollectionId(0x00..00, conditionId, indexSet).
-          3. positionId   = CTF.getPositionId(wcol, collectionId).
-          4. balance      = CTF.balanceOf(holder_safe, positionId).
+          2. ctf_index_set = 1 if Zeus index_set==2 (YES, slot0) else 2.
+          3. collectionId = CTF.getCollectionId(0x00..00, conditionId, ctf_index_set).
+          4. positionId   = CTF.getPositionId(wcol, collectionId).
+          5. balance      = CTF.balanceOf(holder_safe, positionId).
 
         Returns a dict:
           {"ok": True, "balance_micro": int, "position_id": int,
@@ -1261,12 +1276,15 @@ class PolymarketV2Adapter:
                 data=NEGRISK_WCOL_SELECTOR,
             )
             wcol_addr = "0x" + format(wcol_raw, "040x")[-40:]
-            # 2. getCollectionId(parentCollectionId=0, conditionId, indexSet)
+            # 2. Zeus label -> CTF bitmask: 2 (YES, slot0) -> 1<<0 = 1;
+            #    1 (NO, slot1) -> 1<<1 = 2. See CONVENTION ANTIBODY above.
+            ctf_index_set = 1 if int(index_set) == 2 else 2
+            # 3. getCollectionId(parentCollectionId=0, conditionId, ctf_index_set)
             collection_data = (
                 CTF_GET_COLLECTION_ID_SELECTOR
                 + ("00" * 32)
                 + condition_bytes.hex()
-                + format(int(index_set), "064x")
+                + format(ctf_index_set, "064x")
             )
             collection_raw = self._rpc_call(
                 self.polygon_rpc_url,
@@ -1311,6 +1329,8 @@ class PolymarketV2Adapter:
             "position_id": int(position_id),
             "wcol": wcol_addr,
             "holder": holder_addr,
+            "zeus_index_set": int(index_set),
+            "ctf_index_set": ctf_index_set,
         }
 
     def _redeem_via_safe(

@@ -39,7 +39,13 @@ def test_selectors_are_canonical():
         text="balanceOf(address,uint256)")[:4].hex()
 
 
-def _build_stub_rpc(*, balance_micro: int, position_id: int = 0xABC, wcol: str = _WCOL):
+def _build_stub_rpc(
+    *,
+    balance_micro: int,
+    position_id: int = 0xABC,
+    wcol: str = _WCOL,
+    expected_ctf_index_set: int | None = None,
+):
     """Return an rpc_call stub that answers wcol/getCollectionId/getPositionId/
     balanceOf by inspecting the selector prefix of the eth_call data."""
     calls = []
@@ -55,6 +61,16 @@ def _build_stub_rpc(*, balance_micro: int, position_id: int = 0xABC, wcol: str =
             return "0x" + wcol.removeprefix("0x").lower().rjust(64, "0")
         if selector == CTF_GET_COLLECTION_ID_SELECTOR:
             assert to == POLYGON_CTF_ADDRESS.lower()
+            if expected_ctf_index_set is not None:
+                # CONVENTION ANTIBODY (2026-06-09): the indexSet word MUST be
+                # the CTF bitmask (1<<slot), NOT the Zeus label. Zeus 2 (YES,
+                # slot0) -> CTF 1; Zeus 1 (NO, slot1) -> CTF 2. A pass-through
+                # derives the OPPOSITE outcome's position (proven on-chain
+                # against the Safe's 7 real winners, 2026-06-09).
+                assert data.lower().endswith(format(expected_ctf_index_set, "064x")), (
+                    f"getCollectionId indexSet word is not CTF bitmask "
+                    f"{expected_ctf_index_set}; calldata tail={data[-64:]}"
+                )
             return "0x" + ("11" * 32)
         if selector == CTF_GET_POSITION_ID_SELECTOR:
             assert to == POLYGON_CTF_ADDRESS.lower()
@@ -92,6 +108,34 @@ def test_probe_returns_live_balance_and_derived_position():
         CTF_GET_POSITION_ID_SELECTOR,
         ERC1155_BALANCE_OF_SELECTOR,
     ]
+
+
+def test_probe_maps_zeus_index_to_ctf_bitmask():
+    """CONVENTION ANTIBODY: Zeus 2 (YES, slot0) -> CTF indexSet 1;
+    Zeus 1 (NO, slot1) -> CTF indexSet 2.
+
+    Sed-flip: revert the mapping to a pass-through -> the stub's calldata
+    assertion fires -> RED. This is the bug class that derived the LOSING
+    token for all 7 real winners on 2026-06-09 (live=0, pid mismatch)."""
+    # Zeus YES label 2 must hit chain as CTF bitmask 1.
+    rpc, _ = _build_stub_rpc(balance_micro=1, expected_ctf_index_set=1)
+    adapter = PolymarketV2Adapter(
+        funder_address=_SAFE, signer_key="0x" + "1" * 64,
+        polygon_rpc_url="https://rpc.example", rpc_call=rpc,
+    )
+    out = adapter.get_negrisk_winning_position_balance(_CONDITION_ID, 2)
+    assert out["ok"] is True
+    assert out["zeus_index_set"] == 2 and out["ctf_index_set"] == 1
+
+    # Zeus NO label 1 must hit chain as CTF bitmask 2.
+    rpc, _ = _build_stub_rpc(balance_micro=1, expected_ctf_index_set=2)
+    adapter = PolymarketV2Adapter(
+        funder_address=_SAFE, signer_key="0x" + "1" * 64,
+        polygon_rpc_url="https://rpc.example", rpc_call=rpc,
+    )
+    out = adapter.get_negrisk_winning_position_balance(_CONDITION_ID, 1)
+    assert out["ok"] is True
+    assert out["zeus_index_set"] == 1 and out["ctf_index_set"] == 2
 
 
 def test_probe_zero_balance_is_ok_true_balance_zero():
