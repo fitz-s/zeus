@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-09
 # Authority basis: U0R_BAYES_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
 #   raw_model_forecasts), §3 (causality: previous-runs fixed-lead; single-runs live capture;
 #   run_time != source_available_at), §5 (~6mo retention); §7 antibodies (C/F unit mix ->
@@ -234,6 +234,17 @@ U0R_EXTRA_MODELS: tuple[str, ...] = (
     + tuple(REGIONAL_MODELS)
     + ("icon_seamless",)
 )
+
+# K2 (2026-06-09, curl-verified): models the open-meteo single-runs API STRUCTURALLY cannot
+# serve. cmc_gem_gdps_15km returns modelRunUnavailable even for cadence-valid 00z/12z runs —
+# the product is simply not in the single-runs archive. The forward single_runs request leg is
+# skipped for these (no known-dead requests, no 51-cities-per-cycle fail-soft noise); their
+# CURRENT value is served from the previous_runs row at the same natural key (the SAME physical
+# product their walk-forward de-bias history is fit on) via the materializer's declared
+# gem exception in _read_persisted_current_capture. gem_seamless was REJECTED as a substitute:
+# it serves HRDPS/RDPS for North-American cities — a different physical product than the GDPS
+# history (the source-identity violation class of the EB-bias wrong-set bug ff7f33dd5b).
+SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ("gem_global",)
 
 # Open-Meteo PREVIOUS-RUNS model ids keyed by the STORED model identity. The previous-runs API
 # model id can differ from both the stored identity AND the single-runs id: the anchor is stored
@@ -592,19 +603,29 @@ def download_u0r_extra_raw_inputs(
                 continue
 
             # (1) FORWARD single_runs (live capture).
-            try:
-                sv = single_fetch(
-                    model=model, latitude=t.latitude, longitude=t.longitude,
-                    timezone_name=t.timezone_name, run=cycle_utc,
-                    target_local_date=target_local_date, metric=t.metric,
-                    forecast_hours=forecast_hours,
-                )
-            except Exception as exc:
-                _LOG.warning("U0R single_runs dropped %s (fail-soft): %s", model, exc)
+            # K2 (2026-06-09, curl-verified): the single-runs API does not serve
+            # cmc_gem_gdps_15km AT ALL — even cadence-valid 00z/12z runs return
+            # modelRunUnavailable. Requesting the known-dead leg produced 51 cities of
+            # fail-soft drops per cycle masquerading as transient. gem's current value is
+            # served from its previous_runs row (leg 2, SAME GDPS product as its de-bias
+            # history) via the materializer's declared gem exception.
+            if model in SINGLE_RUNS_UNSERVABLE_MODELS:
+                dropped.append(f"{model}:single_runs_unservable")
                 sv = None
-            if sv is None:
-                dropped.append(f"{model}:single_runs")
             else:
+                try:
+                    sv = single_fetch(
+                        model=model, latitude=t.latitude, longitude=t.longitude,
+                        timezone_name=t.timezone_name, run=cycle_utc,
+                        target_local_date=target_local_date, metric=t.metric,
+                        forecast_hours=forecast_hours,
+                    )
+                except Exception as exc:
+                    _LOG.warning("U0R single_runs dropped %s (fail-soft): %s", model, exc)
+                    sv = None
+                if sv is None:
+                    dropped.append(f"{model}:single_runs")
+            if sv is not None:
                 rows.append({
                     "model": model, "city": t.city, "target_date": t.target_date,
                     "metric": t.metric, "source_cycle_time": cycle_iso,

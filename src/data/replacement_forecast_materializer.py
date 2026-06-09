@@ -601,6 +601,15 @@ def _read_persisted_current_capture(
     soft-anchor fallback). Matching on the natural key (no lead filter) makes that
     download/materialize lead-calendar mismatch unconstructable. ``lead_days`` is retained as a
     parameter for call-site compatibility but is no longer used to filter.
+
+    K2 gem_global DECLARED EXCEPTION (2026-06-09, curl-verified): the open-meteo single-runs API
+    does not serve cmc_gem_gdps_15km AT ALL (even cadence-valid 00z runs return
+    modelRunUnavailable), so gem_global can never have a single_runs row. Its current value is
+    served from its previous_runs row at the SAME natural key — the SAME GDPS product its
+    walk-forward de-bias history is fit on (source-identical; the ECMWF anchor needs an
+    ifs025->ifs9 bridge precisely because its history product != live product — gem has no such
+    mismatch). The exception is scoped to gem_global ONLY: any other model missing its
+    single_runs row stays missing/LOUD (no silent endpoint masking of a broken capture).
     """
     try:
         rows = conn.execute(
@@ -625,6 +634,29 @@ def _read_persisted_current_capture(
             continue
         # First row per model wins (deterministic ORDER BY); a model is captured once per cycle.
         out.setdefault(model, (value, rid))
+    if "gem_global" not in out:
+        try:
+            gem_rows = conn.execute(
+                """
+                SELECT raw_model_forecast_id, forecast_value_c
+                FROM raw_model_forecasts
+                WHERE city = ? AND metric = ? AND target_date = ?
+                  AND source_cycle_time = ? AND endpoint = 'previous_runs'
+                  AND model = 'gem_global'
+                ORDER BY lead_days, raw_model_forecast_id
+                """,
+                (city, metric, target_date, source_cycle_time_iso),
+            ).fetchall()
+        except Exception:
+            gem_rows = []
+        for row in gem_rows:
+            try:
+                rid = int(row[0] if not isinstance(row, sqlite3.Row) else row["raw_model_forecast_id"])
+                value = float(row[1] if not isinstance(row, sqlite3.Row) else row["forecast_value_c"])
+            except Exception:
+                continue
+            out["gem_global"] = (value, rid)
+            break
     return out
 
 
