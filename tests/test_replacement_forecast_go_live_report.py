@@ -64,6 +64,7 @@ from src.data.replacement_forecast_runtime_policy import (
     SHADOW_FLAG,
     TRADE_AUTHORITY_FLAG,
     VETO_FLAG,
+    ReplacementForecastCapitalObjectiveEvidence,
     ReplacementForecastPromotionEvidence,
     resolve_replacement_forecast_runtime_policy,
 )
@@ -117,11 +118,31 @@ def _promotion_evidence() -> ReplacementForecastPromotionEvidence:
     )
 
 
+def _capital_objective_evidence() -> ReplacementForecastCapitalObjectiveEvidence:
+    return ReplacementForecastCapitalObjectiveEvidence(
+        selected_label="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00",
+        replay_status="EMPIRICAL_WINNER",
+        after_cost_pnl=97.65,
+        source_availability_observed=True,
+        source_availability_violations=0,
+        anti_lookahead_violations=0,
+        same_clob_replay_passed=True,
+        fee_depth_fill_evidence_passed=True,
+        unit_pnl_only=False,
+        product_specific_refit_passed=True,
+    )
+
+
 def _policy(*, live: bool = False):
+    # FIX-1 AND (ITEM B): LIVE_AUTHORITY now requires BOTH a passing promotion
+    # evidence AND a passing capital-objective evidence. The live policy supplies both
+    # so go-live readiness composition tests exercise the genuine LIVE_AUTHORITY path
+    # under the conjunction law (single-proof no longer reaches LIVE_AUTHORITY).
     flags = _flags(**({TRADE_AUTHORITY_FLAG: True} if live else {}))
     return resolve_replacement_forecast_runtime_policy(
         flags,
         promotion_evidence=_promotion_evidence() if live else None,
+        capital_objective_evidence=_capital_objective_evidence() if live else None,
     )
 
 
@@ -312,6 +333,32 @@ def _capital_replay() -> dict[str, object]:
             "skipped": 475,
             "promotion_grade": False,
             "promotion_blocker": "source_available_at is assumed from decision cutoff",
+        },
+    }
+
+
+def _promotion_grade_capital_replay() -> dict[str, object]:
+    # FIX-1 AND (ITEM B): a promotion-grade, source-availability-OBSERVED capital
+    # replay carrying the EXPECTED capital-objective selected label. This is the only
+    # capital_replay shape that yields a PASSING ReplacementForecastCapitalObjectiveEvidence,
+    # which the AND law now requires (alongside passing promotion evidence) before the
+    # go-live report's runtime policy can reach LIVE_AUTHORITY.
+    return {
+        "objective": "maximize_after_cost_capital_gain_with_roi_drawdown_diagnostics",
+        "status": "EMPIRICAL_WINNER",
+        "variant_status": "STRATEGY_VARIANT_WINNER",
+        "selected_label": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00",
+        "selected_capital_gain_variant": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00:all_top1",
+        "selected_roi_variant": "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00:after_cost_edge",
+        "coverage": {
+            "evidence_grade": "shadow_economic_with_observed_source_time",
+            "rows": 287,
+            "skipped": 0,
+            "promotion_grade": True,
+            "source_availability_mode": "observed",
+            "source_availability_observed": True,
+            "source_availability_violations": 0,
+            "promotion_blocker": "",
         },
     }
 
@@ -863,6 +910,9 @@ def test_go_live_payload_derives_promotion_evidence_from_report_inputs() -> None
     payload["operator_approval_id"] = "operator-approved"
     payload["promotion_evidence"] = None
     payload["derived_promotion_evidence_inputs"] = _derived_promotion_inputs()
+    # FIX-1 AND (ITEM B): LIVE_AUTHORITY now requires BOTH proofs. Supply a passing,
+    # promotion-grade capital replay alongside the derived promotion evidence.
+    payload["capital_replay"] = _promotion_grade_capital_replay()
 
     report = build_replacement_forecast_go_live_readiness_from_payload(payload)
 
@@ -1321,6 +1371,9 @@ def test_go_live_report_cli_live_state_root_uses_derived_promotion_evidence(tmp_
     payload["operator_approval_id"] = "operator-approved"
     payload["promotion_evidence"] = None
     payload["derived_promotion_evidence_inputs"] = _derived_promotion_inputs()
+    # FIX-1 AND (ITEM B): supply a passing, promotion-grade capital replay so the
+    # both-evidence conjunction is satisfied and the CLI reaches LIVE_AUTHORITY.
+    payload["capital_replay"] = _promotion_grade_capital_replay()
     input_path = tmp_path / "readiness_payload.json"
     state_root = tmp_path / "state_root"
     input_path.write_text(json.dumps(payload), encoding="utf-8")

@@ -57,6 +57,7 @@ from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReac
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
+from src.data.replacement_forecast_runtime_policy import replacement_live_authority_evidence_gate
 from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.candidate_evaluation import CandidateEvaluation
@@ -85,6 +86,14 @@ from src.strategy.live_inference.live_admission import (
 )
 from src.strategy import market_phase_evidence as _market_phase_evidence
 from src.types.market import Bin
+# QLCB_HONESTY.md FIX-C — the EXISTING settlement σ-floor (state/settlement_sigma_floor.json,
+# 232 cells, median 3.18C realized residual) + its WMO-aware settlement-preimage bin
+# integrator. Module-level so the live replacement q_lcb floor reuses the SAME antibody
+# that already protects the canonical/EMOS path (one builder; no parallel sigma mechanism).
+from src.calibration.emos import (
+    settlement_sigma_floor,
+    bin_probability_settlement as _bin_probability_settlement,
+)
 
 
 UTC = timezone.utc
@@ -124,6 +133,13 @@ class _CandidateProof:
     q_source: str | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
+    # H2_E2E (REAUDIT_0_1.md §2/§4): carry the bundle posterior_id +
+    # probability_authority from the evidence dict
+    # (_replacement_authority_probability_and_fdr_proof :5752-5754) through to the
+    # receipt so the fill->posterior link is reconstructable in SQL. None on the
+    # canonical path. Observability only — never gates selection.
+    posterior_id: int | None = None
+    probability_authority: str | None = None
 
 
 @dataclass(frozen=True)
@@ -810,20 +826,39 @@ def event_bound_no_submit_adapter_from_trade_conn(
     )
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
-        return build_event_bound_no_submit_receipt(
-            event,
-            trade_conn=trade_conn,
-            decision_time=decision_time,
-            forecast_conn=forecast_conn,
-            topology_conn=topology_conn,
-            calibration_conn=calibration_conn,
-            get_current_level=get_current_level,
-            bankroll_usd_provider=bankroll_usd_provider,
-            portfolio_state_provider=portfolio_state_provider,
-            portfolio_reservation=portfolio_reservation,
-            locked_opportunity_conn=live_cap_conn or trade_conn,
-            replacement_forecast_hook=resolved_replacement_forecast_hook,
-        )
+        # CATEGORY ANTIBODY (2026-06-08, "database is locked" HOLDER-side kill):
+        # same trade-DB lock-hold disease as the live adapter — the reactor's single
+        # per-cycle trade_conn is read/written here via build_event_bound_no_submit_
+        # receipt and committed NOWHERE in process_pending (only closed at cycle end),
+        # so the implicit transaction pins the trade-DB WAL lock / read-mark across
+        # the whole multi-event cycle and starves concurrent trade-DB writers
+        # (substrate warm, log_trade_exit, CollateralLedger heartbeat). Commit
+        # trade_conn per event in a finally to release the lock and end the WAL-floor-
+        # pinning read txn each event (mirrors the live adapter + reactor world-DB
+        # per-event windows). In-memory reservation ledger is unaffected; no gate or
+        # decision semantics change — this only bounds the lock-hold.
+        try:
+            return build_event_bound_no_submit_receipt(
+                event,
+                trade_conn=trade_conn,
+                decision_time=decision_time,
+                forecast_conn=forecast_conn,
+                topology_conn=topology_conn,
+                calibration_conn=calibration_conn,
+                get_current_level=get_current_level,
+                bankroll_usd_provider=bankroll_usd_provider,
+                portfolio_state_provider=portfolio_state_provider,
+                portfolio_reservation=portfolio_reservation,
+                locked_opportunity_conn=live_cap_conn or trade_conn,
+                replacement_forecast_hook=resolved_replacement_forecast_hook,
+                replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+                replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+            )
+        finally:
+            try:
+                trade_conn.commit()
+            except Exception:  # noqa: BLE001 - commit is a lock-release boundary; never mask the real result/raise
+                pass
 
     # Expose the per-cycle ledger so the reactor can commit/rollback provisional
     # reservations in its post-submit phase (FIX B). The reactor reads this
@@ -860,6 +895,7 @@ def event_bound_live_adapter_from_trade_conn(
     durable_submit_outbox_enabled: bool = False,
     canary_force_taker_provider: Callable[[], bool] | None = None,
     taker_fok_fak_live_enabled: bool = False,
+    operator_arm: "OperatorArm | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -897,7 +933,7 @@ def event_bound_live_adapter_from_trade_conn(
         trade_conn=trade_conn,
     )
 
-    def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
+    def _submit_inner(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         no_submit_receipt = build_event_bound_no_submit_receipt(
             event,
             trade_conn=trade_conn,
@@ -911,6 +947,8 @@ def event_bound_live_adapter_from_trade_conn(
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
             replacement_forecast_hook=resolved_replacement_forecast_hook,
+            replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+            replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
         )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
@@ -936,6 +974,22 @@ def event_bound_live_adapter_from_trade_conn(
                 event.event_id,
                 event.causal_snapshot_id,
                 reason="EXECUTOR_BOUNDARY_MISSING",
+                proof_accepted=False,
+            )
+        # FIX-2b (PR_SPEC.md §2) OPERATOR ARM GATE: every real submit on the EDLI
+        # boundary requires the operator-arm capability token, regardless of mode
+        # (canary included). The token is constructible ONLY in main.py via
+        # ``require_operator_arm`` after asserting ``edli_live_operator_authorized is
+        # True``. Absent the token this fails closed BEFORE the live-order build /
+        # executor seam. This is an UPSTREAM guard on the EDLI adapter only; the
+        # mainline convergence node never constructs this adapter, so the 293-order
+        # mainline is unaffected.
+        if real_order_submit_enabled and operator_arm is None:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason="OPERATOR_ARM_REQUIRED",
                 proof_accepted=False,
             )
         # OPERATOR LAW (2026-06-04, Rule-4 antibody): mainstream is OBSERVATIONAL /
@@ -1109,6 +1163,39 @@ def event_bound_live_adapter_from_trade_conn(
             unit=no_submit_receipt.unit,
         )
 
+    def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
+        # CATEGORY ANTIBODY (2026-06-08, "database is locked" HOLDER-side kill):
+        # the reactor opens ONE trade connection per cycle (main.py:5231) and hands
+        # it here; sqlite3 isolation_level="" makes the first read/write inside
+        # _submit_inner open an implicit transaction that takes the trade-DB WAL
+        # write lock (on the live-order build INSERTs) / pins the WAL read-mark, and
+        # NOTHING in process_pending commits trade_conn until cycle-end close().
+        # Across a multi-event cycle (each event doing a venue HTTP POST inside the
+        # executor) that lock is held continuously, so the substrate-warm cycle,
+        # log_trade_exit, and the CollateralLedger heartbeat all block out their
+        # busy_timeout and record "database is locked" (live 2026-06-08 09:43-09:52).
+        #
+        # Fix (mirrors the reactor's WORLD-DB per-event commit windows in
+        # events/reactor.py and the harvester per-event commit in
+        # ingest/harvester_truth_writer): commit trade_conn at the END of EVERY
+        # _submit — accept, gate-reject, or raise — in a finally. This releases the
+        # trade-DB write lock AND ends the WAL-floor-pinning read transaction per
+        # event, so concurrent trade-DB writers get a write window each event and
+        # the WAL can checkpoint. The executor already commits its own venue-command
+        # write units durably; this commits the remaining adapter-level trade_conn
+        # writes (durable, intended) + closes the read txn. The provisional
+        # PortfolioReservationLedger is IN-MEMORY (sizing/portfolio_reservation.py),
+        # so the reactor's post-submit commit/rollback of reservations is unaffected
+        # by a trade_conn.commit() here. No gate is weakened: the commit only
+        # bounds the lock-hold; it changes no decision, gate, or submit semantics.
+        try:
+            return _submit_inner(event, decision_time)
+        finally:
+            try:
+                trade_conn.commit()
+            except Exception:  # noqa: BLE001 - commit is a lock-release boundary; never mask the real result/raise
+                pass
+
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
     # provisional reservations in its post-submit phase.
     _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
@@ -1208,6 +1295,8 @@ def build_event_bound_no_submit_receipt(
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -1343,6 +1432,8 @@ def build_event_bound_no_submit_receipt(
             forecast_conn=source_conn,
             calibration_conn=calibration_conn,
             decision_time=decision_time,
+            promotion_evidence=replacement_forecast_promotion_evidence,
+            capital_objective_evidence=replacement_forecast_capital_objective_evidence,
         )
     except ValueError as exc:
         return EventSubmissionReceipt(
@@ -1974,6 +2065,9 @@ def build_event_bound_no_submit_receipt(
             "q_lcb_5pct": proof.q_lcb_5pct,
             "q_lcb_calibration_source": proof.q_lcb_calibration_source,
             "q_source": proof.q_source,  # #120 calibrator provenance
+            # H2_E2E: typed posterior link carried to the receipt (None on canonical).
+            "posterior_id": proof.posterior_id,
+            "probability_authority": proof.probability_authority,
             "c_fee_adjusted": execution_price.value,
             "c_cost_95pct": proof.c_cost_95pct,
             "p_fill_lcb": proof.p_fill_lcb,
@@ -2126,6 +2220,8 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
         q_lcb_calibration_source=raw_receipt.get("q_lcb_calibration_source"),
+        posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
+        probability_authority=raw_receipt.get("probability_authority"),  # H2_E2E
         strategy_key=raw_receipt.get("strategy_key"),
         opportunity_book=raw_receipt.get("opportunity_book"),
         replacement_forecast=raw_receipt.get("replacement_forecast"),
@@ -2766,6 +2862,12 @@ def _live_decision_audit_payload(
         "unit": receipt.unit,
         "strategy_key": receipt.strategy_key,
         "q_source": receipt.q_source,
+        # H2_E2E: make the live-order aggregate self-contained — the fill->posterior
+        # link is reconstructable from the aggregate payload without JSON_EXTRACT on
+        # the receipt blob. None on canonical orders.
+        "posterior_id": receipt.posterior_id,
+        "probability_authority": receipt.probability_authority,
+        "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -4908,6 +5010,8 @@ def _generate_candidate_proofs(
     forecast_conn: sqlite3.Connection,
     calibration_conn: sqlite3.Connection,
     decision_time: datetime,
+    promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> tuple[_CandidateProof, ...]:
     native_costs = _native_costs_by_candidate_direction(family=family, snapshot_rows=snapshot_rows)
     (
@@ -4924,6 +5028,8 @@ def _generate_candidate_proofs(
         calibration_conn=calibration_conn,
         native_costs=native_costs,
         decision_time=decision_time,
+        promotion_evidence=promotion_evidence,
+        capital_objective_evidence=capital_objective_evidence,
     )
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
@@ -5109,6 +5215,13 @@ def _generate_candidate_proofs(
                     # payload instance (#149 fix), so this is the actual q_source.
                     q_source=payload.get("_edli_q_source"),
                     same_bin_yes_posterior=yes_q,
+                    # H2_E2E: carry posterior_id + probability_authority from the
+                    # probability evidence dict. Present only on the replacement_0_1
+                    # path; None (absent key) on canonical. posterior_id is emitted
+                    # as a string by the authority builder — coerce to int for the
+                    # typed column / FK to forecast_posteriors(posterior_id).
+                    posterior_id=_optional_int(probability_evidence.get("posterior_id")),
+                    probability_authority=probability_evidence.get("probability_authority"),
                 )
             )
     return tuple(proofs)
@@ -5287,6 +5400,8 @@ def _live_yes_probabilities(
     calibration_conn: sqlite3.Connection,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     decision_time: datetime,
+    promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> tuple[
     dict[str, float],
     dict[tuple[str, str], float],
@@ -5298,6 +5413,9 @@ def _live_yes_probabilities(
     # hypothesis-family scan + evaluate_live_bins). Gated by the acceptance suite in
     # tests/engine/test_event_reactor_no_bypass.py; SHADOW until #24 bias. See task Break-4.
     if event.event_type == "FORECAST_SNAPSHOT_READY":
+        # FIX-1 Insertion A: thread the settlement-evidence objects (loaded once in
+        # main.py, carried through the adapter closure) into the live 0.1 authority
+        # builder so the shared gate runs on the path that is actually live.
         replacement = _replacement_authority_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -5305,6 +5423,8 @@ def _live_yes_probabilities(
             conn=conn,
             native_costs=native_costs,
             decision_time=decision_time,
+            promotion_evidence=promotion_evidence,
+            capital_objective_evidence=capital_objective_evidence,
         )
         if replacement is not None:
             return replacement
@@ -5351,6 +5471,123 @@ def _replacement_authority_enabled() -> bool:
     except Exception:
         return False
     return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled", False))
+
+
+def _replacement_qlcb_settlement_sigma_floor_enabled() -> bool:
+    """QLCB_HONESTY.md FIX-C flag (default FALSE). When OFF the replacement q_lcb is
+    byte-identical to the raw Wilson/bundle value — the settlement σ-floor is NEVER
+    consulted, no DB/table read on this path. When ON the per-bin q_lcb is floored at
+    the realized-settlement residual (settlement_sigma_floor) so a tight member cluster
+    cannot manufacture an overconfident lower bound (iron rule #6)."""
+    try:
+        return bool(settings["edli_v1"].get("replacement_qlcb_settlement_sigma_floor_enabled", False))
+    except Exception:
+        return False
+
+
+def _replacement_settlement_grounded_lcb(
+    *,
+    mu_c: float,
+    sigma_floor_c: float,
+    sigma_model_c: float | None,
+    lower_c: float | None,
+    upper_c: float | None,
+) -> float:
+    """The settlement-grounded YES-bin q_lcb under ``N(mu_c, max(sigma_model_c, sigma_floor_c))``.
+
+    QLCB_HONESTY.md §2 Construction B root cause: the live replacement q_lcb is sized
+    from the ~0.67C member spread (Wilson over 51 AIFS votes), ignoring the ~3.2x
+    settlement underdispersion. This integrates the WMO settlement preimage of the bin
+    under a Gaussian whose σ is FLOORED at the per-(city,season,metric) realized residual
+    (settlement_sigma_floor, median 3.18C). The floor only WIDENS σ → LOWERS the q_lcb
+    (never tightens), so caller's ``min(raw_wilson, this)`` is ONLY-LOWERS by construction.
+
+    ``sigma_model_c`` (the AIFS member spread, when carried) participates via ``max`` so a
+    legitimately-wider model σ is preserved; ``None`` (the usual live case — provenance
+    carries vote frequencies, not a member std) means the floor is the effective σ. Uses
+    the SAME ``bin_probability_settlement`` (WMO round-half-up preimage) the canonical/EMOS
+    path uses, so the grounded mass matches the settlement grading semantics.
+    """
+    floor = float(sigma_floor_c)
+    if not (floor > 0.0):
+        # No usable floor — degrade to a non-binding ceiling (caller's min() keeps raw).
+        return 1.0
+    sigma_eff = floor if sigma_model_c is None else max(float(sigma_model_c), floor)
+    if not (sigma_eff > 0.0):
+        return 1.0
+    grounded = _bin_probability_settlement(float(mu_c), sigma_eff, lower_c, upper_c)
+    return float(min(max(grounded, 0.0), 1.0))
+
+
+# QLCB_HONESTY.md FIX-C honest reason code: a missing floor input on the LIVE replacement
+# q_lcb path. Surfaced as a ValueError so it propagates through _live_yes_probabilities ->
+# _generate_candidate_proofs, where the existing `except ValueError` (era.py:1388) converts
+# it into a LIVE_INFERENCE_INPUTS_MISSING no-submit receipt — i.e. the candidate is BLOCKED,
+# no order is placed. Module-level constant so the reason code is the single source of truth
+# for the production raiser AND its antibody tests.
+REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK = "REPLACEMENT_0_1_LIVE_AUTHORITY_QLCB_FLOOR_MISSING"
+
+
+def _resolve_replacement_settlement_floor_lcb(
+    *,
+    live_authority: bool,
+    city: str,
+    condition_id: str,
+    bin_id: str,
+    anchor_mu_c: float | None,
+    sigma_floor_c: float | None,
+    bounds: tuple[float | None, float | None] | None,
+) -> float | None:
+    """The per-bin settlement-grounded q_lcb ceiling, with the BLOCKER 7 mode split.
+
+    QLCB_HONESTY.md FIX-C exists because the raw Wilson q_lcb over the 51 AIFS votes ignores
+    the ~3.2x settlement underdispersion — it is an OVERCONFIDENT lower bound. The floor caps
+    it at the realized-settlement residual. When the floor is ENABLED (the caller only invokes
+    this helper in that case) but a floor input is MISSING — no anchor μ, no σ-floor cell, or
+    no bin topology — there is no settlement-grounded ceiling to compute. The mode then decides
+    the SEMANTICS of that miss (PR#400 the_path audit BLOCKER 7):
+
+      - ``live_authority=True`` (LIVE / authority / capital): degrading to the raw Wilson value
+        re-emits the exact overconfident bound the floor exists to fix, and that bound would
+        size real capital. That is UNSAFE. Raise ``ValueError`` so the candidate is BLOCKED
+        (the caller's ValueError handler turns it into a no-submit receipt). NEVER pass raw.
+
+      - ``live_authority=False`` (SHADOW / observation only, no capital at risk): keep the
+        current fail-soft behavior — emit a queryable raw-fallback log record and return
+        ``None`` so the caller keeps the raw bound for measurement.
+
+    Returns the grounded ceiling (a YES-bin probability in [0,1]) when all inputs are present,
+    in BOTH modes — the floor still floors; only the MISSING case is mode-dependent. ``None``
+    is returned ONLY in shadow mode on a missing input (live mode raises instead).
+    """
+    import logging as _logging  # module uses lazy per-fn logging imports
+    if anchor_mu_c is None or sigma_floor_c is None or bounds is None:
+        missing = (
+            "anchor_mu" if anchor_mu_c is None
+            else "sigma_floor_cell" if sigma_floor_c is None
+            else "bin_topology"
+        )
+        if live_authority:
+            # Iron rule #6 + BLOCKER 7: a missing floor on the live path BLOCKS the candidate;
+            # it must never leak the raw overconfident Wilson bound to capital sizing.
+            raise ValueError(
+                f"{REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK}:{condition_id}:bin={bin_id}:missing={missing}"
+            )
+        _logging.getLogger("zeus.replacement_qlcb_shadow").warning(
+            "replacement q_lcb floor missing (shadow: raw fallback kept) city=%s cond=%s "
+            "bin=%s missing=%s",
+            city, condition_id, bin_id, missing,
+        )
+        return None
+    return _replacement_settlement_grounded_lcb(
+        mu_c=float(anchor_mu_c),
+        sigma_floor_c=float(sigma_floor_c),
+        # AIFS member std is not carried in provenance (vote frequencies only); None → the
+        # floor IS the effective σ (not the tight, underdispersed member spread).
+        sigma_model_c=None,
+        lower_c=bounds[0],
+        upper_c=bounds[1],
+    )
 
 
 def _wilson_lower_bound(successes: float, trials: float, *, z: float = 1.645) -> float:
@@ -5411,17 +5648,81 @@ def _replacement_bound_to_c(value: object, *, unit: str) -> float | None:
     raise ValueError("replacement candidate bin unit must be C or F")
 
 
-def _replacement_yes_lcb_for_bin(replacement_bundle: object, *, bin_id: str, q_yes: float) -> float:
+def _replacement_bin_bounds_c(replacement_bundle: object, bin_id: str) -> tuple[float | None, float | None] | None:
+    """The (lower_c, upper_c) of ``bin_id`` from the bundle's bin_topology (°C).
+
+    ``None`` shoulders are open ends (e.g. an "X or below" floor bin has lower_c None);
+    the settlement-preimage integrator handles them. Returns ``None`` when the topology
+    is absent/malformed so the caller skips the floor (degrade, never crash the hot path).
+    """
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    topology = provenance.get("bin_topology")
+    if not isinstance(topology, list):
+        return None
+    for item in topology:
+        if not isinstance(item, Mapping):
+            continue
+        if str(item.get("bin_id") or "").strip() != bin_id:
+            continue
+        lower = item.get("lower_c")
+        upper = item.get("upper_c")
+        return (
+            None if lower is None else float(lower),
+            None if upper is None else float(upper),
+        )
+    return None
+
+
+def _replacement_anchor_mu_c(replacement_bundle: object) -> float | None:
+    """The soft-anchor point estimate μ (°C) the bundle was built around.
+
+    Read from ``provenance_json.anchor_value_c`` (the deterministic IFS9 anchor the AIFS
+    prior is fused with; confirmed present on all live posteriors). ``None`` when absent
+    so the floor is skipped (degrade, never crash)."""
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    value = provenance.get("anchor_value_c")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _replacement_yes_lcb_for_bin(
+    replacement_bundle: object,
+    *,
+    bin_id: str,
+    q_yes: float,
+    settlement_floor_lcb: float | None = None,
+) -> float:
+    """Raw replacement YES q_lcb (bundle q_lcb map, else Wilson over AIFS votes).
+
+    QLCB_HONESTY.md FIX-C: ``settlement_floor_lcb`` is the settlement-grounded ceiling
+    (``_replacement_settlement_grounded_lcb``); when supplied (flag ON) the returned
+    bound is ``min(raw, settlement_floor_lcb)`` so it ONLY-LOWERS — the floor can never
+    raise the q_lcb. ``None`` (the default, flag OFF) keeps the result byte-identical to
+    the pre-fix Wilson/bundle value.
+    """
+    def _apply_floor(raw: float) -> float:
+        if settlement_floor_lcb is None:
+            return raw
+        return min(raw, float(settlement_floor_lcb))
+
     q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
     if isinstance(q_lcb, Mapping) and bin_id in q_lcb:
-        return min(max(float(q_lcb[bin_id]), 0.0), max(0.0, min(float(q_yes), 1.0)))
+        return _apply_floor(min(max(float(q_lcb[bin_id]), 0.0), max(0.0, min(float(q_yes), 1.0))))
     provenance = getattr(replacement_bundle, "provenance_json", None) or {}
     aifs_probabilities = provenance.get("aifs_probabilities") if isinstance(provenance, Mapping) else None
     if isinstance(aifs_probabilities, Mapping) and bin_id in aifs_probabilities:
         try:
             member_count = float(provenance.get("aifs_member_count") or 51.0)
             successes = float(aifs_probabilities[bin_id]) * member_count
-            return min(max(float(q_yes), 0.0), _wilson_lower_bound(successes, member_count))
+            return _apply_floor(min(max(float(q_yes), 0.0), _wilson_lower_bound(successes, member_count)))
         except (TypeError, ValueError):
             return 0.0
     return 0.0
@@ -5435,6 +5736,8 @@ def _replacement_authority_probability_and_fdr_proof(
     conn: sqlite3.Connection,
     native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
     decision_time: datetime,
+    promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> tuple[
     dict[str, float],
     dict[tuple[str, str], float],
@@ -5444,6 +5747,24 @@ def _replacement_authority_probability_and_fdr_proof(
 ] | None:
     if not _replacement_authority_enabled():
         return None
+    # INSERTION A (REAUDIT_0_1.md §1.3) — the SINGLE shared settlement-evidence gate
+    # on the path that is ACTUALLY live for FORECAST_SNAPSHOT_READY. Consulted
+    # immediately AFTER the flag check and BEFORE the readiness load, so a flag-only
+    # arm can NEVER grant live 0.1 authority on absent/failing promotion+capital
+    # evidence. ``return None`` (NOT raise) is the deliberate fail-safe DEGRADE:
+    # _live_yes_probabilities falls through to the canonical kernel so live trading
+    # continues on canonical truth rather than crashing the cycle. Because this runs
+    # BEFORE payload['_edli_q_source']='replacement_0_1' is stamped, the q_source is
+    # NOT stamped on a failed-evidence cycle — which re-enables the legacy
+    # evidence-gated reactor hook as the second backstop layer (one degrade ladder,
+    # one gate; iron rule #4). Same predicate as resolve_replacement_forecast_runtime_policy.
+    permitted, _gate_reason_codes = replacement_live_authority_evidence_gate(
+        promotion_evidence,
+        capital_objective_evidence,
+    )
+    if not permitted:
+        return None
+    import logging as _logging
     from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
     from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
     from src.engine.replacement_forecast_hook_factory import _latest_replacement_readiness
@@ -5474,13 +5795,84 @@ def _replacement_authority_probability_and_fdr_proof(
     p_values: dict[tuple[str, str], float] = {}
     prefilter: dict[tuple[str, str], bool] = {}
     q_map = replacement_bundle.q
+    # QLCB_HONESTY.md FIX-C — settlement σ-floor inputs, resolved ONCE per family (flag
+    # ON only). μ is the soft-anchor point (°C); σ-floor is the per-(city,season,metric)
+    # realized-residual cell.
+    #
+    # PR#400 the_path audit BLOCKER 7 — this function is the LIVE replacement_0_1 authority
+    # builder: it is reached ONLY after `_replacement_authority_enabled()` (TRADE_AUTHORITY
+    # flag, :5627) AND `replacement_live_authority_evidence_gate` (:5640) both pass, and the
+    # q_lcb it returns is stamped probability_authority="replacement_0_1" and sizes REAL
+    # capital. So the missing-floor mode here is unconditionally live/authority/capital.
+    # A missing floor input must therefore BLOCK (never degrade to the raw, overconfident
+    # Wilson bound) — both at family-setup time and per-bin. The block raises a ValueError
+    # that the caller (_generate_candidate_proofs :1388) converts to a no-submit receipt.
+    floor_enabled = _replacement_qlcb_settlement_sigma_floor_enabled()
+    live_authority = True  # structural: see BLOCKER 7 note above (this is the live path).
+    anchor_mu_c: float | None = None
+    sigma_floor_c: float | None = None
+    if floor_enabled:
+        try:
+            anchor_mu_c = _replacement_anchor_mu_c(replacement_bundle)
+            from src.contracts.season import season_from_date
+
+            city_obj = runtime_cities_by_name().get(family.city)
+            lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+            season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
+            sigma_floor_c = settlement_sigma_floor(
+                str(family.city), season, str(family.metric).lower()
+            )
+        except Exception as _floor_exc:  # noqa: BLE001
+            # BLOCKER 7: setup failure on the LIVE path is NOT fail-soft-to-raw — keeping the
+            # raw bound for every bin would size capital on the overconfident value the floor
+            # exists to fix. Block the whole family (no submit) via the floor-missing code.
+            _logging.getLogger("zeus.replacement_qlcb_shadow").warning(
+                "replacement q_lcb floor setup failed on LIVE path (blocking, not raw): %s",
+                _floor_exc,
+            )
+            raise ValueError(
+                f"{REPLACEMENT_QLCB_FLOOR_MISSING_LIVE_BLOCK}:setup:{family.city}:{_floor_exc}"
+            ) from _floor_exc
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
         if not bin_id or bin_id not in q_map:
             raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BIN_BINDING_MISSING:{condition_id}")
         q_yes = min(max(float(q_map[bin_id]), 0.0), 1.0)
-        yes_lcb = _replacement_yes_lcb_for_bin(replacement_bundle, bin_id=bin_id, q_yes=q_yes)
+        # FIX-C + BLOCKER 7: the settlement-grounded ceiling for THIS bin (flag ON only). The
+        # mode-aware resolver RAISES on a missing floor input when live_authority=True (here,
+        # always — block the candidate, never raw); it would log+return None only in shadow.
+        settlement_floor_lcb: float | None = None
+        if floor_enabled:
+            settlement_floor_lcb = _resolve_replacement_settlement_floor_lcb(
+                live_authority=live_authority,
+                city=str(family.city),
+                condition_id=condition_id,
+                bin_id=bin_id,
+                anchor_mu_c=anchor_mu_c,
+                sigma_floor_c=sigma_floor_c,
+                bounds=_replacement_bin_bounds_c(replacement_bundle, bin_id),
+            )
+        claimed_yes_lcb = _replacement_yes_lcb_for_bin(
+            replacement_bundle, bin_id=bin_id, q_yes=q_yes, settlement_floor_lcb=None
+        )
+        yes_lcb = _replacement_yes_lcb_for_bin(
+            replacement_bundle,
+            bin_id=bin_id,
+            q_yes=q_yes,
+            settlement_floor_lcb=settlement_floor_lcb,
+        )
+        # ITEM 3 — shadow-log claimed -> floored on EVERY replacement q_lcb decision so
+        # live before/after validation data accrues from the next daemon run (the
+        # coverage-shrunk value, when licensed, is logged separately by the K3 helper).
+        _logging.getLogger("zeus.replacement_qlcb_shadow").info(
+            "replacement q_lcb floor city=%s cond=%s bin=%s claimed=%.6f floored=%.6f "
+            "floor_enabled=%s sigma_floor_c=%s anchor_mu_c=%s",
+            family.city, condition_id, bin_id, claimed_yes_lcb, yes_lcb,
+            floor_enabled,
+            "None" if sigma_floor_c is None else f"{sigma_floor_c:.4f}",
+            "None" if anchor_mu_c is None else f"{anchor_mu_c:.4f}",
+        )
         q_by_condition[condition_id] = q_yes
         _set_qlcb_provenance(
             lcb_by_direction,
@@ -5501,6 +5893,18 @@ def _replacement_authority_probability_and_fdr_proof(
         prefilter[(condition_id, "buy_yes")] = bool(yes_edge_lcb_positive)
         p_values[(condition_id, "buy_no")] = 1.0
         prefilter[(condition_id, "buy_no")] = False
+    # ITEM 2 (FIX-B) — wire the EXISTING K3 settlement-backward-coverage shrink into the
+    # LIVE replacement path (its sole prior call site was the canonical/EMOS path). SAME
+    # helper, SAME flag (edli_v1.q_lcb_settlement_coverage_gate_enabled, default FALSE):
+    # flag OFF → immediate no-op (byte-identical); flag ON → only ever LOWERS the q_lcb,
+    # fails open. No-op (INSUFFICIENT_DATA) until ≥min_n replacement markets settle —
+    # wired now so the protection is live the moment June fills resolve (one builder; no
+    # duplicate helper).
+    _maybe_apply_settlement_coverage_to_lcb(
+        family=family,
+        forecast_conn=conn,
+        lcb_by_direction=lcb_by_direction,
+    )
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",
@@ -8190,6 +8594,19 @@ def _execution_price_from_snapshot(
     selected_token_id: str,
     direction: str,
 ) -> tuple[ExecutionPrice, float, float]:
+    # ZEUS-NOBYPASS-1 fail-closed guard (re-added; orig 4f7d963606). Strictly
+    # more restrictive: only block when tradeability_status_json.executable_allowed
+    # is EXPLICITLY False. Absent/None/True -> byte-identical to pre-guard behavior
+    # (do not block snapshots that lack the field). A non-executable substrate row
+    # can never actually fill (submit-time assert_snapshot_executable already
+    # fail-closes); this removes only the phantom tradeable candidate from the
+    # proof/receipt/opportunity-book layer. Raising ValueError routes to the
+    # caller's EXECUTABLE_NATIVE_ASK_MISSING path (execution_price=None,
+    # native_quote_available=False) carrying the substrate reason.
+    tradeability_status = _json_object(row.get("tradeability_status_json") or row.get("tradeability_status") or {})
+    if tradeability_status.get("executable_allowed") is False:
+        reason = _nonnull(tradeability_status.get("reason") or "not_executable")
+        raise ValueError(f"EDLI executable snapshot marked non-executable: {reason}")
     if selected_token_id not in {str(row.get("yes_token_id") or ""), str(row.get("no_token_id") or "")}:
         raise ValueError("EDLI executable snapshot selected token mismatch")
     if _nonnull(row.get("selected_outcome_token_id")) == selected_token_id and not _snapshot_outcome_matches_selected_token(row, selected_token_id):
@@ -8512,6 +8929,18 @@ def _optional_float(value: object) -> float | None:
 def _float_or_default(value: object, default: float) -> float:
     parsed = _optional_float(value)
     return default if parsed is None else parsed
+
+
+def _optional_int(value: object) -> int | None:
+    # H2_E2E: coerce posterior_id (emitted as a string by the authority builder)
+    # to int for the typed column / FK. None on absent/blank/unparseable so the
+    # canonical path leaves the column NULL (observability only — never gates).
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _required_bound_tick_size(snap_for_depth, executable_snapshot_payload) -> str:

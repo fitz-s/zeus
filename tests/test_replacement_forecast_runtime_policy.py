@@ -4,6 +4,13 @@
 # Purpose: Protect replacement forecast runtime policy flags and evidence-gated live authority.
 # Reuse: Run before any event-reactor or daemon wiring of the replacement posterior.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+# History: 2026-06-07 — FIX-1 tightened from OR to AND (PR_SPEC.md §2 FIX-1 + ITEM B/C).
+#   LIVE_AUTHORITY now REQUIRES BOTH a passing promotion_evidence AND a passing
+#   capital_objective_evidence (different proofs: statistical validation vs empirical
+#   winner + after-cost EV). Single-evidence paths cap at SHADOW_VETO_ONLY. The
+#   contamination test that asserted production reaches LIVE_AUTHORITY without passing
+#   evidence is re-authored to the fail-closed invariant; a separate in-memory test
+#   carries the positive both-evidence -> LIVE_AUTHORITY path.
 """Replacement forecast runtime policy tests."""
 
 from __future__ import annotations
@@ -22,10 +29,6 @@ from src.data.replacement_forecast_runtime_policy import (
     ReplacementForecastPromotionEvidence,
     ReplacementForecastCapitalObjectiveEvidence,
     resolve_replacement_forecast_runtime_policy,
-)
-from src.data.replacement_forecast_go_live_report import (
-    replacement_forecast_capital_objective_evidence_from_payload,
-    replacement_forecast_promotion_evidence_from_payload,
 )
 
 
@@ -111,28 +114,62 @@ def test_configured_replacement_forecast_flags_fail_closed_without_runtime_evide
     assert policy.can_flip_direction is False
 
 
-def test_configured_production_replacement_is_live_authority_without_dangerous_escalation() -> None:
-    settings_path = Path(__file__).resolve().parents[1] / "config/settings.json"
-    evidence_path = Path(__file__).resolve().parents[1] / "state/replacement_forecast_shadow/promotion_evidence.json"
-    settings_payload = json.loads(settings_path.read_text())
-    evidence_payload = json.loads(evidence_path.read_text())
-    flags = settings_payload["feature_flags"]
-    promotion_evidence = replacement_forecast_promotion_evidence_from_payload(evidence_payload)
-    capital_objective_evidence = replacement_forecast_capital_objective_evidence_from_payload(evidence_payload)
+def test_configured_production_replacement_flags_without_evidence_are_fail_closed_not_live_authority() -> None:
+    """ITEM C re-author (PR_SPEC.md §2 FIX-1, post AND-tightening).
 
-    assert settings_payload["edli_v1"]["edli_emos_sole_calibrator_enabled"] is True
-    assert flags[SHADOW_FLAG] is True
-    assert flags[VETO_FLAG] is True
-    assert flags[TRADE_AUTHORITY_FLAG] is True
-    assert flags[KELLY_INCREASE_FLAG] is False
-    assert flags[DIRECTION_FLIP_FLAG] is False
-    assert promotion_evidence is not None
-    assert capital_objective_evidence is not None
+    The contamination this replaces asserted the configured production flags reach
+    LIVE_AUTHORITY (the f0368a188c worldview) and depended on an uncommitted
+    state/replacement_forecast_shadow/promotion_evidence.json. After FIX-1, the
+    correct invariant is fail-closed: the configured production flags WITHOUT a pair
+    of passing promotion+capital evidence objects resolve to SHADOW_VETO_ONLY (when
+    the safe flag ladder holds) or BLOCKED — NEVER LIVE_AUTHORITY. This reads ONLY
+    config/settings.json; it never touches the (possibly absent) state evidence file.
+    """
+    settings_path = Path(__file__).resolve().parents[1] / "config/settings.json"
+    settings_payload = json.loads(settings_path.read_text())
+    flags = settings_payload["feature_flags"]
+
+    # Resolve with NO evidence — exactly the daemon's posture when no passing
+    # promotion+capital pair has been produced for THIS commit.
+    policy = resolve_replacement_forecast_runtime_policy(flags)
+
+    assert policy.status != "LIVE_AUTHORITY"
+    assert policy.status in {"BLOCKED", "SHADOW_VETO_ONLY", "SHADOW_ONLY", "DISABLED"}
+    assert policy.can_initiate_trade is False
+    assert policy.can_increase_kelly is False
+    assert policy.can_flip_direction is False
+
+    if flags.get(TRADE_AUTHORITY_FLAG) is True:
+        # trade_authority armed but no evidence => fail-closed BLOCKED with the
+        # evidence-required codes load-bearing.
+        assert policy.status == "BLOCKED"
+        assert "REPLACEMENT_PROMOTION_EVIDENCE_REQUIRED" in policy.reason_codes
+        assert "REPLACEMENT_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED" in policy.reason_codes
+        assert policy.can_read_shadow_posterior is False
+        assert policy.can_apply_veto is False
+
+
+def test_configured_production_replacement_reaches_live_authority_only_with_both_passing_evidence() -> None:
+    """ITEM C positive companion: the configured production flags DO reach
+    LIVE_AUTHORITY, but ONLY when BOTH a passing promotion evidence AND a passing
+    capital-objective evidence are supplied. Both are constructed IN-MEMORY here so
+    the test does not depend on an uncommitted state file (the contamination cause)."""
+    settings_path = Path(__file__).resolve().parents[1] / "config/settings.json"
+    settings_payload = json.loads(settings_path.read_text())
+    flags = dict(settings_payload["feature_flags"])
+    # Pin the flag ladder to the trade-authority posture without the dangerous
+    # kelly/direction-flip flags (matches the configured-production invariant the
+    # original contamination test claimed, minus its illegal LIVE-without-evidence leap).
+    flags[SHADOW_FLAG] = True
+    flags[VETO_FLAG] = True
+    flags[TRADE_AUTHORITY_FLAG] = True
+    flags[KELLY_INCREASE_FLAG] = False
+    flags[DIRECTION_FLIP_FLAG] = False
 
     policy = resolve_replacement_forecast_runtime_policy(
         flags,
-        promotion_evidence=promotion_evidence,
-        capital_objective_evidence=capital_objective_evidence,
+        promotion_evidence=_passing_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
     )
 
     assert policy.status == "LIVE_AUTHORITY"
@@ -206,14 +243,28 @@ def test_replacement_forecast_trade_authority_requires_promotion_evidence() -> N
     still_blocked = resolve_replacement_forecast_runtime_policy(flags, promotion_evidence=weak_evidence)
     assert still_blocked.status == "BLOCKED"
 
-    promoted = resolve_replacement_forecast_runtime_policy(flags, promotion_evidence=_passing_evidence())
-    assert promoted.status == "LIVE_AUTHORITY"
-    assert promoted.can_initiate_trade is True
-    assert promoted.can_increase_kelly is False
-    assert promoted.can_flip_direction is False
+    # FIX-1 AND (ITEM B): a PASSING promotion evidence is NECESSARY but NOT SUFFICIENT.
+    # Without an accompanying passing capital-objective evidence the path is BLOCKED
+    # (strictly-more-restrictive than SHADOW_VETO_ONLY: it also withholds the shadow
+    # read; never weaken the existing no-evidence guard) and surfaces both the
+    # LIVE_AUTHORITY_REQUIRES_EVIDENCE sentinel and the capital-objective-required code.
+    # Overconfidence = ruin: statistical validation alone does not license real money.
+    promotion_only = resolve_replacement_forecast_runtime_policy(flags, promotion_evidence=_passing_evidence())
+    assert promotion_only.status == "BLOCKED"
+    assert promotion_only.status != "LIVE_AUTHORITY"
+    assert "REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE" in promotion_only.reason_codes
+    assert "REPLACEMENT_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED" in promotion_only.reason_codes
+    assert promotion_only.can_initiate_trade is False
+    assert promotion_only.can_increase_kelly is False
+    assert promotion_only.can_flip_direction is False
 
 
-def test_replacement_forecast_trade_authority_accepts_capital_objective_evidence() -> None:
+def test_replacement_forecast_trade_authority_capital_objective_evidence_alone_is_not_sufficient() -> None:
+    # FIX-1 AND (ITEM B): capital-objective evidence alone (the empirical-winner +
+    # after-cost-EV proof) is NECESSARY but NOT SUFFICIENT. Without an accompanying
+    # passing promotion evidence (the statistical-validation proof) the path is BLOCKED
+    # and surfaces the promotion-required code. The two are DIFFERENT proofs; real
+    # money requires both.
     flags = _flags(**{SHADOW_FLAG: True, VETO_FLAG: True, TRADE_AUTHORITY_FLAG: True})
 
     policy = resolve_replacement_forecast_runtime_policy(
@@ -221,11 +272,41 @@ def test_replacement_forecast_trade_authority_accepts_capital_objective_evidence
         capital_objective_evidence=_capital_objective_evidence(),
     )
 
-    assert policy.status == "LIVE_AUTHORITY"
-    assert policy.reason_codes == ("REPLACEMENT_CAPITAL_OBJECTIVE_LIVE_AUTHORITY",)
-    assert policy.can_initiate_trade is True
+    assert policy.status == "BLOCKED"
+    assert policy.status != "LIVE_AUTHORITY"
+    assert "REPLACEMENT_LIVE_AUTHORITY_REQUIRES_EVIDENCE" in policy.reason_codes
+    assert "REPLACEMENT_PROMOTION_EVIDENCE_REQUIRED" in policy.reason_codes
+    assert policy.can_initiate_trade is False
     assert policy.can_increase_kelly is False
     assert policy.can_flip_direction is False
+
+
+def test_replacement_forecast_trade_authority_requires_both_evidence_objects() -> None:
+    # FIX-1 AND (ITEM B) antibody: only the conjunction of BOTH passing evidence
+    # objects reaches LIVE_AUTHORITY. This is the one-evidence-only => NOT
+    # LIVE_AUTHORITY invariant stated as a single antibody.
+    flags = _flags(**{SHADOW_FLAG: True, VETO_FLAG: True, TRADE_AUTHORITY_FLAG: True})
+
+    neither = resolve_replacement_forecast_runtime_policy(flags)
+    assert neither.status != "LIVE_AUTHORITY"
+
+    promotion_only = resolve_replacement_forecast_runtime_policy(
+        flags, promotion_evidence=_passing_evidence()
+    )
+    assert promotion_only.status != "LIVE_AUTHORITY"
+
+    capital_only = resolve_replacement_forecast_runtime_policy(
+        flags, capital_objective_evidence=_capital_objective_evidence()
+    )
+    assert capital_only.status != "LIVE_AUTHORITY"
+
+    both = resolve_replacement_forecast_runtime_policy(
+        flags,
+        promotion_evidence=_passing_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
+    )
+    assert both.status == "LIVE_AUTHORITY"
+    assert both.can_initiate_trade is True
 
 
 def test_replacement_forecast_trade_authority_rejects_bad_capital_objective_evidence() -> None:
@@ -306,6 +387,67 @@ def test_replacement_forecast_trade_authority_rejects_unstructured_nested_finetu
     assert policy.status == "BLOCKED"
     assert "REPLACEMENT_PROMOTION_NESTED_BRIER_MISSING" in policy.reason_codes
     assert "REPLACEMENT_PROMOTION_PRODUCT_SPECIFIC_REFIT_MISSING" in policy.reason_codes
+
+
+def test_replacement_forecast_live_authority_surfaces_evidence_blocking_codes() -> None:
+    """FIX-1 antibody: flags-all-true + evidence-with-blocking-codes must NOT be
+    LIVE_AUTHORITY, and the evidence's own blocking codes must surface verbatim so
+    the gate is load-bearing by type rather than theater (§0.3)."""
+
+    flags = _flags(
+        **{
+            SHADOW_FLAG: True,
+            VETO_FLAG: True,
+            TRADE_AUTHORITY_FLAG: True,
+            KELLY_INCREASE_FLAG: True,
+            DIRECTION_FLIP_FLAG: True,
+        }
+    )
+
+    bad_promotion = ReplacementForecastPromotionEvidence(
+        official_days=2,
+        official_rows=100,
+        after_cost_pnl=-1.0,
+        q_lcb_coverage=0.50,
+        anti_lookahead_violations=3,
+        source_availability_violations=2,
+        unresolved_regression_clusters=1,
+        same_clob_replay_passed=False,
+        nested_walk_forward_passed=False,
+        same_clob_replay_scored_rows=0,
+        same_clob_replay_blocked_rows=5,
+        fee_depth_fill_evidence_passed=False,
+        unit_pnl_only=True,
+        nested_holdout_brier=None,
+        nested_holdout_log_loss=None,
+        nested_selected_anchor_weight=None,
+        nested_selected_anchor_sigma_c=None,
+        nested_guardrail_bucket_count=0,
+        nested_guardrail_bucket_min_rows=0,
+        product_specific_refit_passed=False,
+    )
+    bad_capital = _capital_objective_evidence(
+        selected_label="B0",
+        replay_status="SCORED",
+        source_availability_observed=False,
+    )
+
+    policy = resolve_replacement_forecast_runtime_policy(
+        flags,
+        promotion_evidence=bad_promotion,
+        capital_objective_evidence=bad_capital,
+    )
+
+    assert policy.status != "LIVE_AUTHORITY"
+    assert policy.status == "BLOCKED"
+    assert policy.can_initiate_trade is False
+    assert policy.can_increase_kelly is False
+    assert policy.can_flip_direction is False
+    # The evidence's own blocking codes must be load-bearing, not dropped.
+    for code in bad_promotion.blocking_reason_codes():
+        assert code in policy.reason_codes
+    for code in bad_capital.blocking_reason_codes():
+        assert code in policy.reason_codes
 
 
 def test_replacement_forecast_policy_requires_strict_bool_flags() -> None:

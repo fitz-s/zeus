@@ -73,6 +73,15 @@ _market_discovery_lock = threading.Lock()
 _market_substrate_refresh_lock = threading.Lock()
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+# Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
+# APScheduler interval. The refresh wall-clock budget
+# (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS, _refresh_pending_family_snapshots) MUST be
+# strictly less than this so a cycle finishes before its next trigger; otherwise
+# max_instances=1 skips every overlapping run ("maximum number of running instances
+# reached"), the executable substrate is never refreshed, and the armed daemon is
+# starved of candidates. The interval also stays within the 30s executable-price
+# freshness window. The invariant is asserted at job registration.
+_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
     "edli_shadow_no_submit",
@@ -598,6 +607,40 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
         conn.close()
     if not verified.ok:
         raise RuntimeError(verified.reason)
+
+
+@dataclass(frozen=True)
+class OperatorArm:
+    """FIX-2b (PR_SPEC.md §2) operator-arm token for the EDLI live-submit boundary.
+
+    A capability token that is constructible ONLY through ``require_operator_arm``
+    after asserting ``edli_live_operator_authorized is True``. The EDLI live submit
+    adapter requires this token (regardless of mode — canary included) before any
+    real venue submit. Absent the token, the live adapter's submit guard fails closed
+    with ``OPERATOR_ARM_REQUIRED`` and main.py selects the no-submit adapter.
+
+    Frozen + presence-typed so "armed without operator authorization" is
+    unconstructable rather than merely flag-OFF. The token is applied EXACTLY at the
+    EDLI boundary; the mainline executor (execute_final_intent / _live_order) never
+    constructs this adapter and so is untouched by this gate.
+    """
+
+    authorized: bool = True
+
+
+def require_operator_arm(edli_cfg: dict) -> "OperatorArm | None":
+    """Mint an ``OperatorArm`` token IFF the operator has explicitly authorized live.
+
+    Mirrors the strict assert pattern at ``_assert_edli_live_promotion_artifact``
+    (main.py:567): only the literal ``True`` for ``edli_live_operator_authorized``
+    authorizes — any other value (missing, False, truthy-non-bool) returns ``None``.
+    Returning ``None`` (rather than raising) lets the live-builder selector degrade to
+    the no-submit adapter fail-closed instead of crashing the daemon boot.
+    """
+
+    if edli_cfg.get("edli_live_operator_authorized") is True:
+        return OperatorArm(authorized=True)
+    return None
 
 
 def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
@@ -3059,9 +3102,22 @@ def _refresh_pending_family_snapshots(
     if not families:
         return {"status": "no_pending_families"}
 
+    # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
+    # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
+    # INTERVAL_SECONDS, 20s) and MUST stay within the 30s executable-price freshness
+    # window. The prior 29.0 default predated the reactor→warm-cycle split (blame
+    # 014408394f, sized for the old 1-min reactor interval) and was never re-aligned:
+    # a 29s budget on a 20s interval guarantees the cycle overruns its own trigger,
+    # so every subsequent run is "skipped: maximum number of running instances
+    # reached (1)" (zeus-live.err 2026-06-08) and the universe-wide executable
+    # substrate is never refreshed — coverage NONE, daemon starved of candidates.
+    # The default now fits inside the interval with headroom for scheduler dispatch
+    # and connection teardown; the internal capture reserve (snapshot_reserve_s) and
+    # Gamma slice scale down off this budget below. Env-overridable, but the
+    # interval-fit invariant is asserted at job registration (see add_job below).
     refresh_budget_s = max(
         5.0,
-        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "29.0")),
+        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
     )
     refresh_deadline = time.monotonic() + refresh_budget_s
     snapshot_reserve_s = min(
@@ -4829,6 +4885,70 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     )
 
 
+def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+    """THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (CONTINUITY_AND_WIRING.md §4 step 2,
+    U0R_BAYES_SPEC.md §6 F1). Gated by the NEW capture flag
+    ``settings['edli_v1']['replacement_0_1_u0r_multimodel_capture_enabled']`` (default FALSE),
+    SEPARATE from replacement_0_1_u0r_fusion_enabled: when ON it downloads + persists the 8 extra
+    OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
+    zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
+    center/spread/order -> the money path is byte-identical whether or not this runs. Forward,
+    daily, fail-soft (it NEVER raises into the shadow cycle). Returns None when the flag is OFF or
+    there is no forecast_db / no targets."""
+    try:
+        if not bool(settings["edli_v1"].get("replacement_0_1_u0r_multimodel_capture_enabled", False)):
+            return None
+    except Exception:
+        return None
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return None
+    try:
+        from datetime import date, datetime as _dt, timezone as _tz  # noqa: PLC0415
+
+        from scripts.download_replacement_forecast_current_targets import _parse_cycle  # noqa: PLC0415
+        from src.config import cities_by_name  # noqa: PLC0415
+        from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+            build_replacement_forecast_current_target_plan,
+        )
+        from src.data.u0r_multimodel_download import (  # noqa: PLC0415
+            U0RDownloadTarget,
+            download_u0r_extra_raw_inputs,
+        )
+
+        release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
+        cycle = _parse_cycle(None, now=_dt.now(_tz.utc), release_lag_hours=release_lag_hours)
+
+        plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        targets: list[U0RDownloadTarget] = []
+        for row in plan.rows:
+            if row.covered:
+                continue
+            city_cfg = cities_by_name.get(row.city)
+            if city_cfg is None:
+                continue
+            try:
+                lead_days = max(0, (date.fromisoformat(row.target_date) - cycle.date()).days)
+            except Exception:
+                lead_days = 0
+            targets.append(U0RDownloadTarget(
+                city=row.city, metric=row.temperature_metric, target_date=row.target_date,
+                lead_days=lead_days, latitude=float(city_cfg.lat), longitude=float(city_cfg.lon),
+                timezone_name=str(city_cfg.timezone),
+            ))
+        if not targets:
+            return {"status": "U0R_EXTRA_NO_TARGETS"}
+        return download_u0r_extra_raw_inputs(
+            forecast_db=Path(str(forecast_db)),
+            cycle=cycle,
+            targets=targets,
+            release_lag_hours=release_lag_hours,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail-soft: shadow accrual never breaks the cycle
+        logger.warning("U0R extra-model shadow capture skipped (fail-soft): %s", exc)
+        return {"status": "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
+
+
 def _sqlite_table_names(conn) -> tuple[str, ...]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
     names: list[str] = []
@@ -4870,6 +4990,14 @@ def _replacement_forecast_shadow_materialize_cycle() -> None:
         "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
     }:
         logger.info("replacement forecast current-target download report: %s", download_report)
+    # THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (forward + fixed-lead), gated by the
+    # SEPARATE replacement_0_1_u0r_multimodel_capture_enabled flag. Pure side-effect on
+    # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
+    u0r_capture_report = _download_u0r_extra_raw_inputs_if_needed(cfg)
+    if u0r_capture_report is not None and u0r_capture_report.get("status") not in {
+        "U0R_EXTRA_NO_TARGETS",
+    }:
+        logger.info("U0R extra-model shadow capture report: %s", u0r_capture_report)
     report = process_replacement_forecast_shadow_materialization_queue(
         request_dir=cfg["request_dir"],
         processed_dir=cfg["processed_dir"],
@@ -5172,6 +5300,12 @@ def _edli_event_reactor_cycle() -> None:
 
         replacement_forecast_source_fact_status = _current_live_fact_status(CURRENT_SOURCE_FACT_FILE)
         replacement_forecast_data_fact_status = _current_live_fact_status(CURRENT_DATA_FACT_FILE)
+        # FIX-2b (PR_SPEC.md §2): mint the operator-arm token IFF edli_live_operator_authorized
+        # is True. The live submit adapter is selected ONLY when (live_submit_effective AND
+        # operator_arm is not None); otherwise the no-submit adapter is chosen. This gates
+        # EVERY real submit (canary included) at the EDLI boundary by TYPE. The mainline
+        # executor never constructs this adapter, so the 293-order mainline is untouched.
+        operator_arm = require_operator_arm(edli_cfg)
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5216,8 +5350,9 @@ def _edli_event_reactor_cycle() -> None:
                     snapshot_conn=trade_conn,
                     decision_time=process_pending_decision_time,
                 ),
+                operator_arm=operator_arm,
             )
-            if live_submit_effective
+            if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(
                 trade_conn,
                 forecast_conn=forecasts_conn,
@@ -7686,10 +7821,27 @@ def main():
         # rejects as EXECUTABLE_SNAPSHOT_STALE. The refresh is scoped to pending families
         # (not a global weather scan) and max_instances=1/coalesce prevents stacked venue
         # I/O. Data-only (no orders); fail-soft.
+        # Fitz #5 interval-fit invariant: the refresh budget MUST be strictly less
+        # than the interval so the cycle cannot overrun its own trigger (the live
+        # "skipped: maximum number of running instances reached" starvation). Asserted
+        # here at registration so a future env/default drift that re-breaks the
+        # relationship fails LOUDLY at boot instead of silently re-starving coverage.
+        _warm_refresh_budget_s = max(
+            5.0,
+            float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
+        )
+        if _warm_refresh_budget_s >= _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS:
+            raise RuntimeError(
+                "EDLI market-substrate warm budget-vs-interval misconfiguration: "
+                f"ZEUS_REACTOR_REFRESH_BUDGET_SECONDS={_warm_refresh_budget_s}s must be "
+                f"STRICTLY LESS than the {_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS}s warm "
+                "interval, else every overlapping cycle is skipped and the executable "
+                "substrate is never refreshed (coverage NONE, daemon starved)."
+            )
         scheduler.add_job(
             _edli_market_substrate_warm_cycle,
             "interval",
-            seconds=20,
+            seconds=_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS,
             id="edli_market_substrate_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 1.0),
             max_instances=1,

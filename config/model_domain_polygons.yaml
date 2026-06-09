@@ -1,0 +1,62 @@
+# Created: 2026-06-08
+# Last reused or audited: 2026-06-08
+# Authority basis: U0R_BAYES_SPEC.md §3 source identities ("ICON-D2 2km EU Central-Europe
+#   polygon <=48h; AROME France polygon"), §7 antibody "regional-outside-domain (polygon)";
+#   U0R_PROOF_RESULT.md open question #3 ("in_icon_d2_box polygon is LOOSE ... tighten to the
+#   true Central-Europe polygon so the domain gate and the data-presence gate AGREE before any
+#   wiring"). The proof's loose bounding box [37..71N, -17..37E] flagged Madrid/Warsaw/Helsinki/
+#   Istanbul in_box with no ICON-D2 data; this file uses the TIGHTENED physical model domains.
+#
+# THE STRUCTURAL DECISION (Fitz #1/#4): the regional gate is a polygon, not 15 if-statements.
+# Out-of-domain regionals are made absent at config level (antibody), composed with the runtime
+# data-presence gate (fail-soft drop) so a regional can ONLY enter fusion when BOTH agree.
+# Polygon membership is point-in-polygon over (lat, lon) of the city's settlement coordinate.
+#
+# IMPORTANT: presence here is domain plumbing only. It does NOT enable any source, fetch, or
+# trade authority. ICON-D2/AROME stay shadow-only / deferred per U0R_PROOF_RESULT.md until an
+# ingest+calibration path exists. The U0R fusion flag (replacement_0_1_u0r_fusion_enabled) is
+# default-OFF; with it OFF this file is inert.
+
+schema: model_domain_polygons_v1
+
+domains:
+  # DWD ICON-D2 2km rapid-update nest. Tightened to the official DWD ICON-D2 regular-grid
+  # bounding extent (the rotated-pole nest's lat/lon hull), NOT the proof's loose box. Cities
+  # outside this hull (Madrid -3.56E/40.47N, Helsinki 60.33N, Istanbul 28.74E/41.26N, Moscow
+  # 37.26E) are OUT-OF-DOMAIN -> regional ABSENT (zero-leak). Paris/London/Milan/Munich/
+  # Amsterdam/Warsaw fall inside.
+  icon_d2:
+    model_name: icon_d2
+    region_label: central_europe
+    max_lead_days: 1          # spec §3: regional expert <=48h; gate at lead<=1 (D1 proven lead-1 only)
+    # Closed ring (lon, lat) pairs, last == first. Rectangular hull of the DWD ICON-D2 nest.
+    polygon:
+      - [-3.94, 43.18]
+      - [20.34, 43.18]
+      - [20.34, 58.08]
+      - [-3.94, 58.08]
+      - [-3.94, 43.18]
+    bounding_box:
+      lat_min: 43.18
+      lat_max: 58.08
+      lon_min: -3.94
+      lon_max: 20.34
+
+  # Météo-France AROME-France-HD 1.3km. Official AROME-France domain hull (metropolitan France
+  # + near surroundings). Proof france_cities == [Paris] only; this polygon keeps the France gate
+  # explicit and physical rather than a string match on city name.
+  meteofrance_arome_france_hd:
+    model_name: meteofrance_arome_france_hd
+    region_label: france
+    max_lead_days: 1
+    polygon:
+      - [-5.20, 41.30]
+      - [9.60, 41.30]
+      - [9.60, 51.10]
+      - [-5.20, 51.10]
+      - [-5.20, 41.30]
+    bounding_box:
+      lat_min: 41.30
+      lat_max: 51.10
+      lon_min: -5.20
+      lon_max: 9.60

@@ -524,15 +524,81 @@ def _configured_promotion_evidence(root: Path):
         configured_path = root / configured_path
     try:
         payload = json.loads(configured_path.read_text(encoding="utf-8"))
-        if not isinstance(payload, Mapping):
-            return None, None, "INVALID:NOT_OBJECT"
-        promotion = replacement_forecast_promotion_evidence_from_payload(payload)
-        capital_objective = replacement_forecast_capital_objective_evidence_from_payload(payload)
     except FileNotFoundError:
         return None, None, "MISSING"
     except Exception as exc:  # noqa: BLE001 - diagnostic fail-closed status
         return None, None, f"INVALID:{exc.__class__.__name__}"
-    return promotion, capital_objective, "READY"
+    if not isinstance(payload, Mapping):
+        return None, None, "INVALID:NOT_OBJECT"
+    # The evidence file may be either a full go-live payload (carrying
+    # refit/before-after/capital-replay context) OR the flat evidence-only shape
+    # {promotion_evidence:{...}, capital_objective_evidence:{...}}. Try the rich
+    # go-live parse first; fall back to the flat shape so a standalone evidence
+    # artifact still feeds the load-bearing resolver (FIX-1, §0.3).
+    try:
+        promotion = replacement_forecast_promotion_evidence_from_payload(payload)
+        capital_objective = replacement_forecast_capital_objective_evidence_from_payload(payload)
+        return promotion, capital_objective, "READY"
+    except Exception:  # noqa: BLE001 - fall through to the flat-shape loader
+        promotion = _flat_promotion_evidence(payload.get("promotion_evidence"))
+        capital_objective = _flat_capital_objective_evidence(payload.get("capital_objective_evidence"))
+        if promotion is None and capital_objective is None:
+            return None, None, "INVALID:UNRECOGNIZED_SHAPE"
+        return promotion, capital_objective, "READY"
+
+
+def _flat_promotion_evidence(raw: object):
+    from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
+
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        return ReplacementForecastPromotionEvidence(
+            official_days=int(raw.get("official_days", 0)),
+            official_rows=int(raw.get("official_rows", 0)),
+            after_cost_pnl=float(raw.get("after_cost_pnl", 0.0)),
+            q_lcb_coverage=float(raw.get("q_lcb_coverage", 0.0)),
+            anti_lookahead_violations=int(raw.get("anti_lookahead_violations", 0)),
+            source_availability_violations=int(raw.get("source_availability_violations", 0)),
+            unresolved_regression_clusters=int(raw.get("unresolved_regression_clusters", 0)),
+            same_clob_replay_passed=bool(raw.get("same_clob_replay_passed", False)),
+            nested_walk_forward_passed=bool(raw.get("nested_walk_forward_passed", False)),
+            same_clob_replay_scored_rows=int(raw.get("same_clob_replay_scored_rows", 0)),
+            same_clob_replay_blocked_rows=int(raw.get("same_clob_replay_blocked_rows", 0)),
+            fee_depth_fill_evidence_passed=bool(raw.get("fee_depth_fill_evidence_passed", False)),
+            unit_pnl_only=bool(raw.get("unit_pnl_only", True)),
+            nested_holdout_brier=None if raw.get("nested_holdout_brier") is None else float(raw.get("nested_holdout_brier")),
+            nested_holdout_log_loss=None if raw.get("nested_holdout_log_loss") is None else float(raw.get("nested_holdout_log_loss")),
+            nested_selected_anchor_weight=None if raw.get("nested_selected_anchor_weight") is None else float(raw.get("nested_selected_anchor_weight")),
+            nested_selected_anchor_sigma_c=None if raw.get("nested_selected_anchor_sigma_c") is None else float(raw.get("nested_selected_anchor_sigma_c")),
+            nested_guardrail_bucket_count=int(raw.get("nested_guardrail_bucket_count", 0)),
+            nested_guardrail_bucket_min_rows=int(raw.get("nested_guardrail_bucket_min_rows", 0)),
+            product_specific_refit_passed=bool(raw.get("product_specific_refit_passed", False)),
+        )
+    except Exception:  # noqa: BLE001 - fail-closed on malformed evidence
+        return None
+
+
+def _flat_capital_objective_evidence(raw: object):
+    from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
+
+    if not isinstance(raw, Mapping):
+        return None
+    try:
+        return ReplacementForecastCapitalObjectiveEvidence(
+            selected_label=str(raw.get("selected_label") or ""),
+            replay_status=str(raw.get("replay_status") or ""),
+            after_cost_pnl=float(raw.get("after_cost_pnl", 0.0)),
+            source_availability_observed=bool(raw.get("source_availability_observed", False)),
+            source_availability_violations=int(raw.get("source_availability_violations", 0)),
+            anti_lookahead_violations=int(raw.get("anti_lookahead_violations", 0)),
+            same_clob_replay_passed=bool(raw.get("same_clob_replay_passed", False)),
+            fee_depth_fill_evidence_passed=bool(raw.get("fee_depth_fill_evidence_passed", False)),
+            unit_pnl_only=bool(raw.get("unit_pnl_only", True)),
+            product_specific_refit_passed=bool(raw.get("product_specific_refit_passed", False)),
+        )
+    except Exception:  # noqa: BLE001 - fail-closed on malformed evidence
+        return None
 
 
 def build_replacement_forecast_live_dry_run_report(
@@ -542,7 +608,16 @@ def build_replacement_forecast_live_dry_run_report(
         raise TypeError("request must be ReplacementForecastLiveDryRunInput")
     root = Path(request.root)
     flags = {key: bool(request.runtime_flags.get(key, False)) for key in REQUIRED_FLAGS}
-    policy = resolve_replacement_forecast_runtime_policy(flags)
+    # FIX-1 (§0.3): the dry-run must resolve the SAME evidence-gated authority the
+    # daemon does. The configured evidence loader existed but was never consumed
+    # (dead code post-f0368a188c), leaving the policy resolved from flags alone.
+    # Feed the configured evidence in; absent/invalid evidence resolves to BLOCKED.
+    promotion_evidence, capital_objective_evidence, _evidence_status = _configured_promotion_evidence(root)
+    policy = resolve_replacement_forecast_runtime_policy(
+        flags,
+        promotion_evidence=promotion_evidence,
+        capital_objective_evidence=capital_objective_evidence,
+    )
     forecast_db = root / "state" / "zeus-forecasts.db"
     world_db = root / "state" / "zeus-world.db"
     trade_db = root / "state" / "zeus_trades.db"

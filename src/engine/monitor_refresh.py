@@ -35,6 +35,7 @@ from src.contracts import (
 )
 from src.contracts.day0_observation_context import BoundClassification, classify_bound
 from src.contracts.exceptions import ObservationUnavailableError
+from src.contracts.probability_arithmetic import one_minus
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.executable_forecast_reader import read_executable_forecast
@@ -1183,9 +1184,11 @@ def _refresh_ens_member_counting(
     )
     if anomaly_discount < 1.0:
         alpha *= anomaly_discount
+        # Fraction of alpha removed is (1 - anomaly_discount); de-obfuscated from
+        # the value-identical (1/x - 1) * x that 16c35e7445 wrote (§0.2 / FIX-5a).
         anomaly_removed = (
             1.0 if anomaly_discount <= 0.0
-            else ((1.0 / anomaly_discount) - 1.0) * anomaly_discount
+            else one_minus(anomaly_discount)
         )
         applied.append("persistence_anomaly_discount")
         logger.info(
@@ -1656,6 +1659,10 @@ def _refresh_day0_observation(
         temperature_metric=temperature_metric,
         target_d=target_d,
         observation_time=_day0_observation_field(obs, "observation_time"),
+        # ThePath P1 ITEM 1: honest obs-availability clock from the live obs ctx
+        # (observation_client stamps it = now()-at-fetch). Read verbatim; the
+        # helper records NULL + 'UNVERIFIED' when absent (never synthesizes now()).
+        observation_available_at=_day0_observation_field(obs, "observation_available_at"),
     )
 
     return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
@@ -1717,10 +1724,18 @@ def _maybe_write_day0_nowcast(
     temperature_metric: "MetricIdentity",
     target_d: "date",
     observation_time: "str | None",
+    observation_available_at: "str | None" = None,
 ) -> None:
     """Attempt a day0_nowcast_runs write if position carries a market_slug and
     hours_remaining <= 6.  Fail-soft: any write error is logged as WARNING
     and swallowed so the monitor loop is never interrupted.
+
+    observation_available_at: pre-extracted from the live Day0ObservationContext
+        (observation_client.Day0ObservationContext.observation_available_at =
+        now()-at-fetch). ThePath P1 ITEM 1 (2026-06-07): threaded to persist the
+        honest obs-availability clock per nowcast run. When absent/empty, the
+        write records NULL + provenance 'UNVERIFIED' — NEVER a synthesized now().
+        Default None keeps every existing call signature valid.
 
     Guards:
       - position.market_slug must be non-empty (positions from v1-vintage
@@ -1763,6 +1778,13 @@ def _maybe_write_day0_nowcast(
             else str(temperature_metric)
         )
 
+        # ThePath P1 ITEM 1: thread the honest obs-availability clock. The live
+        # observation_client stamps observation_available_at = now()-at-fetch.
+        # Treat empty string (the contract default when no fetch produced one) as
+        # absent -> NULL + 'UNVERIFIED'. NEVER synthesize now() here.
+        _obs_avail = observation_available_at or None
+        _obs_provenance = "live_fetch" if _obs_avail else "UNVERIFIED"
+
         write_nowcast_run(
             market_slug=position.market_slug,
             temperature_metric=_metric_str,
@@ -1774,6 +1796,8 @@ def _maybe_write_day0_nowcast(
             hours_remaining=hours_remaining,
             daypart=temporal_context.daypart,
             source="live_nowcast",
+            observation_available_at=_obs_avail,
+            obs_availability_provenance=_obs_provenance,
         )
         logger.debug(
             "T5 nowcast write OK: %s market_slug=%s hours_remaining=%.1f daypart=%s fit_run_id=%s",
@@ -1898,7 +1922,9 @@ def _check_persistence_anomaly(
                 return 1.0  # Too few samples to trust the frequency estimate
             # Scale discount: 10% at n=30, grows linearly to 30% at n>=100
             discount_magnitude = min(0.30, 0.10 + 0.20 * (n - 30) / 70.0)
-            return (1.0 / discount_magnitude - 1.0) * discount_magnitude
+            # Remaining multiplier after the discount is (1 - discount_magnitude);
+            # de-obfuscated from the value-identical (1/x - 1) * x (§0.2 / FIX-5a).
+            return one_minus(discount_magnitude)
         else:
             logger.debug(
                 "PERSISTENCE_NO_DATA: world.temp_persistence has no row for %s/%s/bucket=%s — returning 1.0 (no discount)",

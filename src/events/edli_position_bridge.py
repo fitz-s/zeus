@@ -602,6 +602,55 @@ def _open_intent_event_exists(conn: sqlite3.Connection, position_id: str) -> boo
     return row is not None
 
 
+def _posterior_id_for_final_intent(
+    conn: sqlite3.Connection, final_intent_id: str | None
+) -> int | None:
+    """Fail-soft lookup of the driving posterior_id for an entry fill.
+
+    H2_E2E (REAUDIT_0_1.md §2/§4): the only durable, typed link between a
+    replacement_0_1 order and the posterior that drove it is
+    ``edli_no_submit_receipts.posterior_id`` (populated by the reactor on the
+    NO_SUBMIT receipt; ``no_submit_receipts.py:165``). The reconcile here joins
+    that row by ``final_intent_id`` so ``execution_fact.posterior_id`` is
+    populated from the actually-written source rather than left dead.
+
+    Observability ONLY and STRICTLY FAIL-SOFT: any miss (no final_intent_id, no
+    receipts table, no matching row, NULL posterior_id, or ANY sqlite error)
+    returns ``None`` so the fill is never blocked or altered. ``log_execution_fact``
+    COALESCEs the value, so passing None never NULLs an existing link, and a
+    canonical (non-replacement) order whose receipt has NULL posterior_id simply
+    leaves the column NULL.
+    """
+    if not final_intent_id:
+        return None
+    try:
+        table = _resolved_table(conn, "edli_no_submit_receipts")
+        row = conn.execute(
+            f"""
+            SELECT posterior_id
+            FROM {table}
+            WHERE final_intent_id = ?
+              AND posterior_id IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (final_intent_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        # Receipts table absent (single-table unit conn) or any read error:
+        # fail-soft. The posterior link is observability only — never a gate.
+        return None
+    if row is None:
+        return None
+    value = row["posterior_id"] if isinstance(row, sqlite3.Row) else row[0]
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def materialize_position_current_from_edli_fill(
     conn: sqlite3.Connection,
     aggregate_id: str,
@@ -695,6 +744,19 @@ def materialize_position_current_from_edli_fill(
         upsert_position_current(conn, projection)
         created = False
 
+    # H2_E2E: populate execution_fact.posterior_id at the PRIMARY entry-fill
+    # reconcile from the actually-written receipt source (edli_no_submit_receipts,
+    # joined on the real final_intent_id). Fail-soft: None on any miss, COALESCEd
+    # in log_execution_fact so it never NULLs an existing link and never gates the
+    # fill. Only the primary entry-fill site is wired; the exit/recovery callers
+    # (exit_lifecycle / exchange_reconcile / command_recovery) legitimately leave
+    # posterior_id NULL — exits/recoveries are not driven by a replacement_0_1
+    # posterior and have no NO_SUBMIT receipt to join, so there is nothing to
+    # carry (and COALESCE preserves the entry-set link if one later re-upserts).
+    _entry_posterior_id = _posterior_id_for_final_intent(
+        conn, identity["final_intent_id"]
+    )
+
     log_execution_fact(
         conn,
         intent_id=identity["final_intent_id"] or identity["execution_command_id"] or aggregate_id,
@@ -711,6 +773,7 @@ def materialize_position_current_from_edli_fill(
         fill_quality=1.0,
         venue_status="CONFIRMED",
         terminal_exec_status="filled",
+        posterior_id=_entry_posterior_id,
     )
 
     return {

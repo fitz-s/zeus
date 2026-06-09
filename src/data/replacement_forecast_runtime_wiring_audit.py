@@ -9,6 +9,7 @@ from typing import Mapping
 
 from src.data.replacement_forecast_live_dry_run import (
     ReplacementForecastLiveDryRunInput,
+    _configured_promotion_evidence,
     build_replacement_forecast_live_dry_run_report,
 )
 from src.data.replacement_forecast_live_switch_surface import REFIT_HANDOFF_FILE
@@ -252,7 +253,15 @@ def build_replacement_forecast_runtime_wiring_audit(
     repo = Path(repo_root)
     settings_payload = _settings_payload(root)
     flags = _feature_flags(settings_payload, assume_shadow_veto=assume_shadow_veto)
-    policy = resolve_replacement_forecast_runtime_policy(flags)
+    # FIX-1 (§0.3): reason about the SAME evidence-gated authority the daemon makes.
+    # Reuse the single canonical evidence loader (shared with the live dry-run) so
+    # the audit and the dry-run can never drift on which evidence gates authority.
+    promotion_evidence, capital_objective_evidence, _evidence_status = _configured_promotion_evidence(root)
+    policy = resolve_replacement_forecast_runtime_policy(
+        flags,
+        promotion_evidence=promotion_evidence,
+        capital_objective_evidence=capital_objective_evidence,
+    )
     dry_run = build_replacement_forecast_live_dry_run_report(
         ReplacementForecastLiveDryRunInput(
             root=root,

@@ -675,6 +675,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/calibration_bakeoff_v2.py",  # read_only: corrected bake-off (RAW on live-served vector, OOS-gated); writes JSON/txt only
         "scripts/backfill_settlement_outcomes_canonical_2026_06_02.py",  # RO dry-run default; RW settlement_outcomes only with --execute, atomic SAVEPOINT (zeus-forecasts.db)
         "scripts/backfill_settlement_unit_2026_06_03.py",  # operator_invoked: RO dry-run default; RW settlement_outcomes.settlement_unit only with --commit, atomic SAVEPOINT (zeus-forecasts.db, W2)
+        # --- U0R-Bayes walk-forward history seed (2026-06-08, operator-invoked offline) ---
+        "scripts/backfill_u0r_history_from_b0.py",  # operator_invoked: RW raw_model_forecasts (SHADOW_ONLY, training_allowed=0) only; INSERT OR IGNORE idempotent; never money-path; --db REQUIRED; B0 seed 2026-06-08
         # --- read-only scripts: verified SELECT-only, named in PR #86 ---
         "scripts/attribution_drift_weekly.py",          # read_only (PR #86)
         "scripts/audit_divergence_exit_counterfactual.py",  # read_only (PR #86)
@@ -837,6 +839,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/mc_entry_gate.py",  # read_only_gate: P0 opens world DB mode=ro; P2 uses an isolated :memory: DB for the reader-behaviour check; never writes any production DB
         # --- one-shot admin: drain stale PARTIAL FSR events from opportunity_events (2026-05-31) ---
         "scripts/purge_partial_fsr_events.py",  # operator_invoked: drops/restores no_delete+no_update triggers; DELETE PARTIAL FSR rows only; ran once 2026-05-31 (941 rows); idempotent
+        # --- ThePath P1 (2026-06-07): activate the Day0 nowcast lane / start the obs-timing clock ---
+        "scripts/persist_day0_horizon_identity_fit.py",  # operator_invoked + already_guarded: the LIVE write goes through write_platt_fit -> get_forecasts_connection(LIVE) under db_writer_lock(LIVE); the bare sqlite3.connect() sites are ONLY the read-back/--verify (file:...?mode=ro uri, SELECT-only) and the --dry-run TEMP copy (throwaway file, never a canonical DB); persists a documented CONSERVATIVE/IDENTITY HorizonPlattFit (zero claimed skill)
     }
 )
 

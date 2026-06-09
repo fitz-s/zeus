@@ -716,7 +716,7 @@ state_machines:
       are order-fact states on the CLOB orderbook, distinct from the venue_command
       lifecycle. CANCEL_UNKNOWN is the fail-safe state when the cancel-confirmation
       WS message is lost (order truth reducer sets this). Not emitted on the happy
-      path. Added by PR #399.
+      path.
     states:
       - CANCEL_UNKNOWN
 
@@ -725,7 +725,7 @@ state_machines:
     description: >
       Reason tag written into MonitorResult.exit_reason when a blocking review
       fact is found for a position. Not a lifecycle state; used exclusively for
-      monitor-skip telemetry. Added by PR #399.
+      monitor-skip telemetry.
     states:
       - REVIEW_REQUIRED_INVALID_ENTRY_PROOF
 
@@ -735,9 +735,26 @@ state_machines:
       Fallback-mode label returned by the EDLI entry calibration identity
       resolver when no matching calibration identity can be found for the
       current position. Used only for diagnostic telemetry, never for
-      trade decisions. Added by PR #399.
+      trade decisions.
     states:
       - EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK
+
+  u0r_fusion_method:
+    owner: src/forecast/u0r_bayes.py
+    description: >
+      U0R-Bayes fusion-method labels. ANCHOR_FALLBACK means all extra models are
+      absent so the posterior is the anchor prior. Not venue command states.
+    states:
+      - ANCHOR_FALLBACK
+
+  u0r_backfill_status:
+    owner: scripts/backfill_u0r_history_from_b0.py
+    description: >
+      Status labels written to the backfill output manifest. Script-only, never on
+      the live daemon path. Registered to prevent ACK-prefix false positives.
+    states:
+      - U0R_BACKFILL_DRY_RUN
+      - U0R_BACKFILL_SEEDED
 
 schema_objects:
   authority_fabricating_defaults:

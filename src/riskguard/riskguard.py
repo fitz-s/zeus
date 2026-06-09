@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-06-08
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -14,6 +14,12 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   try/finally to guarantee conn.close() on every exit path.
 #   2026-05-17 live lock remediation: trade/world metric lock loss degrades to
 #   a fresh DATA_DEGRADED risk_state row, not stale RED force-exit.
+#   2026-06-08 thepath/audit-realign iron #4/#6 fix: (1) init_risk_db re-applies
+#   busy_timeout after executescript (Fitz #5 strip-trap); (2) lock-attestation
+#   FAILS CONSERVATIVE — max(previous_level, DATA_DEGRADED), never re-stamps a
+#   fail-open GREEN, never weakens RED; (3) get_current_level() floors a degraded
+#   row (riskguard_degraded_reason) to DATA_DEGRADED so the SINGLE authority never
+#   surfaces a degraded GREEN as clean — kills the status-vs-gate split-brain.
 """
 
 import json
@@ -938,6 +944,18 @@ def init_risk_db(conn: sqlite3.Connection) -> None:
             checked_at TEXT NOT NULL
         );
     """)
+    # CATEGORY ANTIBODY (Fitz #5): executescript() can NULL the C-level busy
+    # handler on some Python/SQLite builds, leaving this risk_state.db handle at a
+    # 0 ms wait budget so the immediately-following reads/writes (every tick(),
+    # get_current_level(), lock-attestation) raise "database is locked" instead of
+    # waiting. Re-apply the SQL-level busy_timeout here so the factory's wait
+    # budget survives the schema-ensure. Best-effort: a stub conn in tests may not
+    # implement execute(), so failure is swallowed (the factory already set it).
+    try:
+        from src.state.db import _apply_busy_timeout as _apply_db_busy_timeout
+        _apply_db_busy_timeout(conn)
+    except Exception:  # noqa: BLE001 - never let timeout re-apply break schema init
+        pass
     # B5: Add force_exit_review column if missing (code-level migration, no raw ALTER)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(risk_state)").fetchall()}
     if "force_exit_review" not in cols:
@@ -1021,16 +1039,39 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
                 "full_metrics_status": "unavailable_no_fresh_full_risk_row",
             }
         else:
-            level = RiskLevel(previous_full["level"])
+            # FAIL CONSERVATIVE (AGENTS.md iron #6): a locked dependency means
+            # RiskGuard CANNOT compute fresh risk this tick. Re-stamping the
+            # previous full level verbatim is FAIL-OPEN whenever that level was
+            # GREEN — it asserts "all clear" through a window where risk is
+            # unknowable. Instead, clamp the persisted level to the conservative
+            # floor: max(previous_level, DATA_DEGRADED). This NEVER weakens a
+            # stronger halt (RED/ORANGE/YELLOW survive — overall_level ordering)
+            # and NEVER lets a GREEN pass (GREEN floors to DATA_DEGRADED, which
+            # blocks new entries while preserving held positions). The entry gate
+            # admits only on RiskLevel.GREEN, so any floored level blocks entries.
+            previous_level = RiskLevel(previous_full["level"])
+            level = overall_level(previous_level, RiskLevel.DATA_DEGRADED)
+            clamped = level != previous_level
+            # force_exit_review is a halt signal — carry it forward (never clear it
+            # under degraded truth); a previous RED keeps its force-exit posture.
             force_exit_review = int(previous_full["force_exit_review"] or 0)
             details = {
-                "status": "dependency_db_locked_previous_risk_level_preserved",
+                "status": (
+                    "dependency_db_locked_previous_risk_level_preserved"
+                    if not clamped
+                    else "dependency_db_locked_clamped_conservative"
+                ),
                 "riskguard_degraded_reason": "dependency_db_locked",
                 "bankroll_truth_source": "polymarket_wallet",
                 "dependency_db_lock_error": str(exc),
-                "full_metrics_status": "locked_previous_fresh_level_preserved",
+                "full_metrics_status": (
+                    "locked_previous_fresh_level_preserved"
+                    if not clamped
+                    else "locked_previous_green_floored_to_data_degraded"
+                ),
                 "previous_full_risk_level": previous_full["level"],
                 "previous_full_risk_checked_at": previous_full["checked_at"],
+                "conservative_floor_applied": clamped,
             }
         risk_conn.execute(
             """
@@ -1553,12 +1594,23 @@ def get_current_level() -> RiskLevel:
     """Read current risk level from risk_state.db.
 
     R4: Fail-closed — if DB error or stale (>5 min), return RED.
+
+    SINGLE AUTHORITY (AGENTS.md iron #4): this is the ONE level both the daemon
+    entry gate (riskguard_allows_new_entries) and the status risk block consume.
+    A risk_state row that carries a ``riskguard_degraded_reason`` is a degraded
+    attestation — RiskGuard could NOT compute fresh full metrics when it was
+    written. Surfacing such a row's stored level verbatim would let a degraded
+    GREEN read as a clean GREEN and admit entries (the split-brain / read-side
+    fail-open). Apply the conservative floor max(level, DATA_DEGRADED) to any
+    degraded row so the authority NEVER reports clean GREEN when truth is
+    degraded, while never weakening a stronger halt (RED/ORANGE/YELLOW survive).
     """
     try:
         conn = get_connection(RISK_DB_PATH, write_class="live")
         init_risk_db(conn)
         row = conn.execute(
-            "SELECT level, checked_at FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+            "SELECT level, checked_at, details_json "
+            "FROM risk_state ORDER BY checked_at DESC LIMIT 1"
         ).fetchone()
         conn.close()
 
@@ -1575,7 +1627,26 @@ def get_current_level() -> RiskLevel:
                            int(age_seconds))
             return RiskLevel.RED
 
-        return RiskLevel(row["level"])
+        stored_level = RiskLevel(row["level"])
+
+        # Conservative floor for degraded attestations (read-side split-brain kill).
+        try:
+            details = json.loads(row["details_json"]) if row["details_json"] else {}
+        except (json.JSONDecodeError, TypeError):
+            details = {}
+        if isinstance(details, dict) and details.get("riskguard_degraded_reason"):
+            floored = overall_level(stored_level, RiskLevel.DATA_DEGRADED)
+            if floored != stored_level:
+                logger.warning(
+                    "RiskGuard latest row is degraded (reason=%s) with level=%s; "
+                    "surfacing conservative floor %s to the entry gate / status.",
+                    details.get("riskguard_degraded_reason"),
+                    stored_level.value,
+                    floored.value,
+                )
+            return floored
+
+        return stored_level
 
     except Exception as e:
         # R4: DB error = fail closed → RED

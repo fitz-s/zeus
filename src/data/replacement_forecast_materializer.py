@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import hashlib
 from dataclasses import asdict, dataclass
@@ -411,6 +412,394 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
     return int(row[0] if not isinstance(row, sqlite3.Row) else row["anchor_id"])
 
 
+def _replacement_eb_bias_shift_c(
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> float | None:
+    """Flag-gated per-city EB bias shift (degC) for the replacement_0_1 center.
+
+    P2_BLEND.md §3,§4,§5. Returns the degC shift to subtract from the AIFS member votes
+    and the OM9 anchor center BEFORE the zero-prior veto, or None when the flag is OFF or
+    no VERIFIED promoted bias exists (FAIL-CLOSED). REUSES the already-built
+    zeus-world.model_bias_ens via src/calibration/replacement_eb_bias (ONE-BUILDER — no
+    parallel store). Self-calibrating: the shift is whatever the accruing per-city VERIFIED
+    residuals currently say (no hardcoded magnitude).
+
+    The bias row is keyed by the LIVE forecast product the bias was fit on
+    (model_bias_ens.live_data_version = the OpenData ECMWF ENS product, the same ECMWF
+    family as AIFS — P2_BLEND.md §1b), NOT the soft-anchor posterior data_version. The key
+    + the cell unit + season come from config so this surface holds no magic constants. Any
+    failure / missing config / missing row degrades to None (no correction). Never raises.
+    """
+    try:
+        from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
+
+        edli_cfg = settings["edli_v1"]
+        if not bool(edli_cfg.get("replacement_0_1_eb_bias_correction_enabled", False)):
+            return None
+
+        # live_data_version the promoted bias was fit on (OpenData ENS product family).
+        # Product-keyed (HIGH vs LOW); resolved from config, fail-closed if absent.
+        ldv_map = edli_cfg.get("replacement_0_1_eb_bias_live_data_version") or {}
+        bias_ldv = ldv_map.get(metric) if isinstance(ldv_map, dict) else None
+        if not bias_ldv:
+            return None
+
+        city_obj = runtime_cities_by_name().get(request.city)
+        if city_obj is None:
+            return None
+        lat = float(getattr(city_obj, "lat", 90.0))
+        settlement_unit = str(getattr(city_obj, "settlement_unit", "C"))
+
+        from src.contracts.season import season_from_date  # noqa: PLC0415
+
+        target_date = _date_text(request.target_date)
+        season = season_from_date(target_date, lat=lat)
+        month = int(str(target_date)[5:7])
+
+        from src.calibration.replacement_eb_bias import resolve_replacement_eb_bias_shift_c  # noqa: PLC0415
+        from src.state.db import get_world_connection  # noqa: PLC0415
+        import contextlib  # noqa: PLC0415
+
+        with contextlib.closing(get_world_connection()) as world_conn:
+            return resolve_replacement_eb_bias_shift_c(
+                world_conn,
+                city=request.city,
+                season=season,
+                month=month,
+                metric=metric,
+                live_data_version=str(bias_ldv),
+                settlement_unit=settlement_unit,
+                # ITEM 2 anti-lookahead self-gate: the resolver serves the row only if its
+                # training_cutoff is STRICTLY BEFORE this target_date (no external gate).
+                target_date=target_date,
+            )
+    except Exception as exc:  # fail-closed: never break shadow materialization
+        try:
+            import logging  # noqa: PLC0415
+            logging.getLogger("zeus.replacement_eb_bias").warning(
+                "replacement_0_1 EB bias wiring skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
+def _replacement_member_vote_smoothing_alpha() -> float | None:
+    """Flag-gated additive (Laplace/Dirichlet) smoothing alpha for the AIFS member-vote prior.
+
+    THE_PATH member-vote smoothing. Returns the configured alpha (degC-free Dirichlet
+    pseudo-count) ONLY when ``replacement_0_1_member_vote_smoothing_enabled`` is true, else
+    None. None makes build_openmeteo_ifs9_aifs_soft_anchor_result reproduce the raw count/total
+    member prior BYTE-IDENTICALLY (default-OFF). FAIL-CLOSED: any config error / missing key /
+    non-positive or non-finite alpha -> None (no smoothing, construction proceeds with raw
+    inputs). Never raises. This is the ONE place the flag is read; the smoothing itself reuses
+    the existing soft-anchor fusion (no parallel posterior path).
+    """
+    try:
+        from src.config import settings  # noqa: PLC0415
+        from src.strategy.ecmwf_aifs_sampled_2t_probabilities import (  # noqa: PLC0415
+            MEMBER_VOTE_SMOOTHING_ALPHA,
+        )
+
+        edli_cfg = settings["edli_v1"]
+        if not bool(edli_cfg.get("replacement_0_1_member_vote_smoothing_enabled", False)):
+            return None
+        raw_alpha = edli_cfg.get("replacement_0_1_member_vote_smoothing_alpha", MEMBER_VOTE_SMOOTHING_ALPHA)
+        alpha = float(raw_alpha)
+        if not math.isfinite(alpha) or alpha <= 0.0:
+            return None
+        return alpha
+    except Exception as exc:  # fail-closed: never break shadow materialization
+        try:
+            import logging  # noqa: PLC0415
+            logging.getLogger("zeus.replacement_member_vote_smoothing").warning(
+                "replacement_0_1 member-vote smoothing wiring skipped (fail-closed): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
+@dataclass(frozen=True)
+class _U0RFusionOverride:
+    """The U0R fused center/spread that replace the single-anchor in the soft-anchor build,
+    plus the F6 EMOS identity components (model_set_hash, resolution_mix_hash, lead_bucket)
+    and provenance for the fused product."""
+
+    anchor_value_c: float
+    anchor_sigma_c: float
+    method: str
+    used_models: tuple[str, ...]
+    model_set_hash: str
+    resolution_mix_hash: str
+    lead_bucket: str
+    dropped_models: tuple[str, ...]
+    excluded_regionals: tuple[str, ...]
+    dropped_aliases: tuple[str, ...]
+    # BLOCKER 5: the persisted current single_runs rows this q was fused from (reconstructable).
+    raw_model_forecast_ids: tuple[int, ...] = ()
+    # BLOCKER 3: the ifs025->ifs9 anchor bridge provenance applied to the anchor prior.
+    anchor_bridge: Mapping[str, object] | None = None
+
+
+def _read_persisted_current_capture(
+    conn: "sqlite3.Connection",
+    *,
+    city: str,
+    metric: str,
+    target_date: str,
+    lead_days: int,
+    source_cycle_time_iso: str,
+) -> dict[str, tuple[float, int]]:
+    """BLOCKER 5 — read the PERSISTED current single_runs rows for this cycle.
+
+    Returns {model: (forecast_value_c, raw_model_forecast_id)} for the single_runs rows the
+    download job persisted for THIS exact (city, metric, target_date, lead, source_cycle_time).
+    The q path consumes THESE rows (never a network fetch), so the traded q is reconstructable to
+    the exact persisted inputs (model, params, url hash, source_available_at). Empty dict ->
+    the current capture is missing for this cycle (the caller blocks / falls back with a reason).
+    Fail-soft: any DB error -> empty dict (treated as missing capture, never raises).
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT raw_model_forecast_id, model, forecast_value_c
+            FROM raw_model_forecasts
+            WHERE city = ? AND metric = ? AND target_date = ? AND lead_days = ?
+              AND source_cycle_time = ? AND endpoint = 'single_runs'
+            ORDER BY model, raw_model_forecast_id
+            """,
+            (city, metric, target_date, int(lead_days), source_cycle_time_iso),
+        ).fetchall()
+    except Exception:
+        return {}
+    out: dict[str, tuple[float, int]] = {}
+    for row in rows:
+        try:
+            rid = int(row[0] if not isinstance(row, sqlite3.Row) else row["raw_model_forecast_id"])
+            model = row[1] if not isinstance(row, sqlite3.Row) else row["model"]
+            value = float(row[2] if not isinstance(row, sqlite3.Row) else row["forecast_value_c"])
+        except Exception:
+            continue
+        # First row per model wins (deterministic ORDER BY); a model is captured once per cycle.
+        out.setdefault(model, (value, rid))
+    return out
+
+
+def _u0r_city_local_lead_days(
+    *, computed_at: datetime, target_local_date: date, tz_name: str
+) -> int:
+    """BLOCKER 6 — lead in the CITY-LOCAL calendar, never the UTC calendar.
+
+    computed_at is UTC; the decision date for the lead bucket / regional eligibility / sigma is
+    the city-local date of that instant. Using computed_at.date() (UTC) is off-by-one across
+    timezones (Tokyo: 2026-06-03T16:30Z is local 06-04 -> a 06-04 target is lead 0, not 1).
+    Floors at 0 (a target before the local decision date is lead 0). Falls back to the UTC date
+    only if tz_name is unresolvable (defensive; the caller always passes the city timezone).
+    """
+    try:
+        from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+        computed_local_date = computed_at.astimezone(ZoneInfo(tz_name)).date()
+    except Exception:
+        computed_local_date = computed_at.date()
+    return max(0, (target_local_date - computed_local_date).days)
+
+
+def _u0r_lead_bucket(lead_days: int) -> str:
+    """F6 lead_bucket for the fused EMOS cell. Regional expert is lead<=1; group leads."""
+    if lead_days <= 1:
+        return "L1"
+    if lead_days <= 3:
+        return "L2_3"
+    return "L4P"
+
+
+def _replacement_u0r_fusion_override(
+    request: "ReplacementForecastMaterializeRequest",
+    *,
+    metric: str,
+    anchor_value_corrected_c: float,
+    conn: "sqlite3.Connection | None" = None,
+) -> _U0RFusionOverride | None:
+    """Flag-gated U0R-Bayes multi-model fusion override (the_path replacement_0_1_u0r_fusion).
+
+    Returns the fused (anchor_value_c, anchor_sigma_c) that REPLACE the single OM9 9km anchor
+    center/spread in the soft-anchor construction, ONLY when ``replacement_0_1_u0r_fusion_enabled``
+    is true AND at least one decorrelated extra survives the fail-soft capture. Returns None when
+    the flag is OFF (default) OR all extras are absent -> the existing single-anchor path runs
+    BYTE-IDENTICALLY. This is the ONE place the flag is read; the fusion itself is the ported
+    proof C1 (src/forecast/u0r_bayes.py — no parallel fusion).
+
+    LAYERING (U0R_BAYES_SPEC.md §6 integration): the override is computed from the ALREADY
+    EB-bias-corrected anchor center (so it composes AFTER the EB bias layer); it replaces only
+    the anchor center/spread; the AIFS member-vote prior + member-vote smoothing + the downstream
+    q_lcb settlement floor + EMOS + bin integration are all UNCHANGED. FAIL-SOFT / FAIL-CLOSED:
+    any error, missing config, or zero surviving extras -> None (never raises, never blocks).
+    """
+    try:
+        from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
+
+        edli_cfg = settings["edli_v1"]
+        if not bool(edli_cfg.get("replacement_0_1_u0r_fusion_enabled", False)):
+            return None
+
+        city_obj = runtime_cities_by_name().get(request.city)
+        if city_obj is None:
+            return None
+        lat = float(getattr(city_obj, "lat"))
+        lon = float(getattr(city_obj, "lon"))
+        tz_name = str(getattr(city_obj, "timezone", request.city_timezone))
+
+        target_date = _date_text(request.target_date)
+        target_local_date = date.fromisoformat(target_date)
+        computed_at = _to_utc(request.computed_at, field_name="computed_at")
+        # BLOCKER 6: lead in the CITY-LOCAL date (tz_name), NOT the UTC date. Cross-timezone the
+        # UTC date is off-by-one -> wrong lead bucket / regional eligibility / sigma.
+        lead_days = _u0r_city_local_lead_days(
+            computed_at=computed_at, target_local_date=target_local_date, tz_name=tz_name
+        )
+
+        from src.data.u0r_multimodel_capture import capture_u0r_instruments  # noqa: PLC0415
+        from src.forecast.u0r_bayes import fuse_u0r_posterior  # noqa: PLC0415
+
+        # Optional injected seams (live wiring / tests). An explicitly-assigned
+        # _history_provider attribute wins (tests inject a fixture). When none is assigned AND
+        # the materialization connection is available, the LIVE default is the real walk-forward
+        # history provider reading the PERSISTED previous-runs raw_model_forecasts JOINed to
+        # VERIFIED settlement on the SAME zeus-forecasts.db connection (intra-DB, INV-37; no-leak
+        # target_date<decision, IRON RULE #3). This assignment is THE switch that lets
+        # fuse_u0r_posterior reach T2_BAYES once n_train>=MIN_TRAIN (else EQUAL_WEIGHT). Fail-soft:
+        # the provider NEVER raises (returns {} on any error) -> anchor fallback / equal-weight.
+        history_provider = getattr(_replacement_u0r_fusion_override, "_history_provider", None)
+        if history_provider is None and conn is not None:
+            from src.data.u0r_history_provider import U0RHistoryProvider  # noqa: PLC0415
+
+            history_provider = U0RHistoryProvider(conn)
+
+        # BLOCKER 5: the CURRENT values feeding the traded q come from the PERSISTED single_runs
+        # rows the download job wrote — NEVER a network fetch inside the q path. Read them by
+        # (city, metric, target_date, lead, source_cycle_time) on the SAME connection so the q is
+        # reconstructable to the exact persisted inputs. If the current capture is MISSING (the
+        # download did not run / failed), fall back to the single-anchor posterior (return None)
+        # WITH a logged reason — never silently network-fetch.
+        source_cycle_iso = _to_utc(
+            request.source_cycle_time, field_name="source_cycle_time"
+        ).isoformat()
+        persisted_current: dict[str, tuple[float, int]] = {}
+        if conn is not None:
+            persisted_current = _read_persisted_current_capture(
+                conn, city=request.city, metric=metric, target_date=target_date,
+                lead_days=lead_days, source_cycle_time_iso=source_cycle_iso,
+            )
+
+        # An explicitly-assigned _live_fetch is honored ONLY as a per-model override seam for
+        # models WITHOUT a persisted current row (legacy/test injection). It is never consulted
+        # when the persisted row exists. It does NOT defeat the missing-capture gate: when the
+        # persisted capture is entirely absent the q path falls back to single-anchor regardless,
+        # because B5 forbids building the traded q from any non-persisted current value.
+        injected_live_fetch = getattr(_replacement_u0r_fusion_override, "_live_fetch", None)
+
+        if conn is not None and not persisted_current:
+            # Missing current capture on the live path -> single-anchor fallback + logged reason.
+            # NEVER a network fetch in the q path (the persisted download is the sole q source).
+            import logging  # noqa: PLC0415
+            logging.getLogger("zeus.replacement_u0r_fusion").warning(
+                "replacement_0_1 U0R fusion: persisted current single_runs capture MISSING for "
+                "%s %s %s lead=%s cycle=%s -> single-anchor fallback (no network fetch in q path)",
+                request.city, metric, target_date, lead_days, source_cycle_iso,
+            )
+            return None
+
+        consumed_ids: list[int] = []
+
+        def _persisted_then_injected_fetch(*, model, **_kwargs):
+            hit = persisted_current.get(model)
+            if hit is not None:
+                value, rid = hit
+                consumed_ids.append(int(rid))
+                return float(value)
+            # No persisted current row for this model: consult the injected seam if present
+            # (legacy/test seam, e.g. conn-less unit tests of the capture), else the model is
+            # simply absent (fail-soft drop).
+            if injected_live_fetch is not None:
+                return injected_live_fetch(model=model, **_kwargs)
+            return None
+
+        capture = capture_u0r_instruments(
+            city=request.city, metric=metric, latitude=lat, longitude=lon,
+            timezone_name=tz_name,
+            run=_to_utc(request.source_cycle_time, field_name="source_cycle_time"),
+            target_local_date=target_local_date, lead_days=lead_days,
+            anchor_z_corrected=float(anchor_value_corrected_c),
+            history_provider=history_provider, live_fetch=_persisted_then_injected_fetch,
+        )
+        if not capture.has_extras:
+            # All extras absent -> keep the existing single-anchor posterior (byte-identical).
+            return None
+
+        fused = fuse_u0r_posterior(
+            anchor_z=capture.anchor_z, anchor_tau0=capture.anchor_tau0,
+            likelihood=capture.likelihood, disagree_var=capture.disagree_var,
+            use_covariance=True,
+        )
+
+        used_models = tuple(fused.used_models)
+        model_set_hash = _json_hash(sorted(used_models))
+        # resolution_mix_hash captures which native grid resolutions entered the fused product
+        # (anchor 0.1, globals ~0.25/seamless, regional 2km). Keyed by the deduped model set.
+        resolution_mix_hash = _json_hash(
+            {"models": sorted(used_models), "regional": sorted(fused.regional_models)}
+        )
+
+        # BLOCKER 5: the raw_model_forecast_ids this q was fused from = the persisted current
+        # single_runs rows consumed for the extras PLUS the persisted anchor current row (the
+        # anchor center, though passed as anchor_z_corrected, is the persisted anchor product).
+        # Sorted + de-duped for a deterministic provenance list.
+        dep_ids = set(consumed_ids)
+        from src.forecast.model_selection import ANCHOR_MODEL as _ANCHOR  # noqa: PLC0415
+        anchor_row = persisted_current.get(_ANCHOR)
+        if anchor_row is not None:
+            dep_ids.add(int(anchor_row[1]))
+        raw_model_forecast_ids = tuple(sorted(dep_ids))
+
+        # BLOCKER 3: declare the ifs025->ifs9 anchor bridge provenance (applied when the anchor
+        # history product is the 0.25 feed, which is the only ECMWF previous-runs OM serves).
+        from src.data.u0r_multimodel_capture import (  # noqa: PLC0415
+            OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
+        )
+        from src.forecast.u0r_anchor_bridge import bridge_metadata  # noqa: PLC0415
+        anchor_bridge = bridge_metadata(
+            stored_model_name=OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME
+        )
+
+        return _U0RFusionOverride(
+            anchor_value_c=float(fused.mu),
+            anchor_sigma_c=float(fused.sd),
+            method=fused.method,
+            used_models=used_models,
+            model_set_hash=model_set_hash,
+            resolution_mix_hash=resolution_mix_hash,
+            lead_bucket=_u0r_lead_bucket(lead_days),
+            dropped_models=capture.dropped_models,
+            excluded_regionals=capture.selection.excluded_regionals,
+            dropped_aliases=capture.selection.dropped_aliases,
+            raw_model_forecast_ids=raw_model_forecast_ids,
+            anchor_bridge=anchor_bridge,
+        )
+    except Exception as exc:  # fail-soft: never break shadow materialization
+        try:
+            import logging  # noqa: PLC0415
+            logging.getLogger("zeus.replacement_u0r_fusion").warning(
+                "replacement_0_1 U0R fusion wiring skipped (fail-soft): %s", exc
+            )
+        except Exception:
+            pass
+        return None
+
+
 def _insert_posterior(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -418,6 +807,23 @@ def _insert_posterior(
     metric: str,
     anchor_id: int,
 ) -> int:
+    # P2_BLEND.md §3-§5: flag-gated per-city EB bias-correction of the center, applied
+    # BEFORE the soft-anchor zero-prior veto (inside build_openmeteo_ifs9_aifs_soft_anchor_result).
+    # None when flag OFF or no VERIFIED row -> byte-identical to today.
+    bias_shift_c = _replacement_eb_bias_shift_c(request, metric=metric)
+    # THE_PATH member-vote smoothing: flag-gated additive Laplace/Dirichlet alpha so the AIFS
+    # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
+    # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
+    member_vote_smoothing_alpha = _replacement_member_vote_smoothing_alpha()
+    # U0R-Bayes fusion (flag-gated, default-OFF): replace the single OM9 9km anchor center/spread
+    # with the multi-model Bayesian posterior. Computed from the EB-corrected anchor center so it
+    # composes AFTER the EB bias layer; member-vote smoothing stays applied to the AIFS prior; the
+    # downstream q_lcb floor + EMOS + bin integration are unchanged. None -> byte-identical path.
+    raw_anchor_value_c = request.openmeteo_anchor.high_c if metric == "high" else request.openmeteo_anchor.low_c
+    anchor_value_corrected_c = float(raw_anchor_value_c) - (0.0 if bias_shift_c is None else float(bias_shift_c))
+    u0r_override = _replacement_u0r_fusion_override(
+        request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c, conn=conn
+    )
     result = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=request.aifs_extraction,
         openmeteo_anchor=request.openmeteo_anchor,
@@ -425,6 +831,10 @@ def _insert_posterior(
         bins=request.bins,
         config=SoftAnchorConfig(anchor_weight=request.anchor_weight, anchor_sigma_c=request.anchor_sigma_c),
         settlement_step_c=float(request.settlement_step_c),
+        bias_shift_c=bias_shift_c,
+        member_vote_smoothing_alpha=member_vote_smoothing_alpha,
+        anchor_value_override_c=(u0r_override.anchor_value_c if u0r_override is not None else None),
+        anchor_sigma_override_c=(u0r_override.anchor_sigma_c if u0r_override is not None else None),
     )
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
@@ -450,6 +860,23 @@ def _insert_posterior(
         "anchor_sigma_c": float(request.anchor_sigma_c),
         "settlement_step_c": float(request.settlement_step_c),
     }
+    if u0r_override is not None:
+        # F6: the FUSED product gets its OWN EMOS cell identity (product + resolution_mix_hash +
+        # model_set_hash + lead_bucket) so it never reuses the single-anchor EMOS cell. The fused
+        # center/spread REPLACE the OM9 anchor, so posterior_config_hash diverges from the
+        # single-anchor cell by construction.
+        posterior_config.update(
+            {
+                "posterior_method": "the_path_u0r_fusion",
+                "u0r_fusion_method": u0r_override.method,
+                "u0r_product_id": "the_path_u0r_fusion_v1",
+                "u0r_model_set_hash": u0r_override.model_set_hash,
+                "u0r_resolution_mix_hash": u0r_override.resolution_mix_hash,
+                "u0r_lead_bucket": u0r_override.lead_bucket,
+                "u0r_anchor_value_c": float(u0r_override.anchor_value_c),
+                "u0r_anchor_sigma_c": float(u0r_override.anchor_sigma_c),
+            }
+        )
     posterior_config_hash = _json_hash(posterior_config)
     family_id = f"{request.city}:{target_date}:{metric}:{bin_topology_hash}"
     provenance_payload = {
@@ -484,6 +911,24 @@ def _insert_posterior(
         "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
+    if u0r_override is not None:
+        provenance_payload["u0r_fusion"] = {
+            "method": u0r_override.method,
+            "used_models": list(u0r_override.used_models),
+            "model_set_hash": u0r_override.model_set_hash,
+            "resolution_mix_hash": u0r_override.resolution_mix_hash,
+            "lead_bucket": u0r_override.lead_bucket,
+            "anchor_value_c": float(u0r_override.anchor_value_c),
+            "anchor_sigma_c": float(u0r_override.anchor_sigma_c),
+            "dropped_models": list(u0r_override.dropped_models),
+            "excluded_regionals": list(u0r_override.excluded_regionals),
+            "dropped_aliases": list(u0r_override.dropped_aliases),
+            # BLOCKER 5: the persisted current rows this traded q was fused from (reconstructable).
+            "raw_model_forecast_ids": list(u0r_override.raw_model_forecast_ids),
+            # BLOCKER 3: the ifs025->ifs9 anchor bridge provenance applied to the anchor prior.
+            "anchor_bridge": dict(u0r_override.anchor_bridge) if u0r_override.anchor_bridge else None,
+            "fusion_authority": "SHADOW_ONLY",
+        }
     posterior_identity_hash = _json_hash(
         {
             "source_id": SOURCE_ID,

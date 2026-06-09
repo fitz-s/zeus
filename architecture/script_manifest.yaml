@@ -2360,3 +2360,67 @@ scripts:
     required_tests:
       - tests/test_arm_gate_direction_law.py
       - tests/test_arm_gate_settlement_capital_weight.py
+
+  preflight_restart_check.py:
+    class: diagnostic
+    status: active
+    lifecycle: long_lived
+    authority_scope: flag_posture_read_only
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: null
+    target_db: null
+    read_targets: [config/settings.json, state/replacement_forecast_shadow/promotion_evidence.json]
+    write_targets: [stdout]
+    external_inputs: []
+    delete_policy: retain_until_superseded
+    promotion_barrier: "Read-only. No writes, no DB access, no network. Safe to run anytime."
+    reuse_when: >
+      Run before any restart or flag change to verify the current flag posture is
+      coherent (no fusion-without-data, no authority-without-evidence, no arm-without-
+      evidence, no caps-off) and to identify the single next flag to flip. Exit 0 =
+      coherent; exit 2 = CRITICAL hazard combo present (read the CRITICAL lines).
+    do_not_use_when: >
+      Does not read DB or network — posture reflects only the JSON config state at the
+      time of the run. Not a live trade authority check.
+    canonical_command: "python3 scripts/preflight_restart_check.py --root <deployment_root>"
+    required_helpers:
+      - docs/the_path/RESTART_RUNBOOK.md
+      - src/forecast/replacement_forecast_runtime_policy.py
+    required_tests:
+      - tests/test_preflight_restart_check_reads_edli_v1_flags.py
+
+  backfill_u0r_history_from_b0.py:
+    class: etl_writer
+    status: active
+    lifecycle: long_lived
+    authority_scope: shadow_only_research_accrual
+    dangerous_if_run: false
+    dry_run_default: true
+    apply_flag: "--dry-run omitted"
+    target_db: state/zeus-forecasts.db
+    read_targets: [<--b0 path>/B0_multilead_dataset.json]
+    write_targets: [raw_model_forecasts]
+    external_inputs: [B0_multilead_dataset.json]
+    delete_policy: retain_until_superseded
+    promotion_barrier: >
+      Writes ONLY trade_authority_status='SHADOW_ONLY', training_allowed=0 rows.
+      Does NOT change any posterior or live-money table. Fusion reaches T2_BAYES
+      only after replacement_0_1_u0r_fusion_enabled is flipped AND U0RHistoryProvider
+      reads the seeded rows. INSERT OR IGNORE — fully idempotent.
+    reuse_when: >
+      Run once (or idempotently re-run) to seed raw_model_forecasts with the proven
+      fixed-lead multi-model dataset (B0_multilead_dataset.json) so U0RHistoryProvider
+      has walk-forward training history immediately without waiting 25 days for forward
+      accrual. Always use --dry-run first to verify row count and settlement join.
+    do_not_use_when: >
+      --db and --b0 are both REQUIRED. Never point --db at the live zeus-forecasts.db
+      without explicit operator intent. Never run without verifying the self-check
+      settlement join count (should be >0 if settlements are present).
+    canonical_command: "python3 scripts/backfill_u0r_history_from_b0.py --b0 <path/to/B0_multilead_dataset.json> --db <path/to/zeus-forecasts.db> [--dry-run]"
+    required_helpers:
+      - src/forecast/u0r_history_provider.py::U0RHistoryProvider
+      - src/forecast/u0r_bayes.py
+    required_tests:
+      - tests/test_u0r_history_provider_materializer_wiring.py
+      - tests/test_u0r_no_leak_history_join.py

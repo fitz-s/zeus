@@ -79,6 +79,16 @@ def test_replacement_0_1_authority_uses_yes_posterior_and_blocks_no_without_nati
         lambda *a, **k: SimpleNamespace(ok=True, bundle=_replacement_bundle(), reason_code="READY"),
     )
 
+    # REAUDIT_0_1.md §1.6 (item 3): this success-path test originally called the 0.1
+    # builder with NO evidence, which encoded the flag-alone bug as expected behavior.
+    # FIX-1 moved the success path BEHIND the shared evidence gate, so both passing
+    # evidence objects are now supplied; absent/failing evidence is covered by
+    # tests/engine/test_replacement_0_1_authority_evidence_gate.py (returns None).
+    from tests.test_replacement_forecast_runtime_policy import (
+        _capital_objective_evidence,
+        _passing_evidence,
+    )
+
     q_by_condition, lcb_by_direction, p_values, prefilter, evidence = (
         adapter._replacement_authority_probability_and_fdr_proof(
             event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
@@ -92,6 +102,8 @@ def test_replacement_0_1_authority_uses_yes_posterior_and_blocks_no_without_nati
                 ("cond-28", "buy_no"): (None, ExecutionPrice(0.45, "ask", fee_deducted=True, currency="probability_units"), 0.45, None, None),
             },
             decision_time=datetime(2026, 6, 7, tzinfo=timezone.utc),
+            promotion_evidence=_passing_evidence(),
+            capital_objective_evidence=_capital_objective_evidence(),
         )
     )
 

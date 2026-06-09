@@ -171,6 +171,13 @@ class EventSubmissionReceipt:
     replacement_forecast: dict[str, Any] | None = None
     unit: str | None = None
     q_lcb_calibration_source: str | None = None
+    # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order
+    # is SQL-reconstructable forecast(posterior_id) -> ... -> fill WITHOUT
+    # JSON_EXTRACT. None on canonical/legacy receipts (observability only — these
+    # never change a trading decision and are omitted-when-None from receipt_json
+    # so existing-row hashes stay byte-stable).
+    posterior_id: int | None = None
+    probability_authority: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:

@@ -182,6 +182,80 @@ tables:
       Lives only on zeus-forecasts.db; not a settlement, calibration, or order
       truth table.
 
+  - name: raw_model_forecasts
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: ensure_replacement_forecast_shadow_schema
+    pk_col: raw_model_forecast_id
+    notes: >
+      U0R-Bayes F1 multi-model walk-forward capture (2026-06-08, U0R_BAYES_SPEC.md
+      §6 F1). SHADOW_ONLY, training_allowed=0 (CHECK-pinned). One row per
+      (model, city, target_date, metric, source_cycle_time, endpoint): the
+      decorrelated globals (gfs_global/icon_global/gem_global/jma_seamless/icon_eu)
+      and in-domain regionals (icon_d2/arome) captured alongside the ECMWF anchor.
+      forecast_value_c is ALWAYS degC (no C/F mix). endpoint distinguishes
+      single_runs (live capture) from previous_runs (fixed-lead walk-forward train).
+      PRODUCT-IDENTITY columns (2026-06-08, U0R PR#400 BLOCKER 4, Fitz Constraint #4
+      data provenance): source_id, source_family, product_id, provider, model_name,
+      request_params_json, request_url_hash, raw_sha256 (nullable), latitude_requested,
+      longitude_requested, timezone_requested, cell_selection, elevation_param,
+      downscaling_policy, endpoint_mode, model_domain_hash, coverage_status,
+      artifact_id (nullable, REFERENCES raw_forecast_artifacts). These make a stored
+      forecast_value_c reconstructable to its exact physical Open-Meteo product (which
+      endpoint/model id, cell, elevation, requested coordinates, timezone) so a
+      live-money posterior never trains on a value whose product cannot be proven.
+      The anchor (model='ecmwf_ifs', the fusion identity) is stored with
+      model_name='ecmwf_ifs025' because OM's previous-runs API serves only the 0.25
+      ECMWF product (BLOCKER 3 ifs025->ifs9 bridge in src/forecast/u0r_anchor_bridge.py).
+      Added via an idempotent forward-only ALTER guard in
+      _create_replacement_forecast_shadow_tables (column-existence checked before ADD;
+      no DROP). Created via _create_replacement_forecast_shadow_tables (the shadow-schema
+      helper invoked by both ensure_replacement_forecast_shadow_schema and
+      apply_canonical_schema forecast_tables=True). Lives ONLY on
+      zeus-forecasts.db (INV-37 single-DB); the history JOIN to settlement_outcomes
+      (same DB) is intra-DB on one connection. Gated by
+      replacement_0_1_u0r_multimodel_capture_enabled; not a settlement, calibration,
+      or order truth table.
+      UNIQUENESS (2026-06-08, U0R PR#400 BLOCKER 4 operator-sharpened): the row key
+      is UNIQUE(model, product_id, request_url_hash, city, target_date, metric,
+      source_cycle_time, endpoint) — WIDENED from the original logical-only
+      UNIQUE(model,city,target_date,metric,source_cycle_time,endpoint). The old key
+      + INSERT OR IGNORE silently dropped a Run-2 that carried the SAME logical key
+      but a DIFFERENT physical request (changed timezone/cell_selection/elevation/
+      product_id), leaving a stale forecast_value_c to contaminate bias/MAE/sigma/
+      covariance/q. The widened key makes a changed request a NEW row; the persist
+      layer (src/data/u0r_multimodel_download.py::_persist_rows /
+      _scan_and_audit_request_conflicts) additionally REJECTS a same-logical-key/
+      different-request insert (RawModelForecastRequestConflict + audit row in
+      raw_model_forecast_request_conflicts) so the contamination category is
+      impossible, not merely deduplicated. For pre-existing DBs the widened key is
+      added forward-only via CREATE UNIQUE INDEX IF NOT EXISTS
+      uq_raw_model_forecasts_logical_plus_request (no table rebuild). Schema
+      fingerprint re-pinned (architecture/_schema_fingerprint.txt).
+
+  - name: raw_model_forecast_request_conflicts
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: ensure_replacement_forecast_shadow_schema
+    pk_col: conflict_id
+    notes: >
+      BLOCKER 4 (2026-06-08, U0R PR#400 operator-sharpened) conflict audit ledger for
+      raw_model_forecasts. When a capture row arrives with the SAME logical key
+      (model,city,target_date,metric,source_cycle_time,endpoint) as a stored row but a
+      DIFFERENT physical request identity (product_id / request_url_hash changed — a
+      corrected request: changed timezone / cell_selection / elevation / OM model id),
+      the persist layer writes ONE row here recording BOTH the existing and the
+      incoming request identity (product_id, request_url_hash, forecast_value_c,
+      cell_selection) and raises RawModelForecastRequestConflict — converting the
+      pre-fix SILENT INSERT-OR-IGNORE drop into a loud, forensically-attributable event
+      (Fitz Constraint #3 immune system: an antibody, not an alert). The production
+      download writes this audit on autocommit BEFORE its rollback-on-error BEGIN so the
+      trail survives the cycle ROLLBACK. SHADOW research/forensic surface only; lives
+      ONLY on zeus-forecasts.db (INV-37 single-DB); never a settlement, calibration, or
+      order truth table.
+
   - name: deterministic_forecast_anchors
     db: forecasts
     schema_class: forecast_class

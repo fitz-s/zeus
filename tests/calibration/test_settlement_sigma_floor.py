@@ -173,3 +173,68 @@ def test_settlement_sigma_floor_required_non_positive_floor_raises(monkeypatch):
     assert emos_mod.settlement_sigma_floor("X", "JJA", "high") is None
     with pytest.raises(emos_mod.SettlementSigmaFloorError, match="NON_POSITIVE"):
         emos_mod.settlement_sigma_floor("X", "JJA", "high", required=True)
+
+
+# ----------------------------------------------------------------------------
+# ITEM 3 — PATH PROVENANCE. _SIGMA_FLOOR_PATH must resolve to the SAME runtime live
+#   state dir the rest of the daemon uses (src.config.state_path / STATE_DIR), NOT a
+#   module-local recomputed dir. Provenance: the loader must reuse the single canonical
+#   resolver so a future state-dir relocation moves the floor file with the daemon. And
+#   it must FAIL-LOUD (warn) when the floor file is absent rather than silently returning
+#   0 cells (which makes the q_lcb floor inert).
+# ----------------------------------------------------------------------------
+def test_sigma_floor_path_resolves_via_canonical_state_resolver():
+    # The module's floor path MUST equal the canonical runtime state path, proving the
+    # loader reuses src.config.state_path (the daemon's single state-dir resolver) and is
+    # NOT a worktree-relative recomputed dir that silently diverges from runtime state.
+    importlib.reload(emos_mod)
+    from src.config import state_path as canonical_state_path
+
+    expected = canonical_state_path("settlement_sigma_floor.json")
+    assert emos_mod._SIGMA_FLOOR_PATH == expected, (
+        "settlement σ-floor path must resolve via the canonical state_path resolver "
+        f"(got {emos_mod._SIGMA_FLOOR_PATH}, expected {expected})"
+    )
+    # The EMOS table path must use the same resolver (one canonical state dir, no parallel
+    # path computation) so the provenance fix covers every artifact the module loads.
+    assert emos_mod._EMOS_TABLE_PATH == canonical_state_path("emos_calibration.json")
+
+
+def test_sigma_floor_path_follows_canonical_resolver_relocation(monkeypatch, tmp_path):
+    # STRUCTURAL proof of REUSE (not coincidence): if the canonical resolver is repointed,
+    # the module's floor path follows it after reload. A module that recomputed its own
+    # __file__-relative dir would NOT follow — this test would fail for that implementation.
+    import src.config as config_mod
+
+    relocated = tmp_path / "relocated_state"
+    monkeypatch.setattr(config_mod, "STATE_DIR", relocated, raising=True)
+    importlib.reload(emos_mod)
+    try:
+        assert emos_mod._SIGMA_FLOOR_PATH == relocated / "settlement_sigma_floor.json", (
+            "floor path must follow the canonical resolver's relocation (proves reuse, "
+            "not a recomputed __file__-relative path)"
+        )
+    finally:
+        # Restore the real resolver so later tests see the canonical path.
+        monkeypatch.undo()
+        importlib.reload(emos_mod)
+
+
+def test_sigma_floor_loader_warns_loud_on_absent_file(monkeypatch, tmp_path, caplog):
+    # A MISSING floor file silently returning {} makes the q_lcb floor inert (0 cells).
+    # The legacy (required=False) loader must STILL emit a loud WARNING (not a quiet
+    # debug) when the artifact is absent so an operator sees the floor is disabled.
+    import logging
+
+    importlib.reload(emos_mod)
+    missing = tmp_path / "settlement_sigma_floor.json"
+    monkeypatch.setattr(emos_mod, "_SIGMA_FLOOR_PATH", missing, raising=False)
+    monkeypatch.setattr(emos_mod, "_sigma_floor_cache", None, raising=False)
+
+    with caplog.at_level(logging.WARNING, logger=emos_mod.logger.name):
+        table = emos_mod.load_sigma_floor_table()
+    assert table == {}
+    warned = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("settlement_sigma_floor" in r.getMessage() for r in warned), (
+        "absent σ-floor file must warn LOUD (q_lcb floor would be inert), not log quietly"
+    )

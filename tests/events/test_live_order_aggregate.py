@@ -511,6 +511,124 @@ def _seed_command_with_submit_attempt(ledger: LiveOrderAggregateLedger) -> None:
     )
 
 
+# --------------------------------------------------------------------------- #
+# H2_E2E (REAUDIT_0_1.md §2/§4): the projection's typed posterior trace is
+# populated from the REAL DecisionProofAccepted event payload (the decision_audit
+# block event_reactor_adapter.py:2818-2819 writes), via the production
+# rebuild_projection path — NOT a manual column write. Relationship test: when
+# the aggregate's DecisionProofAccepted payload carries a decision_audit posterior
+# trace, the projection row must reconstruct it WITHOUT JSON_EXTRACT.
+# --------------------------------------------------------------------------- #
+
+def _decision_proof_payload_with_audit(*, posterior_id, probability_authority):
+    """Mirror the production DecisionProofAccepted payload shape (decision_audit
+    block carries the receipt's posterior trace — see _live_decision_audit_payload
+    in event_reactor_adapter.py)."""
+    return {
+        "event_id": "event-1",
+        "final_intent_id": "intent-1",
+        "no_submit_certificate_count": 3,
+        "no_submit_receipt_event_id": "evt-receipt-1",
+        "decision_audit": {
+            "schema": "edli_live_decision_audit_v1",
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "posterior_id": posterior_id,
+            "probability_authority": probability_authority,
+            "q_lcb_calibration_source": "FORECAST_BOOTSTRAP",
+        },
+    }
+
+
+def test_projection_populates_posterior_trace_from_decision_audit_payload():
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    # Production append → rebuild_projection runs inside append_event. The
+    # posterior trace is read from the decision_audit payload, not injected.
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload=_decision_proof_payload_with_audit(
+            posterior_id=4242, probability_authority="replacement_0_1"
+        ),
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    # Reconstruct the live-order aggregate -> posterior link in SQL (typed
+    # columns, NO JSON_EXTRACT).
+    row = conn.execute(
+        """
+        SELECT posterior_id, probability_authority
+        FROM edli_live_order_projection
+        WHERE aggregate_id = ?
+          AND probability_authority = 'replacement_0_1'
+          AND posterior_id IS NOT NULL
+        """,
+        ("event-1:intent-1",),
+    ).fetchone()
+    assert row is not None, (
+        "edli_live_order_projection.posterior_id must be populated by the "
+        "production rebuild from the decision_audit payload — dead-column antibody"
+    )
+    assert row["posterior_id"] == 4242
+    assert row["probability_authority"] == "replacement_0_1"
+
+
+def test_projection_posterior_trace_is_sticky_across_later_events():
+    """COALESCE proof: a later event whose payload lacks a decision_audit block
+    (e.g. a reconcile re-projection) must NOT clear the posterior link set by
+    DecisionProofAccepted."""
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload=_decision_proof_payload_with_audit(
+            posterior_id=777, probability_authority="replacement_0_1"
+        ),
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="PreSubmitRevalidated",
+        payload=_pre_submit_payload(),  # no decision_audit block
+        occurred_at=NOW,
+        source_authority="engine_adapter",
+    )
+    row = conn.execute(
+        "SELECT posterior_id, probability_authority FROM edli_live_order_projection WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    ).fetchone()
+    assert row["posterior_id"] == 777
+    assert row["probability_authority"] == "replacement_0_1"
+
+
+def test_projection_posterior_trace_null_for_canonical_order():
+    """Observability only: a canonical order (no decision_audit posterior block)
+    leaves the typed columns NULL — never changes order state, excluded from the
+    replacement_0_1 query."""
+    conn = _conn()
+    ledger = LiveOrderAggregateLedger(conn)
+    ledger.append_event(
+        aggregate_id="event-1:intent-1",
+        event_type="DecisionProofAccepted",
+        payload={"event_id": "event-1", "final_intent_id": "intent-1"},  # no audit
+        occurred_at=NOW,
+        source_authority="decision_kernel",
+    )
+    row = conn.execute(
+        "SELECT posterior_id, probability_authority FROM edli_live_order_projection WHERE aggregate_id = ?",
+        ("event-1:intent-1",),
+    ).fetchone()
+    assert row["posterior_id"] is None
+    assert row["probability_authority"] is None
+    excluded = conn.execute(
+        "SELECT * FROM edli_live_order_projection WHERE probability_authority = 'replacement_0_1'"
+    ).fetchall()
+    assert excluded == []
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

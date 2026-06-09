@@ -231,6 +231,16 @@ class LiveOrderAggregateLedger:
         event_id = str(_payload(rows[0])["event_id"])
         final_intent_id: str | None = None
         venue_order_id: str | None = None
+        # H2_E2E (REAUDIT_0_1.md §2/§4): the live-order projection's posterior
+        # trace is reconstructed from the DecisionProofAccepted event payload's
+        # decision_audit block (event_reactor_adapter.py:2818-2819 writes the
+        # receipt's posterior_id there), so the projection is SQL-reconstructable
+        # to the driving posterior WITHOUT JSON_EXTRACT and WITHOUT a cross-table
+        # join. Observability only and fail-soft: None on canonical orders /
+        # absent block — never changes order state. Sticky once set so a later
+        # reconcile event (no decision_audit) does not clear it.
+        posterior_id: int | None = None
+        probability_authority: str | None = None
         pending_reconcile = False
         current_state = "UNKNOWN"
         for row in rows:
@@ -241,6 +251,14 @@ class LiveOrderAggregateLedger:
                 final_intent_id = str(payload["final_intent_id"])
             if payload.get("venue_order_id") is not None:
                 venue_order_id = str(payload["venue_order_id"])
+            _audit = payload.get("decision_audit")
+            if isinstance(_audit, dict):
+                _pid = _optional_posterior_id(_audit.get("posterior_id"))
+                if _pid is not None:
+                    posterior_id = _pid
+                _auth = _audit.get("probability_authority")
+                if _auth is not None:
+                    probability_authority = str(_auth)
             event_type = str(row["event_type"])
             if event_type == "SubmitUnknown":
                 current_state = EVENT_STATE[event_type]
@@ -259,8 +277,9 @@ class LiveOrderAggregateLedger:
             INSERT INTO edli_live_order_projection (
                 aggregate_id, event_id, final_intent_id, current_state,
                 last_sequence, last_event_type, last_event_hash,
-                pending_reconcile, venue_order_id, updated_at, schema_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                pending_reconcile, venue_order_id, updated_at, schema_version,
+                posterior_id, probability_authority
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(aggregate_id) DO UPDATE SET
                 event_id = excluded.event_id,
                 final_intent_id = excluded.final_intent_id,
@@ -271,7 +290,13 @@ class LiveOrderAggregateLedger:
                 pending_reconcile = excluded.pending_reconcile,
                 venue_order_id = excluded.venue_order_id,
                 updated_at = excluded.updated_at,
-                schema_version = excluded.schema_version
+                schema_version = excluded.schema_version,
+                -- H2_E2E: COALESCE so a later rebuild from events that lack a
+                -- decision_audit block (e.g. a reconcile-only re-projection)
+                -- never clears an already-recorded posterior link. NULL on
+                -- canonical orders. Observability only.
+                posterior_id = COALESCE(excluded.posterior_id, edli_live_order_projection.posterior_id),
+                probability_authority = COALESCE(excluded.probability_authority, edli_live_order_projection.probability_authority)
             """,
             (
                 aggregate_id,
@@ -284,6 +309,8 @@ class LiveOrderAggregateLedger:
                 1 if pending_reconcile else 0,
                 venue_order_id,
                 _dt(datetime.now(timezone.utc)),
+                posterior_id,
+                probability_authority,
             ),
         )
         return self.get_projection(aggregate_id)
@@ -588,6 +615,23 @@ def _payload(row: sqlite3.Row) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise LiveOrderAggregateError("live-order event payload must be an object")
     return payload
+
+
+def _optional_posterior_id(value: Any) -> int | None:
+    """Fail-soft coercion of a payload posterior_id to int (None on any failure).
+
+    H2_E2E: the authority builder emits posterior_id as a string in some paths
+    (event_reactor_adapter.py:5778) and as an int via the receipt in others, so
+    coerce defensively. Returns None for None / empty / non-numeric — the
+    posterior trace is observability only and must never raise in the projection
+    rebuild (which runs on every live-order event append).
+    """
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _validate_pre_submit_revalidation_payload(payload: dict[str, Any]) -> None:
