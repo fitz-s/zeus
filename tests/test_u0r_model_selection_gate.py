@@ -23,10 +23,11 @@ from src.forecast.model_selection import (
 PARIS = (48.967, 2.428)
 LONDON = (51.505, 0.055)
 MUNICH = (48.348, 11.813)
-MOSCOW = (55.592, 37.261)      # out of Central-EU polygon (37.26E > 20.34E hull)
-MADRID = (40.466, -3.555)      # out of TIGHTENED polygon (40.47N < 43.18N, -3.56E)
-ISTANBUL = (41.262, 28.74)     # out (28.74E > 20.34E)
-HELSINKI = (60.327, 24.957)    # out (60.33N > 58.08N, 24.96E > 20.34E)
+MOSCOW = (55.592, 37.261)      # out of icon_d2 Central-EU polygon; INSIDE the ICON-EU domain
+MADRID = (40.466, -3.555)      # out of icon_d2 Central-EU; INSIDE ICON-EU
+ISTANBUL = (41.262, 28.74)     # out of icon_d2 Central-EU; INSIDE ICON-EU
+HELSINKI = (60.327, 24.957)    # out of icon_d2 Central-EU; INSIDE ICON-EU
+TOKYO = (35.68, 139.69)        # OUTSIDE the ICON-EU domain entirely (lon 139.69E >> 45E)
 
 
 def test_icon_d2_eligible_inside_central_eu_polygon_at_lead_1() -> None:
@@ -78,20 +79,41 @@ def test_select_models_paris_in_domain_enters_both_regionals() -> None:
 
 
 def test_dwd_provider_uses_one_representative_by_default() -> None:
-    # OUT of every regional polygon (Moscow): icon_d2 cannot enter. Of the two remaining
-    # DWD-ICON globals (icon_global, icon_eu), exactly ONE survives as the family rep. Without
-    # explicit in-EU evidence the conservative default rep is the global-scope icon_global;
-    # icon_eu is suppressed so the DWD/ICON family is never double-counted in one fusion.
+    # OUTSIDE the ICON-EU domain entirely (Tokyo): neither icon_d2 nor icon_eu can enter. Of the
+    # DWD-ICON family, exactly ONE survives as the rep. With no in-EU evidence the conservative
+    # default rep is the global-scope icon_global; icon_eu is suppressed so the DWD/ICON family is
+    # never double-counted in one fusion.
     present = {
         "ecmwf_ifs": 4.7, "gfs_global": 5.1, "icon_global": 3.7, "gem_global": 5.0,
         "jma_seamless": 3.8, "icon_eu": 4.1,
     }
-    sel = select_models(present_models=present, lat=MOSCOW[0], lon=MOSCOW[1], lead_days=1)
+    sel = select_models(present_models=present, lat=TOKYO[0], lon=TOKYO[1], lead_days=1)
     icon_family = [m for m in sel.used_models if m in {"icon_global", "icon_eu", "icon_d2"}]
     assert icon_family == ["icon_global"]          # exactly one DWD-ICON representative
     assert "icon_eu" not in sel.used_models
     assert "icon_eu" in sel.dropped_provider_dups
     assert "icon_d2" not in sel.used_models        # out of polygon -> regional absent
+
+
+def test_icon_eu_is_the_dwd_rep_inside_its_own_icon_eu_domain() -> None:
+    # 2026-06-09 FIX (regression antibody): for EU-edge cities inside the ICON-EU 7km nest but
+    # OUTSIDE the icon_d2 Central-EU box (Moscow/Madrid/Istanbul/Helsinki), icon_eu — the more
+    # skilful 7km regional (Exp O: -0.22 MAE vs ECMWF-9km) — MUST be the single DWD-ICON rep,
+    # NOT icon_global (13km). Previously icon_eu borrowed the tightened icon_d2 box and was wrongly
+    # dropped as a provider_dup of icon_global for all 7 EU-edge cities.
+    present = {
+        "ecmwf_ifs": 4.7, "gfs_global": 5.1, "icon_global": 3.7, "gem_global": 5.0,
+        "jma_seamless": 3.8, "icon_eu": 4.1,
+    }
+    for lat, lon in (MOSCOW, MADRID, ISTANBUL, HELSINKI):
+        sel = select_models(present_models=present, lat=lat, lon=lon, lead_days=1)
+        icon_family = [m for m in sel.used_models if m in {"icon_global", "icon_eu", "icon_d2"}]
+        assert icon_family == ["icon_eu"], (lat, lon, sel.used_models)
+        assert "icon_global" in sel.dropped_provider_dups   # 13km global yields to the 7km nest
+        assert "icon_d2" not in sel.used_models             # 2km nest absent out of Central-EU
+    # And at lead beyond the ICON-EU horizon (>3) icon_eu falls back to the global rep.
+    sel_far = select_models(present_models=present, lat=MOSCOW[0], lon=MOSCOW[1], lead_days=5)
+    assert [m for m in sel_far.used_models if m in {"icon_global", "icon_eu"}] == ["icon_global"]
 
 
 def test_icon_d2_replaces_icon_global_inside_domain() -> None:
@@ -111,14 +133,14 @@ def test_icon_d2_replaces_icon_global_inside_domain() -> None:
 
 
 def test_icon_eu_not_selected_with_icon_global_without_explicit_evidence() -> None:
-    # Both DWD globals present, NO icon_d2, OUT of every regional polygon (Moscow). icon_eu must
-    # NOT join icon_global in the same fusion: without explicit in-EU evidence (an eligible
-    # regional / in-domain city) the family collapses to the single global-scope rep.
+    # Both DWD globals present, NO icon_d2, OUTSIDE the ICON-EU domain entirely (Tokyo). icon_eu
+    # must NOT join icon_global in the same fusion: with no in-EU domain evidence the family
+    # collapses to the single global-scope rep.
     present = {
         "ecmwf_ifs": 4.7, "gfs_global": 5.1, "icon_global": 3.7, "gem_global": 5.0,
         "jma_seamless": 3.8, "icon_eu": 4.1,
     }
-    sel = select_models(present_models=present, lat=MOSCOW[0], lon=MOSCOW[1], lead_days=1)
+    sel = select_models(present_models=present, lat=TOKYO[0], lon=TOKYO[1], lead_days=1)
     assert "icon_global" in sel.likelihood_globals
     assert "icon_eu" not in sel.likelihood_globals
     assert "icon_eu" not in sel.used_models

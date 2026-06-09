@@ -267,14 +267,19 @@ _DOMAIN_GATED_MODELS: frozenset[str] = frozenset(REGIONAL_MODELS) | frozenset({I
 def _model_in_domain(model: str, *, lat: float, lon: float, lead_days: int) -> bool:
     """Return True when it is safe to request ``model`` for the given coordinate.
 
-    Regional models are gated by their own polygon.  icon_eu uses the icon_d2 polygon
-    (same Central-EU domain; aligned with model_selection.select_models). Global models
-    always return True (no domain restriction).
+    Regional models are gated by their OWN polygon (config/model_domain_polygons.yaml).
+    2026-06-09 FIX: icon_eu now uses its OWN ICON-EU 7km-nest polygon (Europe + W-Asia/Middle
+    East), NOT the tightened icon_d2 Central-EU box. The prior icon_d2-borrow (commit bbe616e1eb)
+    stopped the forward single_runs fetch for the 7 EU-edge cities (Madrid/Moscow/Istanbul/Ankara/
+    Helsinki/Tel Aviv/Warsaw) that have real COVERED icon_eu data — starving their walk-forward
+    history. The original 400-storm was from icon_d2/arome (truly narrow nests), never icon_eu
+    (COVERED for all 12 cities), so icon_eu should not have been folded into the icon_d2 gate.
+    Global models always return True (no domain restriction).
     """
     if model not in _DOMAIN_GATED_MODELS:
         return True  # global model — worldwide coverage
-    # icon_eu: eligible iff the city is inside the Central-EU (icon_d2) polygon.
-    gate_model = "icon_d2" if model == ICON_EU_MODEL else model
+    # Each domain-gated model is gated by its OWN polygon key (icon_eu has its own ICON-EU hull).
+    gate_model = model
     # Pass lead_days=0 to bypass the lead-day cap: we want geographic eligibility only.
     # The fusion's model_selection already applies the correct lead gate; the download
     # should fetch for ALL leads when the city is in-domain so the history accrues.

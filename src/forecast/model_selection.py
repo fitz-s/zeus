@@ -66,9 +66,12 @@ ALIAS_CORR_THRESHOLD = 0.995
 ALIAS_MEAN_ABS_DELTA_EPS = 0.05  # degC
 
 # Which regional model each domain key in the polygon config governs.
+# icon_eu has its OWN ICON-EU 7km-nest polygon (2026-06-09 fix) — it is domain-gated like the
+# other regionals, not borrowing the icon_d2 Central-EU box.
 _REGIONAL_DOMAIN_KEY = {
     "icon_d2": "icon_d2",
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
+    ICON_EU_MODEL: ICON_EU_MODEL,
 }
 
 
@@ -288,13 +291,19 @@ def select_models(
     # Keep the FIRST eligible member of ICON_FAMILY (most-specific-first) and suppress the rest.
     #   - icon_d2 (2km nest) is eligible only when it already qualified as a regional expert
     #     above (in Central-EU polygon + lead ok). It carries the family inside the EU box.
-    #   - icon_eu (7km nest) is eligible only with EXPLICIT in-EU evidence: the city is inside
-    #     the same Central-EU domain that gates icon_d2. Outside that box it is NOT an eligible
-    #     family rep, so it cannot ride alongside icon_global "without explicit evidence".
+    #   - icon_eu (7km nest) is eligible inside its OWN ICON-EU domain (config polygon 'icon_eu',
+    #     Europe + W-Asia/Middle East) at lead<=3. 2026-06-09 FIX: this previously borrowed the
+    #     TIGHTENED icon_d2 Central-EU box, so for EU-edge cities (Madrid/Moscow/Istanbul/Ankara/
+    #     Helsinki/Tel Aviv/Warsaw) where icon_d2 is absent but icon_eu has real data + Exp-O
+    #     uplift, icon_eu_in_eu_domain was False -> icon_global (13km) became the rep and the
+    #     better 7km icon_eu was dropped as a provider_dup. With its own polygon, icon_eu wins the
+    #     ICON-family rep contest in those cities (icon_d2 absent, icon_eu eligible before
+    #     icon_global). In Central-EU icon_d2 still wins (most-specific-first), so icon_eu is
+    #     correctly dropped there. Out of the ICON-EU domain entirely, icon_global remains the rep.
     #   - icon_global is always eligible (global scope) and is the conservative default rep
-    #     used out-of-EU (spec §3: "use icon_d2 in-EU, icon_global out").
+    #     used outside the ICON-EU domain (spec §3: "use icon_d2 in-EU, icon_global out").
     icon_eu_in_eu_domain = regional_eligible(
-        "icon_d2", lat=lat, lon=lon, lead_days=lead_days, polygons=polygons
+        "icon_eu", lat=lat, lon=lon, lead_days=lead_days, polygons=polygons
     )
 
     def _icon_member_eligible(member: str) -> bool:

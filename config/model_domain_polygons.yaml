@@ -60,3 +60,28 @@ domains:
       lat_max: 51.10
       lon_min: -5.20
       lon_max: 9.60
+
+  # DWD ICON-EU 7km nest. 2026-06-09 FIX: icon_eu previously had NO own domain and wrongly
+  # inherited the TIGHTENED icon_d2 Central-EU box in BOTH the download fetch gate and the
+  # model_selection fusion gate -> icon_eu was fetched/admitted only for the 5 Central-EU cities
+  # (and even there dropped as an ICON-family provider_dup of icon_d2), so 7 EU/Mid-East cities
+  # with REAL icon_eu data (Madrid, Moscow, Istanbul, Ankara, Helsinki, Tel Aviv, Warsaw) lost
+  # their 7km regional. Exp O CONFIRMED icon_eu beats ECMWF-9km on settled WU (-0.22 MAE). This
+  # hull is the operational ICON-EU regular-grid extent (Europe + W-Asia/Middle East), which
+  # contains exactly the 12 COVERED cities, so the domain gate and the data-presence gate AGREE.
+  # max_lead_days=3 matches the persisted icon_eu lead coverage (leads 0-3).
+  icon_eu:
+    model_name: icon_eu
+    region_label: europe_west_asia
+    max_lead_days: 3
+    polygon:
+      - [-24.00, 29.00]
+      - [45.00, 29.00]
+      - [45.00, 71.00]
+      - [-24.00, 71.00]
+      - [-24.00, 29.00]
+    bounding_box:
+      lat_min: 29.00
+      lat_max: 71.00
+      lon_min: -24.00
+      lon_max: 45.00
