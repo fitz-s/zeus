@@ -1,6 +1,11 @@
-# Last reused or audited: 2026-06-08 (S4: marginal-utility ranker is the SOLE size
-#   authority via RobustCandidateScore.optimal_stake_usd on robust q_lcb + exposure;
-#   removed scalar market-disagreement / pre-selection scalar-Kelly gates —
+# Last reused or audited: 2026-06-08 (S7: deleted the last opportunity-book
+#   selector on/off gate artifacts — the dead `selector_enabled`/`selector_shadow`
+#   cache keys, the `_env_flag_enabled` helper + its `import os`, and every literal
+#   toggle-name string. The marginal-utility ranker is the unconditional single
+#   selection path — "bin selection.md" §14 item 8 + operator directive 2026-06-08.
+#   S4: marginal-utility ranker is the SOLE size authority via
+#   RobustCandidateScore.optimal_stake_usd on robust q_lcb + exposure; removed
+#   scalar market-disagreement / pre-selection scalar-Kelly gates —
 #   "bin selection.md" §3/§5.2/§5.3/§6/§14.7 + operator directive 2026-06-08)
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset;
 #   P1 ZERO-SUBMIT FIX B (2026-06-05, iron-rule-1, co-cause) — per-cycle in-flight reservation
@@ -58,10 +63,10 @@
 #   select_best_family_candidate, and the max(executable, key=(trade_score,q_lcb))
 #   fallback) are RETIRED as the decision; build_family_opportunity_book now RECORDS
 #   the ΔU decision (decided_candidate_id) and uses select_best_family_candidate only
-#   for display ranks/loser reasons. The off-able ZEUS_OPPORTUNITY_BOOK_SELECTOR /
-#   edli_v1.opportunity_book_selector_enabled gate is REMOVED (the ranker is
-#   unconditional). q_lcb > q_point is a §13/Hidden #2 Q_LCB_INVALID no-trade. One
-#   ranking surface, one decision, one truth. No flag, no shadow branch.
+#   for display ranks/loser reasons. The off-able family-selector on/off env+settings
+#   toggle is REMOVED (the ranker is unconditional). q_lcb > q_point is a
+#   §13/Hidden #2 Q_LCB_INVALID no-trade. One ranking surface, one decision, one
+#   truth. No flag, no shadow branch.
 #   S5 (2026-06-08, "bin selection.md" §5.1-§5.3/§5.2/§14.7/§14.10/§9 Hidden #6+#15/
 #   §12.C.2/.3/.4 + operator directive 2026-06-08): the live decision body now sizes
 #   from RobustCandidateScore.optimal_stake_usd AND reprices the Kelly cost-of-entry
@@ -104,7 +109,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import sqlite3
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
@@ -4774,17 +4778,22 @@ def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
 _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.0
 
 
-def _env_flag_enabled(name: str) -> bool:
-    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+# REMOVED 2026-06-08 (S7; operator directive; "bin selection.md" §14 item 8): the
+# `_env_flag_enabled` helper was used ONLY to read the opportunity-book shadow
+# toggle env var into the cache_summary. With the shadow / off-able selector
+# artifacts deleted (single-primary-live, no flag, no shadow), it has no caller
+# and is removed — there is no env-driven branch on the selection path.
 
 
-# REMOVED 2026-06-08 (operator directive; "bin selection.md" §14.7/§14.8 single-
-# primary-live): the family-selector on/off gate (ZEUS_OPPORTUNITY_BOOK_SELECTOR /
-# edli_v1.opportunity_book_selector_enabled) is GONE. The bin-selection robust
-# marginal-log-utility ranker is the UNCONDITIONAL single live decision surface —
-# there is no disable path to silently flip. A scattered off-able gate is the
-# regression disease the directive abolishes; correctness is enforced by types +
-# relationship tests + the ff-branch review, never a runtime flag.
+# REMOVED 2026-06-08 (operator directive; "bin selection.md" §14 item 8 single-
+# primary-live): the family-selector on/off gate (its env var + its
+# edli_v1 settings key) is GONE. The bin-selection robust marginal-log-utility
+# ranker is the UNCONDITIONAL single live decision surface — there is no disable
+# path to silently flip. A scattered off-able gate is the regression disease the
+# directive abolishes; correctness is enforced by types + relationship tests +
+# the ff-branch review, never a runtime flag. (S7 also deleted the last literal
+# toggle-name strings so the symbol cannot be re-grepped into a gate; antibody
+# tests/engine/test_s7_selector_gate_removed.py.)
 #
 # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13): the scalar
 # market-disagreement buy_no demotion (_market_disagreement_demotes_buy_no + its
@@ -5334,9 +5343,11 @@ def _opportunity_book_from_proofs(
     )
     # The live decision is the ΔU ranker's pick (selected_proof). The book RECORDS
     # it as the single selected_candidate_id (operator directive 2026-06-08;
-    # §14.7/§14.8) rather than re-deciding via legacy scalar-Kelly. selector_enabled
-    # is fixed True: the bin-selection ranker is unconditional (no off-able gate),
-    # so the receipt's selected_candidate_id is always the ΔU decision.
+    # spec §14 item 7/8) rather than re-deciding via legacy scalar-Kelly. The
+    # bin-selection ranker is the unconditional single path: there is no off-able
+    # gate, so the receipt's selected_candidate_id is always the ΔU decision (S7
+    # deleted the last `selector_enabled` / shadow toggle artifacts from the
+    # cache_summary; the receipt serializer records the decision unconditionally).
     #
     # A NON-executable selected_proof (execution_price None) is the best-belief
     # fallback surfaced for the EXECUTABLE_NATIVE_ASK_MISSING receipt, NOT a real
@@ -5357,8 +5368,6 @@ def _opportunity_book_from_proofs(
         cache_summary={
             "belief_cache": "source_run_bound",
             "price_cache": "snapshot_rows_refreshed_for_family",
-            "selector_shadow": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SHADOW"),
-            "selector_enabled": True,
             "actual_receipt_selected_candidate_id": decided_candidate_id,
         },
     )
@@ -6209,14 +6218,14 @@ def _selected_candidate_proof(
 ) -> _CandidateProof | None:
     """Pick the single live primary leg via the bin-selection ΔU ranker (§14.7).
 
-    ONE decision path (operator directive 2026-06-08; spec §14.8): every priced
-    proof is materialized as a ``NativeSideCandidate`` and the family primary is
-    the robust-marginal-expected-log-utility winner
+    ONE decision path (operator directive 2026-06-08; spec §14 item 8): every
+    priced proof is materialized as a ``NativeSideCandidate`` and the family
+    primary is the robust-marginal-expected-log-utility winner
     (:func:`_select_proof_by_robust_marginal_utility`). The legacy scalar-Kelly
     surfaces (``select_best_family_candidate`` / the ``(trade_score, q_lcb_5pct)``
-    tuple) and the off-able ``ZEUS_OPPORTUNITY_BOOK_SELECTOR`` runtime gate are
-    GONE — the ranker is unconditional, so the materialized candidate is the
-    decision, never discarded.
+    tuple) and the off-able family-selector runtime gate (its env var + settings
+    key) are GONE — the ranker is unconditional, so the materialized candidate is
+    the decision, never discarded.
 
     Sizing is computed POST-selection on the winning leg by
     :func:`_robust_marginal_utility_optimal_stake_usd` (the ΔU optimizer's

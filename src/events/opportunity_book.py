@@ -1,10 +1,15 @@
 # Last reused or audited: 2026-06-08
-# Authority basis: "bin selection.md" §14.7 (rank by robust marginal utility) +
-#   §14.8 (single-primary-live) + operator directive 2026-06-08. S3-fix:
+# Authority basis: "bin selection.md" §14 item 7 (rank by robust marginal utility) +
+#   §14 item 8 (single-primary-live) + operator directive 2026-06-08. S3-fix:
 #   build_family_opportunity_book RECORDS the upstream ΔU decision
 #   (decided_candidate_id) instead of self-selecting via select_best_family_candidate;
 #   that legacy scalar-Kelly selector now produces ONLY display ranks + loser reasons
 #   (provenance), never the live selection. One decision surface, one truth.
+#   S7 (2026-06-08): the off-able selector gate is GONE. to_receipt_dict no longer
+#   reads a ``selector_enabled`` cache flag to decide whether to surface the
+#   recorded selection — it records the ΔU decision unconditionally. There is no
+#   runtime toggle that can silently null the live selection (operator directive:
+#   no flag, no shadow, no default-off switch).
 """In-memory opportunity book receipt evidence."""
 
 from __future__ import annotations
@@ -38,7 +43,6 @@ class OpportunityBook:
             ),
             None,
         )
-        selector_enabled = bool(self.cache_summary.get("selector_enabled"))
         actual_selected_candidate_id = self.cache_summary.get("actual_receipt_selected_candidate_id")
         return {
             "book_id": self.book_id,
@@ -46,7 +50,14 @@ class OpportunityBook:
             "family_id": self.family_id,
             "evaluated_count": len(self.evaluations),
             "admitted_count": sum(1 for evaluation in self.evaluations if evaluation.admitted),
-            "selected_candidate_id": self.selected_candidate_id if selector_enabled else None,
+            # SINGLE DECISION SURFACE (operator directive 2026-06-08; "bin
+            # selection.md" §14 item 8). The recorded selection is the ΔU decision
+            # (``self.selected_candidate_id`` == ``decided_candidate_id``)
+            # UNCONDITIONALLY. The former off-able ``selector_enabled`` cache gate —
+            # which nulled the recorded decision whenever that flag was falsy/absent —
+            # is REMOVED: a scattered runtime toggle that can silently discard the
+            # live selection is the regression disease the directive abolishes.
+            "selected_candidate_id": self.selected_candidate_id,
             "proposed_selected_candidate_id": self.selected_candidate_id,
             "actual_receipt_selected_candidate_id": actual_selected_candidate_id,
             "selected_objective": (
