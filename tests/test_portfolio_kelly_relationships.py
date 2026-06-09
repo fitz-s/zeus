@@ -215,7 +215,12 @@ def test_K1_simultaneous_stakes_shrink_without_hard_zero():
         reserved.append((NEAR_CITY, s))
     assert all(s > 0.0 for s in sizes), sizes
     assert sizes[-1] < sizes[0], sizes
-    assert max(sizes) <= BANKROLL * MAX_SINGLE_POSITION_PCT + 1e-6
+    # The concentration cap is only an invariant when one is configured. Operator directive
+    # 2026-06-09: NO cap (max_single_position_pct=0.0) -> the layered fractional Kelly +
+    # heat/correlation is the SOLE risk scale; a hard cap is not the mechanism. The headline
+    # laws above (positive flow, marginal decline) hold in both regimes.
+    if MAX_SINGLE_POSITION_PCT > 0.0:
+        assert max(sizes) <= BANKROLL * MAX_SINGLE_POSITION_PCT + 1e-6
 
 
 def test_K1b_distant_city_raw_pressure_shrinks_without_stopping_flow():
@@ -297,11 +302,20 @@ def test_K3_single_bet_respects_max_single_position_pct():
     """
     # Strong edge: p=0.95, price=0.50 → f*≈0.90 → single-Kelly ≈ 0.90·0.25·B = 22.5%·B.
     s = _size(new_city=NEAR_CITY, held=[], p_posterior=0.95, price=0.50)
-    cap = BANKROLL * MAX_SINGLE_POSITION_PCT
-    assert s <= cap + 1e-6, (
-        f"single bet {s:.4f} ({s / BANKROLL * 100:.1f}% of B) exceeds "
-        f"max_single_position_pct cap {cap:.4f} (10% of B)"
-    )
+    if MAX_SINGLE_POSITION_PCT > 0.0:
+        cap = BANKROLL * MAX_SINGLE_POSITION_PCT
+        assert s <= cap + 1e-6, (
+            f"single bet {s:.4f} ({s / BANKROLL * 100:.1f}% of B) exceeds "
+            f"max_single_position_pct cap {cap:.4f}"
+        )
+    else:
+        # Operator directive 2026-06-09: NO cap. The size IS the fractional Kelly (no hard clip)
+        # — positive and finite. With q_point this CAN exceed 10%·B; that defect is bounded in
+        # production NOT by a cap but by sizing on the conservative q_lcb (the live decision core
+        # sizes on RobustCandidateScore.optimal_stake_usd over the ensemble q_lcb), so a strong
+        # q_point edge never reaches a live order at this magnitude.
+        assert s == pytest.approx(_single_kelly_size(p_posterior=0.95, price=0.50))
+        assert s > 0.0
 
 
 # ── INV-K4: monotone in committed capital ────────────────────────────────────
@@ -426,16 +440,17 @@ def test_K8_never_amplifies_vs_single_kelly(p_post, held_committed):
         f"(p={p_post}, committed={held_committed})"
     )
     if held_committed == 0.0:
-        # Empty portfolio ⇒ effective bankroll == bankroll ⇒ the ONLY reduction
-        # vs single-Kelly is the K3 single-bet cap (max_single_position_pct·B).
-        # So the portfolio-aware size equals min(single-Kelly, cap): identical
-        # when the edge is small, clipped to the cap when single-Kelly exceeds
-        # 10%·B (which is itself the headline defect being fixed). This is NOT a
-        # regression — it is K3 holding even with an empty book.
-        cap = BANKROLL * MAX_SINGLE_POSITION_PCT
-        assert s_portfolio == pytest.approx(min(s_single, cap)), (
-            f"empty-portfolio not equal to min(single-Kelly, cap): "
-            f"{s_portfolio:.4f} vs min({s_single:.4f}, {cap:.4f})"
+        # Empty portfolio ⇒ effective bankroll == bankroll ⇒ the portfolio-aware size equals
+        # single-Kelly. With a configured cap it equals min(single-Kelly, cap); under the
+        # operator's 2026-06-09 NO-cap directive (max_single_position_pct=0.0) there is no clip,
+        # so it equals single-Kelly exactly. The no-amplify law (≤ single) above holds in both.
+        expected = (
+            min(s_single, BANKROLL * MAX_SINGLE_POSITION_PCT)
+            if MAX_SINGLE_POSITION_PCT > 0.0
+            else s_single
+        )
+        assert s_portfolio == pytest.approx(expected), (
+            f"empty-portfolio size {s_portfolio:.4f} != expected {expected:.4f}"
         )
 
 
