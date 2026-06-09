@@ -104,7 +104,16 @@ class U0RHistoryProvider:
                 ORDER BY r.model, r.target_date
             """
             params: list[object] = [city, metric, int(lead_days), *models, decision_date]
-            rows = self._conn.execute(sql, params).fetchall()
+            # ROW-FACTORY SELF-SUFFICIENCY (2026-06-09 hardening): the loop below accesses rows
+            # by COLUMN NAME. On a caller connection without row_factory=sqlite3.Row, sqlite3
+            # yields plain tuples -> row["model"] raises -> the per-row fail-soft except silently
+            # skipped EVERY row -> empty history -> n_train=0 with no error (the exact silent
+            # de-bias-off failure observed as a probe-conn artifact on 2026-06-09). A per-CURSOR
+            # row factory guarantees named access regardless of the caller's conn config, without
+            # mutating the caller's connection.
+            cursor = self._conn.cursor()
+            cursor.row_factory = sqlite3.Row
+            rows = cursor.execute(sql, params).fetchall()
         except Exception as exc:  # FAIL-SOFT: any DB error -> no history (Protocol contract).
             _LOG.warning(
                 "U0R history provider query failed (fail-soft, no history): %s", exc

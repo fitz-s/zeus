@@ -45,6 +45,13 @@ domains:
   # Météo-France AROME-France-HD 1.3km. Official AROME-France domain hull (metropolitan France
   # + near surroundings). Proof france_cities == [Paris] only; this polygon keeps the France gate
   # explicit and physical rather than a string match on city name.
+  # MILAN RETENTION VERDICT (2026-06-09 audit, CURRENT_REUSABLE): a wiring-audit note claimed
+  # Milan (45.43N, 9.28E) sits "outside the true AROME nest" and the ring should be tightened.
+  # REFUTED by settlement truth: the physical AROME-France domain extends past the Po valley,
+  # open-meteo serves real values there (384 previous_runs rows), and at fixed lead-1 HIGH
+  # (n=76) arome is Milan's 3rd-best instrument — MAE 0.868 / bias +0.18 vs anchor ecmwf_ifs
+  # 1.304 / icon_global 1.097. Milan STAYS in. Do not tighten on geometric speculation; the
+  # domain gate must agree with data presence AND settlement-graded skill.
   meteofrance_arome_france_hd:
     model_name: meteofrance_arome_france_hd
     region_label: france

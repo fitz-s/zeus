@@ -334,3 +334,33 @@ def test_capture_on_fusion_off_money_path_byte_identical(monkeypatch) -> None:
     assert cap["posterior_identity_hash"] == base["posterior_identity_hash"]
     assert cap["posterior_config_hash"] == base["posterior_config_hash"]
     assert "u0r_fusion" not in json.loads(cap["provenance_json"])
+
+
+def test_provider_self_supplies_row_factory_tuple_conn_identical_history() -> None:
+    """ROW-FACTORY ANTIBODY (2026-06-09): the provider accesses rows by column name. On a
+    caller conn WITHOUT row_factory=sqlite3.Row, sqlite3 yields tuples -> row["model"] raised
+    -> the per-row fail-soft silently skipped EVERY row -> n_train=0 with no error (silent
+    de-bias-off). The provider now sets a per-CURSOR Row factory, so a tuple-factory caller
+    conn yields IDENTICAL history to a Row-factory conn — the category is unconstructable."""
+    from src.data.u0r_history_provider import U0RHistoryProvider
+
+    conn = _conn()
+    models = ["ecmwf_ifs", "gfs_global", "icon_global"]
+    _seed_history(conn, decision=date(2026, 6, 7), models=models)
+
+    row_hist = U0RHistoryProvider(conn)(
+        city="Paris", metric="high", lead_days=1, target_date=date(2026, 6, 7), models=models
+    )
+    assert row_hist and all(h.n_train > 0 for h in row_hist.values())  # precondition
+
+    conn.row_factory = None  # tuple-factory caller (the live conn config is OUT of our control)
+    tuple_hist = U0RHistoryProvider(conn)(
+        city="Paris", metric="high", lead_days=1, target_date=date(2026, 6, 7), models=models
+    )
+    assert set(tuple_hist) == set(row_hist), (
+        "a tuple-factory caller connection must not silently empty the walk-forward history"
+    )
+    for m in row_hist:
+        assert tuple_hist[m].forecast_values == row_hist[m].forecast_values
+        assert tuple_hist[m].settlement_values == row_hist[m].settlement_values
+        assert tuple_hist[m].target_dates == row_hist[m].target_dates
