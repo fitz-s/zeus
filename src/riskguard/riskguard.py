@@ -695,6 +695,53 @@ def _append_reason(bucket: dict[str, list[str]], key: str, reason: str) -> None:
         reasons.append(reason)
 
 
+# Canonical component order for the per-tick breakdown. Pinning this list in ONE
+# place (and asserting it in the test) is the structural half of the
+# anti-silent-verdict antibody: a future component added to `overall_level` that
+# is NOT added here would change the overall level WITHOUT appearing in the log —
+# re-creating the exact "RED with no printed reason" failure. The test asserts
+# that the breakdown enumerates every component fed to `overall_level`.
+RISK_COMPONENT_ORDER: tuple[str, ...] = (
+    "brier",
+    "settlement_quality",
+    "execution_quality",
+    "strategy_signal",
+    "daily_loss",
+    "weekly_loss",
+)
+
+
+def _component_breakdown(
+    overall: RiskLevel,
+    component_levels: dict[str, RiskLevel],
+    component_detail: dict[str, str],
+) -> tuple[str, str]:
+    """Build (driven_by, breakdown_str) for the per-tick component log.
+
+    `driven_by` is the comma-joined set of components whose level equals the
+    overall level (the load-bearing component(s)) — empty string when GREEN.
+    `breakdown_str` lists EVERY component's level, annotating non-GREEN ones with
+    their driving number so the daemon log alone answers "why is this tick RED?".
+
+    Pure function (no DB / no logging) so the anti-silent-verdict antibody is
+    unit-testable and the component enumeration is asserted against
+    RISK_COMPONENT_ORDER.
+    """
+    driving = sorted(
+        name
+        for name in RISK_COMPONENT_ORDER
+        if component_levels.get(name) == overall and overall != RiskLevel.GREEN
+    )
+    parts = []
+    for name in RISK_COMPONENT_ORDER:
+        lvl = component_levels[name]
+        if lvl != RiskLevel.GREEN:
+            parts.append(f"{name}={lvl.value}[{component_detail.get(name, '')}]")
+        else:
+            parts.append(f"{name}={lvl.value}")
+    return ",".join(driving) or "none", " | ".join(parts)
+
+
 def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
     exits: list[dict] = []
     for row in rows:
@@ -1683,9 +1730,56 @@ def _tick_once() -> RiskLevel:
         except Exception as exc:
             logger.warning("Discord alert emission failed: %s", exc)
 
-        if level != RiskLevel.GREEN:
-            logger.warning("RiskGuard level: %s (storage_source=%s, Brier=%.3f, Accuracy=%.1f%%)",
-                           level.value, settlement_storage_source, b_score, d_accuracy * 100)
+        # Per-component tick breakdown (anti-silent-verdict antibody, 2026-06-09):
+        # overall = max(components), and the daemon's `Tick complete: <LEVEL>` line
+        # prints ONLY that max. When the daemon sat RED for >24h (operator
+        # zero-trade), the single printed word gave no way to tell WHICH component
+        # drove it — a RED could be a Brier corpse, a settlement-quality gap, OR a
+        # genuine realized-loss breach, and they demand opposite responses. The
+        # diagnosis required a manual risk_state.db dive. This log makes every
+        # tick self-explaining: each component's level plus the load-bearing number
+        # for any non-GREEN component, so the log alone answers "why RED?".
+        component_levels = {
+            "brier": brier_level,
+            "settlement_quality": settlement_quality_level,
+            "execution_quality": execution_quality_level,
+            "strategy_signal": strategy_signal_level,
+            "daily_loss": daily_loss_level,
+            "weekly_loss": weekly_loss_level,
+        }
+        component_detail = {
+            "brier": f"score={b_score:.4f} (n={len(p_forecasts)}, red>={thresholds['brier_red']})",
+            "settlement_quality": (
+                f"metric_ready={len(metric_ready_rows)}/{len(settlement_rows)} "
+                f"degraded={degraded_rows} storage={settlement_storage_source}"
+            ),
+            "execution_quality": (
+                f"fill_rate={execution_overall['fill_rate']} observed={execution_observed}"
+            ),
+            "strategy_signal": (
+                f"edge_compression_alerts={len(edge_compression_alerts)} "
+                f"tracker_error={'yes' if strategy_tracker_error else 'no'}"
+            ),
+            "daily_loss": (
+                f"realized_24h_loss={float(daily_loss or 0.0):.2f} "
+                f"threshold={round(current_bankroll_usd * float(thresholds['max_daily_loss_pct']), 2)} "
+                f"(8%%x${round(current_bankroll_usd, 2)}) status={daily_loss_snapshot['status']} "
+                f"n={(daily_loss_snapshot.get('reference') or {}).get('settlement_count', 0)}"
+            ),
+            "weekly_loss": (
+                f"realized_7d_loss={float(weekly_loss or 0.0):.2f} "
+                f"threshold={round(current_bankroll_usd * float(thresholds['max_weekly_loss_pct']), 2)} "
+                f"status={weekly_loss_snapshot['status']}"
+            ),
+        }
+        driving, breakdown = _component_breakdown(level, component_levels, component_detail)
+        log_fn = logger.warning if level != RiskLevel.GREEN else logger.info
+        log_fn(
+            "RiskGuard tick components: overall=%s driven_by=%s :: %s",
+            level.value,
+            driving,
+            breakdown,
+        )
 
         return level
     except sqlite3.OperationalError as exc:
