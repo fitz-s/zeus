@@ -72,6 +72,14 @@ _REGIONAL_DOMAIN_KEY = {
     "icon_d2": "icon_d2",
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
     ICON_EU_MODEL: ICON_EU_MODEL,
+    # CANDIDATE-ACCRUAL DOMAIN GATING ONLY (2026-06-09 regional survey, settlement-graded):
+    # these two are domain-limited models the DOWNLOAD job accrues data for. They are NOT in
+    # REGIONAL_MODELS / GLOBAL_LIKELIHOOD_MODELS, so select_models can NEVER admit them into a
+    # fusion — entries here only let the download's _model_in_domain gate skip out-of-domain
+    # requests (the API 400-storm guard). Promotion into the fusion requires its own
+    # forward-shadow validation + an explicit selection change (no in-sample promote).
+    "ncep_nbm_conus": "ncep_nbm_conus",
+    "ukmo_uk_deterministic_2km": "ukmo_uk_deterministic_2km",
 }
 
 

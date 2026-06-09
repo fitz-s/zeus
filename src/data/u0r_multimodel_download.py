@@ -235,6 +235,29 @@ U0R_EXTRA_MODELS: tuple[str, ...] = (
     + ("icon_seamless",)
 )
 
+# CANDIDATE-ACCRUAL LANE (2026-06-09 regional survey /tmp/uncovered_cities_regional_report.md,
+# settlement-graded). These models accrue raw data (forward single_runs + fixed-lead
+# previous_runs, both curl-verified available 2026-06-09) so a future promotion has walk-forward
+# history — they are NOT in U0R_EXTRA_MODELS' selection inputs and select_models NEVER admits
+# them into a fusion (REGIONAL_MODELS / GLOBAL_LIKELIHOOD_MODELS unchanged).
+#   ncep_nbm_conus               — CONUS, pooled MAE 1.193 vs ecmwf_ifs 1.395 (-14.4%, n=1029).
+#                                  Role candidate: CONUS ANCHOR replacement. NBM blends NCEP
+#                                  models incl. GFS -> must NEVER join the decorrelated globals.
+#   ukmo_global_deterministic_10km — global, pooled MAE 1.266 vs ecmwf_ifs 1.411 (-10.3%,
+#                                  n=1099, 16 non-EU cities; strongest SE-Asia/tropics). Role
+#                                  candidate: 5th decorrelated global (distinct dynamical core).
+#                                  Weak South Asia (Karachi/Lucknow warm bias) — anchor role
+#                                  excluded there.
+#   ukmo_uk_deterministic_2km    — UK-only, London MAE 0.919 vs 1.039 (n=112). Role candidate:
+#                                  London regional expert (icon_d2 pattern).
+# Domain gating: nbm + ukmo_uk have their own polygons (config/model_domain_polygons.yaml);
+# ukmo_global is worldwide. Promotion requires forward-shadow validation, never in-sample.
+U0R_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = (
+    "ncep_nbm_conus",
+    "ukmo_global_deterministic_10km",
+    "ukmo_uk_deterministic_2km",
+)
+
 # K2 (2026-06-09, curl-verified): models the open-meteo single-runs API STRUCTURALLY cannot
 # serve. cmc_gem_gdps_15km returns modelRunUnavailable even for cadence-valid 00z/12z runs —
 # the product is simply not in the single-runs archive. The forward single_runs request leg is
@@ -272,7 +295,13 @@ OPENMETEO_PREVIOUS_RUNS_MODEL_IDS: dict[str, str] = {
 #
 # Globals (gfs_global, icon_global, gem_global, jma_seamless, ecmwf_ifs) are worldwide;
 # they are never skipped here.
-_DOMAIN_GATED_MODELS: frozenset[str] = frozenset(REGIONAL_MODELS) | frozenset({ICON_EU_MODEL})
+_DOMAIN_GATED_MODELS: frozenset[str] = (
+    frozenset(REGIONAL_MODELS)
+    | frozenset({ICON_EU_MODEL})
+    # Candidate-accrual models with limited physical domains (nbm: CONUS; ukmo_uk: UK).
+    # ukmo_global_deterministic_10km is worldwide and intentionally NOT gated.
+    | frozenset({"ncep_nbm_conus", "ukmo_uk_deterministic_2km"})
+)
 
 
 def _model_in_domain(model: str, *, lat: float, lon: float, lead_days: int) -> bool:
@@ -587,7 +616,7 @@ def download_u0r_extra_raw_inputs(
 
     for t in target_list:
         target_local_date = date.fromisoformat(t.target_date)
-        for model in U0R_EXTRA_MODELS:
+        for model in U0R_EXTRA_MODELS + U0R_CANDIDATE_ACCRUAL_MODELS:
             # Domain gate: skip domain-limited models for out-of-domain cities. The API
             # returns HTTP 400 "No data is available for this location" for these, which
             # would be retried (wasting time) and then fail-soft dropped (silent absence).

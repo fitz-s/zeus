@@ -92,3 +92,43 @@ domains:
       lat_max: 71.00
       lon_min: -24.00
       lon_max: 45.00
+
+  # NOAA/NCEP NBM CONUS (statistical blend). CANDIDATE-ACCRUAL ONLY (2026-06-09 survey,
+  # settlement-graded n=1029: pooled MAE 1.193 vs ecmwf_ifs 1.395, -14.4%). Role candidate:
+  # CONUS ANCHOR replacement — NBM blends NCEP models incl. GFS, so it must NEVER enter the
+  # decorrelated-globals likelihood set alongside gfs_global. Domain: CONUS + S-Canada
+  # (covers Toronto; previous-runs verified). NOT in REGIONAL_MODELS — never selected today.
+  ncep_nbm_conus:
+    model_name: ncep_nbm_conus
+    region_label: conus
+    max_lead_days: 3
+    polygon:
+      - [-125.00, 23.00]
+      - [-66.00, 23.00]
+      - [-66.00, 50.00]
+      - [-125.00, 50.00]
+      - [-125.00, 23.00]
+    bounding_box:
+      lat_min: 23.00
+      lat_max: 50.00
+      lon_min: -125.00
+      lon_max: -66.00
+
+  # UK Met Office UKV 2km deterministic. CANDIDATE-ACCRUAL ONLY (2026-06-09 survey: London
+  # MAE 0.919 vs ecmwf_ifs 1.039, near-zero bias, n=112). Role candidate: London regional
+  # expert (icon_d2 pattern). Domain strictly UK (API 400s outside). NOT in REGIONAL_MODELS.
+  ukmo_uk_deterministic_2km:
+    model_name: ukmo_uk_deterministic_2km
+    region_label: uk
+    max_lead_days: 2
+    polygon:
+      - [-9.00, 49.00]
+      - [2.50, 49.00]
+      - [2.50, 61.00]
+      - [-9.00, 61.00]
+      - [-9.00, 49.00]
+    bounding_box:
+      lat_min: 49.00
+      lat_max: 61.00
+      lon_min: -9.00
+      lon_max: 2.50
