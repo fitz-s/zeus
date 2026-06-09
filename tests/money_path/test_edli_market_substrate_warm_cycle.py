@@ -59,6 +59,27 @@ import src.main as main_module
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 
 
+@pytest.fixture(autouse=True)
+def _reset_substrate_refresh_cursor():
+    """Reset the round-robin family cursor before each test.
+
+    Funnel-starvation fix (2026-06-09) made ``_SUBSTRATE_REFRESH_CURSOR`` a module
+    global that the warmer advances each cycle. Tests that assert a specific
+    family-processing ORDER (e.g. the gamma direct-lookup tests) depend on the
+    sweep starting at offset 0; without this reset a prior test's cursor advance
+    rotates the family list and the order-sensitive assertions become flaky on a
+    full-file run. Production correctness does not depend on the start offset (the
+    cursor wraps ``% n_families`` and every family is swept within one period); the
+    reset is purely test determinism.
+    """
+    saved = main_module._SUBSTRATE_REFRESH_CURSOR
+    main_module._SUBSTRATE_REFRESH_CURSOR = 0
+    try:
+        yield
+    finally:
+        main_module._SUBSTRATE_REFRESH_CURSOR = saved
+
+
 def _enable_edli_cfg(monkeypatch, *, enabled: bool = True) -> None:
     monkeypatch.setattr(
         main_module,
@@ -113,7 +134,22 @@ def test_pending_family_refresh_has_no_fixed_family_cap():
     src = inspect.getsource(main_module._refresh_pending_family_snapshots)
 
     assert "_FAMILY_REFRESH_CAP" not in src
-    assert "families[:" not in src
+    # No fixed-prefix truncation that DROPS families. The funnel-starvation fix
+    # (2026-06-09) introduced a rotating cursor that wraps the family list
+    # (``families[start_offset:] + families[:start_offset]``) — this REORDERS, it
+    # does not drop, so the only legitimate ``families[:`` occurrence is the
+    # rotation wrap-around. Forbid the dropping forms (a numeric/const cap slice)
+    # while allowing the wrap-around concatenation.
+    assert "families[:_" not in src  # families[:_SOME_CAP]
+    import re
+
+    # families[:<int>] would be a hard drop; families[:start_offset] is the rotation.
+    dropping_caps = re.findall(r"families\[:\s*\d+\s*\]", src)
+    assert not dropping_caps, f"fixed-count family cap present: {dropping_caps}"
+    assert "families[:start_offset]" in src, (
+        "expected the rotating-cursor wrap-around families[:start_offset]; the "
+        "round-robin sweep is what prevents tail-family starvation"
+    )
 
 
 def test_snapshot_capture_budget_uses_reserve_when_selection_overruns(monkeypatch):

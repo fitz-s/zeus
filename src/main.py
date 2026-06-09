@@ -82,6 +82,15 @@ OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 # starved of candidates. The interval also stays within the 30s executable-price
 # freshness window. The invariant is asserted at job registration.
 _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
+
+# FUNNEL-STARVATION FIX (2026-06-09): rotating cursor for the pending-family
+# substrate refresh. The warm cycle cannot reconstruct all live families in one
+# wall-clock budget (~150 families × ~225ms ≈ 34s > 17s budget), so each cycle
+# refreshes a SLICE; this offset advances by the slice size actually processed so
+# consecutive cycles cover disjoint families and the whole live set is swept
+# within a bounded number of cycles. See _refresh_pending_family_snapshots.
+_SUBSTRATE_REFRESH_CURSOR = 0
+
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
     "edli_shadow_no_submit",
@@ -2970,15 +2979,42 @@ def _topology_lookup_deadline_for_snapshot_refresh(
     refresh_budget_s: float,
     snapshot_reserve_s: float,
 ) -> float:
-    """Stop topology reconstruction early enough to attempt direct Gamma lookup."""
+    """Stop topology reconstruction early enough to attempt direct Gamma lookup.
+
+    FUNNEL-STARVATION FIX (2026-06-09): the topology/reconstruction phase is the
+    phase that SELECTS which families' books to capture this cycle. The prior math
+    reserved a FIXED 15s gamma slice on top of the 12s snapshot reserve, out of a
+    17s budget — i.e. 27s reserved for downstream phases out of 17s, clamping the
+    topology deadline to ``refresh_deadline - refresh_budget_s`` = CYCLE START.
+    With a 0s topology budget the loop time-boxed after 1-2 of ~150 live families
+    every cycle, so only ONE family's executable books were refreshed per ~20s
+    tick. The other ~150 FORECAST_SNAPSHOT_READY events found no fresh snapshot,
+    requeued EXECUTABLE_SNAPSHOT_PENDING, and after 8 cycles dead-lettered as
+    EXECUTABLE_SNAPSHOT_BLOCKED — the visible funnel starvation (the substrate was
+    never swept).
+
+    Gamma HTTP is only needed for families with NO cached topology
+    (``gamma_refresh_families``); in steady state that set is EMPTY (every live
+    family already has market_events topology), so a fixed 15s gamma reserve is
+    pure waste that starves the dominant topology phase. The reserve is now a SMALL
+    FLOOR (default 2s, env-overridable) AND capped to at most half of the
+    available pre-capture window, so the topology/reconstruction phase keeps the
+    MAJORITY of the budget and can sweep its rotating family slice (see the
+    rotating cursor in _refresh_pending_family_snapshots). When a cycle genuinely
+    has gamma families, that small floor still lets the gamma phase begin; it just
+    no longer pre-empts topology before topology has done any work.
+    """
 
     pre_capture_deadline = refresh_deadline - snapshot_reserve_s
+    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
     gamma_min_slice_s = max(
         0.0,
-        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "15.0")),
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "2.0")),
     )
-    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
-    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s)
+    # Never let the gamma floor consume more than half the pre-capture window —
+    # the topology phase (which selects the capture set) must always keep the
+    # majority share so it makes real progress through the rotating family slice.
+    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s * 0.5)
     return max(refresh_deadline - refresh_budget_s, pre_capture_deadline - gamma_min_slice_s)
 
 
@@ -3106,6 +3142,35 @@ def _refresh_pending_family_snapshots(
     if not families:
         return {"status": "no_pending_families"}
 
+    # FUNNEL-STARVATION FIX (2026-06-09): rotate the per-cycle starting offset so
+    # EVERY live family is refreshed within one SWEEP PERIOD instead of the newest
+    # 1-2 being re-refreshed forever while the rest starve.
+    #
+    # Root cause this completes: the warm cycle's wall-clock budget (~17s) cannot
+    # reconstruct all ~150 live families in one tick — each family's
+    # reconstruct_weather_market_from_static_topology is ~225ms (a sort over the
+    # 1.5M-row executable_market_snapshots IN-list), so a full sweep is ~34s, two
+    # cycles' worth. The pending-family query (_pending_family_rows_for_refresh)
+    # returns families target_date DESC, so without rotation the SAME front slice
+    # is processed every cycle and the tail (older target_dates / cities reached
+    # later in the deterministic order) NEVER gets fresh books. Those families'
+    # FORECAST_SNAPSHOT_READY events then retry EXECUTABLE_SNAPSHOT_PENDING until
+    # the 8-attempt cap dead-letters them (EXECUTABLE_SNAPSHOT_BLOCKED) — the
+    # operator-observed "25 events cycle in retried forever / dead=25" funnel.
+    #
+    # The fix is a fair rotating cursor: advance a module-global offset by the
+    # number of families ACTUALLY processed last cycle so consecutive cycles cover
+    # disjoint slices and the whole live set is swept within
+    # ceil(len(families) / families_per_cycle) cycles — bounded minutes, not the
+    # never-completing tail starvation. The order WITHIN the rotated list is still
+    # the freshness-first deterministic order; we only choose a different *start*.
+    # No family is dropped — rotation reorders, it does not filter — so a True from
+    # the freshness check still captures and no candidate is starved.
+    global _SUBSTRATE_REFRESH_CURSOR
+    n_families = len(families)
+    start_offset = _SUBSTRATE_REFRESH_CURSOR % n_families
+    families = families[start_offset:] + families[:start_offset]
+
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
     # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
     # INTERVAL_SECONDS, 20s) and MUST stay within the 30s executable-price freshness
@@ -3160,6 +3225,11 @@ def _refresh_pending_family_snapshots(
     cached_topology_incomplete = 0
     topology_budget_exhausted = False
     topology_deferred_families = 0
+    # FUNNEL-STARVATION FIX (2026-06-09): how many families this cycle actually
+    # reached in the topology phase. Advances the rotating cursor so the NEXT
+    # cycle resumes from where this one stopped, sweeping every live family within
+    # a bounded number of cycles instead of re-processing the same front slice.
+    families_processed_this_cycle = len(families)
 
     write_conn = get_trade_connection(write_class="live")
     try:
@@ -3169,6 +3239,8 @@ def _refresh_pending_family_snapshots(
             ):
                 topology_budget_exhausted = True
                 topology_deferred_families = len(families) - index
+                # Resume from the first UNPROCESSED family next cycle.
+                families_processed_this_cycle = index
                 logger.info(
                     "refresh_pending_family_snapshots: topology time-box hit after %d/%d "
                     "families; reserving %.1fs for CLOB capture",
@@ -3222,6 +3294,18 @@ def _refresh_pending_family_snapshots(
                     gamma_refresh_families.append((city, target_date, metric))
             else:
                 fresh_skipped += 1
+
+        # FUNNEL-STARVATION FIX (2026-06-09): advance the rotating cursor by the
+        # families actually processed this cycle so the next cycle resumes at the
+        # first family this one did not reach. This is what converts "always the
+        # newest 1-2 families" into a fair round-robin that sweeps the whole live
+        # set within ceil(n_families / families_per_cycle) cycles. Advanced HERE
+        # (after the topology loop, before any downstream return) so every exit
+        # path — all_fresh, refreshed, or a later gamma/capture error — advances
+        # the cursor identically and no slice is ever skipped or double-swept.
+        _SUBSTRATE_REFRESH_CURSOR = (
+            start_offset + max(1, families_processed_this_cycle)
+        ) % n_families
 
         if not gamma_refresh_families and not cached_topology_markets:
             logger.info(
@@ -4931,8 +5015,21 @@ def _edli_event_reactor_cycle() -> None:
             edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50
         )
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
+        # FUNNEL-STARVATION FIX (2026-06-09): raise the per-cycle evaluation ceiling
+        # so the reactor can sweep the FULL live FORECAST_SNAPSHOT_READY set
+        # (~200 events across ~50 cities × 3 target dates) within one or two cycles
+        # once the substrate warmer (now round-robin, see _SUBSTRATE_REFRESH_CURSOR)
+        # keeps books fresh. The prior maximum=50 capped a cycle at 50 evaluations
+        # regardless of config, so even with fresh books the live family set could
+        # not be fully swept per cadence — a throttle on EVALUATION COVERAGE, the
+        # exact thing the operator directive forbids (every live family must be
+        # evaluated, honest no-edge only after a FULL evaluation). The reactor's own
+        # 30s wall-clock budget (ZEUS_REACTOR_CYCLE_BUDGET_SECONDS, in reactor.py)
+        # remains the real safety bound on cycle length; this ceiling just stops
+        # truncating the admissible queue below the live family count. Economic
+        # gates (q_lcb, cost floor, Kelly, depth) are untouched.
         proof_limit = _edli_positive_int_or_unbounded(
-            edli_cfg, "no_submit_proof_limit", default=10, maximum=50
+            edli_cfg, "no_submit_proof_limit", default=10, maximum=400
         )
         store = EventStore(conn)
         # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
