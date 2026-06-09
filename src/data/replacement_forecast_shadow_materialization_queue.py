@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -75,6 +76,26 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
     )
+
+
+_LOG = logging.getLogger("zeus.replacement_shadow_materialization_queue")
+
+
+def _surface_subprocess_warnings(input_name: str, completed: "subprocess.CompletedProcess[str]") -> None:
+    """ANTI-SILENT-SINK (2026-06-09): each materialization runs as a SUBPROCESS with
+    capture_output=True, so every WARNING the materializer emits (e.g. the K3 fusion
+    degradation antibodies) lands ONLY in the per-request sidecar JSON — invisible to the
+    daemon log, where an operator actually looks. The K3 'decorrelated-provider INCOMPLETE'
+    warnings fired 19/40 recent cells and reached no log. Re-emit subprocess WARNING/ERROR
+    lines at the queue level so a degradation antibody can never again warn into a void.
+    Fail-soft: never raises into the queue loop."""
+    try:
+        for stream in (completed.stderr or "", completed.stdout or ""):
+            for line in stream.splitlines():
+                if "WARNING" in line or "ERROR" in line:
+                    _LOG.warning("materialize[%s] %s", input_name, line.strip()[:500])
+    except Exception:
+        pass
 
 
 def _receipt_name(path: Path) -> str:
@@ -521,6 +542,7 @@ def _process_replacement_forecast_shadow_materialization_queue_locked(
             "--commit",
         )
         completed = runner(command)
+        _surface_subprocess_warnings(input_json.name, completed)
         payload = {
             "command": list(command),
             "returncode": int(completed.returncode),
