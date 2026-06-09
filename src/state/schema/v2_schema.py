@@ -281,6 +281,155 @@ def _create_ensemble_snapshots(conn: sqlite3.Connection) -> None:
     """)
 
 
+def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None:
+    """Create shadow-only replacement forecast provenance tables."""
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_forecast_artifacts (
+            artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            artifact_path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+            request_url TEXT,
+            request_params_json TEXT NOT NULL DEFAULT '{}',
+            artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            training_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (training_allowed = 0),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(source_id, product_id, data_version, source_cycle_time, sha256)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_forecast_artifacts_product_cycle
+            ON raw_forecast_artifacts(source_id, product_id, source_cycle_time)
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS deterministic_forecast_anchors (
+            anchor_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            anchor_value_c REAL NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            artifact_id INTEGER REFERENCES raw_forecast_artifacts(artifact_id),
+            model TEXT NOT NULL,
+            native_grid TEXT,
+            delivery_grid_resolution TEXT,
+            interpolation_method TEXT,
+            contributing_times_json TEXT NOT NULL DEFAULT '[]',
+            anchor_identity_hash TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            training_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (training_allowed = 0),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_deterministic_forecast_anchors_target
+            ON deterministic_forecast_anchors(city, target_date, temperature_metric, source_id, product_id)
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_deterministic_forecast_anchors_identity_hash
+            ON deterministic_forecast_anchors(anchor_identity_hash)
+            WHERE anchor_identity_hash IS NOT NULL
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS forecast_posteriors (
+            posterior_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            data_version TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL CHECK (temperature_metric IN ('high', 'low')),
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            computed_at TEXT NOT NULL,
+            q_json TEXT NOT NULL,
+            q_lcb_json TEXT,
+            q_ucb_json TEXT,
+            posterior_method TEXT NOT NULL,
+            aifs_source_run_id TEXT,
+            openmeteo_anchor_id INTEGER REFERENCES deterministic_forecast_anchors(anchor_id),
+            dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
+            family_id TEXT,
+            bin_topology_hash TEXT,
+            dependency_hash TEXT,
+            posterior_config_hash TEXT,
+            posterior_identity_hash TEXT,
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')),
+            training_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (training_allowed = 0),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_target
+            ON forecast_posteriors(city, target_date, temperature_metric, product_id, computed_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_topology
+            ON forecast_posteriors(city, target_date, temperature_metric, bin_topology_hash, computed_at)
+    """)
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_posteriors_identity_hash
+            ON forecast_posteriors(posterior_identity_hash)
+            WHERE posterior_identity_hash IS NOT NULL
+    """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS replacement_shadow_decisions (
+            decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            posterior_id INTEGER NOT NULL REFERENCES forecast_posteriors(posterior_id),
+            baseline_source_run_id TEXT,
+            market_snapshot_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            decision_time TEXT NOT NULL,
+            baseline_direction TEXT NOT NULL,
+            candidate_direction TEXT NOT NULL,
+            allowed_direction TEXT NOT NULL,
+            baseline_q_lcb REAL NOT NULL CHECK (baseline_q_lcb >= 0.0 AND baseline_q_lcb <= 1.0),
+            candidate_q_lcb REAL NOT NULL CHECK (candidate_q_lcb >= 0.0 AND candidate_q_lcb <= 1.0),
+            allowed_q_lcb REAL NOT NULL CHECK (allowed_q_lcb >= 0.0 AND allowed_q_lcb <= 1.0),
+            baseline_kelly_fraction REAL NOT NULL CHECK (baseline_kelly_fraction >= 0.0),
+            candidate_kelly_fraction REAL NOT NULL CHECK (candidate_kelly_fraction >= 0.0),
+            allowed_kelly_fraction REAL NOT NULL CHECK (allowed_kelly_fraction >= 0.0),
+            veto INTEGER NOT NULL CHECK (veto IN (0, 1)),
+            veto_reason TEXT,
+            dependency_source_run_ids_json TEXT NOT NULL DEFAULT '[]',
+            provenance_json TEXT NOT NULL DEFAULT '{}',
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_VETO_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_VETO_ONLY')),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(posterior_id, market_snapshot_id, condition_id, token_id, decision_time)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_replacement_shadow_decisions_market_time
+            ON replacement_shadow_decisions(condition_id, token_id, decision_time)
+    """)
+
+
 def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
     """Create calibration_pairs table + indexes + ALTERs. Idempotent.
 
@@ -432,6 +581,37 @@ def _create_settlement_capture_verifications(conn: sqlite3.Connection) -> None:
     """)
 
 
+def ensure_replacement_forecast_shadow_schema(conn: sqlite3.Connection) -> None:
+    """Create only the replacement forecast shadow tables on a forecast DB.
+
+    This is the targeted simple-switch initializer for the Open-Meteo ECMWF IFS
+    9km + AIFS sampled-2t path. It deliberately avoids the broader canonical
+    schema migration surface and creates no world/trade truth tables.
+    """
+
+    nested_transaction = conn.in_transaction
+    if nested_transaction:
+        conn.execute("SAVEPOINT replacement_forecast_shadow_schema")
+    else:
+        conn.execute("BEGIN")
+    try:
+        _create_replacement_forecast_shadow_tables(conn)
+        if nested_transaction:
+            conn.execute("RELEASE SAVEPOINT replacement_forecast_shadow_schema")
+        else:
+            conn.execute("COMMIT")
+    except Exception:
+        try:
+            if nested_transaction:
+                conn.execute("ROLLBACK TO SAVEPOINT replacement_forecast_shadow_schema")
+                conn.execute("RELEASE SAVEPOINT replacement_forecast_shadow_schema")
+            else:
+                conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+
+
 def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = True) -> None:
     """Apply the Zeus World DB v2 schema to *conn*.
 
@@ -562,6 +742,12 @@ def apply_canonical_schema(conn: sqlite3.Connection, *, forecast_tables: bool = 
             # ensemble_snapshots  (K1 forecast-class: moves to zeus-forecasts.db)
             # ----------------------------------------------------------------
             _create_ensemble_snapshots(conn)
+
+            # ----------------------------------------------------------------
+            # Replacement forecast shadow provenance tables. These are forecast-
+            # class research surfaces only; they do not grant entry authority.
+            # ----------------------------------------------------------------
+            _create_replacement_forecast_shadow_tables(conn)
 
             # ----------------------------------------------------------------
             # calibration_pairs  (K1 forecast-class: moves to zeus-forecasts.db)

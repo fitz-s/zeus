@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = ROOT / "raw"
 REGION_ROOT = RAW_ROOT / "tigge_ecmwf_ens_regions"
 CITY_ROOT = RAW_ROOT / "tigge_ecmwf_ens"

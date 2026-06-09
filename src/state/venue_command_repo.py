@@ -1606,28 +1606,44 @@ def _validate_review_confirmed_fill_payload(
         raise ValueError("review confirmed-fill clearance payload requires reason=review_cleared_confirmed_fill")
     if payload.get("command_id") != command_id:
         raise ValueError("review confirmed-fill clearance payload command_id must match appended command")
-    if payload.get("proof_class") != "prior_fill_confirmed_event_with_positive_trade_fact":
+    proof_class = payload.get("proof_class")
+    if proof_class not in {
+        "prior_fill_confirmed_event_with_positive_trade_fact",
+        "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+    }:
         raise ValueError("review confirmed-fill clearance proof_class is not supported")
     required_predicates = payload.get("required_predicates")
     if not isinstance(required_predicates, dict):
         raise ValueError("review confirmed-fill clearance requires required_predicates")
-    required_true = (
-        "latest_event_is_review_required",
-        "review_reason_supported",
-        "prior_fill_confirmed_event",
-        "positive_trade_fact",
-    )
+    if proof_class == "cancel_unknown_confirmed_trade_with_positive_trade_fact":
+        required_true = (
+            "latest_event_is_cancel_replace_blocked",
+            "semantic_cancel_status_cancel_unknown",
+            "requires_m5_reconcile",
+            "positive_trade_fact",
+        )
+    else:
+        required_true = (
+            "latest_event_is_review_required",
+            "review_reason_supported",
+            "prior_fill_confirmed_event",
+            "positive_trade_fact",
+        )
     missing = [name for name in required_true if required_predicates.get(name) is not True]
     if missing:
         raise ValueError(f"review confirmed-fill predicates are not proven true: {missing}")
     actual = _actual_review_confirmed_fill_predicates(conn, command_id, payload)
-    actual_failures = [name for name, ok in actual.items() if not ok]
+    actual_failures = [name for name in required_true if not actual.get(name)]
     if actual_failures:
         raise ValueError(f"review confirmed-fill DB predicates failed: {actual_failures}")
     source = payload.get("source_proof")
     if not isinstance(source, dict):
         raise ValueError("review confirmed-fill clearance requires source_proof")
-    if source.get("source_function") not in {"PolymarketUserChannelIngestor._handle_trade", "operator_review"}:
+    if source.get("source_function") not in {
+        "PolymarketUserChannelIngestor._handle_trade",
+        "operator_review",
+        "command_recovery._review_required_cancel_unknown_live_order_recovery",
+    }:
         raise ValueError("review confirmed-fill clearance source_function is not supported")
     if not str(source.get("source_commit") or "").strip():
         raise ValueError("review confirmed-fill clearance requires source_commit")
@@ -1912,6 +1928,7 @@ def _actual_review_confirmed_fill_predicates(
         ):
             prior_fill_confirmed = True
             break
+    latest_payload = _review_clearance_json_dict(events[-1]["payload_json"]) if events else {}
     review_reason = _actual_review_required_reason(conn, command_id)
     positive_trade_fact = (
         trade_fact is not None
@@ -1921,6 +1938,11 @@ def _actual_review_confirmed_fill_predicates(
     )
     return {
         "latest_event_is_review_required": latest_event_type == "REVIEW_REQUIRED",
+        "latest_event_is_cancel_replace_blocked": latest_event_type == "CANCEL_REPLACE_BLOCKED",
+        "semantic_cancel_status_cancel_unknown": (
+            str(latest_payload.get("semantic_cancel_status") or "").upper() == "CANCEL_UNKNOWN"
+        ),
+        "requires_m5_reconcile": latest_payload.get("requires_m5_reconcile") is True,
         "review_reason_supported": review_reason == "ws_trade_lifecycle_regression_or_economic_drift",
         "prior_fill_confirmed_event": prior_fill_confirmed,
         "positive_trade_fact": positive_trade_fact,

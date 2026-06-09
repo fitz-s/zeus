@@ -9,8 +9,8 @@ STRATEGY_TAXONOMY_DIRECTIVE §1 theorem:
   Physical possible interval I_t = [L_t, U_t] (daily-high: L_t = H_t = high-so-far floor,
   U_t = H_t + Δ_phys⁺ physical envelope). Bin B_i = [bin_low, bin_high] (inclusive).
 
-  Enter YES  iff I_t ⊆ B_i  → Π = 1 − a − phi(a), positive iff a + phi(a) < 1.
-  Enter NO   iff I_t ∩ B_i = ∅ → Π = 1 − b − phi(b), positive iff b + phi(b) < 1.
+  Enter YES  iff I_t ⊆ B_i  and deterministic payout exceeds ask plus fee.
+  Enter NO   iff I_t ∩ B_i = ∅ and deterministic payout exceeds ask plus fee.
   No-trade otherwise (overlap-not-subset).
 
 Evidence = timestamp/source coherence (source_available_at + QC state), NOT win-rate.
@@ -193,11 +193,11 @@ class SettlementCaptureShadow(BaseStrategyCandidate):
     ) -> "CandidateDecision | DeterministicEdgeDecision":
         """Evaluate the physical-interval theorem against the market context.
 
-        Enter path (YES): I_t ⊆ B_i AND (1 − ask − phi(ask, shares=1)) > 0
+        Enter path (YES): I_t ⊆ B_i AND deterministic payout exceeds ask plus fee
           → DeterministicEdgeDecision(side='buy_yes', proof_type='physical_interval_subset')
           Writes shadow decision_events row.
 
-        Enter path (NO): I_t ∩ B_i = ∅ AND (1 − no_ask − phi(no_ask, shares=1)) > 0
+        Enter path (NO): I_t ∩ B_i = ∅ AND deterministic payout exceeds ask plus fee
           → DeterministicEdgeDecision(side='buy_no', proof_type='physical_interval_disjoint')
           Writes shadow decision_events row.
 
@@ -291,6 +291,7 @@ class SettlementCaptureShadow(BaseStrategyCandidate):
         ceiling = bound.ceiling
         fee_rate = venue_fee_rate()
         shares_one = Decimal("1")
+        deterministic_payout = Decimal("1")
 
         # ── YES path: I_t ⊆ B_i ──────────────────────────────────────────────
         if _interval_subset(floor, ceiling, bin_low, bin_high):
@@ -308,7 +309,7 @@ class SettlementCaptureShadow(BaseStrategyCandidate):
 
             ask_dec = Decimal(str(yes_ask))
             fee_dec = phi(shares_one, ask_dec, fee_rate)
-            profit = Decimal("1") - ask_dec - fee_dec
+            profit = deterministic_payout - ask_dec - fee_dec
 
             if profit <= Decimal("0"):
                 decision = CandidateDecision(
@@ -316,7 +317,7 @@ class SettlementCaptureShadow(BaseStrategyCandidate):
                     reason=NoTradeReason.PHYSICAL_INTERVAL_UNPROFITABLE,
                     reason_detail=(
                         f"settlement_capture_shadow: I_t⊆B_i but "
-                        f"1 − ask({yes_ask}) − phi({float(fee_dec):.6f}) = "
+                        f"payout minus ask({yes_ask}) minus phi({float(fee_dec):.6f}) = "
                         f"{float(profit):.6f} ≤ 0; no positive profit."
                     ),
                 )
@@ -340,7 +341,7 @@ class SettlementCaptureShadow(BaseStrategyCandidate):
                 token_id=token_id,
                 executable_price=ask_dec,
                 fee=fee_dec,
-                deterministic_payoff=Decimal("1"),
+                deterministic_payoff=deterministic_payout,
                 deterministic_profit=profit,
                 proof_inputs_hash=_proof_inputs_hash(
                     bound, bin_low, bin_high, token_id, "buy_yes", yes_ask
@@ -363,7 +364,7 @@ class SettlementCaptureShadow(BaseStrategyCandidate):
 
             no_ask_dec = Decimal(str(no_ask))
             fee_dec = phi(shares_one, no_ask_dec, fee_rate)
-            profit = Decimal("1") - no_ask_dec - fee_dec
+            profit = deterministic_payout - no_ask_dec - fee_dec
 
             if profit <= Decimal("0"):
                 decision = CandidateDecision(
@@ -371,7 +372,7 @@ class SettlementCaptureShadow(BaseStrategyCandidate):
                     reason=NoTradeReason.PHYSICAL_INTERVAL_UNPROFITABLE,
                     reason_detail=(
                         f"settlement_capture_shadow: I_t∩B_i=∅ but "
-                        f"1 − no_ask({no_ask}) − phi({float(fee_dec):.6f}) = "
+                        f"payout minus no_ask({no_ask}) minus phi({float(fee_dec):.6f}) = "
                         f"{float(profit):.6f} ≤ 0; no positive profit."
                     ),
                 )

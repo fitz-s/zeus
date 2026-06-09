@@ -24,6 +24,7 @@ NOW = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
 def conn(monkeypatch):
     """In-memory trades DB with live-money gates neutralized for unit tests."""
     from src.state.db import init_schema
+    from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
@@ -35,6 +36,31 @@ def conn(monkeypatch):
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+
+    def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
+        CollateralLedger(conn).set_snapshot(
+            CollateralSnapshot(
+                pusd_balance_micro=1_000_000_000,
+                pusd_allowance_micro=1_000_000_000,
+                usdc_e_legacy_balance_micro=0,
+                ctf_token_balances={},
+                ctf_token_allowances={},
+                reserved_pusd_for_buys_micro=0,
+                reserved_tokens_for_sells={},
+                captured_at=datetime.now(timezone.utc),
+                authority_tier="CHAIN",
+                raw_balance_payload_hash="test-collateral",
+            )
+        )
+        return {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "allowed",
+            "authority_tier": "CHAIN",
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    monkeypatch.setattr("src.execution.executor._refresh_entry_collateral_snapshot_for_submit", _seed_submit_collateral)
     yield c
     c.close()
 
@@ -477,6 +503,68 @@ def test_marketable_buy_min_size_polyapi_exception_creates_terminal_rejection(co
     assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
     assert payload["venue_order_created"] is False
     assert "SUBMIT_TIMEOUT_UNKNOWN" not in [row["event_type"] for row in events]
+
+
+def test_marketable_buy_min_size_without_currency_polyapi_exception_creates_terminal_rejection(conn):
+    from src.execution.executor import _live_order
+
+    class PolyApiException(Exception):
+        pass
+
+    intent = _make_entry_intent(conn, price=0.01)
+    mock_client = MagicMock()
+    mock_client.v2_preflight.return_value = None
+    mock_client.place_limit_order.side_effect = PolyApiException(
+        "PolyApiException[status_code=400, error_message={'error': "
+        "'invalid amount for a marketable BUY order ($0.12), min size: 1'}]"
+    )
+
+    with patch("src.data.polymarket_client.PolymarketClient", return_value=mock_client):
+        result = _live_order(
+            "trade-m2-marketable-buy-min-no-currency",
+            intent,
+            shares=12.0,
+            conn=conn,
+            decision_id="dec-m2-marketable-buy-min-no-currency",
+        )
+
+    cmd = _command(conn)
+    assert result.status == "rejected"
+    assert "venue_rejected_invalid_amount_400" in (result.reason or "")
+    assert cmd["state"] == "REJECTED"
+    events = conn.execute(
+        "SELECT event_type, payload_json FROM venue_command_events WHERE command_id = ? ORDER BY sequence_no",
+        (cmd["command_id"],),
+    ).fetchall()
+    assert [row["event_type"] for row in events][-1] == "SUBMIT_REJECTED"
+    payload = json.loads(events[-1]["payload_json"])
+    assert payload["reason"] == "venue_rejected_invalid_amount_400"
+    assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
+    assert payload["venue_order_created"] is False
+    assert "SUBMIT_TIMEOUT_UNKNOWN" not in [row["event_type"] for row in events]
+
+
+def test_risk_allocator_pre_submit_exception_does_not_create_unknown_side_effect(conn, monkeypatch):
+    from src.execution.executor import _live_order
+
+    intent = _make_entry_intent(conn)
+    monkeypatch.setattr(
+        "src.execution.executor._assert_risk_allocator_allows_submit",
+        lambda _intent: (_ for _ in ()).throw(RuntimeError("unknown_side_effect_threshold")),
+    )
+
+    result = _live_order(
+        "trade-m2-risk-pre-submit",
+        intent,
+        shares=5.0,
+        conn=conn,
+        decision_id="dec-m2-risk-pre-submit",
+    )
+
+    assert result.status == "rejected"
+    assert result.command_state == "REJECTED"
+    assert "risk_allocator_pre_submit_blocked" in (result.reason or "")
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
 
 
 def test_pre_post_signing_exception_safe_to_retry(conn):

@@ -5,26 +5,17 @@
 #                  + src/calibration/bounds.py (split-conformal p⁺)
 """CenterSellModelNo — calibrated stochastic NO buy (shadow candidate).
 
-Theorem (§6 / §8.2): for finite bin B_i, buy NO at ask b_i when the model
-says YES is overpriced. Expected value per share:
+Theorem (§6 / §8.2): for finite bin B_i, buy NO at ask b_i only when a native
+NO lower bound proves positive edge:
 
-    EV^NO_i = 1 − p_i − b_i − phi(b_i)
+    EV^NO_i = no_p_lower_i − b_i − phi(b_i)
 
-Application condition uses the calibrated upper bound p⁺ (§0 / §6):
-
-    1 − p⁺_i − b_i − phi(b_i, fee_rate) > 0
-
-where p⁺ = calibrated_bounds(p_hat, cal_p_hats, cal_outcomes, alpha)[1]
-(split-conformal upper bound — same calibration system as center_buy, upper
-bound instead of lower).
-
-NO payoff N_i = 1 − Y_i: if the bin does NOT settle, the NO token pays $1.
-Positive EV requires market to overprice the bin more than calibration spread +
-taker fee.
+YES upper bounds are not executable NO evidence.
 
 Data inputs (pulled via getattr from MarketAnalysisVNext):
   center_sell_model_no_p_hat       — point probability estimate for bin i (float ∈ (0,1))
   center_sell_model_no_no_ask      — executable NO ask price b_i (float ∈ (0,1))
+  center_sell_model_no_no_p_lower  — native NO lower bound (float ∈ [0,1])
   center_sell_model_no_cal_p_hats  — calibration-set point estimates (Sequence[float])
   center_sell_model_no_cal_outcomes — calibration-set binary outcomes (Sequence[int])
   center_sell_model_no_alpha        — miscoverage rate (float, default 0.10)
@@ -64,18 +55,18 @@ from . import (
 _DEFAULT_ALPHA = 0.10
 
 
-def _ev_no(p_plus: float, b: Decimal, fee_rate: Decimal) -> Decimal:
-    """Compute calibrated NO edge: 1 − p⁺ − b − phi(1, b, fee_rate).
+def _ev_no(no_p_lower: float, b: Decimal, fee_rate: Decimal) -> Decimal:
+    """Compute calibrated NO edge from native NO lower-bound evidence.
 
     Args:
-        p_plus: calibrated upper bound p⁺ ∈ [0, 1].
+        no_p_lower: native NO lower bound ∈ [0, 1].
         b: NO ask price as Decimal ∈ (0, 1).
         fee_rate: venue taker fee rate.
 
     Returns:
         Decimal edge (may be negative or zero).
     """
-    return Decimal("1") - Decimal(str(p_plus)) - b - phi(Decimal("1"), b, fee_rate)
+    return Decimal(str(no_p_lower)) - b - phi(Decimal("1"), b, fee_rate)
 
 
 class CenterSellModelNo(BaseStrategyCandidate):
@@ -96,8 +87,7 @@ class CenterSellModelNo(BaseStrategyCandidate):
                 family="center_sell",
                 description=(
                     "Calibrated stochastic NO buy — center_sell model-NO layer. "
-                    "Enter buy_no iff 1 − p⁺_i − b_i − phi(b_i) > 0. "
-                    "p⁺ = calibrated upper bound (split conformal). "
+                    "Enter buy_no iff native no_p_lower_i − b_i − phi(b_i) > 0. "
                     "proof_type='center_sell_model_no'. Shadow only; kelly=0. "
                     "Authority: zeus_strategy_spec §8.2, STRATEGY_TAXONOMY_DIRECTIVE §6."
                 ),
@@ -115,15 +105,15 @@ class CenterSellModelNo(BaseStrategyCandidate):
         """Evaluate calibrated NO edge for a single bin.
 
         Guard path (reason=CENTER_SELL_MODEL_NO_CALIBRATION_UNAVAILABLE):
-          - Any of p_hat, no_ask, cal_p_hats, cal_outcomes absent or None.
+          - Any of p_hat, no_ask, cal_p_hats, cal_outcomes, native NO lower bound absent or None.
 
         No-trade path (reason=CENTER_SELL_MODEL_NO_NO_EDGE):
-          - 1 − p⁺ − b − phi ≤ 0 (calibrated edge non-positive).
+          - native no_p_lower − b − phi ≤ 0 (calibrated edge non-positive).
 
         Enter path:
           - outcome="enter", side="buy_no".
-          - edge = 1 − p⁺ − b − phi (Decimal, > 0).
-          - p_posterior = p⁺ (upper bound stored, not raw p_hat).
+          - edge = native no_p_lower − b − phi (Decimal, > 0).
+          - p_posterior = native NO lower bound.
           - target_size_usd = None (shadow; no Kelly sizing).
           - Writes ONE shadow decision_events row.
 
@@ -135,6 +125,7 @@ class CenterSellModelNo(BaseStrategyCandidate):
         # --- Pull data-gated inputs via getattr ---
         p_hat_raw: Optional[float] = getattr(analysis, "center_sell_model_no_p_hat", None)
         no_ask_raw: Optional[float] = getattr(analysis, "center_sell_model_no_no_ask", None)
+        no_p_lower_raw: Optional[float] = getattr(analysis, "center_sell_model_no_no_p_lower", None)
         cal_p_hats: Optional[Sequence[float]] = getattr(
             analysis, "center_sell_model_no_cal_p_hats", None
         )
@@ -146,7 +137,7 @@ class CenterSellModelNo(BaseStrategyCandidate):
         )
 
         # --- Guard: all calibration inputs must be present ---
-        if any(v is None for v in (p_hat_raw, no_ask_raw, cal_p_hats, cal_outcomes)):
+        if any(v is None for v in (p_hat_raw, no_ask_raw, no_p_lower_raw, cal_p_hats, cal_outcomes)):
             decision = CandidateDecision(
                 outcome="no_trade",
                 reason=NoTradeReason.CENTER_SELL_MODEL_NO_CALIBRATION_UNAVAILABLE,
@@ -154,6 +145,7 @@ class CenterSellModelNo(BaseStrategyCandidate):
                     f"center_sell_model_no: calibration inputs absent for "
                     f"market_slug={market_slug!r}; "
                     f"p_hat={p_hat_raw!r}, no_ask={no_ask_raw!r}, "
+                    f"no_p_lower={no_p_lower_raw!r}, "
                     f"cal_p_hats={'present' if cal_p_hats is not None else 'None'}, "
                     f"cal_outcomes={'present' if cal_outcomes is not None else 'None'}."
                 ),
@@ -183,7 +175,19 @@ class CenterSellModelNo(BaseStrategyCandidate):
 
         fee_rate = venue_fee_rate()
         b = Decimal(str(float(no_ask_raw)))  # type: ignore[arg-type]
-        edge = _ev_no(p_plus, b, fee_rate)
+        no_p_lower = float(no_p_lower_raw)  # type: ignore[arg-type]
+        if not 0.0 <= no_p_lower <= 1.0:
+            decision = CandidateDecision(
+                outcome="no_trade",
+                reason=NoTradeReason.CENTER_SELL_MODEL_NO_CALIBRATION_UNAVAILABLE,
+                reason_detail=(
+                    f"center_sell_model_no: native NO lower bound outside [0,1] for "
+                    f"market_slug={market_slug!r}; no_p_lower={no_p_lower_raw!r}."
+                ),
+            )
+            write_candidate_no_trade_row(conn, context, decision)
+            return decision
+        edge = _ev_no(no_p_lower, b, fee_rate)
 
         # --- Gate: edge must be strictly positive ---
         if edge <= Decimal("0"):
@@ -193,7 +197,7 @@ class CenterSellModelNo(BaseStrategyCandidate):
                 reason_detail=(
                     f"center_sell_model_no: edge={edge} ≤ 0 for "
                     f"market_slug={market_slug!r}; "
-                    f"p_hat={p_hat_raw}, p⁺={p_plus}, no_ask={no_ask_raw}."
+                    f"p_hat={p_hat_raw}, no_p_lower={no_p_lower}, no_ask={no_ask_raw}."
                 ),
             )
             write_candidate_no_trade_row(conn, context, decision)
@@ -218,7 +222,7 @@ class CenterSellModelNo(BaseStrategyCandidate):
             strategy_key=self.strategy_key,
             conn=conn,
             edge=float(edge),
-            p_posterior=p_plus,
+            p_posterior=no_p_lower,
             polymarket_end_anchor_source=anchor_source,
         )
 
@@ -226,7 +230,7 @@ class CenterSellModelNo(BaseStrategyCandidate):
             outcome="enter",
             side="buy_no",
             edge=edge,
-            p_posterior=Decimal(str(p_plus)),
+            p_posterior=Decimal(str(no_p_lower)),
             target_price=b,
             target_size_usd=None,  # shadow; Kelly sizing deferred
         )

@@ -1,1 +1,0 @@
-"""Risk-level adapter boundary."""

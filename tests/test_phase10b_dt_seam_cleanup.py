@@ -1003,6 +1003,8 @@ class TestRCPV2RowCountSensor:
         })
         status = json.loads(status_path.read_text())
 
+        assert status["generated_at"] == status["timestamp"]
+        assert status["truth"]["generated_at"] == status["generated_at"]
         assert status["execution"]["overall"] == {"entry_attempted": 1}
         assert status["execution"]["by_strategy"] == {}
         assert isinstance(status["execution"]["current_open_entry_orders"], dict)

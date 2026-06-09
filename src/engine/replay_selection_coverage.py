@@ -36,12 +36,12 @@ import logging
 import sqlite3
 import uuid
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date
 from typing import Literal, Optional
 
 import numpy as np
 
-from src.config import City, cities_by_name, edge_n_bootstrap, settings
+from src.config import City, cities_by_name, edge_n_bootstrap
 from src.contracts.season import season_from_month
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.engine.replay import (
@@ -52,11 +52,10 @@ from src.engine.replay import (
     _insert_backtest_outcome,
     _insert_backtest_run,
     _replay_calibration_lookup_keys,
-    _table_exists,
 )
 from src.state.db import get_backtest_connection, get_trade_connection_with_world, init_backtest_schema
 from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
-from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
+from src.strategy.market_analysis_family_scan import scan_full_hypothesis_family
 from src.strategy.selection_family import apply_familywise_fdr, make_hypothesis_family_id
 from src.types import Bin
 

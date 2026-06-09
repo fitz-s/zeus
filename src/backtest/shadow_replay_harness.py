@@ -47,9 +47,8 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-import sys
 import uuid
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -307,7 +306,6 @@ def run_replay(
     from src.contracts.shoulder_strategy_vnext import classify_shoulder_candidate
     from src.state.shadow_experiment_registry import (
         register_shadow_experiment,
-        hash_config,
     )
     from src.state.schema.phase6_evidence_schema import ensure_tables
 
@@ -572,7 +570,7 @@ def run_replay(
         blocker = f"n_settled={n_settled} < 100 minimum before non-HOLD verdict"
     else:
         # Run PromotionReadinessValidator
-        from src.analysis.evidence_report import build_evidence_report, EvidenceReport
+        from src.analysis.evidence_report import build_evidence_report
         from src.analysis.promotion_readiness import PromotionReadinessValidator
         from src.contracts.evidence_tier import EvidenceTier
 

@@ -47,8 +47,8 @@ def _mem_world() -> sqlite3.Connection:
     return conn
 
 
-def _cache_no_belief(conn, *, p_posterior_no: float, recorded_at: str, snapshot_id: str = "snap1"):
-    """Cache a 2-bin belief; NO-prob of b30 = 1 - p_posterior[b30]."""
+def _cache_yes_belief(conn, *, p_posterior_yes: float, recorded_at: str, snapshot_id: str = "snap1"):
+    """Cache a 2-bin belief; YES-prob of b30."""
     cr.cache_belief(
         conn,
         family_id="Wuhan|2026-06-01|high",
@@ -57,7 +57,7 @@ def _cache_no_belief(conn, *, p_posterior_no: float, recorded_at: str, snapshot_
         snapshot_id=snapshot_id,
         calibrator_model_hash="identity",
         bin_labels=["b29", "b30"],
-        p_posterior_vec=[0.001, 1.0 - p_posterior_no],
+        p_posterior_vec=[0.001, p_posterior_yes],
         recorded_at=recorded_at,
     )
 
@@ -72,14 +72,14 @@ def test_belief_worsening_reprice_fires_cancel_replace():
     pulled — symmetric to the existing edge-IMPROVEMENT re-fire. The move is EVIDENCE-backed: a new
     snapshot_id (new FSR/day0/obs), not a bare price tick."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    # New evidence (snap2): NO-belief decays 0.90 -> 0.80 (Δ0.10 ≥ belief_reprice_delta 0.03).
-    _cache_no_belief(conn, p_posterior_no=0.80, recorded_at="2026-05-31T06:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    # New evidence (snap2): YES-belief decays 0.90 -> 0.80 (Δ0.10 ≥ belief_reprice_delta 0.03).
+    _cache_yes_belief(conn, p_posterior_yes=0.80, recorded_at="2026-05-31T06:00:00+00:00", snapshot_id="snap2")
     decision = cr.screen_reprice(
         conn,
         family_id="Wuhan|2026-06-01|high",
         bin_label="b30",
-        side="buy_no",
+        side="buy_yes",
         resting_posterior=0.90,            # belief the resting order was priced at
         resting_snapshot_id="snap1",       # the evidence the resting order was priced on
         belief_reprice_delta=0.03,
@@ -93,13 +93,13 @@ def test_bare_price_wiggle_does_not_reprice():
     """ANTI-TWITCH: the belief is UNCHANGED (same snapshot_id) — only the price moved. screen_reprice
     must return None (HOLD). A bare price wiggle is not evidence and must never cancel/re-price."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
     # No new snapshot written. The resting order's evidence (snap1) is still the latest belief.
     decision = cr.screen_reprice(
         conn,
         family_id="Wuhan|2026-06-01|high",
         bin_label="b30",
-        side="buy_no",
+        side="buy_yes",
         resting_posterior=0.90,
         resting_snapshot_id="snap1",
         belief_reprice_delta=0.03,
@@ -111,13 +111,13 @@ def test_sub_delta_belief_move_does_not_reprice():
     """A NEW snapshot exists but the belief barely moved (Δ0.01 < belief_reprice_delta) → HOLD.
     Evidence changed but not MATERIALLY → no twitchy re-price."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_no_belief(conn, p_posterior_no=0.89, recorded_at="2026-05-31T06:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.89, recorded_at="2026-05-31T06:00:00+00:00", snapshot_id="snap2")
     decision = cr.screen_reprice(
         conn,
         family_id="Wuhan|2026-06-01|high",
         bin_label="b30",
-        side="buy_no",
+        side="buy_yes",
         resting_posterior=0.90,
         resting_snapshot_id="snap1",
         belief_reprice_delta=0.03,
@@ -126,17 +126,17 @@ def test_sub_delta_belief_move_does_not_reprice():
 
 
 def test_belief_improving_does_not_pull_order():
-    """Belief moved in our FAVOR (NO-belief 0.90 -> 0.95) on new evidence. screen_reprice (the
+    """Belief moved in our FAVOR (YES-belief 0.90 -> 0.95) on new evidence. screen_reprice (the
     WORSENING trigger) must NOT pull the order — improvement is the existing IMPROVE_DELTA re-fire's
     job, not a cancel. This guards against re-pricing a more-favorable resting order off the book."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_no_belief(conn, p_posterior_no=0.95, recorded_at="2026-05-31T06:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.95, recorded_at="2026-05-31T06:00:00+00:00", snapshot_id="snap2")
     decision = cr.screen_reprice(
         conn,
         family_id="Wuhan|2026-06-01|high",
         bin_label="b30",
-        side="buy_no",
+        side="buy_yes",
         resting_posterior=0.90,
         resting_snapshot_id="snap1",
         belief_reprice_delta=0.03,
@@ -151,7 +151,7 @@ def test_stale_quote_cancel_fires_past_max_age():
     decision = cr.screen_stale_quote_cancel(
         family_id="Wuhan|2026-06-01|high",
         bin_label="b30",
-        side="buy_no",
+        side="buy_yes",
         quote_age_ms=1500.0,
         pre_submit_max_quote_age_ms=1000.0,
     )
@@ -166,7 +166,7 @@ def test_fresh_quote_is_not_cancelled():
     decision = cr.screen_stale_quote_cancel(
         family_id="Wuhan|2026-06-01|high",
         bin_label="b30",
-        side="buy_no",
+        side="buy_yes",
         quote_age_ms=200.0,
         pre_submit_max_quote_age_ms=1000.0,
     )
@@ -181,13 +181,13 @@ def test_fresh_quote_is_not_cancelled():
 @_skip_deleted_exit_api
 def test_exit_ci_separated_reversal_exits():
     """SD-7: exit fires when the new belief's CI EXCLUDES the entry belief (separated evidence).
-    Entry NO-belief 0.90 [0.86, 0.94]; current NO-belief 0.70 [0.66, 0.74] — the CIs are disjoint
+    Entry YES-belief 0.90 [0.86, 0.94]; current YES-belief 0.70 [0.66, 0.74] — the CIs are disjoint
     (0.74 < 0.86) → CI-separated reversal → EXIT, even though Δ0.20 alone would already pass 0.15."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_no_belief(conn, p_posterior_no=0.70, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.70, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
     decision = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
         entry_ci=(0.86, 0.94), current_ci=(0.66, 0.74),
     )
@@ -201,10 +201,10 @@ def test_exit_sub_ci_noisy_reversal_holds():
     entry CI (wide/noisy snapshot) → HOLD. CI-separation is STRICTER than the flat threshold: a
     single noisy snapshot must not exit. This is the core SD-7 hardening."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_no_belief(conn, p_posterior_no=0.70, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.70, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
     decision = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
         entry_ci=(0.80, 1.00),       # entry CI is wide
         current_ci=(0.55, 0.92),     # current CI overlaps entry (0.92 > 0.80) → NOT separated
@@ -217,19 +217,19 @@ def test_exit_flat_floor_fallback_when_no_ci():
     """Back-compat: when CI inputs are unavailable, fall back to the flat reversal_belief_delta floor
     (the pre-hardening behavior). Δ0.30 ≥ 0.15 → EXIT; Δ0.04 < 0.15 → HOLD."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_no_belief(conn, p_posterior_no=0.60, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.60, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
     exited = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
     )
     assert exited is not None, "flat-floor fallback: Δ0.30 ≥ 0.15 must still exit when no CI given"
 
     conn2 = _mem_world()
-    _cache_no_belief(conn2, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_no_belief(conn2, p_posterior_no=0.86, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn2, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn2, p_posterior_yes=0.86, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
     held = cr.screen_exit(
-        conn2, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn2, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
     )
     assert held is None, "flat-floor fallback: Δ0.04 < 0.15 must hold"
@@ -242,15 +242,15 @@ def test_exit_evidence_unavailable_third_state():
     belief can't be computed, distinct from belief-reversed), screen_exit returns a THIRD state
     EVIDENCE_UNAVAILABLE → flag for the 守护 heartbeat. Do NOT exit on price, do NOT blindly hold."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
     decision = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
         belief_available=False,   # day0 math degraded → belief is unavailable, NOT reversed
     )
     assert decision is not None, "degraded belief must NOT silently hold (None) — it is a first-class state"
     assert decision.reason == "EVIDENCE_UNAVAILABLE"
-    assert getattr(decision, "side", None) == "buy_no"
+    assert getattr(decision, "side", None) == "buy_yes"
 
 
 @_skip_deleted_exit_api
@@ -258,9 +258,9 @@ def test_exit_evidence_unavailable_is_not_an_exit_on_price():
     """EVIDENCE_UNAVAILABLE must be distinguishable from an actual EXIT so the caller does NOT route
     it through the exit-submit path (it's a heartbeat flag, not a sell)."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
     decision = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15, belief_available=False,
     )
     assert decision.reason == "EVIDENCE_UNAVAILABLE"
@@ -275,10 +275,10 @@ def test_exit_re_reversal_cancels_pending_exit():
     the belief RE-reverses back (current CI re-OVERLAPS the entry CI) → the reversal was noise →
     CANCEL the pending exit."""
     conn = _mem_world()
-    # Latest belief has recovered back toward entry (NO-belief 0.88, CI overlapping entry).
-    _cache_no_belief(conn, p_posterior_no=0.88, recorded_at="2026-05-31T18:00:00+00:00", snapshot_id="snap3")
+    # Latest belief has recovered back toward entry (YES-belief 0.88, CI overlapping entry).
+    _cache_yes_belief(conn, p_posterior_yes=0.88, recorded_at="2026-05-31T18:00:00+00:00", snapshot_id="snap3")
     decision = cr.screen_exit_cancel(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
         entry_ci=(0.86, 0.94), current_ci=(0.84, 0.92),  # re-overlaps entry → noise
     )
@@ -292,9 +292,9 @@ def test_exit_re_reversal_does_not_cancel_when_still_separated():
     """If the belief is STILL CI-separated from entry (reversal sustained), the pending exit must NOT
     be cancelled — let it fill. Cancel only when the reversal proved to be noise."""
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.70, recorded_at="2026-05-31T18:00:00+00:00", snapshot_id="snap3")
+    _cache_yes_belief(conn, p_posterior_yes=0.70, recorded_at="2026-05-31T18:00:00+00:00", snapshot_id="snap3")
     decision = cr.screen_exit_cancel(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
         entry_ci=(0.86, 0.94), current_ci=(0.66, 0.74),  # still separated → reversal sustained
     )
@@ -322,7 +322,7 @@ def test_exit_order_mode_reuses_entry_select_edli_order_mode():
     era._select_edli_order_mode = _fake_select
     try:
         mode = cr.select_exit_order_mode(
-            held_side="buy_no",                 # we HELD buy_no → exit SELLS no = buy_yes
+            held_side="buy_no",                 # we HELD buy_no -> exit enters buy_yes
             exit_reservation=0.42,
             actionable_payload={"direction": "buy_no", "c_fee_adjusted": 0.30},
             quote_payload={},

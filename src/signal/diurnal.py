@@ -10,7 +10,7 @@ from datetime import date, datetime, time, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from src.calibration.manager import hemisphere_for_lat, season_from_month
+from src.calibration.manager import season_from_month
 from src.types import Day0TemporalContext, ObservationInstant, SolarDay
 
 logger = logging.getLogger(__name__)

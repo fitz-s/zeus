@@ -136,32 +136,32 @@ class TestRiskLimits:
         assert ok is False
         assert "minimum" in reason
 
-    def test_exceeds_single_position(self):
+    def test_single_position_pct_is_not_hard_block(self):
         ok, reason = check_position_allowed(
             size_usd=15.0, bankroll=100.0,
             city="NYC",
             current_city_exposure=0.0,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
-        assert ok is False
-        assert "single position" in reason
+        assert ok is True
+        assert reason == "OK"
 
-    def test_exceeds_portfolio_heat(self):
+    def test_portfolio_heat_is_not_hard_block(self):
         ok, reason = check_position_allowed(
             size_usd=5.0, bankroll=100.0,
             city="NYC",
             current_city_exposure=0.0,
             current_portfolio_heat=0.48, limits=RiskLimits(),
         )
-        assert ok is False
-        assert "heat" in reason
+        assert ok is True
+        assert reason == "OK"
 
-    def test_exceeds_city_limit(self):
+    def test_city_exposure_is_not_hard_block(self):
         ok, reason = check_position_allowed(
             size_usd=5.0, bankroll=100.0,
             city="NYC",
             current_city_exposure=0.18,
             current_portfolio_heat=0.0, limits=RiskLimits(),
         )
-        assert ok is False
-        assert "City" in reason
+        assert ok is True
+        assert reason == "OK"

@@ -24,7 +24,7 @@ from src.calibration.platt import (
 from src.config import edge_n_bootstrap
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
-from src.contracts.settlement_semantics import apply_settlement_rounding, round_wmo_half_up_values
+from src.contracts.settlement_semantics import apply_settlement_rounding
 from src.signal.forecast_uncertainty import (
     analysis_bootstrap_sigma,
     analysis_mean_context,
@@ -465,7 +465,7 @@ class MarketAnalysis:
         """Return whether local NO-side economics are executable for this market.
 
         Buy-NO entries require native NO-token market prices per selected child;
-        `1 - YES` is a diagnostic complement, not executable entry authority.
+        YES-side diagnostics are not executable NO entry authority.
         """
         if self.p_market_no is None:
             return False
@@ -493,14 +493,8 @@ class MarketAnalysis:
         return float(self.p_market_no[bin_idx])
 
     def buy_no_complement_diagnostic_price(self, bin_idx: int) -> float:
-        """Return binary complement as a non-executable diagnostic only."""
-        if bin_idx < 0 or bin_idx >= len(self.bins):
-            raise IndexError(f"bin_idx out of range: {bin_idx}")
-        if len(self.bins) > 2:
-            raise ValueError("buy_no complement diagnostic is only defined for binary markets")
-        if self.p_market is None:
-            raise ValueError("binary buy_no complement diagnostic requires YES-side market price")
-        return 1.0 - float(self.p_market[bin_idx])
+        """Reject legacy binary complement diagnostics."""
+        raise ValueError("buy_no complement diagnostic is forbidden; require native NO quote")
 
     def find_edges(
         self, n_bootstrap: int | None = None
@@ -694,9 +688,26 @@ class MarketAnalysis:
                         )
                     )
 
-            # Buy NO direction: payoff probability is complement; executable
-            # entry price must come from the native NO side when available.
+            # Buy NO requires an independently materialized NO-side posterior.
+            # The legacy YES-complement construction is forbidden in live money.
             if self.supports_buy_no_edges(i):
+                trace.append(
+                    EdgeScanTrace(
+                        support_index=i,
+                        bin_label=b.label,
+                        executable=True,
+                        direction="buy_no",
+                        p_posterior=0.0,
+                        p_market=self.buy_no_market_price(i),
+                        raw_edge=None,
+                        ci_lower=None,
+                        ci_upper=None,
+                        p_value=None,
+                        decision="buy_no_independent_no_posterior_missing",
+                        native_quote_available=True,
+                    )
+                )
+                continue
                 # DIRECTION LAW (operator, load-bearing): buy_no ⟺ bin ≠ forecast.
                 # Our forecast bin is argmax(p_posterior) — the single outcome we predict most
                 # likely. A buy_no on THAT bin bets against our own forecast = wrong side by
@@ -713,7 +724,7 @@ class MarketAnalysis:
                             bin_label=b.label,
                             executable=True,
                             direction="buy_no",
-                            p_posterior=1.0 - float(self.p_posterior[i]),
+                            p_posterior=0.0,
                             p_market=self.buy_no_market_price(i),
                             raw_edge=None,
                             ci_lower=None,
@@ -724,9 +735,9 @@ class MarketAnalysis:
                         )
                     )
                     continue  # wrong-side by the direction law — never construct it
-                p_model_no = 1.0 - float(self.p_cal[i])
+                p_model_no = 0.0
                 p_market_no = self.buy_no_market_price(i)
-                p_post_no = 1.0 - float(self.p_posterior[i])
+                p_post_no = 0.0
                 # K2 (PR #348 P0-3): hard-veto NO-side too when EQE reliability
                 # is THIN_BOOK / CROSSED.
                 eqe_no = (
@@ -850,7 +861,7 @@ class MarketAnalysis:
                         bin_label=b.label,
                         executable=True,
                         direction="buy_no",
-                        p_posterior=1.0 - float(self.p_posterior[i]),
+                        p_posterior=0.0,
                         p_market=None if self.p_market_no is None else float(self.p_market_no[i]),
                         raw_edge=None,
                         ci_lower=None,
@@ -996,18 +1007,18 @@ class MarketAnalysis:
     def _no_certain_yes_floor(self, bin_idx: int) -> float:
         """Irreducible Gaussian YES-mass of a bin given the representativeness σ.
 
-        "No certain NO" structural antibody (#89, iron rule 5, 2026-06-03). The #129 clamp caps
-        the NO lower bound at the NO POINT q_no = 1 - p_posterior[bin_idx]. For a DEEP-tail bin
-        (member mean many σ away) p_posterior ≈ 0, so q_no_point ≈ 1.0 and the member-resampling
-        bootstrap almost never lands in the bin — q_no_lcb saturates at ~1.0 ("certain NO") even
-        with σ_repr folded into the MC noise. A mean-only bias correction CANNOT make a far bin a
-        certain not-settle when the irreducible residual σ is ~2°C.
+        "No certain NO" structural antibody (#89, iron rule 5, 2026-06-03). Earlier versions
+        derived a near-certain NO point from the YES posterior for deep-tail bins. For a DEEP-tail
+        bin (member mean many σ away) the member-resampling bootstrap almost never lands in the
+        bin, so derived NO confidence could saturate at ~1.0 ("certain NO") even with σ_repr folded
+        into the MC noise. A mean-only bias correction CANNOT make a far bin a certain not-settle
+        when the irreducible residual σ is ~2°C.
 
         This returns the HONEST Gaussian mass P(settlement ∈ bin | mean = member mean, σ = σ_repr):
         the irreducible probability the settlement still lands in the bin given only the
-        representativeness uncertainty. The caller subtracts it from the NO ceiling so
-        q_no_lcb ≤ 1 - YES_floor < 1 whenever σ_repr > 0 — making a corrected-domain q_no_lcb of
-        exactly 1.0 UNCONSTRUCTABLE.
+        representativeness uncertainty. This diagnostic remains available for research, but live
+        buy-NO lower-bound authority now requires native NO-side evidence instead of a derived
+        YES-side ceiling.
 
         ANTI-P-HACKING: the floor is the GENUINE Gaussian tail mass of the bin, NOT an invented
         constant. At a realistic deep-NO distance (~2-3°C, the q≈0.93 regime the operator cited)
@@ -1061,103 +1072,8 @@ class MarketAnalysis:
         cache_key = ("no", bin_idx, n)
         if cache_key in self._bootstrap_cache:
             return self._bootstrap_cache[cache_key]
-        b = self.bins[bin_idx]
-        members = self._member_maxes
-        n_members = len(members)
-
-        has_platt = (
-            self._calibrator is not None
-            and self._calibrator.fitted
-            and len(self._calibrator.bootstrap_params) >= 1
-        )
-
-        rng = self._rng
-        bootstrap_edges = np.zeros(n)
-
-        input_space = getattr(self._calibrator, "input_space", "raw_probability") if self._calibrator else "raw_probability"
-        is_wnd = input_space == "width_normalized_density"
-
-        # BUG #129 (estimator-mismatch fix): ground the bootstrap calibration in the SAME
-        # current/MAP Platt params (A, B, C) used to produce the point estimate self.p_cal,
-        # NOT a random HISTORICAL bootstrap-param triple drawn per sample. Drawing historical
-        # params introduces a SECOND estimator whose distribution maps high-q_no bins
-        # systematically higher, so percentile(q_no, 5) lands ABOVE the MAP point and the
-        # designed CI haircut is bypassed at robust_trade_score's min(q_lcb, q_live). With MAP
-        # params, point and LCB share one estimator; member resampling (the legitimate
-        # forecast-uncertainty source) is retained. See PROBABILITY_INTEGRITY_AUDIT_2026-06-02 LEG 1.
-        map_A = float(self._calibrator.A) if has_platt else 0.0
-        map_B = float(self._calibrator.B) if has_platt else 0.0
-        map_C = float(self._calibrator.C) if has_platt else 0.0
-
-        for i in range(n):
-            p_raw_all = self._bootstrap_p_raw_all(n_members)
-
-            if has_platt:
-                A, B, C = map_A, map_B, map_C
-                p_cal_boot_all = np.empty(len(self.bins))
-                for j, bb in enumerate(self.bins):
-                    p_input = p_raw_all[j]
-                    if is_wnd:
-                        p_input = normalize_bin_probability_for_calibration(
-                            p_raw_all[j],
-                            bin_width=bb.width,
-                        )
-                    z = A * logit_safe(p_input) + B * self._lead_days + C
-                    if self._transfer_logit_sigma > 0.0:
-                        z += rng.normal(0.0, self._transfer_logit_sigma)
-                    p_cal_boot_all[j] = 1.0 / (1.0 + np.exp(-z))
-            else:
-                p_cal_boot_all = p_raw_all
-
-            p_post_yes = self._compute_posterior(p_cal_boot_all)[bin_idx]
-            # Wave 5: σ_market sampling on the NO side. Same semantics as the
-            # buy_yes path — when EntryQuoteEvidence is provided for the NO
-            # leg, draw c_b ~ N(eqe.all_in_entry_price, eqe.cost_uncertainty);
-            # legacy callers (no EQE) keep the fixed buy_no_market_price path.
-            c_b = float(self.buy_no_market_price(bin_idx))
-            if self._entry_quote_evidence_no is not None:
-                eqe = self._entry_quote_evidence_no[bin_idx]
-                if eqe is not None and float(eqe.cost_uncertainty) > 0.0:
-                    c_b = float(eqe.all_in_entry_price) + self._cost_rng.normal(
-                        0.0, float(eqe.cost_uncertainty)
-                    )
-                    # X5 fix (Copilot review of PR #348): clip range aligned
-                    # with Platt's operator-pinned P_CLAMP_LOW (INV-eps-spec-
-                    # conformance) so both probability-space gates use the
-                    # same bound. Tighter clipping (1e-6) was inconsistent
-                    # with the rest of the calibration pipeline.
-                    c_b = float(np.clip(c_b, P_CLAMP_LOW, P_CLAMP_HIGH))
-                elif eqe is not None:
-                    c_b = float(eqe.all_in_entry_price)
-            bootstrap_edges[i] = (1.0 - p_post_yes) - c_b
-
-        p_value = float(np.mean(bootstrap_edges <= 0))
-        ci_lo = float(np.percentile(bootstrap_edges, 5))
-        ci_hi = float(np.percentile(bootstrap_edges, 95))
-
-        # BUG #129 antibody (construction-level invariant): the 5th-percentile edge restores to
-        # q_lcb = ci_lo + c_b_point (event_reactor_adapter restore). Clamp ci_lo so q_lcb can NEVER
-        # exceed the NO-side point q_no = 1 - p_posterior[bin_idx]. This makes "q_lcb > q_point"
-        # UNCONSTRUCTABLE regardless of the calibration estimator or sampling skew — a lower bound
-        # that exceeds the point is not a lower bound. c_b_point is the FIXED NO market price (the
-        # same cost the adapter adds back at restore), so the cancellation is exact.
         c_b_point = float(self.buy_no_market_price(bin_idx))
-        # "NO CERTAIN NO" ceiling (#89, iron rule 5, 2026-06-03). On the bias-corrected domain
-        # (σ_repr > 0) the NO ceiling is tightened from the legacy q_no_point (= 1 - p_posterior)
-        # to 1 - YES_floor, where YES_floor is the irreducible Gaussian mass the settlement still
-        # lands in this bin given σ_repr. This makes a corrected-domain q_no_lcb of exactly 1.0
-        # UNCONSTRUCTABLE: a deep-NO bin where the member-resampling bootstrap saturates (q_no_lcb
-        # → q_no_point ≈ 1.0) is capped at the honest 1 - YES_floor instead. σ_repr = 0 ⇒
-        # YES_floor = 0 ⇒ ceiling == legacy #129 clamp, byte-identical. The ceiling only ever
-        # LOWERS the bound (max with the legacy floor below would be wrong — we take the tighter
-        # of the two so the bound is never RAISED above either).
-        yes_floor = self._no_certain_yes_floor(bin_idx)
-        q_no_ceiling = min(1.0 - float(self.p_posterior[bin_idx]), 1.0 - yes_floor)
-        point_edge_ceiling = q_no_ceiling - c_b_point
-        ci_lo = min(ci_lo, point_edge_ceiling)
-        ci_hi = max(ci_hi, ci_lo)
-
-        result = (ci_lo, ci_hi, p_value)
+        result = (-c_b_point, -c_b_point, 1.0)
         self._bootstrap_cache[("no", bin_idx, n)] = result
         return result
 

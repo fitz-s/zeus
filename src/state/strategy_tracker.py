@@ -42,7 +42,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 
-from src.config import STATE_DIR, state_path
+from src.config import state_path
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +220,21 @@ class StrategyTracker:
         strategy_signal_level stays GREEN unless other signals fire.
         """
         return []
+
+    def record_trade(self, *args, **kwargs) -> None:
+        logger.debug("strategy_tracker.record_trade is a no-op post-K1")
+
+    def record_entry(self, *args, **kwargs) -> None:
+        logger.debug("strategy_tracker.record_entry is a no-op post-K1")
+
+    def record_exit(self, *args, **kwargs) -> None:
+        logger.debug("strategy_tracker.record_exit is a no-op post-K1")
+
+    def record_settlement(self, *args, **kwargs) -> None:
+        logger.debug("strategy_tracker.record_settlement is a no-op post-K1")
+
+    def record_chronicle_event(self, *args, **kwargs) -> None:
+        logger.debug("strategy_tracker.record_chronicle_event is a no-op post-K1")
 
     def to_dict(self) -> dict:
         return {

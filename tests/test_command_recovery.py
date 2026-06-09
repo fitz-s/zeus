@@ -41,7 +41,7 @@ def conn():
 
 @pytest.fixture
 def mock_client():
-    return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "v2_preflight"])
+    return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +244,40 @@ def _advance_to_submitting(conn, command_id="cmd-001", venue_order_id=None):
         conn.commit()
 
 
+def _insert_edli_live_order_event(
+    conn,
+    *,
+    aggregate_id: str,
+    sequence: int,
+    event_type: str,
+    payload: dict,
+    occurred_at: str,
+):
+    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    event_hash = hashlib.sha256(f"{aggregate_id}:{sequence}:{event_type}:{payload_hash}".encode("utf-8")).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO edli_live_order_events (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, 'explicit_reconcile', ?, ?, 1)
+        """,
+        (
+            f"edli-test-{sequence}",
+            aggregate_id,
+            sequence,
+            event_type,
+            event_hash,
+            payload_json,
+            payload_hash,
+            occurred_at,
+            occurred_at,
+        ),
+    )
+
+
 def _advance_to_unknown(conn, command_id="cmd-001", venue_order_id=None):
     """Advance to UNKNOWN state (INTENT_CREATED u2192 SUBMITTING u2192 UNKNOWN)."""
     from src.state.venue_command_repo import append_event
@@ -372,6 +406,7 @@ def _seed_pending_entry_projection(
         "cost_basis_usd": 0.0,
         "entry_price": 0.0,
         "p_posterior": 0.9,
+        "entry_ci_width": 0.0,
         "last_monitor_prob": None,
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
@@ -818,6 +853,81 @@ class TestRecoveryResolutionTable:
         payload = json.loads(rr_event["payload_json"])
         assert payload["reason"] == "recovery_no_venue_order_id"
 
+    def test_edli_confirmed_fill_terminalizes_submitting_without_order_id(
+        self, conn, mock_client
+    ):
+        execution_command_id = "edli_exec_cmd:test-event:test-intent:tok-001:buy_no"
+        final_intent_id = "edli_intent:test-event:tok-001"
+        venue_order_id = "0xedliorder"
+        trade_id = "edli-trade-001"
+        _insert(conn, decision_id=execution_command_id, size=9.0, price=0.97)
+        _advance_to_submitting(conn, venue_order_id=None)
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id="edli-aggregate",
+            sequence=1,
+            event_type="VenueSubmitAcknowledged",
+            occurred_at="2026-04-26T00:02:00+00:00",
+            payload={
+                "execution_command_id": execution_command_id,
+                "final_intent_id": final_intent_id,
+                "venue_order_id": venue_order_id,
+                "recovered_trade_id": trade_id,
+                "transaction_hash": "0xtx",
+            },
+        )
+        _insert_edli_live_order_event(
+            conn,
+            aggregate_id="edli-aggregate",
+            sequence=2,
+            event_type="UserTradeObserved",
+            occurred_at="2026-04-26T00:03:00+00:00",
+            payload={
+                "final_intent_id": final_intent_id,
+                "venue_order_id": venue_order_id,
+                "trade_id": trade_id,
+                "trade_status": "CONFIRMED",
+                "fill_authority_state": "FILL_CONFIRMED",
+                "filled_size": "9",
+                "fill_price": "0.97",
+                "avg_fill_price": "0.97",
+                "transaction_hash": "0xtx",
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_confirmed_legacy_command_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        mock_client.get_order.assert_not_called()
+        command = conn.execute(
+            "SELECT venue_order_id FROM venue_commands WHERE command_id = 'cmd-001'"
+        ).fetchone()
+        assert command["venue_order_id"] == venue_order_id
+        trade = conn.execute(
+            """
+            SELECT state, filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+               AND trade_id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+        assert dict(trade) == {
+            "state": "CONFIRMED",
+            "filled_size": "9",
+            "fill_price": "0.97",
+        }
+        events = [e["event_type"] for e in _get_events(conn, "cmd-001")]
+        assert events == ["INTENT_CREATED", "SUBMIT_REQUESTED", "SUBMIT_ACKED", "FILL_CONFIRMED"]
+
     # Case 3: UNKNOWN + venue_order_id + venue finds order u2192 ACKED
     def test_unknown_with_venue_order_resolves_to_acked(self, conn, mock_client):
         _insert(conn)
@@ -916,6 +1026,51 @@ class TestRecoveryResolutionTable:
         assert payload["reason"] == "review_cleared_venue_order_live"
         assert payload["required_predicates"]["latest_event_is_cancel_replace_blocked"] is True
         assert payload["required_predicates"]["point_order_status_live"] is True
+
+    def test_cancel_unknown_review_required_matched_order_with_confirmed_trade_fills(self, conn, mock_client):
+        _insert(conn, intent_kind="EXIT", side="SELL", size=5, price=0.55)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-exit")
+        mock_client.get_order.return_value = {
+            "orderID": "ord-exit",
+            "status": "MATCHED",
+            "size_matched": "5",
+            "price": "0.55",
+        }
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-exit-001",
+                "taker_order_id": "ord-exit",
+                "status": "CONFIRMED",
+                "side": "SELL",
+                "size": "5",
+                "price": "0.56",
+                "transaction_hash": "0xabc",
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "FILLED"
+        assert summary["advanced"] == 1
+        events = _get_events(conn, "cmd-001")
+        assert events[-1]["event_type"] == "FILL_CONFIRMED"
+        payload = json.loads(events[-1]["payload_json"])
+        assert payload["proof_class"] == "cancel_unknown_confirmed_trade_with_positive_trade_fact"
+        assert payload["required_predicates"]["semantic_cancel_status_cancel_unknown"] is True
+        fact = conn.execute(
+            """
+            SELECT state, filled_size, fill_price, tx_hash
+              FROM venue_trade_facts
+             WHERE command_id = 'cmd-001'
+            """
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "CONFIRMED",
+            "filled_size": "5",
+            "fill_price": "0.56",
+            "tx_hash": "0xabc",
+        }
 
     def test_cancel_unknown_review_required_terminal_no_fill_expires_entry(self, conn, mock_client):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
@@ -2008,6 +2163,349 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_filled_entry_repair_does_not_duplicate_existing_order_token_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A venue fill can have only one local exposure projection."""
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        _seed_pending_entry_projection(
+            conn,
+            position_id="legacy-pos",
+            command_id="legacy-command",
+            order_id="ord-001",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 5.0,
+                   cost_basis_usd = 1.7,
+                   entry_price = 0.34,
+                   order_status = 'filled'
+             WHERE position_id = 'legacy-pos'
+            """
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_projection_repair"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        rows = conn.execute(
+            """
+            SELECT position_id, phase, shares
+              FROM position_current
+             WHERE lower(order_id) = lower('ord-001')
+             ORDER BY position_id
+            """
+        ).fetchall()
+        assert [dict(row) for row in rows] == [
+            {"position_id": "legacy-pos", "phase": "active", "shares": 5.0}
+        ]
+
+    def test_filled_entry_repair_does_not_reopen_existing_terminal_order_token_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Closed exposure for the same venue order/token remains authoritative."""
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        _seed_pending_entry_projection(
+            conn,
+            position_id="legacy-pos",
+            command_id="legacy-command",
+            order_id="ord-001",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'economically_closed',
+                   shares = 5.0,
+                   cost_basis_usd = 1.7,
+                   entry_price = 0.34,
+                   order_status = 'filled',
+                   exit_reason = 'test_existing_terminal_projection'
+             WHERE position_id = 'legacy-pos'
+            """
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_projection_repair"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
+    def test_edli_trade_case_accepts_final_intent_without_top_level_token_id(
+        self,
+        conn,
+    ):
+        """FinalIntentCertificate may bind the selected token in semantic identity only."""
+        from src.execution.command_recovery import _edli_trade_case_for_command
+
+        event_id = "edli_evt_token_bound_final_intent"
+        token_id = "tok-no"
+        final_intent_id = f"edli_intent:{event_id}:{token_id}"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:{token_id}:{token_id}:buy_no"
+
+        def insert_certificate(certificate_type: str, semantic_key: str, payload: dict, created_at: str) -> None:
+            payload_json = json.dumps(payload, sort_keys=True)
+            payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+            conn.execute(
+                """
+                INSERT INTO decision_certificates (
+                    certificate_id, certificate_type, schema_version, canonicalization_version,
+                    semantic_key, claim_type, mode, decision_time, authority_id,
+                    authority_version, algorithm_id, algorithm_version, payload_json,
+                    payload_hash, certificate_hash, verifier_status, created_at
+                ) VALUES (?, ?, 1, 'test', ?, 'test', 'LIVE', ?, 'test',
+                          'test', 'test', 'test', ?, ?, ?, 'VERIFIED', ?)
+                """,
+                (
+                    f"cert:{certificate_type}:{semantic_key}",
+                    certificate_type,
+                    semantic_key,
+                    created_at,
+                    payload_json,
+                    payload_hash,
+                    hashlib.sha256(f"{certificate_type}:{payload_hash}".encode()).hexdigest(),
+                    created_at,
+                ),
+            )
+
+        insert_certificate(
+            "ActionableTradeCertificate",
+            f"actionable:{event_id}:family:condition-1",
+            {
+                "event_id": event_id,
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "condition_id": "condition-1",
+                "direction": "buy_no",
+                "token_id": token_id,
+                "q_live": 0.81,
+                "causal_snapshot_id": "source-run-1",
+            },
+            "2026-06-07T00:00:00Z",
+        )
+        insert_certificate(
+            "FinalIntentCertificate",
+            f"final_intent:{event_id}:{final_intent_id}",
+            {
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": "condition-1",
+                "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+                "temperature_metric": "high",
+                "unit": "C",
+                "decision_source_context": {
+                    "city": "Madrid",
+                    "target_date": "2026-06-08",
+                },
+            },
+            "2026-06-07T00:00:01Z",
+        )
+
+        trade_case = _edli_trade_case_for_command(
+            conn,
+            {
+                "position_id": "pos-edli",
+                "decision_id": decision_id,
+                "token_id": token_id,
+                "env_condition_id": "condition-1",
+                "env_yes_token_id": "tok-yes",
+                "env_no_token_id": token_id,
+            },
+        )
+
+        assert trade_case["trade_id"] == "pos-edli"
+        assert trade_case["city"] == "Madrid"
+        assert trade_case["target_date"] == "2026-06-08"
+        assert trade_case["bin_label"] == "Will the highest temperature in Madrid be 33°C on June 8?"
+        assert trade_case["direction"] == "buy_no"
+        assert trade_case["strategy_key"] == "opening_inertia"
+        assert trade_case["p_posterior"] == pytest.approx(0.81)
+
+    def test_edli_filled_entry_repair_recovers_missing_bin_label_from_clob_market_identity(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Missing EDLI bin labels may be recovered only from matching CLOB market identity."""
+        from src.state.venue_command_repo import append_event
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        event_id = "edli_evt_missing_bin_label"
+        yes_token_id = "tok-yes"
+        no_token_id = "tok-no"
+        condition_id = "condition-test"
+        final_intent_id = f"edli_intent:{event_id}:{no_token_id}"
+        decision_id = f"edli_exec_cmd:{event_id}:{final_intent_id}:{no_token_id}:{no_token_id}:buy_no"
+
+        def insert_certificate(certificate_type: str, semantic_key: str, payload: dict, created_at: str) -> None:
+            payload_json = json.dumps(payload, sort_keys=True)
+            payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+            conn.execute(
+                """
+                INSERT INTO decision_certificates (
+                    certificate_id, certificate_type, schema_version, canonicalization_version,
+                    semantic_key, claim_type, mode, decision_time, authority_id,
+                    authority_version, algorithm_id, algorithm_version, payload_json,
+                    payload_hash, certificate_hash, verifier_status, created_at
+                ) VALUES (?, ?, 1, 'test', ?, 'test', 'LIVE', ?, 'test',
+                          'test', 'test', 'test', ?, ?, ?, 'VERIFIED', ?)
+                """,
+                (
+                    f"cert:{certificate_type}:{semantic_key}",
+                    certificate_type,
+                    semantic_key,
+                    created_at,
+                    payload_json,
+                    payload_hash,
+                    hashlib.sha256(f"{certificate_type}:{payload_hash}".encode()).hexdigest(),
+                    created_at,
+                ),
+            )
+
+        _insert(
+            conn,
+            decision_id=decision_id,
+            token_id=yes_token_id,
+            no_token_id=no_token_id,
+            selected_token_id=no_token_id,
+            outcome_label="NO",
+            size=8.0,
+            price=0.55,
+        )
+        _advance_to_acked(conn, venue_order_id="ord-edli-clob")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-edli-clob", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-edli-clob",
+            state="CONFIRMED",
+            filled_size="8",
+            fill_price="0.55",
+        )
+
+        insert_certificate(
+            "ActionableTradeCertificate",
+            f"actionable:{event_id}:family:{condition_id}",
+            {
+                "event_id": event_id,
+                "event_type": "FORECAST_SNAPSHOT_READY",
+                "condition_id": condition_id,
+                "direction": "buy_no",
+                "token_id": no_token_id,
+                "q_live": 0.82,
+                "causal_snapshot_id": "source-run-clob",
+            },
+            "2026-06-07T00:00:00Z",
+        )
+        insert_certificate(
+            "FinalIntentCertificate",
+            f"final_intent:{event_id}:{final_intent_id}",
+            {
+                "event_id": event_id,
+                "final_intent_id": final_intent_id,
+                "condition_id": condition_id,
+                "temperature_metric": "high",
+                "unit": "C",
+                "decision_source_context": {
+                    "city": "Madrid",
+                    "target_date": "2026-06-08",
+                },
+            },
+            "2026-06-07T00:00:01Z",
+        )
+        mock_client.get_clob_market_info.return_value = {
+            "condition_id": condition_id,
+            "question": "Will the highest temperature in Madrid be 33°C on June 8?",
+            "tokens": [
+                {"token_id": yes_token_id, "outcome": "Yes"},
+                {"token_id": no_token_id, "outcome": "No"},
+            ],
+        }
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["filled_entry_projection_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        mock_client.get_clob_market_info.assert_called_once_with(condition_id)
+        current = conn.execute(
+            """
+            SELECT phase, city, target_date, bin_label, direction, strategy_key, shares, entry_price
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "city": "Madrid",
+            "target_date": "2026-06-08",
+            "bin_label": "Will the highest temperature in Madrid be 33°C on June 8?",
+            "direction": "buy_no",
+            "strategy_key": "opening_inertia",
+            "shares": 8.0,
+            "entry_price": 0.55,
+        }
+
     def test_terminal_filled_entry_repair_canonicalizes_legacy_imminent_strategy_key(
         self,
         conn,
@@ -2158,6 +2656,51 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+
+    def test_live_entry_repair_does_not_duplicate_existing_order_token_projection(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=13.45, price=0.01)
+        _advance_to_acked(conn, venue_order_id="ord-live")
+        _append_order_fact(
+            conn,
+            order_id="ord-live",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="13.45",
+            source="REST",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        _seed_pending_entry_projection(
+            conn,
+            position_id="legacy-pos",
+            command_id="legacy-command",
+            order_id="ord-live",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["live_entry_projection_repair"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        rows = conn.execute(
+            """
+            SELECT position_id, phase, shares
+              FROM position_current
+             WHERE lower(order_id) = lower('ord-live')
+             ORDER BY position_id
+            """
+        ).fetchall()
+        assert [dict(row) for row in rows] == [
+            {"position_id": "legacy-pos", "phase": "pending_entry", "shares": 0.0}
+        ]
 
     def test_live_acked_entry_order_with_positive_trade_fact_waits_for_fill_reconciliation(
         self,
@@ -3481,6 +4024,121 @@ class TestRecoveryResolutionTable:
         assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
         assert payload["venue_order_created"] is False
 
+    def test_unknown_side_effect_marketable_buy_min_size_without_currency_400_terminalizes_without_lookup(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, price=0.01, size=12.0)
+        _advance_to_submitting(conn)
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="SUBMIT_TIMEOUT_UNKNOWN",
+            occurred_at="2026-04-26T00:02:00Z",
+            payload={
+                "reason": "post_submit_exception_possible_side_effect",
+                "exception_type": "PolyApiException",
+                "exception_message": (
+                    "PolyApiException[status_code=400, "
+                    "error_message={'error': 'invalid amount for a marketable "
+                    "BUY order ($0.12), min size: 1'}]"
+                ),
+                "idempotency_key": _DEFAULT_IDEM_KEY,
+            },
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert _get_state(conn, "cmd-001") == "SUBMIT_REJECTED"
+        mock_client.get_order.assert_not_called()
+        events = _get_events(conn, "cmd-001")
+        rejected = [e for e in events if e["event_type"] == "SUBMIT_REJECTED"][-1]
+        payload = json.loads(rejected["payload_json"])
+        assert payload["reason"] == "venue_rejected_invalid_amount_400"
+        assert payload["proof_class"] == "deterministic_venue_invalid_amount_400"
+        assert payload["venue_order_created"] is False
+
+    def test_edli_pre_venue_unknown_threshold_reconcile_releases_cap(self, conn, mock_client):
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        execution_command_id = "edli_exec_cmd:event-1:intent-1:token-1:token-1:buy_yes"
+        aggregate_id = "event-1:intent-1"
+        payload = {
+            "event_id": "event-1",
+            "final_intent_id": "intent-1",
+            "execution_command_id": execution_command_id,
+            "execution_receipt_hash": "receipt-hash-1",
+            "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold",
+            "submit_status": "POST_SUBMIT_UNKNOWN",
+            "reconciliation_followup_required": True,
+            "side_effect_known": False,
+            "venue_call_started": True,
+        }
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_events (
+                aggregate_event_id, aggregate_id, event_sequence, event_type,
+                parent_event_hash, event_hash, payload_json, payload_hash,
+                source_authority, occurred_at, created_at, schema_version
+            ) VALUES ('evt-1', ?, 1, 'SubmitUnknown', NULL, 'hash-1', ?, 'payload-hash-1',
+                      'existing_executor', '2026-04-26T00:02:00+00:00',
+                      '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (aggregate_id, json.dumps(payload, sort_keys=True)),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_order_projection (
+                aggregate_id, event_id, final_intent_id, current_state,
+                last_sequence, last_event_type, last_event_hash,
+                pending_reconcile, venue_order_id, updated_at, schema_version
+            ) VALUES (?, 'event-1', 'intent-1', 'PENDING_RECONCILE',
+                      1, 'SubmitUnknown', 'hash-1', 1, NULL,
+                      '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (aggregate_id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO edli_live_cap_usage (
+                usage_id, event_id, decision_time, cap_scope, max_notional_usd,
+                max_orders_per_day, reserved_notional_usd, order_count,
+                reservation_status, final_intent_id, execution_command_id,
+                created_at, schema_version
+            ) VALUES ('cap-1', 'event-1', '2026-04-26T00:02:00+00:00',
+                      'tiny-live', 100.0, 100, 0.18, 1, 'RESERVED',
+                      'intent-1', ?, '2026-04-26T00:02:00+00:00', 1)
+            """,
+            (execution_command_id,),
+        )
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["edli_pre_venue_unknown_thresholds"]["advanced"] == 1
+        projection = conn.execute(
+            "SELECT current_state, pending_reconcile FROM edli_live_order_projection WHERE aggregate_id = ?",
+            (aggregate_id,),
+        ).fetchone()
+        assert projection["current_state"] == "CAP_TRANSITIONED"
+        assert bool(projection["pending_reconcile"]) is False
+        cap = conn.execute("SELECT reservation_status FROM edli_live_cap_usage WHERE usage_id = 'cap-1'").fetchone()
+        assert cap["reservation_status"] == "RELEASED"
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM edli_live_order_events WHERE aggregate_id = ? ORDER BY event_sequence",
+                (aggregate_id,),
+            )
+        ]
+        assert event_types == ["SubmitUnknown", "Reconciled", "CapTransitioned"]
+
     def test_partial_confirmed_fill_absent_from_open_orders_expires_remainder_without_voiding_fill(
         self,
         conn,
@@ -3641,6 +4299,94 @@ class TestRecoveryResolutionTable:
             "venue_status": "MATCHED",
         }
         assert not any(row["event_type"] == "EXIT_ORDER_FILLED" for row in lifecycle_events)
+
+    def test_spurious_model_divergence_pending_exit_without_exit_command_releases_active(
+        self,
+        conn,
+        mock_client,
+    ):
+        position_id = "pos-spurious-panic"
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, trade_id, market_id, city, cluster,
+                target_date, bin_label, direction, unit, size_usd, shares,
+                cost_basis_usd, entry_price, p_posterior, last_monitor_prob,
+                last_monitor_edge, last_monitor_market_price, decision_snapshot_id,
+                entry_method, strategy_key, edge_source, discovery_mode,
+                chain_state, token_id, no_token_id, condition_id, order_id,
+                order_status, updated_at, temperature_metric, exit_reason
+            ) VALUES (
+                ?, 'pending_exit', ?, 'mkt-1', 'Karachi', 'Karachi',
+                '2026-06-08', 'Will high be 36C?', 'buy_no', 'C',
+                17.01, 21, 17.01, 0.81, 0.96, 0.0, -0.76, 0.76,
+                'snap-1', 'ens_member_counting', 'opening_inertia',
+                'opening_inertia', 'opening_hunt', 'synced', 'tok-yes',
+                'tok-no', 'cond-1', 'ord-entry', 'filled',
+                '2026-06-07T17:14:48+00:00', 'high',
+                'MODEL_DIVERGENCE_PANIC (score=0.77)'
+            )
+            """,
+            (position_id, position_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                phase_before, phase_after, strategy_key, decision_id,
+                snapshot_id, order_id, command_id, caused_by, idempotency_key,
+                venue_status, source_module, payload_json, env
+            ) VALUES
+              ('evt-open', ?, 1, 'ENTRY_ORDER_FILLED', '2026-06-07T00:00:00+00:00',
+               'pending_entry', 'active', 'opening_inertia', 'dec-1', 'snap-1',
+               'ord-entry', 'cmd-entry', 'seed', 'idem-open', 'CONFIRMED',
+               'pytest', '{}', 'live'),
+              ('evt-panic', ?, 2, 'EXIT_ORDER_REJECTED', '2026-06-07T17:14:48+00:00',
+               'active', 'pending_exit', 'opening_inertia', 'dec-1', 'snap-1',
+               NULL, NULL, 'transition_phase', 'idem-panic', 'retry_pending',
+               'src.execution.exit_lifecycle',
+               '{"exit_reason":"MODEL_DIVERGENCE_PANIC (score=0.77)","error":"collateral_snapshot_stale"}',
+               'live')
+            """
+            ,
+            (position_id, position_id),
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["spurious_model_divergence_pending_exit_repair"]["advanced"] == 1
+        current = conn.execute(
+            """
+            SELECT phase, exit_reason, last_monitor_prob, last_monitor_edge
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "exit_reason": None,
+            "last_monitor_prob": None,
+            "last_monitor_edge": None,
+        }
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, source_module, payload_json
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        assert event["event_type"] == "MANUAL_OVERRIDE_APPLIED"
+        assert event["phase_before"] == "pending_exit"
+        assert event["phase_after"] == "active"
+        assert event["source_module"] == "src.execution.command_recovery"
+        assert payload["proof_class"] == "no_exit_command_model_divergence_panic_from_missing_buy_no_authority"
 
     def test_exit_matched_trade_fact_repairs_retry_pending_projection(
         self,

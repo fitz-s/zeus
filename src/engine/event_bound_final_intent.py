@@ -287,7 +287,7 @@ def _final_execution_intent_from_payload(final_payload: dict):
         min_order_size=_decimal(final_payload.get("min_order_size"), "min_order_size"),
         fee_rate=Decimal("0"),
         neg_risk=bool(final_payload.get("neg_risk", False)),
-        event_id=str(final_payload["event_id"]),
+        event_id=str(final_payload.get("market_event_id") or final_payload["event_id"]),
         resolution_window=str(final_payload.get("resolution_window") or "default"),
         correlation_key=str(final_payload["final_intent_id"]),
         decision_source_context=decision_source_context,

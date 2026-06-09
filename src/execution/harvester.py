@@ -25,8 +25,8 @@ from src.calibration.manager import maybe_refit_bucket, season_from_date
 from src.calibration.effective_sample_size import build_decision_group_for_key, write_decision_groups
 from src.calibration.decision_group import compute_id
 from src.calibration.store import add_calibration_pair
-from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN, MetricIdentity
-from src.config import City, cities_by_name, get_mode
+from src.types.metric_identity import MetricIdentity
+from src.config import City
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.contracts.settlement_outcome import SettlementOutcome, classify_settlement_outcome
 from src.contracts.exceptions import SettlementPrecisionError
@@ -64,7 +64,6 @@ from src.state.portfolio import (
     void_position,
 )
 from src.state.strategy_tracker import get_tracker, save_tracker
-from src.riskguard.discord_alerts import alert_redeem
 from src.observability.counters import increment as _cnt_inc
 
 logger = logging.getLogger(__name__)

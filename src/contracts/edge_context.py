@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional, List
 import numpy as np
 
 from src.contracts.semantic_types import EntryMethod

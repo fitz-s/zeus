@@ -14,6 +14,8 @@ intermediate files must not collide.  The filename pattern is:
 from __future__ import annotations
 
 import sqlite3
+import importlib.util
+import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -98,3 +100,64 @@ def test_cross_track_per_step_filenames_are_distinct(tmp_path, monkeypatch):
     # Sanity: each track produces exactly STEP_HOURS files.
     assert len(high_files) == 3, f"Expected 3 high files, got {len(high_files)}: {high_files}"
     assert len(low_files)  == 3, f"Expected 3 low files, got {len(low_files)}: {low_files}"
+
+
+def test_collect_open_ens_cycle_passes_repo_local_manifest(tmp_path, monkeypatch):
+    """OpenData extract must not rely on extractor defaults from an old checkout."""
+    from src.data import ecmwf_open_data
+
+    fifty_one_root = tmp_path / "51 source data"
+    manifest_path = fifty_one_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
+    monkeypatch.setattr(ecmwf_open_data, "EXTRACT_SCRIPT", fifty_one_root / "scripts" / "extract_open_ens_localday.py")
+    monkeypatch.setattr(ecmwf_open_data, "EXTRACT_MANIFEST_PATH", manifest_path)
+
+    commands: list[list[str]] = []
+
+    def capture_extract(cmd, *, label, timeout):
+        commands.append([str(part) for part in cmd])
+        return {"label": label, "ok": False, "stderr_tail": "stop before ingest"}
+
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=date(2026, 6, 6),
+        run_hour=0,
+        now_utc=datetime(2026, 6, 6, 9, 0, tzinfo=timezone.utc),
+        skip_download=True,
+        conn=_make_conn(tmp_path),
+        _runner=capture_extract,
+    )
+
+    assert result["status"] == "extract_failed"
+    assert commands
+    cmd = commands[0]
+    assert "--manifest-path" in cmd
+    assert cmd[cmd.index("--manifest-path") + 1] == str(manifest_path)
+    assert ".openclaw/workspace-venus" not in " ".join(cmd)
+
+
+def test_tigge_localday_common_manifest_default_is_repo_local():
+    """The extractor default manifest follows the checked-out 51 source data tree."""
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "51 source data"
+        / "scripts"
+        / "tigge_local_calendar_day_common.py"
+    )
+    script_dir = str(module_path.parent)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.syspath_prepend(script_dir)
+    spec = importlib.util.spec_from_file_location("tigge_local_calendar_day_common_under_test", module_path)
+    try:
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        expected_root = Path(__file__).resolve().parents[1] / "51 source data"
+        assert module.ROOT == expected_root
+        assert module.DEFAULT_MANIFEST == expected_root / "docs" / "tigge_city_coordinate_manifest_full_latest.json"
+        assert ".openclaw/workspace-venus" not in str(module.DEFAULT_MANIFEST)
+    finally:
+        monkeypatch.undo()

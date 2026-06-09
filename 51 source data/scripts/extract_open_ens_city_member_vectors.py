@@ -16,7 +16,7 @@ from eccodes import (
     codes_release,
 )
 
-MANIFEST_PATH = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data/docs/tigge_city_coordinate_manifest_20260330.json")
+MANIFEST_PATH = Path(__file__).resolve().parents[1] / "docs" / "tigge_city_coordinate_manifest_20260330.json"
 
 
 def _load_city(manifest_path: Path, city_name: str) -> dict:

@@ -718,18 +718,21 @@ def load_entry_evidence(
 
     events = query_position_events(conn, runtime_trade_id, limit=50)
     for event in events:
-        if event.get("event_type") != "ENTRY_ORDER_POSTED":
+        event_type = event.get("event_type")
+        if event_type not in {"ENTRY_ORDER_POSTED", "MANUAL_OVERRIDE_APPLIED"}:
             continue
         details = event.get("details")
         if not isinstance(details, dict):
+            continue
+        if event_type == "MANUAL_OVERRIDE_APPLIED" and details.get("repair_type") != "entry_decision_evidence_backfill":
             continue
         envelope = details.get("decision_evidence_envelope")
         if not isinstance(envelope, str) or not envelope:
             # ENTRY_ORDER_POSTED without envelope = legacy-backfill or
             # pre-T4.1b; absence is informative (skip audit).
-            return None
+            continue
         try:
             return DecisionEvidence.from_json(envelope)
         except (ValueError, UnknownContractVersionError):
-            return None
+            continue
     return None

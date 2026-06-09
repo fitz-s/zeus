@@ -38,8 +38,8 @@ def _mem_world() -> sqlite3.Connection:
     return conn
 
 
-def _cache_no_belief(conn, *, p_posterior_no: float, recorded_at: str, snapshot_id: str = "snap1"):
-    """Cache a 2-bin belief where the NO side of bin 'b30' has p_posterior_no."""
+def _cache_yes_belief(conn, *, p_posterior_yes: float, recorded_at: str, snapshot_id: str = "snap1"):
+    """Cache a 2-bin belief where the YES side of bin 'b30' has p_posterior_yes."""
     cr.cache_belief(
         conn,
         family_id="Wuhan|2026-06-01|high",
@@ -48,8 +48,8 @@ def _cache_no_belief(conn, *, p_posterior_no: float, recorded_at: str, snapshot_
         snapshot_id=snapshot_id,
         calibrator_model_hash="identity",
         bin_labels=["b29", "b30"],
-        # p_posterior is YES-prob per bin; NO-prob of b30 = 1 - p_posterior[b30].
-        p_posterior_vec=[0.001, 1.0 - p_posterior_no],
+        # p_posterior is YES-prob per bin; YES-prob of b30.
+        p_posterior_vec=[0.001, p_posterior_yes],
         recorded_at=recorded_at,
     )
 
@@ -59,10 +59,10 @@ def _cache_no_belief(conn, *, p_posterior_no: float, recorded_at: str, snapshot_
 # ---------------------------------------------------------------------------
 def test_R1_fresh_price_positive_edge_enqueues_redecision():
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.99, recorded_at="2026-05-31T00:00:00+00:00")
-    # Market underprices NO: best NO cost 0.70 → edge = 0.99 - 0.70 - cost_fee ≈ +0.27.
+    _cache_yes_belief(conn, p_posterior_yes=0.99, recorded_at="2026-05-31T00:00:00+00:00")
+    # Market underprices YES: best YES cost 0.70 → edge = 0.99 - 0.70 - cost_fee ≈ +0.27.
     price_lookup = {
-        ("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(
+        ("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(
             price=0.70, freshness_deadline="2026-05-31T01:00:00+00:00"
         ),
     }
@@ -73,7 +73,7 @@ def test_R1_fresh_price_positive_edge_enqueues_redecision():
         min_edge=0.01,
     )
     keys = {(e.family_id, e.bin_label, e.direction) for e in enqueued}
-    assert ("Wuhan|2026-06-01|high", "b30", "buy_no") in keys
+    assert ("Wuhan|2026-06-01|high", "b30", "buy_yes") in keys
     assert all(e.event_type == "EDLI_REDECISION_PENDING" for e in enqueued)
 
 
@@ -82,10 +82,10 @@ def test_R1_fresh_price_positive_edge_enqueues_redecision():
 # ---------------------------------------------------------------------------
 def test_R2_sub_edge_does_not_enqueue():
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.72, recorded_at="2026-05-31T00:00:00+00:00")
-    # NO cost 0.71 → edge ≈ +0.01 minus fee < min_edge → no action.
+    _cache_yes_belief(conn, p_posterior_yes=0.72, recorded_at="2026-05-31T00:00:00+00:00")
+    # YES cost 0.71 → edge ≈ +0.01 minus fee < min_edge → no action.
     price_lookup = {
-        ("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(
+        ("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(
             price=0.71, freshness_deadline="2026-05-31T01:00:00+00:00"
         ),
     }
@@ -100,14 +100,14 @@ def test_R2_sub_edge_does_not_enqueue():
 # ---------------------------------------------------------------------------
 def test_R6_second_cycle_price_improvement_reenqueues():
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00")
     acted: dict = {}  # in-memory dedup state, held across cycles (the reactor owns this live).
-    # Cycle 1: NO cost 0.88 → edge ≈ +0.01 (clears min 0.01) → enqueue.
-    q1 = {("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(price=0.88, freshness_deadline="2026-05-31T01:00:00+00:00")}
+    # Cycle 1: YES cost 0.88 → edge ≈ +0.01 (clears min 0.01) → enqueue.
+    q1 = {("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(price=0.88, freshness_deadline="2026-05-31T01:00:00+00:00")}
     e1 = cr.enqueue_live_redecisions(conn, decision_time="2026-05-31T00:30:00+00:00", price_lookup=q1, min_edge=0.01, acted_state=acted)
     assert len(e1) == 1
     # Cycle 2: price improves to 0.80 → edge ≈ +0.09, materially better → re-enqueue (NOT deduped away).
-    q2 = {("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(price=0.80, freshness_deadline="2026-05-31T02:00:00+00:00")}
+    q2 = {("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(price=0.80, freshness_deadline="2026-05-31T02:00:00+00:00")}
     e2 = cr.enqueue_live_redecisions(conn, decision_time="2026-05-31T01:30:00+00:00", price_lookup=q2, min_edge=0.01, acted_state=acted)
     assert len(e2) == 1, "price improved past delta → continuous re-decision must fire again (one-shot killed)"
     # Cycle 3: price unchanged (same edge) → deduped away (NOT a re-fire on noise).
@@ -120,10 +120,10 @@ def test_R6_second_cycle_price_improvement_reenqueues():
 # ---------------------------------------------------------------------------
 def test_R7_stale_price_does_not_enqueue_phantom_edge():
     conn = _mem_world()
-    _cache_no_belief(conn, p_posterior_no=0.99, recorded_at="2026-05-31T00:00:00+00:00")
+    _cache_yes_belief(conn, p_posterior_yes=0.99, recorded_at="2026-05-31T00:00:00+00:00")
     # Price looks like positive edge BUT its freshness_deadline is in the past at decision_time.
     price_lookup = {
-        ("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(
+        ("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(
             price=0.70, freshness_deadline="2026-05-31T00:10:00+00:00"
         ),
     }
@@ -142,7 +142,7 @@ def test_R7_stale_price_does_not_enqueue_phantom_edge():
 def test_R3_no_belief_enqueues_nothing():
     conn = _mem_world()  # empty cache
     price_lookup = {
-        ("Wuhan|2026-06-01|high", "b30", "buy_no"): cr.PriceQuote(
+        ("Wuhan|2026-06-01|high", "b30", "buy_yes"): cr.PriceQuote(
             price=0.50, freshness_deadline="2026-05-31T01:00:00+00:00"
         ),
     }
@@ -162,22 +162,22 @@ def test_R3_no_belief_enqueues_nothing():
 def test_R8_exit_on_belief_reversal_not_price_noise():
     conn = _mem_world()
     # Entered a NO position on bin b30 when belief said NO=0.90.
-    _cache_no_belief(conn, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
 
     # Case A — belief later collapses to NO=0.60 (Δ0.30, material) → exit (reversal).
-    _cache_no_belief(conn, p_posterior_no=0.60, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn, p_posterior_yes=0.60, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
     exit_a = cr.screen_exit(
-        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
     )
     assert exit_a is not None and exit_a.reason == "BELIEF_EDGE_REVERSAL"
 
     # Case B — belief barely moves to NO=0.86 (Δ0.04, price-noise scale) → HOLD (no exit).
     conn2 = _mem_world()
-    _cache_no_belief(conn2, p_posterior_no=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
-    _cache_no_belief(conn2, p_posterior_no=0.86, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
+    _cache_yes_belief(conn2, p_posterior_yes=0.90, recorded_at="2026-05-31T00:00:00+00:00", snapshot_id="snap1")
+    _cache_yes_belief(conn2, p_posterior_yes=0.86, recorded_at="2026-05-31T12:00:00+00:00", snapshot_id="snap2")
     exit_b = cr.screen_exit(
-        conn2, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_no",
+        conn2, family_id="Wuhan|2026-06-01|high", bin_label="b30", side="buy_yes",
         entry_posterior=0.90, reversal_belief_delta=0.15,
     )
     assert exit_b is None, "a non-material belief move (price-noise scale) must NOT trigger exit"

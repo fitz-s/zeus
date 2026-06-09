@@ -9,7 +9,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from src.config import get_mode, settings, state_path
+from src.config import get_mode, state_path
 from src.control.control_plane import (
     get_entries_pause_reason,
     get_entries_pause_source,
@@ -105,7 +105,18 @@ def write_cycle_pulse(cycle_summary: dict | None = None) -> None:
         "pulse_only": True,
     }
     if cycle_summary is not None:
-        status["cycle"] = dict(cycle_summary)
+        incoming_cycle = dict(cycle_summary)
+        prior_cycle = prior.get("cycle") if isinstance(prior, dict) else None
+        if (
+            isinstance(prior_cycle, dict)
+            and "candidates" in prior_cycle
+            and "candidates" not in incoming_cycle
+        ):
+            merged_cycle = dict(prior_cycle)
+            merged_cycle.update(incoming_cycle)
+            status["cycle"] = merged_cycle
+        else:
+            status["cycle"] = incoming_cycle
     minimal_refresh_ok = _refresh_minimal_runtime_read_model_for_status(status)
     try:
         status["execution_capability"] = _get_execution_capability_status()
@@ -1222,6 +1233,7 @@ def write_status(cycle_summary: dict = None) -> None:
 
     status = {
         "timestamp": generated_at,
+        "generated_at": generated_at,
         "process": {
             "pid": os.getpid(),
             "mode": get_mode(),

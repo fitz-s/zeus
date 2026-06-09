@@ -62,7 +62,7 @@ def _mem_conn(monkeypatch):
     init_schema(mem)
     global _TEST_CONN
     _TEST_CONN = mem
-    monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem)
+    monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world", lambda: mem, raising=False)
     monkeypatch.setattr("src.execution.executor.get_trade_connection_with_world_required", lambda **_kwargs: mem)
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
@@ -606,6 +606,24 @@ class TestExecutor:
         assert captured["intent"].limit_price == pytest.approx(0.33)
         assert captured["intent"].target_size_usd == pytest.approx(10.16 * 0.33)
 
+    def test_execute_final_intent_rejects_buy_notional_below_venue_minimum(self, monkeypatch):
+        final_intent = _final_execution_intent(
+            token_id="yes-token-tiny-notional",
+            final_limit_price=Decimal("0.02"),
+            expected_fill_price_before_fee=Decimal("0.02"),
+            size_value=Decimal("0.24"),
+            submitted_shares=Decimal("12"),
+            snapshot_top_ask=Decimal("0.02"),
+        )
+
+        def fail_live_order(*args, **kwargs):
+            raise AssertionError("below-minimum BUY notional must be rejected before venue submit")
+
+        monkeypatch.setattr("src.execution.executor._live_order", fail_live_order)
+
+        with pytest.raises(ValueError, match="BUY notional is below venue minimum"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
+
     def test_execute_final_intent_routes_buy_no_selected_token(self, monkeypatch):
         final_intent = _final_execution_intent(
             token_id="no-token-final",
@@ -1074,6 +1092,16 @@ class TestExecutor:
 
             def v2_preflight(self):
                 return None
+
+            def _ensure_v2_adapter(self):
+                return self
+
+            def get_collateral_payload(self):
+                return {
+                    "authority_tier": "CHAIN",
+                    "pusd_balance_micro": 10_000_000,
+                    "pusd_allowance_micro": 10_000_000,
+                }
 
             def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
                 raise PolyApiException(

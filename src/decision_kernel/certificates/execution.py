@@ -21,6 +21,7 @@ from src.decision_kernel.verifier import (
     verify_final_intent,
     verify_live_cap_transition,
 )
+from src.contracts.execution_intent import quantize_submit_shares_for_venue_at_most
 from src.events.live_order_aggregate import LiveOrderAggregateEvent
 
 
@@ -45,6 +46,7 @@ def build_final_intent_certificate_from_actionable(
     taker_fok_fak_live_enabled: bool = False,
     available_crossable_shares: float | None = None,
     sweep_expected_fill_price: str | None = None,
+    executable_market_context: Mapping[str, object] | None = None,
 ) -> DecisionCertificate:
     action = actionable_cert.payload
     # The governor-decided ``order_mode`` is the SOLE authority for the order-type
@@ -88,6 +90,22 @@ def build_final_intent_certificate_from_actionable(
                 f"DEPTH_BELOW_MIN_ORDER_SIZE: available_crossable_shares="
                 f"{available_crossable_shares:.4f} < min_order_size={min_order_size:.4f}"
             )
+    if order_spec.mode == "TAKER":
+        quantized_size = quantize_submit_shares_for_venue_at_most(
+            str(action["direction"]),
+            Decimal(str(size)),
+            final_limit_price=Decimal(str(limit_price)),
+            order_type=order_spec.time_in_force,
+        )
+        if available_crossable_shares is not None:
+            available_depth = Decimal(str(available_crossable_shares))
+            if quantized_size > available_depth:
+                raise ValueError(
+                    "DEPTH_BELOW_VENUE_QUANTIZED_SIZE:"
+                    f"available_crossable_shares={available_depth}:"
+                    f"venue_quantized_shares={quantized_size}"
+                )
+        size = float(quantized_size)
     notional = size * limit_price
     expected_fill_price = float(
         sweep_expected_fill_price
@@ -102,7 +120,11 @@ def build_final_intent_certificate_from_actionable(
     )
     executable_snapshot_hash = _required_text(executable_snapshot_cert.payload, "executable_snapshot_hash")
     cost_basis_hash = _required_text(cost_model_cert.payload, "cost_basis_hash")
-    decision_source_context_payload = _context_payload(decision_source_context, "decision_source_context")
+    decision_source_context_payload = _decision_source_context_payload(
+        decision_source_context,
+        executable_snapshot_cert.payload,
+        executable_market_context,
+    )
     # WALL #1 (2026-06-01): passive_maker_context is MAKER-ONLY. A taker FOK/FAK
     # crosses the JIT book at submit and never rests, so it carries no maker context.
     # Requiring it for taker was the design coupling that produced the dominant live
@@ -117,6 +139,13 @@ def build_final_intent_certificate_from_actionable(
         passive_maker_context_payload = _context_payload(passive_maker_context, "passive_maker_context")
     payload = {
         "event_id": action["event_id"],
+        "event_type": action.get("event_type"),
+        "market_event_id": _market_context_value(
+            executable_market_context,
+            "event_id",
+            executable_snapshot_cert.payload.get("event_id"),
+        ),
+        "strategy_key": action.get("strategy_key"),
         "actionable_certificate_hash": actionable_cert.certificate_hash,
         "final_intent_id": action["final_intent_id"],
         "family_id": action["family_id"],
@@ -124,6 +153,13 @@ def build_final_intent_certificate_from_actionable(
         "condition_id": action["condition_id"],
         "token_id": action["token_id"],
         "direction": action["direction"],
+        "city": action.get("city"),
+        "target_date": action.get("target_date"),
+        "metric": action.get("metric") or action.get("temperature_metric"),
+        "temperature_metric": action.get("temperature_metric") or action.get("metric"),
+        "bin_label": action.get("bin_label"),
+        "outcome_label": action.get("outcome_label"),
+        "unit": action.get("unit"),
         "side": _side_for_direction(str(action["direction"])),
         "order_type": order_spec.order_type,
         "executor_order_type": order_spec.time_in_force,
@@ -209,6 +245,7 @@ def build_executor_expressibility_certificate(
     payload = {
         "event_id": final_intent["event_id"],
         "final_intent_id": final_intent["final_intent_id"],
+        "strategy_key": final_intent.get("strategy_key"),
         "executor_name": executor_name,
         "executor_capability_version": executor_capability_version,
         "can_express": True,
@@ -268,8 +305,10 @@ def build_execution_command_certificate_from_final_intent(
     )
     payload = {
         "event_id": action["event_id"],
+        "event_type": final_intent.get("event_type"),
         "actionable_certificate_hash": actionable_cert.certificate_hash,
         "final_intent_id": final_intent["final_intent_id"],
+        "strategy_key": final_intent.get("strategy_key"),
         "execution_command_id": execution_command_id,
         "executor_name": executor_expressibility_cert.payload["executor_name"],
         "order_type": final_intent["order_type"],
@@ -629,6 +668,40 @@ def _context_payload(context, field_name: str) -> dict[str, object]:
     if not payload:
         raise ValueError(f"{field_name} required")
     return payload
+
+
+def _decision_source_context_payload(
+    context,
+    executable_snapshot_payload: Mapping[str, object],
+    executable_market_context: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    payload = _context_payload(context, "decision_source_context")
+    if not str(payload.get("polymarket_end_anchor_source") or "").strip():
+        explicit_end = (
+            _market_context_value(executable_market_context, "market_end_at")
+            or _market_context_value(executable_market_context, "market_close_at")
+            or _market_context_value(executable_market_context, "endDate")
+            or _market_context_value(executable_market_context, "end_date")
+            or executable_snapshot_payload.get("market_end_at")
+            or executable_snapshot_payload.get("market_close_at")
+            or executable_snapshot_payload.get("endDate")
+            or executable_snapshot_payload.get("end_date")
+        )
+        payload["polymarket_end_anchor_source"] = (
+            "gamma_explicit" if str(explicit_end or "").strip() else "f1_12z_fallback"
+        )
+    return payload
+
+
+def _market_context_value(
+    executable_market_context: Mapping[str, object] | None,
+    field: str,
+    default: object = None,
+) -> object:
+    if not isinstance(executable_market_context, Mapping):
+        return default
+    value = executable_market_context.get(field)
+    return default if value in (None, "") else value
 
 
 def _required_text(payload: Mapping[str, object], field: str) -> str:

@@ -1,16 +1,20 @@
 # Created: 2026-05-01
 # Last reused/audited: 2026-05-01
 # Authority basis: docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
-"""On-chain wallet bankroll provider — single source of truth for live-mode bankroll.
+"""Polymarket bankroll provider — single source of truth for live-mode bankroll.
 
-Wraps `PolymarketClient.get_balance()` with a small in-process cache + staleness
-window so that the riskguard tick (60s cadence) and other consumers can ask
-"what is the current bankroll of record?" without each call hitting the venue.
+Wraps Polymarket wallet + position-equity reads with a small in-process cache +
+staleness window so that the riskguard tick (60s cadence) and other consumers
+can ask "what is the current bankroll of record?" without each call hitting the
+venue.
 
 Authority semantics (architect memo §2):
-- The on-chain wallet is the canonical bankroll for trailing-loss math, equity,
-  and drawdown computation. Retired config-literal capital is not a bankroll
-  truth source.
+- Polymarket wallet equity is the canonical bankroll for trailing-loss math,
+  equity, and drawdown computation. Retired config-literal capital is not a
+  bankroll truth source.
+- Free pUSD is BUY collateral. Live entry sizing must use this spendable-cash
+  field instead of equity so open positions cannot inflate the next order's
+  single-position cap.
 
 Behaviour contract (architect memo §7):
 - Fresh cache (age < `max_age_seconds`, default 30s): return cached value with
@@ -92,10 +96,12 @@ class BankrollOfRecord:
     authority: str = "canonical"
     staleness_seconds: float = 0.0  # 0.0 = fresh fetch this call
     cached: bool = False  # True iff returned from cache without re-fetching
+    spendable_cash_usd: float | None = None
 
 
 _lock = threading.Lock()
 _last_value_usd: Optional[float] = None
+_last_spendable_cash_usd: Optional[float] = None
 _last_fetched_at: Optional[datetime] = None
 
 
@@ -103,8 +109,8 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _fetch_balance() -> float:
-    """Single underlying call site for the on-chain wallet query.
+def _fetch_balance() -> float | tuple[float, float]:
+    """Single underlying call site for Polymarket account equity.
 
     Imported lazily to avoid pulling polymarket SDK into modules that only
     care about the typed contract.
@@ -112,7 +118,25 @@ def _fetch_balance() -> float:
     from src.data.polymarket_client import PolymarketClient
 
     client = PolymarketClient()
-    return float(client.get_balance())
+    free_pusd = float(client.get_wallet_balance())
+    positions = client.get_positions_from_api() or []
+    position_value = 0.0
+    for position in positions:
+        try:
+            position_value += max(0.0, float(position.get("current_value", 0.0) or 0.0))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError(f"bankroll_position_value_malformed:{position!r}")
+    return (free_pusd + position_value, free_pusd)
+
+
+def _coerce_fetch_balance_result(result: float | tuple[float, float]) -> tuple[float, float | None]:
+    if isinstance(result, tuple):
+        if len(result) != 2:
+            raise ValueError(f"bankroll_fetch_result_malformed:{result!r}")
+        equity = float(result[0])
+        spendable = float(result[1])
+        return equity, spendable
+    return float(result), None
 
 
 def current(
@@ -131,7 +155,7 @@ def current(
         BankrollOfRecord on success; None when the wallet is unreachable AND
         no usable cache exists. Callers MUST treat None as fail-closed.
     """
-    global _last_value_usd, _last_fetched_at
+    global _last_value_usd, _last_spendable_cash_usd, _last_fetched_at
 
     with _lock:
         now = _now_utc()
@@ -143,6 +167,7 @@ def current(
         if cached_value is not None and cached_age is not None and cached_age < max_age_seconds:
             return BankrollOfRecord(
                 value_usd=cached_value,
+                spendable_cash_usd=_last_spendable_cash_usd,
                 fetched_at=cached_fetched_at.isoformat(),
                 staleness_seconds=cached_age,
                 cached=True,
@@ -150,11 +175,13 @@ def current(
 
         # 2. Cache miss or stale — try a live fetch.
         try:
-            fresh_value = _fetch_balance()
+            fresh_value, fresh_spendable_cash = _coerce_fetch_balance_result(_fetch_balance())
             _last_value_usd = fresh_value
+            _last_spendable_cash_usd = fresh_spendable_cash
             _last_fetched_at = now
             return BankrollOfRecord(
                 value_usd=fresh_value,
+                spendable_cash_usd=fresh_spendable_cash,
                 fetched_at=now.isoformat(),
                 staleness_seconds=0.0,
                 cached=False,
@@ -173,6 +200,7 @@ def current(
             # so the caller can annotate the risk decision.
             return BankrollOfRecord(
                 value_usd=cached_value,
+                spendable_cash_usd=_last_spendable_cash_usd,
                 fetched_at=cached_fetched_at.isoformat(),
                 staleness_seconds=cached_age,
                 cached=True,
@@ -218,6 +246,7 @@ def cached(*, max_age_seconds: Optional[float] = None) -> Optional[BankrollOfRec
             return None
         return BankrollOfRecord(
             value_usd=_last_value_usd,
+            spendable_cash_usd=_last_spendable_cash_usd,
             fetched_at=_last_fetched_at.isoformat(),
             staleness_seconds=age,
             cached=True,
@@ -226,7 +255,8 @@ def cached(*, max_age_seconds: Optional[float] = None) -> Optional[BankrollOfRec
 
 def reset_cache_for_tests() -> None:
     """Clear the module-level cache. Tests only — not part of the public contract."""
-    global _last_value_usd, _last_fetched_at
+    global _last_value_usd, _last_spendable_cash_usd, _last_fetched_at
     with _lock:
         _last_value_usd = None
+        _last_spendable_cash_usd = None
         _last_fetched_at = None

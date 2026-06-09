@@ -10,7 +10,7 @@ Theorem (§9 / §10.2):
   Closer to resolution → tighter calibration interval [p⁻, p⁺] → binds gate harder.
 
   YES entry: p⁻_i(t) − a_i − phi(1, a_i, fee_rate) > 0
-  NO  entry: 1 − p⁺_i(t) − b_i − phi(1, b_i, fee_rate) > 0
+  NO  entry: no_p_lower_i(t) − b_i − phi(1, b_i, fee_rate) > 0
 
   where p⁻, p⁺ = calibrated_bounds(p_hat, cal_p_hats, cal_outcomes, alpha=0.10).
 
@@ -55,11 +55,15 @@ _STRATEGY_KEY = "imminent_open_capture_posterior_collapse"
 _ALPHA = 0.10  # 90% conformal coverage; per §9 default
 
 
+def _format_optional_decimal(value: Optional[Decimal]) -> str:
+    return "N/A" if value is None else f"{float(value):.4f}"
+
+
 class ImminentOpenCapturePosteriorCollapse(BaseStrategyCandidate):
     """Shadow candidate: short-horizon posterior-collapse arbitrage (§9 / §10).
 
     Edge source: as τ → 0, σ²(τ) → 0, so calibration interval [p⁻, p⁺] shrinks.
-    Trade when p⁻ − ask − phi > 0 (YES) or 1 − p⁺ − bid − phi > 0 (NO).
+    Trade when p⁻ − ask − phi > 0 (YES) or native no_p_lower − bid − phi > 0 (NO).
 
     DATA-GATED: analysis fields cal_p_hats/cal_outcomes/p_hat/ask/bid must be
     present; empty or absent → fail-closed no_trade.
@@ -74,7 +78,7 @@ class ImminentOpenCapturePosteriorCollapse(BaseStrategyCandidate):
                 family="imminent_open_capture",
                 description=(
                     "Shadow candidate: short-horizon posterior-collapse arb. "
-                    "Trade YES iff p⁻−ask−phi>0, NO iff 1−p⁺−bid−phi>0. "
+                    "Trade YES iff p⁻−ask−phi>0, NO iff native no_p_lower−bid−phi>0. "
                     "p⁻/p⁺ from split-conformal calibrated_bounds(). "
                     "Data-gated: no_trade until cal feed is wired."
                 ),
@@ -95,7 +99,7 @@ class ImminentOpenCapturePosteriorCollapse(BaseStrategyCandidate):
           - analysis is None (data-gated; all fields absent).
           - cal_p_hats is empty or absent (calibration unavailable → fail-closed).
           - calibrated_bounds() raises (invalid inputs → fail-closed).
-          - Neither YES gate (p⁻ − ask − phi > 0) nor NO gate (1−p⁺−bid−phi > 0) met.
+          - Neither YES gate (p⁻ − ask − phi > 0) nor native NO gate met.
 
         Enter path: first gate that passes wins; YES preferred over NO on tie
         (asymmetric only if BOTH pass, which is rare for well-calibrated estimates).
@@ -117,6 +121,7 @@ class ImminentOpenCapturePosteriorCollapse(BaseStrategyCandidate):
         bid_raw = getattr(analysis, "bid", None)
         cal_p_hats_raw = getattr(analysis, "cal_p_hats", None)
         cal_outcomes_raw = getattr(analysis, "cal_outcomes", None)
+        native_no_p_lower_raw = getattr(analysis, "no_p_lower", None)
 
         if any(v is None for v in (p_hat_raw, ask_raw, bid_raw, cal_p_hats_raw, cal_outcomes_raw)):
             return self._no_trade(
@@ -160,11 +165,22 @@ class ImminentOpenCapturePosteriorCollapse(BaseStrategyCandidate):
             fee_yes = phi(Decimal("1"), ask, fee_rate)
             yes_edge = p_lower - ask - fee_yes
 
-        # Gate 3: NO — 1 − p⁺ − bid − phi(1, bid, fee_rate) > 0
+        # Gate 3: NO requires a native held-side lower bound. The YES upper
+        # bound is not an executable NO-side probability.
         no_edge: Optional[Decimal] = None
-        if Decimal("0") < bid < Decimal("1"):
+        native_no_p_lower: Optional[Decimal] = None
+        if native_no_p_lower_raw is not None:
+            try:
+                native_no_p_lower = Decimal(str(native_no_p_lower_raw))
+            except Exception:
+                native_no_p_lower = None
+        if (
+            native_no_p_lower is not None
+            and Decimal("0") <= native_no_p_lower <= Decimal("1")
+            and Decimal("0") < bid < Decimal("1")
+        ):
             fee_no = phi(Decimal("1"), bid, fee_rate)
-            no_edge = Decimal("1") - p_upper - bid - fee_no
+            no_edge = native_no_p_lower - bid - fee_no
 
         # Pick best positive edge; YES preferred on tie
         best_side: Optional[str] = None
@@ -187,8 +203,8 @@ class ImminentOpenCapturePosteriorCollapse(BaseStrategyCandidate):
                     f"imminent_open_capture_posterior_collapse: "
                     f"p⁻={float(p_lower):.4f}, p⁺={float(p_upper):.4f}, "
                     f"ask={float(ask):.4f}, bid={float(bid):.4f}; "
-                    f"yes_edge={float(yes_edge) if yes_edge is not None else 'N/A':.4f}, "
-                    f"no_edge={float(no_edge) if no_edge is not None else 'N/A':.4f}; "
+                    f"yes_edge={_format_optional_decimal(yes_edge)}, "
+                    f"no_edge={_format_optional_decimal(no_edge)}; "
                     "neither gate positive."
                 ),
             )
@@ -201,7 +217,7 @@ class ImminentOpenCapturePosteriorCollapse(BaseStrategyCandidate):
             strategy_key=_STRATEGY_KEY,
             conn=conn,
             edge=float(best_edge),
-            p_posterior=float(p_lower if best_side == "buy_yes" else (Decimal("1") - p_upper)),
+            p_posterior=float(p_lower if best_side == "buy_yes" else native_no_p_lower),
             target_size_usd=None,   # shadow — no live sizing
             target_price=float(ask if best_side == "buy_yes" else bid),
         )
@@ -210,7 +226,7 @@ class ImminentOpenCapturePosteriorCollapse(BaseStrategyCandidate):
             outcome="enter",
             side=best_side,
             edge=best_edge,
-            p_posterior=p_lower if best_side == "buy_yes" else (Decimal("1") - p_upper),
+            p_posterior=p_lower if best_side == "buy_yes" else native_no_p_lower,
             target_price=ask if best_side == "buy_yes" else bid,
             target_size_usd=None,
         )

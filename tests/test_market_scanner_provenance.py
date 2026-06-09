@@ -287,6 +287,7 @@ def _insert_persisted_reader_snapshot(
     *,
     market_end_at: str = "2026-05-20T12:00:00+00:00",
     active: int = 1,
+    orderbook_top_ask: str = "0.43",
 ) -> None:
     conn.execute(
         """
@@ -306,7 +307,7 @@ def _insert_persisted_reader_snapshot(
                 'question-mid', 'yes-mid', 'no-mid', 'yes-mid', 'YES',
             1, ?, 0, 1, '0.01', '5', '{}',
             '{"clobTokenIds":["yes-mid","no-mid"],"outcomes":["Yes","No"]}',
-            1, '0.41', '0.43', '{}',
+            1, '0.41', ?, '{}',
             '2026-05-19T08:00:00+00:00',
             ?,
             ?,
@@ -317,7 +318,7 @@ def _insert_persisted_reader_snapshot(
             '2026-05-20T10:15:00+00:00'
         )
         """,
-        (active, market_end_at, market_end_at, market_end_at),
+        (active, orderbook_top_ask, market_end_at, market_end_at, market_end_at),
     )
     conn.commit()
 
@@ -449,6 +450,51 @@ def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
     assert summary["budget_truncated_city_count"] == 1
     assert summary["uncaptured_candidate_city_count"] == 0
     assert summary["executable_substrate_coverage_status"] == "PARTIAL"
+
+
+def test_snapshot_refresh_db_lock_wait_is_bound_to_capture_budget(monkeypatch):
+    """A background snapshot DB lock must not consume the entire capture window."""
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    market = {
+        "event_id": "lock-event",
+        "slug": "highest-temperature-in-lock-on-may-21-2026",
+        "outcomes": [
+            {
+                "condition_id": f"cond-lock-{idx}",
+                "token_id": f"yes-lock-{idx}",
+                "no_token_id": f"no-lock-{idx}",
+                "market_end_at": "2026-05-21T12:00:00+00:00",
+                "executable": True,
+            }
+            for idx in range(3)
+        ],
+    }
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    observed_timeouts: list[int] = []
+
+    def fake_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side, **kwargs):
+        observed_timeouts.append(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ms, "capture_executable_market_snapshot", fake_capture)
+
+    summary = ms.refresh_executable_market_substrate_snapshots(
+        conn,
+        markets=[market],
+        clob=object(),
+        captured_at=now,
+        max_outcomes=3,
+        budget_seconds=2.0,
+    )
+
+    assert summary["attempted"] == 3
+    assert summary["inserted"] == 0
+    assert summary["failed"] == 3
+    assert summary["failure_samples"][0]["error"] == "database is locked"
+    assert observed_timeouts == [250, 250, 250]
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
 
 
 def test_reconstructed_snapshot_recapture_requires_explicit_current_clob_tradability():
@@ -3523,6 +3569,50 @@ class TestForwardMarketSubstrateProducer:
         assert market["hours_to_resolution"] == 1.9166666666666667
         assert market["hours_since_open"] == 26.083333333333332
 
+    def test_persisted_reader_treats_absent_top_ask_as_missing_price_not_bad_topology(self):
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(conn, orderbook_top_ask="ABSENT")
+
+        snapshot = ms.read_persisted_weather_markets(
+            conn,
+            now_utc=datetime(2026, 5, 20, 10, 5, tzinfo=timezone.utc),
+            max_age_seconds=900,
+        )
+
+        assert snapshot.authority == "VERIFIED"
+        market = snapshot.events[0]
+        assert [o["condition_id"] for o in market["outcomes"]] == [
+            "cond-low",
+            "cond-mid",
+            "cond-high",
+        ]
+        held = next(o for o in market["outcomes"] if o["condition_id"] == "cond-mid")
+        assert held["executable"] is True
+        assert held["price"] is None
+
     def test_persisted_reader_does_not_verify_snapshot_defined_partial_support(self):
         conn = _make_persisted_substrate_conn()
         conn.execute(
@@ -3847,6 +3937,55 @@ class TestForwardMarketSubstrateProducer:
         assert held["executable"] is False
         assert held["price"] is None
         assert held["source_contract"]["source"] == "market_events_static_topology"
+
+    def test_persisted_sibling_reader_prefers_static_topology_without_global_snapshot_scan(self, monkeypatch):
+        conn = _make_persisted_substrate_conn()
+        for condition_id, label, low, high, token in (
+            ("cond-low", "35°F or lower", None, 35.0, "yes-low"),
+            ("cond-mid", "36-37°F", 36.0, 37.0, "yes-mid"),
+            ("cond-high", "38°F or higher", 38.0, None, "yes-high"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO market_events (
+                    market_slug, city, target_date, temperature_metric,
+                    condition_id, token_id, range_label, range_low,
+                    range_high, recorded_at
+                ) VALUES (?, 'Chicago', '2026-04-30', 'low', ?, ?, ?, ?, ?,
+                    '2026-05-20T09:59:00+00:00')
+                """,
+                (
+                    "lowest-temperature-in-chicago-on-april-30-2026",
+                    condition_id,
+                    token,
+                    label,
+                    low,
+                    high,
+                ),
+            )
+        _insert_persisted_reader_snapshot(conn, orderbook_top_ask="ABSENT")
+        monkeypatch.setattr(
+            ms,
+            "read_persisted_weather_markets",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("global snapshot scan not allowed for static sibling topology")
+            ),
+        )
+
+        snapshot = ms.read_persisted_sibling_outcomes(
+            "cond-mid",
+            conn=conn,
+            now_utc=datetime(2026, 5, 20, 10, 20, tzinfo=timezone.utc),
+            max_age_seconds=60,
+        )
+
+        assert snapshot.authority == "VERIFIED"
+        assert [o["condition_id"] for o in snapshot.events] == [
+            "cond-low",
+            "cond-mid",
+            "cond-high",
+        ]
+        assert all(o["price"] is None for o in snapshot.events)
 
     def test_get_sibling_outcomes_uses_persisted_authority_without_legacy_scan(self, monkeypatch):
         monkeypatch.setattr(

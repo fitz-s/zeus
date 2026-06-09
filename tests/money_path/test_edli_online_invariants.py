@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -305,6 +306,33 @@ def test_market_substrate_warm_cadence_stays_inside_executable_price_ttl(monkeyp
     )
 
 
+def test_shadow_no_submit_with_user_ws_registers_reconcile_job(monkeypatch, tmp_path):
+    monkeypatch.setenv("ZEUS_USER_CHANNEL_WS_ENABLED", "1")
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        {
+            "enabled": True,
+            "live_execution_mode": "edli_shadow_no_submit",
+            "reactor_mode": "live_no_submit",
+            "event_writer_enabled": True,
+            "forecast_snapshot_trigger_enabled": True,
+            "day0_extreme_trigger_enabled": False,
+            "day0_hard_fact_live_enabled": False,
+            "market_channel_ingestor_enabled": False,
+            "edli_user_channel_reconcile_enabled": False,
+            "real_order_submit_enabled": False,
+            "taker_fok_fak_live_enabled": False,
+            **_stage_evidence_updates(tmp_path),
+        },
+    )
+
+    job_ids = {job.id for job in scheduler.jobs}
+    assert "edli_user_channel_reconcile" in job_ids
+    assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_shadow_no_submit"
+    assert settings_copy["edli_v1"]["real_order_submit_enabled"] is False
+    assert settings_copy["edli_v1"]["edli_user_channel_reconcile_enabled"] is False
+
+
 def test_live_execution_mode_rejects_legacy_cron_with_edli_runtime_enabled(monkeypatch):
     with pytest.raises(RuntimeError, match="LEGACY_CRON_REQUIRES_REACTOR_MODE_DISABLED"):
         _run_main_with_fake_scheduler(
@@ -535,6 +563,46 @@ def test_edli_live_canary_with_stage_evidence_waits_for_qualifying_event(monkeyp
     assert settings_copy["edli_v1"]["live_execution_mode"] == "edli_live_canary"
 
 
+def test_edli_live_canary_does_not_consume_promotion_arm_artifact(monkeypatch, tmp_path):
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _edli_live_canary_updates(
+            **_stage_evidence_updates(tmp_path),
+            edli_arm_gate_artifact_required=True,
+            edli_arm_gate_artifact_path=str(tmp_path / "promotion-arm-not-yet-created.json"),
+        ),
+    )
+
+    assert scheduler.started is True
+    assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
+    assert settings_copy["edli_v1"]["edli_arm_gate_artifact_required"] is True
+
+
+def test_emos_sole_canary_skips_legacy_bias_platt_boot_guard(monkeypatch, tmp_path):
+    import src.observability.calibration_coverage_guard as coverage_guard
+
+    def _legacy_guard_must_not_run(*args, **kwargs):
+        raise AssertionError("legacy bias/Platt coverage guard ran under EMOS-sole")
+
+    monkeypatch.setattr(
+        coverage_guard,
+        "assert_calibration_coverage",
+        _legacy_guard_must_not_run,
+    )
+
+    scheduler, settings_copy = _run_main_with_fake_scheduler(
+        monkeypatch,
+        _edli_live_canary_updates(
+            **_stage_evidence_updates(tmp_path),
+            edli_emos_sole_calibrator_enabled=True,
+        ),
+    )
+
+    assert scheduler.started is True
+    assert "edli_event_reactor" in {job.id for job in scheduler.jobs}
+    assert settings_copy["edli_v1"]["edli_emos_sole_calibrator_enabled"] is True
+
+
 def test_edli_live_canary_boot_runs_stage_readiness_before_registering_edli_jobs(monkeypatch):
     import src.main as main
 
@@ -690,6 +758,37 @@ def test_edli_live_canary_stage_readiness_blocks_stale_source(monkeypatch, tmp_p
     assert any(reason.startswith("EDLI_STAGE_SOURCE_HEALTH_STALE") for reason in report.reasons)
 
 
+def test_edli_live_canary_boot_defers_self_written_status_summary_staleness(monkeypatch, tmp_path):
+    import src.main as main
+
+    db_path = tmp_path / "world.db"
+    _init_stage_world_db(db_path).close()
+    monkeypatch.setattr(main, "get_world_connection_read_only", lambda *args, **kwargs: _stage_conn(db_path))
+    monkeypatch.setitem(main._BOOT_STATE, "sha", "abc123")
+    loaded = tmp_path / "loaded_sha.json"
+    source = tmp_path / "source_health.json"
+    status = tmp_path / "status_summary.json"
+    now = datetime.now(timezone.utc)
+    loaded.write_text(json.dumps({"loaded_sha": "abc123"}))
+    source.write_text(json.dumps({"generated_at": now.isoformat()}))
+    status.write_text(json.dumps({"generated_at": (now - timedelta(hours=1)).isoformat()}))
+
+    report = main._assert_edli_stage_readiness(
+        {
+            "live_execution_mode": "edli_live_canary",
+            "edli_stage_loaded_sha_file": str(loaded),
+            "edli_stage_source_health_json": str(source),
+            "edli_stage_status_json": str(status),
+            "edli_stage_readiness_max_age_seconds": 60,
+        }
+    )
+
+    assert report.status == "WAITING_FOR_QUALIFYING_EVENT"
+    assert report.live_entries_allowed is True
+    assert report.submit_allowed is True
+    assert any(reason.startswith("EDLI_STAGE_STATUS_SUMMARY_STALE") for reason in report.reasons)
+
+
 def _edli_live_canary_updates(**overrides):
     values = {
         "enabled": True,
@@ -701,6 +800,8 @@ def _edli_live_canary_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
+        "taker_fok_fak_live_enabled": True,
+        "durable_submit_outbox_enabled": True,
         # 2026-06-04: the arm direction-gate boot guard is DELETED (mainstream is
         # display-only). These keys are now INERT (no boot guard reads them); retained
         # here only to keep this canary config explicit. They do not affect boot.
@@ -722,6 +823,8 @@ def _edli_live_updates(**overrides):
         "edli_user_channel_reconcile_enabled": True,
         "real_order_submit_enabled": True,
         "live_canary_enabled": True,
+        "taker_fok_fak_live_enabled": True,
+        "durable_submit_outbox_enabled": True,
         "edli_live_operator_authorized": True,
         "edli_live_promotion_artifact_required": True,
         "edli_live_min_canary_count": 1,

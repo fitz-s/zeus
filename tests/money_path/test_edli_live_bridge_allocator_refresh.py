@@ -292,3 +292,22 @@ def test_main_edli_cycle_wires_live_bridge_allocator_refresh_source():
     assert source.count("_edli_refresh_global_allocator_for_live_bridge") >= 2
     # It must be gated on live_bridge_mode.
     assert "live_bridge_mode" in source
+
+
+def test_main_edli_cycle_refreshes_allocator_for_shadow_no_submit_visibility():
+    """The EDLI shadow/no-submit runtime must still publish a real allocator state.
+
+    `live_no_submit` cannot place orders, but the global allocator summary is the
+    operator-visible proof of whether real-live would be blocked by risk,
+    reconcile findings, drawdown, or wiring. Leaving the singleton unconfigured
+    hides those real blockers behind `allocator_not_configured`.
+    """
+    from pathlib import Path
+
+    source = Path("src/main.py").read_text()
+
+    assert 'submit_disabled_effective_mode = reactor_mode == "live_no_submit"' in source
+    assert "live_submit_effective = live_bridge_mode or submit_disabled_effective_mode" in source
+    assert "trade_conn = get_trade_connection_with_world_required(write_class=None)" in source
+    assert "if live_submit_effective:\n            _alloc_refresh = _edli_refresh_global_allocator_for_live_bridge(trade_conn)" in source
+    assert "if live_bridge_mode and not _alloc_refresh.get(\"configured\")" in source

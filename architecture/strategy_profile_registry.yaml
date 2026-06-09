@@ -225,7 +225,7 @@ opening_inertia:
   allowed_bin_topology: [point, finite_range, open_shoulder]
   metric_support:
     high: live
-    low:  blocked
+    low:  live
   kelly_default_multiplier: 0.5
   kelly_phase_overrides:
     pre_trading: 0.0

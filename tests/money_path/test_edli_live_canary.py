@@ -13,33 +13,30 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_live_canary_runtime_stays_in_shadow_no_submit_until_operator_unshadow():
-    """SHADOW-contract money guard (2026-05-30).
+def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
+    """Current live-canary contract after operator unshadow.
 
-    The reactor runs in shadow (edli_shadow_no_submit): it forms decisions/candidates with NO
-    venue submission so the p_raw-vs-online bias test (#24) can run on real flow. The
-    load-bearing money guard is ``real_order_submit_enabled is False`` plus venue write-side
-    triggers staying off — these must hold until the operator's irreversible unshadow.
-    Supersedes the prior fully-disabled canary, which predated the deliberate shadow launch.
+    This used to assert the pre-unshadow shadow/no-submit state. The operator has
+    since authorized real live canary, so the load-bearing guard is now coherent
+    real-submit wiring: live mode, live canary, durable outbox, and taker path all
+    enabled together rather than a split shadow/live configuration.
     """
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
 
-    # MONEY GUARD — no real capital can leave until operator unshadow.
-    assert edli["real_order_submit_enabled"] is False
-    assert edli["live_execution_mode"] == "edli_shadow_no_submit"
-    assert edli["reactor_mode"] == "live_no_submit"
-    # Shadow surfaces that are intentionally ON to produce decisions for the bias test.
+    assert edli["real_order_submit_enabled"] is True
+    assert edli["live_execution_mode"] == "edli_live_canary"
+    assert edli["reactor_mode"] == "live"
+    assert edli["live_canary_enabled"] is True
+    assert edli["durable_submit_outbox_enabled"] is True
     assert edli["enabled"] is True
     assert edli["event_writer_enabled"] is True
     assert edli["forecast_snapshot_trigger_enabled"] is True
-    # Day0 is local observation eventing; venue write-side triggers stay OFF in shadow.
     assert edli["edli_live_scope"] == "day0_shadow"
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
-    assert edli["market_channel_ingestor_enabled"] is False
-    assert edli["taker_fok_fak_live_enabled"] is False
-    assert "live_canary_enabled" not in edli
+    assert edli["market_channel_ingestor_enabled"] is True
+    assert edli["taker_fok_fak_live_enabled"] is True
 
 
 def test_live_canary_groundwork_has_live_cap_schema_and_verifiers():
@@ -91,6 +88,18 @@ def test_live_adapter_builds_actionable_final_intent_command_and_submit_disabled
             risk_decision_id="risk-1",
             final_intent_id="intent-1",
             decision_proof_bundle=object(),
+            mainstream_agreement_pass=True,
+            mainstream_point=0.42,
+            mainstream_delta=0.01,
+            mainstream_bin_label="21C",
+            mainstream_source="cache",
+            mainstream_fetched_at_utc="2026-05-24T18:09:00+00:00",
+            alpha_gap=0.12,
+            q_source="emos",
+            opportunity_book={
+                "book_id": "book-1",
+                "selected_candidate_id": "candidate-1",
+            },
         ),
     )
     monkeypatch.setattr(
@@ -111,6 +120,14 @@ def test_live_adapter_builds_actionable_final_intent_command_and_submit_disabled
     assert receipt.submitted is False
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle == marker_bundle
+    assert receipt.q_source == "emos"
+    assert receipt.opportunity_book == {
+        "book_id": "book-1",
+        "selected_candidate_id": "candidate-1",
+    }
+    assert receipt.mainstream_agreement_pass is True
+    assert receipt.mainstream_point == 0.42
+    assert receipt.alpha_gap == 0.12
 
 
 def test_live_adapter_does_not_call_executor_when_real_submit_disabled(monkeypatch):
@@ -719,6 +736,128 @@ def test_live_execution_command_build_fails_without_pre_submit_authority_witness
         )
 
 
+def test_live_execution_command_blocks_identity_fallback_calibration():
+    from dataclasses import replace
+
+    from src.engine import event_reactor_adapter as adapter
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = _accepted_receipt(event)
+    proof_bundle = build_test_no_submit_proof_bundle(event, accepted, decision_time=decision_time)
+    proof_bundle = replace(
+        proof_bundle,
+        calibration=replace(
+            proof_bundle.calibration,
+            payload={
+                **proof_bundle.calibration.payload,
+                "authority": "IDENTITY_FALLBACK_NO_PLATT_BUCKET",
+                "n_samples": 0,
+            },
+        ),
+    )
+    accepted = replace(accepted, decision_proof_bundle=proof_bundle)
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            tiny_live_max_notional_usd=5.0,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+            taker_fok_fak_live_enabled=True,
+        )
+
+
+def test_live_execution_command_requires_q_source_provenance():
+    from dataclasses import replace
+
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(_accepted_receipt(event), q_source=None)
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_Q_SOURCE_MISSING"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            tiny_live_max_notional_usd=5.0,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+            taker_fok_fak_live_enabled=True,
+        )
+
+
+def test_actionable_payload_persists_live_authority_provenance():
+    from types import SimpleNamespace
+
+    from src.engine import event_reactor_adapter as adapter
+
+    event = _forecast_event()
+    receipt = _accepted_receipt(event)
+    live_cap = SimpleNamespace(
+        payload={
+            "usage_id": "usage-1",
+            "reserved_notional_usd": 3.0,
+            "notional_cap_enabled": False,
+        }
+    )
+
+    payload = adapter._actionable_payload_from_receipt(receipt, live_cap, event=event)
+
+    assert payload["q_source"] == "emos"
+    assert payload["opportunity_book"] == {
+        "selected_candidate_id": "candidate-1",
+        "actual_receipt_selected_candidate_id": "candidate-1",
+        "candidates": [
+            {
+                "candidate_id": "candidate-1",
+                "condition_id": "condition-1",
+                "token_id": "yes-1",
+                "direction": "buy_yes",
+            }
+        ],
+    }
+    assert payload["strategy_key"] == "center_buy"
+
+
+def test_live_execution_command_requires_opportunity_book_selection_match():
+    from dataclasses import replace
+
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    event = _forecast_event()
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(
+        _accepted_receipt(event),
+        opportunity_book={
+            "selected_candidate_id": "candidate-2",
+            "actual_receipt_selected_candidate_id": "candidate-1",
+        },
+    )
+
+    with pytest.raises(ValueError, match="EDLI_LIVE_OPPORTUNITY_BOOK_SELECTION_MISMATCH"):
+        adapter._build_live_execution_command_certificates(
+            event=event,
+            receipt=accepted,
+            decision_time=decision_time,
+            tiny_live_max_notional_usd=5.0,
+            live_cap_conn=conn,
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+            taker_fok_fak_live_enabled=True,
+        )
+
+
 def test_crossing_post_only_pre_submit_witness_blocks_command():
     # Tests that a POST_ONLY MAKER order whose limit_price >= current_best_ask
     # (i.e. would cross the book) is rejected by the pre-submit verifier with
@@ -806,8 +945,22 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
     assert final_intent.payload["post_only"] is False
     assert final_intent.payload["time_in_force"] in {"FOK", "FAK"}
     assert final_intent.payload["limit_price"] == pytest.approx(0.40)
+    assert final_intent.payload["city"] == "Chicago"
+    assert final_intent.payload["target_date"] == "2026-05-24"
+    assert final_intent.payload["metric"] == "high"
+    assert final_intent.payload["temperature_metric"] == "high"
+    assert final_intent.payload["bin_label"] == "80-82"
+    assert final_intent.payload["outcome_label"] == "YES"
+    assert final_intent.payload["unit"] == "F"
     assert pre_submit.payload["would_cross_book"] is True
     assert pre_submit.payload["post_only"] is False
+    assert pre_submit.payload["city"] == "Chicago"
+    assert pre_submit.payload["target_date"] == "2026-05-24"
+    assert pre_submit.payload["metric"] == "high"
+    assert pre_submit.payload["temperature_metric"] == "high"
+    assert pre_submit.payload["bin_label"] == "80-82"
+    assert pre_submit.payload["outcome_label"] == "YES"
+    assert pre_submit.payload["unit"] == "F"
 
 
 def test_live_command_reuses_single_pre_submit_authority_witness():
@@ -944,6 +1097,99 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
         assert conn.execute("SELECT reservation_status FROM edli_live_cap_usage").fetchone()["reservation_status"] == "CONSUMED"
         assert _cap_transition_status(receipt) == "CONSUMED"
         assert _cap_transition_projection_status(receipt) == "CONSUMED"
+    finally:
+        adapter.build_event_bound_no_submit_receipt = original_build
+
+
+def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine.event_bound_final_intent import EventBoundExecutorSubmitResult
+    from src.riskguard.risk_level import RiskLevel
+    from tests.decision_kernel.no_submit_fixtures import build_test_no_submit_proof_bundle
+
+    event = _forecast_event()
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    accepted = replace(
+        _accepted_receipt(event),
+        decision_proof_bundle=build_test_no_submit_proof_bundle(
+            event,
+            _accepted_receipt(event),
+            decision_time=decision_time,
+        ),
+    )
+    original_build = adapter.build_event_bound_no_submit_receipt
+    adapter.build_event_bound_no_submit_receipt = lambda *_args, **_kwargs: accepted
+
+    try:
+        submit = adapter.event_bound_live_adapter_from_trade_conn(
+            conn,
+            live_cap_conn=conn,
+            get_current_level=lambda: RiskLevel.GREEN,
+            real_order_submit_enabled=True,
+            live_canary_enabled=True,
+            durable_submit_outbox_enabled=True,
+            executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
+                status="SUBMITTED",
+                reason_code="OK",
+                venue_order_id="venue-1",
+                submit_started_at="2026-05-24T18:10:00+00:00",
+                submit_finished_at="2026-05-24T18:10:01+00:00",
+                raw_response={"status": "submitted"},
+            ),
+            pre_submit_authority_provider=_pre_submit_authority_provider,
+            taker_fok_fak_live_enabled=True,
+        )
+
+        receipt = submit(event, decision_time)
+
+        row = conn.execute(
+            """
+            SELECT payload_json
+            FROM edli_live_order_events
+            WHERE event_type = 'DecisionProofAccepted'
+            """
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        audit = payload["decision_audit"]
+
+        assert receipt.side_effect_status == "SUBMITTED"
+        assert audit["schema"] == "edli_live_decision_audit_v1"
+        assert audit["event_id"] == event.event_id
+        assert audit["final_intent_id"] == "intent-1"
+        assert audit["condition_id"] == "condition-1"
+        assert audit["token_id"] == "yes-1"
+        assert audit["direction"] == "buy_yes"
+        assert audit["q_source"] == "emos"
+        assert audit["q_live"] == pytest.approx(0.7)
+        assert audit["q_lcb_5pct"] == pytest.approx(0.6)
+        assert audit["c_fee_adjusted"] == pytest.approx(0.4)
+        assert audit["trade_score"] == pytest.approx(0.2)
+        assert audit["kelly_size_usd"] == pytest.approx(3.0)
+        assert audit["selected_candidate_id"] == "candidate-1"
+        assert audit["actual_receipt_selected_candidate_id"] == "candidate-1"
+        assert audit["selected_condition_id"] == "condition-1"
+        assert audit["selected_token_id"] == "yes-1"
+        assert audit["selected_direction"] == "buy_yes"
+        assert audit["actual_condition_id"] == "condition-1"
+        assert audit["actual_token_id"] == "yes-1"
+        assert audit["actual_direction"] == "buy_yes"
+        assert audit["opportunity_book"] == {
+            "selected_candidate_id": "candidate-1",
+            "actual_receipt_selected_candidate_id": "candidate-1",
+            "candidates": [
+                {
+                    "candidate_id": "candidate-1",
+                    "condition_id": "condition-1",
+                    "token_id": "yes-1",
+                    "direction": "buy_yes",
+                }
+            ],
+        }
+        assert audit["actionable_certificate_hash"]
+        assert audit["final_intent_certificate_hash"]
+        assert {cert["certificate_type"] for cert in audit["parent_certificates"]}
     finally:
         adapter.build_event_bound_no_submit_receipt = original_build
 
@@ -1619,6 +1865,13 @@ def _accepted_receipt(event):
         family_id="family-1",
         candidate_id="candidate-1",
         direction="buy_yes",
+        strategy_key="center_buy",
+        city="Chicago",
+        target_date="2026-05-24",
+        metric="high",
+        bin_label="80-82",
+        outcome_label="YES",
+        unit="F",
         q_live=0.7,
         q_lcb_5pct=0.6,
         c_fee_adjusted=0.4,
@@ -1637,6 +1890,19 @@ def _accepted_receipt(event):
         kelly_decision_id="kelly-1",
         risk_decision_id="risk-1",
         final_intent_id="intent-1",
+        q_source="emos",
+        opportunity_book={
+            "selected_candidate_id": "candidate-1",
+            "actual_receipt_selected_candidate_id": "candidate-1",
+            "candidates": [
+                {
+                    "candidate_id": "candidate-1",
+                    "condition_id": "condition-1",
+                    "token_id": "yes-1",
+                    "direction": "buy_yes",
+                }
+            ],
+        },
         decision_proof_bundle=object(),
     )
 
@@ -1852,7 +2118,14 @@ def _fake_candidate_proof(
         execution_price=SimpleNamespace(value=limit_price),
         row={"min_tick_size": min_tick_size},
         trade_score=trade_score,
+        q_posterior=q_lcb_5pct,
         q_lcb_5pct=q_lcb_5pct,
+        c_cost_95pct=limit_price,
+        p_fill_lcb=q_lcb_5pct,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        missing_reason=None,
     )
 
 

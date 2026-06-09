@@ -68,6 +68,10 @@ def _insert_snapshot_row(
     causality_status: str = "OK",
     authority: str = "VERIFIED",
     data_version: str | None = None,
+    provenance_json: dict | None = None,
+    settlement_source_type: str | None = None,
+    forecast_window_start_utc: str | None = None,
+    forecast_window_end_utc: str | None = None,
 ) -> None:
     scope = _scope(city)
     conn.execute(
@@ -81,7 +85,8 @@ def _insert_snapshot_row(
             training_allowed, causality_status, boundary_ambiguous,
             ambiguous_member_count, manifest_hash, provenance_json, authority,
             members_unit, local_day_start_utc, step_horizon_hours,
-            contributes_to_target_extrema, forecast_window_attribution_status
+            contributes_to_target_extrema, forecast_window_attribution_status,
+            settlement_source_type, forecast_window_start_utc, forecast_window_end_utc
         ) VALUES (
             :city, :target_date, :temperature_metric, :physical_quantity,
             :observation_field, :issue_time, :valid_time, :available_at, :fetch_time,
@@ -91,7 +96,8 @@ def _insert_snapshot_row(
             :training_allowed, :causality_status, :boundary_ambiguous,
             :ambiguous_member_count, :manifest_hash, :provenance_json, :authority,
             :members_unit, :local_day_start_utc, :step_horizon_hours,
-            :contributes_to_target_extrema, :forecast_window_attribution_status
+            :contributes_to_target_extrema, :forecast_window_attribution_status,
+            :settlement_source_type, :forecast_window_start_utc, :forecast_window_end_utc
         )
         """,
         {
@@ -120,13 +126,16 @@ def _insert_snapshot_row(
             "boundary_ambiguous": boundary_ambiguous,
             "ambiguous_member_count": 0,
             "manifest_hash": "a" * 64,
-            "provenance_json": "{}",
+            "provenance_json": json.dumps(provenance_json or {}),
             "authority": authority,
             "members_unit": "degC",
             "local_day_start_utc": _WINDOW_START,
             "step_horizon_hours": 144.0,
             "contributes_to_target_extrema": contributes_to_target_extrema,
             "forecast_window_attribution_status": forecast_window_attribution_status,
+            "settlement_source_type": settlement_source_type,
+            "forecast_window_start_utc": forecast_window_start_utc,
+            "forecast_window_end_utc": forecast_window_end_utc,
         },
     )
 
@@ -341,6 +350,71 @@ class TestReaderExtremaPreference:
         )
         assert not result.ok
         assert result.reason_code == "EXECUTABLE_FORECAST_EXTREMA_AUTHORITY_UNKNOWN"
+
+    def test_positive_attribution_subwindow_is_not_reblocked_by_full_day_gate(self):
+        """Extrema authority is the classifier contract, not a redundant 24h gate.
+
+        ECMWF period-extrema products can prove a target extrema through selected
+        contributing windows without their raw forecast_window_* timestamps
+        spanning every civil-day second. Requiring full-day coverage here was an
+        SF-shaped overfit and would regress other cities.
+        """
+        conn = _conn()
+        _insert_snapshot_row(
+            conn,
+            city=_TAIPEI_CITY,
+            source_cycle_time="2026-05-22T00:00:00+00:00",
+            available_at="2026-05-22T07:00:00+00:00",
+            contributes_to_target_extrema=1,
+            forecast_window_attribution_status="FULLY_INSIDE_TARGET_LOCAL_DAY",
+            members_values=[30.0 + i * 0.1 for i in range(51)],
+            source_run_id="run-taipei-positive-subwindow",
+            forecast_window_start_utc="2026-05-21T18:00:00+00:00",
+            forecast_window_end_utc="2026-05-22T14:00:00+00:00",
+        )
+        result = read_executable_forecast_snapshot(
+            conn,
+            scope=_scope(_TAIPEI_CITY),
+            source_id="ecmwf_open_data",
+            source_transport="ensemble_snapshots_db_reader",
+            source_run_id="run-taipei-positive-subwindow",
+        )
+        assert result.ok, result.reason_code
+        assert result.reason_code == "EXECUTABLE_FORECAST_READY"
+
+    def test_wu_icao_current_version_requires_grid_provenance(self):
+        """WU airport-settled OpenData rows need explicit grid-to-station evidence
+        before EMOS may consume them as live-entry input."""
+        conn = _conn()
+        _insert_snapshot_row(
+            conn,
+            city=_TAIPEI_CITY,
+            source_cycle_time="2026-05-22T00:00:00+00:00",
+            available_at="2026-05-22T07:00:00+00:00",
+            contributes_to_target_extrema=1,
+            forecast_window_attribution_status="EXPLICIT",
+            members_values=[30.0 + i * 0.1 for i in range(51)],
+            source_run_id="run-taipei-grid-missing",
+            settlement_source_type="wu_icao",
+            provenance_json={
+                "nearest_grid_lat": None,
+                "nearest_grid_lon": None,
+                "nearest_grid_distance_km": None,
+                "contract_outcome_evidence": {
+                    "settlement_source_type": "wu_icao",
+                    "settlement_station_id": "RCTP",
+                },
+            },
+        )
+        result = read_executable_forecast_snapshot(
+            conn,
+            scope=_scope(_TAIPEI_CITY),
+            source_id="ecmwf_open_data",
+            source_transport="ensemble_snapshots_db_reader",
+            source_run_id="run-taipei-grid-missing",
+        )
+        assert not result.ok
+        assert result.reason_code == "EXECUTABLE_FORECAST_STATION_GRID_PROVENANCE_MISSING"
 
     def test_current_version_null_contributes_blocks_fail_closed(self):
         """P0 follow-up §2: NULL contributes on a CURRENT data_version now fails

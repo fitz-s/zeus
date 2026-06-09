@@ -102,7 +102,7 @@ def _collect_files(root: Path | None, paths: list[Path], max_files: int | None) 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path("/Users/leofitz/.openclaw/workspace-venus/51 source data/raw/tigge_ecmwf_ens_regions_mn2t6"))
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1] / "raw" / "tigge_ecmwf_ens_regions_mn2t6")
     parser.add_argument("--path", action="append", type=Path, default=[])
     parser.add_argument("--expected-steps", nargs="+", type=int, default=None)
     parser.add_argument("--max-files", type=int, default=None)

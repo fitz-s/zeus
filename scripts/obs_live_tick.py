@@ -55,7 +55,7 @@ import logging
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -76,6 +76,7 @@ from src.data.tier_resolver import (  # noqa: E402
     tier_for_city,
 )
 from src.data.wu_hourly_client import HourlyObservation, fetch_wu_hourly  # noqa: E402
+from src.engine.time_context import city_local_fetch_window  # noqa: E402
 from src.state.db_writer_lock import WriteClass, db_writer_lock  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,18 @@ def _hourly_obs_to_v2_row(
 # Per-city fetch + write
 # ---------------------------------------------------------------------------
 
+def _city_local_fetch_window(city_name: str, *, now_utc: datetime, days_back: int) -> tuple[date, date]:
+    """Return the rolling fetch window in the city's local calendar.
+
+    Day0 observation consumers reason over the market's city-local settlement
+    date. UTC-date windows miss east-of-UTC cities after local midnight while
+    UTC is still on the previous date, exactly when day0 capture needs rows.
+    """
+    if now_utc.tzinfo is None or now_utc.utcoffset() is None:
+        raise ValueError("now_utc must be timezone-aware")
+    city = cities_by_name[city_name]
+    return city_local_fetch_window(city.timezone, reference_time=now_utc, days_back=days_back)
+
 def _tick_wu_city(
     city_name: str,
     conn,
@@ -309,8 +322,6 @@ def run_live_tick(
     import sqlite3
 
     now_utc = datetime.now(timezone.utc)
-    end_date = now_utc.date()
-    start_date = end_date - timedelta(days=days_back)
 
     # Collect cities by tier
     all_names = city_filter if city_filter else list(cities_by_name.keys())
@@ -319,23 +330,27 @@ def run_live_tick(
     hko_names = [n for n in all_names if tier_for_city(n) == Tier.HKO_NATIVE]
 
     logger.info(
-        "obs_v2_live_tick: start=%s end=%s wu=%d ogimet=%d hko_skipped=%d dry_run=%s",
-        start_date, end_date, len(wu_names), len(ogimet_names), len(hko_names), dry_run,
+        "obs_v2_live_tick: city_local_window_policy=per_city days_back=%d wu=%d ogimet=%d hko_skipped=%d dry_run=%s",
+        days_back,
+        len(wu_names), len(ogimet_names), len(hko_names), dry_run,
     )
 
     results: list[TickResult] = []
 
     # HKO: always skip — handled by hko_ingest_tick.py
     for name in hko_names:
+        start_date, end_date = _city_local_fetch_window(name, now_utc=now_utc, days_back=days_back)
         r = TickResult(city=name, tier="HKO_NATIVE", skipped_hko=True)
         results.append(r)
         logger.debug("skip HKO_NATIVE city %s", name)
+        _append_log(log_path, r, start_date=start_date, end_date=end_date)
 
     with db_writer_lock(db_path, WriteClass.BULK):
         conn = sqlite3.connect(str(db_path)) if not dry_run else None
         try:
             # WU_ICAO cities
             for city_name in wu_names:
+                start_date, end_date = _city_local_fetch_window(city_name, now_utc=now_utc, days_back=days_back)
                 try:
                     r = _tick_wu_city(city_name, conn, start_date=start_date, end_date=end_date, dry_run=dry_run)
                 except Exception as exc:
@@ -348,6 +363,7 @@ def run_live_tick(
 
             # OGIMET_METAR cities (21s inter-request limit enforced by client module)
             for city_name in ogimet_names:
+                start_date, end_date = _city_local_fetch_window(city_name, now_utc=now_utc, days_back=days_back)
                 try:
                     r = _tick_ogimet_city(city_name, conn, start_date=start_date, end_date=end_date, dry_run=dry_run)
                 except Exception as exc:

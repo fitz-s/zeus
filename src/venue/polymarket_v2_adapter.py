@@ -15,11 +15,12 @@ two-step SDK order submission shapes.
 
 from __future__ import annotations
 
-import hashlib
 import importlib.metadata
+import hashlib
 import json
 import logging
 import os
+import sys
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -40,6 +41,8 @@ from src.observability.counters import increment as _cnt_inc
 from src.state.db import assert_no_world_mutex_held_for_io as _assert_no_world_mutex_held_for_io
 
 logger = logging.getLogger(__name__)
+
+_DERIVED_API_CREDS_CACHE: dict[tuple[str, int, str, int, str], Any] = {}
 
 DEFAULT_V2_HOST = "https://clob.polymarket.com"
 POLYMARKET_DATA_API_BASE = "https://data-api.polymarket.com"
@@ -302,39 +305,63 @@ class PolymarketV2Adapter:
         except Exception:  # noqa: BLE001 - non-fatal; library default retained
             pass
 
+        explicit_api_creds = kwargs.get("api_creds")
+        effective_api_creds = explicit_api_creds
+        if effective_api_creds is None:
+            effective_api_creds = _cached_derived_api_creds(
+                host=kwargs["host"],
+                chain_id=kwargs["chain_id"],
+                signer_key=kwargs.get("signer_key"),
+                signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
+                funder_address=kwargs.get("funder_address"),
+            )
+        if effective_api_creds is None:
+            effective_api_creds = _api_creds_from_runtime()
+
         client = ClobClient(
             kwargs["host"],
             kwargs["chain_id"],
             key=kwargs.get("signer_key"),
-            creds=kwargs.get("api_creds"),
+            creds=effective_api_creds,
             signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
             funder=kwargs.get("funder_address"),
         )
-        # CLOB v2 L2 endpoints (balance/order) require API creds. The canonical
-        # SDK path is `set_api_creds(create_or_derive_api_key())` — this derives
-        # them deterministically from the L1 signer rather than relying on a
-        # separately-stored copy that can drift out of sync. We only derive when
-        # no static creds were provided so callers (eg. tests) can still inject
-        # specific credentials.
-        if not kwargs.get("api_creds"):
+        # CLOB v2 L2 endpoints (balance/order/user-channel auth) require L2 API
+        # creds bound to the active signer. Use runtime creds first: Keychain is
+        # the operator-owned source of truth, env is a fallback for non-Keychain
+        # runtimes. Only derive when neither runtime surface has complete creds.
+        # Prefer the SDK's pure derive endpoint when derivation is needed:
+        # create_or_derive
+        # attempts POST /auth/api-key before deriving, which logs a persistent
+        # upstream 400 for accounts that already have signer-bound credentials.
+        if explicit_api_creds is None and effective_api_creds is None:
             try:
-                client.set_api_creds(client.create_or_derive_api_key())
+                derived_api_creds = _derive_l2_api_creds(client)
+                client.set_api_creds(derived_api_creds)
+                _store_derived_api_creds(
+                    host=kwargs["host"],
+                    chain_id=kwargs["chain_id"],
+                    signer_key=kwargs.get("signer_key"),
+                    signature_type=kwargs.get("signature_type", DEFAULT_SIGNATURE_TYPE),
+                    funder_address=kwargs.get("funder_address"),
+                    api_creds=derived_api_creds,
+                )
                 logger.warning(
-                    "VENUE_AUTH_FALLBACK_TRIGGERED: create_or_derive_api_key used "
-                    "(primary /auth/api-key creds absent); L2 calls proceeding via derived creds",
+                    "VENUE_AUTH_FALLBACK_TRIGGERED: signer-bound L2 API creds derived "
+                    "(no cached signer-bound L2 creds); L2 calls proceeding via derived creds",
                 )
             except Exception as exc:  # pragma: no cover - upstream SDK behaviour
-                env_api_creds = _api_creds_from_env()
-                if env_api_creds is None:
+                runtime_api_creds = _api_creds_from_runtime()
+                if runtime_api_creds is None:
                     logger.warning(
-                        "create_or_derive_api_key failed; L2-authenticated calls will "
+                        "signer-bound L2 API credential derivation failed; L2-authenticated calls will "
                         "fail until creds are provided: %s", exc,
                     )
                 else:
-                    client.set_api_creds(env_api_creds)
+                    client.set_api_creds(runtime_api_creds)
                     logger.warning(
-                        "VENUE_AUTH_STATIC_FALLBACK_TRIGGERED: create_or_derive_api_key "
-                        "failed; using POLYMARKET_API_* creds and deferring validity "
+                        "VENUE_AUTH_STATIC_FALLBACK_TRIGGERED: signer-bound L2 API credential derivation "
+                        "failed; using runtime CLOB creds and deferring validity "
                         "to the next L2-authenticated preflight: %s",
                         exc,
                     )
@@ -352,6 +379,25 @@ class PolymarketV2Adapter:
                 builder_code=self.builder_code,
             )
         return self._client
+
+    def _refresh_signer_bound_l2_api_creds(self, client: Any) -> None:
+        set_api_creds = getattr(client, "set_api_creds", None)
+        if not callable(set_api_creds):
+            raise V2AdapterError("SDK client does not expose set_api_creds")
+        api_creds = _derive_l2_api_creds(client)
+        set_api_creds(api_creds)
+        _store_derived_api_creds(
+            host=self.host,
+            chain_id=self.chain_id,
+            signer_key=self.signer_key,
+            signature_type=self.signature_type,
+            funder_address=self.funder_address,
+            api_creds=api_creds,
+        )
+        logger.warning(
+            "VENUE_AUTH_RUNTIME_CREDS_REFRESHED: runtime L2 creds failed auth; "
+            "re-derived signer-bound L2 creds and retried once",
+        )
 
     def preflight(self) -> PreflightResult:
         if self.q1_egress_evidence_path is not None:
@@ -717,9 +763,19 @@ class PolymarketV2Adapter:
                 signature_type=self.signature_type,
             )
         update_balance_allowance = getattr(client, "update_balance_allowance", None)
-        if callable(update_balance_allowance):
-            update_balance_allowance(params)
-        raw = get_balance_allowance(params)
+
+        def _read_once() -> Any:
+            if callable(update_balance_allowance):
+                update_balance_allowance(params)
+            return get_balance_allowance(params)
+
+        try:
+            raw = _read_once()
+        except Exception as exc:
+            if not _is_l2_auth_error(exc):
+                raise
+            self._refresh_signer_bound_l2_api_creds(client)
+            raw = _read_once()
         if not isinstance(raw, dict):
             raw = dict(raw)
         if raw.get("balance") is None:
@@ -2402,18 +2458,115 @@ def _sdk_version() -> str:
         return "uninstalled"
 
 
+def _derived_api_creds_cache_key(
+    *,
+    host: str,
+    chain_id: int,
+    signer_key: Any,
+    signature_type: int,
+    funder_address: Any,
+) -> tuple[str, int, str, int, str]:
+    signer_digest = hashlib.sha256(str(signer_key or "").encode()).hexdigest()
+    return (
+        str(host).rstrip("/"),
+        int(chain_id),
+        signer_digest,
+        _normalize_signature_type(signature_type),
+        str(funder_address or "").lower(),
+    )
+
+
+def _cached_derived_api_creds(
+    *,
+    host: str,
+    chain_id: int,
+    signer_key: Any,
+    signature_type: int,
+    funder_address: Any,
+) -> Any | None:
+    return _DERIVED_API_CREDS_CACHE.get(
+        _derived_api_creds_cache_key(
+            host=host,
+            chain_id=chain_id,
+            signer_key=signer_key,
+            signature_type=signature_type,
+            funder_address=funder_address,
+        )
+    )
+
+
+def _store_derived_api_creds(
+    *,
+    host: str,
+    chain_id: int,
+    signer_key: Any,
+    signature_type: int,
+    funder_address: Any,
+    api_creds: Any,
+) -> None:
+    _DERIVED_API_CREDS_CACHE[
+        _derived_api_creds_cache_key(
+            host=host,
+            chain_id=chain_id,
+            signer_key=signer_key,
+            signature_type=signature_type,
+            funder_address=funder_address,
+        )
+    ] = api_creds
+
+
+def _derive_l2_api_creds(client: Any) -> Any:
+    derive_api_key = getattr(client, "derive_api_key", None)
+    if callable(derive_api_key):
+        return derive_api_key()
+    return client.create_or_derive_api_key()
+
+
+def _is_l2_auth_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}:{exc}".lower()
+    return "unauthorized" in text or "invalid api key" in text or "status_code=401" in text
+
+
+def _api_creds_from_runtime() -> Any | None:
+    return _api_creds_from_keychain() or _api_creds_from_env()
+
+
+def _api_creds_from_keychain() -> Any | None:
+    try:
+        read_keychain = _import_keychain_reader()
+        api_key = read_keychain("openclaw-polymarket-api-key")
+        api_secret = read_keychain("openclaw-polymarket-api-secret")
+        api_passphrase = read_keychain("openclaw-polymarket-api-passphrase")
+    except Exception:
+        return None
+    return _api_creds_from_values(api_key, api_secret, api_passphrase)
+
+
+def _import_keychain_reader() -> Callable[[str], str]:
+    openclaw_root = str(Path.home() / ".openclaw")
+    if openclaw_root not in sys.path:
+        sys.path.insert(0, openclaw_root)
+    from bin.keychain_resolver import read_keychain  # type: ignore[import-not-found]
+
+    return read_keychain
+
+
 def _api_creds_from_env() -> Any | None:
     api_key = os.environ.get("POLYMARKET_API_KEY")
     api_secret = os.environ.get("POLYMARKET_API_SECRET")
     api_passphrase = os.environ.get("POLYMARKET_API_PASSPHRASE")
+    return _api_creds_from_values(api_key, api_secret, api_passphrase)
+
+
+def _api_creds_from_values(api_key: Any, api_secret: Any, api_passphrase: Any) -> Any | None:
     if not (api_key and api_secret and api_passphrase):
         return None
     from py_clob_client_v2.clob_types import ApiCreds
 
     return ApiCreds(
-        api_key=api_key,
-        api_secret=api_secret,
-        api_passphrase=api_passphrase,
+        api_key=str(api_key),
+        api_secret=str(api_secret),
+        api_passphrase=str(api_passphrase),
     )
 
 

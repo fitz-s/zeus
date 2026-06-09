@@ -136,9 +136,11 @@ def _seed_confirmed_fill_aggregate(
             "target_date": "2026-06-02",
             "bin_label": "high_29_30",
             "metric": "high",
+            "unit": "C",
             "q_live": 0.62,
             "executable_snapshot_id": "snap-MF1",
             "market_id": "mkt-MF1",
+            "strategy_key": "opening_inertia",
         },
         source_authority="decision_kernel",
     )
@@ -280,9 +282,11 @@ class TestDurableFillBridgeScan:
                 "target_date": "2026-06-02",
                 "bin_label": "high_20_21",
                 "metric": "high",
+                "unit": "C",
                 "q_live": 0.5,
                 "executable_snapshot_id": "snap-c",
                 "market_id": "mkt-c",
+                "strategy_key": "settlement_capture",
             },
             source_authority="decision_kernel",
         )

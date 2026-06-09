@@ -21,7 +21,6 @@ INV-37 contract:
 from __future__ import annotations
 
 import sqlite3
-from typing import Optional
 
 from src.state.schema.shoulder_exposure_ledger_schema import SCHEMA_VERSION
 

@@ -133,6 +133,7 @@ def _make_context(
     no_ask: float,
     cal_p_hats: list[float],
     cal_outcomes: list[int],
+    no_p_lower: float | None = None,
     m0: float | None = None,
     opening_ticks: list[tuple[float, float]] | None = None,
 ) -> Any:
@@ -144,6 +145,7 @@ def _make_context(
         p_hat=p_hat,
         ask=ask,
         no_ask=no_ask,
+        no_p_lower=no_p_lower,
         cal_p_hats=cal_p_hats,
         cal_outcomes=cal_outcomes,
         m0=m0,          # opening mid-price (None → λ estimation skipped)
@@ -329,32 +331,22 @@ def test_r3_yes_buy_gate_strict_boundary(edge_sign, expected_outcome):
     ("negative", "no_trade"),
 ])
 def test_r4_no_buy_gate_strict_boundary(no_edge_sign, expected_outcome):
-    """R4 — buy NO iff 1 − p⁺ − noAsk − phi(noAsk) > 0 (strict); zero → no_trade."""
-    from src.calibration.bounds import calibrated_bounds
+    """R4 — buy NO iff native no_p_lower − noAsk − phi(noAsk) > 0."""
 
     cal_p_hats = [0.20]
     cal_outcomes = [0]  # residual = |0 − 0.20| = 0.20
     p_hat = 0.20
-    _, p_hi = calibrated_bounds(p_hat, cal_p_hats, cal_outcomes, alpha=0.10)
-
     fee_rate = Decimal("0.05")
-    # NO edge = 1 − p_hi − noAsk − phi(1, noAsk, fee_rate)
-    # phi = 0.05 * noAsk * (1 - noAsk)
+    no_ask = 0.40
+    no_ask_d = Decimal(str(no_ask))
+    fee_no = phi(Decimal("1"), no_ask_d, fee_rate)
 
     if no_edge_sign == "positive":
-        no_ask = (1 - p_hi) - 0.05
+        no_p_lower = float(no_ask_d + fee_no + Decimal("0.05"))
     elif no_edge_sign == "zero":
-        # 1 - p_hi = noAsk + 0.05 * noAsk * (1 - noAsk)
-        na = (1 - p_hi) / 1.05
-        for _ in range(50):
-            f = (1 - p_hi) - na - 0.05 * na * (1 - na)
-            df = -1 - 0.05 * (1 - 2 * na)
-            na = na - f / df
-        no_ask = na
+        no_p_lower = float(no_ask_d + fee_no)
     else:
-        no_ask = (1 - p_hi) + 0.05
-
-    no_ask = max(0.01, min(0.99, no_ask))
+        no_p_lower = float(no_ask_d + fee_no - Decimal("0.05"))
     # Make YES side unprofitable so NO path is the relevant decision
     ask = 0.95  # p_lo clearly below ask
 
@@ -363,6 +355,7 @@ def test_r4_no_buy_gate_strict_boundary(no_edge_sign, expected_outcome):
         p_hat=p_hat,
         ask=ask,
         no_ask=no_ask,
+        no_p_lower=no_p_lower,
         cal_p_hats=cal_p_hats,
         cal_outcomes=cal_outcomes,
     )
@@ -374,9 +367,9 @@ def test_r4_no_buy_gate_strict_boundary(no_edge_sign, expected_outcome):
     )
     assert isinstance(result, CandidateDecision)
     assert result.outcome == expected_outcome, (
-        f"R4 FAIL for no_edge_sign={no_edge_sign!r}: "
-        f"expected {expected_outcome!r}, got {result.outcome!r} "
-        f"(p_hi={p_hi:.4f}, no_ask={no_ask:.4f})"
+            f"R4 FAIL for no_edge_sign={no_edge_sign!r}: "
+            f"expected {expected_outcome!r}, got {result.outcome!r} "
+            f"(no_p_lower={no_p_lower:.4f}, no_ask={no_ask:.4f})"
     )
 
 

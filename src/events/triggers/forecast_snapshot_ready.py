@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -19,6 +18,8 @@ from src.events.opportunity_event import (
 from src.strategy.market_phase import market_phase_admits
 
 UTC = timezone.utc
+REPLACEMENT_0_1_PRODUCT_ID = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1"
+REPLACEMENT_0_1_TRACK_LABEL = "replacement_0_1_aifs_openmeteo_soft_anchor"
 
 
 def _target_local_day_strictly_past(
@@ -81,6 +82,27 @@ def _coverage_fairness_emit_enabled() -> bool:
 
         return bool(settings["edli_v1"].get("coverage_fairness_emit_enabled", False))
     except Exception:  # noqa: BLE001 — config glitch must never dark all cities
+        return False
+
+
+def _replacement_trade_authority_enabled() -> bool:
+    """True when live FSR probability authority is the 0.1 replacement posterior.
+
+    Fail-closed for the replacement-specific paths: when this flag is on, an FSR
+    without a matching replacement posterior must not enter live re-decision as a
+    legacy OpenData/t3 candidate.
+    """
+
+    try:
+        from src.config import settings
+
+        return bool(
+            settings["feature_flags"].get(
+                "openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled",
+                False,
+            )
+        )
+    except Exception:  # noqa: BLE001
         return False
 
 
@@ -474,6 +496,20 @@ class ForecastSnapshotReadyTrigger:
                 " AND m.target_date = c.target_local_date"
                 " AND m.temperature_metric = c.temperature_metric))"
             )
+        replacement_filter = ""
+        if _replacement_trade_authority_enabled():
+            if not _table_exists(forecasts_conn, "forecast_posteriors"):
+                replacement_filter = " AND 0"
+            else:
+                replacement_filter = (
+                    " AND EXISTS (SELECT 1 FROM forecast_posteriors fp"
+                    " WHERE fp.product_id = '" + REPLACEMENT_0_1_PRODUCT_ID + "'"
+                    " AND fp.city = c.city"
+                    " AND fp.target_date = c.target_local_date"
+                    " AND fp.temperature_metric = c.temperature_metric"
+                    " AND fp.source_available_at <= ?"
+                    " AND fp.computed_at <= ?)"
+                )
         # B4 coverage-fairness contract (Phase-2, shadow-gated).
         # When flag ON: fetch ALL candidates (no SQL LIMIT) then apply
         # CoverageFairnessRequest.select_rows() which deduplicates to ≤1 row per
@@ -489,6 +525,16 @@ class ForecastSnapshotReadyTrigger:
             except (ValueError, IndexError):
                 _cycle_index = 0
 
+        _snapshot_latest_join = """
+             AND s.snapshot_id = (
+                SELECT MAX(s2.snapshot_id)
+                  FROM ensemble_snapshots s2
+                 WHERE s2.source_run_id = c.source_run_id
+                   AND s2.city = c.city
+                   AND s2.target_date = c.target_local_date
+                   AND s2.temperature_metric = c.temperature_metric
+             )
+        """
         _select_sql_base = f"""
             SELECT
                 c.*,
@@ -520,14 +566,74 @@ class ForecastSnapshotReadyTrigger:
              AND s.city = c.city
              AND s.target_date = c.target_local_date
              AND s.temperature_metric = c.temperature_metric
+             {_snapshot_latest_join}
             WHERE COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
               AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
-              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}
+              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}{replacement_filter}
             ORDER BY
                 CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
                 c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
         """
+        if _fairness_on:
+            _select_sql_base = f"""
+            WITH ranked_coverage AS (
+                SELECT
+                    c0.*,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY c0.city, c0.target_local_date, c0.temperature_metric
+                        ORDER BY
+                            CASE WHEN c0.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
+                            c0.computed_at DESC,
+                            c0.coverage_id DESC
+                    ) AS _family_rank
+                  FROM source_run_coverage c0
+                 WHERE c0.computed_at IS NULL OR c0.computed_at <= ?
+            )
+            SELECT
+                c.*,
+                sr.source_cycle_time AS sr_source_cycle_time,
+                sr.source_issue_time AS sr_source_issue_time,
+                sr.source_release_time AS sr_source_release_time,
+                sr.source_available_at AS sr_source_available_at,
+                sr.fetch_started_at AS sr_fetch_started_at,
+                sr.fetch_finished_at AS sr_fetch_finished_at,
+                sr.captured_at AS sr_captured_at,
+                sr.status AS sr_status,
+                sr.completeness_status AS sr_completeness_status,
+                sr.expected_steps_json AS sr_expected_steps_json,
+                sr.observed_steps_json AS sr_observed_steps_json,
+                sr.expected_members AS sr_expected_members,
+                sr.observed_members AS sr_observed_members,
+                s.snapshot_id,
+                s.city AS snapshot_city,
+                s.target_date AS snapshot_target_date,
+                s.temperature_metric AS snapshot_temperature_metric,
+                s.available_at AS snapshot_available_at,
+                s.fetch_time AS snapshot_fetch_time,
+                s.manifest_hash AS snapshot_manifest_hash,
+                s.members_json AS snapshot_members_json
+            FROM ranked_coverage c
+            JOIN source_run sr ON sr.source_run_id = c.source_run_id
+            JOIN ensemble_snapshots s
+              ON s.source_run_id = c.source_run_id
+             AND s.city = c.city
+             AND s.target_date = c.target_local_date
+             AND s.temperature_metric = c.temperature_metric
+             {_snapshot_latest_join}
+            WHERE c._family_rank = 1
+              AND COALESCE(s.available_at, sr.source_available_at, c.computed_at) <= ?
+              AND (sr.source_available_at IS NULL OR sr.source_available_at <= ?)
+              AND (c.computed_at IS NULL OR c.computed_at <= ?){market_filter}{replacement_filter}
+            ORDER BY
+                CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END ASC,
+                c.computed_at DESC, s.available_at DESC, s.snapshot_id DESC
+            """
         _decision_iso = decision_time.astimezone(UTC).isoformat()
+        _replacement_params: tuple[str, ...] = (
+            (_decision_iso, _decision_iso)
+            if _replacement_trade_authority_enabled() and _table_exists(forecasts_conn, "forecast_posteriors")
+            else ()
+        )
         if _fairness_on:
             # Fetch all candidates (no LIMIT); fairness contract applies LIMIT per cycle.
             rows = _dict_rows(
@@ -537,11 +643,18 @@ class ForecastSnapshotReadyTrigger:
                     _decision_iso,
                     _decision_iso,
                     _decision_iso,
+                    _decision_iso,
+                    *_replacement_params,
                 ),
             )
-            if limit is not None:
+            if rows:
+                # ``limit=None`` means no cap on the number of city families, not
+                # "emit every historical source_run for each family."  Fairness owns
+                # the one-row-per-(city,target,metric) contract in both capped and
+                # unbounded modes.
                 rows = CoverageFairnessRequest(
-                    limit=max(1, int(limit)), cycle_index=_cycle_index
+                    limit=max(1, len(rows) if limit is None else int(limit)),
+                    cycle_index=0 if limit is None else _cycle_index,
                 ).select_rows(rows)
         else:
             if limit is None:
@@ -552,6 +665,7 @@ class ForecastSnapshotReadyTrigger:
                         _decision_iso,
                         _decision_iso,
                         _decision_iso,
+                        *_replacement_params,
                     ),
                 )
             else:
@@ -563,6 +677,7 @@ class ForecastSnapshotReadyTrigger:
                         _decision_iso,
                         _decision_iso,
                         _decision_iso,
+                        *_replacement_params,
                         max(1, int(limit)),
                     ),
                 )
@@ -736,12 +851,14 @@ def _required_expected_steps(*, source_run: dict[str, Any], coverage: dict[str, 
 def _serving_track_label(*, track: str, data_version: str) -> str:
     """Return the live-serving product label carried in FSR payloads.
 
-    OpenData source_run IDs still contain legacy mx2t6/mn2t6 track names, while
-    the actual written data_version is the post-cutover mx2t3/mn2t3 product.
-    Keep source_run_id unchanged for DB provenance, but expose the canonical
-    t3 serving track in trading receipts/events.
+    OpenData source_run IDs may still be the causal trigger row. Keep
+    source_run_id unchanged for DB provenance, but when 0.1 replacement is live
+    probability authority, expose the replacement serving product instead of
+    leaking legacy t3/t6 carrier names into trading receipts/events.
     """
 
+    if _replacement_trade_authority_enabled():
+        return REPLACEMENT_0_1_TRACK_LABEL
     if data_version == "ecmwf_opendata_mx2t3_local_calendar_day_max":
         return "mx2t3_high_full_horizon" if track.endswith("_full_horizon") else "mx2t3_high"
     if data_version == "ecmwf_opendata_mn2t3_local_calendar_day_min":

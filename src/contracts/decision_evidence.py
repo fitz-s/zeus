@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from typing import Literal
 
 # T4.1a 2026-04-23 — persistence-format version. Bump on any change to
 # the DecisionEvidence field set or field semantics so legacy rows are

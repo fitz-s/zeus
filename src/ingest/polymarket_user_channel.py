@@ -20,7 +20,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from src.control import ws_gap_guard
 from src.execution.command_bus import CommandState, IN_FLIGHT_STATES
@@ -476,6 +476,7 @@ class PolymarketUserChannelIngestor:
         self.own_connection = own_connection
         self._running = False
         self._heartbeat_task: asyncio.Task | None = None
+        self._connection_started_at: datetime | None = None
 
     @staticmethod
     def _auth_from_args(api_key: str | None, secret: str | None, passphrase: str | None) -> WSAuth:
@@ -517,6 +518,7 @@ class PolymarketUserChannelIngestor:
         connect = self.websocket_connect or _default_websocket_connect
         try:
             async with connect(self.endpoint) as ws:
+                self._connection_started_at = _utcnow()
                 await ws.send(json.dumps(self.subscription_message()))
                 # Codex P1 follow-up to PR #37: do NOT call
                 # _record_subscribed_message() here. ws.send() is outbound
@@ -558,7 +560,16 @@ class PolymarketUserChannelIngestor:
     async def _heartbeat_loop(self, ws: Any) -> None:
         while self._running:
             await asyncio.sleep(PING_INTERVAL_SECONDS)
-            await ws.send("PING")
+            ping = getattr(ws, "ping", None)
+            if callable(ping):
+                pong_waiter = ping()
+                if hasattr(pong_waiter, "__await__"):
+                    pong_waiter = await pong_waiter
+                if hasattr(pong_waiter, "__await__"):
+                    await pong_waiter
+                self._record_transport_keepalive()
+            else:
+                await ws.send("PING")
 
     async def handle_raw_message(self, raw: str | bytes | dict[str, Any]) -> dict[str, Any] | None:
         if isinstance(raw, bytes):
@@ -609,6 +620,94 @@ class PolymarketUserChannelIngestor:
                 "no unresolved local venue commands, position lots, or M5 findings exist"
             )
         return status
+
+    def _record_transport_keepalive(self, *, observed_at: datetime | None = None) -> WSStatus:
+        """Refresh liveness from a protocol pong after auth was already proven.
+
+        A websocket protocol pong proves the TCP/WebSocket transport is alive,
+        but not that the CLOB user subscription was accepted.  Therefore it may
+        keep an already-unlatched AUTHED/SUBSCRIBED guard fresh.  It may also
+        clear the clean-boot ``not_configured`` latch after the heartbeat delay:
+        by then an asynchronous auth-failure frame would have had a chance to
+        arrive, and there is no missed-order risk when the local side-effect
+        surface is empty.  Genuine mid-run gaps still require explicit M5
+        reconcile evidence.
+        """
+
+        current = ws_gap_guard.status()
+        now = observed_at or datetime.now(timezone.utc)
+        updated_at = current.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        clean_boot_reference = self._connection_started_at or updated_at
+        if clean_boot_reference.tzinfo is None:
+            clean_boot_reference = clean_boot_reference.replace(tzinfo=timezone.utc)
+        clean_boot_age_seconds = (now - clean_boot_reference.astimezone(timezone.utc)).total_seconds()
+        if (
+            current.subscription_state == "DISCONNECTED"
+            and current.gap_reason == "not_configured"
+            and current.m5_reconcile_required
+            and clean_boot_age_seconds >= 0
+            and self._clean_boot_side_effect_surface_empty()
+        ):
+            ws_gap_guard.record_message(
+                observed_at=now,
+                subscription_state="AUTHED",
+                stale_after_seconds=self.stale_after_seconds,
+            )
+            return ws_gap_guard.clear_after_no_local_side_effects(
+                observed_at=now,
+                stale_after_seconds=self.stale_after_seconds,
+            )
+        if (
+            current.subscription_state not in {"AUTHED", "SUBSCRIBED"}
+            or current.m5_reconcile_required
+            or current.is_stale(now=observed_at)
+        ):
+            return current
+        return ws_gap_guard.record_message(
+            observed_at=observed_at,
+            subscription_state=current.subscription_state,
+            stale_after_seconds=self.stale_after_seconds,
+        )
+
+    def _clean_boot_side_effect_surface_empty(self) -> bool:
+        """Return whether a boot-only WS latch can clear without M5 replay.
+
+        ``not_configured`` means this process has not yet had a user-channel
+        subscription that could have missed a message.  Historical or current
+        exposure lots are known portfolio state, not evidence of a missed WS
+        side effect.  In-flight venue commands and unresolved reconcile findings
+        still block clean-boot clearing because they can represent hidden order
+        or fill transitions.
+        """
+
+        conn = self.conn_factory()
+        try:
+            command_placeholders = ",".join("?" for _ in UNRESOLVED_COMMAND_STATES)
+            checks: tuple[tuple[str, tuple[Any, ...]], ...] = (
+                (
+                    f"SELECT COUNT(*) FROM venue_commands WHERE state IN ({command_placeholders})",
+                    UNRESOLVED_COMMAND_STATES,
+                ),
+                (
+                    "SELECT COUNT(*) FROM exchange_reconcile_findings WHERE resolved_at IS NULL",
+                    (),
+                ),
+            )
+            return all(
+                int(conn.execute(sql, params).fetchone()[0] or 0) == 0
+                for sql, params in checks
+            )
+        except Exception as exc:
+            logger.warning(
+                "M3 user-channel clean-boot proof unavailable; preserving M5 latch: %s",
+                exc,
+            )
+            return False
+        finally:
+            if self.own_connection:
+                conn.close()
 
     def _local_side_effect_surface_empty(self) -> bool:
         conn = self.conn_factory()

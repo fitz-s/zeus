@@ -11,7 +11,7 @@ from ecmwfapi import ECMWFDataServer
 
 from tigge_regions import REGIONS, TiggeRegion
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = ROOT / "raw"
 
 

@@ -22,7 +22,7 @@ lower-confidence-bound (q_lcb) widens honestly. Contract:
 
   1. σ_repr=0 -> q_lcb bit-identical to the legacy path (backward compatible).
   2. σ_repr>0 -> q_lcb strictly LOWER (more conservative) for the same members.
-  3. buy_no q_lcb remains INDEPENDENT (not 1 - buy_yes_lcb) and also widens (#106/#129).
+  3. buy_no q_lcb remains unavailable unless native NO-side evidence exists (#106/#129).
   4. a high-σ city (Seoul 2.5) gets a materially wider CI than a low-σ city (Tokyo 1.7)
      at the same point.
 
@@ -120,32 +120,27 @@ class TestReprSigmaWidensYesLcb:
 # (c) buy_no q_lcb is INDEPENDENT and also widens
 # ---------------------------------------------------------------------------
 
-class TestReprSigmaWidensNoLcbIndependently:
-    def test_no_ci_lower_widens_with_repr_sigma(self):
+class TestReprSigmaDoesNotMintNoLcb:
+    def test_no_ci_lower_remains_unavailable_with_repr_sigma(self):
         a_legacy = _make_analysis(representativeness_sigma=0.0, rng_seed=42)
         a_repr = _make_analysis(representativeness_sigma=2.5, rng_seed=42)
         no_legacy = a_legacy._bootstrap_bin_no(0, 4000)
         no_repr = a_repr._bootstrap_bin_no(0, 4000)
-        assert no_repr[0] < no_legacy[0], (
-            f"σ_repr=2.5 did not widen NO CI: ci_lower_repr={no_repr[0]:.6f} >= "
-            f"ci_lower_legacy={no_legacy[0]:.6f}"
-        )
+        assert no_legacy[0] + float(a_legacy.buy_no_market_price(0)) == 0.0
+        assert no_repr[0] + float(a_repr.buy_no_market_price(0)) == 0.0
 
-    def test_no_lcb_is_not_one_minus_yes_lcb(self):
-        # Independence (#106/#129): the NO lower bound is its own bootstrap of
-        # (1 - p_post_yes) - c_no, NOT the algebraic complement 1 - yes_lcb.
+    def test_no_lcb_does_not_follow_yes_lcb(self):
+        # Independence (#106/#129): absent a native NO lower bound, the NO lower
+        # bound fails closed instead of being derived from the YES lower bound.
         a = _make_analysis(representativeness_sigma=2.5, rng_seed=42)
         yes_ci = a._bootstrap_bin(0, 4000)
         no_ci = a._bootstrap_bin_no(0, 4000)
-        # Restore probability-space q_lcb (adapter adds back the fixed cost c_b).
         c_yes = 0.30
         c_no = 0.30
         yes_q_lcb = yes_ci[0] + c_yes
         no_q_lcb = no_ci[0] + c_no
-        # If NO were the algebraic complement of YES, no_q_lcb would equal 1 - yes_q_lcb.
-        assert abs(no_q_lcb - (1.0 - yes_q_lcb)) > 1e-6, (
-            "buy_no q_lcb must be independently grounded, not 1 - buy_yes_lcb"
-        )
+        assert yes_q_lcb > 0.0
+        assert no_q_lcb == 0.0
 
 
 # ---------------------------------------------------------------------------

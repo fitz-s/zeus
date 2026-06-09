@@ -245,7 +245,7 @@ def enqueue_live_redecisions(
             if idx >= len(belief.p_posterior_vec):
                 continue
             yes_post = float(belief.p_posterior_vec[idx])
-            for direction, posterior in (("buy_yes", yes_post), ("buy_no", 1.0 - yes_post)):
+            for direction, posterior in (("buy_yes", yes_post),):
                 key = (belief.family_id, label, direction)
                 quote = price_lookup.get(key)
                 if quote is None:
@@ -302,7 +302,9 @@ def screen_reprice(
     if idx >= len(belief.p_posterior_vec):
         return None
     yes_post = float(belief.p_posterior_vec[idx])
-    current = yes_post if side == "buy_yes" else 1.0 - yes_post
+    if side != "buy_yes":
+        return None
+    current = yes_post
     delta = float(resting_posterior) - current  # >0 means belief WORSENED against the held side
     if delta >= belief_reprice_delta - _EPS:
         return RepriceDecision(

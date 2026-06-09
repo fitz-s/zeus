@@ -74,6 +74,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -103,6 +104,19 @@ from tigge_local_calendar_day_common import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _haversine_km(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    radius_km = 6371.0088
+    phi_a = math.radians(float(lat_a))
+    phi_b = math.radians(float(lat_b))
+    d_phi = math.radians(float(lat_b) - float(lat_a))
+    d_lambda = math.radians(float(lon_b) - float(lon_a))
+    h = (
+        math.sin(d_phi / 2.0) ** 2
+        + math.cos(phi_a) * math.cos(phi_b) * math.sin(d_lambda / 2.0) ** 2
+    )
+    return radius_km * 2.0 * math.atan2(math.sqrt(h), math.sqrt(max(0.0, 1.0 - h)))
 
 
 def _aggregation_window_hours_for_param(open_data_param: str) -> int:
@@ -239,8 +253,8 @@ def _scan_grib_for_track(
 def _compute_city_grid_indices(
     gid: int,
     cities: list[dict],
-) -> tuple[list[int], list[tuple[float, float]]]:
-    """Compute (flat_index, (grid_lat, grid_lon)) per city for a regular_ll
+) -> tuple[list[int], list[tuple[float, float, float]]]:
+    """Compute (flat_index, (grid_lat, grid_lon, distance_km)) per city for a regular_ll
     GRIB message. Computed ONCE from message #1 — every message in an ECMWF
     Open Data ENS file shares the same grid (regular 0.25° lat-lon, 1440×721,
     lon_first=180, scanningMode=0).
@@ -268,7 +282,7 @@ def _compute_city_grid_indices(
     dx = float(codes_get(gid, "iDirectionIncrementInDegrees"))
     dy = float(codes_get(gid, "jDirectionIncrementInDegrees"))
     indices: list[int] = []
-    grids: list[tuple[float, float]] = []
+    grids: list[tuple[float, float, float]] = []
     for city in cities:
         lat = float(city["lat"])
         lon = float(city["lon"])
@@ -283,7 +297,8 @@ def _compute_city_grid_indices(
         grid_lon = (lon1 + i * dx) % 360.0
         if grid_lon > 180.0:
             grid_lon -= 360.0
-        grids.append((lat1 - j * dy, grid_lon))
+        grid_lat = lat1 - j * dy
+        grids.append((grid_lat, grid_lon, _haversine_km(lat, lon, grid_lat, grid_lon)))
     return indices, grids
 
 
@@ -363,14 +378,12 @@ def _scan_grib_with_city_values(
                         "city_values_k": {},
                     }
                 values = codes_get_values(gid)
-                for city, idx, (g_lat, g_lon) in zip(cities, city_indices, city_grids):
+                for city, idx, (g_lat, g_lon, g_distance_km) in zip(cities, city_indices, city_grids):
                     bucket[key]["city_values_k"][city["city"]] = {
                         "value_k": float(values[idx]),
                         "nearest_grid_lat": g_lat,
                         "nearest_grid_lon": g_lon,
-                        # nearest_grid_distance_km no longer computed
-                        # (downstream payloads hardcode None anyway, lines 385-387/457-459).
-                        "nearest_grid_distance_km": None,
+                        "nearest_grid_distance_km": g_distance_km,
                     }
             finally:
                 codes_release(gid)
@@ -439,6 +452,20 @@ def extract_open_ens_localday(
         city_name = city["city"]
         timezone_name = str(city["timezone"])
         unit = str(city["unit"])
+        grid_provenance: dict[str, float | None] = {
+            "nearest_grid_lat": None,
+            "nearest_grid_lon": None,
+            "nearest_grid_distance_km": None,
+        }
+        for entry in entries.values():
+            city_value = entry.get("city_values_k", {}).get(city_name)
+            if isinstance(city_value, dict):
+                grid_provenance = {
+                    "nearest_grid_lat": city_value.get("nearest_grid_lat"),
+                    "nearest_grid_lon": city_value.get("nearest_grid_lon"),
+                    "nearest_grid_distance_km": city_value.get("nearest_grid_distance_km"),
+                }
+                break
         # Determine the lead-day range covered by the GRIB step set.
         step_set = sorted({step for (_m, step) in entries.keys()})
         if not step_set:
@@ -521,9 +548,9 @@ def extract_open_ens_localday(
                     "step_horizon_deficit_hours": 0.0,
                     "causality": {"status": "OK"},
                     "boundary_ambiguous": False,
-                    "nearest_grid_lat": None,
-                    "nearest_grid_lon": None,
-                    "nearest_grid_distance_km": None,
+                    "nearest_grid_lat": grid_provenance["nearest_grid_lat"],
+                    "nearest_grid_lon": grid_provenance["nearest_grid_lon"],
+                    "nearest_grid_distance_km": grid_provenance["nearest_grid_distance_km"],
                     "selected_step_ranges": sorted(selected_step_ranges_inner),
                     "member_count": len(members_out),
                     "missing_members": missing_members,
@@ -593,9 +620,9 @@ def extract_open_ens_localday(
                         "boundary_ambiguous": len(boundary_ambiguous_members) > 0,
                         "ambiguous_member_count": len(boundary_ambiguous_members),
                     },
-                    "nearest_grid_lat": None,
-                    "nearest_grid_lon": None,
-                    "nearest_grid_distance_km": None,
+                    "nearest_grid_lat": grid_provenance["nearest_grid_lat"],
+                    "nearest_grid_lon": grid_provenance["nearest_grid_lon"],
+                    "nearest_grid_distance_km": grid_provenance["nearest_grid_distance_km"],
                     "selected_step_ranges_inner": sorted(selected_step_ranges_inner),
                     "selected_step_ranges_boundary": sorted(selected_step_ranges_boundary),
                     "member_count": len(members_out),

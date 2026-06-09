@@ -1,6 +1,6 @@
 """Market types: Bin and BinEdge."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import logging
 import math
 

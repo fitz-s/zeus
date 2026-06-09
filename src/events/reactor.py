@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sqlite3
 import time
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
@@ -35,10 +36,26 @@ from src.decision_kernel import claims
 from src.events.event_store import EventStore
 from src.events.opportunity_event import OpportunityEvent, assert_available_for_decision
 from src.state.db import world_write_mutex
+from src.strategy.live_inference.live_admission import (
+    live_buy_no_conservative_evidence_rejection_reason,
+    live_capital_efficiency_rejection_reason,
+    live_lcb_consistency_rejection_reason,
+)
 
 UTC = timezone.utc
 
 DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 30.0
+
+
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return (
+        "database is locked" in message
+        or "database table is locked" in message
+        or "database is busy" in message
+    )
 
 
 def _cycle_budget_seconds() -> float | None:
@@ -147,9 +164,13 @@ class EventSubmissionReceipt:
     # ONLY when set (omit-when-None for hash stability) so 06-05+ settlement can
     # attribute EMOS-cells vs maze-cells per city — the PROMOTE evidence.
     q_source: str | None = None
+    strategy_key: str | None = None
     # Shadow-only Opportunity Book selector evidence. Omitted from receipt_json
     # when None so pre-book receipts keep byte-identical hashes.
     opportunity_book: dict[str, Any] | None = None
+    replacement_forecast: dict[str, Any] | None = None
+    unit: str | None = None
+    q_lcb_calibration_source: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
@@ -189,8 +210,8 @@ class ReactorConfig:
 _EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
 MAX_EXECUTABLE_SNAPSHOT_RETRIES = 8
 # Sentinel returned by _process_one when a FORECAST_SNAPSHOT_READY event has been dead-lettered
-# due to a non-COMPLETE source_run_completeness_status. The dead-letter + reject writes are done
-# inside _process_one; process_pending must NOT double-count or attempt mark_processed on this path.
+# due to non-live-eligible window authority. The dead-letter + reject writes are done inside
+# _process_one; process_pending must NOT double-count or attempt mark_processed on this path.
 _FSR_PARTIAL_DEAD_LETTER = "FSR_PARTIAL_DEAD_LETTER"
 
 
@@ -316,7 +337,14 @@ class OpportunityEventReactor:
         pre_disposition: str | None
         should_submit = False
         try:
-            if not self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat()):
+            try:
+                claimed = self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat())
+            except Exception as exc:
+                if _is_sqlite_lock_error(exc):
+                    result.retried += 1
+                    return
+                raise
+            if not claimed:
                 # Claim lost (another worker / lease not yet stale): release any
                 # open txn and the mutex; nothing to process this cycle.
                 self._commit_event_unit()
@@ -414,6 +442,19 @@ class OpportunityEventReactor:
                 self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
                 self._commit_event_unit()
             except Exception as exc:
+                if _is_sqlite_lock_error(exc):
+                    with contextlib.suppress(Exception):
+                        self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
+                        self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
+                    with contextlib.suppress(Exception):
+                        self._finalize_reservation(event, emitted=False)
+                    # If the lock failure happened before the savepoint opened
+                    # (for example BEGIN IMMEDIATE in Window B), we cannot safely
+                    # write requeue/dead-letter surfaces because the same writer
+                    # lock is unavailable. Leave the event in processing; the
+                    # store's stale-lease fetch path will retry it next cycle.
+                    result.retried += 1
+                    return
                 with contextlib.suppress(Exception):
                     self._store.conn.execute("ROLLBACK TO SAVEPOINT edli_reactor_event")
                     self._store.conn.execute("RELEASE SAVEPOINT edli_reactor_event")
@@ -584,21 +625,33 @@ class OpportunityEventReactor:
             self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result, decision_time=decision_time)
             return None, False
         if event.event_type == "FORECAST_SNAPSHOT_READY":
-            # Dead-letter immediately if the source_run is not COMPLETE — a PARTIAL-payload FSR
-            # event can never satisfy the NO_SUBMIT_CERTIFICATE gate (which requires COMPLETE).
-            # Dead-lettering here drains the queue permanently and prevents PARTIAL events from
-            # starving COMPLETE ones across cycles.
+            # A run-level PARTIAL can still contain a COMPLETE/LIVE_ELIGIBLE target
+            # window.  Dead-letter only payloads whose window authority cannot
+            # satisfy the certificate contract.
             try:
                 payload = json.loads(event.payload_json) if isinstance(event.payload_json, str) else event.payload_json
-                src_completeness = payload.get("source_run_completeness_status", "")
+                src_completeness = str(payload.get("source_run_completeness_status", "") or "")
+                coverage_completeness = str(payload.get("coverage_completeness_status", "") or "")
+                coverage_readiness = str(payload.get("coverage_readiness_status", "") or "")
             except Exception:
                 src_completeness = ""
-            if src_completeness != "COMPLETE":
-                error_msg = f"FSR source_run_completeness_status={src_completeness!r} must be COMPLETE; dead-lettering"
-                self._reject_event(event, "SOURCE_TRUTH", "FSR_SOURCE_RUN_NOT_COMPLETE", result, decision_time=decision_time)
+                coverage_completeness = ""
+                coverage_readiness = ""
+            if (
+                src_completeness not in {"COMPLETE", "PARTIAL"}
+                or coverage_completeness != "COMPLETE"
+                or coverage_readiness != "LIVE_ELIGIBLE"
+            ):
+                error_msg = (
+                    "FSR forecast authority not live eligible: "
+                    f"source_run_completeness_status={src_completeness!r}; "
+                    f"coverage_completeness_status={coverage_completeness!r}; "
+                    f"coverage_readiness_status={coverage_readiness!r}; dead-lettering"
+                )
+                self._reject_event(event, "SOURCE_TRUTH", "FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE", result, decision_time=decision_time)
                 self._store.mark_dead_letter(
                     event,
-                    failure_stage="FSR_SOURCE_RUN_NOT_COMPLETE",
+                    failure_stage="FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE",
                     error_message=error_msg,
                     created_at=decision_time.astimezone(UTC).isoformat(),
                 )
@@ -999,16 +1052,36 @@ def _receipt_money_path_blocker(
         return "KELLY", receipt.reason or "KELLY_TOO_SMALL"
     if not receipt.final_intent_id:
         return "EXECUTOR_EXPRESSIBILITY", receipt.reason or "FINAL_INTENT_RECEIPT_MISSING"
-    # Task #102 — book-wide edge-zone admission, the LAST money-path step (after
-    # trade_score/FDR/Kelly so it only ever further TIGHTENS an already-admissible
-    # proof; never loosens). Gated by ``edge_zone_admission_enabled`` and computed
-    # ONLY when True => OFF is byte-identical to the legacy chain (the function
-    # falls straight through to ``return None, ""`` exactly as before). The gate
-    # is a pure function of THIS receipt's own (q_lcb_5pct, c_fee_adjusted): it
-    # demotes the confident tails where honest after-cost EV-per-dollar (computed
-    # on the CONSERVATIVE q_lcb, never point q) is non-positive, concentrating
-    # admission on the market-uncertain mid-range where settlement-grounded edge
-    # is real. Order-independent by construction — see edge_zone_admission.py.
+    has_live_admission_inputs = any(
+        value is not None
+        for value in (receipt.q_live, receipt.q_lcb_5pct, receipt.c_fee_adjusted, receipt.trade_score, receipt.direction)
+    )
+    if has_live_admission_inputs:
+        lcb_consistency_reason = live_lcb_consistency_rejection_reason(
+            q_direction=receipt.q_live,
+            q_lcb=receipt.q_lcb_5pct,
+        )
+        if lcb_consistency_reason is not None:
+            return "TRADE_SCORE", lcb_consistency_reason
+        capital_efficiency_reason = live_capital_efficiency_rejection_reason(
+            q_lcb=receipt.q_lcb_5pct,
+            execution_price=receipt.c_fee_adjusted,
+            trade_score=receipt.trade_score,
+        )
+        if capital_efficiency_reason is not None:
+            return "TRADE_SCORE", capital_efficiency_reason
+        buy_no_conservative_reason = live_buy_no_conservative_evidence_rejection_reason(
+            direction=receipt.direction,
+            q_direction=receipt.q_live,
+            q_lcb=receipt.q_lcb_5pct,
+            execution_price=receipt.c_fee_adjusted,
+            q_lcb_calibration_source=receipt.q_lcb_calibration_source,
+        )
+        if buy_no_conservative_reason is not None:
+            return "TRADE_SCORE", buy_no_conservative_reason
+    # Task #102 — optional book-wide edge-zone admission. The always-on live
+    # admission checks above own capital efficiency and conservative Buy-NO
+    # evidence. This flag remains a separate extra tightening over q_lcb-vs-cost.
     if config is not None and getattr(config, "edge_zone_admission_enabled", False):
         from src.contracts.edge_zone_admission import edge_zone_admits
 
@@ -1025,9 +1098,18 @@ def _receipt_money_path_blocker(
 def _is_transient_money_path_reason(reason: str | None) -> bool:
     if not reason:
         return False
+    reason_lower = reason.lower()
     return (
         "SOURCE_CAPTURED_AFTER_DECISION_TIME" in reason
         or "EXECUTABLE_SNAPSHOT_STALE" in reason
+        or (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:" in reason
+            and (
+                "database is locked" in reason_lower
+                or "database table is locked" in reason_lower
+                or "database is busy" in reason_lower
+            )
+        )
     )
 
 

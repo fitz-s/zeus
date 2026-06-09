@@ -45,6 +45,9 @@ class OpportunityBook:
             "selected_objective": (
                 {
                     "robust_ev_per_dollar": selected.robust_ev_per_dollar,
+                    "robust_kelly_fraction_lcb": selected.robust_kelly_fraction_lcb,
+                    "robust_kelly_growth_score": selected.robust_kelly_growth_score,
+                    "capital_weighted_growth_score": selected.capital_weighted_growth_score,
                     "expected_robust_dollars": selected.expected_robust_dollars,
                     "q_lcb_5pct": selected.q_lcb_5pct,
                     "trade_score": selected.trade_score,

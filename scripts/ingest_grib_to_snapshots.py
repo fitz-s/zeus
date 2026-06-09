@@ -43,6 +43,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import sqlite3
 import sys
 import time
@@ -156,6 +157,8 @@ def _provenance_json(
         "nearest_grid_lat": payload.get("nearest_grid_lat"),
         "nearest_grid_lon": payload.get("nearest_grid_lon"),
         "nearest_grid_distance_km": payload.get("nearest_grid_distance_km"),
+        "nearest_grid_provenance_source": payload.get("nearest_grid_provenance_source"),
+        "nearest_grid_resolution_deg": payload.get("nearest_grid_resolution_deg"),
     }
     # Reuse precomputed evidence when available to avoid duplicate timezone/range parsing.
     evidence = contract_evidence if contract_evidence is not None else _contract_evidence_fields(
@@ -185,6 +188,85 @@ def _provenance_json(
         }
     }
     return json.dumps(prov, ensure_ascii=False)
+
+
+def _is_finite_number(value: object) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _haversine_km(lat_a: float, lon_a: float, lat_b: float, lon_b: float) -> float:
+    radius_km = 6371.0088
+    phi_a = math.radians(lat_a)
+    phi_b = math.radians(lat_b)
+    d_phi = math.radians(lat_b - lat_a)
+    d_lambda = math.radians(lon_b - lon_a)
+    h = (
+        math.sin(d_phi / 2.0) ** 2
+        + math.cos(phi_a) * math.cos(phi_b) * math.sin(d_lambda / 2.0) ** 2
+    )
+    return 2.0 * radius_km * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _nearest_regular_ll_grid(
+    *,
+    lat: float,
+    lon: float,
+    resolution_deg: float,
+) -> tuple[float, float, float]:
+    grid_lat = round(lat / resolution_deg) * resolution_deg
+    grid_lat = max(-90.0, min(90.0, grid_lat))
+    grid_lon = round(lon / resolution_deg) * resolution_deg
+    grid_lon = ((grid_lon + 180.0) % 360.0) - 180.0
+    if grid_lon == -180.0 and lon > 0:
+        grid_lon = 180.0
+    return (
+        round(grid_lat, 6),
+        round(grid_lon, 6),
+        _haversine_km(lat, lon, grid_lat, grid_lon),
+    )
+
+
+def _fill_opendata_grid_provenance(payload: dict) -> None:
+    """Backstop OpenData grid provenance from settlement coordinates.
+
+    The extractor normally emits nearest_grid_* from the GRIB grid itself.  Stale
+    raw OpenData JSONs can carry nulls, and WU-settled live rows must not enter the
+    reader without explicit station-grid provenance.  This producer-side backstop
+    fills only ECMWF OpenData payloads from the canonical city settlement
+    coordinates; the reader gate still blocks rows that remain incomplete.
+    """
+
+    data_version = str(payload.get("data_version") or "")
+    if "ecmwf_opendata" not in data_version:
+        return
+    required = (
+        payload.get("nearest_grid_lat"),
+        payload.get("nearest_grid_lon"),
+        payload.get("nearest_grid_distance_km"),
+    )
+    if all(_is_finite_number(value) for value in required):
+        return
+    city_name = str(payload.get("city") or "")
+    city = runtime_cities_by_name().get(city_name)
+    if city is None:
+        return
+    lat = getattr(city, "lat", None)
+    lon = getattr(city, "lon", None)
+    if not _is_finite_number(lat) or not _is_finite_number(lon):
+        return
+    grid_lat, grid_lon, distance_km = _nearest_regular_ll_grid(
+        lat=float(lat),
+        lon=float(lon),
+        resolution_deg=0.25,
+    )
+    payload["nearest_grid_lat"] = grid_lat
+    payload["nearest_grid_lon"] = grid_lon
+    payload["nearest_grid_distance_km"] = distance_km
+    payload["nearest_grid_provenance_source"] = "canonical_settlement_coordinate_regular_ll_0p25"
+    payload["nearest_grid_resolution_deg"] = 0.25
 
 
 def _extract_boundary_fields(payload: dict) -> tuple[int, int]:
@@ -536,6 +618,7 @@ def ingest_json_file(
     if normalized_dv != data_version:
         data_version = normalized_dv
         payload["data_version"] = data_version
+    _fill_opendata_grid_provenance(payload)
     # NC-12: guard must fire before INSERT
     assert_data_version_allowed(data_version, context="ingest_grib_to_snapshots")
 

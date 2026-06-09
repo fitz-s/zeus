@@ -54,7 +54,6 @@ from src.state.data_coverage import (
     CoverageReason,
     DataTable,
     record_failed,
-    record_legitimate_gap,
     record_written,
 )
 

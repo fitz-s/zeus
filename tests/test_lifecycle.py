@@ -11,6 +11,8 @@
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave28/PLAN.md
 """Tests for exit triggers and harvester."""
 
+import json
+import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +39,9 @@ def _call_exit(
     market_velocity_1h: float = 0.0,
     whale_toxicity: bool | None = None,
     market_vig: float | None = None,
+    entry_ci: tuple[float, float] | None = None,
+    current_ci: tuple[float, float] | None = None,
+    entry_posterior: float | None = None,
 ):
     """Thin wrapper: call the one live exit path."""
     ctx = ExitContext(
@@ -51,6 +56,9 @@ def _call_exit(
         divergence_score=divergence_score,
         whale_toxicity=whale_toxicity,
         market_vig=market_vig,
+        entry_ci=entry_ci,
+        current_ci=current_ci,
+        entry_posterior=entry_posterior,
     )
     return pos.evaluate_exit(ctx)
 
@@ -72,6 +80,359 @@ def _make_position(**kwargs) -> Position:
     )
     defaults.update(kwargs)
     return Position(**defaults)
+
+
+def test_legacy_edli_forecast_high_buy_no_strategy_label_repairs_at_runtime():
+    from src.state.portfolio import _runtime_strategy_key_from_projection_row
+
+    row = {
+        "position_id": "legacy-high",
+        "strategy_key": "settlement_capture",
+        "entry_method": "ens_member_counting",
+        "direction": "buy_no",
+        "temperature_metric": "high",
+        "target_date": "2999-01-01",
+    }
+
+    assert _runtime_strategy_key_from_projection_row(row) == "opening_inertia"
+
+
+def test_legacy_edli_forecast_low_buy_no_strategy_label_repairs_at_runtime():
+    from src.state.portfolio import _runtime_strategy_key_from_projection_row
+
+    row = {
+        "position_id": "legacy-low",
+        "strategy_key": "settlement_capture",
+        "entry_method": "ens_member_counting",
+        "direction": "buy_no",
+        "temperature_metric": "low",
+        "target_date": "2999-01-01",
+    }
+
+    assert _runtime_strategy_key_from_projection_row(row) == "opening_inertia"
+
+
+def test_legacy_edli_same_day_high_buy_no_strategy_label_repairs_at_runtime():
+    from src.state.portfolio import _runtime_strategy_key_from_projection_row
+
+    row = {
+        "position_id": "legacy-sameday-high",
+        "strategy_key": "settlement_capture",
+        "entry_method": "ens_member_counting",
+        "direction": "buy_no",
+        "temperature_metric": "high",
+        "target_date": datetime.now(timezone.utc).date().isoformat(),
+    }
+
+    assert _runtime_strategy_key_from_projection_row(row) == "opening_inertia"
+
+
+def test_repaired_opening_inertia_position_does_not_emit_review_fact():
+    from src.state.portfolio import _invalid_strategy_review_fact_from_position
+
+    pos = _make_position(
+        trade_id="legacy-low",
+        city="Tokyo",
+        target_date="2999-01-01",
+        temperature_metric="low",
+        direction="buy_no",
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        entry_method="ens_member_counting",
+        no_token_id="no-token-low",
+        condition_id="condition-low",
+        shares=9.0,
+        entry_price=0.97,
+        cost_basis_usd=8.73,
+    )
+
+    assert _invalid_strategy_review_fact_from_position(pos) is None
+
+
+def test_terminal_invalid_legacy_position_does_not_emit_review_fact():
+    from src.state.portfolio import _invalid_strategy_review_fact_from_position
+
+    pos = _make_position(
+        trade_id="terminal-low",
+        city="Tokyo",
+        target_date="2026-06-08",
+        temperature_metric="low",
+        direction="buy_no",
+        strategy_key="settlement_capture",
+        strategy="settlement_capture",
+        state="settled",
+        chain_state="synced",
+        no_token_id="no-token-low",
+    )
+
+    assert _invalid_strategy_review_fact_from_position(pos) is None
+
+
+def test_entry_proof_accepts_actionable_provenance_without_receipt_row():
+    from src.state.portfolio import _entry_proof_rejection_from_evidence
+
+    rejection = _entry_proof_rejection_from_evidence(
+        receipt_json=None,
+        actionable_payload_json=json.dumps(
+            {
+                "strategy_key": "opening_inertia",
+                "q_source": "emos",
+                "opportunity_book": {
+                    "selected_candidate_id": "c1",
+                    "actual_receipt_selected_candidate_id": "c1",
+                },
+            }
+        ),
+        calibration_payload_json=json.dumps({"authority": "EMOS", "n_samples": 20}),
+    )
+
+    assert rejection is None
+
+
+def test_entry_proof_accepts_live_decision_audit_as_real_submit_authority():
+    from src.state.portfolio import _entry_proof_rejection_from_evidence
+
+    rejection = _entry_proof_rejection_from_evidence(
+        decision_audit_json=json.dumps(
+            {
+                "strategy_key": "opening_inertia",
+                "q_source": "emos",
+                "opportunity_book": {
+                    "selected_candidate_id": "c1",
+                    "actual_receipt_selected_candidate_id": "c1",
+                },
+            }
+        ),
+        receipt_json=None,
+        actionable_payload_json=None,
+        calibration_payload_json=None,
+    )
+
+    assert rejection is None
+
+
+def test_edli_entry_proof_query_does_not_freeze_legacy_pre_audit_fill():
+    from src.state.portfolio import _query_edli_entry_proof_review_reasons
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            decision_id TEXT,
+            venue_order_id TEXT,
+            intent_kind TEXT,
+            token_id TEXT,
+            updated_at TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute("CREATE TABLE world.edli_no_submit_receipts (event_id TEXT, token_id TEXT, created_at TEXT, receipt_json TEXT)")
+    conn.execute("CREATE TABLE world.decision_certificates (certificate_type TEXT, semantic_key TEXT, payload_json TEXT, created_at TEXT)")
+    conn.execute(
+        """
+        CREATE TABLE world.edli_live_order_events (
+            aggregate_id TEXT,
+            event_sequence INTEGER,
+            event_type TEXT,
+            payload_json TEXT,
+            occurred_at TEXT
+        )
+        """
+    )
+    event_id = "edli_evt_legacy"
+    token_id = "tok-legacy"
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, 'ENTRY', ?, ?, ?)",
+        (
+            f"edli_exec_cmd:{event_id}:intent-legacy:{token_id}:buy_no",
+            "order-legacy",
+            token_id,
+            "2026-06-07T01:02:00+00:00",
+            "2026-06-07T01:01:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO world.edli_live_order_events VALUES (?, 1, 'DecisionProofAccepted', ?, ?)",
+        (
+            f"{event_id}:intent-legacy",
+            json.dumps({"event_id": event_id, "final_intent_id": "intent-legacy"}),
+            "2026-06-07T01:01:00+00:00",
+        ),
+    )
+
+    reasons = _query_edli_entry_proof_review_reasons(
+        conn,
+        [
+            {
+                "trade_id": "edli-legacy",
+                "phase": "active",
+                "entry_method": "ens_member_counting",
+                "no_token_id": token_id,
+                "order_id": "order-legacy",
+            }
+        ],
+    )
+
+    assert reasons == {}
+
+
+def test_edli_entry_proof_query_requires_decision_audit_after_hotfix():
+    from src.state.portfolio import _query_edli_entry_proof_review_reasons
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("ATTACH DATABASE ':memory:' AS world")
+    conn.execute(
+        """
+        CREATE TABLE venue_commands (
+            decision_id TEXT,
+            venue_order_id TEXT,
+            intent_kind TEXT,
+            token_id TEXT,
+            updated_at TEXT,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute("CREATE TABLE world.edli_no_submit_receipts (event_id TEXT, token_id TEXT, created_at TEXT, receipt_json TEXT)")
+    conn.execute("CREATE TABLE world.decision_certificates (certificate_type TEXT, semantic_key TEXT, payload_json TEXT, created_at TEXT)")
+    conn.execute(
+        """
+        CREATE TABLE world.edli_live_order_events (
+            aggregate_id TEXT,
+            event_sequence INTEGER,
+            event_type TEXT,
+            payload_json TEXT,
+            occurred_at TEXT
+        )
+        """
+    )
+    event_id = "edli_evt_new"
+    token_id = "tok-new"
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?, ?, 'ENTRY', ?, ?, ?)",
+        (
+            f"edli_exec_cmd:{event_id}:intent-new:{token_id}:buy_no",
+            "order-new",
+            token_id,
+            "2026-06-07T03:02:00+00:00",
+            "2026-06-07T03:01:00+00:00",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO world.edli_live_order_events VALUES (?, 1, 'DecisionProofAccepted', ?, ?)",
+        (
+            f"{event_id}:intent-new",
+            json.dumps({"event_id": event_id, "final_intent_id": "intent-new"}),
+            "2026-06-07T03:01:00+00:00",
+        ),
+    )
+
+    reasons = _query_edli_entry_proof_review_reasons(
+        conn,
+        [
+            {
+                "trade_id": "edli-new",
+                "phase": "active",
+                "entry_method": "ens_member_counting",
+                "no_token_id": token_id,
+                "order_id": "order-new",
+            }
+        ],
+    )
+
+    assert reasons == {"edli-new": "EDLI_ENTRY_DECISION_AUDIT_MISSING"}
+
+
+def test_entry_proof_rejects_missing_actionable_provenance_without_receipt_row():
+    from src.state.portfolio import _entry_proof_rejection_from_evidence
+
+    rejection = _entry_proof_rejection_from_evidence(
+        receipt_json=None,
+        actionable_payload_json=json.dumps({"strategy_key": "opening_inertia"}),
+        calibration_payload_json=json.dumps({"authority": "EMOS", "n_samples": 20}),
+    )
+
+    assert rejection == "EDLI_ENTRY_ACTIONABLE_Q_SOURCE_MISSING"
+
+
+def test_entry_proof_rejects_missing_family_selection_authority():
+    from src.state.portfolio import _entry_proof_rejection_from_evidence
+
+    rejection = _entry_proof_rejection_from_evidence(
+        receipt_json=json.dumps({"q_source": "emos"}),
+        actionable_payload_json=json.dumps(
+            {
+                "strategy_key": "opening_inertia",
+                "q_source": "emos",
+                "opportunity_book": {"selected_candidate_id": "c1"},
+            }
+        ),
+        calibration_payload_json=json.dumps({"authority": "EMOS", "n_samples": 20}),
+    )
+
+    assert rejection == "EDLI_ENTRY_OPPORTUNITY_BOOK_MISSING"
+
+
+def test_entry_proof_rejects_identity_fallback_calibration():
+    from src.state.portfolio import _entry_proof_rejection_from_evidence
+
+    rejection = _entry_proof_rejection_from_evidence(
+        receipt_json=json.dumps(
+            {
+                "q_source": "emos",
+                "opportunity_book": {
+                    "selected_candidate_id": "c1",
+                    "actual_receipt_selected_candidate_id": "c1",
+                },
+            }
+        ),
+        actionable_payload_json=json.dumps(
+            {
+                "strategy_key": "opening_inertia",
+                "q_source": "emos",
+                "opportunity_book": {"selected_candidate_id": "c1"},
+            }
+        ),
+        calibration_payload_json=json.dumps(
+            {"authority": "IDENTITY_FALLBACK_NO_PLATT_BUCKET", "n_samples": 0}
+        ),
+    )
+
+    assert rejection == "EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK"
+
+
+def test_invalid_entry_proof_emits_blocking_review_fact_for_repaired_high_position():
+    from src.state.portfolio import _invalid_entry_proof_review_fact_from_position
+
+    pos = _make_position(
+        trade_id="edli-high-invalid-proof",
+        city="Helsinki",
+        target_date="2999-01-01",
+        temperature_metric="high",
+        direction="buy_no",
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        entry_method="ens_member_counting",
+        no_token_id="no-token-high",
+        condition_id="condition-high",
+        shares=5.0,
+        entry_price=0.69,
+        cost_basis_usd=3.45,
+    )
+
+    fact = _invalid_entry_proof_review_fact_from_position(
+        pos,
+        reason="EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK",
+    )
+
+    assert fact is not None
+    assert fact.token_id == "no-token-high"
+    assert fact.blocks_entry is False
+    assert fact.blocks_position_management is True
 
 
 def test_chain_reconciliation_phantom_void_persists_canonical_projection(tmp_path):
@@ -315,6 +676,29 @@ class TestExitTriggers:
         decision = _call_exit(pos, 0.30, 0.40)
         assert decision.should_exit
         assert decision.trigger == "EDGE_REVERSAL"
+
+    def test_ci_separated_but_positive_held_edge_holds(self):
+        """CI separation alone is not a sell signal while held-side edge remains positive."""
+        pos = _make_position(
+            direction="buy_no",
+            p_posterior=0.999999999,
+            entry_price=0.949,
+            shares=10.0,
+            cost_basis_usd=9.49,
+            size_usd=9.49,
+        )
+
+        decision = _call_exit(
+            pos,
+            fresh_prob=0.9992713626795082,
+            current_market_price=0.8609807447600297,
+            entry_ci=(0.999999999, 0.999999999),
+            current_ci=(0.9992713626795082, 0.9992713626795082),
+            entry_posterior=0.999999999,
+        )
+
+        assert not decision.should_exit
+        assert decision.trigger == "CI_SEPARATED_POSITIVE_EDGE_HOLD"
 
     def test_buy_yes_ev_gate_hold_when_bid_below_posterior(self):
         """When best_bid < p_posterior (hold EV > sell EV), exit is blocked.

@@ -271,6 +271,7 @@ def _verify_actionable_payload(cert: DecisionCertificate) -> None:
         "risk_decision_id",
         "live_cap_usage_id",
         "final_intent_id",
+        "strategy_key",
     )
     for field in required:
         if payload.get(field) in (None, ""):
@@ -370,7 +371,7 @@ def _verify_execution_command_payload(
         raise CertificateVerificationError("executor expressibility must pass")
     if live_cap.get("reservation_status") != "RESERVED":
         raise CertificateVerificationError("live cap reservation must be RESERVED")
-    for field in ("event_id", "condition_id", "token_id", "direction", "final_intent_id"):
+    for field in ("event_id", "condition_id", "token_id", "direction", "final_intent_id", "strategy_key"):
         _require_equal(f"execution_command.{field}", payload.get(field), f"actionable.{field}", actionable.get(field))
     _require_equal(
         "execution_command.actionable_certificate_hash",
@@ -381,6 +382,8 @@ def _verify_execution_command_payload(
     _require_equal("final_intent.final_intent_id", final_intent.get("final_intent_id"), "actionable.final_intent_id", actionable.get("final_intent_id"))
     _require_equal("final_intent.token_id", final_intent.get("token_id"), "actionable.token_id", actionable.get("token_id"))
     _require_equal("final_intent.condition_id", final_intent.get("condition_id"), "actionable.condition_id", actionable.get("condition_id"))
+    _require_equal("final_intent.strategy_key", final_intent.get("strategy_key"), "actionable.strategy_key", actionable.get("strategy_key"))
+    _require_equal("expressibility.strategy_key", expressibility.get("strategy_key"), "final_intent.strategy_key", final_intent.get("strategy_key"))
     _require_equal("live_cap.usage_id", live_cap.get("usage_id"), "actionable.live_cap_usage_id", actionable.get("live_cap_usage_id"))
     _verify_pre_submit_revalidation_for_command(payload, pre_submit, final_intent, live_cap)
     size = _finite_float(payload.get("size"), "execution command size")
@@ -426,7 +429,9 @@ def _verify_pre_submit_revalidation_for_command(
 ) -> None:
     for field in (
         "event_id",
+        "event_type",
         "final_intent_id",
+        "strategy_key",
         "condition_id",
         "token_id",
         "side",
@@ -536,6 +541,14 @@ def _verify_final_intent_payload(
         "executable_snapshot_id",
     ):
         _require_equal(f"final_intent.{field}", payload.get(field), f"actionable.{field}", actionable.get(field))
+    _require_equal(
+        "final_intent.strategy_key",
+        payload.get("strategy_key"),
+        "actionable.strategy_key",
+        actionable.get("strategy_key"),
+    )
+    if payload.get("strategy_key") in (None, ""):
+        raise CertificateVerificationError("final intent strategy_key missing")
     limit_price = _finite_float(payload.get("limit_price"), "final intent limit_price")
     size = _finite_float(payload.get("size"), "final intent size")
     notional = _finite_float(payload.get("notional_usd"), "final intent notional_usd")
@@ -871,8 +884,13 @@ def _validate_forecast_authority_payload(forecast: dict) -> None:
         raise CertificateVerificationError("forecast.coverage_readiness_status is not LIVE_ELIGIBLE")
     if forecast.get("coverage_completeness_status") != "COMPLETE":
         raise CertificateVerificationError("forecast.coverage_completeness_status is not COMPLETE")
-    if forecast.get("source_run_completeness_status") != "COMPLETE":
-        raise CertificateVerificationError("forecast.source_run_completeness_status is not COMPLETE")
+    source_run_completeness = str(forecast.get("source_run_completeness_status") or "")
+    if source_run_completeness not in {"COMPLETE", "PARTIAL"}:
+        raise CertificateVerificationError("forecast.source_run_completeness_status is not COMPLETE or PARTIAL")
+    if source_run_completeness == "PARTIAL":
+        source_run_status = str(forecast.get("source_run_status") or "")
+        if source_run_status not in {"SUCCESS", "PARTIAL"}:
+            raise CertificateVerificationError("forecast.source_run_status is not SUCCESS or PARTIAL for PARTIAL source_run")
     required_steps = tuple(forecast.get("required_steps") or ())
     observed_steps = tuple(forecast.get("observed_steps") or ())
     if not required_steps:

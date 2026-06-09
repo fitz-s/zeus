@@ -18,7 +18,7 @@ from eccodes import codes_grib_new_from_file, codes_release
 
 from tigge_regions import REGIONS, TiggeRegion
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = ROOT / "raw"
 QUEUE_RETRY_LIMIT = int(os.environ.get("TIGGE_QUEUE_RETRY_LIMIT", "60"))
 QUEUE_RETRY_SLEEP_SECONDS = int(os.environ.get("TIGGE_QUEUE_RETRY_SLEEP_SECONDS", "120"))

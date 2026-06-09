@@ -15,7 +15,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from download_ecmwf_open_ens import download_open_ens
 from extract_open_ens_city_member_vectors import extract_open_ens
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = ROOT / "raw" / "ecmwf_open_ens"
 DEFAULT_MANIFEST = ROOT / "docs" / "tigge_city_coordinate_manifest_full_20260330.json"
 

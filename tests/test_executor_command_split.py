@@ -44,6 +44,8 @@ def mem_conn():
 @pytest.fixture(autouse=True)
 def _cutover_guard_live_enabled(monkeypatch):
     """This file tests command-journal ordering, not cutover gating."""
+    from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+
     monkeypatch.setenv("ZEUS_ALLOW_LEGACY_EXECUTION_INTENT", "1")
     monkeypatch.setenv("ZEUS_LEGACY_EXECUTION_INTENT_SCOPE", "paper")
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
@@ -52,6 +54,31 @@ def _cutover_guard_live_enabled(monkeypatch):
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_buy", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.execution.executor._reserve_collateral_for_sell", lambda *args, **kwargs: None)
+
+    def _seed_submit_collateral(conn: sqlite3.Connection) -> dict:
+        CollateralLedger(conn).set_snapshot(
+            CollateralSnapshot(
+                pusd_balance_micro=1_000_000_000,
+                pusd_allowance_micro=1_000_000_000,
+                usdc_e_legacy_balance_micro=0,
+                ctf_token_balances={},
+                ctf_token_allowances={},
+                reserved_pusd_for_buys_micro=0,
+                reserved_tokens_for_sells={},
+                captured_at=datetime.now(timezone.utc),
+                authority_tier="CHAIN",
+                raw_balance_payload_hash="test-collateral",
+            )
+        )
+        return {
+            "component": "collateral_snapshot_refresh",
+            "allowed": True,
+            "reason": "allowed",
+            "authority_tier": "CHAIN",
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    monkeypatch.setattr("src.execution.executor._refresh_entry_collateral_snapshot_for_submit", _seed_submit_collateral)
 
 
 def _ensure_snapshot(conn, *, token_id: str, snapshot_id: str | None = None) -> str:

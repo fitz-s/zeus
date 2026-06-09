@@ -49,6 +49,8 @@ from src.state.no_trade_events import (
     NoTradeEventsSchemaCompatibilityError,
     assert_no_trade_events_schema_current_for_live,
 )
+from src.config import cities_by_name
+from src.data.replacement_forecast_current_target_plan import build_replacement_forecast_current_target_plan
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -206,7 +208,7 @@ def _check_world_schema(world_db: Path) -> GateResult:
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name=?",
         (table,),
     ).fetchone()
     return row is not None
@@ -290,6 +292,134 @@ def _check_forecast_executable_bundle(forecasts_db: Path, now: datetime) -> Gate
         return GateResult("forecast_executable_bundle", PASS, f"live_eligible_count={count}")
     finally:
         conn.close()
+
+
+def _day0_observed_extreme_coverage_detail(plan, world_db: Path) -> tuple[bool, str]:
+    if not world_db.exists():
+        return False, f"day0_world_db_missing:{world_db}"
+    conn = sqlite3.connect(str(world_db))
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _table_exists(conn, "observation_hourly_extrema"):
+            return False, "day0_observation_hourly_extrema_missing"
+        missing: list[str] = []
+        covered = 0
+        for row in plan.rows:
+            if row.covered or not row.day0_observed_extreme_required:
+                continue
+            city_unit = getattr(cities_by_name.get(row.city), "settlement_unit", "")
+            observed = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS n,
+                    group_concat(DISTINCT temp_unit) AS temp_units,
+                    max(CASE WHEN running_max IS NOT NULL OR hour_bucket_max IS NOT NULL THEN 1 ELSE 0 END) AS has_high,
+                    max(CASE WHEN running_min IS NOT NULL OR hour_bucket_min IS NOT NULL THEN 1 ELSE 0 END) AS has_low
+                FROM observation_hourly_extrema
+                WHERE city = ?
+                  AND target_date = ?
+                  AND authority IN ('VERIFIED', 'ICAO_STATION_NATIVE')
+                """,
+                (row.city, row.target_date),
+            ).fetchone()
+            temp_units = {
+                part.strip()
+                for part in str(observed["temp_units"] or "").split(",")
+                if part.strip()
+            }
+            metric_ok = (
+                (row.temperature_metric == "high" and int(observed["has_high"] or 0) == 1)
+                or (row.temperature_metric == "low" and int(observed["has_low"] or 0) == 1)
+            )
+            unit_ok = bool(city_unit) and temp_units == {str(city_unit)}
+            if int(observed["n"] or 0) > 0 and metric_ok and unit_ok:
+                covered += 1
+                continue
+            if len(missing) < 12:
+                missing.append(
+                    f"{row.city}|{row.target_date}|{row.temperature_metric}|"
+                    f"rows={int(observed['n'] or 0)}|units={','.join(sorted(temp_units)) or 'none'}|"
+                    f"expected_unit={city_unit or 'unknown'}"
+                )
+        required = sum(
+            1
+            for row in plan.rows
+            if not row.covered and row.day0_observed_extreme_required
+        )
+        if missing:
+            return False, f"day0_observed_extreme_missing={len(missing)}/{required}:sample={';'.join(missing)}"
+        return True, f"day0_observed_extreme_covered={covered}/{required}"
+    finally:
+        conn.close()
+
+
+def _check_replacement_current_target_coverage(forecasts_db: Path, world_db: Path) -> GateResult:
+    """Gate: replacement 0.1 current targets must be fully covered before live release."""
+    if not forecasts_db.exists():
+        return GateResult("replacement_current_target_coverage", FAIL, f"missing:{forecasts_db}")
+    conn = sqlite3.connect(str(forecasts_db))
+    try:
+        required_tables = {
+            "market_events",
+            "forecast_posteriors",
+            "readiness_state",
+            "source_run_coverage",
+            "raw_forecast_artifacts",
+        }
+        missing_tables = sorted(table for table in required_tables if not _table_exists(conn, table))
+        if missing_tables:
+            return GateResult(
+                "replacement_current_target_coverage",
+                PASS,
+                f"not_configured:missing_tables={missing_tables}",
+            )
+    finally:
+        conn.close()
+    plan = build_replacement_forecast_current_target_plan(str(forecasts_db))
+    if plan.ready:
+        return GateResult(
+            "replacement_current_target_coverage",
+            PASS,
+            f"covered={plan.covered_count}/{plan.target_count}",
+        )
+    if plan.status == "NO_CURRENT_TARGETS":
+        # market_events table exists but is empty: no live targets → nothing to cover → pass
+        return GateResult(
+            "replacement_current_target_coverage",
+            PASS,
+            "no_current_targets",
+        )
+    if plan.status == "CURRENT_TARGETS_REQUIRE_DAY0_OBSERVED_EXTREME":
+        ok, detail = _day0_observed_extreme_coverage_detail(plan, world_db)
+        if ok:
+            return GateResult(
+                "replacement_current_target_coverage",
+                PASS,
+                (
+                    f"status={plan.status}:covered={plan.covered_count}/{plan.target_count}:"
+                    f"forecast_missing={plan.missing_coverage_count}:can_seed={plan.can_seed_count}:"
+                    f"{detail}"
+                ),
+            )
+        return GateResult(
+            "replacement_current_target_coverage",
+            FAIL,
+            (
+                f"status={plan.status}:covered={plan.covered_count}/{plan.target_count}:"
+                f"forecast_missing={plan.missing_coverage_count}:can_seed={plan.can_seed_count}:"
+                f"{detail}"
+            ),
+        )
+    return GateResult(
+        "replacement_current_target_coverage",
+        FAIL,
+        (
+            f"status={plan.status}:covered={plan.covered_count}/{plan.target_count}:"
+            f"missing={plan.missing_coverage_count}:can_seed={plan.can_seed_count}:"
+            f"day0_observed_extreme_required={getattr(plan, 'day0_observed_extreme_required_count', 0)}:"
+            f"reasons={','.join(plan.reason_codes)}"
+        ),
+    )
 
 
 def _check_trade_state(trade_db: Path) -> GateResult:
@@ -395,6 +525,7 @@ def evaluate_release_gate(args: argparse.Namespace) -> ReleaseGateReport:
         _check_world_schema(args.world_db),
         _check_forecasts_schema(args.forecasts_db),
         _check_forecast_executable_bundle(args.forecasts_db, now),
+        _check_replacement_current_target_coverage(args.forecasts_db, args.world_db),
         _check_trade_state(args.trade_db),
         _check_redeem_state(args.trade_db, tuple(args.allow_redeem_command or ()), now),
         _check_fresh_file("source_health", args.source_health_json, max_age_seconds=args.source_max_age_seconds, now=now),
@@ -477,8 +608,29 @@ def _edli_stage_results(args: argparse.Namespace) -> list[GateResult]:
             f"status={report.status}:scaleout_allowed={report.scaleout_allowed}:reasons={list(report.reasons)}",
         )
     ]
+    results.append(_check_edli_arm_gate_artifact(args))
     results.append(_check_edli_promotion_artifact(args))
     return results
+
+
+def _check_edli_arm_gate_artifact(args: argparse.Namespace) -> GateResult:
+    path = getattr(args, "arm_artifact_json", None)
+    if not path:
+        return GateResult("edli_arm_gate_artifact", FAIL, "missing_arm_artifact_path")
+    if not path.exists():
+        return GateResult("edli_arm_gate_artifact", FAIL, f"missing:{path}")
+    from src.events.live_profit_audit import verify_edli_arm_gate_artifact
+
+    try:
+        artifact = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        return GateResult("edli_arm_gate_artifact", FAIL, f"invalid_json:{exc}")
+    verified = verify_edli_arm_gate_artifact(artifact, head_sha=str(args.expected_sha or ""))
+    return GateResult(
+        "edli_arm_gate_artifact",
+        PASS if verified.ok else FAIL,
+        verified.reason,
+    )
 
 
 def _check_edli_promotion_artifact(args: argparse.Namespace) -> GateResult:
@@ -551,6 +703,10 @@ def _check_stage_settings(stage: str, settings_json: Path) -> GateResult:
             errors.append("real_order_submit_enabled=false")
         if not bool(edli_cfg.get("live_canary_enabled", False)):
             errors.append("live_canary_enabled=false")
+        if not bool(edli_cfg.get("taker_fok_fak_live_enabled", False)):
+            errors.append("taker_fok_fak_live_enabled=false")
+        if not bool(edli_cfg.get("durable_submit_outbox_enabled", False)):
+            errors.append("durable_submit_outbox_enabled=false")
     if stage == "edli_live" and not bool(edli_cfg.get("edli_live_operator_authorized", False)):
         errors.append("edli_live_operator_authorized=false")
     if errors:
@@ -714,6 +870,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--paper-proof-json", type=Path, default=ROOT / "state" / "paper_money_path_proof.json")
     parser.add_argument("--settings-json", type=Path)
     parser.add_argument("--canary-artifact-json", type=Path)
+    parser.add_argument("--arm-artifact-json", type=Path, default=ROOT / "state" / "edli_arm_gate_artifact.json")
     parser.add_argument("--promotion-artifact-json", type=Path)
     parser.add_argument("--edli-live-min-canary-count", type=int, default=1)
     parser.add_argument("--edli-live-max-unresolved-unknowns", type=int, default=0)

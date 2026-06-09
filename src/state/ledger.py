@@ -208,6 +208,10 @@ def _ensure_position_current_authority_columns(conn: sqlite3.Connection) -> None
         ("settlement_price", "REAL"),
         ("settled_at", "TEXT"),
         ("exit_reason", "TEXT"),
+        # EDLI bridge / live exit evidence: entry-time belief CI width must
+        # survive daemon restarts so CI-separated exits do not degrade to a
+        # point-estimate gate.
+        ("entry_ci_width", "REAL"),
     )
     with conn:
         for col_name, col_type in additions:

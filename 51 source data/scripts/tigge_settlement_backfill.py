@@ -33,11 +33,11 @@ from pathlib import Path
 # --- ECMWF API imports ---
 from ecmwfapi import ECMWFDataServer
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 RAW_ROOT = ROOT / "raw"
 MANIFEST_PATH = ROOT / "docs" / "tigge_city_coordinate_manifest_full_20260330.json"
 SCRIPT_DIR = Path(__file__).resolve().parent
-ZEUS_ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/zeus")
+ZEUS_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ZEUS_DBS = (
     ZEUS_ROOT / "state" / "zeus-world.db",
     ZEUS_ROOT / "state" / "zeus-shared.db",

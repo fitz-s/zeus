@@ -301,6 +301,12 @@ def test_live_quality_floors_are_registry_backed() -> None:
     assert profile.allow_ultra_low_tail is False
 
 
+def test_opening_inertia_supports_high_and_low_weather_metrics() -> None:
+    profile = sp.get("opening_inertia")
+    assert profile.metric_is_live("high") is True
+    assert profile.metric_is_live("low") is True
+
+
 def test_regime_throttle_uses_reviewed_city_cluster_not_city_name() -> None:
     """P2-4: correlated risk grouping must use city config metadata."""
     source = Path("src/engine/evaluator.py").read_text()

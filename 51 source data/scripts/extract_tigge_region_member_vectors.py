@@ -10,7 +10,7 @@ from pathlib import Path
 
 from eccodes import codes_get, codes_grib_find_nearest, codes_grib_new_from_file, codes_release
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "docs" / "tigge_city_coordinate_manifest_full_20260330.json"
 
 

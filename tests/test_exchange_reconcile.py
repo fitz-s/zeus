@@ -2451,6 +2451,97 @@ def test_position_drift_compares_exchange_to_confirmed_not_optimistic(conn):
     assert '"reason":"exchange_position_differs_from_confirmed_trade_facts"' in evidence
 
 
+def test_position_drift_treats_venue_live_sell_as_locked_wallet_tokens(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "live-sell-locked-token"
+    seed_command(
+        conn,
+        command_id="cmd-live-sell-entry",
+        venue_order_id="ord-live-sell-entry",
+        token_id=token,
+        state="FILLED",
+        created_at=NOW - timedelta(minutes=10),
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-live-sell-entry",
+        venue_order_id="ord-live-sell-entry",
+        token_id=token,
+        trade_id="trade-live-sell-entry",
+        size="10",
+        state="CONFIRMED",
+    )
+    seed_command(
+        conn,
+        command_id="cmd-live-sell-exit",
+        venue_order_id="ord-live-sell-exit",
+        token_id=token,
+        side="SELL",
+        size=10.0,
+        price=0.86,
+        state="ACKED",
+        created_at=NOW - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(
+            open_orders=[order(order_id="ord-live-sell-exit", status="LIVE")],
+            positions=[],
+        ),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+
+
+def test_position_drift_requires_fresh_venue_live_sell_before_locking_wallet_tokens(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "missing-live-sell-token"
+    seed_command(
+        conn,
+        command_id="cmd-missing-sell-entry",
+        venue_order_id="ord-missing-sell-entry",
+        token_id=token,
+        state="FILLED",
+        created_at=NOW - timedelta(minutes=10),
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-missing-sell-entry",
+        venue_order_id="ord-missing-sell-entry",
+        token_id=token,
+        trade_id="trade-missing-sell-entry",
+        size="10",
+        state="CONFIRMED",
+    )
+    seed_command(
+        conn,
+        command_id="cmd-missing-sell-exit",
+        venue_order_id="ord-missing-sell-exit",
+        token_id=token,
+        side="SELL",
+        size=10.0,
+        price=0.86,
+        state="ACKED",
+        created_at=NOW - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(open_orders=[], positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    position_findings = [finding for finding in result if finding.kind == "position_drift"]
+    assert [finding.subject_id for finding in position_findings] == [token]
+    assert '"open_sell_locked_size":"0"' in position_findings[0].evidence_json
+
+
 def test_position_drift_tolerates_venue_precision_and_resolves_existing(conn):
     from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
 
@@ -2767,6 +2858,69 @@ def test_settled_redeem_pending_token_holding_is_expected_wallet_balance(conn):
     ).fetchone()
     assert dict(resolved) == {
         "resolution": "position_drift_settlement_command_token_holding",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_terminal_position_current_token_holding_is_expected_wallet_balance(conn):
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    token = "terminal-position-current-token"
+    seed_command(
+        conn,
+        command_id="cmd-terminal-position-current",
+        venue_order_id="ord-terminal-position-current",
+        position_id="pos-terminal-position-current",
+        token_id=token,
+        state="FILLED",
+        size=12.5,
+        price=0.11,
+    )
+    seed_position_baseline(
+        conn,
+        position_id="pos-terminal-position-current",
+        order_id="ord-terminal-position-current",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               chain_state = 'synced',
+               token_id = ?,
+               condition_id = 'condition-m5',
+               market_id = 'condition-m5',
+               direction = 'buy_yes',
+               shares = 12.5,
+               order_id = 'ord-terminal-position-current',
+               updated_at = ?
+         WHERE position_id = 'pos-terminal-position-current'
+        """,
+        (token, NOW.isoformat()),
+    )
+    observed = NOW + timedelta(minutes=10)
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "terminal_position_current_probe"},
+        recorded_at=observed - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=token, size="12.5")]),
+        conn,
+        context="ws_gap",
+        observed_at=observed,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_closed_position_token_holding",
         "resolved_by": "src.execution.exchange_reconcile",
     }
 
@@ -3465,6 +3619,218 @@ def test_unresolved_position_drift_refresh_resolves_pending_exit_offset_after_la
     ).fetchone()
     assert dict(resolved) == {
         "resolution": "position_drift_pending_exit_offset",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_unresolved_position_drift_refresh_nets_confirmed_exit_on_closed_position(conn):
+    from src.execution.exchange_reconcile import (
+        record_finding,
+        refresh_unresolved_reconcile_findings,
+    )
+
+    token = "refresh-closed-exit-token"
+    seed_command(
+        conn,
+        command_id="cmd-refresh-closed-entry",
+        venue_order_id="ord-refresh-closed-entry",
+        position_id="legacy-entry-position",
+        token_id=token,
+        side="BUY",
+        size=14.75,
+        price=0.76,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-refresh-closed-entry",
+        venue_order_id="ord-refresh-closed-entry",
+        token_id=token,
+        trade_id="trade-refresh-closed-entry",
+        size="14.75",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(
+        conn,
+        position_id="pos-refresh-closed-exit",
+        order_id="ord-refresh-closed-exit",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'economically_closed',
+               token_id = ?,
+               order_id = 'ord-refresh-closed-exit',
+               order_status = 'sell_filled',
+               shares = 14.75,
+               cost_basis_usd = 11.21,
+               entry_price = 0.76,
+               exit_price = 0.75,
+               updated_at = ?
+         WHERE position_id = 'pos-refresh-closed-exit'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-refresh-closed-exit",
+        venue_order_id="ord-refresh-closed-exit",
+        position_id="pos-refresh-closed-exit",
+        token_id=token,
+        side="SELL",
+        size=14.75,
+        price=0.75,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-refresh-closed-exit",
+        venue_order_id="ord-refresh-closed-exit",
+        token_id=token,
+        trade_id="trade-refresh-closed-exit",
+        size="14.75",
+        fill_price="0.75",
+        state="CONFIRMED",
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "closed_exit_netting_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(open_orders=[], trades=[], positions=[]),
+        conn,
+        observed_at=NOW,
+    )
+
+    assert result["status"] == "resolved"
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_cleared",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
+
+
+def test_closed_position_exit_without_historical_entry_does_not_create_negative_wallet_drift(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    token = "closed-exit-without-entry-token"
+    seed_position_baseline(conn, position_id="pos-closed-exit-only", order_id="ord-closed-exit-only")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               chain_state = 'local_only',
+               token_id = ?,
+               order_id = 'ord-closed-exit-only',
+               order_status = 'sell_filled',
+               shares = 35.6,
+               updated_at = ?
+         WHERE position_id = 'pos-closed-exit-only'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-closed-exit-only",
+        venue_order_id="ord-closed-exit-only",
+        position_id="pos-closed-exit-only",
+        token_id=token,
+        side="SELL",
+        size=35.6,
+        price=0.14,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-closed-exit-only",
+        venue_order_id="ord-closed-exit-only",
+        token_id=token,
+        trade_id="trade-closed-exit-only",
+        size="35.6",
+        fill_price="0.14",
+        state="CONFIRMED",
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+
+
+def test_closed_position_wallet_dust_uses_visibility_floor(conn):
+    from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
+
+    token = "closed-position-wallet-dust-token"
+    seed_position_baseline(conn, position_id="pos-closed-wallet-dust", order_id="ord-closed-wallet-dust")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'settled',
+               chain_state = 'synced',
+               token_id = ?,
+               order_id = 'ord-closed-wallet-dust',
+               order_status = 'sell_filled',
+               shares = 13.157891,
+               updated_at = ?
+         WHERE position_id = 'pos-closed-wallet-dust'
+        """,
+        (token, NOW.isoformat()),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-closed-wallet-dust",
+        venue_order_id="ord-closed-wallet-dust",
+        position_id="pos-closed-wallet-dust",
+        token_id=token,
+        side="SELL",
+        size=13.15,
+        price=0.17,
+        state="FILLED",
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-closed-wallet-dust",
+        venue_order_id="ord-closed-wallet-dust",
+        token_id=token,
+        trade_id="trade-closed-wallet-dust",
+        size="13.15",
+        fill_price="0.17",
+        state="CONFIRMED",
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "closed_position_wallet_dust_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = refresh_unresolved_reconcile_findings(
+        FakeM5Adapter(open_orders=[], trades=[], positions=[]),
+        conn,
+        observed_at=NOW,
+    )
+
+    assert result["status"] == "resolved"
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_cleared",
         "resolved_by": "src.execution.exchange_reconcile",
     }
 

@@ -18,7 +18,7 @@ import math
 import os
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import Any, Optional
@@ -44,8 +44,6 @@ from src.contracts.execution_price import (
 from src.types import BinEdge
 from src.architecture.decorators import capability, protects
 from src.state.db import (
-    get_connection,
-    get_trade_connection_with_world,
     get_trade_connection_with_world_required,
 )
 
@@ -186,15 +184,16 @@ def _is_polymarket_invalid_amount_400(exc: Exception) -> bool:
 def _is_polymarket_invalid_amount_400_message(message: str) -> bool:
     if "status_code=400" not in message:
         return False
+    normalized = " ".join(message.split())
     precision_rejection = (
-        "invalid amounts" in message
-        and "maker amount" in message
-        and "taker amount" in message
+        "invalid amounts" in normalized
+        and "maker amount" in normalized
+        and "taker amount" in normalized
     )
     marketable_buy_min_rejection = (
-        "invalid amount" in message
-        and "marketable BUY order" in message
-        and "min size: $1" in message
+        "invalid amount" in normalized
+        and "marketable BUY order" in normalized
+        and ("min size: $1" in normalized or "min size: 1" in normalized)
     )
     return precision_rejection or marketable_buy_min_rejection
 
@@ -465,12 +464,42 @@ def _buy_order_notional_micro(intent: ExecutionIntent, shares: float) -> int:
     return int(notional.to_integral_value(rounding=ROUND_CEILING))
 
 
-def _assert_collateral_allows_buy(intent: ExecutionIntent, *, spend_micro: int | None = None) -> dict:
+def _assert_collateral_allows_buy(
+    intent: ExecutionIntent,
+    *,
+    spend_micro: int | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> dict:
     """Fail before command persistence or SDK contact when pUSD is insufficient."""
-    from src.state.collateral_ledger import assert_buy_preflight
+    from src.state.collateral_ledger import CollateralLedger, assert_buy_preflight
 
-    assert_buy_preflight(intent, spend_micro=spend_micro)
+    if conn is not None:
+        CollateralLedger(conn).buy_preflight(intent, spend_micro=spend_micro)
+    else:
+        assert_buy_preflight(intent, spend_micro=spend_micro)
     return _capability_component("collateral_ledger", collateral="pUSD", spend_micro=spend_micro or 0)
+
+
+def _refresh_entry_collateral_snapshot_for_submit(conn: sqlite3.Connection) -> dict:
+    """Refresh collateral truth synchronously on the submit path before preflight."""
+    from src.data.polymarket_client import PolymarketClient
+    from src.state.collateral_ledger import CollateralInsufficient, CollateralLedger
+
+    try:
+        client = PolymarketClient()
+        adapter = client._ensure_v2_adapter()
+        snapshot = CollateralLedger(conn).refresh(adapter)
+    except CollateralInsufficient:
+        raise
+    except Exception as exc:
+        raise CollateralInsufficient(f"collateral_refresh_failed: {exc}") from exc
+    if snapshot.authority_tier == "DEGRADED":
+        raise CollateralInsufficient("collateral_snapshot_degraded: refreshed_before_submit")
+    return _capability_component(
+        "collateral_snapshot_refresh",
+        authority_tier=snapshot.authority_tier,
+        captured_at=snapshot.captured_at.isoformat(),
+    )
 
 
 def _assert_collateral_allows_sell(token_id: str, shares: float) -> dict:
@@ -1697,6 +1726,24 @@ def _final_intent_target_size_usd(intent: FinalExecutionIntent, shares: float) -
     return float(Decimal(str(shares)) * intent.final_limit_price)
 
 
+MIN_MARKETABLE_BUY_NOTIONAL_USD = Decimal("1")
+
+
+def _assert_final_intent_buy_notional_meets_venue_minimum(
+    intent: FinalExecutionIntent,
+    *,
+    submitted_shares: float,
+) -> None:
+    if intent.direction not in {"buy_yes", "buy_no"}:
+        return
+    notional = Decimal(str(submitted_shares)) * Decimal(str(intent.final_limit_price))
+    if notional < MIN_MARKETABLE_BUY_NOTIONAL_USD:
+        raise ValueError(
+            "FinalExecutionIntent BUY notional is below venue minimum: "
+            f"notional={notional} min_notional={MIN_MARKETABLE_BUY_NOTIONAL_USD}"
+        )
+
+
 def _final_intent_timeout_seconds(intent: FinalExecutionIntent) -> int:
     if intent.cancel_after is None:
         raise ValueError("FinalExecutionIntent missing cancel_after")
@@ -1816,14 +1863,16 @@ def _legacy_entry_intent_from_final(
             f"intent={intent_event_id!r} snapshot={snapshot_event_id!r}"
         )
     execution_event_id = snapshot_event_id or intent_event_id
+    max_slippage_bps = float(intent.max_slippage_bps)
+    max_slippage_direction = "zero" if max_slippage_bps == 0.0 else "adverse"
     return ExecutionIntent(
         direction=Direction(intent.direction),
         target_size_usd=_final_intent_target_size_usd(intent, submitted_shares),
         limit_price=float(intent.final_limit_price),
         toxicity_budget=0.05,
         max_slippage=SlippageBps(
-            value_bps=float(intent.max_slippage_bps),
-            direction="adverse",
+            value_bps=max_slippage_bps,
+            direction=max_slippage_direction,
         ),
         is_sandbox=False,
         market_id=market_id,
@@ -1844,6 +1893,83 @@ def _legacy_entry_intent_from_final(
         decision_source_context=intent.decision_source_context,
         submit_order_type=intent.order_type,
         post_only=intent.post_only,
+    )
+
+
+def _recapture_fresh_entry_snapshot_if_needed(
+    legacy_intent: ExecutionIntent,
+    final_intent: FinalExecutionIntent,
+    *,
+    conn: sqlite3.Connection | None,
+    submitted_shares: float,
+) -> ExecutionIntent:
+    """Refresh a stale executable snapshot without changing final-intent economics."""
+
+    from src.contracts.executable_market_snapshot import is_fresh
+    from src.state.snapshot_repo import get_snapshot
+
+    if conn is None:
+        return legacy_intent
+    snapshot = get_snapshot(conn, legacy_intent.executable_snapshot_id)
+    if snapshot is None or is_fresh(snapshot, datetime.now(timezone.utc)):
+        return legacy_intent
+    if os.environ.get("ZEUS_REPRICE_RECAPTURE_DISABLED"):
+        return legacy_intent
+    from types import SimpleNamespace
+    from src.data.market_scanner import capture_executable_market_snapshot
+    from src.data.polymarket_client import PolymarketClient
+    from src.engine.cycle_runtime import _market_dict_from_snapshot
+
+    decision = SimpleNamespace(
+        tokens={
+            "token_id": snapshot.yes_token_id,
+            "no_token_id": snapshot.no_token_id,
+            "market_id": snapshot.condition_id,
+        },
+        edge=SimpleNamespace(direction=final_intent.direction),
+    )
+    captured_at = datetime.now(timezone.utc)
+    with PolymarketClient() as clob:
+        fields = capture_executable_market_snapshot(
+            conn,
+            market=_market_dict_from_snapshot(snapshot),
+            decision=decision,
+            clob=clob,
+            captured_at=captured_at,
+            scan_authority="VERIFIED",
+            execution_side="BUY",
+        )
+    fresh_id = str(fields.get("executable_snapshot_id") or "")
+    fresh = get_snapshot(conn, fresh_id) if fresh_id else None
+    if fresh is None or not is_fresh(fresh, captured_at):
+        return legacy_intent
+    if fresh.selected_outcome_token_id != final_intent.selected_token_id:
+        raise ValueError("recaptured executable snapshot selected token mismatch")
+    if fresh.min_tick_size != final_intent.tick_size:
+        raise ValueError("recaptured executable snapshot tick_size mismatch")
+    if fresh.min_order_size != final_intent.min_order_size:
+        raise ValueError("recaptured executable snapshot min_order_size mismatch")
+    if fresh.neg_risk != final_intent.neg_risk:
+        raise ValueError("recaptured executable snapshot neg_risk mismatch")
+    sweep = simulate_clob_sweep(
+        snapshot=fresh,
+        direction=final_intent.direction,
+        requested_size_kind="shares",
+        requested_size_value=Decimal(str(submitted_shares)),
+        limit_price=final_intent.final_limit_price,
+    )
+    if sweep.depth_status != "PASS" or sweep.average_price != final_intent.expected_fill_price_before_fee:
+        raise ValueError(
+            "recaptured executable snapshot changed final-intent economics: "
+            f"depth_status={sweep.depth_status} average_price={sweep.average_price}"
+        )
+    return replace(
+        legacy_intent,
+        executable_snapshot_id=fresh.snapshot_id,
+        executable_snapshot_hash=fresh.executable_snapshot_hash,
+        executable_snapshot_min_tick_size=fresh.min_tick_size,
+        executable_snapshot_min_order_size=fresh.min_order_size,
+        executable_snapshot_neg_risk=fresh.neg_risk,
     )
 
 
@@ -1882,6 +2008,10 @@ def execute_final_intent(
         intent.assert_no_recompute_inputs()
         intent.assert_submit_ready()
         submitted_shares = _final_intent_submit_shares(intent)
+        _assert_final_intent_buy_notional_meets_venue_minimum(
+            intent,
+            submitted_shares=submitted_shares,
+        )
         market_id, event_id = _final_intent_snapshot_metadata(
             intent,
             snapshot_conn if snapshot_conn is not None else conn,
@@ -1891,6 +2021,12 @@ def execute_final_intent(
             intent,
             market_id=market_id,
             event_id=event_id,
+            submitted_shares=submitted_shares,
+        )
+        legacy_intent = _recapture_fresh_entry_snapshot_if_needed(
+            legacy_intent,
+            intent,
+            conn=snapshot_conn if snapshot_conn is not None else conn,
             submitted_shares=submitted_shares,
         )
     except _PreVenueSubmitError:
@@ -2069,8 +2205,8 @@ def execute_exit_order(
     from src.architecture.gate_runtime import check as _gate_runtime_check
     _gate_runtime_check("settlement_write")
     from src.data.polymarket_client import PolymarketClient
-    from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand, CommandState
-    from src.state.venue_command_repo import append_order_fact, insert_command, append_event, get_command
+    from src.execution.command_bus import IdempotencyKey, IntentKind, VenueCommand
+    from src.state.venue_command_repo import append_order_fact, insert_command, append_event
     from src.contracts.executable_market_snapshot import MarketSnapshotError
     from src.state.collateral_ledger import CollateralInsufficient
 
@@ -3033,7 +3169,18 @@ def _live_order(
             order_role="entry",
         )
 
-    risk_allocator_decision = _assert_risk_allocator_allows_submit(intent)
+    try:
+        risk_allocator_decision = _assert_risk_allocator_allows_submit(intent)
+    except Exception as exc:
+        return OrderResult(
+            trade_id=trade_id,
+            status="rejected",
+            reason=f"risk_allocator_pre_submit_blocked: {exc}",
+            submitted_price=intent.limit_price,
+            shares=shares,
+            order_role="entry",
+            command_state="REJECTED",
+        )
     required_pusd_micro = _buy_order_notional_micro(intent, shares)
 
     # -----------------------------------------------------------------------
@@ -3137,7 +3284,6 @@ def _live_order(
             )
         heartbeat_component = _assert_heartbeat_allows_submit(effective_order_type)
         ws_gap_component = _assert_ws_gap_allows_submit(getattr(intent, "market_id", None) or getattr(intent, "token_id", None))
-        collateral_component = _assert_collateral_allows_buy(intent, spend_micro=required_pusd_micro)
 
         # -------------------------------------------------------------------
         # P1.S5: pre-submit idempotency lookup (NC-19 fast-path gate).
@@ -3255,6 +3401,24 @@ def _live_order(
             )
 
         try:
+            collateral_refresh_component = _refresh_entry_collateral_snapshot_for_submit(conn)
+        except CollateralInsufficient as exc:
+            return OrderResult(
+                trade_id=trade_id,
+                status="rejected",
+                reason=f"pre_submit_collateral_refresh_failed: {exc}",
+                submitted_price=intent.limit_price,
+                shares=shares,
+                order_role="entry",
+                idempotency_key=idem.value,
+            )
+
+        try:
+            collateral_component = _assert_collateral_allows_buy(
+                intent,
+                spend_micro=required_pusd_micro,
+                conn=conn,
+            )
             pre_submit_envelope = _build_pre_submit_envelope(
                 conn,
                 command_id=command_id,
@@ -3324,6 +3488,7 @@ def _live_order(
                             ),
                             heartbeat_component,
                             ws_gap_component,
+                            collateral_refresh_component,
                             collateral_component,
                             decision_source_component,
                             corrected_identity_component,

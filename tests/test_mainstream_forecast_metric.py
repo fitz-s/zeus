@@ -11,6 +11,7 @@
 # Purpose: Relationship antibody — the mainstream gate must fetch the Open-Meteo field matching the market metric (LOW->temperature_2m_min, HIGH->temperature_2m_max), never the opposite extremum.
 # Reuse: Re-run when fetch_mainstream_point / mainstream_forecast_source metric selection changes.
 import src.data.mainstream_forecast_source as mfs
+from types import SimpleNamespace
 
 # Capture the REAL implementation at import time — BEFORE the conftest autouse
 # `_forbid_live_mainstream` fixture replaces the module attribute. We test the real
@@ -70,3 +71,34 @@ def test_metric_is_required_no_silent_high_default(monkeypatch):
     import pytest
     with pytest.raises(TypeError):
         _REAL_FETCH("Paris", "2026-06-05")  # no metric -> must fail loud
+
+
+def test_fetch_uses_runtime_reloaded_city_coordinates(monkeypatch):
+    captured = _patch_fetch(monkeypatch)
+    import src.config as config
+
+    current = {"lat": 32.0853, "lon": 34.7818}
+
+    def _runtime_cities_by_name():
+        return {
+            "Tel Aviv": SimpleNamespace(
+                lat=current["lat"],
+                lon=current["lon"],
+                settlement_unit="C",
+                timezone="Asia/Jerusalem",
+            )
+        }
+
+    monkeypatch.setattr(config, "runtime_cities_by_name", _runtime_cities_by_name)
+    monkeypatch.setattr(config, "cities_by_alias", {})
+
+    first = _REAL_FETCH("Tel Aviv", "2026-06-05", metric="high")
+    assert first is not None
+    assert captured["params"]["latitude"] == 32.0853
+    assert captured["params"]["longitude"] == 34.7818
+
+    current.update({"lat": 32.011, "lon": 34.887})
+    second = _REAL_FETCH("Tel Aviv", "2026-06-05", metric="high")
+    assert second is not None
+    assert captured["params"]["latitude"] == 32.011
+    assert captured["params"]["longitude"] == 34.887

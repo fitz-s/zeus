@@ -2659,6 +2659,46 @@ def _emit_day0_window_entered_canonical_if_available(
     return True
 
 
+def _monitor_refreshed_phase_for_position(pos) -> str:
+    state = _position_state_value(pos)
+    if state == "day0_window":
+        return LifecyclePhase.DAY0_WINDOW.value
+    if state == "pending_exit":
+        return LifecyclePhase.PENDING_EXIT.value
+    return LifecyclePhase.ACTIVE.value
+
+
+def _emit_monitor_refreshed_canonical_if_available(conn, pos, *, deps) -> bool:
+    if conn is None:
+        return True
+
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.db import append_many_and_project
+
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) FROM position_events WHERE position_id = ?",
+            (getattr(pos, "trade_id", ""),),
+        ).fetchone()
+        next_seq = int((row[0] if row else 0) or 0) + 1
+        events, projection = build_monitor_refreshed_canonical_write(
+            pos,
+            sequence_no=next_seq,
+            phase_after=_monitor_refreshed_phase_for_position(pos),
+            source_module="src.engine.cycle_runtime",
+        )
+        append_many_and_project(conn, events, projection)
+    except Exception as exc:
+        deps.logger.warning(
+            "CANONICAL_MONITOR_REFRESHED_EMIT_FAILED trade_id=%s reason=%s",
+            getattr(pos, "trade_id", ""),
+            exc,
+        )
+        return False
+
+    return True
+
+
 def _dual_write_canonical_entry_if_available(
     conn,
     pos,
@@ -2820,6 +2860,31 @@ def _is_open_crowding_exposure(pos) -> bool:
     return True
 
 
+def _position_held_token_id(pos) -> str:
+    direction = _position_direction_value(pos)
+    if direction == "buy_no":
+        return str(getattr(pos, "no_token_id", "") or getattr(pos, "token_id", "") or "")
+    return str(getattr(pos, "token_id", "") or getattr(pos, "no_token_id", "") or "")
+
+
+def _blocking_review_fact_for_position(portfolio, pos):
+    held_token_id = _position_held_token_id(pos)
+    condition_id = str(getattr(pos, "condition_id", "") or "")
+    if not held_token_id:
+        return None
+    for fact in getattr(portfolio, "chain_only_facts", None) or ():
+        if not bool(getattr(fact, "blocks_position_management", True)):
+            continue
+        fact_token_id = str(getattr(fact, "token_id", "") or "")
+        if fact_token_id != held_token_id:
+            continue
+        fact_condition_id = str(getattr(fact, "condition_id", "") or "")
+        if fact_condition_id and condition_id and fact_condition_id != condition_id:
+            continue
+        return fact
+    return None
+
+
 def _finite_float_or_none(value):
     try:
         value_f = float(value)
@@ -2911,15 +2976,22 @@ def _build_exit_context(
     _cb_hi = getattr(edge_ctx, "confidence_band_upper", None)
     _held_price = p_market
     _fresh_post = getattr(edge_ctx, "p_posterior", None)
+    _pos_entry_posterior = None
+    try:
+        _pos_entry_posterior = float(pos.p_posterior)
+    except (TypeError, ValueError):
+        _pos_entry_posterior = None
     if (
-        pos.p_posterior is not None
+        _pos_entry_posterior is not None
+        and math.isfinite(_pos_entry_posterior)
+        and 0.0 < _pos_entry_posterior < 1.0
         and _fresh_post is not None and math.isfinite(float(_fresh_post))
         and _cb_lo is not None and _cb_hi is not None and _held_price is not None
         and math.isfinite(float(_cb_lo)) and math.isfinite(float(_cb_hi))
         and math.isfinite(float(_held_price))
     ):
         # Both entry and a finite CURRENT belief CI are available → arm the CI-separation gate.
-        _entry_posterior = float(pos.p_posterior)
+        _entry_posterior = _pos_entry_posterior
         _ci_half = max(0.0, float(getattr(pos, "entry_ci_width", 0.0) or 0.0)) / 2.0
         _entry_ci = (_entry_posterior - _ci_half, _entry_posterior + _ci_half)
         # Shift edge-space band → belief space by adding the held-side price back.
@@ -3236,6 +3308,24 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             summary["monitor_skipped_quarantine_resolution"] = summary.get("monitor_skipped_quarantine_resolution", 0) + 1
             continue
 
+        review_fact = _blocking_review_fact_for_position(portfolio, pos)
+        if review_fact is not None:
+            artifact.add_monitor_result(
+                deps.MonitorResult(
+                    position_id=pos.trade_id,
+                    fresh_prob=None,
+                    fresh_edge=None,
+                    should_exit=False,
+                    exit_reason="REVIEW_REQUIRED_INVALID_ENTRY_PROOF",
+                    neg_edge_count=pos.neg_edge_count,
+                )
+            )
+            summary["monitor_skipped_blocking_review_fact"] = summary.get(
+                "monitor_skipped_blocking_review_fact",
+                0,
+            ) + 1
+            continue
+
         if _position_direction_value(pos) not in {"buy_yes", "buy_no"}:
             artifact.add_monitor_result(
                 deps.MonitorResult(
@@ -3370,6 +3460,29 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 continue
 
             edge_ctx = refresh_position(conn, clob, pos)
+            monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
+                conn,
+                pos,
+                deps=deps,
+            )
+            if not monitor_canonical_written:
+                monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
+                artifact.add_monitor_result(
+                    deps.MonitorResult(
+                        position_id=pos.trade_id,
+                        fresh_prob=monitor_fresh_prob,
+                        fresh_edge=monitor_fresh_edge,
+                        should_exit=False,
+                        exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
+                        neg_edge_count=pos.neg_edge_count,
+                    )
+                )
+                monitor_result_written = True
+                summary["monitor_canonical_write_failed"] = (
+                    summary.get("monitor_canonical_write_failed", 0) + 1
+                )
+                summary["monitors"] += 1
+                continue
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,
@@ -3516,6 +3629,7 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     )
                 )
 
+    _emit_portfolio_rotation_shadow_summary(conn, summary, deps=deps)
     return portfolio_dirty, tracker_dirty
 
 
@@ -3539,6 +3653,194 @@ def _availability_status_for_exception(exc: Exception) -> str:
     if "chain" in text:
         return "CHAIN_UNAVAILABLE"
     return "DATA_UNAVAILABLE"
+
+
+def _is_attached_schema(conn, schema_name: str) -> bool:
+    try:
+        return any(str(row[1]) == schema_name for row in conn.execute("PRAGMA database_list").fetchall())
+    except Exception:
+        return False
+
+
+def _table_exists_in_schema(conn, schema_name: str, table_name: str) -> bool:
+    try:
+        row = conn.execute(
+            f"SELECT 1 FROM {schema_name}.sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _emit_portfolio_rotation_shadow_summary(conn, summary: dict, *, deps) -> None:
+    """Shadow-only global capital-rotation evidence.
+
+    This does not submit exits or entries. It joins current held positions from
+    the trade DB with recent budget-rejected candidates from world DB and records
+    whether a universal after-fee replacement candidate exists.
+    """
+    if conn is None:
+        summary["portfolio_rotation_shadow_status"] = "unavailable:no_connection"
+        return
+    try:
+        if not _is_attached_schema(conn, "world"):
+            conn.execute("ATTACH DATABASE ? AS world", (str(state_path("zeus-world.db")),))
+        if not _table_exists_in_schema(conn, "main", "position_current"):
+            summary["portfolio_rotation_shadow_status"] = "unavailable:no_position_current"
+            return
+        if not _table_exists_in_schema(conn, "main", "position_events"):
+            summary["portfolio_rotation_shadow_status"] = "unavailable:no_position_events"
+            return
+        if not _table_exists_in_schema(conn, "world", "no_trade_regret_events"):
+            summary["portfolio_rotation_shadow_status"] = "unavailable:no_regret_events"
+            return
+
+        from src.config import exit_fee_rate
+        from src.strategy.portfolio_rotation import (
+            RotationCandidate,
+            RotationHold,
+            best_rotation,
+        )
+
+        now = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)
+        cutoff = (now - timedelta(minutes=30)).isoformat()
+        pos_rows = conn.execute(
+            """
+            SELECT pc.position_id, pc.city, pc.target_date,
+                   COALESCE(pc.temperature_metric, 'high') AS metric,
+                   pc.bin_label, pc.direction, pc.shares,
+                   pc.last_monitor_prob, pc.last_monitor_market_price,
+                   pc.token_id, pc.no_token_id, pc.condition_id,
+                   pe.payload_json
+              FROM position_current pc
+              JOIN (
+                    SELECT position_id, MAX(occurred_at) AS max_at
+                      FROM position_events
+                     WHERE event_type = 'MONITOR_REFRESHED'
+                     GROUP BY position_id
+                   ) latest ON latest.position_id = pc.position_id
+              JOIN position_events pe
+                ON pe.position_id = latest.position_id
+               AND pe.occurred_at = latest.max_at
+               AND pe.event_type = 'MONITOR_REFRESHED'
+             WHERE lower(COALESCE(pc.phase, '')) IN ('active', 'day0_window')
+            """
+        ).fetchall()
+        holds: list[RotationHold] = []
+        for row in pos_rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+                best_bid = payload.get("last_monitor_best_bid")
+                if best_bid is None:
+                    best_bid = row["last_monitor_market_price"]
+                token_id = row["token_id"] or row["no_token_id"] or ""
+                holds.append(
+                    RotationHold(
+                        position_id=str(row["position_id"] or ""),
+                        city=str(row["city"] or ""),
+                        target_date=str(row["target_date"] or ""),
+                        metric=str(row["metric"] or ""),
+                        bin_label=str(row["bin_label"] or ""),
+                        direction=str(row["direction"] or ""),
+                        shares=float(row["shares"] or 0.0),
+                        held_probability=float(row["last_monitor_prob"] or 0.0),
+                        held_side_best_bid=float(best_bid),
+                        token_id=str(token_id),
+                        condition_id=str(row["condition_id"] or ""),
+                    )
+                )
+            except Exception:
+                continue
+
+        cand_rows = conn.execute(
+            """
+            WITH latest AS (
+                SELECT token_id, MAX(created_at) AS max_created_at
+                  FROM world.no_trade_regret_events
+                 WHERE created_at >= ?
+                   AND rejection_reason LIKE 'KELLY_REJECTED:%'
+                   AND trade_score > 0
+                   AND q_lcb_5pct IS NOT NULL
+                   AND c_fee_adjusted IS NOT NULL
+                   AND token_id IS NOT NULL
+                 GROUP BY token_id
+            )
+            SELECT n.*
+              FROM world.no_trade_regret_events n
+              JOIN latest l
+                ON l.token_id = n.token_id
+               AND l.max_created_at = n.created_at
+             ORDER BY n.trade_score DESC
+             LIMIT 200
+            """,
+            (cutoff,),
+        ).fetchall()
+        candidates: list[RotationCandidate] = []
+        for row in cand_rows:
+            try:
+                candidates.append(
+                    RotationCandidate(
+                        event_id=str(row["event_id"] or ""),
+                        city=str(row["city"] or ""),
+                        target_date=str(row["target_date"] or ""),
+                        metric=str(row["metric"] or ""),
+                        bin_label=str(row["bin_label"] or ""),
+                        direction=str(row["direction"] or ""),
+                        q_lcb=float(row["q_lcb_5pct"]),
+                        fee_adjusted_cost=float(row["c_fee_adjusted"]),
+                        trade_score=float(row["trade_score"]),
+                        p_fill_lcb=(
+                            None if row["p_fill_lcb"] is None else float(row["p_fill_lcb"])
+                        ),
+                        token_id=str(row["token_id"] or ""),
+                        condition_id=str(row["condition_id"] or ""),
+                        rejection_reason=str(row["rejection_reason"] or ""),
+                    )
+                )
+            except Exception:
+                continue
+
+        decision = best_rotation(
+            holds,
+            candidates,
+            fee_rate=exit_fee_rate(),
+            min_net_improvement_usd=0.0,
+            min_net_improvement_ratio=0.0,
+            require_fill_lcb=True,
+        )
+        summary["portfolio_rotation_shadow_status"] = "ok"
+        summary["portfolio_rotation_shadow_holds"] = len(holds)
+        summary["portfolio_rotation_shadow_candidates"] = len(candidates)
+        summary["portfolio_rotation_shadow_has_replace_candidate"] = decision is not None
+        if decision is not None:
+            summary["portfolio_rotation_shadow_best"] = {
+                "reason": decision.reason,
+                "net_improvement_usd": round(decision.net_improvement_usd, 6),
+                "net_improvement_ratio": round(decision.net_improvement_ratio, 6),
+                "sell_position_id": decision.hold.position_id,
+                "sell_city": decision.hold.city,
+                "sell_target_date": decision.hold.target_date,
+                "sell_metric": decision.hold.metric,
+                "sell_bin_label": decision.hold.bin_label,
+                "buy_city": decision.candidate.city,
+                "buy_target_date": decision.candidate.target_date,
+                "buy_metric": decision.candidate.metric,
+                "buy_bin_label": decision.candidate.bin_label,
+                "buy_direction": decision.candidate.direction,
+                "buy_trade_score": round(decision.candidate.trade_score, 6),
+                "buy_q_lcb": round(decision.candidate.q_lcb, 6),
+                "buy_cost": round(decision.candidate.fee_adjusted_cost, 6),
+                "buy_p_fill_lcb": round(decision.fill_lcb_used, 6),
+            }
+            deps.logger.info(
+                "PORTFOLIO_ROTATION_SHADOW best=%s",
+                summary["portfolio_rotation_shadow_best"],
+            )
+    except Exception as exc:
+        summary["portfolio_rotation_shadow_status"] = "error"
+        summary["portfolio_rotation_shadow_error"] = f"{exc.__class__.__name__}: {exc}"
+        deps.logger.warning("Portfolio rotation shadow probe failed: %s", exc, exc_info=True)
 
 
 def _observation_time_to_local_date(observation_time, timezone_name: str):

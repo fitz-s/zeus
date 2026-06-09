@@ -11,9 +11,9 @@ measurement-substrate-first pattern repeated.
 K1 contract (mirrors src/state/edge_observation.py + attribution_drift.py + ws_poll_reaction.py):
   - Read-only projection. NO write path. NO JSON persistence. NO caches.
   - Reads canonical surfaces directly via src.calibration.store.list_active_platt_models
-    + list_active_platt_models_legacy (BATCH 1 read-side additions to store.py;
-    pure SELECT, mirror load_platt_model[_v2] read filters: is_active=1 AND
-    authority='VERIFIED').
+    (BATCH 1 read-side addition to store.py; pure SELECT, mirrors
+    load_platt_model[_v2] read filters: is_active=1 AND authority='VERIFIED').
+    (list_active_platt_models_legacy was removed B3cont 2026-05-28.)
   - Imports consolidated to top of file per Tier 2 Phase 4 LOW-CAVEAT-EO-2-1
     (cited by name above; mid-file imports with noqa are an anti-pattern).
 
@@ -271,12 +271,12 @@ def compute_platt_parameter_snapshot_per_bucket(
 ) -> dict[str, dict[str, Any]]:
     """Compute per-bucket-key Platt parameter snapshot for the current window.
 
-    K1-compliant read-only. Reads list_active_platt_models +
-    list_active_platt_models_legacy (canonical store.py readers; pure
-    SELECT; is_active=1 + authority='VERIFIED' filter applied at the
-    source). Returns a dict keyed by bucket_key (v2 model_key for v2
-    rows; legacy bucket_key for legacy rows) with the full snapshot
-    shape per row.
+    K1-compliant read-only. Reads list_active_platt_models (canonical
+    store.py reader; pure SELECT; is_active=1 + authority='VERIFIED'
+    filter applied at the source). Returns a dict keyed by bucket_key
+    (v2 model_key) with the full snapshot shape per row.
+    (legacy platt_models table + list_active_platt_models_legacy reader
+    were removed B3cont 2026-05-28.)
 
     Args:
         conn: open sqlite3 connection to a Zeus state DB

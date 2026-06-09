@@ -47,12 +47,17 @@ def _make_opendata_high_payload(
     *,
     local_day_start_iso: str | None = None,
     local_day_end_iso: str | None = None,
+    forecast_window_start_iso: str | None = None,
+    forecast_window_end_iso: str | None = None,
+    nearest_grid_lat: float | None = 51.5,
+    nearest_grid_lon: float | None = -0.5,
+    nearest_grid_distance_km: float | None = 5.0,
     missing_member_ids: tuple[int, ...] = (),
 ) -> dict:
     local_day_start_iso = local_day_start_iso or f"{target_date}T00:00:00+00:00"
     local_day_end_iso = local_day_end_iso or f"{target_date}T23:59:59+00:00"
     missing_members = sorted(set(missing_member_ids))
-    return {
+    payload = {
         "generated_at": "2026-05-01T08:00:00+00:00",
         "data_version": ECMWF_OPENDATA_HIGH_DATA_VERSION,
         # 2026-05-07 mx2t3 cutover: payload now reports the 3h native physical
@@ -85,9 +90,9 @@ def _make_opendata_high_payload(
         "step_horizon_deficit_hours": 0.0,
         "causality": {"status": "OK"},
         "boundary_ambiguous": False,
-        "nearest_grid_lat": 51.5,
-        "nearest_grid_lon": -0.5,
-        "nearest_grid_distance_km": 5.0,
+        "nearest_grid_lat": nearest_grid_lat,
+        "nearest_grid_lon": nearest_grid_lon,
+        "nearest_grid_distance_km": nearest_grid_distance_km,
         "selected_step_ranges": ["18-24", "24-30"],
         "member_count": 51,
         "missing_members": missing_members,
@@ -100,6 +105,16 @@ def _make_opendata_high_payload(
             for i in range(51)
         ],
     }
+    if forecast_window_start_iso is not None and forecast_window_end_iso is not None:
+        payload.update(
+            {
+                "forecast_window_start_utc": forecast_window_start_iso,
+                "forecast_window_end_utc": forecast_window_end_iso,
+                "forecast_window_start_local": forecast_window_start_iso,
+                "forecast_window_end_local": forecast_window_end_iso,
+            }
+        )
+    return payload
 
 
 def test_opendata_high_payload_lands_in_v2(tmp_path: Path, monkeypatch):
@@ -176,6 +191,8 @@ def test_collect_open_ens_cycle_writes_authority_chain_readable_by_live_reader(t
         issue,
         local_day_start_iso="2026-05-01T23:00:00+00:00",
         local_day_end_iso="2026-05-02T23:00:00+00:00",
+        forecast_window_start_iso="2026-05-01T23:00:00+00:00",
+        forecast_window_end_iso="2026-05-02T23:00:00+00:00",
     )
     json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
@@ -317,6 +334,62 @@ def test_collect_open_ens_cycle_blocks_live_when_member_value_missing(tmp_path: 
     assert json.loads(producer["reason_codes_json"]) == ["MISSING_EXPECTED_MEMBERS"]
 
 
+def test_collect_open_ens_cycle_fills_wu_rows_missing_grid_provenance(tmp_path: Path, monkeypatch):
+    """Producer backfills WU grid provenance before readiness/reader authority."""
+    from src.data import ecmwf_open_data
+
+    forecasts_conn = sqlite3.connect(str(tmp_path / "forecasts.db"))
+    forecasts_conn.row_factory = sqlite3.Row
+    init_schema_forecasts(forecasts_conn)
+
+    fifty_one_root = tmp_path / "51 source data"
+    monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
+    extract_subdir = "open_ens_mx2t6_localday_max"
+    payload = _make_opendata_high_payload(
+        "2026-05-02",
+        "2026-05-01T00:00:00+00:00",
+        local_day_start_iso="2026-05-01T23:00:00+00:00",
+        local_day_end_iso="2026-05-02T23:00:00+00:00",
+        forecast_window_start_iso="2026-05-01T23:00:00+00:00",
+        forecast_window_end_iso="2026-05-02T23:00:00+00:00",
+        nearest_grid_lat=None,
+        nearest_grid_lon=None,
+        nearest_grid_distance_km=None,
+    )
+    json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
+    json_dir.mkdir(parents=True)
+    (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+
+    result = ecmwf_open_data.collect_open_ens_cycle(
+        track="mx2t6_high",
+        run_date=date(2026, 5, 1),
+        run_hour=0,
+        skip_download=True,
+        skip_extract=True,
+        conn=forecasts_conn,
+        now_utc=datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["status"] == "ok"
+    snapshot = forecasts_conn.execute("SELECT provenance_json FROM ensemble_snapshots").fetchone()
+    provenance = json.loads(snapshot["provenance_json"])
+    assert provenance["nearest_grid_lat"] is not None
+    assert provenance["nearest_grid_lon"] is not None
+    assert provenance["nearest_grid_distance_km"] is not None
+    assert provenance["nearest_grid_provenance_source"] == "canonical_settlement_coordinate_regular_ll_0p25"
+    coverage = forecasts_conn.execute("SELECT * FROM source_run_coverage").fetchone()
+    assert coverage["readiness_status"] == "LIVE_ELIGIBLE"
+    assert coverage["reason_code"] is None
+    producer = forecasts_conn.execute(
+        "SELECT * FROM readiness_state WHERE strategy_key = 'producer_readiness'"
+    ).fetchone()
+    assert producer["status"] == "LIVE_ELIGIBLE"
+    assert json.loads(producer["reason_codes_json"]) == ["PRODUCER_COVERAGE_READY"]
+
+
 def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_path: Path, monkeypatch):
     from src.data import ecmwf_open_data
 
@@ -327,17 +400,23 @@ def test_collect_open_ens_cycle_partial_global_run_allows_covered_target(tmp_pat
 
     fifty_one_root = tmp_path / "51 source data"
     monkeypatch.setattr(ecmwf_open_data, "FIFTY_ONE_ROOT", fifty_one_root)
-    monkeypatch.setattr(ecmwf_open_data, "STEP_HOURS", [3, 6, 9, 12, 15, 18, 21, 24, 150])
+    monkeypatch.setattr(
+        ecmwf_open_data,
+        "STEP_HOURS",
+        [3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45, 48, 150],
+    )
     extract_subdir = "open_ens_mx2t6_localday_max"
     payload = _make_opendata_high_payload(
-        "2026-05-01",
+        "2026-05-02",
         "2026-05-01T00:00:00+00:00",
-        local_day_start_iso="2026-04-30T23:00:00+00:00",
-        local_day_end_iso="2026-05-01T23:00:00+00:00",
+        local_day_start_iso="2026-05-01T23:00:00+00:00",
+        local_day_end_iso="2026-05-02T23:00:00+00:00",
+        forecast_window_start_iso="2026-05-01T23:00:00+00:00",
+        forecast_window_end_iso="2026-05-02T23:00:00+00:00",
     )
     json_dir = fifty_one_root / "raw" / extract_subdir / "london" / "20260501"
     json_dir.mkdir(parents=True)
-    (json_dir / f"{extract_subdir}_target_2026-05-01_lead_1.json").write_text(
+    (json_dir / f"{extract_subdir}_target_2026-05-02_lead_1.json").write_text(
         json.dumps(payload),
         encoding="utf-8",
     )

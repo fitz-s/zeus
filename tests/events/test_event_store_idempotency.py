@@ -71,6 +71,8 @@ def _fsr_entity_event(
     target_date: str = "2026-05-24",
     metric: str = "high",
     source_run_completeness_status: str = "COMPLETE",
+    coverage_completeness_status: str | None = None,
+    coverage_readiness_status: str | None = None,
 ):
     payload = _payload(
         snapshot_id,
@@ -81,9 +83,10 @@ def _fsr_entity_event(
     if source_run_completeness_status != "COMPLETE":
         payload = dataclasses.replace(
             payload,
-            completeness_status="PARTIAL_ALLOWED",
+            completeness_status=coverage_completeness_status or "PARTIAL_ALLOWED",
             source_run_completeness_status=source_run_completeness_status,
-            coverage_completeness_status=source_run_completeness_status,
+            coverage_completeness_status=coverage_completeness_status or source_run_completeness_status,
+            coverage_readiness_status=coverage_readiness_status or "NOT_ELIGIBLE",
         )
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
@@ -346,6 +349,43 @@ def test_archive_superseded_forecast_snapshot_events_keeps_complete_over_newer_p
     )
     assert rows[complete.event_id] == "pending"
     assert rows[partial.event_id] == "expired"
+
+
+def test_archive_superseded_forecast_snapshot_events_keeps_window_complete_source_partial():
+    conn = _world_conn()
+    store = EventStore(conn)
+    entity_key = "Chicago|2026-05-24|high|source-run-1"
+    older_incomplete = _fsr_entity_event(
+        entity_key,
+        "snap-coverage-partial",
+        "2026-05-24T04:00:00+00:00",
+        "2026-05-24T04:01:00+00:00",
+        source_run_completeness_status="PARTIAL",
+        coverage_completeness_status="PARTIAL",
+        coverage_readiness_status="NOT_ELIGIBLE",
+    )
+    window_complete = _fsr_entity_event(
+        entity_key,
+        "snap-window-complete",
+        "2026-05-24T04:10:00+00:00",
+        "2026-05-24T04:11:00+00:00",
+        source_run_completeness_status="PARTIAL",
+        coverage_completeness_status="COMPLETE",
+        coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    for event in (older_incomplete, window_complete):
+        store.insert_or_ignore(event)
+
+    archived = store.archive_superseded_forecast_snapshot_events()
+
+    assert archived == 1
+    rows = dict(
+        conn.execute(
+            "SELECT event_id, processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    )
+    assert rows[older_incomplete.event_id] == "expired"
+    assert rows[window_complete.event_id] == "pending"
 
 
 def test_fetch_pending_prioritizes_day0_hard_fact_over_complete_forecast_backlog():

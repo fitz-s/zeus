@@ -1,2 +1,0 @@
-city,target_date,bin_label,direction,p_posterior,p_cal,p_market,entry_price_raw,price_type_in,price_type_out,value_in,value_out,fee_delta
-Kuala Lumpur,2026-05-23,Will the highest temperature in Kuala Lumpur be 25°C or below on May 23?,buy_yes,0.06199814143947086,0.06199814143947086,0.0042789935323823865,0.0042789935323823865,implied_probability,fee_adjusted,0.0042789935323823865,0.004492027719718997,0.0002130341873366106

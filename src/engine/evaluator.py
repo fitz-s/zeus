@@ -65,10 +65,8 @@ from src.calibration.ens_error_model import (
 from src.calibration.ens_bias_model import PosteriorBias as _PosteriorBias
 from src.config import (
     CONFIG_DIR,
-    PROJECT_ROOT,
     City,
     EntryForecastConfig,
-    EntryForecastRolloutMode,
     day0_n_mc,
     edge_n_bootstrap,
     ensemble_crosscheck_member_count,
@@ -88,7 +86,6 @@ from src.control.entry_forecast_rollout import evaluate_entry_forecast_rollout_g
 from src.data.calibration_transfer_policy import (
     MIN_TRANSFER_EVIDENCE_PAIRS,
     POLICY_ECMWF_OPENDATA_USES_TIGGE_LOCALDAY_CAL_V1,
-    evaluate_calibration_transfer_policy,
     evaluate_calibration_transfer_policy_with_evidence,
     source_platt_transfer_evidence_valid,
     target_transfer_cohort_evidence_valid,
@@ -98,7 +95,6 @@ from src.data.executable_forecast_reader import read_executable_forecast
 from src.data.forecast_target_contract import ForecastTargetScope
 from src.contracts import (
     EntryMethod,
-    Direction,
     EdgeContext,
     EpistemicContext,
     SettlementSemantics,
@@ -111,7 +107,6 @@ from src.engine.time_context import lead_days_to_date_start, lead_hours_to_date_
 from src.signal.day0_router import Day0Router, Day0SignalInputs
 from src.signal.probability_sanity import (
     check_cumulative_tail_discrepancy,
-    check_edge_bin_tail_discrepancy,
     probability_edge_bin_sanity,
     validate_high_distribution,
 )
@@ -139,21 +134,17 @@ from src.state.portfolio import (
     is_token_on_cooldown,
     portfolio_heat_for_bankroll,
 )
-from src.strategy.fdr_filter import fdr_filter, DEFAULT_FDR_ALPHA
+from src.strategy.fdr_filter import DEFAULT_FDR_ALPHA
 from src.strategy.family_exclusive_dedup import (
     FAMILY_REJECTION_STAGE,
     MUTUALLY_EXCLUSIVE_FAMILY_DEDUP,
-    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
-    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
     build_weather_family_decision,
-    native_multibin_buy_no_live_enabled,
     native_multibin_buy_no_shadow_enabled,
 )
 from src.strategy.kelly import (
     _unified_uncertainty_budget_enabled,
     dynamic_kelly_mult,
     kelly_size,
-    observed_target_day_fraction,
     phase_aware_kelly_multiplier,
     strategy_kelly_multiplier,
 )
@@ -179,7 +170,7 @@ from src.contracts.executable_market_snapshot import (
     fee_rate_fraction_from_details,
 )
 from src.contracts.effective_kelly_context import EffectiveKellyContext, MissingEffectiveContextError
-from src.contracts.execution_price import ExecutionPrice, polymarket_fee
+from src.contracts.execution_price import ExecutionPrice
 from src.contracts.alpha_decision import AlphaTargetMismatchError
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.data.forecast_source_registry import (
@@ -2695,7 +2686,7 @@ def _apply_edli_live_family_before_selection(
 
         def _edli_bootstrap_bin_no(bin_idx: int, _n: int) -> tuple[float, float, float]:
             p_market_no = analysis.buy_no_market_price(bin_idx)
-            edge = float((1.0 - probabilities[bin_idx]) - p_market_no)
+            edge = -float("inf")
             return edge, edge, (0.0 if edge > 0.0 else 1.0)
 
         analysis._bootstrap_bin = _edli_bootstrap_bin  # type: ignore[method-assign]
@@ -4552,7 +4543,7 @@ def evaluate_candidate(
                 authority_filter='UNVERIFIED',
                 metric=_gate_metric,
             )
-        except Exception as e:
+        except Exception:
             return [EdgeDecision(
                 decision_id=_decision_id(),
                 tokens=tokens,
@@ -6344,11 +6335,11 @@ def evaluate_candidate(
                 f"oracle_penalty_observed_{oracle.penalty_multiplier:g}x"
             )
 
-        # DDD v2 Rail 2 discount: reduce Kelly by (1 − ddd_discount). Applied
+        # DDD v2 Rail 2 discount: reduce Kelly by the remaining multiplier. Applied
         # AFTER oracle penalty so the two compose multiplicatively. ddd_discount
         # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
         if ddd_discount > 0.0:
-            km *= max(0.0, 1.0 - ddd_discount)
+            km *= max(0.0, (1.0 / ddd_discount - 1.0) * ddd_discount)
         km *= source_quality_haircut
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.

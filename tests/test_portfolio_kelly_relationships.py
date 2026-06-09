@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-06-03; last_reviewed=2026-06-03; last_reused=2026-06-03
 # Purpose: K1–K8 cross-module relationship tests for portfolio-aware (multi) Kelly sizing (#107)
 # Reuse: verify sizing_context + evaluate_kelly + correlated_committed_usd are all at HEAD;
-#   confirm effective_bankroll / effective_bankroll_raw formulas unchanged before relying on results
+#   confirm portfolio pressure is a soft Kelly input, not a hard global cap
 """Relationship tests for portfolio-aware (multi) Kelly sizing — Task #107.
 
 These are CROSS-MODULE relationship tests (Fitz methodology: test the property
@@ -10,13 +10,14 @@ that holds when one module's output flows into another), written RED-first.
 The single structural decision under test: "committed capital =
 correlation-weighted open+in-flight exposure", computed in
 ``portfolio.correlated_committed_usd`` and consumed by ``SizingContext`` /
-``evaluate_kelly`` so the live EDLI reactor sizes each bet against a bankroll
-NET of already-committed (correlation-weighted) capital.
+``evaluate_kelly`` so the live EDLI reactor reduces each marginal Kelly size
+as portfolio pressure rises.
 
 Let ``size(new, held, B)`` be the portfolio-aware sized stake in USD. The
 invariants:
 
-- INV-K1  budget:        Σ simultaneous stakes ≤ B·f_cap.
+- INV-K1  flow:          positive-edge simultaneous stakes keep flowing while
+                          later marginal stakes shrink under pressure.
 - INV-K2  MECE:          same (city,date,metric) bins size with corr=1.0 —
                           the 2nd bin is strictly smaller than independent.
 - INV-K3  single cap:    a single bet ≤ max_single_position_pct·B (0.10).
@@ -25,7 +26,8 @@ invariants:
                           correlated capital strictly decreases it.
 - INV-K5  corr-weighting: a correlated held position reduces size MORE than an
                           uncorrelated one of equal committed capital.
-- INV-K6  fail-closed:   corr_committed ≥ B  ⇒  size 0 (never negative/NaN).
+- INV-K6  no hard cap:   corr_committed ≥ B still produces a small positive
+                          marginal size for a positive-edge candidate.
 - INV-K7  in-flight:     a just-emitted (unfilled, cost_basis=0) sibling within
                           the same cycle is counted via the reservation accumulator.
 - INV-K8  no-amplify:    portfolio-aware size ≤ single-Kelly size, everywhere.
@@ -39,7 +41,7 @@ import pytest
 
 from src.contracts.execution_price import ExecutionPrice
 from src.events.money_path_adapters import evaluate_kelly
-from src.sizing.sizing_context import SizingContext, effective_bankroll, effective_bankroll_raw
+from src.sizing.sizing_context import SizingContext
 from src.state.portfolio import (
     PortfolioState,
     Position,
@@ -186,11 +188,16 @@ def _single_kelly_size(
     return proof.size_usd
 
 
-# ── INV-K1: budget — Σ simultaneous stakes ≤ B·f_cap ─────────────────────────
+# ── INV-K1: flow — pressure shrinks marginal Kelly without hard-zeroing ──────
 
-def test_K1_simultaneous_stakes_respect_budget():
-    """Five same-cycle bets across the same family, sized in sequence against a
-    running reservation, must sum to ≤ B·f_cap (the budget is never breached)."""
+def test_K1_simultaneous_stakes_shrink_without_hard_zero():
+    """Same-family same-cycle bets keep flowing, but marginal size declines.
+
+    This pins the 2026-06-07 live-flow fix: fractional Kelly is the risk scale.
+    Portfolio heat/correlation is a soft pressure input; it must not become a
+    hard ``B * cap - committed`` gate that fabricates size=0 for positive-edge
+    candidates after the book crosses an arbitrary total-portfolio line.
+    """
     reserved: list[tuple[str, float]] = []
     sizes: list[float] = []
     for i in range(5):
@@ -202,31 +209,13 @@ def test_K1_simultaneous_stakes_respect_budget():
         )
         sizes.append(s)
         reserved.append((NEAR_CITY, s))
-    total = sum(sizes)
-    # Budget: Σ stakes ≤ B·f_cap (+ float epsilon).
-    assert total <= BANKROLL * F_CAP + 1e-6, (
-        f"budget breached: Σ={total:.4f} > B·f_cap={BANKROLL * F_CAP:.4f}"
-    )
+    assert all(s > 0.0 for s in sizes), sizes
+    assert sizes[-1] < sizes[0], sizes
+    assert max(sizes) <= BANKROLL * MAX_SINGLE_POSITION_PCT + 1e-6
 
 
-def test_K1b_distant_city_absolute_raw_floor():
-    """INV-K1b (verifier defect): 15 geographically distant cities at the 0.10
-    correlation floor must collectively sum to ≤ B·max_portfolio_heat_pct (the
-    absolute cash ceiling), AND ≤ B (never exceed the bankroll).
-
-    This is the HEADLINE VERIFIER DEFECT: before the fix each of 15 sequential
-    distant-city bets saw only 0.10 fraction of prior committed as ``corr_committed``
-    → the corr-weighted effective bankroll barely shrank → each bet sized near the
-    K3 single-bet cap ($17) → Σ = $253 against B=$170.
-
-    This test was RED under the original impl (no raw-dollar floor) and GREEN after
-    the ``effective_bankroll_raw`` fix. It exercises the SECOND structural belt:
-    absolute raw-committed constraint (INV-K1b).
-
-    Uses ``_size`` (which mirrors the live reactor by passing both
-    ``corr_committed_usd`` AND ``raw_committed_usd``) with sequentially growing held
-    books of distant-city positions.
-    """
+def test_K1b_distant_city_raw_pressure_shrinks_without_stopping_flow():
+    """Raw exposure contributes to soft pressure without becoming a hard cap."""
     # 15 distinct far-apart cities: use Singapore as new_city (gets 0.10 corr floor
     # vs all others) and build up the held book sequentially.
     NEW_CITY = "Singapore"
@@ -255,15 +244,10 @@ def test_K1b_distant_city_absolute_raw_floor():
         held.append(_held_position(city=city, committed_usd=s, tid=f"far_{i}"))
         reserved.append((city, s))
 
-    total_raw = sum(sizes)
-    max_heat_cap = BANKROLL * 0.5  # max_portfolio_heat_pct=0.5 from config
-    assert total_raw <= max_heat_cap + 1e-6, (
-        f"absolute cash ceiling breached: Σ raw stakes={total_raw:.4f} "
-        f"> max_heat_cap={max_heat_cap:.4f} (B·0.5). "
-        f"Individual sizes: {[f'{s:.2f}' for s in sizes]}"
-    )
-    assert total_raw <= BANKROLL + 1e-6, (
-        f"total exceeds full bankroll: Σ={total_raw:.4f} > B={BANKROLL:.4f}"
+    assert all(s > 0.0 for s in sizes), sizes
+    assert sizes[-1] < sizes[0], sizes
+    assert sum(sizes) < 15 * sizes[0], (
+        f"raw pressure did not reduce cumulative marginal sizing: {sizes!r}"
     )
 
 
@@ -284,8 +268,8 @@ def test_K2_same_family_bins_sized_non_independent():
     a visible s2=$15.75 < cap=$17.00 (K3 clamp ≠ K2 territory here).
     """
     first = _held_position(city=NEAR_CITY, committed_usd=20.0, tid="binA")
-    s2 = _size(new_city=NEAR_CITY, held=[first])  # binB after binA committed
-    s2_indep = _size(new_city=NEAR_CITY, held=[])  # binB sized alone
+    s2 = _size(new_city=NEAR_CITY, held=[first], p_posterior=0.65)
+    s2_indep = _size(new_city=NEAR_CITY, held=[], p_posterior=0.65)
     assert s2 < s2_indep, (
         f"same-family bin not reduced: s2={s2:.4f} !< s2_indep={s2_indep:.4f}"
     )
@@ -321,14 +305,14 @@ def test_K3_single_bet_respects_max_single_position_pct():
 def test_K4_size_monotone_decreasing_in_committed():
     """Adding an open position never increases the next bet's size; a correlated
     add strictly decreases it."""
-    base = _size(new_city=NEAR_CITY, held=[])
+    base = _size(new_city=NEAR_CITY, held=[], p_posterior=0.65)
     # Far (uncorrelated) add → non-increasing.
     far = _held_position(city=FAR_CITY, committed_usd=30.0, tid="far1")
-    with_far = _size(new_city=NEAR_CITY, held=[far])
+    with_far = _size(new_city=NEAR_CITY, held=[far], p_posterior=0.65)
     assert with_far <= base + 1e-9
     # Correlated (same-city) add → strictly decreasing.
     near = _held_position(city=NEAR_CITY, committed_usd=30.0, tid="near1")
-    with_near = _size(new_city=NEAR_CITY, held=[near])
+    with_near = _size(new_city=NEAR_CITY, held=[near], p_posterior=0.65)
     assert with_near < base, f"correlated add did not reduce: {with_near:.4f} !< {base:.4f}"
 
 
@@ -350,17 +334,17 @@ def test_K5_correlated_position_reduces_more_than_uncorrelated():
 
 # ── INV-K6: full-exposure fail-closed ────────────────────────────────────────
 
-def test_K6_full_exposure_sizes_to_zero():
-    """When correlation-weighted committed ≥ B, effective bankroll is 0 → size 0
-    (never negative, never NaN)."""
+def test_K6_full_exposure_damps_without_hard_zero():
+    """Heavy existing exposure damps but does not hard-zero a positive edge."""
     # Same-city committed capital ≥ bankroll (corr=1.0 → full weight).
     over = _held_position(city=NEAR_CITY, committed_usd=BANKROLL + 50.0, tid="over1")
     s = _size(new_city=NEAR_CITY, held=[over])
-    assert s == 0.0, f"full-exposure did not fail-closed to 0: {s!r}"
+    assert s > 0.0, f"positive-edge candidate was hard-zeroed: {s!r}"
+    assert s < _size(new_city=NEAR_CITY, held=[]), (
+        f"heavy exposure did not damp marginal size: {s!r}"
+    )
     assert not math.isnan(s)
     assert s >= 0.0
-    # effective_bankroll helper itself clamps at 0.
-    assert effective_bankroll(BANKROLL, BANKROLL + 50.0) == 0.0
 
 
 # ── INV-K7: in-flight reservation (intra-cycle) ──────────────────────────────

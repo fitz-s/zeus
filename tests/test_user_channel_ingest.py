@@ -1652,6 +1652,131 @@ def test_handle_message_auth_failure_does_not_clear_m5_latch(conn):
     assert status.m5_reconcile_required is True
 
 
+def test_transport_keepalive_refreshes_only_already_unlatched_subscription(conn):
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=True,
+            last_message_at=NOW - timedelta(seconds=10),
+            subscription_state="SUBSCRIBED",
+            gap_reason="message_received",
+            m5_reconcile_required=False,
+            updated_at=NOW - timedelta(seconds=10),
+            stale_after_seconds=30,
+        )
+    )
+
+    status = _ingestor(conn)._record_transport_keepalive(observed_at=NOW)
+
+    assert status.subscription_state == "SUBSCRIBED"
+    assert status.m5_reconcile_required is False
+    assert status.last_message_at == NOW
+
+
+def test_transport_keepalive_clears_clean_boot_when_local_surface_empty(conn):
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="DISCONNECTED",
+            gap_reason="not_configured",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+        )
+    )
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+
+    status = _ingestor(conn)._record_transport_keepalive(observed_at=NOW)
+
+    assert status.subscription_state == "AUTHED"
+    assert status.m5_reconcile_required is False
+    assert status.gap_reason == "message_received_no_local_side_effects"
+
+
+def test_transport_keepalive_clears_clean_boot_with_known_exposure_history(conn):
+    conn.execute("UPDATE venue_commands SET state = 'FILLED' WHERE command_id = 'cmd-ws'")
+    confirmed_trade_fact_id = _seed_lot_trade_fact(
+        conn,
+        state="CONFIRMED",
+        trade_id="trade-clean-boot-confirmed",
+    )
+    append_position_lot(
+        conn,
+        position_id=99,
+        state="CONFIRMED_EXPOSURE",
+        shares=1,
+        entry_price_avg="0.50",
+        source_command_id="cmd-ws",
+        source_trade_fact_id=confirmed_trade_fact_id,
+        captured_at=NOW,
+        state_changed_at=NOW,
+    )
+    optimistic_trade_fact_id = _seed_lot_trade_fact(
+        conn,
+        state="MATCHED",
+        trade_id="trade-clean-boot-matched",
+    )
+    append_position_lot(
+        conn,
+        position_id=100,
+        state="OPTIMISTIC_EXPOSURE",
+        shares=1,
+        entry_price_avg="0.50",
+        source_command_id="cmd-ws",
+        source_trade_fact_id=optimistic_trade_fact_id,
+        captured_at=NOW,
+        state_changed_at=NOW,
+    )
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="DISCONNECTED",
+            gap_reason="not_configured",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(seconds=10),
+            stale_after_seconds=30,
+        )
+    )
+
+    status = _ingestor(conn)._record_transport_keepalive(observed_at=NOW)
+
+    assert status.subscription_state == "AUTHED"
+    assert status.m5_reconcile_required is False
+    assert status.gap_reason == "message_received_no_local_side_effects"
+
+
+def test_transport_keepalive_does_not_clear_stale_gap(conn):
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="DISCONNECTED",
+            gap_reason="not_configured",
+            m5_reconcile_required=True,
+            updated_at=NOW - timedelta(minutes=2),
+            stale_after_seconds=30,
+        )
+    )
+
+    assert _ingestor(conn)._record_transport_keepalive(observed_at=NOW).m5_reconcile_required is True
+
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=True,
+            last_message_at=NOW - timedelta(minutes=2),
+            subscription_state="SUBSCRIBED",
+            gap_reason="message_received",
+            m5_reconcile_required=False,
+            updated_at=NOW - timedelta(minutes=2),
+            stale_after_seconds=30,
+        )
+    )
+
+    status = _ingestor(conn)._record_transport_keepalive(observed_at=NOW)
+
+    assert status.last_message_at == NOW - timedelta(minutes=2)
+
+
 def test_record_subscribed_message_no_longer_called_in_start_outbound_path():
     """Codex P1 follow-up to PR #37: structural antibody.
 

@@ -6,6 +6,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
+
 from src.events.event_writer import EventWriter
 from src.events.triggers.forecast_snapshot_ready import (
     ForecastSnapshotReadyTrigger,
@@ -18,6 +20,14 @@ from src.state.db import init_schema
 
 
 UTC = timezone.utc
+
+
+@pytest.fixture(autouse=True)
+def _replacement_authority_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        lambda: False,
+    )
 
 
 def _source_run(status: str = "SUCCESS", completeness: str = "COMPLETE") -> dict:
@@ -138,6 +148,47 @@ def test_opendata_t3_data_version_normalizes_legacy_track_label():
     payload = _json.loads(conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
     assert payload["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-06-05T12Z"
     assert payload["track"] == "mx2t3_high_full_horizon"
+
+
+def test_replacement_authority_track_masks_legacy_t3_carrier(monkeypatch):
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        lambda: True,
+    )
+    conn = sqlite3.connect(":memory:")
+    init_schema(conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(conn),
+        live_eligibility_reader=lambda _sr, _cov, _snap, _now: True,
+    )
+    source_run = _source_run()
+    source_run["source_id"] = "ecmwf_open_data"
+    source_run["source_run_id"] = "ecmwf_open_data:mx2t6_high:2026-06-05T12Z"
+    source_run["track"] = "mx2t6_high_full_horizon"
+    coverage = _coverage()
+    coverage["source_id"] = "ecmwf_open_data"
+    coverage["source_run_id"] = source_run["source_run_id"]
+    coverage["track"] = "mx2t6_high_full_horizon"
+    coverage["data_version"] = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+    snapshot = _snapshot()
+    snapshot["source_run_id"] = source_run["source_run_id"]
+    snapshot["data_version"] = "ecmwf_opendata_mx2t3_local_calendar_day_max"
+
+    trigger.emit_from_rows(
+        source_run=source_run,
+        coverage=coverage,
+        snapshot=snapshot,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+    )
+
+    import json as _json
+
+    payload = _json.loads(conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
+    assert payload["source_run_id"] == "ecmwf_open_data:mx2t6_high:2026-06-05T12Z"
+    assert payload["track"] == "replacement_0_1_aifs_openmeteo_soft_anchor"
+    assert "t3" not in payload["track"]
+    assert "t6" not in payload["track"]
 
 
 def test_rerun_idempotent_same_source_run_snapshot_hash():
@@ -473,6 +524,63 @@ def test_scan_emits_zero_for_strictly_past_target_local_day():
     assert results == [], "strictly-past target must emit ZERO events at the source"
     count = world_conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0]
     assert count == 0, "no opportunity_event row may be written for an already-settled target"
+
+
+def test_replacement_authority_scan_requires_matching_0_1_posterior(monkeypatch):
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        lambda: True,
+    )
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    _seed_committed_chicago_2026_05_24(forecasts_conn)
+
+    world_conn = sqlite3.connect(":memory:")
+    init_schema(world_conn)
+    trigger = ForecastSnapshotReadyTrigger(
+        EventWriter(world_conn),
+        live_eligibility_reader=executable_forecast_live_eligible_reader(forecasts_conn),
+    )
+
+    without_posterior = trigger.scan_committed_snapshots(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:17:00+00:00",
+    )
+    assert without_posterior == []
+
+    forecasts_conn.execute(
+        """
+        INSERT INTO forecast_posteriors (
+            source_id, product_id, data_version, city, target_date, temperature_metric,
+            source_cycle_time, source_available_at, computed_at, q_json, q_lcb_json,
+            q_ucb_json, posterior_method, dependency_source_run_ids_json,
+            provenance_json, trade_authority_status, training_allowed
+        ) VALUES (
+            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor',
+            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1',
+            'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1',
+            'Chicago', '2026-05-24', 'high',
+            '2026-05-24T00:00:00+00:00',
+            '2026-05-24T04:15:00+00:00',
+            '2026-05-24T04:16:00+00:00',
+            '{"bin:28":0.42}', NULL, NULL,
+            'aifs_openmeteo_soft_anchor',
+            '[]', '{}', 'SHADOW_ONLY', 0
+        )
+        """
+    )
+
+    with_posterior = trigger.scan_committed_snapshots(
+        forecasts_conn=forecasts_conn,
+        decision_time=_decision_time(),
+        received_at="2026-05-24T04:18:00+00:00",
+    )
+    assert len(with_posterior) == 1
+    import json
+
+    payload = json.loads(world_conn.execute("SELECT payload_json FROM opportunity_events").fetchone()[0])
+    assert payload["track"] == "replacement_0_1_aifs_openmeteo_soft_anchor"
 
 
 def test_scan_emits_only_for_families_with_a_market_when_markets_exist():

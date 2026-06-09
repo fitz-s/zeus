@@ -20,7 +20,6 @@ DT#5 / INV-21 (Phase 10E strict enforcement):
 
 import logging
 
-import numpy as np
 
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.provenance_registry import require_provenance
@@ -490,9 +489,15 @@ def dynamic_kelly_mult(
     elif lead_days >= 3:
         m *= 0.8
 
-    # Portfolio concentration: high heat → reduce marginal sizing
-    if portfolio_heat > 0.40:
-        m *= max(0.1, 1.0 - portfolio_heat)
+    # Portfolio concentration: positive heat → reduce marginal sizing.
+    # ``portfolio_heat`` is supplied by the money-path adapter as normalized
+    # risk-budget pressure (raw and corr budgets both considered). It is a
+    # soft multi-Kelly pressure input, not a hard cap. Use a reciprocal
+    # attenuation curve instead of a fixed floor: heat=0 leaves size unchanged,
+    # heat=1 halves the marginal multiplier, and higher heat continues to shrink
+    # smoothly toward zero without creating a discontinuous no-trade boundary.
+    if portfolio_heat > 0.0:
+        m *= 1.0 / (1.0 + portfolio_heat)
 
     # INV-05 / §P9.7: cascade floor — risk inputs must never collapse to zero or NaN.
     # Note: This check applies to the upstream Kelly computation before per-strategy

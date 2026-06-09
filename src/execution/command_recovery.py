@@ -31,10 +31,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import json
+import re
 import sqlite3
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
@@ -44,6 +46,7 @@ from src.execution.command_bus import (
     IN_FLIGHT_STATES,
     VenueCommand,
 )
+from src.decision_kernel.canonicalization import canonical_json, stable_hash
 from src.state.venue_command_repo import (
     find_unresolved_commands,
     append_event,
@@ -268,6 +271,7 @@ def _order_status(raw: dict) -> str:
 def _order_matched_size(raw: dict) -> str:
     value = (
         raw.get("matched_size")
+        or raw.get("size_matched")
         or raw.get("matched")
         or raw.get("matched_amount")
         or raw.get("filled_size")
@@ -494,6 +498,85 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    row = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _maybe_attach_world_for_recovery(conn: sqlite3.Connection) -> None:
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached:
+        return
+    main_path = ""
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if str(row[1]) == "main":
+            main_path = str(row[2] or "")
+            break
+    if not main_path or Path(main_path).name != "zeus_trades.db":
+        return
+    try:
+        from src.state.db import ZEUS_WORLD_DB_PATH
+
+        if ZEUS_WORLD_DB_PATH.exists():
+            conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+    except sqlite3.OperationalError:
+        logger.debug("command recovery could not attach world DB", exc_info=True)
+
+
+def _edli_live_order_events_ref(conn: sqlite3.Connection) -> str | None:
+    _maybe_attach_world_for_recovery(conn)
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached and _attached_table_exists(conn, "world", "edli_live_order_events"):
+        return "world.edli_live_order_events"
+    if _table_exists(conn, "edli_live_order_events"):
+        return "edli_live_order_events"
+    return None
+
+
+def _edli_live_order_projection_ref(conn: sqlite3.Connection) -> str | None:
+    _maybe_attach_world_for_recovery(conn)
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached and _attached_table_exists(conn, "world", "edli_live_order_projection"):
+        return "world.edli_live_order_projection"
+    if _table_exists(conn, "edli_live_order_projection"):
+        return "edli_live_order_projection"
+    return None
+
+
+def _edli_live_cap_ref(conn: sqlite3.Connection, table: str) -> str | None:
+    _maybe_attach_world_for_recovery(conn)
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached and _attached_table_exists(conn, "world", table):
+        return f"world.{table}"
+    if _table_exists(conn, table):
+        return table
+    return None
+
+
+def _decision_certificates_ref(conn: sqlite3.Connection) -> str | None:
+    _maybe_attach_world_for_recovery(conn)
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "world" in attached and _attached_table_exists(conn, "world", "decision_certificates"):
+        return "world.decision_certificates"
+    if _table_exists(conn, "decision_certificates"):
+        return "decision_certificates"
+    return None
+
+
+def _market_events_ref(conn: sqlite3.Connection) -> str | None:
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if "forecasts" in attached and _attached_table_exists(conn, "forecasts", "market_events"):
+        return "forecasts.market_events"
+    if "world" in attached and _attached_table_exists(conn, "world", "market_events"):
+        return "world.market_events"
+    if _table_exists(conn, "market_events"):
+        return "market_events"
+    return None
 
 
 def _json_dict(raw: object) -> dict:
@@ -1226,6 +1309,124 @@ def _json_mapping(raw: object) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _edli_certificate_matches_token(payload: dict, *, semantic_key: str, token_id: str) -> bool:
+    if not token_id:
+        return True
+    for key in ("token_id", "selected_outcome_token_id", "no_token_id", "yes_token_id"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value == token_id
+    final_intent_id = str(payload.get("final_intent_id") or "").strip()
+    return token_id in semantic_key or token_id in final_intent_id
+
+
+def _market_token_strings_from_payload(payload: object) -> set[str]:
+    tokens: set[str] = set()
+    if isinstance(payload, Mapping):
+        for key in ("tokens", "clobTokenIds", "clob_token_ids", "outcomeTokens"):
+            tokens.update(_market_token_strings_from_payload(payload.get(key)))
+        for key in (
+            "token_id",
+            "tokenId",
+            "yes_token_id",
+            "no_token_id",
+            "yesTokenId",
+            "noTokenId",
+            "asset_id",
+            "assetId",
+        ):
+            value = payload.get(key)
+            if value not in (None, "") and not isinstance(value, (Mapping, list, tuple)):
+                tokens.add(str(value))
+    elif isinstance(payload, str):
+        stripped = payload.strip()
+        if stripped[:1] in "[{":
+            try:
+                tokens.update(_market_token_strings_from_payload(json.loads(stripped)))
+            except json.JSONDecodeError:
+                if stripped:
+                    tokens.add(stripped)
+        elif stripped:
+            tokens.add(stripped)
+    elif isinstance(payload, (list, tuple)):
+        for item in payload:
+            tokens.update(_market_token_strings_from_payload(item))
+    return tokens
+
+
+_TEMPERATURE_BIN_QUESTION_RE = re.compile(
+    r"-?\d+(?:\.\d+)?\s*(?:[-–]\s*-?\d+(?:\.\d+)?\s*)?°[FfCc]"
+    r"(?:\s+or\s+(?:below|lower|higher|above|more)|\s+on\b|$)"
+)
+
+
+def _is_parseable_temperature_bin_label(label: str) -> bool:
+    return bool(_TEMPERATURE_BIN_QUESTION_RE.search(str(label or "").strip()))
+
+
+def _clob_market_identity_from_payload(
+    payload: object,
+    *,
+    condition_id: str,
+    yes_token_id: str,
+    no_token_id: str,
+) -> dict:
+    raw = getattr(payload, "raw", payload)
+    if not isinstance(raw, Mapping) or not raw:
+        return {}
+    raw_condition = str(
+        raw.get("condition_id")
+        or raw.get("conditionId")
+        or raw.get("market")
+        or ""
+    ).strip()
+    if condition_id and raw_condition and raw_condition != condition_id:
+        return {}
+    required_tokens = {str(yes_token_id or "").strip(), str(no_token_id or "").strip()} - {""}
+    if required_tokens:
+        payload_tokens = _market_token_strings_from_payload(raw)
+        if required_tokens - payload_tokens:
+            return {}
+    for key in ("question", "groupItemTitle", "title", "name"):
+        label = str(raw.get(key) or "").strip()
+        if label and _is_parseable_temperature_bin_label(label):
+            return {
+                "bin_label": label,
+                "range_label": label,
+                "market_metadata_source": "clob_market_info",
+            }
+    return {}
+
+
+def _clob_market_identity_for_command(
+    client,
+    *,
+    condition_id: str,
+    yes_token_id: str,
+    no_token_id: str,
+) -> dict:
+    if client is None or not condition_id:
+        return {}
+    getter = getattr(client, "get_clob_market_info", None)
+    if not callable(getter):
+        return {}
+    try:
+        payload = getter(condition_id)
+    except Exception:
+        logger.debug(
+            "recovery: CLOB market identity lookup failed for condition_id=%s",
+            condition_id,
+            exc_info=True,
+        )
+        return {}
+    return _clob_market_identity_from_payload(
+        payload,
+        condition_id=condition_id,
+        yes_token_id=yes_token_id,
+        no_token_id=no_token_id,
+    )
+
+
 def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> list[dict]:
     required = {
         "venue_commands",
@@ -1284,6 +1485,21 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
            AND pc.position_id IS NULL
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM position_current existing_pc
+                WHERE existing_pc.position_id != cmd.position_id
+                  AND COALESCE(existing_pc.order_id, '') != ''
+                  AND lower(existing_pc.order_id) = lower(cmd.venue_order_id)
+                  AND (
+                      COALESCE(existing_pc.token_id, '') = cmd.token_id
+                      OR COALESCE(existing_pc.no_token_id, '') = cmd.token_id
+                      OR (
+                          COALESCE(existing_pc.condition_id, '') != ''
+                          AND COALESCE(existing_pc.condition_id, '') = COALESCE(env.condition_id, snap.condition_id, cmd.market_id, '')
+                      )
+                  )
+           )
          ORDER BY entry_fill.observed_at, cmd.command_id
         """
     rows = conn.execute(
@@ -1353,6 +1569,21 @@ def _latest_unprojected_live_entry_candidates(conn: sqlite3.Connection) -> list[
            AND pc.position_id IS NULL
            AND NOT EXISTS (
                SELECT 1
+                 FROM position_current existing_pc
+                WHERE existing_pc.position_id != cmd.position_id
+                  AND COALESCE(existing_pc.order_id, '') != ''
+                  AND lower(existing_pc.order_id) = lower(cmd.venue_order_id)
+                  AND (
+                      COALESCE(existing_pc.token_id, '') = cmd.token_id
+                      OR COALESCE(existing_pc.no_token_id, '') = cmd.token_id
+                      OR (
+                          COALESCE(existing_pc.condition_id, '') != ''
+                          AND COALESCE(existing_pc.condition_id, '') = COALESCE(env.condition_id, snap.condition_id, cmd.market_id, '')
+                      )
+                  )
+           )
+           AND NOT EXISTS (
+               SELECT 1
                  FROM venue_trade_facts trade_fact
                 WHERE trade_fact.command_id = cmd.command_id
                   AND trade_fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
@@ -1364,7 +1595,12 @@ def _latest_unprojected_live_entry_candidates(conn: sqlite3.Connection) -> list[
     return [_dict_row(row) for row in rows]
 
 
-def _decision_log_trade_case_for_command(conn: sqlite3.Connection, command: dict) -> tuple[dict, int | None]:
+def _decision_log_trade_case_for_command(
+    conn: sqlite3.Connection,
+    command: dict,
+    *,
+    client=None,
+) -> tuple[dict, int | None]:
     if not _table_exists(conn, "decision_log"):
         return {}, None
     position_id = str(command.get("position_id") or "")
@@ -1406,7 +1642,201 @@ def _decision_log_trade_case_for_command(conn: sqlite3.Connection, command: dict
                 or (token_id and str(case.get("token_id") or "") == token_id)
             ):
                 return case, int(record.get("id") or 0)
-    return {}, None
+    return _edli_trade_case_for_command(conn, command, client=client), None
+
+
+def _edli_event_id_from_decision_id(decision_id: str) -> str:
+    parts = str(decision_id or "").split(":")
+    if len(parts) >= 2 and parts[0] == "edli_exec_cmd":
+        return parts[1]
+    return ""
+
+
+def _edli_certificate_payload(
+    conn: sqlite3.Connection,
+    *,
+    certificate_type: str,
+    event_id: str,
+    token_id: str,
+) -> dict:
+    ref = _decision_certificates_ref(conn)
+    if ref is None or not event_id:
+        return {}
+    rows = conn.execute(
+        f"""
+        SELECT semantic_key, payload_json
+          FROM {ref}
+         WHERE certificate_type = ?
+           AND semantic_key LIKE ?
+         ORDER BY created_at DESC
+         LIMIT 50
+        """,
+        (certificate_type, f"%{event_id}%"),
+    ).fetchall()
+    for row in rows:
+        record = _dict_row(row)
+        payload = _json_mapping(record.get("payload_json"))
+        if not _edli_certificate_matches_token(
+            payload,
+            semantic_key=str(record.get("semantic_key") or ""),
+            token_id=token_id,
+        ):
+            continue
+        return payload
+    return {}
+
+
+def _market_event_identity_for_condition(conn: sqlite3.Connection, condition_id: str) -> dict:
+    ref = _market_events_ref(conn)
+    if ref is None or not condition_id:
+        return {}
+    row = conn.execute(
+        f"""
+        SELECT city, target_date, range_label, outcome
+         FROM {ref}
+         WHERE condition_id = ?
+         ORDER BY rowid DESC
+         LIMIT 1
+        """,
+        (condition_id,),
+    ).fetchone()
+    return _dict_row(row)
+
+
+def _event_bound_strategy_key_from_payload(payload: dict) -> str:
+    strategy = str(payload.get("strategy_key") or "").strip()
+    if strategy:
+        return strategy
+    event_type = str(payload.get("event_type") or "").strip()
+    direction = str(payload.get("direction") or "").strip().lower()
+    if event_type == "FORECAST_SNAPSHOT_READY":
+        return "opening_inertia" if direction == "buy_no" else "center_buy"
+    if event_type == "DAY0_EXTREME_UPDATED":
+        return "settlement_capture"
+    return ""
+
+
+def _edli_trade_case_for_command(conn: sqlite3.Connection, command: dict, *, client=None) -> dict:
+    """Recover a trade_case from EDLI certificates when legacy decision_log is absent."""
+
+    decision_id = str(command.get("decision_id") or "")
+    event_id = _edli_event_id_from_decision_id(decision_id)
+    selected_token_id = str(command.get("token_id") or "").strip()
+    condition_id = str(
+        command.get("env_condition_id")
+        or command.get("snapshot_condition_id")
+        or ""
+    ).strip()
+    actionable = _edli_certificate_payload(
+        conn,
+        certificate_type="ActionableTradeCertificate",
+        event_id=event_id,
+        token_id=selected_token_id,
+    )
+    final_intent = _edli_certificate_payload(
+        conn,
+        certificate_type="FinalIntentCertificate",
+        event_id=event_id,
+        token_id=selected_token_id,
+    )
+    source_context = _json_mapping(final_intent.get("decision_source_context"))
+    market_event = _market_event_identity_for_condition(
+        conn,
+        condition_id or str(actionable.get("condition_id") or final_intent.get("condition_id") or ""),
+    )
+    city = str(
+        actionable.get("city")
+        or final_intent.get("city")
+        or source_context.get("city")
+        or market_event.get("city")
+        or ""
+    ).strip()
+    target_date = str(
+        actionable.get("target_date")
+        or final_intent.get("target_date")
+        or source_context.get("target_date")
+        or source_context.get("target_local_date")
+        or market_event.get("target_date")
+        or ""
+    ).strip()
+    bin_label = str(
+        actionable.get("bin_label")
+        or final_intent.get("bin_label")
+        or market_event.get("range_label")
+        or market_event.get("outcome")
+        or ""
+    ).strip()
+    direction = str(actionable.get("direction") or final_intent.get("direction") or "").strip().lower()
+    yes_token_id = str(command.get("env_yes_token_id") or command.get("snapshot_yes_token_id") or "").strip()
+    no_token_id = str(command.get("env_no_token_id") or command.get("snapshot_no_token_id") or "").strip()
+    if not bin_label:
+        clob_identity = _clob_market_identity_for_command(
+            client,
+            condition_id=condition_id,
+            yes_token_id=yes_token_id,
+            no_token_id=no_token_id,
+        )
+        bin_label = str(clob_identity.get("bin_label") or "").strip()
+    strategy_key = _canonical_projection_strategy_key(
+        _event_bound_strategy_key_from_payload(actionable or final_intent)
+    )
+    metric = str(
+        actionable.get("temperature_metric")
+        or actionable.get("metric")
+        or final_intent.get("temperature_metric")
+        or final_intent.get("metric")
+        or source_context.get("temperature_metric")
+        or source_context.get("metric")
+        or ""
+    ).strip().lower()
+    unit = str(
+        actionable.get("unit")
+        or final_intent.get("unit")
+        or source_context.get("settlement_unit")
+        or source_context.get("unit")
+        or ""
+    ).strip().upper()
+    if not (
+        city
+        and target_date
+        and bin_label
+        and direction in {"buy_yes", "buy_no"}
+        and strategy_key in _CANONICAL_STRATEGY_KEYS
+        and metric in {"high", "low"}
+        and unit in {"F", "C"}
+        and yes_token_id
+        and no_token_id
+    ):
+        return {}
+    return {
+        "trade_id": str(command.get("position_id") or ""),
+        "decision_id": decision_id,
+        "token_id": yes_token_id,
+        "no_token_id": no_token_id,
+        "city": city,
+        "target_date": target_date,
+        "bin_label": bin_label,
+        "range_label": bin_label,
+        "direction": direction,
+        "strategy_key": strategy_key,
+        "strategy": strategy_key,
+        "temperature_metric": metric,
+        "unit": unit,
+        "selected_method": "ens_member_counting",
+        "entry_method": "ens_member_counting",
+        "edge_source": strategy_key,
+        "discovery_mode": "opening_hunt",
+        "cluster": city,
+        "p_posterior": actionable.get("q_live") or final_intent.get("q_live") or 0.0,
+        "decision_snapshot_id": (
+            actionable.get("causal_snapshot_id")
+            or final_intent.get("causal_snapshot_id")
+            or source_context.get("snapshot_id")
+            or command.get("snapshot_id")
+            or ""
+        ),
+        "size_usd": None,
+    }
 
 
 def _case_unit(case: dict) -> str:
@@ -1621,6 +2051,51 @@ def _live_entry_recovery_position(
     )
 
 
+def _existing_order_token_projection(
+    conn: sqlite3.Connection,
+    *,
+    position: SimpleNamespace,
+) -> dict | None:
+    if not _table_exists(conn, "position_current"):
+        return None
+    order_id = str(position.order_id or "").strip()
+    if not order_id:
+        return None
+    position_id = str(position.trade_id or "").strip()
+    selected_token_id = (
+        str(position.no_token_id or "").strip()
+        if str(position.direction or "") == "buy_no"
+        else str(position.token_id or "").strip()
+    )
+    condition_id = str(position.condition_id or "").strip()
+    if not selected_token_id and not condition_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT position_id, phase, direction, token_id, no_token_id, condition_id, order_id
+          FROM position_current
+         WHERE position_id != ?
+           AND COALESCE(order_id, '') != ''
+           AND lower(order_id) = lower(?)
+           AND (
+               (? != '' AND (COALESCE(token_id, '') = ? OR COALESCE(no_token_id, '') = ?))
+               OR (? != '' AND COALESCE(condition_id, '') = ?)
+           )
+         LIMIT 1
+        """,
+        (
+            position_id,
+            order_id,
+            selected_token_id,
+            selected_token_id,
+            selected_token_id,
+            condition_id,
+            condition_id,
+        ),
+    ).fetchone()
+    return _dict_row(row) if row is not None else None
+
+
 def _entry_recovery_event(
     position: SimpleNamespace,
     *,
@@ -1710,12 +2185,13 @@ def _append_filled_entry_projection_repair(
     conn: sqlite3.Connection,
     *,
     candidate: dict,
+    client=None,
 ) -> None:
     from src.engine.lifecycle_events import build_position_current_projection
     from src.state.ledger import append_many_and_project
     from src.state.projection import upsert_position_current
 
-    trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate)
+    trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
     if not trade_case:
         raise ValueError("filled entry projection repair requires matching decision_log trade_case")
     position = _filled_entry_recovery_position(
@@ -1723,6 +2199,17 @@ def _append_filled_entry_projection_repair(
         trade_case,
         decision_log_id=decision_log_id,
     )
+    existing_order_projection = _existing_order_token_projection(conn, position=position)
+    if existing_order_projection is not None:
+        logger.warning(
+            "recovery: filled entry projection repair skipped duplicate order/token projection "
+            "for command %s position %s; existing position %s phase=%s",
+            position.command_id,
+            position.trade_id,
+            existing_order_projection.get("position_id"),
+            existing_order_projection.get("phase"),
+        )
+        return
     projection = build_position_current_projection(position)
     position_id = str(position.trade_id)
     existing_fill = conn.execute(
@@ -1782,12 +2269,13 @@ def _append_live_entry_projection_repair(
     conn: sqlite3.Connection,
     *,
     candidate: dict,
+    client=None,
 ) -> None:
     from src.engine.lifecycle_events import build_position_current_projection
     from src.state.ledger import append_many_and_project
     from src.state.projection import upsert_position_current
 
-    trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate)
+    trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
     if not trade_case:
         raise ValueError("live entry projection repair requires matching decision_log trade_case")
     position = _live_entry_recovery_position(
@@ -1795,6 +2283,17 @@ def _append_live_entry_projection_repair(
         trade_case,
         decision_log_id=decision_log_id,
     )
+    existing_order_projection = _existing_order_token_projection(conn, position=position)
+    if existing_order_projection is not None:
+        logger.warning(
+            "recovery: live entry projection repair skipped duplicate order/token projection "
+            "for command %s position %s; existing position %s phase=%s",
+            position.command_id,
+            position.trade_id,
+            existing_order_projection.get("position_id"),
+            existing_order_projection.get("phase"),
+        )
+        return
     projection = build_position_current_projection(position)
     position_id = str(position.trade_id)
     existing_posted = conn.execute(
@@ -1842,7 +2341,7 @@ def _append_live_entry_projection_repair(
     append_many_and_project(conn, events, projection)
 
 
-def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection) -> dict:
+def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection, client=None) -> dict:
     """Repair open ACKED ENTRY command truth when initial pending projection failed."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -1851,7 +2350,7 @@ def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection) -> dict:
         command_id = str(candidate.get("command_id") or "")
         conn.execute("SAVEPOINT sp_live_entry_projection_repair")
         try:
-            _append_live_entry_projection_repair(conn, candidate=candidate)
+            _append_live_entry_projection_repair(conn, candidate=candidate, client=client)
             conn.execute("RELEASE SAVEPOINT sp_live_entry_projection_repair")
             summary["advanced"] += 1
         except Exception as exc:
@@ -1866,7 +2365,237 @@ def reconcile_live_entry_projection_repairs(conn: sqlite3.Connection) -> dict:
     return summary
 
 
-def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection) -> dict:
+def _canonical_payload_hash(payload: Mapping[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _edli_confirmed_legacy_command_candidates(conn: sqlite3.Connection) -> list[dict]:
+    """Find legacy venue_commands stranded before terminalization despite EDLI fill proof."""
+
+    events_ref = _edli_live_order_events_ref(conn)
+    if events_ref is None or not _table_exists(conn, "venue_commands"):
+        return []
+    sql = f"""
+        WITH ack AS (
+            SELECT json_extract(payload_json, '$.execution_command_id') AS execution_command_id,
+                   json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                   json_extract(payload_json, '$.venue_order_id') AS venue_order_id,
+                   json_extract(payload_json, '$.recovered_trade_id') AS recovered_trade_id,
+                   json_extract(payload_json, '$.transaction_hash') AS ack_transaction_hash,
+                   occurred_at AS acked_at,
+                   payload_json AS ack_payload_json,
+                   rowid AS ack_rowid
+              FROM {events_ref}
+             WHERE event_type = 'VenueSubmitAcknowledged'
+        ),
+        trade AS (
+            SELECT json_extract(payload_json, '$.final_intent_id') AS final_intent_id,
+                   json_extract(payload_json, '$.venue_order_id') AS venue_order_id,
+                   json_extract(payload_json, '$.trade_id') AS trade_id,
+                   json_extract(payload_json, '$.trade_status') AS trade_status,
+                   json_extract(payload_json, '$.filled_size') AS filled_size,
+                   json_extract(payload_json, '$.fill_price') AS fill_price,
+                   json_extract(payload_json, '$.avg_fill_price') AS avg_fill_price,
+                   json_extract(payload_json, '$.fees') AS fees,
+                   json_extract(payload_json, '$.transaction_hash') AS trade_transaction_hash,
+                   occurred_at AS filled_at,
+                   payload_json AS trade_payload_json,
+                   rowid AS trade_rowid
+              FROM {events_ref}
+             WHERE event_type = 'UserTradeObserved'
+               AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+        ),
+        ranked AS (
+            SELECT cmd.command_id,
+                   cmd.state AS command_state,
+                   cmd.venue_order_id AS command_venue_order_id,
+                   cmd.size AS command_size,
+                   cmd.price AS command_price,
+                   ack.execution_command_id,
+                   ack.final_intent_id,
+                   ack.venue_order_id AS ack_venue_order_id,
+                   ack.recovered_trade_id,
+                   ack.ack_transaction_hash,
+                   ack.acked_at,
+                   ack.ack_payload_json,
+                   trade.venue_order_id AS trade_venue_order_id,
+                   trade.trade_id,
+                   trade.trade_status,
+                   trade.filled_size,
+                   trade.fill_price,
+                   trade.avg_fill_price,
+                   trade.fees,
+                   trade.trade_transaction_hash,
+                   trade.filled_at,
+                   trade.trade_payload_json,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY cmd.command_id
+                       ORDER BY trade.trade_rowid DESC, ack.ack_rowid DESC
+                   ) AS rn
+              FROM venue_commands cmd
+              JOIN ack
+                ON ack.execution_command_id = cmd.decision_id
+              JOIN trade
+                ON trade.final_intent_id = ack.final_intent_id
+               AND trade.venue_order_id = ack.venue_order_id
+             WHERE cmd.intent_kind = 'ENTRY'
+               AND cmd.side = 'BUY'
+               AND cmd.state IN ('SUBMITTING', 'UNKNOWN', 'SUBMIT_UNKNOWN_SIDE_EFFECT', 'ACKED', 'POST_ACKED', 'REVIEW_REQUIRED')
+               AND COALESCE(ack.venue_order_id, '') != ''
+               AND COALESCE(trade.trade_id, '') != ''
+               AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(trade.fill_price, trade.avg_fill_price, '0') AS REAL) > 0
+               AND (COALESCE(cmd.venue_order_id, '') = '' OR cmd.venue_order_id = ack.venue_order_id)
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM venue_trade_facts fact
+                    WHERE fact.command_id = cmd.command_id
+                      AND fact.trade_id = trade.trade_id
+               )
+        )
+        SELECT *
+          FROM ranked
+         WHERE rn = 1
+         ORDER BY filled_at, command_id
+    """
+    return [_dict_row(row) for row in conn.execute(sql).fetchall()]
+
+
+def _append_edli_confirmed_legacy_command_repair(
+    conn: sqlite3.Connection,
+    *,
+    candidate: dict,
+) -> None:
+    command_id = str(candidate.get("command_id") or "")
+    venue_order_id = str(candidate.get("ack_venue_order_id") or candidate.get("trade_venue_order_id") or "")
+    trade_id = str(candidate.get("trade_id") or candidate.get("recovered_trade_id") or "")
+    filled_size = str(candidate.get("filled_size") or "")
+    fill_price = str(candidate.get("fill_price") or candidate.get("avg_fill_price") or "")
+    acked_at = str(candidate.get("acked_at") or candidate.get("filled_at") or _now_iso())
+    filled_at = str(candidate.get("filled_at") or acked_at)
+    if not command_id or not venue_order_id or not trade_id or not filled_size or not fill_price:
+        raise ValueError("EDLI confirmed command repair requires command/order/trade/fill identity")
+
+    ack_payload = {
+        "venue_order_id": venue_order_id,
+        "venue_status": "MATCHED",
+        "source": "edli_live_order_reconcile",
+        "edli_execution_command_id": candidate.get("execution_command_id"),
+        "edli_final_intent_id": candidate.get("final_intent_id"),
+        "recovered_trade_id": trade_id,
+        "recovered_from": "edli_confirmed_fill",
+    }
+    current_state = str(candidate.get("command_state") or "")
+    if current_state in {
+        CommandState.SUBMITTING.value,
+        CommandState.UNKNOWN.value,
+        CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+        CommandState.POST_ACKED.value,
+    }:
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.SUBMIT_ACKED.value,
+            occurred_at=acked_at,
+            payload=ack_payload,
+        )
+
+    order_payload = {
+        "source": "edli_live_order_reconcile",
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "ack_payload": _json_dict(candidate.get("ack_payload_json")),
+        "trade_payload": _json_dict(candidate.get("trade_payload_json")),
+    }
+    append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size=filled_size,
+        source="REST",
+        observed_at=filled_at,
+        venue_timestamp=filled_at,
+        raw_payload_hash=_canonical_payload_hash(order_payload),
+        raw_payload_json=order_payload,
+    )
+    trade_payload = {
+        "source": "edli_live_order_reconcile",
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "trade_status": candidate.get("trade_status"),
+        "filled_size": filled_size,
+        "fill_price": fill_price,
+        "edli_final_intent_id": candidate.get("final_intent_id"),
+        "raw": _json_dict(candidate.get("trade_payload_json")),
+    }
+    append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=filled_size,
+        fill_price=fill_price,
+        source="REST",
+        observed_at=filled_at,
+        venue_timestamp=filled_at,
+        raw_payload_hash=_canonical_payload_hash(trade_payload),
+        raw_payload_json=trade_payload,
+        fee_paid_micro=None,
+        tx_hash=str(candidate.get("trade_transaction_hash") or candidate.get("ack_transaction_hash") or "") or None,
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.FILL_CONFIRMED.value,
+        occurred_at=filled_at,
+        payload={
+            "venue_order_id": venue_order_id,
+            "venue_status": "CONFIRMED",
+            "trade_id": trade_id,
+            "filled_size": filled_size,
+            "fill_price": fill_price,
+            "source": "edli_live_order_reconcile",
+            "edli_final_intent_id": candidate.get("final_intent_id"),
+        },
+    )
+
+
+def reconcile_edli_confirmed_legacy_command_repairs(conn: sqlite3.Connection) -> dict:
+    """Terminalize legacy command rows when EDLI aggregate already has confirmed fill proof."""
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _edli_confirmed_legacy_command_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        conn.execute("SAVEPOINT edli_confirmed_command_repair")
+        try:
+            _append_edli_confirmed_legacy_command_repair(conn, candidate=candidate)
+            verified = conn.execute(
+                "SELECT state, venue_order_id FROM venue_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            if verified is None or str(verified["state"] or "") != CommandState.FILLED.value:
+                raise RuntimeError("EDLI confirmed command repair did not terminalize command")
+            conn.execute("RELEASE SAVEPOINT edli_confirmed_command_repair")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT edli_confirmed_command_repair")
+            conn.execute("RELEASE SAVEPOINT edli_confirmed_command_repair")
+            logger.error(
+                "recovery: EDLI confirmed command repair failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
+def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection, client=None) -> dict:
     """Repair filled ENTRY command truth when initial position projection failed."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -1877,7 +2606,7 @@ def reconcile_filled_entry_projection_repairs(conn: sqlite3.Connection) -> dict:
         sp_name = f"sp_filled_entry_projection_{safe_command_id}"
         conn.execute("SAVEPOINT " + sp_name)
         try:
-            _append_filled_entry_projection_repair(conn, candidate=candidate)
+            _append_filled_entry_projection_repair(conn, candidate=candidate, client=client)
             conn.execute("RELEASE SAVEPOINT " + sp_name)
             summary["advanced"] += 1
         except Exception as exc:
@@ -2950,6 +3679,155 @@ def reconcile_completed_partial_order_facts(conn: sqlite3.Connection) -> dict:
     return summary
 
 
+def _spurious_model_divergence_pending_exit_candidates(conn: sqlite3.Connection) -> list[dict]:
+    if not (
+        _table_exists(conn, "position_current")
+        and _table_exists(conn, "position_events")
+        and _table_exists(conn, "venue_commands")
+    ):
+        return []
+    rows = conn.execute(
+        """
+        WITH latest_event AS (
+            SELECT pe.*
+              FROM position_events pe
+             WHERE pe.sequence_no = (
+                   SELECT MAX(newer.sequence_no)
+                     FROM position_events newer
+                    WHERE newer.position_id = pe.position_id
+             )
+        )
+        SELECT pc.*,
+               latest_event.event_id AS latest_event_id,
+               latest_event.event_type AS latest_event_type,
+               latest_event.sequence_no AS latest_sequence_no,
+               latest_event.phase_before AS latest_phase_before,
+               latest_event.payload_json AS latest_payload_json
+          FROM position_current pc
+          JOIN latest_event
+            ON latest_event.position_id = pc.position_id
+         WHERE pc.phase = 'pending_exit'
+           AND pc.exit_reason LIKE 'MODEL_DIVERGENCE_PANIC%'
+           AND latest_event.event_type IN ('EXIT_INTENT', 'EXIT_ORDER_REJECTED')
+           AND latest_event.payload_json LIKE '%MODEL_DIVERGENCE_PANIC%'
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM venue_commands vc
+                WHERE vc.position_id = pc.position_id
+                  AND UPPER(COALESCE(vc.intent_kind, '')) = 'EXIT'
+           )
+         ORDER BY pc.updated_at
+        """
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
+def repair_spurious_model_divergence_pending_exits(conn: sqlite3.Connection) -> dict:
+    """Release pending_exit rows caused by the forbidden buy-NO zero-probability bug.
+
+    This is deliberately narrow: it does not touch any position with an EXIT
+    command, any non-MODEL_DIVERGENCE reason, or any pending_exit whose latest
+    event does not itself carry the panic reason.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for row in _spurious_model_divergence_pending_exit_candidates(conn):
+        summary["scanned"] += 1
+        position_id = str(row.get("position_id") or "")
+        phase_before = str(row.get("phase") or "pending_exit")
+        phase_after = str(row.get("latest_phase_before") or "active")
+        if phase_after not in {"active", "day0_window"}:
+            phase_after = "active"
+        now = _now_iso()
+        safe_position_id = "".join(ch if ch.isalnum() else "_" for ch in position_id)
+        sp_name = f"sp_spurious_model_divergence_release_{safe_position_id}"
+        payload = {
+            "schema_version": 1,
+            "reason": "spurious_model_divergence_pending_exit_released",
+            "proof_class": "no_exit_command_model_divergence_panic_from_missing_buy_no_authority",
+            "position_id": position_id,
+            "phase_before": phase_before,
+            "phase_after": phase_after,
+            "exit_reason": str(row.get("exit_reason") or ""),
+            "latest_event_id": str(row.get("latest_event_id") or ""),
+            "latest_event_type": str(row.get("latest_event_type") or ""),
+            "required_predicates": {
+                "position_phase_pending_exit": True,
+                "exit_reason_model_divergence_panic": True,
+                "latest_event_carries_model_divergence_panic": True,
+                "no_exit_command_for_position": True,
+            },
+            "source_proof": {
+                "source_function": "command_recovery.repair_spurious_model_divergence_pending_exits",
+                "source_reason": "buy_no_monitor_probability_zero_bug",
+            },
+        }
+        try:
+            conn.execute(f"SAVEPOINT {sp_name}")
+            next_sequence = int(row.get("latest_sequence_no") or 0) + 1
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no,
+                    event_type, occurred_at, phase_before, phase_after,
+                    strategy_key, decision_id, snapshot_id, order_id,
+                    command_id, caused_by, idempotency_key, venue_status,
+                    source_module, payload_json, env
+                ) VALUES (?, ?, 1, ?, 'MANUAL_OVERRIDE_APPLIED', ?, ?, ?, ?, ?, ?, NULL,
+                          NULL, ?, ?, 'spurious_panic_released', ?, ?, 'live')
+                """,
+                (
+                    f"{position_id}:spurious_model_divergence_release:{next_sequence}",
+                    position_id,
+                    next_sequence,
+                    now,
+                    phase_before,
+                    phase_after,
+                    str(row.get("strategy_key") or "unknown"),
+                    str(row.get("decision_snapshot_id") or ""),
+                    str(row.get("decision_snapshot_id") or ""),
+                    str(row.get("latest_event_id") or ""),
+                    f"{position_id}:spurious_model_divergence_release:{next_sequence}",
+                    "src.execution.command_recovery",
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE position_current
+                   SET phase = ?,
+                       exit_reason = NULL,
+                       last_monitor_prob = NULL,
+                       last_monitor_edge = NULL,
+                       updated_at = ?
+                 WHERE position_id = ?
+                   AND phase = 'pending_exit'
+                   AND exit_reason LIKE 'MODEL_DIVERGENCE_PANIC%'
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM venue_commands vc
+                        WHERE vc.position_id = position_current.position_id
+                          AND UPPER(COALESCE(vc.intent_kind, '')) = 'EXIT'
+                   )
+                """,
+                (phase_after, now, position_id),
+            )
+            if conn.total_changes <= 0:
+                raise RuntimeError("position_current update did not affect a row")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: spurious model-divergence pending_exit repair failed for %s: %s",
+                position_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def _partial_remainder_candidates(
     conn: sqlite3.Connection,
     *,
@@ -3692,6 +4570,152 @@ def _latest_cancel_unknown_payload(events: list[dict]) -> dict | None:
     return latest_payload
 
 
+def _trade_matches_venue_order_id(raw: dict, venue_order_id: str) -> bool:
+    if str(raw.get("taker_order_id") or raw.get("order_id") or raw.get("orderID") or "") == venue_order_id:
+        return True
+    for maker in raw.get("maker_orders") or ():
+        if isinstance(maker, dict) and str(
+            maker.get("order_id") or maker.get("orderID") or maker.get("id") or ""
+        ) == venue_order_id:
+            return True
+    return False
+
+
+def _confirmed_trade_for_order_id(client, venue_order_id: str) -> dict | None:
+    try:
+        trades = _client_read_items(client, "get_trades").items
+    except Exception as exc:
+        logger.warning(
+            "recovery: cancel-unknown trade lookup unavailable for order %s: %s",
+            venue_order_id,
+            exc,
+        )
+        return None
+    for item in trades:
+        raw = _raw_payload(item)
+        if not _trade_matches_venue_order_id(raw, venue_order_id):
+            continue
+        status = str(raw.get("status") or raw.get("state") or "").upper()
+        if status != "CONFIRMED":
+            continue
+        if not _positive_decimal_or_none(raw.get("size") or raw.get("matched_amount")):
+            continue
+        if not _positive_decimal_or_none(raw.get("price")):
+            continue
+        if not str(raw.get("id") or raw.get("trade_id") or "").strip():
+            continue
+        return raw
+    return None
+
+
+def _append_cancel_unknown_confirmed_trade_fill(
+    conn: sqlite3.Connection,
+    *,
+    command: dict,
+    point_order: dict,
+    trade: dict,
+    observed_at: str,
+) -> None:
+    command_id = str(command.get("command_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "")
+    trade_id = str(trade.get("id") or trade.get("trade_id") or "")
+    filled_size = str(trade.get("size") or trade.get("matched_amount") or "")
+    fill_price = str(trade.get("price") or "")
+    tx_hash = str(trade.get("transaction_hash") or trade.get("tx_hash") or "") or None
+    venue_status = _order_status(point_order)
+    matched_size = _point_order_matched_size(point_order, fallback=filled_size)
+    remaining_size = _matched_remaining_size(command, matched_size, venue_status=venue_status)
+    event_type = _matched_event_type(command, matched_size, venue_status=venue_status)
+    if event_type != CommandEventType.FILL_CONFIRMED.value:
+        raise ValueError("cancel-unknown confirmed trade did not prove full fill")
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_confirmed_fill",
+        "command_id": command_id,
+        "decision_id": str(command.get("decision_id") or ""),
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "filled_size": filled_size,
+        "fill_price": fill_price,
+        "proof_class": "cancel_unknown_confirmed_trade_with_positive_trade_fact",
+        "venue_order_proof": {
+            "source": "authenticated_clob_point_order_read",
+            "observed_at": observed_at,
+            "venue_status": venue_status,
+            "matched_size": matched_size,
+            "remaining_size": remaining_size,
+            "point_order": point_order,
+        },
+        "trade_fact_proof": {
+            "source": "authenticated_clob_user_trades",
+            "observed_at": observed_at,
+            "trade_status": str(trade.get("status") or trade.get("state") or ""),
+            "trade": trade,
+        },
+        "required_predicates": {
+            "latest_event_is_cancel_replace_blocked": True,
+            "semantic_cancel_status_cancel_unknown": True,
+            "requires_m5_reconcile": True,
+            "positive_trade_fact": True,
+        },
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": "command_recovery._review_required_cancel_unknown_live_order_recovery",
+            "source_reason": "cancel_unknown_confirmed_trade_fill",
+        },
+        "reviewed_by": "command_recovery",
+        "cleared_at": observed_at,
+    }
+    append_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state=_matched_order_fact_state(
+            event_type=event_type,
+            venue_status=venue_status,
+            remaining_size=remaining_size,
+        ),
+        remaining_size=remaining_size,
+        matched_size=matched_size,
+        source="REST",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=_payload_hash({**payload, "fact_type": "order"}),
+        raw_payload_json=payload,
+    )
+    append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=filled_size,
+        fill_price=fill_price,
+        source="REST",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        tx_hash=tx_hash,
+        raw_payload_hash=_payload_hash({**payload, "fact_type": "trade"}),
+        raw_payload_json=payload,
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=event_type,
+        occurred_at=observed_at,
+        payload=payload,
+    )
+    _append_exit_order_fill_projection(
+        conn,
+        command=command,
+        venue_order_id=venue_order_id,
+        matched_size=filled_size,
+        fill_price=fill_price,
+        observed_at=observed_at,
+        event_type=event_type,
+    )
+
+
 def _review_required_cancel_unknown_live_order_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
@@ -3720,6 +4744,47 @@ def _review_required_cancel_unknown_live_order_recovery(
     order_id = _extract_order_id(order)
     status = _order_status(order)
     matched_size = _order_matched_size(order)
+    if order_id == venue_order_id and status in {"MATCHED", "FILLED"} and _is_positive_decimal(matched_size):
+        trade = _confirmed_trade_for_order_id(client, venue_order_id)
+        if trade is None:
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                "(matched point order but confirmed trade fact not visible)",
+                cmd.command_id,
+            )
+            return "stayed"
+        command = _dict_row(
+            conn.execute(
+                "SELECT * FROM venue_commands WHERE command_id = ?",
+                (cmd.command_id,),
+            ).fetchone()
+        )
+        now = _now_iso()
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
+        sp_name = f"sp_cancel_unknown_confirmed_fill_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            _append_cancel_unknown_confirmed_trade_fill(
+                conn,
+                command=command,
+                point_order=order,
+                trade=trade,
+                observed_at=now,
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        except Exception:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            raise
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED cancel-unknown -> FILLED "
+            "(venue_order_id=%s status=%s matched_size=%s)",
+            cmd.command_id,
+            venue_order_id,
+            status,
+            matched_size,
+        )
+        return "advanced"
     if (
         order_id != venue_order_id
         or status not in _LIVE_ORDER_STATUSES
@@ -4050,7 +5115,394 @@ def _terminalize_submit_unknown_invalid_amount_400_if_proven(
         occurred_at=occurred_at,
         payload=payload,
     )
+    _reconcile_edli_pending_no_order_if_proven(
+        conn,
+        execution_command_id=str(command.get("decision_id") or ""),
+        occurred_at=occurred_at,
+        reason="venue_rejected_invalid_amount_400",
+        proof_class="deterministic_venue_invalid_amount_400",
+        command_id=command_id,
+        required_predicates=predicates,
+    )
     return payload
+
+
+def _latest_edli_event(conn: sqlite3.Connection, events_ref: str, aggregate_id: str, event_type: str | None = None) -> dict:
+    if event_type is None:
+        row = conn.execute(
+            f"""
+            SELECT *
+            FROM {events_ref}
+            WHERE aggregate_id = ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id,),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            f"""
+            SELECT *
+            FROM {events_ref}
+            WHERE aggregate_id = ? AND event_type = ?
+            ORDER BY event_sequence DESC
+            LIMIT 1
+            """,
+            (aggregate_id, event_type),
+        ).fetchone()
+    return _dict_row(row)
+
+
+def _edli_payload(row: Mapping[str, object] | None) -> dict:
+    if not row:
+        return {}
+    return _json_dict(_dict_row(row).get("payload_json"))
+
+
+def _append_edli_event_qualified(
+    conn: sqlite3.Connection,
+    *,
+    events_ref: str,
+    aggregate_id: str,
+    event_type: str,
+    payload: dict,
+    occurred_at: str,
+    source_authority: str,
+) -> dict:
+    latest = _latest_edli_event(conn, events_ref, aggregate_id)
+    if not latest:
+        raise ValueError("EDLI recovery requires existing aggregate event")
+    parent_hash = str(latest.get("event_hash") or "")
+    next_sequence = int(latest.get("event_sequence") or 0) + 1
+    payload_json = canonical_json(payload)
+    payload_hash = stable_hash(payload)
+    event_hash = stable_hash(
+        {
+            "aggregate_id": aggregate_id,
+            "event_sequence": next_sequence,
+            "event_type": event_type,
+            "parent_event_hash": parent_hash,
+            "payload_hash": payload_hash,
+            "source_authority": source_authority,
+            "occurred_at": occurred_at,
+        }
+    )
+    aggregate_event_id = "edli_live_order_event:" + event_hash[:32]
+    conn.execute(
+        f"""
+        INSERT INTO {events_ref} (
+            aggregate_event_id, aggregate_id, event_sequence, event_type,
+            parent_event_hash, event_hash, payload_json, payload_hash,
+            source_authority, occurred_at, created_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            aggregate_event_id,
+            aggregate_id,
+            next_sequence,
+            event_type,
+            parent_hash,
+            event_hash,
+            payload_json,
+            payload_hash,
+            source_authority,
+            occurred_at,
+            _now_iso(),
+        ),
+    )
+    return {
+        "aggregate_event_id": aggregate_event_id,
+        "event_hash": event_hash,
+        "event_sequence": next_sequence,
+    }
+
+
+def _rebuild_edli_projection_qualified(
+    conn: sqlite3.Connection,
+    *,
+    events_ref: str,
+    projection_ref: str,
+    aggregate_id: str,
+) -> None:
+    rows = conn.execute(
+        f"""
+        SELECT *
+        FROM {events_ref}
+        WHERE aggregate_id = ?
+        ORDER BY event_sequence ASC
+        """,
+        (aggregate_id,),
+    ).fetchall()
+    if not rows:
+        raise ValueError("cannot rebuild EDLI projection for empty aggregate")
+    event_id = str(_edli_payload(rows[0]).get("event_id") or "")
+    final_intent_id = None
+    venue_order_id = None
+    pending_reconcile = False
+    current_state = "UNKNOWN"
+    state_by_type = {
+        "DecisionProofAccepted": "DECISION_PROOF_ACCEPTED",
+        "SubmitPlanBuilt": "SUBMIT_PLAN_BUILT",
+        "PreSubmitRevalidated": "PRE_SUBMIT_REVALIDATED",
+        "LiveCapReserved": "LIVE_CAP_RESERVED",
+        "ExecutionCommandCreated": "EXECUTION_COMMAND_CREATED",
+        "VenueSubmitAttempted": "VENUE_SUBMIT_ATTEMPTED",
+        "VenueSubmitAcknowledged": "VENUE_SUBMIT_ACKED",
+        "SubmitRejected": "SUBMIT_REJECTED",
+        "SubmitUnknown": "PENDING_RECONCILE",
+        "UserOrderObserved": "USER_ORDER_OBSERVED",
+        "UserTradeObserved": "USER_TRADE_OBSERVED",
+        "Reconciled": "RECONCILED",
+        "CapTransitioned": "CAP_TRANSITIONED",
+        "OrderLifecycleProjected": "ORDER_LIFECYCLE_PROJECTED",
+    }
+    for row in rows:
+        payload = _edli_payload(row)
+        if payload.get("final_intent_id") is not None:
+            final_intent_id = str(payload["final_intent_id"])
+        if payload.get("venue_order_id") is not None:
+            venue_order_id = str(payload["venue_order_id"])
+        current_event_type = str(row["event_type"])
+        if current_event_type == "SubmitUnknown":
+            current_state = "PENDING_RECONCILE"
+            pending_reconcile = True
+        elif current_event_type == "CapTransitioned" and str(payload.get("to_status") or "") == "PENDING_RECONCILE":
+            current_state = "PENDING_RECONCILE"
+            pending_reconcile = True
+        elif current_event_type == "Reconciled":
+            current_state = "RECONCILED"
+            pending_reconcile = bool(payload.get("pending_reconcile", False))
+        else:
+            current_state = state_by_type.get(current_event_type, current_event_type)
+    last = rows[-1]
+    conn.execute(
+        f"""
+        INSERT INTO {projection_ref} (
+            aggregate_id, event_id, final_intent_id, current_state,
+            last_sequence, last_event_type, last_event_hash,
+            pending_reconcile, venue_order_id, updated_at, schema_version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        ON CONFLICT(aggregate_id) DO UPDATE SET
+            event_id = excluded.event_id,
+            final_intent_id = excluded.final_intent_id,
+            current_state = excluded.current_state,
+            last_sequence = excluded.last_sequence,
+            last_event_type = excluded.last_event_type,
+            last_event_hash = excluded.last_event_hash,
+            pending_reconcile = excluded.pending_reconcile,
+            venue_order_id = excluded.venue_order_id,
+            updated_at = excluded.updated_at,
+            schema_version = excluded.schema_version
+        """,
+        (
+            aggregate_id,
+            event_id,
+            final_intent_id,
+            current_state,
+            int(last["event_sequence"]),
+            str(last["event_type"]),
+            str(last["event_hash"]),
+            1 if pending_reconcile else 0,
+            venue_order_id,
+            _now_iso(),
+        ),
+    )
+
+
+def _reconcile_edli_pending_no_order_if_proven(
+    conn: sqlite3.Connection,
+    *,
+    execution_command_id: str,
+    occurred_at: str,
+    reason: str,
+    proof_class: str,
+    command_id: str | None = None,
+    required_predicates: Mapping[str, object] | None = None,
+) -> bool:
+    if not execution_command_id:
+        return False
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
+    day_slots_ref = _edli_live_cap_ref(conn, "edli_live_cap_day_slots")
+    rate_window_ref = _edli_live_cap_ref(conn, "edli_live_cap_rate_window")
+    if not events_ref or not projection_ref or not cap_usage_ref:
+        return False
+    row = conn.execute(
+        f"""
+        SELECT aggregate_id, payload_json
+        FROM {events_ref}
+        WHERE event_type = 'SubmitUnknown'
+          AND json_extract(payload_json, '$.execution_command_id') = ?
+        ORDER BY event_sequence DESC
+        LIMIT 1
+        """,
+        (execution_command_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    aggregate_id = str(row["aggregate_id"])
+    submit_unknown_payload = _json_dict(row["payload_json"])
+    if submit_unknown_payload.get("side_effect_known") is True:
+        return False
+    unsafe_count = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {events_ref}
+        WHERE aggregate_id = ?
+          AND event_type IN ('VenueSubmitAcknowledged', 'UserOrderObserved', 'UserTradeObserved')
+        """,
+        (aggregate_id,),
+    ).fetchone()[0]
+    if int(unsafe_count) != 0:
+        return False
+    projection = conn.execute(
+        f"""
+        SELECT pending_reconcile, venue_order_id
+        FROM {projection_ref}
+        WHERE aggregate_id = ?
+        """,
+        (aggregate_id,),
+    ).fetchone()
+    if projection is None or not bool(projection["pending_reconcile"]):
+        return False
+    if str(projection["venue_order_id"] or "").strip():
+        return False
+    cap = conn.execute(
+        f"""
+        SELECT usage_id, event_id, final_intent_id, reservation_status
+        FROM {cap_usage_ref}
+        WHERE execution_command_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (execution_command_id,),
+    ).fetchone()
+    if cap is None or str(cap["reservation_status"]) != "RESERVED":
+        return False
+    usage_id = str(cap["usage_id"])
+    event_id = str(cap["event_id"])
+    final_intent_id = str(cap["final_intent_id"] or submit_unknown_payload.get("final_intent_id") or "")
+    reconcile_payload = {
+        "schema_version": 1,
+        "event_id": event_id,
+        "final_intent_id": final_intent_id,
+        "source_authority": "venue_reconcile",
+        "pending_reconcile": False,
+        "venue_order_exists": False,
+        "cap_transition_recommendation": "RELEASED",
+        "reason": reason,
+        "proof_class": proof_class,
+        "execution_command_id": execution_command_id,
+        "command_id": command_id,
+        "required_predicates": dict(required_predicates or {}),
+    }
+    reconciled = _append_edli_event_qualified(
+        conn,
+        events_ref=events_ref,
+        aggregate_id=aggregate_id,
+        event_type="Reconciled",
+        payload=reconcile_payload,
+        occurred_at=occurred_at,
+        source_authority="explicit_reconcile",
+    )
+    conn.execute(
+        f"UPDATE {cap_usage_ref} SET reservation_status = 'RELEASED' WHERE usage_id = ?",
+        (usage_id,),
+    )
+    if day_slots_ref:
+        conn.execute(f"DELETE FROM {day_slots_ref} WHERE usage_id = ?", (usage_id,))
+    if rate_window_ref:
+        conn.execute(f"DELETE FROM {rate_window_ref} WHERE usage_id = ?", (usage_id,))
+    _append_edli_event_qualified(
+        conn,
+        events_ref=events_ref,
+        aggregate_id=aggregate_id,
+        event_type="CapTransitioned",
+        payload={
+            "schema_version": 1,
+            "event_id": event_id,
+            "final_intent_id": final_intent_id,
+            "execution_command_id": execution_command_id,
+            "execution_receipt_hash": str(submit_unknown_payload.get("execution_receipt_hash") or reconciled["event_hash"]),
+            "to_status": "RELEASED",
+            "projection_status": "RELEASED",
+            "transition_reason": reason,
+            "reconciled_event_hash": reconciled["event_hash"],
+        },
+        occurred_at=occurred_at,
+        source_authority="live_cap_ledger",
+    )
+    _rebuild_edli_projection_qualified(
+        conn,
+        events_ref=events_ref,
+        projection_ref=projection_ref,
+        aggregate_id=aggregate_id,
+    )
+    return True
+
+
+def _reconcile_edli_pre_venue_unknown_thresholds(conn: sqlite3.Connection) -> dict:
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    events_ref = _edli_live_order_events_ref(conn)
+    projection_ref = _edli_live_order_projection_ref(conn)
+    cap_usage_ref = _edli_live_cap_ref(conn, "edli_live_cap_usage")
+    if not events_ref or not projection_ref or not cap_usage_ref:
+        return summary
+    rows = conn.execute(
+        f"""
+        SELECT proj.aggregate_id,
+               json_extract(unknown.payload_json, '$.execution_command_id') AS execution_command_id,
+               unknown.payload_json AS unknown_payload_json
+        FROM {projection_ref} proj
+        JOIN {events_ref} unknown
+          ON unknown.aggregate_id = proj.aggregate_id
+         AND unknown.event_type = 'SubmitUnknown'
+        WHERE proj.pending_reconcile = 1
+          AND COALESCE(proj.venue_order_id, '') = ''
+          AND json_extract(unknown.payload_json, '$.reason_code') = 'EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM venue_commands cmd
+              WHERE cmd.decision_id = json_extract(unknown.payload_json, '$.execution_command_id')
+          )
+        ORDER BY unknown.occurred_at
+        """
+    ).fetchall()
+    for row in rows:
+        summary["scanned"] += 1
+        execution_command_id = str(row["execution_command_id"] or "")
+        conn.execute("SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
+        try:
+            advanced = _reconcile_edli_pending_no_order_if_proven(
+                conn,
+                execution_command_id=execution_command_id,
+                occurred_at=_now_iso(),
+                reason="pre_venue_risk_allocator_block_misclassified_unknown",
+                proof_class="pre_venue_no_command_no_venue_order",
+                command_id=None,
+                required_predicates={
+                    "reason_code": "EXECUTOR_SUBMIT_UNKNOWN:unknown_side_effect_threshold",
+                    "no_venue_command": True,
+                    "no_projection_venue_order_id": True,
+                    "pending_reconcile": True,
+                },
+            )
+            conn.execute("RELEASE SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute("ROLLBACK TO SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
+            conn.execute("RELEASE SAVEPOINT edli_pre_venue_unknown_threshold_reconcile")
+            logger.error(
+                "recovery: EDLI pre-venue unknown-threshold reconcile failed for %s: %s",
+                execution_command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
@@ -4957,6 +6409,12 @@ def reconcile_unresolved_commands(
     started_at = _now_iso()
 
     try:
+        edli_confirmed_command_summary = reconcile_edli_confirmed_legacy_command_repairs(conn)
+        summary["edli_confirmed_legacy_command_repair"] = edli_confirmed_command_summary
+        summary["advanced"] += edli_confirmed_command_summary["advanced"]
+        summary["stayed"] += edli_confirmed_command_summary["stayed"]
+        summary["errors"] += edli_confirmed_command_summary["errors"]
+
         rows = find_unresolved_commands(conn)
         summary["scanned"] = len(rows)
 
@@ -5015,13 +6473,19 @@ def reconcile_unresolved_commands(
         summary["stayed"] += completed_partial_summary["stayed"]
         summary["errors"] += completed_partial_summary["errors"]
 
-        live_entry_repair_summary = reconcile_live_entry_projection_repairs(conn)
+        edli_pre_venue_summary = _reconcile_edli_pre_venue_unknown_thresholds(conn)
+        summary["edli_pre_venue_unknown_thresholds"] = edli_pre_venue_summary
+        summary["advanced"] += edli_pre_venue_summary["advanced"]
+        summary["stayed"] += edli_pre_venue_summary["stayed"]
+        summary["errors"] += edli_pre_venue_summary["errors"]
+
+        live_entry_repair_summary = reconcile_live_entry_projection_repairs(conn, client=client)
         summary["live_entry_projection_repair"] = live_entry_repair_summary
         summary["advanced"] += live_entry_repair_summary["advanced"]
         summary["stayed"] += live_entry_repair_summary["stayed"]
         summary["errors"] += live_entry_repair_summary["errors"]
 
-        filled_entry_repair_summary = reconcile_filled_entry_projection_repairs(conn)
+        filled_entry_repair_summary = reconcile_filled_entry_projection_repairs(conn, client=client)
         summary["filled_entry_projection_repair"] = filled_entry_repair_summary
         summary["advanced"] += filled_entry_repair_summary["advanced"]
         summary["stayed"] += filled_entry_repair_summary["stayed"]
@@ -5044,6 +6508,12 @@ def reconcile_unresolved_commands(
         summary["advanced"] += exit_pending_summary["advanced"]
         summary["stayed"] += exit_pending_summary["stayed"]
         summary["errors"] += exit_pending_summary["errors"]
+
+        spurious_panic_summary = repair_spurious_model_divergence_pending_exits(conn)
+        summary["spurious_model_divergence_pending_exit_repair"] = spurious_panic_summary
+        summary["advanced"] += spurious_panic_summary["advanced"]
+        summary["stayed"] += spurious_panic_summary["stayed"]
+        summary["errors"] += spurious_panic_summary["errors"]
 
         partial_summary = reconcile_partial_remainders(
             conn,

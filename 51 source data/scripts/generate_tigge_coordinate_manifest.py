@@ -7,9 +7,9 @@ import math
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus")
-RAINSTORM_CITIES = ROOT / "rainstorm" / "config" / "cities.json"
-STAGING_CITIES = ROOT / "rainstorm" / "config" / "city_expansion_staging.json"
+ROOT = Path(__file__).resolve().parents[2]
+RAINSTORM_CITIES = ROOT / "config" / "cities.json"
+STAGING_CITIES = ROOT / "config" / "city_expansion_staging.json"
 DOCS_DIR = ROOT / "51 source data" / "docs"
 JSON_OUT = DOCS_DIR / "tigge_city_coordinate_manifest_20260330.json"
 MD_OUT = DOCS_DIR / "TIGGE_CITY_COORDINATE_MANIFEST_20260330.md"

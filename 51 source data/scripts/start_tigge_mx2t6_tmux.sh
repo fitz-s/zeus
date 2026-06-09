@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/leofitz/.openclaw/workspace-venus/51 source data"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON_BIN="/Users/leofitz/miniconda3/bin/python"
 SESSION_NAME="${1:-tigge-mx2t6}"
 

@@ -159,7 +159,7 @@ def dispatch_shadow_candidates(
     if not shadow_candidate_capture_enabled():
         return
 
-    from src.strategy.candidates import CandidateContext, write_candidate_no_trade_row
+    from src.strategy.candidates import CandidateContext
 
     # Resolve world connection. Self-open if not provided (live path).
     # Mirrors write_decision_event's conn=None self-open pattern (cycle_runtime.py).

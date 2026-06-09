@@ -208,6 +208,22 @@ def test_obs_v2_live_tick_imports_cleanly() -> None:
     assert DATA_VERSION.startswith("v1."), f"DATA_VERSION must match v1.* pattern, got {DATA_VERSION!r}"
 
 
+def test_obs_v2_live_tick_uses_city_local_fetch_window_for_day0() -> None:
+    """East-of-UTC cities must fetch the already-started local day."""
+    from datetime import datetime, timezone
+
+    from scripts.obs_live_tick import _city_local_fetch_window
+
+    start_date, end_date = _city_local_fetch_window(
+        "Tokyo",
+        now_utc=datetime(2026, 6, 7, 16, 0, tzinfo=timezone.utc),
+        days_back=1,
+    )
+
+    assert start_date.isoformat() == "2026-06-07"
+    assert end_date.isoformat() == "2026-06-08"
+
+
 def test_obs_v2_live_tick_does_not_use_openmeteo_source() -> None:
     """The live-tick script must not use openmeteo_archive_hourly as a source.
 

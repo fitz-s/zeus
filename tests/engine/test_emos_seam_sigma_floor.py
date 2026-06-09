@@ -181,6 +181,7 @@ def _run_with_patched_builder(monkeypatch, *, returned_sigma_c: float) -> float:
         unit,
         bins,
         apply_settlement_floor=False,
+        require_settlement_floor=True,
     ):
         n = len(bins)
         q = np.full(n, 1.0 / n, dtype=float)  # arbitrary valid normalized point-q

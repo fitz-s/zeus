@@ -34,7 +34,7 @@ import gzip
 import io
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 

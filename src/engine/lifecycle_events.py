@@ -140,6 +140,7 @@ def projection_updated_at(position: Any) -> str:
     # positive or absence — advances the projection clock. Timestamps are UTC
     # ISO-8601 from one system, so lexicographic max == chronological max.
     candidates = [
+        str(getattr(position, "last_monitor_at", "") or ""),
         str(getattr(position, "last_exit_at", "") or ""),
         str(getattr(position, "chain_verified_at", "") or ""),
         str(getattr(position, "last_chain_absence_observed_at", "") or ""),
@@ -204,6 +205,7 @@ def build_position_current_projection(position: Any) -> dict:
         "cost_basis_usd": getattr(position, "cost_basis_usd", 0.0),
         "entry_price": getattr(position, "entry_price", 0.0),
         "p_posterior": getattr(position, "p_posterior", 0.0),
+        "entry_ci_width": getattr(position, "entry_ci_width", 0.0),
         "last_monitor_prob": _nullable(getattr(position, "last_monitor_prob", None)),
         "last_monitor_edge": _nullable(getattr(position, "last_monitor_edge", None)),
         "last_monitor_market_price": _nullable(getattr(position, "last_monitor_market_price", None)),
@@ -549,6 +551,76 @@ def build_day0_window_entered_canonical_write(
         "payload_json": json.dumps(payload, default=str, sort_keys=True),
     }
 
+    return [event], projection
+
+
+def build_monitor_refreshed_canonical_write(
+    position: Any,
+    *,
+    sequence_no: int,
+    phase_after: str,
+    source_module: str = "src.engine.cycle_runtime",
+) -> tuple[list[dict], dict]:
+    """Persist a no-transition monitor refresh for an open position."""
+    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
+        raise ValueError(
+            "monitor refreshed canonical builder requires phase_after in "
+            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT}}, got {phase_after!r}"
+        )
+    projection = build_position_current_projection(position)
+    projection["phase"] = phase_after
+    occurred_at = _non_empty(
+        getattr(position, "last_monitor_at", ""),
+        projection["updated_at"],
+    )
+    trade_id = str(getattr(position, "trade_id"))
+    slug = f"monitor_refreshed:{sequence_no}"
+    payload = json.dumps(
+        {
+            "city": getattr(position, "city", ""),
+            "target_date": getattr(position, "target_date", ""),
+            "bin_label": getattr(position, "bin_label", ""),
+            "direction": getattr(position, "direction", ""),
+            "unit": getattr(position, "unit", "F"),
+            "last_monitor_prob": _nullable(getattr(position, "last_monitor_prob", None)),
+            "last_monitor_prob_is_fresh": bool(getattr(position, "last_monitor_prob_is_fresh", False)),
+            "last_monitor_edge": _nullable(getattr(position, "last_monitor_edge", None)),
+            "last_monitor_market_price": _nullable(getattr(position, "last_monitor_market_price", None)),
+            "last_monitor_market_price_is_fresh": bool(
+                getattr(position, "last_monitor_market_price_is_fresh", False)
+            ),
+            "last_monitor_best_bid": _nullable(getattr(position, "last_monitor_best_bid", None)),
+            "last_monitor_best_ask": _nullable(getattr(position, "last_monitor_best_ask", None)),
+            "last_monitor_market_vig": _nullable(getattr(position, "last_monitor_market_vig", None)),
+            "selected_method": getattr(position, "selected_method", ""),
+            "applied_validations": list(getattr(position, "applied_validations", []) or []),
+            "condition_id": getattr(position, "condition_id", ""),
+            "phase_after": phase_after,
+        },
+        default=str,
+        sort_keys=True,
+    )
+    event = {
+        "event_id": f"{trade_id}:monitor_refreshed:{sequence_no}",
+        "position_id": trade_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": "MONITOR_REFRESHED",
+        "occurred_at": occurred_at,
+        "phase_before": phase_after,
+        "phase_after": fold_lifecycle_phase(phase_after, phase_after).value,
+        "strategy_key": _strategy_key(position),
+        "decision_id": None,
+        "snapshot_id": _nullable(getattr(position, "decision_snapshot_id", "")),
+        "order_id": _nullable(getattr(position, "order_id", "")),
+        "command_id": None,
+        "caused_by": "monitor_refresh",
+        "idempotency_key": f"{trade_id}:{slug}",
+        "venue_status": _nullable(getattr(position, "order_status", "")),
+        "source_module": source_module,
+        "env": _position_env(position),
+        "payload_json": payload,
+    }
     return [event], projection
 
 

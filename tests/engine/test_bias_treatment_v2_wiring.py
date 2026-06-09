@@ -50,7 +50,7 @@ class _Family:
         self.target_date = target_date
 
 
-def _row(*, eff=3.5, sd=2.1, n=7, authority="VERIFIED",
+def _row(*, eff=3.5, sd=2.1, n=7, n_prior=1, n_paired=0, authority="VERIFIED",
          training_cutoff="2026-06-10T00:00:00+00:00", weight_live=1.0,
          total_sd=None, correction_strength=0.8):
     """A model_bias_ens row dict the patched read_bias_model returns."""
@@ -59,6 +59,8 @@ def _row(*, eff=3.5, sd=2.1, n=7, authority="VERIFIED",
         "residual_sd_c": sd,
         "total_residual_sd_c": total_sd if total_sd is not None else sd,
         "n_live": n,
+        "n_prior": n_prior,
+        "n_paired": n_paired,
         "authority": authority,
         "training_cutoff": training_cutoff,
         "weight_live": weight_live,
@@ -96,8 +98,8 @@ def patched(monkeypatch):
 # ---------------------------------------------------------------------------
 # (1) FLAG-OFF == LEGACY (byte-identical) — the non-negotiable shadow-safety contract
 # ---------------------------------------------------------------------------
-class TestFlagOffByteIdenticalToLegacy:
-    def test_flag_off_correction_byte_identical(self, patched, monkeypatch):
+class TestFlagOffCorrectionFailClosed:
+    def test_flag_off_correction_returns_raw_members(self, patched, monkeypatch):
         monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", False)
         members = np.array([20.0, 21.0, 22.0, 23.0, 24.0])
         snapshot = {"dataset_id": "ecmwf_opendata_mx2t3_local_calendar_day_max"}
@@ -106,9 +108,8 @@ class TestFlagOffByteIdenticalToLegacy:
         out, applied = era._maybe_apply_edli_bias_correction(
             members, snapshot=snapshot, family=family, city=city, payload={}
         )
-        # legacy: members - eff (degC, Tokyo) = members - 3.5
-        assert applied is True
-        np.testing.assert_allclose(out, members - 3.5)
+        assert applied is False
+        np.testing.assert_allclose(out, members)
 
     def test_flag_off_haircut_byte_identical(self, patched, monkeypatch):
         monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", False)
@@ -187,6 +188,19 @@ class TestFailClosedProvenanceAndStale:
             members, snapshot=snapshot, family=family, city=city, payload={}
         )
         assert applied is False, "stale (May) fit entered a June correction"
+        np.testing.assert_allclose(out, members)
+
+    def test_no_prior_or_paired_support_correction_row_refused(self, patched, monkeypatch):
+        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", True)
+        patched["row"] = _row(correction_strength=0.8, n_prior=0, n_paired=0)
+        family = _Family("Tokyo", target_date="2026-06-15")
+        city = era.runtime_cities_by_name()["Tokyo"]
+        snapshot = {"dataset_id": "ecmwf_opendata_mx2t3_local_calendar_day_max"}
+        members = np.array([20.0, 21.0, 22.0, 23.0, 24.0])
+        out, applied = era._maybe_apply_edli_bias_correction(
+            members, snapshot=snapshot, family=family, city=city, payload={}
+        )
+        assert applied is False, "no-support bias row shifted p_raw"
         np.testing.assert_allclose(out, members)
 
 

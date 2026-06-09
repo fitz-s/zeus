@@ -10,7 +10,6 @@ import json
 import sqlite3
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Iterable
 
 from src.events.opportunity_event import OpportunityEvent
 
@@ -129,11 +128,18 @@ class EventStore:
               AND e.available_at <= ?
               AND e.received_at <= ?
               AND (e.expires_at IS NULL OR e.expires_at > ?)
+              AND e.event_type NOT IN (
+                    'BEST_BID_ASK_CHANGED',
+                    'BOOK_SNAPSHOT',
+                    'NEW_MARKET_DISCOVERED'
+              )
             ORDER BY
               -- Tier 0: DAY0_EXTREME_UPDATED hard facts — realized observations are the freshest
               --         actionable alpha source and must not sit behind forecast redecision backlog.
-              -- Tier 1: COMPLETE FORECAST_SNAPSHOT_READY — direct receipt candidates.
-              -- Tier 2: Other decision-trigger events (PARTIAL FSR) — still actionable or cheaply
+              -- Tier 1: window-complete FORECAST_SNAPSHOT_READY — direct receipt candidates.
+              --         Run-level PARTIAL can still carry a COMPLETE/LIVE_ELIGIBLE
+              --         target window, so source_run completeness is not the queue authority.
+              -- Tier 2: Other decision-trigger events — still actionable or cheaply
               --         dead-letterable; must not be starved by market-channel.
               -- Tier 3: Market-channel cache-hydration events (BEST_BID_ASK_CHANGED, BOOK_SNAPSHOT,
               --         NEW_MARKET_DISCOVERED) — they get rejected NO_DIRECT_STALE_TRADE immediately
@@ -142,7 +148,8 @@ class EventStore:
                 WHEN e.event_type = 'DAY0_EXTREME_UPDATED'
                 THEN 0
                 WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'
-                 AND json_extract(e.payload_json, '$.source_run_completeness_status') = 'COMPLETE'
+                 AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
+                 AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
                 THEN 1
                 WHEN e.event_type IN ('BEST_BID_ASK_CHANGED', 'BOOK_SNAPSHOT', 'NEW_MARKET_DISCOVERED')
                 THEN 3
@@ -153,13 +160,14 @@ class EventStore:
               -- budget is spent on stale ones. NULL target_date (non-forecast
               -- events) sorts last within its tier (json_extract → NULL → last
               -- under DESC in SQLite, which orders NULLs first for ASC / last for
-              -- DESC). Within the same target, newest events must also win before
-              -- retry debt: executable prices expire after 30s, so a retry-first
-              -- order can spend the whole proof window on stale old rows while the
-              -- just-refreshed redecision rows expire before evaluation.
+              -- DESC). Newer available_at wins before retry debt because it is
+              -- fresher evidence. For the SAME target_date + available_at, retry
+              -- debt wins before zero-attempt redecision rows so transiently
+              -- blocked events cannot be starved forever by same-evidence rows.
               json_extract(e.payload_json, '$.target_date') DESC,
-              e.available_at DESC, e.received_at DESC,
+              e.available_at DESC,
               CASE WHEN p.attempt_count > 0 THEN 0 ELSE 1 END ASC,
+              e.received_at DESC,
               e.event_id ASC
             LIMIT ?
             """,
@@ -446,6 +454,56 @@ class EventStore:
             )
         return len(superseded_ids)
 
+    def ignore_channel_cache_events(self, *, batch_limit: int = 5_000) -> int:
+        """Move channel cache-hydration events out of the submit reactor working set.
+
+        Market-channel rows are authoritative inputs for quote cache / feasibility
+        evidence, but they are not direct decision events. Letting their latest
+        per-token rows remain ``pending`` makes the reactor spend live proof budget
+        on deterministic ``NO_DIRECT_STALE_TRADE`` rejects. Preserve the immutable
+        event rows and mark only the mutable processing rows ``ignored``.
+        """
+
+        self._require_world_event_tables()
+        type_placeholders = ",".join("?" * len(self._CHANNEL_EVENT_TYPES))
+        rows = self.conn.execute(
+            f"""
+            SELECT e.event_id
+              FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+              JOIN opportunity_events e
+                ON e.event_id = p.event_id
+             WHERE p.consumer_name = ?
+               AND p.processing_status IN ('pending', 'processing')
+               AND e.event_type IN ({type_placeholders})
+               AND json_extract(e.payload_json, '$.token_id') IS NOT NULL
+             ORDER BY e.available_at ASC
+             LIMIT ?
+            """,
+            (self.consumer_name, *self._CHANNEL_EVENT_TYPES, batch_limit),
+        ).fetchall()
+        event_ids = [str(row[0]) for row in rows]
+        if not event_ids:
+            return 0
+
+        now = _utc_now()
+        _CHUNK = 500
+        for chunk_start in range(0, len(event_ids), _CHUNK):
+            chunk = event_ids[chunk_start : chunk_start + _CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            self.conn.execute(
+                f"""
+                UPDATE opportunity_event_processing
+                   SET processing_status = 'ignored',
+                       processed_at = ?,
+                       updated_at = ?
+                 WHERE consumer_name = ?
+                   AND event_id IN ({placeholders})
+                   AND processing_status IN ('pending', 'processing')
+                """,
+                (now, now, self.consumer_name, *chunk),
+            )
+        return len(event_ids)
+
     def archive_superseded_forecast_snapshot_events(
         self, *, batch_limit: int = 5_000
     ) -> int:
@@ -527,7 +585,8 @@ class EventStore:
                    AND p.processing_status IN ('pending', 'processing')
                  ORDER BY
                    CASE
-                     WHEN json_extract(e.payload_json, '$.source_run_completeness_status') = 'COMPLETE'
+                     WHEN json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
+                      AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
                      THEN 0
                      ELSE 1
                    END ASC,

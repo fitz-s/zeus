@@ -15,8 +15,9 @@ GOLDEN RULE: economic close is ONLY created after CONFIRMED fill truth.
 import logging
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -58,6 +59,7 @@ from src.state.portfolio import (
     PortfolioState,
     close_position,
 )
+from src.contracts.position_truth import ChainOnlyFact, ChainOnlyReviewState
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -2603,6 +2605,33 @@ def test_chain_reconciliation_economically_closed_local_does_not_mask_chain_only
     assert fact.condition_id == "cond-live-1"
 
 
+def test_chain_only_fact_position_only_scope_does_not_freeze_new_entries():
+    global_fact = ChainOnlyFact(
+        token_id="global-token",
+        condition_id="global-condition",
+        size=1.0,
+        avg_price=0.5,
+        cost_basis=0.5,
+        first_seen_at="2026-06-07T00:00:00+00:00",
+        last_seen_at="2026-06-07T00:00:00+00:00",
+    )
+    position_only_fact = ChainOnlyFact(
+        token_id="position-token",
+        condition_id="position-condition",
+        size=1.0,
+        avg_price=0.5,
+        cost_basis=0.5,
+        first_seen_at="2026-06-07T00:00:00+00:00",
+        last_seen_at="2026-06-07T00:00:00+00:00",
+        entry_block_scope="position_only",
+    )
+
+    assert global_fact.blocks_entry is True
+    assert global_fact.blocks_position_management is True
+    assert position_only_fact.blocks_entry is False
+    assert position_only_fact.blocks_position_management is True
+
+
 def test_chain_reconciliation_does_not_void_verified_entry_waiting_for_chain():
     from src.state.chain_reconciliation import ChainPosition, reconcile
 
@@ -2877,6 +2906,81 @@ def test_monitoring_skips_fill_authority_quarantine_without_chain_quarantine(mon
     assert summary["monitor_skipped_quarantine_resolution"] == 1
     assert summary["monitors"] == 0
     assert monitor_results[0].exit_reason == "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
+    assert monitor_results[0].fresh_prob is None
+    assert monitor_results[0].fresh_edge is None
+
+
+def test_monitoring_skips_blocking_review_fact_position_without_exit(monkeypatch):
+    """Invalid entry-proof review facts must stop automatic monitor/exit churn."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="invalid-proof-position",
+        direction="buy_no",
+        state="holding",
+        chain_state="synced",
+        token_id="yes-invalid-proof",
+        no_token_id="no-invalid-proof",
+        condition_id="condition-invalid-proof",
+    )
+    portfolio = _make_portfolio(pos)
+    portfolio.chain_only_facts.append(
+        ChainOnlyFact(
+            token_id="no-invalid-proof",
+            condition_id="condition-invalid-proof",
+            size=5.0,
+            avg_price=0.70,
+            cost_basis=3.50,
+            first_seen_at="2026-06-07T01:00:00+00:00",
+            last_seen_at="2026-06-07T01:00:00+00:00",
+            review_state=ChainOnlyReviewState.UNRESOLVED,
+        )
+    )
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("blocking review fact position must not auto-exit")
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_blocking_review_fact_monitor_skip"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime(2026, 6, 7, 1, 30, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("blocking review fact position must not reach monitor refresh")
+        ),
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is False
+    assert tracker_dirty is False
+    assert summary["monitor_skipped_blocking_review_fact"] == 1
+    assert summary["monitors"] == 0
+    assert summary["exits"] == 0
+    assert len(monitor_results) == 1
+    assert monitor_results[0].exit_reason == "REVIEW_REQUIRED_INVALID_ENTRY_PROOF"
+    assert monitor_results[0].should_exit is False
     assert monitor_results[0].fresh_prob is None
     assert monitor_results[0].fresh_edge is None
 
@@ -3369,6 +3473,207 @@ def test_day0_canonical_emit_is_idempotent_when_monitor_replays_same_position(tm
     conn.close()
 
 
+def test_monitor_refresh_canonical_emit_updates_current_projection(tmp_path):
+    """Monitor refresh evidence must persist before exit logic can rely on it."""
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "monitor-refresh-canonical.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="monitor-refresh-1",
+        state="holding",
+        city="Chicago",
+        target_date="2026-04-01",
+        order_id="o-monitor-refresh",
+        entered_at="2026-04-01T04:00:00+00:00",
+        order_posted_at="2026-04-01T03:59:00+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="50-51°F",
+        condition_id="0xmonitorrefresh000000000000000000000000000000000000000000000001",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-monitor-refresh-seed",
+        source_module="tests/test_monitor_refresh_canonical_emit",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+
+    pos.last_monitor_prob = 0.61
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = 0.17
+    pos.last_monitor_market_price = 0.44
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.43
+    pos.last_monitor_best_ask = 0.45
+    pos.selected_method = "emos"
+    pos.applied_validations = ["identity_one_calibrator"]
+    pos.last_monitor_at = "2026-04-01T05:00:00+00:00"
+
+    deps = type(
+        "Deps",
+        (),
+        {"logger": logging.getLogger("test_monitor_refresh_canonical_emit")},
+    )
+
+    assert cycle_runtime._emit_monitor_refreshed_canonical_if_available(conn, pos, deps=deps) is True
+
+    event = conn.execute(
+        """
+        SELECT event_type, occurred_at, phase_before, phase_after, payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+        """,
+        ("monitor-refresh-1",),
+    ).fetchone()
+    assert event is not None
+    assert event["occurred_at"] == "2026-04-01T05:00:00+00:00"
+    assert event["phase_before"] == LifecyclePhase.ACTIVE.value
+    assert event["phase_after"] == LifecyclePhase.ACTIVE.value
+    payload = json.loads(event["payload_json"])
+    assert payload["last_monitor_prob"] == pytest.approx(0.61)
+    assert payload["last_monitor_market_price"] == pytest.approx(0.44)
+    assert payload["selected_method"] == "emos"
+    assert payload["applied_validations"] == ["identity_one_calibrator"]
+
+    current = conn.execute(
+        """
+        SELECT phase, last_monitor_prob, last_monitor_edge,
+               last_monitor_market_price, updated_at
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        ("monitor-refresh-1",),
+    ).fetchone()
+    assert current["phase"] == LifecyclePhase.ACTIVE.value
+    assert current["last_monitor_prob"] == pytest.approx(0.61)
+    assert current["last_monitor_edge"] == pytest.approx(0.17)
+    assert current["last_monitor_market_price"] == pytest.approx(0.44)
+    assert current["updated_at"] == "2026-04-01T05:00:00+00:00"
+    conn.close()
+
+
+def test_monitoring_phase_persists_monitor_evidence_before_exit_evaluation(tmp_path, monkeypatch):
+    """Exit evaluation must not consume monitor evidence that was never projected."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "monitor-before-exit.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="monitor-before-exit-1",
+        state="holding",
+        city="Chicago",
+        target_date="2026-04-01",
+        order_id="o-monitor-before-exit",
+        entered_at="2026-04-01T04:00:00+00:00",
+        order_posted_at="2026-04-01T03:59:00+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="50-51°F",
+        condition_id="0xmonitorbeforeexit000000000000000000000000000000000000000001",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        pos,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-monitor-before-exit-seed",
+        source_module="tests/test_monitoring_phase_persists_monitor_evidence",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    portfolio = _make_portfolio(pos)
+
+    def fake_refresh(conn_arg, clob_arg, position):
+        assert conn_arg is conn
+        position.last_monitor_prob = 0.62
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = 0.18
+        position.last_monitor_market_price = 0.44
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_at = "2026-04-01T05:00:00+00:00"
+        return EdgeContext(
+            p_raw=np.array([0.62]),
+            p_cal=np.array([0.62]),
+            p_market=np.array([0.44]),
+            p_posterior=0.62,
+            forward_edge=0.18,
+            alpha=0.0,
+            confidence_band_upper=0.20,
+            confidence_band_lower=0.16,
+            entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+            decision_snapshot_id="snapshot-monitor-before-exit",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
+
+    def fake_evaluate_exit(self, exit_context):
+        row = conn.execute(
+            """
+            SELECT last_monitor_prob, last_monitor_market_price, updated_at
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (self.trade_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["last_monitor_prob"] == pytest.approx(0.62)
+        assert row["last_monitor_market_price"] == pytest.approx(0.44)
+        assert row["updated_at"] == "2026-04-01T05:00:00+00:00"
+        return ExitDecision(False, reason="HOLD", selected_method=self.selected_method or self.entry_method)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(Position, "evaluate_exit", fake_evaluate_exit)
+
+    class Tracker:
+        def record_exit(self, position):
+            raise AssertionError("No exit expected")
+
+    monitor_results = []
+    artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
+    summary = {"monitors": 0, "exits": 0}
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type("MonitorResult", (), {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)}),
+            "logger": logging.getLogger("test_monitoring_phase_persists_monitor_evidence"),
+            "cities_by_name": {},
+            "_utcnow": staticmethod(lambda: datetime(2026, 4, 1, 5, 0, tzinfo=timezone.utc)),
+            "has_acknowledged_quarantine_clear": staticmethod(lambda token_id: False),
+        },
+    )
+
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        portfolio,
+        artifact,
+        Tracker(),
+        summary,
+        deps=deps,
+    )
+
+    assert portfolio_dirty is True
+    assert tracker_dirty is False
+    assert summary["monitors"] == 1
+    assert summary["exits"] == 0
+    assert monitor_results[0].fresh_prob == pytest.approx(0.62)
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'",
+            ("monitor-before-exit-1",),
+        ).fetchone()[0]
+        == 1
+    )
+    conn.close()
+
+
 def test_same_cycle_day0_crossing_refreshes_through_day0_semantics(monkeypatch):
     """A same-cycle `<6h` crossing must not refresh through the old non-Day0 path.
 
@@ -3489,6 +3794,191 @@ def test_day0_window_refresh_uses_day0_observation_semantics(monkeypatch):
     assert edge_ctx.entry_provenance == EntryMethod.ENS_MEMBER_COUNTING
     assert pos.last_monitor_prob == pytest.approx(0.52)
     assert pos.last_monitor_market_price == pytest.approx(0.41)
+
+
+def test_day0_wu_observation_unavailable_falls_back_to_forecast_origin_monitor(monkeypatch):
+    """Forecast-origin day0 positions stay monitorable when WU has no current observation."""
+    from src.contracts import EntryMethod
+    from src.contracts.exceptions import ObservationUnavailableError
+    from src.engine import monitor_refresh
+
+    pos = _make_position(
+        state="day0_window",
+        city="Chicago",
+        target_date="2026-04-01",
+        entry_method=EntryMethod.ENS_MEMBER_COUNTING.value,
+        selected_method="",
+        applied_validations=[],
+    )
+    city = type(
+        "City",
+        (),
+        {
+            "name": "Chicago",
+            "timezone": "America/Chicago",
+            "settlement_source_type": "wu_icao",
+        },
+    )()
+    observed_methods = []
+
+    def fake_recompute(position, current_p_market, registry, **context):
+        observed_methods.append(position.entry_method)
+        if position.entry_method == EntryMethod.DAY0_OBSERVATION.value:
+            raise ObservationUnavailableError("wu observation unavailable")
+        position.selected_method = position.entry_method
+        position.applied_validations = [position.entry_method, "q_source:emos"]
+        monitor_refresh._set_monitor_probability_fresh(position, True)
+        return 0.66
+
+    monkeypatch.setattr(monitor_refresh, "recompute_native_probability", fake_recompute)
+
+    p, refresh_pos, fresh = monitor_refresh.monitor_probability_refresh(
+        pos,
+        conn=None,
+        city=city,
+        target_d=date(2026, 4, 1),
+    )
+
+    assert observed_methods == [
+        EntryMethod.DAY0_OBSERVATION.value,
+        EntryMethod.ENS_MEMBER_COUNTING.value,
+    ]
+    assert p == pytest.approx(0.66)
+    assert refresh_pos is pos
+    assert fresh is True
+    assert pos.selected_method == EntryMethod.ENS_MEMBER_COUNTING.value
+    assert "day0_observation_unavailable:forecast_monitor_fallback" in pos.applied_validations
+    assert "q_source:emos" in pos.applied_validations
+
+
+def test_day0_high_morning_observation_is_not_exit_authority():
+    """A local-day running HIGH near midnight is not the day's final high authority."""
+    from src.engine import monitor_refresh
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX
+
+    temporal_context = SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
+
+    reason = monitor_refresh._day0_extreme_authority_rejection_reason(
+        temperature_metric=HIGH_LOCALDAY_MAX,
+        temporal_context=temporal_context,
+        hours_remaining=23.0,
+        observed_extreme_so_far=22.2,
+        member_extrema_remaining=np.array([24.0, 25.0, 26.0]),
+    )
+
+    assert reason is not None
+    assert reason.startswith("day0_high_extreme_not_mature:")
+
+
+def test_day0_low_nonterminal_observation_is_not_exit_authority():
+    """A local-day running LOW is not final-low authority while most of the day remains."""
+    from src.engine import monitor_refresh
+    from src.types.metric_identity import LOW_LOCALDAY_MIN
+
+    temporal_context = SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
+
+    reason = monitor_refresh._day0_extreme_authority_rejection_reason(
+        temperature_metric=LOW_LOCALDAY_MIN,
+        temporal_context=temporal_context,
+        hours_remaining=18.0,
+        observed_extreme_so_far=18.0,
+        member_extrema_remaining=np.array([17.0, 16.5, 18.5]),
+    )
+
+    assert reason == "day0_low_extreme_not_terminal:hours_remaining=18.0"
+
+
+def test_day0_deterministic_extreme_can_remain_exit_authority():
+    """Observed extreme may be authority when it already determines the local-day outcome."""
+    from src.engine import monitor_refresh
+    from src.types.metric_identity import HIGH_LOCALDAY_MAX, LOW_LOCALDAY_MIN
+
+    temporal_context = SimpleNamespace(daypart="morning", post_peak_confidence=0.0)
+
+    assert monitor_refresh._day0_extreme_authority_rejection_reason(
+        temperature_metric=HIGH_LOCALDAY_MAX,
+        temporal_context=temporal_context,
+        hours_remaining=23.0,
+        observed_extreme_so_far=35.0,
+        member_extrema_remaining=np.array([24.0, 25.0, 26.0]),
+    ) is None
+    assert monitor_refresh._day0_extreme_authority_rejection_reason(
+        temperature_metric=LOW_LOCALDAY_MIN,
+        temporal_context=temporal_context,
+        hours_remaining=18.0,
+        observed_extreme_so_far=5.0,
+        member_extrema_remaining=np.array([17.0, 16.5, 18.5]),
+    ) is None
+
+
+def test_day0_high_morning_refresh_marks_probability_stale(monkeypatch):
+    """Seoul-style local-midnight HIGH observation must not create exit authority."""
+    from src.config import City
+    from src.engine import monitor_refresh
+    from src.signal.day0_extrema import RemainingMemberExtrema
+    import src.signal.diurnal as diurnal
+
+    pos = _make_position(
+        state="day0_window",
+        city="Seoul",
+        target_date="2026-06-08",
+        bin_label="25°C",
+        temperature_metric="high",
+        entry_method="ens_member_counting",
+        selected_method="",
+        p_posterior=0.79,
+    )
+    city = City(
+        name="Seoul",
+        lat=37.558,
+        lon=126.791,
+        timezone="Asia/Seoul",
+        settlement_unit="C",
+        cluster="East Asia",
+        wu_station="RKSI",
+        settlement_source_type="wu_icao",
+    )
+
+    monkeypatch.setattr(monitor_refresh, "_fetch_day0_observation", lambda *_: {
+        "high_so_far": 22.2,
+        "low_so_far": 20.0,
+        "current_temp": 22.2,
+        "observation_time": "2026-06-08T00:10:00+09:00",
+        "source": "wu_api",
+    })
+    monkeypatch.setattr(monitor_refresh, "fetch_ensemble", lambda *a, **k: {
+        "members_hourly": np.zeros((3, 3)),
+        "times": ["2026-06-07T15:00:00+00:00"],
+        "source_id": "test_source",
+        "forecast_source_role": "monitor_fallback",
+    })
+    monkeypatch.setattr(monitor_refresh, "validate_ensemble", lambda *_: True)
+    monkeypatch.setattr(diurnal, "build_day0_temporal_context", lambda *a, **k: SimpleNamespace(
+        daypart="morning",
+        post_peak_confidence=0.0,
+        current_utc_timestamp=datetime(2026, 6, 7, 15, 10, tzinfo=timezone.utc),
+    ))
+    monkeypatch.setattr(
+        monitor_refresh,
+        "remaining_member_extrema_for_day0",
+        lambda *a, **k: (
+            RemainingMemberExtrema.for_metric(np.array([24.0, 25.0, 26.0]), k["temperature_metric"]),
+            23.0,
+        ),
+    )
+
+    p, validations = monitor_refresh._refresh_day0_observation(
+        position=pos,
+        current_p_market=0.72,
+        conn=None,
+        city=city,
+        target_d=date(2026, 6, 8),
+    )
+
+    assert p == pytest.approx(0.79)
+    assert getattr(pos, "_monitor_probability_is_fresh") is False
+    assert "day0_extreme_maturity_gate" in validations
+    assert any(v.startswith("day0_high_extreme_not_mature:") for v in validations)
 
 
 def test_day0_window_live_refresh_uses_best_bid_not_vwmp(monkeypatch):
@@ -4530,7 +5020,7 @@ def test_buy_yes_edge_exit_requires_best_bid():
     assert decision.reason == "INCOMPLETE_EXIT_CONTEXT (missing=best_bid)"
 
 
-def test_day0_buy_yes_uses_single_confirmation_observation_reversal():
+def test_day0_buy_yes_point_reversal_requires_stronger_evidence():
     pos = _make_position(direction="buy_yes", size_usd=5.0, entry_price=0.40, entry_ci_width=0.02)
 
     decision = pos.evaluate_exit(
@@ -4546,12 +5036,13 @@ def test_day0_buy_yes_uses_single_confirmation_observation_reversal():
         )
     )
 
-    assert decision.should_exit is True
-    assert decision.trigger == "DAY0_OBSERVATION_REVERSAL"
+    assert decision.should_exit is False
+    assert decision.trigger == "DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE"
     assert "day0_observation_gate" in decision.applied_validations
+    assert "day0_observation_reversal_requires_ci_separation" in decision.applied_validations
 
 
-def test_day0_buy_no_uses_single_confirmation_observation_reversal():
+def test_day0_buy_no_point_reversal_requires_stronger_evidence():
     pos = _make_position(direction="buy_no", size_usd=5.0, entry_price=0.60, entry_ci_width=0.02)
 
     decision = pos.evaluate_exit(
@@ -4567,9 +5058,10 @@ def test_day0_buy_no_uses_single_confirmation_observation_reversal():
         )
     )
 
-    assert decision.should_exit is True
-    assert decision.trigger == "DAY0_OBSERVATION_REVERSAL"
+    assert decision.should_exit is False
+    assert decision.trigger == "DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE"
     assert "day0_observation_gate" in decision.applied_validations
+    assert "day0_observation_reversal_requires_ci_separation" in decision.applied_validations
 
 
 def test_day0_observation_exits_when_settlement_imminent():

@@ -168,6 +168,58 @@ tables:
       (DERIVED_FROM_DISSEMINATION) row. latest_event_time is event-time plane; computed_at is
       write-time provenance only.
 
+  - name: raw_forecast_artifacts
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: apply_canonical_schema
+    pk_col: artifact_id
+    notes: >
+      Replacement forecast shadow/live-authority provenance table (2026-06-07).
+      Records immutable raw Open-Meteo ECMWF ecmwf_ifs 9km/0.1 and ECMWF AIFS
+      ENS downloaded artifacts with source_available_at, request metadata,
+      checksum, and fail-closed SHADOW_ONLY/training_allowed=0 constraints.
+      Lives only on zeus-forecasts.db; not a settlement, calibration, or order
+      truth table.
+
+  - name: deterministic_forecast_anchors
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: apply_canonical_schema
+    pk_col: anchor_id
+    notes: >
+      Replacement forecast deterministic spatial anchor table (2026-06-07).
+      Materializes Open-Meteo ECMWF ecmwf_ifs 9km/0.1 local-calendar-day anchor
+      values by city/date/metric with grid/interpolation provenance. It is an
+      input to replacement posterior calculation and remains non-training,
+      non-order truth.
+
+  - name: forecast_posteriors
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: apply_canonical_schema
+    pk_col: posterior_id
+    notes: >
+      Replacement forecast posterior table (2026-06-07). Stores the derived
+      Open-Meteo ECMWF ecmwf_ifs 9km/0.1 soft spatial anchor plus AIFS ENS
+      sampled-2t posterior q/q_lcb payloads and dependency provenance. Runtime
+      readers must respect trade_authority_status and product-specific refit
+      evidence before using rows in the event reactor.
+
+  - name: replacement_shadow_decisions
+    db: forecasts
+    schema_class: forecast_class
+    schema_version_owner: SCHEMA_FORECASTS_VERSION
+    created_by: apply_canonical_schema
+    pk_col: decision_id
+    notes: >
+      Replacement forecast event-reactor decision provenance table (2026-06-07).
+      Records baseline-vs-candidate q_lcb/Kelly/direction comparisons and veto
+      decisions at the same market snapshot. It is append-only audit evidence
+      for replacement authority behavior, not a venue command or fill record.
+
   - name: market_events
     db: forecasts
     schema_class: forecast_class

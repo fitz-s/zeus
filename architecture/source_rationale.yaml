@@ -152,6 +152,14 @@ providers:
     role: forecast_infrastructure
     client: src/data/forecast_source_registry.py
     why: Internal forecast infrastructure module — registry, ingest protocol, extrema authority, DB fetcher. Not an external truth source; coordinates routing between ecmwf_open_data and tigge providers. (PR #359)
+  polymarket_gamma:
+    role: internal_probe
+    client: src/data/station_migration_probe.py
+    why: >
+      Polymarket gamma API probe for station-migration drift detection only.
+      Compares Polymarket market resolution URLs against config/cities.json::wu_station;
+      writes alerts when they diverge.  Operator-only tooling — not on any live daemon
+      hot-path and never a forecast/settlement/calibration source.  Added 2026-05-01. (PR #399)
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel
@@ -1389,6 +1397,34 @@ files:
     why: Deterministic canonical position_id from SHA-256 of aggregate_id (68 chars). Widened from 11-char truncation (28 bits) to full digest (256 bits) in FIX #96 to eliminate birthday collision at ~10k fills.
     downstream:
     - src/state/projection.py
+  src/events/candidate_evaluation.py:
+    zone: K3_extension
+    authority_role: edli_family_candidate_evaluation
+    why: Pure value object for executable same-family opportunity candidates; records q/q_lcb, price, fill evidence, robust capital-efficiency objectives, and receipt fields used by the EDLI opportunity book selector.
+    hazards:
+    - MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION
+    downstream:
+    - src/events/opportunity_selector.py
+    - src/events/opportunity_book.py
+    - src/engine/event_reactor_adapter.py
+  src/events/opportunity_selector.py:
+    zone: K3_extension
+    authority_role: edli_family_candidate_selector
+    why: Pure same-family selector that ranks admitted weather-bin siblings by capital efficiency and conservative probability evidence before live authority binds a token.
+    hazards:
+    - MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION
+    downstream:
+    - src/events/opportunity_book.py
+    - src/engine/event_reactor_adapter.py
+  src/events/opportunity_book.py:
+    zone: K3_extension
+    authority_role: edli_family_opportunity_book_receipt
+    why: Builds auditable opportunity-book receipts containing all evaluated family siblings, selected candidate identity, ranks, and loser reasons for EDLI live/no-submit decisions.
+    hazards:
+    - MULTI_BIN_MUTUALLY_EXCLUSIVE_OVERALLOCATION
+    downstream:
+    - src/engine/event_reactor_adapter.py
+    - src/events/no_submit_receipts.py
   src/execution/AGENTS.md:
     zone: docs
     authority_role: registry

@@ -13,6 +13,7 @@ side-effect boundary.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 from dataclasses import dataclass, replace as dataclass_replace
@@ -52,6 +53,10 @@ from src.engine.event_bound_final_intent import (
     serialize_event_bound_final_intent_receipt,
     validate_final_intent_cert_for_existing_executor,
 )
+from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReactorHookResult
+from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
+from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
+from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
 from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.candidate_evaluation import CandidateEvaluation
@@ -73,6 +78,10 @@ from src.strategy.market_phase import (
     MarketPhase,
     FORECAST_ONLY_ADMIT_PHASES as _FORECAST_ONLY_ADMIT_PHASES,
     market_phase_admits,
+)
+from src.strategy.live_inference.live_admission import (
+    live_buy_no_conservative_evidence_rejection_reason,
+    live_capital_efficiency_rejection_reason,
 )
 from src.strategy import market_phase_evidence as _market_phase_evidence
 from src.types.market import Bin
@@ -113,6 +122,8 @@ class _CandidateProof:
     # fix). Carried to the receipt so 06-05+ settlement can attribute EMOS-cells
     # vs maze-cells per city (the PROMOTE evidence).
     q_source: str | None = None
+    q_lcb_calibration_source: str | None = None
+    same_bin_yes_posterior: float | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +155,340 @@ class PreSubmitAuthorityWitness:
 
 class _LiveOpportunityAlreadyLocked(RuntimeError):
     """Raised when continuous redecision rediscovers an already-locked opportunity."""
+
+
+_DURABLE_LIVE_CAP_UNKNOWN_CITY = "__unknown_live_cap_city__"
+
+
+def _adapter_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+_DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES = frozenset(
+    {"CANCELLED", "CANCELED", "EXPIRED", "FILLED", "REJECTED", "SUBMIT_REJECTED"}
+)
+_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES = frozenset(
+    {"active", "day0_window", "pending_exit"}
+)
+
+
+def _durable_live_cap_final_intent_token(final_intent_id: str) -> str:
+    token = str(final_intent_id or "").rsplit(":", 1)[-1].strip()
+    return token if token and token != str(final_intent_id or "") else ""
+
+
+def _durable_live_cap_usage_is_represented_in_trade_truth(
+    trade_conn: sqlite3.Connection | None,
+    *,
+    execution_command_id: str,
+    final_intent_id: str,
+) -> bool:
+    if trade_conn is None:
+        return False
+    try:
+        if execution_command_id and _adapter_table_exists(trade_conn, "venue_commands"):
+            row = trade_conn.execute(
+                """
+                SELECT state
+                  FROM venue_commands
+                 WHERE decision_id = ?
+                   AND intent_kind = 'ENTRY'
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT 1
+                """,
+                (execution_command_id,),
+            ).fetchone()
+            if row is not None:
+                state = str(row[0] if not isinstance(row, sqlite3.Row) else row["state"]).strip().upper()
+                if state in _DURABLE_LIVE_CAP_TERMINAL_COMMAND_STATES:
+                    return True
+
+        token = _durable_live_cap_final_intent_token(final_intent_id)
+        if token and _adapter_table_exists(trade_conn, "position_current"):
+            row = trade_conn.execute(
+                """
+                SELECT 1
+                  FROM position_current
+                 WHERE phase IN (?, ?, ?)
+                   AND (
+                        token_id = ?
+                     OR no_token_id = ?
+                   )
+                   AND (
+                        COALESCE(cost_basis_usd, 0) > 0
+                     OR COALESCE(chain_cost_basis_usd, 0) > 0
+                     OR COALESCE(shares, 0) > 0
+                   )
+                 LIMIT 1
+                """,
+                (*sorted(_DURABLE_LIVE_CAP_MATERIALIZED_POSITION_PHASES), token, token),
+            ).fetchone()
+            if row is not None:
+                return True
+    except Exception as exc:  # noqa: BLE001 - sizing must fail closed on exposure ambiguity.
+        raise RuntimeError(
+            f"DURABLE_LIVE_CAP_TRADE_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+        ) from exc
+    return False
+
+
+def _durable_unmaterialized_live_cap_reservations(
+    conn: sqlite3.Connection | None,
+    *,
+    trade_conn: sqlite3.Connection | None = None,
+) -> tuple[tuple[str, str, float], ...]:
+    """Return durable live-cap exposure not yet represented by position truth.
+
+    ``position_current`` is the canonical open-position truth after a
+    ``UserTradeObserved`` bridge. Between venue submit and user-channel/bridge
+    materialization, however, the submitted notional is real in-flight capital.
+    Seed that cross-cycle exposure into the same Kelly reservation ledger so a
+    later reactor cycle cannot over-size while waiting for fills to arrive.
+    """
+    if conn is None:
+        return ()
+    try:
+        if not (
+            _adapter_table_exists(conn, "edli_live_cap_usage")
+            and _adapter_table_exists(conn, "edli_live_order_events")
+        ):
+            return ()
+        rows = conn.execute(
+            """
+            WITH live_cap AS (
+                SELECT
+                    usage_id,
+                    event_id,
+                    final_intent_id,
+                    execution_command_id,
+                    reserved_notional_usd,
+                    event_id || ':' || COALESCE(final_intent_id, '') AS aggregate_id
+                FROM edli_live_cap_usage
+                WHERE reservation_status IN ('RESERVED', 'CONSUMED')
+                  AND reserved_notional_usd > 0
+            ),
+            observed AS (
+                SELECT DISTINCT aggregate_id
+                FROM edli_live_order_events
+                WHERE event_type = 'UserTradeObserved'
+                  AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
+            ),
+            absence_reconciled AS (
+                SELECT DISTINCT aggregate_id
+                FROM edli_live_order_events
+                WHERE event_type = 'Reconciled'
+                  AND (
+                    json_extract(payload_json, '$.cap_transition_recommendation') = 'RELEASED'
+                    OR json_type(payload_json, '$.authenticated_absence_proof') IS NOT NULL
+                  )
+            ),
+            pre_submit AS (
+                SELECT aggregate_id, payload_json
+                FROM edli_live_order_events
+                WHERE event_type = 'PreSubmitRevalidated'
+            ),
+            decision_audit AS (
+                SELECT aggregate_id, payload_json
+                FROM edli_live_order_events
+                WHERE event_type = 'DecisionProofAccepted'
+            )
+            SELECT
+                live_cap.usage_id,
+                live_cap.final_intent_id,
+                live_cap.execution_command_id,
+                COALESCE(
+                    NULLIF(json_extract(pre_submit.payload_json, '$.city'), ''),
+                    NULLIF(json_extract(decision_audit.payload_json, '$.decision_audit.city'), ''),
+                    ?
+                ) AS city,
+                live_cap.reserved_notional_usd
+            FROM live_cap
+            LEFT JOIN observed ON observed.aggregate_id = live_cap.aggregate_id
+            LEFT JOIN absence_reconciled ON absence_reconciled.aggregate_id = live_cap.aggregate_id
+            LEFT JOIN pre_submit ON pre_submit.aggregate_id = live_cap.aggregate_id
+            LEFT JOIN decision_audit ON decision_audit.aggregate_id = live_cap.aggregate_id
+            WHERE observed.aggregate_id IS NULL
+              AND absence_reconciled.aggregate_id IS NULL
+            ORDER BY live_cap.usage_id
+            """,
+            (_DURABLE_LIVE_CAP_UNKNOWN_CITY,),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - sizing must fail closed on exposure ambiguity.
+        import logging
+
+        logging.getLogger("zeus.edli_portfolio").warning(
+            "durable live-cap exposure seed unavailable: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        raise RuntimeError(
+            f"DURABLE_LIVE_CAP_EXPOSURE_SEED_UNAVAILABLE:{type(exc).__name__}:{exc}"
+        ) from exc
+    out: list[tuple[str, str, float]] = []
+    for row in rows:
+        usage_id = str(row[0] if not isinstance(row, sqlite3.Row) else row["usage_id"])
+        final_intent_id = str(row[1] if not isinstance(row, sqlite3.Row) else row["final_intent_id"] or "")
+        execution_command_id = str(row[2] if not isinstance(row, sqlite3.Row) else row["execution_command_id"] or "")
+        city = str(row[3] if not isinstance(row, sqlite3.Row) else row["city"])
+        reserved = float(row[4] if not isinstance(row, sqlite3.Row) else row["reserved_notional_usd"])
+        if _durable_live_cap_usage_is_represented_in_trade_truth(
+            trade_conn,
+            execution_command_id=execution_command_id,
+            final_intent_id=final_intent_id,
+        ):
+            continue
+        if usage_id and reserved > 0.0:
+            out.append((f"durable_live_cap:{usage_id}", city, reserved))
+    return tuple(out)
+
+
+def _seed_portfolio_reservations_from_durable_live_cap(
+    ledger: PortfolioReservationLedger,
+    conn: sqlite3.Connection | None,
+    *,
+    trade_conn: sqlite3.Connection | None = None,
+) -> int:
+    seeded = 0
+    for reservation_id, city, reserved_usd in _durable_unmaterialized_live_cap_reservations(
+        conn,
+        trade_conn=trade_conn,
+    ):
+        ledger.seed_committed(reservation_id, city, reserved_usd)
+        seeded += 1
+    return seeded
+
+
+def _event_bound_strategy_key(
+    *,
+    event_type: str,
+    direction: str | None,
+    metric: str | None,
+    require_metric_live: bool = False,
+) -> str:
+    """Classify the EDLI event-bound entry strategy without defaulting to settlement_capture."""
+
+    normalized_direction = str(direction or "").strip().lower()
+    normalized_metric = str(metric or "").strip().lower()
+    if event_type == "DAY0_EXTREME_UPDATED":
+        strategy = "settlement_capture"
+    elif event_type == "FORECAST_SNAPSHOT_READY":
+        strategy = "opening_inertia" if normalized_direction == "buy_no" else "center_buy"
+    else:
+        raise ValueError(f"EDLI_STRATEGY_UNSUPPORTED_EVENT_TYPE:{event_type}")
+
+    from src.strategy.strategy_profile import try_get
+
+    profile = try_get(strategy)
+    if profile is None or not profile.is_runtime_live():
+        raise ValueError(f"EDLI_STRATEGY_NOT_RUNTIME_LIVE:{strategy}")
+    if normalized_direction and not profile.is_direction_allowed(normalized_direction):
+        raise ValueError(
+            f"EDLI_STRATEGY_DIRECTION_BLOCKED:{strategy}:direction={normalized_direction}"
+        )
+    if require_metric_live and normalized_metric and not profile.metric_is_live(normalized_metric):
+        raise ValueError(f"EDLI_STRATEGY_METRIC_BLOCKED:{strategy}:metric={normalized_metric}")
+    return strategy
+
+
+def _assert_event_bound_strategy_live_admitted(
+    *,
+    strategy_key: str | None,
+    direction: str | None,
+    metric: str | None,
+) -> None:
+    """Fail closed before the executor boundary if registry semantics reject the receipt."""
+
+    from src.strategy.strategy_profile import try_get
+
+    normalized_strategy = str(strategy_key or "").strip()
+    normalized_direction = str(direction or "").strip().lower()
+    normalized_metric = str(metric or "").strip().lower()
+    profile = try_get(normalized_strategy)
+    if profile is None or not profile.is_runtime_live():
+        raise ValueError(f"EDLI_STRATEGY_NOT_RUNTIME_LIVE:{normalized_strategy or 'missing'}")
+    if normalized_direction and not profile.is_direction_allowed(normalized_direction):
+        raise ValueError(
+            f"EDLI_STRATEGY_DIRECTION_BLOCKED:{normalized_strategy}:direction={normalized_direction}"
+        )
+    if normalized_metric and not profile.metric_is_live(normalized_metric):
+        raise ValueError(f"EDLI_STRATEGY_METRIC_BLOCKED:{normalized_strategy}:metric={normalized_metric}")
+
+
+def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertificate) -> None:
+    """Identity fallback is evidence-only; it must never authorize real live commands."""
+
+    payload = calibration.payload
+    authority = str(payload.get("authority") or "").strip().upper()
+    n_samples_raw = payload.get("n_samples")
+    try:
+        n_samples = int(n_samples_raw) if n_samples_raw is not None else None
+    except (TypeError, ValueError):
+        n_samples = None
+    if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
+        raise ValueError("EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:IDENTITY_FALLBACK_NO_PLATT_BUCKET")
+    if n_samples is not None and n_samples <= 0:
+        raise ValueError(f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}")
+
+
+def _assert_event_bound_receipt_live_authority(receipt: EventSubmissionReceipt) -> None:
+    """Real submit needs the family-selection provenance shown in receipts."""
+
+    if str(receipt.q_source or "").strip() == "":
+        raise ValueError("EDLI_LIVE_Q_SOURCE_MISSING")
+    book = receipt.opportunity_book
+    if not isinstance(book, dict):
+        raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_MISSING")
+    selected = str(book.get("selected_candidate_id") or "").strip()
+    actual = str(book.get("actual_receipt_selected_candidate_id") or "").strip()
+    if not selected:
+        raise ValueError("EDLI_LIVE_OPPORTUNITY_BOOK_SELECTED_MISSING")
+    if actual and actual != selected:
+        raise ValueError(
+            "EDLI_LIVE_OPPORTUNITY_BOOK_SELECTION_MISMATCH:"
+            f"selected={selected}:actual={actual}"
+        )
+    receipt_candidate_id = _opportunity_book_candidate_id_for_receipt(book, receipt)
+    if not receipt_candidate_id:
+        raise ValueError(
+            "EDLI_LIVE_OPPORTUNITY_BOOK_RECEIPT_CANDIDATE_MISSING:"
+            f"condition_id={receipt.condition_id}:token_id={receipt.token_id}:direction={receipt.direction}"
+        )
+    if receipt_candidate_id != selected:
+        raise ValueError(
+            "EDLI_LIVE_OPPORTUNITY_BOOK_RECEIPT_NOT_SELECTED:"
+            f"selected={selected}:receipt_candidate={receipt_candidate_id}:"
+            f"condition_id={receipt.condition_id}:token_id={receipt.token_id}:direction={receipt.direction}"
+        )
+
+
+def _opportunity_book_candidate_id_for_receipt(
+    book: Mapping[str, object],
+    receipt: EventSubmissionReceipt,
+) -> str | None:
+    candidates = book.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    condition_id = str(receipt.condition_id or "").strip()
+    token_id = str(receipt.token_id or "").strip()
+    direction = str(receipt.direction or "").strip()
+    if not condition_id or not token_id or not direction:
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        if str(candidate.get("condition_id") or "").strip() != condition_id:
+            continue
+        if str(candidate.get("token_id") or "").strip() != token_id:
+            continue
+        if str(candidate.get("direction") or "").strip() != direction:
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "").strip()
+        return candidate_id or None
+    return None
 
 
 def build_event_reactor(
@@ -264,6 +609,153 @@ def edli_trade_score_gate(event: OpportunityEvent) -> bool:
     return event.event_type in {"FORECAST_SNAPSHOT_READY", "DAY0_EXTREME_UPDATED"}
 
 
+def _resolve_replacement_forecast_adapter_hook(
+    *,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None,
+    replacement_forecast_runtime_flags: Mapping[str, object] | None,
+    replacement_forecast_baseline_bundle_provider: Callable[["_CandidateProof", OpportunityEvent, datetime], object | None] | None,
+    replacement_forecast_world_tables: tuple[str, ...],
+    replacement_forecast_source_fact_status: str,
+    replacement_forecast_data_fact_status: str,
+    replacement_forecast_refit_decision: ReplacementForecastRefitDecision | None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None,
+    forecast_conn: sqlite3.Connection | None,
+    trade_conn: sqlite3.Connection,
+) -> Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None:
+    if replacement_forecast_hook is not None or replacement_forecast_runtime_flags is None:
+        return replacement_forecast_hook
+    if forecast_conn is None:
+        def _missing_forecast_conn_hook(
+            proof: _CandidateProof,
+            _event: OpportunityEvent,
+            _decision_time: datetime,
+        ) -> ReplacementForecastReactorHookResult:
+            return ReplacementForecastReactorHookResult(
+                status="BLOCKED",
+                reason_codes=("REPLACEMENT_FORECAST_HOOK_FORECAST_CONNECTION_MISSING",),
+                effective_direction=proof.direction,
+                effective_q_posterior=proof.q_posterior,
+                effective_q_lcb=proof.q_lcb_5pct,
+                effective_kelly_fraction=0.0,
+            )
+
+        return _missing_forecast_conn_hook
+    from src.engine.replacement_forecast_hook_factory import (
+        ReplacementForecastHookFactoryInput,
+        build_replacement_forecast_event_hook,
+    )
+
+    return build_replacement_forecast_event_hook(
+        ReplacementForecastHookFactoryInput(
+            forecast_conn=forecast_conn,
+            trade_conn=trade_conn,
+            runtime_flags=replacement_forecast_runtime_flags,
+            baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+            refit_decision=replacement_forecast_refit_decision,
+            promotion_evidence=replacement_forecast_promotion_evidence,
+            capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+            world_tables=replacement_forecast_world_tables,
+            source_fact_status=replacement_forecast_source_fact_status,
+            data_fact_status=replacement_forecast_data_fact_status,
+        )
+    )
+
+
+def replacement_forecast_baseline_bundle_provider_from_forecast_conn(
+    forecast_conn: sqlite3.Connection,
+) -> Callable[["_CandidateProof", OpportunityEvent, datetime], object | None]:
+    """Build the B0 executable forecast provider used by replacement shadow/veto."""
+
+    def _provider(
+        proof: _CandidateProof,
+        event: OpportunityEvent,
+        decision_time: datetime,
+    ) -> object | None:
+        from src.data.executable_forecast_reader import SOURCE_TRANSPORT, read_executable_forecast
+
+        payload = _payload(event)
+        candidate = proof.candidate
+        city = str(payload.get("city") or candidate.city)
+        target_date_text = str(payload.get("target_date") or candidate.target_date)
+        metric = str(payload.get("metric") or candidate.metric)
+        source_run_id = str(payload.get("source_run_id") or "")
+        source_id = str(payload.get("source_id") or "")
+        track = str(payload.get("track") or "")
+        if not city or not target_date_text or metric not in {"high", "low"} or not source_run_id:
+            return None
+        table_ref = _authority_table_ref(forecast_conn, "source_run_coverage")
+        if table_ref is None:
+            return None
+        columns = _table_ref_columns(forecast_conn, table_ref)
+        required = {
+            "source_run_id",
+            "city",
+            "target_local_date",
+            "temperature_metric",
+            "data_version",
+            "source_id",
+            "track",
+            "computed_at",
+        }
+        if not required.issubset(columns):
+            return None
+        predicates = [
+            "source_run_id = ?",
+            "city = ?",
+            "target_local_date = ?",
+            "temperature_metric = ?",
+        ]
+        params: list[object] = [source_run_id, city, target_date_text, metric]
+        if source_id:
+            predicates.append("source_id = ?")
+            params.append(source_id)
+        if track:
+            predicates.append("track = ?")
+            params.append(track)
+        row = forecast_conn.execute(
+            f"""
+            SELECT *
+            FROM {table_ref}
+            WHERE {' AND '.join(predicates)}
+            ORDER BY computed_at DESC, recorded_at DESC
+            LIMIT 1
+            """,
+            params,
+        ).fetchone()
+        if row is None:
+            return None
+        coverage = dict(row)
+        city_id = str(coverage.get("city_id") or city)
+        city_timezone = str(coverage.get("city_timezone") or getattr(runtime_cities_by_name().get(city), "timezone", "UTC"))
+        final_source_id = str(coverage.get("source_id") or source_id)
+        source_transport = str(coverage.get("source_transport") or SOURCE_TRANSPORT)
+        data_version = str(coverage.get("data_version") or "")
+        final_track = str(coverage.get("track") or track)
+        if not final_source_id or not data_version or not final_track:
+            return None
+        result = read_executable_forecast(
+            forecast_conn,
+            city_id=city_id,
+            city_name=str(coverage.get("city") or city),
+            city_timezone=city_timezone,
+            target_local_date=date.fromisoformat(target_date_text),
+            temperature_metric=metric,
+            source_id=final_source_id,
+            source_transport=source_transport,
+            data_version=data_version,
+            track=final_track,
+            strategy_key="entry_forecast",
+            market_family=str(candidate.condition_id or ""),
+            condition_id=str(candidate.condition_id or ""),
+            decision_time=decision_time,
+            require_entry_readiness=False,
+        )
+        return result.bundle if result.ok and result.bundle is not None else None
+
+    return _provider
+
+
 def event_bound_no_submit_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
@@ -274,6 +766,15 @@ def event_bound_no_submit_adapter_from_trade_conn(
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
+    replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
+    replacement_forecast_baseline_bundle_provider: Callable[["_CandidateProof", OpportunityEvent, datetime], object | None] | None = None,
+    replacement_forecast_world_tables: tuple[str, ...] = (),
+    replacement_forecast_source_fact_status: str = "STALE_FOR_LIVE",
+    replacement_forecast_data_fact_status: str = "STALE_FOR_LIVE",
+    replacement_forecast_refit_decision: ReplacementForecastRefitDecision | None = None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build a proof-only final-intent receipt adapter for EDLI events.
 
@@ -289,6 +790,24 @@ def event_bound_no_submit_adapter_from_trade_conn(
     # ledger (not a bare list) so a candidate rejected downstream of Kelly is
     # rolled back by the reactor before the next sequential event reads it.
     portfolio_reservation = PortfolioReservationLedger()
+    _seed_portfolio_reservations_from_durable_live_cap(
+        portfolio_reservation,
+        live_cap_conn,
+        trade_conn=trade_conn,
+    )
+    resolved_replacement_forecast_hook = _resolve_replacement_forecast_adapter_hook(
+        replacement_forecast_hook=replacement_forecast_hook,
+        replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
+        replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+        replacement_forecast_world_tables=replacement_forecast_world_tables,
+        replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
+        replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
+        replacement_forecast_refit_decision=replacement_forecast_refit_decision,
+        replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+        replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+        forecast_conn=forecast_conn,
+        trade_conn=trade_conn,
+    )
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         return build_event_bound_no_submit_receipt(
@@ -303,6 +822,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
+            replacement_forecast_hook=resolved_replacement_forecast_hook,
         )
 
     # Expose the per-cycle ledger so the reactor can commit/rollback provisional
@@ -323,6 +843,15 @@ def event_bound_live_adapter_from_trade_conn(
     live_cap_conn: sqlite3.Connection | None = None,
     bankroll_usd_provider: Callable[[], float | None] | None = None,
     portfolio_state_provider: "Callable[[], Any] | None" = None,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
+    replacement_forecast_runtime_flags: Mapping[str, object] | None = None,
+    replacement_forecast_baseline_bundle_provider: Callable[["_CandidateProof", OpportunityEvent, datetime], object | None] | None = None,
+    replacement_forecast_world_tables: tuple[str, ...] = (),
+    replacement_forecast_source_fact_status: str = "STALE_FOR_LIVE",
+    replacement_forecast_data_fact_status: str = "STALE_FOR_LIVE",
+    replacement_forecast_refit_decision: ReplacementForecastRefitDecision | None = None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
     real_order_submit_enabled: bool = False,
     live_canary_enabled: bool = False,
     tiny_live_max_notional_usd: float = 5.0,
@@ -349,6 +878,24 @@ def event_bound_live_adapter_from_trade_conn(
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
     # rolled back by the reactor before the next sequential event reads it.
     portfolio_reservation = PortfolioReservationLedger()
+    _seed_portfolio_reservations_from_durable_live_cap(
+        portfolio_reservation,
+        live_cap_conn,
+        trade_conn=trade_conn,
+    )
+    resolved_replacement_forecast_hook = _resolve_replacement_forecast_adapter_hook(
+        replacement_forecast_hook=replacement_forecast_hook,
+        replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
+        replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
+        replacement_forecast_world_tables=replacement_forecast_world_tables,
+        replacement_forecast_source_fact_status=replacement_forecast_source_fact_status,
+        replacement_forecast_data_fact_status=replacement_forecast_data_fact_status,
+        replacement_forecast_refit_decision=replacement_forecast_refit_decision,
+        replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+        replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+        forecast_conn=forecast_conn,
+        trade_conn=trade_conn,
+    )
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
         no_submit_receipt = build_event_bound_no_submit_receipt(
@@ -363,6 +910,7 @@ def event_bound_live_adapter_from_trade_conn(
             portfolio_state_provider=portfolio_state_provider,
             portfolio_reservation=portfolio_reservation,
             locked_opportunity_conn=live_cap_conn or trade_conn,
+            replacement_forecast_hook=resolved_replacement_forecast_hook,
         )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
@@ -546,6 +1094,19 @@ def event_bound_live_adapter_from_trade_conn(
             reason=reason,
             proof_accepted=True,
             decision_proof_bundle=certificates,
+            mainstream_agreement_pass=no_submit_receipt.mainstream_agreement_pass,
+            mainstream_agreement_fail_reason=no_submit_receipt.mainstream_agreement_fail_reason,
+            mainstream_point=no_submit_receipt.mainstream_point,
+            mainstream_delta=no_submit_receipt.mainstream_delta,
+            mainstream_bin_label=no_submit_receipt.mainstream_bin_label,
+            mainstream_source=no_submit_receipt.mainstream_source,
+            mainstream_fetched_at_utc=no_submit_receipt.mainstream_fetched_at_utc,
+            alpha_gap=no_submit_receipt.alpha_gap,
+            q_source=no_submit_receipt.q_source,
+            strategy_key=no_submit_receipt.strategy_key,
+            opportunity_book=no_submit_receipt.opportunity_book,
+            replacement_forecast=no_submit_receipt.replacement_forecast,
+            unit=no_submit_receipt.unit,
         )
 
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
@@ -646,6 +1207,7 @@ def build_event_bound_no_submit_receipt(
     portfolio_state_provider: "Callable[[], Any] | None" = None,
     portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -795,10 +1357,19 @@ def build_event_bound_no_submit_receipt(
             source_status="MATCH",
             family_complete=True,
         )
+    candidate_kelly_size_usd_by_id = _candidate_selection_kelly_size_usd_by_id(
+        payload=payload,
+        family=family,
+        proofs=proofs,
+        bankroll_usd_provider=bankroll_usd_provider,
+        portfolio_state_provider=portfolio_state_provider,
+        portfolio_reservation=portfolio_reservation,
+    )
     proof = _selected_candidate_proof(
         payload,
         proofs,
         locked_opportunity_conn=locked_opportunity_conn,
+        candidate_kelly_size_usd_by_id=candidate_kelly_size_usd_by_id,
     )
     opportunity_book = _opportunity_book_from_proofs(
         event_id=event.event_id,
@@ -806,6 +1377,7 @@ def build_event_bound_no_submit_receipt(
         proofs=proofs,
         selected_proof=proof,
         locked_opportunity_conn=locked_opportunity_conn,
+        candidate_kelly_size_usd_by_id=candidate_kelly_size_usd_by_id,
     )
     if proof is None:
         # MAJOR2 fix (#135): when ALL candidates fail the mainstream-agreement gate,
@@ -898,6 +1470,195 @@ def build_event_bound_no_submit_receipt(
             source_status="MATCH",
             family_complete=True,
         )
+    replacement_forecast_receipt_tag: dict[str, Any] | None = None
+    if replacement_forecast_hook is not None and not _replacement_primary_authority_already_applied(proof):
+        replacement_hook_result = replacement_forecast_hook(proof, event, decision_time)
+        if replacement_hook_result is not None:
+            if replacement_hook_result.status == "BLOCKED":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="REPLACEMENT_FORECAST_HOOK_BLOCKED:" + ",".join(replacement_hook_result.reason_codes),
+                    city=family.city,
+                    target_date=family.target_date,
+                    metric=family.metric,
+                    condition_id=str(candidate.condition_id or ""),
+                    token_id=selected_token_id,
+                    executable_snapshot_id=proof.executable_snapshot_id,
+                    family_id=family.family_id,
+                    bin_label=candidate.bin.label,
+                    direction=direction,
+                    q_live=proof.q_posterior,
+                    q_lcb_5pct=proof.q_lcb_5pct,
+                    c_fee_adjusted=execution_price.value,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                    trade_score=proof.trade_score,
+                    native_quote_available=True,
+                    source_status="MATCH",
+                    family_complete=True,
+                    replacement_forecast=replacement_forecast_receipt_tag,
+                )
+            if replacement_hook_result.status == "SHADOW_VETO_ONLY":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+                if replacement_hook_result.effective_direction != direction:
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason="REPLACEMENT_FORECAST_HOOK_DIRECTION_FLIP",
+                        city=family.city,
+                        target_date=family.target_date,
+                        metric=family.metric,
+                        condition_id=str(candidate.condition_id or ""),
+                        token_id=selected_token_id,
+                        executable_snapshot_id=proof.executable_snapshot_id,
+                        family_id=family.family_id,
+                        bin_label=candidate.bin.label,
+                        direction=direction,
+                        q_live=proof.q_posterior,
+                        q_lcb_5pct=proof.q_lcb_5pct,
+                        c_fee_adjusted=execution_price.value,
+                        c_cost_95pct=proof.c_cost_95pct,
+                        p_fill_lcb=proof.p_fill_lcb,
+                        trade_score=proof.trade_score,
+                        native_quote_available=True,
+                        source_status="MATCH",
+                        family_complete=True,
+                        replacement_forecast=replacement_forecast_receipt_tag,
+                    )
+                effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)
+                effective_trade_score = _robust_trade_score_from_generated_inputs(
+                    q_posterior=proof.q_posterior,
+                    q_lcb_5pct=effective_q_lcb,
+                    execution_price=execution_price,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                )
+                proof = dataclass_replace(
+                    proof,
+                    q_lcb_5pct=effective_q_lcb,
+                    trade_score=min(proof.trade_score, effective_trade_score),
+                )
+            elif replacement_hook_result.status == "LIVE_AUTHORITY":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+                effective_proof = _replacement_live_authority_proof_for_direction(
+                    proofs=proofs,
+                    baseline_proof=proof,
+                    effective_direction=replacement_hook_result.effective_direction,
+                )
+                if effective_proof is None:
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason="REPLACEMENT_FORECAST_LIVE_DIRECTION_PROOF_MISSING",
+                        city=family.city,
+                        target_date=family.target_date,
+                        metric=family.metric,
+                        condition_id=str(candidate.condition_id or ""),
+                        token_id=selected_token_id,
+                        executable_snapshot_id=proof.executable_snapshot_id,
+                        family_id=family.family_id,
+                        bin_label=candidate.bin.label,
+                        direction=direction,
+                        q_live=proof.q_posterior,
+                        q_lcb_5pct=proof.q_lcb_5pct,
+                        c_fee_adjusted=execution_price.value,
+                        c_cost_95pct=proof.c_cost_95pct,
+                        p_fill_lcb=proof.p_fill_lcb,
+                        trade_score=proof.trade_score,
+                        native_quote_available=True,
+                        source_status="MATCH",
+                        family_complete=True,
+                        replacement_forecast=replacement_forecast_receipt_tag,
+                    )
+                proof = effective_proof
+                candidate = proof.candidate
+                selected_token_id = proof.token_id
+                direction = proof.direction
+                execution_price = proof.execution_price
+                row = proof.row
+                opportunity_book = _opportunity_book_from_proofs(
+                    event_id=event.event_id,
+                    family_id=family.family_id,
+                    proofs=proofs,
+                    selected_proof=proof,
+                    locked_opportunity_conn=locked_opportunity_conn,
+                    candidate_kelly_size_usd_by_id=candidate_kelly_size_usd_by_id,
+                )
+                if execution_price is None or row is None:
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason="REPLACEMENT_FORECAST_LIVE_EXECUTABLE_PROOF_MISSING",
+                        city=family.city,
+                        target_date=family.target_date,
+                        metric=family.metric,
+                        condition_id=str(candidate.condition_id or ""),
+                        token_id=selected_token_id,
+                        executable_snapshot_id=proof.executable_snapshot_id,
+                        family_id=family.family_id,
+                        bin_label=candidate.bin.label,
+                        direction=direction,
+                        q_live=proof.q_posterior,
+                        q_lcb_5pct=proof.q_lcb_5pct,
+                        c_fee_adjusted=None,
+                        c_cost_95pct=proof.c_cost_95pct,
+                        p_fill_lcb=proof.p_fill_lcb,
+                        trade_score=proof.trade_score,
+                        native_quote_available=False,
+                        source_status="MATCH",
+                        family_complete=True,
+                        replacement_forecast=replacement_forecast_receipt_tag,
+                    )
+                effective_q_posterior = replacement_hook_result.effective_q_posterior
+                effective_q_lcb = replacement_hook_result.effective_q_lcb
+                effective_trade_score = _robust_trade_score_from_generated_inputs(
+                    q_posterior=effective_q_posterior,
+                    q_lcb_5pct=effective_q_lcb,
+                    execution_price=execution_price,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                )
+                proof = dataclass_replace(
+                    proof,
+                    q_posterior=effective_q_posterior,
+                    q_lcb_5pct=effective_q_lcb,
+                    trade_score=effective_trade_score,
+                )
+            elif replacement_hook_result.status == "SHADOW_ONLY":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+            elif replacement_hook_result.status != "DISABLED":
+                replacement_forecast_receipt_tag = replacement_hook_result.as_receipt_tag()
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=f"REPLACEMENT_FORECAST_HOOK_UNSUPPORTED:{replacement_hook_result.status}",
+                    city=family.city,
+                    target_date=family.target_date,
+                    metric=family.metric,
+                    condition_id=str(candidate.condition_id or ""),
+                    token_id=selected_token_id,
+                    executable_snapshot_id=proof.executable_snapshot_id,
+                    family_id=family.family_id,
+                    bin_label=candidate.bin.label,
+                    direction=direction,
+                    q_live=proof.q_posterior,
+                    q_lcb_5pct=proof.q_lcb_5pct,
+                    c_fee_adjusted=execution_price.value,
+                    c_cost_95pct=proof.c_cost_95pct,
+                    p_fill_lcb=proof.p_fill_lcb,
+                    trade_score=proof.trade_score,
+                    native_quote_available=True,
+                    source_status="MATCH",
+                    family_complete=True,
+                    replacement_forecast=replacement_forecast_receipt_tag,
+                )
     trade_score = proof.trade_score
     if trade_score <= 0.0:
         return EventSubmissionReceipt(
@@ -1003,7 +1764,11 @@ def build_event_bound_no_submit_receipt(
             _bias_decay_applied,
             _bias_decay_native,
             _bias_decay_reason,
-        ) = _maybe_bias_decay_kelly_haircut(kelly_multiplier, family=family)
+        ) = _maybe_bias_decay_kelly_haircut(
+            kelly_multiplier,
+            family=family,
+            q_source=proof.q_source,
+        )
         # S3 (variance-required Kelly, task #103/#111): carry the candidate's
         # posterior CI width and forecast lead into Kelly so a wider-CI edge
         # sizes STRICTLY smaller. The config/bias-decay multiplier above is the
@@ -1013,12 +1778,13 @@ def build_event_bound_no_submit_receipt(
         # fail-closed, never silent.
         _lead_days = _snapshot_lead_days(snapshot=row, family=family, payload=payload)
         # Task #107 (portfolio/multi Kelly): when a PortfolioState provider is
-        # wired, size against the bankroll NET of correlation-weighted committed
-        # capital (open + pending + same-cycle in-flight reservation). The
-        # reservation accumulator (closure-held in the adapter factory) carries
-        # this cycle's already-emitted-but-unfilled stakes (INV-K7). When no
-        # provider is wired (back-compat / tests), fall back to the #103 3-arg
-        # context → sizes against the raw bankroll, EXACTLY as before #107.
+        # wired, carry correlation-weighted and raw committed capital into the
+        # Kelly context as SOFT marginal pressure inputs. They shrink the next
+        # multiplier but do not subtract from a global budget and hard-zero a
+        # positive-edge candidate. The reservation accumulator (closure-held in
+        # the adapter factory) carries this cycle's already-emitted-but-unfilled
+        # stakes (INV-K7). When no provider is wired (back-compat / tests), fall
+        # back to the #103 3-arg context.
         if portfolio_state_provider is not None:
             from src.state.portfolio import correlated_committed_usd, total_exposure_usd
 
@@ -1032,10 +1798,10 @@ def build_event_bound_no_submit_receipt(
                     else None
                 ),
             )
-            # INV-K1b absolute raw-dollar floor (verifier fix): total cash
-            # deployed across all open positions (no corr weighting) + same-cycle
-            # reservation usd. This bounds Σ raw stakes ≤ max_portfolio_heat_pct·B
-            # regardless of city correlation.
+            # Raw exposure pressure: total cash deployed across all open
+            # positions (no corr weighting) + same-cycle reservation usd. This
+            # is not a hard portfolio cap; evaluate_kelly turns it into a
+            # continuous marginal Kelly haircut.
             _raw_committed_usd = total_exposure_usd(_portfolio_state) + sum(
                 float(usd)
                 for _, usd in (portfolio_reservation or [])
@@ -1196,10 +1962,17 @@ def build_event_bound_no_submit_receipt(
             "city": family.city,
             "target_date": family.target_date,
             "metric": family.metric,
+            "strategy_key": _event_bound_strategy_key(
+                event_type=event.event_type,
+                direction=direction,
+                metric=family.metric,
+            ),
             "bin_label": candidate.bin.label,
+            "unit": getattr(candidate.bin, "unit", None),
             "outcome_label": "NO" if selected_token_id == candidate.no_token_id else "YES",
             "q_live": proof.q_posterior,
             "q_lcb_5pct": proof.q_lcb_5pct,
+            "q_lcb_calibration_source": proof.q_lcb_calibration_source,
             "q_source": proof.q_source,  # #120 calibrator provenance
             "c_fee_adjusted": execution_price.value,
             "c_cost_95pct": proof.c_cost_95pct,
@@ -1217,6 +1990,8 @@ def build_event_bound_no_submit_receipt(
     )
     if opportunity_book is not None:
         raw_receipt["opportunity_book"] = opportunity_book.to_receipt_dict()
+    if replacement_forecast_receipt_tag is not None:
+        raw_receipt["replacement_forecast"] = replacement_forecast_receipt_tag
     # Mainstream-agreement gate fields (#135). Added when the verdict is available on the
     # selected proof; absent otherwise (gate OFF or evaluation error — receipt stays clean).
     if proof.mainstream_agreement is not None:
@@ -1350,7 +2125,11 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_source=raw_receipt.get("mainstream_source"),
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
+        q_lcb_calibration_source=raw_receipt.get("q_lcb_calibration_source"),
+        strategy_key=raw_receipt.get("strategy_key"),
         opportunity_book=raw_receipt.get("opportunity_book"),
+        replacement_forecast=raw_receipt.get("replacement_forecast"),
+        unit=raw_receipt.get("unit"),
     )
 
 
@@ -1405,6 +2184,12 @@ def _build_live_execution_command_certificates(
     canary_force_taker: bool = False,
     taker_fok_fak_live_enabled: bool = False,
 ) -> tuple[DecisionCertificate, ...]:
+    _assert_event_bound_strategy_live_admitted(
+        strategy_key=receipt.strategy_key,
+        direction=receipt.direction,
+        metric=receipt.metric,
+    )
+    _assert_event_bound_receipt_live_authority(receipt)
     proof_bundle = receipt.decision_proof_bundle
     compile_result = DecisionCompiler().compile_no_submit(
         event,
@@ -1434,6 +2219,7 @@ def _build_live_execution_command_certificates(
         for cert in compile_result.certificates
         if cert.certificate_type not in {claims.NO_SUBMIT_DECISION, claims.NO_SUBMIT_MODE}
     )
+    _assert_event_bound_calibration_live_admitted(_required_cert(base_certs, claims.CALIBRATION))
     executable_snapshot = _required_cert(base_certs, claims.EXECUTABLE_SNAPSHOT)
     live_cap = _build_live_cap_certificate_from_ledger(
         event=event,
@@ -1445,7 +2231,7 @@ def _build_live_execution_command_certificates(
     )
     try:
         actionable = build_actionable_trade_certificate(
-            payload=_actionable_payload_from_receipt(receipt, live_cap),
+            payload=_actionable_payload_from_receipt(receipt, live_cap, event=event),
             parent_certificates=base_certs + (live_cap,),
             decision_time=decision_time,
         )
@@ -1526,7 +2312,10 @@ def _build_live_execution_command_certificates(
         # executable_snapshot payload default, which is correct for the MAKER path.
         _snap_for_depth = None
         if str(order_mode).strip().upper() == "TAKER" and trade_conn is not None:
-            from src.contracts.execution_intent import simulate_clob_sweep
+            from src.contracts.execution_intent import (
+                quantize_submit_shares_for_venue_at_most,
+                simulate_clob_sweep,
+            )
             _snap_id_for_depth = str(
                 executable_snapshot.payload.get("identity")
                 or executable_snapshot.payload.get("selected_snapshot_id")
@@ -1622,48 +2411,47 @@ def _build_live_execution_command_certificates(
                     limit_price=_limit_price_d,
                 )
                 if _depth_sweep.filled_shares > 0:
-                    available_crossable_shares = float(_depth_sweep.filled_shares)
-                    # SEV-1.1 fix (2026-06-01): the cert builder caps size to
-                    # available_crossable_shares.  The executor guard re-sweeps on
-                    # the CAPPED submitted_shares and asserts exact VWAP equality.
-                    # If we store the VWAP from the uncapped _desired_shares sweep,
-                    # the two VWAPs diverge on any multi-level book where desired >
-                    # crossable → parity rejection on first armed TAKER order.
-                    # Fix: re-sweep on the capped size to get the VWAP that the
-                    # executor will actually see.  The cert builder's
-                    #   size = min(desired_shares, available_crossable_shares)
-                    # is mirrored here as min(_desired_shares_f, available_crossable_shares).
-                    # Single-source principle: ONE sweep result drives both the cert
-                    # fill price and the executor guard re-sweep (same snap, same
-                    # size, same limit → bitwise identical VWAP Decimal).
-                    _capped_shares_f = min(
-                        _desired_shares_f,
-                        available_crossable_shares,
+                    # SEV-1.2 fix (2026-06-06): the submitted share amount itself
+                    # must already obey the venue's immediate-BUY amount grids before
+                    # the final intent certificate is built.  The earlier Wall-B fix
+                    # mirrored the cert builder's size cap, but left many-decimal BUY
+                    # sizes such as 36.304447843137254 in SubmitPlanBuilt; the
+                    # executor correctly rejected them before contacting the SDK.
+                    #
+                    # Mirror the final builder's exact size law here, then sweep on
+                    # the largest venue-legal size that does not exceed the target or
+                    # available depth. If no venue-legal size can fully fill, fail
+                    # closed rather than submitting a deterministic reject.
+                    _raw_capped_shares = min(_desired_shares, _depth_sweep.filled_shares)
+                    _venue_quantized_shares = quantize_submit_shares_for_venue_at_most(
+                        _direction_for_depth,
+                        _raw_capped_shares,
+                        final_limit_price=_limit_price_d,
+                        order_type="FOK",
                     )
-                    _capped_shares = Decimal(str(_capped_shares_f))
-                    if _capped_shares < _desired_shares:
-                        # Capped by depth — re-sweep on the capped size so the
-                        # stored VWAP matches what the executor guard will compute.
-                        _capped_sweep = simulate_clob_sweep(
-                            snapshot=_snap_for_depth,
-                            direction=_direction_for_depth,
-                            requested_size_kind="shares",
-                            requested_size_value=_capped_shares,
-                            limit_price=_limit_price_d,
+                    _venue_quantized_sweep = simulate_clob_sweep(
+                        snapshot=_snap_for_depth,
+                        direction=_direction_for_depth,
+                        requested_size_kind="shares",
+                        requested_size_value=_venue_quantized_shares,
+                        limit_price=_limit_price_d,
+                    )
+                    if not _venue_quantized_sweep.fully_filled:
+                        raise ValueError(
+                            "DEPTH_BELOW_VENUE_QUANTIZED_SIZE:"
+                            f"filled_shares={_venue_quantized_sweep.filled_shares}:"
+                            f"venue_quantized_shares={_venue_quantized_shares}:"
+                            f"depth_status={_venue_quantized_sweep.depth_status}"
                         )
-                        sweep_expected_fill_price = (
-                            str(_capped_sweep.average_price)
-                            if _capped_sweep.average_price is not None else None
-                        )
-                    else:
-                        # Not capped — original sweep VWAP is already correct.
-                        # Bug B fix: store exact Decimal string, not float, so the
-                        # cert payload round-trips via _decimal(str) without losing
-                        # precision.
-                        sweep_expected_fill_price = (
-                            str(_depth_sweep.average_price)
-                            if _depth_sweep.average_price is not None else None
-                        )
+                    available_crossable_shares = float(_venue_quantized_shares)
+                    # Single-source principle: the final intent size, the stored
+                    # expected fill price, and the executor guard re-sweep are all
+                    # driven by the same snapshot, limit, and venue-legal size.
+                    sweep_expected_fill_price = (
+                        str(_venue_quantized_sweep.average_price)
+                        if _venue_quantized_sweep.average_price is not None else None
+                    )
+        executable_market_context = _executable_market_context_from_snapshot(_snap_for_depth)
         final_intent = build_final_intent_certificate_from_actionable(
             actionable_cert=actionable,
             executable_snapshot_cert=executable_snapshot,
@@ -1696,6 +2484,7 @@ def _build_live_execution_command_certificates(
             taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
             available_crossable_shares=available_crossable_shares,
             sweep_expected_fill_price=sweep_expected_fill_price,
+            executable_market_context=executable_market_context,
         )
         if (
             taker_fok_fak_live_enabled
@@ -1723,10 +2512,11 @@ def _build_live_execution_command_certificates(
                 min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
                 best_bid=fresh_best_bid,
                 best_ask=fresh_best_ask,
-                taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
-                available_crossable_shares=available_crossable_shares,
-                sweep_expected_fill_price=sweep_expected_fill_price,
-            )
+                    taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
+                    available_crossable_shares=available_crossable_shares,
+                    sweep_expected_fill_price=sweep_expected_fill_price,
+                    executable_market_context=executable_market_context,
+                )
         already_locked_reason = _locked_live_opportunity_no_price_improvement_reason(
             live_cap_conn,
             condition_id=str(final_intent.payload["condition_id"]),
@@ -1748,6 +2538,12 @@ def _build_live_execution_command_certificates(
                 "final_intent_id": final_intent.payload["final_intent_id"],
                 "no_submit_certificate_count": len(base_certs),
                 "no_submit_receipt_event_id": receipt.event_id,
+                "decision_audit": _live_decision_audit_payload(
+                    receipt=receipt,
+                    base_certs=base_certs,
+                    actionable=actionable,
+                    final_intent=final_intent,
+                ),
             },
             occurred_at=decision_time,
             source_authority="decision_kernel",
@@ -1876,18 +2672,26 @@ def _build_live_execution_command_certificates(
 def _actionable_payload_from_receipt(
     receipt: EventSubmissionReceipt,
     live_cap_cert: DecisionCertificate,
+    *,
+    event: OpportunityEvent | None = None,
 ) -> dict[str, object]:
     reserved_notional = float(live_cap_cert.payload["reserved_notional_usd"])
+    city = receipt.city or _event_identity_value(event, "city")
+    target_date = receipt.target_date or _event_identity_value(event, "target_date")
+    metric = receipt.metric or _event_identity_value(event, "metric") or _event_identity_value(event, "temperature_metric")
     return {
         "event_id": receipt.event_id,
-        "event_type": "FORECAST_SNAPSHOT_READY",
+        "event_type": event.event_type if event is not None else None,
         "causal_snapshot_id": receipt.causal_snapshot_id,
+        "strategy_key": receipt.strategy_key,
         "family_id": receipt.family_id,
         "candidate_id": receipt.candidate_id,
         "condition_id": receipt.condition_id,
         "token_id": receipt.token_id,
         "direction": receipt.direction,
         "executable_snapshot_id": receipt.executable_snapshot_id,
+        "q_source": receipt.q_source,
+        "opportunity_book": receipt.opportunity_book,
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -1906,8 +2710,118 @@ def _actionable_payload_from_receipt(
         "neg_risk": receipt.neg_risk,
         "side_effect_status": "ACTIONABLE_NOT_SUBMITTED",
         "native_quote_available": receipt.native_quote_available,
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+        "temperature_metric": metric,
+        "bin_label": receipt.bin_label,
+        "outcome_label": receipt.outcome_label,
+        "unit": receipt.unit,
         "submitted": False,
     }
+
+
+def _live_decision_audit_payload(
+    *,
+    receipt: EventSubmissionReceipt,
+    base_certs: tuple[DecisionCertificate, ...],
+    actionable: DecisionCertificate,
+    final_intent: DecisionCertificate,
+) -> dict[str, object]:
+    """Compact durable audit payload for real-submit aggregate root events.
+
+    ``edli_no_submit_receipts`` intentionally rejects real-submit receipts. The
+    live-order aggregate is therefore the durable source for reconstructing why a
+    submitted order existed. Keep this payload small and derived from the same
+    receipt/certificates already authorized by the money path.
+    """
+
+    book = receipt.opportunity_book if isinstance(receipt.opportunity_book, dict) else {}
+    selected_candidate_id = str(book.get("selected_candidate_id") or "").strip() or None
+    actual_candidate_id = str(book.get("actual_receipt_selected_candidate_id") or "").strip() or None
+    selected_candidate: Mapping[str, object] | None = None
+    candidates = book.get("candidates")
+    if isinstance(candidates, list) and selected_candidate_id is not None:
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                continue
+            if str(candidate.get("candidate_id") or "").strip() == selected_candidate_id:
+                selected_candidate = candidate
+                break
+
+    return {
+        "schema": "edli_live_decision_audit_v1",
+        "event_id": receipt.event_id,
+        "final_intent_id": receipt.final_intent_id,
+        "family_id": receipt.family_id,
+        "candidate_id": receipt.candidate_id,
+        "condition_id": receipt.condition_id,
+        "token_id": receipt.token_id,
+        "direction": receipt.direction,
+        "city": receipt.city,
+        "target_date": receipt.target_date,
+        "metric": receipt.metric,
+        "bin_label": receipt.bin_label,
+        "outcome_label": receipt.outcome_label,
+        "unit": receipt.unit,
+        "strategy_key": receipt.strategy_key,
+        "q_source": receipt.q_source,
+        "q_live": receipt.q_live,
+        "q_lcb_5pct": receipt.q_lcb_5pct,
+        "c_fee_adjusted": receipt.c_fee_adjusted,
+        "c_cost_95pct": receipt.c_cost_95pct,
+        "p_fill_lcb": receipt.p_fill_lcb,
+        "trade_score": receipt.trade_score,
+        "kelly_size_usd": receipt.kelly_size_usd,
+        "kelly_decision_id": receipt.kelly_decision_id,
+        "risk_decision_id": receipt.risk_decision_id,
+        "opportunity_book": receipt.opportunity_book,
+        "selected_candidate_id": selected_candidate_id,
+        "actual_receipt_selected_candidate_id": actual_candidate_id,
+        "selected_condition_id": (
+            str(selected_candidate.get("condition_id") or "").strip()
+            if selected_candidate is not None
+            else None
+        ),
+        "selected_token_id": (
+            str(selected_candidate.get("token_id") or "").strip()
+            if selected_candidate is not None
+            else None
+        ),
+        "selected_direction": (
+            str(selected_candidate.get("direction") or "").strip()
+            if selected_candidate is not None
+            else None
+        ),
+        "selected_bin_label": (
+            selected_candidate.get("bin_label")
+            if selected_candidate is not None
+            else None
+        ),
+        "actual_condition_id": receipt.condition_id,
+        "actual_token_id": receipt.token_id,
+        "actual_direction": receipt.direction,
+        "actual_bin_label": receipt.bin_label,
+        "actionable_certificate_hash": actionable.certificate_hash,
+        "final_intent_certificate_hash": final_intent.certificate_hash,
+        "parent_certificates": [
+            {
+                "certificate_type": cert.certificate_type,
+                "certificate_id": cert.certificate_id,
+                "certificate_hash": cert.certificate_hash,
+            }
+            for cert in base_certs
+        ],
+    }
+
+
+def _event_identity_value(event: OpportunityEvent | None, key: str) -> object | None:
+    if event is None:
+        return None
+    payload = getattr(event, "payload", None)
+    if isinstance(payload, dict):
+        return payload.get(key)
+    return getattr(payload, key, None)
 
 
 def _live_order_aggregate_id(event_id: str, final_intent_id: str) -> str:
@@ -2033,11 +2947,20 @@ def _pre_submit_revalidation_payload_from_final_intent(
     )
     return {
         "event_id": payload["event_id"],
+        "event_type": payload.get("event_type"),
         "final_intent_id": payload["final_intent_id"],
+        "strategy_key": payload.get("strategy_key"),
         "condition_id": payload["condition_id"],
         "token_id": payload["token_id"],
         "side": payload["side"],
         "direction": payload["direction"],
+        "city": payload.get("city"),
+        "target_date": payload.get("target_date"),
+        "metric": payload.get("metric") or payload.get("temperature_metric"),
+        "temperature_metric": payload.get("temperature_metric") or payload.get("metric"),
+        "bin_label": payload.get("bin_label"),
+        "outcome_label": payload.get("outcome_label"),
+        "unit": payload.get("unit"),
         "order_type": payload["order_type"],
         "time_in_force": payload["time_in_force"],
         "post_only": payload["post_only"],
@@ -2551,6 +3474,19 @@ def _queue_depth_ahead_from_quote(quote_payload: Mapping[str, object]) -> str | 
     return None
 
 
+def _executable_market_context_from_snapshot(snapshot) -> dict[str, object] | None:
+    if snapshot is None:
+        return None
+    context: dict[str, object] = {}
+    for field in ("event_id", "event_slug", "market_end_at", "market_close_at"):
+        value = getattr(snapshot, field, None)
+        if hasattr(value, "isoformat"):
+            value = value.isoformat()
+        if value not in (None, ""):
+            context[field] = value
+    return context or None
+
+
 def _select_edli_order_mode(
     *,
     actionable_payload: Mapping[str, object],
@@ -2674,7 +3610,7 @@ def _ev_boundary_favors_cross(
     fee = _optional_float(actionable_payload.get("fee_rate")) or 0.0
     adverse = _adverse_selection_proxy(actionable_payload=actionable_payload, spread_usd=spread)
     a = float(adverse) if adverse is not None else 0.0
-    lhs = e * (1.0 - p_fill)
+    lhs = e - (e * p_fill)
     rhs = (spread / 2.0) * (1.0 + p_fill) + fee - a
     return lhs >= rhs
 
@@ -3252,6 +4188,7 @@ def _forecast_authority_payload_and_clock(
             "horizon_profile": snapshot.get("horizon_profile"),
         }
     )
+    ens_result = result.bundle.to_ens_result()
     payload_out = {
         "identity": str(result.bundle.snapshot.snapshot_id),
         "snapshot_id": str(result.bundle.snapshot.snapshot_id),
@@ -3284,6 +4221,19 @@ def _forecast_authority_payload_and_clock(
             }
         ),
         "forecast_source_id": evidence.forecast_source_id,
+        "model": ens_result.get("model"),
+        "model_family": ens_result.get("model"),
+        "forecast_issue_time": ens_result.get("issue_time"),
+        "forecast_valid_time": ens_result.get("valid_time"),
+        "forecast_fetch_time": ens_result.get("fetch_time"),
+        "forecast_available_at": ens_result.get("available_at"),
+        "degradation_level": ens_result.get("degradation_level"),
+        "forecast_source_role": ens_result.get("forecast_source_role"),
+        "authority_tier": ens_result.get("authority_tier"),
+        "decision_time": decision_time.astimezone(UTC).isoformat(),
+        "decision_time_status": "OK",
+        "first_member_observed_time": ens_result.get("first_member_observed_time"),
+        "run_complete_time": ens_result.get("run_complete_time"),
         "forecast_data_version": evidence.forecast_data_version,
         "source_transport": evidence.source_transport,
         "source_cycle_time": evidence.source_cycle_time,
@@ -3294,7 +4244,7 @@ def _forecast_authority_payload_and_clock(
         "producer_readiness_id": evidence.producer_readiness_id,
         "entry_readiness_id": evidence.entry_readiness_id,
         "input_snapshot_ids": tuple(str(item) for item in evidence.input_snapshot_ids),
-        "raw_payload_hash": evidence.raw_payload_hash,
+        "raw_payload_hash": ens_result.get("raw_payload_hash"),
         "manifest_hash": evidence.manifest_hash,
         "required_steps": tuple(evidence.required_steps),
         "observed_steps": tuple(evidence.observed_steps),
@@ -3545,13 +4495,12 @@ def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
 #
 # q_lcb SEMANTICS (the seam the 2026-06-05 review caught — DIRECTION LAW / Fitz
 # #4): for direction="buy_no", q_lcb_5pct is the conservative lower bound of
-# p(NO) = "the bin will NOT settle here" (market_analysis_family_scan derives the
-# buy_no hypothesis from p_posterior_no = 1 - p_posterior and bootstraps ci_lo in
-# NO-space). So "OVERWHELMING settlement-licensed evidence the bin won't settle"
-# means q_lcb_5pct is HIGH (→1), not low. The original guard read the escape in
-# YES-space (low q_lcb), which inverted it: it demoted exactly the high-conviction
-# contrarian (high NO-lower-bound) and waved through the weakest one. Corrected
-# below to NO-space.
+# native NO evidence: "the bin will NOT settle here." So "OVERWHELMING
+# settlement-licensed evidence the bin won't settle" means q_lcb_5pct is HIGH
+# (→1), not low. The original guard read the escape in YES-space (low q_lcb),
+# which inverted it: it demoted exactly the high-conviction contrarian
+# (high NO-lower-bound) and waved through the weakest one. Corrected below
+# to NO-space.
 #
 #   market_disagree_no_price_max  — a NO token cheaper than this means the market
 #     prices the bin as LIKELY to settle (YES expensive). Buying NO here is betting
@@ -3561,11 +4510,26 @@ def _date_cutoff_from_calibration_row(row: dict[str, Any]) -> str | None:
 #     bound on p(NO) says the bin overwhelmingly will NOT settle). Default 0.95.
 _MARKET_DISAGREE_NO_PRICE_MAX = 0.15
 _MARKET_DISAGREE_QLCB_MIN_ESCAPE = 0.95
-_MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.02
+_MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.0
 
 
 def _env_flag_enabled(name: str) -> bool:
     return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _opportunity_book_selector_enabled() -> bool:
+    """Family selector is live-default; env/settings may only explicitly disable it."""
+
+    raw = os.environ.get("ZEUS_OPPORTUNITY_BOOK_SELECTOR")
+    if raw is not None:
+        return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+    try:
+        configured = settings["edli_v1"].get("opportunity_book_selector_enabled", True)
+    except Exception:
+        return True
+    if isinstance(configured, str):
+        return configured.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(configured)
 
 
 def _market_disagreement_demotes_buy_no(
@@ -3618,31 +4582,16 @@ def _market_disagreement_demotes_buy_no(
 def _capital_efficiency_untradeable_reason(
     *,
     execution_price: ExecutionPrice | None,
+    q_lcb_5pct: float,
     trade_score: float,
-    min_roi: float | None = None,
 ) -> str | None:
     if execution_price is None:
-        return None
-    price = _optional_float(execution_price.value)
-    if price is None or price <= 0.0:
-        return "CAPITAL_EFFICIENCY_PRICE_INVALID"
-    if min_roi is None and not _env_flag_enabled("ZEUS_ROBUST_ROI_EXPERIMENTAL_GATE"):
-        return None
-    threshold = (
-        float(min_roi)
-        if min_roi is not None
-        else float(settings["edli_v1"].get("min_robust_capital_efficiency_roi", _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI))
+        return "ADMISSION_CAPITAL_EFFICIENCY:price=missing"
+    return live_capital_efficiency_rejection_reason(
+        q_lcb=q_lcb_5pct,
+        execution_price=execution_price.value,
+        trade_score=trade_score,
     )
-    if threshold <= 0.0:
-        return None
-    robust_roi = float(trade_score) / price
-    if robust_roi < threshold:
-        return (
-            "CAPITAL_EFFICIENCY_ROI_BELOW_MIN:"
-            f"robust_roi={robust_roi:.6f}:min_roi={threshold:.6f}:"
-            f"trade_score={float(trade_score):.6f}:execution_price={price:.6f}"
-        )
-    return None
 
 
 def _candidate_robust_roi(proof: _CandidateProof) -> float:
@@ -3673,10 +4622,33 @@ def _candidate_low_volume_usd(row: Mapping[str, object]) -> float | None:
     return None
 
 
+def _candidate_max_executable_shares(proof: _CandidateProof) -> float | None:
+    row = proof.row
+    if row is None or proof.execution_price is None:
+        return None
+    try:
+        book = _native_quote_book_from_snapshot_row(row)
+    except Exception:
+        return None
+    levels = {
+        "buy_yes": book.yes_asks,
+        "buy_no": book.no_asks,
+        "sell_yes": book.yes_bids,
+        "sell_no": book.no_bids,
+    }.get(str(proof.direction or ""))
+    if not levels:
+        return 0.0
+    try:
+        return float(sum((level.size for level in levels), Decimal("0")))
+    except Exception:
+        return None
+
+
 def _candidate_evaluation_from_proof(
     *,
     family_id: str,
     proof: _CandidateProof,
+    kelly_size_usd: float = 0.0,
 ) -> CandidateEvaluation:
     execution_price = _optional_float(getattr(getattr(proof, "execution_price", None), "value", None))
     row = proof.row or {}
@@ -3692,6 +4664,8 @@ def _candidate_evaluation_from_proof(
         execution_price=execution_price,
         q_posterior=float(proof.q_posterior),
         q_lcb_5pct=float(proof.q_lcb_5pct),
+        q_lcb_calibration_source=proof.q_lcb_calibration_source,
+        same_bin_yes_posterior=proof.same_bin_yes_posterior,
         c_cost_95pct=_optional_float(proof.c_cost_95pct),
         p_fill_lcb=float(proof.p_fill_lcb),
         trade_score=float(proof.trade_score),
@@ -3699,50 +4673,119 @@ def _candidate_evaluation_from_proof(
         passed_prefilter=bool(proof.passed_prefilter),
         native_quote_available=bool(proof.native_quote_available),
         missing_reason=proof.missing_reason,
+        kelly_size_usd=max(0.0, float(kelly_size_usd)),
+        max_executable_shares=_candidate_max_executable_shares(proof),
         book_hash=_nonnull(row.get("book_hash") or row.get("executable_book_hash") or row.get("snapshot_hash")),
         low_volume_usd=_candidate_low_volume_usd(row),
     )
 
 
-def _opportunity_book_from_proofs(
+def _candidate_selection_kelly_size_usd_by_id(
     *,
-    event_id: str,
-    family_id: str,
+    payload: dict[str, object],
+    family,
     proofs: tuple[_CandidateProof, ...],
-    selected_proof: _CandidateProof | None = None,
-    locked_opportunity_conn: sqlite3.Connection | None = None,
-) -> OpportunityBook:
-    evaluations = tuple(
-        _candidate_evaluation_from_proof(family_id=family_id, proof=proof)
-        for proof in _proofs_for_opportunity_book(
-            proofs=proofs,
-            locked_opportunity_conn=locked_opportunity_conn,
+    bankroll_usd_provider: Callable[[], float | None] | None = None,
+    portfolio_state_provider: "Callable[[], Any] | None" = None,
+    portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
+) -> dict[str, float]:
+    """Estimate marginal Kelly size for each sibling candidate before selection.
+
+    Sibling candidates are alternatives, not cumulative orders. Each candidate is
+    therefore evaluated against the same current portfolio snapshot and
+    reservation state; the chosen candidate is reserved later by the existing
+    money path.
+    """
+
+    try:
+        bankroll_usd = (
+            _bankroll_usd_from_provider(bankroll_usd_provider)
+            if bankroll_usd_provider is not None
+            else _runtime_bankroll_usd(cached_only=True)
         )
-    )
-    return build_family_opportunity_book(
-        family_id=family_id,
-        evaluations=evaluations,
-        event_id=event_id,
-        cache_summary={
-            "belief_cache": "source_run_bound",
-            "price_cache": "snapshot_rows_refreshed_for_family",
-            "selector_shadow": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SHADOW"),
-            "selector_enabled": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SELECTOR"),
-            "actual_receipt_selected_candidate_id": (
-                _candidate_evaluation_id(selected_proof)
-                if selected_proof is not None
-                else None
-            ),
-        },
-    )
+    except (TypeError, ValueError):
+        return {}
+    if bankroll_usd <= 0.0:
+        return {}
+
+    _portfolio_state = None
+    _reservation_items: list[tuple[str, float]] = []
+    if portfolio_reservation is not None:
+        try:
+            _reservation_items = [(str(city), float(usd)) for city, usd in portfolio_reservation]
+        except Exception:
+            _reservation_items = []
+    if portfolio_state_provider is not None:
+        try:
+            _portfolio_state = portfolio_state_provider()
+        except Exception:
+            _portfolio_state = None
+
+    sizes: dict[str, float] = {}
+    for proof in proofs:
+        if proof.execution_price is None:
+            continue
+        try:
+            kelly_multiplier = _runtime_kelly_multiplier()
+            (
+                kelly_multiplier,
+                _bias_decay_applied,
+                _bias_decay_native,
+                _bias_decay_reason,
+            ) = _maybe_bias_decay_kelly_haircut(
+                kelly_multiplier,
+                family=family,
+                q_source=proof.q_source,
+            )
+            lead_days = _snapshot_lead_days(
+                snapshot=proof.row or {},
+                family=family,
+                payload=payload,
+            )
+            if _portfolio_state is not None:
+                from src.state.portfolio import correlated_committed_usd, total_exposure_usd
+
+                corr_committed_usd = correlated_committed_usd(
+                    _portfolio_state,
+                    new_city=family.city,
+                    extra_reserved=_reservation_items,
+                )
+                raw_committed_usd = total_exposure_usd(_portfolio_state) + sum(
+                    float(usd) for _, usd in _reservation_items
+                )
+                sizing_context = SizingContext.from_candidate_proof_with_portfolio(
+                    q_posterior=proof.q_posterior,
+                    q_lcb_5pct=proof.q_lcb_5pct,
+                    lead_days=lead_days,
+                    bankroll_usd=bankroll_usd,
+                    corr_committed_usd=corr_committed_usd,
+                    raw_committed_usd=raw_committed_usd,
+                )
+            else:
+                sizing_context = SizingContext.from_candidate_proof(
+                    q_posterior=proof.q_posterior,
+                    q_lcb_5pct=proof.q_lcb_5pct,
+                    lead_days=lead_days,
+                )
+            kelly = evaluate_kelly(
+                kelly_decision_id=f"edli_selection_kelly:{proof.token_id}",
+                p_posterior=proof.q_posterior,
+                execution_price=proof.execution_price,
+                bankroll_usd=bankroll_usd,
+                sizing_context=sizing_context,
+                kelly_multiplier=kelly_multiplier,
+            )
+            sizes[_candidate_evaluation_id(proof)] = max(0.0, float(kelly.size_usd))
+        except (TypeError, ValueError):
+            sizes[_candidate_evaluation_id(proof)] = 0.0
+    return sizes
 
 
-def _proofs_for_opportunity_book(
+def _selection_scoped_proofs(
     *,
     proofs: tuple[_CandidateProof, ...],
     locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> tuple[_CandidateProof, ...]:
-    excluded_by_id: dict[str, str] = {}
     executable = [proof for proof in proofs if proof.execution_price is not None]
     tradeable_limit = [
         proof
@@ -3751,13 +4794,6 @@ def _proofs_for_opportunity_book(
     ]
     scoped = executable
     if tradeable_limit:
-        scoped_ids = {_candidate_evaluation_id(proof) for proof in tradeable_limit}
-        for proof in executable:
-            proof_id = _candidate_evaluation_id(proof)
-            if proof_id not in scoped_ids:
-                reason = _candidate_limit_price_untradeable_reason(proof)
-                if reason is not None:
-                    excluded_by_id[proof_id] = reason
         scoped = tradeable_limit
     if locked_opportunity_conn is not None:
         unlocked = [
@@ -3770,24 +4806,39 @@ def _proofs_for_opportunity_book(
             is None
         ]
         if unlocked:
-            unlocked_ids = {_candidate_evaluation_id(proof) for proof in unlocked}
-            for proof in scoped:
-                proof_id = _candidate_evaluation_id(proof)
-                if proof_id not in unlocked_ids:
-                    reason = _locked_candidate_no_price_improvement_reason(
-                        locked_opportunity_conn,
-                        proof,
-                    )
-                    if reason is not None:
-                        excluded_by_id[proof_id] = reason
+            scoped = unlocked
         elif scoped:
-            for proof in scoped:
-                reason = _locked_candidate_no_price_improvement_reason(
-                    locked_opportunity_conn,
-                    proof,
-                )
-                if reason is not None:
-                    excluded_by_id[_candidate_evaluation_id(proof)] = reason
+            return ()
+    return tuple(scoped)
+
+
+def _opportunity_book_proofs_with_selection_rejections(
+    *,
+    proofs: tuple[_CandidateProof, ...],
+    locked_opportunity_conn: sqlite3.Connection | None = None,
+) -> tuple[_CandidateProof, ...]:
+    excluded_by_id: dict[str, str] = {}
+    selected_ids = {
+        _candidate_evaluation_id(proof)
+        for proof in _selection_scoped_proofs(
+            proofs=proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+        )
+    }
+    for proof in proofs:
+        proof_id = _candidate_evaluation_id(proof)
+        if selected_ids and proof_id in selected_ids:
+            continue
+        if proof.execution_price is None:
+            continue
+        reason = _candidate_limit_price_untradeable_reason(proof)
+        if reason is None and locked_opportunity_conn is not None:
+            reason = _locked_candidate_no_price_improvement_reason(
+                locked_opportunity_conn,
+                proof,
+            )
+        if reason is not None:
+            excluded_by_id[proof_id] = reason
     if not excluded_by_id:
         return proofs
     annotated: list[_CandidateProof] = []
@@ -3805,6 +4856,46 @@ def _proofs_for_opportunity_book(
             )
         )
     return tuple(annotated)
+
+
+def _opportunity_book_from_proofs(
+    *,
+    event_id: str,
+    family_id: str,
+    proofs: tuple[_CandidateProof, ...],
+    selected_proof: _CandidateProof | None = None,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
+    candidate_kelly_size_usd_by_id: Mapping[str, float] | None = None,
+) -> OpportunityBook:
+    evaluations = tuple(
+        _candidate_evaluation_from_proof(
+            family_id=family_id,
+            proof=proof,
+            kelly_size_usd=(
+                candidate_kelly_size_usd_by_id or {}
+            ).get(_candidate_evaluation_id(proof), 0.0),
+        )
+        for proof in _opportunity_book_proofs_with_selection_rejections(
+            proofs=proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+        )
+    )
+    return build_family_opportunity_book(
+        family_id=family_id,
+        evaluations=evaluations,
+        event_id=event_id,
+        cache_summary={
+            "belief_cache": "source_run_bound",
+            "price_cache": "snapshot_rows_refreshed_for_family",
+            "selector_shadow": _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SHADOW"),
+            "selector_enabled": _opportunity_book_selector_enabled(),
+            "actual_receipt_selected_candidate_id": (
+                _candidate_evaluation_id(selected_proof)
+                if selected_proof is not None
+                else None
+            ),
+        },
+    )
 
 
 def _generate_candidate_proofs(
@@ -3835,7 +4926,7 @@ def _generate_candidate_proofs(
         decision_time=decision_time,
     )
     proofs: list[_CandidateProof] = []
-    rows_by_condition = _snapshot_rows_by_condition(snapshot_rows)
+    rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
@@ -3854,15 +4945,21 @@ def _generate_candidate_proofs(
         from src.calibration.qlcb_provenance import _qlcb_raw_float
         yes_lcb = _qlcb_raw_float(yes_lcb_entry)
         no_lcb = _qlcb_raw_float(no_lcb_entry)
-        row = rows_by_condition.get(condition_id)
-        for token_id, direction, q_value, q_lcb in (
-            (str(candidate.yes_token_id or ""), "buy_yes", yes_q, yes_lcb),
-            (str(candidate.no_token_id or ""), "buy_no", 1.0 - yes_q, no_lcb),
+        for token_id, direction, q_value, q_lcb, independent_no_missing_reason in (
+            (str(candidate.yes_token_id or ""), "buy_yes", yes_q, yes_lcb, None),
+            (
+                str(candidate.no_token_id or ""),
+                "buy_no",
+                0.0,
+                0.0,
+                "ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING",
+            ),
         ):
+            row = rows_by_direction.get((condition_id, direction))
             # R5/#176 boundary antibody (2026-06-04): a recorded lower bound can
             # never exceed its own recorded point. q_value is the inference-engine
-            # NORMALIZED point (1 - yes_q); q_lcb is the market_analysis bootstrap
-            # lower bound, clamped only against market_analysis's OWN un-normalized
+            # native direction point; q_lcb is the market_analysis bootstrap
+            # lower bound, clamped only against market_analysis's OWN
             # p_posterior (the BUG #129 within-module clamp). When the two modules'
             # normalizations diverge (sum(P)<1) the raw q_lcb can land ABOVE
             # q_value (43% of live buy_no on 2026-06-03, worst gap 0.79) — a
@@ -3883,23 +4980,23 @@ def _generate_candidate_proofs(
             c_cost_95pct: float | None = None
             p_fill_lcb = 0.0
             missing_reason: str | None = None
-            if not token_id:
+            if independent_no_missing_reason is not None:
+                missing_reason = independent_no_missing_reason
+            elif not token_id:
                 missing_reason = "missing token id"
             elif row is None:
                 missing_reason = "missing executable snapshot row"
             else:
-                stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
-                if stale_reason is not None:
-                    missing_reason = stale_reason
-                else:
-                    try:
-                        execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
-                            row,
-                            selected_token_id=token_id,
-                            direction=direction,
-                        )
-                    except ValueError as exc:
-                        missing_reason = str(exc)
+                # Price TTL must not shrink the family selector. The selected
+                # executable is re-authorized against a JIT book at submit time.
+                try:
+                    execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
+                        row,
+                        selected_token_id=token_id,
+                        direction=direction,
+                    )
+                except ValueError as exc:
+                    missing_reason = str(exc)
             score = _robust_trade_score_from_generated_inputs(
                 q_posterior=q_value,
                 q_lcb_5pct=q_lcb,
@@ -3949,18 +5046,40 @@ def _generate_candidate_proofs(
                     )
             capital_efficiency_reason = _capital_efficiency_untradeable_reason(
                 execution_price=execution_price,
+                q_lcb_5pct=q_lcb,
                 trade_score=score,
             )
             if capital_efficiency_reason is not None:
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = capital_efficiency_reason
+            def _lcb_source(value: object) -> str | None:
+                source = getattr(value, "calibration_source", None)
+                return str(source) if source else None
+
+            q_lcb_source = _lcb_source(no_lcb_entry if direction == "buy_no" else yes_lcb_entry)
+            buy_no_conservative_evidence_reason = live_buy_no_conservative_evidence_rejection_reason(
+                direction=direction,
+                q_direction=q_value,
+                q_lcb=q_lcb,
+                execution_price=execution_price.value if execution_price is not None else None,
+                q_lcb_calibration_source=q_lcb_source,
+                same_bin_yes_posterior=yes_q,
+            )
+            if buy_no_conservative_evidence_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = buy_no_conservative_evidence_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A demoted contrarian buy_no must not enter the FDR family as a
             # "passed" hypothesis — it is structurally non-tradeable, not merely
             # low-scoring. Force prefilter False so it can never be selected.
-            if _market_disagreement_demoted or capital_efficiency_reason is not None:
+            if (
+                _market_disagreement_demoted
+                or capital_efficiency_reason is not None
+                or buy_no_conservative_evidence_reason is not None
+            ):
                 passed_prefilter = False
             proofs.append(
                 _CandidateProof(
@@ -3972,6 +5091,7 @@ def _generate_candidate_proofs(
                     execution_price=execution_price,
                     q_posterior=q_value,
                     q_lcb_5pct=q_lcb,
+                    q_lcb_calibration_source=q_lcb_source,
                     c_cost_95pct=c_cost_95pct,
                     p_fill_lcb=p_fill_lcb,
                     trade_score=score,
@@ -3988,6 +5108,7 @@ def _generate_candidate_proofs(
                     # ONE-CALIBRATOR SEAM (era.py:3772 emos / 3774 maze). Same
                     # payload instance (#149 fix), so this is the actual q_source.
                     q_source=payload.get("_edli_q_source"),
+                    same_bin_yes_posterior=yes_q,
                 )
             )
     return tuple(proofs)
@@ -3998,17 +5119,29 @@ def _selected_candidate_proof(
     proofs: tuple[_CandidateProof, ...],
     *,
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    candidate_kelly_size_usd_by_id: Mapping[str, float] | None = None,
 ) -> _CandidateProof | None:
-    selector_enabled = _env_flag_enabled("ZEUS_OPPORTUNITY_BOOK_SELECTOR")
+    selector_enabled = _opportunity_book_selector_enabled()
     requested_token = _nonnull(payload.get("token_id"))
     requested_condition = _nonnull(payload.get("condition_id"))
+    if (
+        requested_token
+        and not selector_enabled
+        and os.environ.get("ZEUS_OPPORTUNITY_BOOK_SELECTOR") is not None
+    ):
+        return next(
+            (
+                proof
+                for proof in proofs
+                if proof.token_id == requested_token
+                and (
+                    not requested_condition
+                    or str(proof.candidate.condition_id or "") == requested_condition
+                )
+            ),
+            None,
+        )
     if requested_token and not selector_enabled:
-        for proof in proofs:
-            if proof.token_id != requested_token:
-                continue
-            if requested_condition and str(proof.candidate.condition_id or "") != requested_condition:
-                continue
-            return proof
         return None
     # REFERENCE-ONLY GATE (operator directive 2026-06-03). The mainstream-agreement
     # verdict (#135 + #135-B) is computed and recorded on the receipt to inform the
@@ -4019,29 +5152,12 @@ def _selected_candidate_proof(
     # to drop gate-failed proofs; that exclusion is removed so the forecast's true
     # pick always reaches the receipt with its verdict annotated. The only reason
     # these are no_submit is shadow/arm=False, not the mainstream gate.)
-    executable = [proof for proof in proofs if proof.execution_price is not None]
-    tradeable_limit = [
-        proof
-        for proof in executable
-        if _candidate_limit_price_untradeable_reason(proof) is None
-    ]
-    if tradeable_limit:
-        executable = tradeable_limit
-    if locked_opportunity_conn is not None:
-        unlocked = [
-            proof
-            for proof in executable
-            if _locked_candidate_no_price_improvement_reason(
-                locked_opportunity_conn,
-                proof,
-            )
-            is None
-        ]
-        if unlocked:
-            executable = unlocked
-        elif executable:
-            non_executable = [proof for proof in proofs if proof.execution_price is None]
-            return max(non_executable, key=lambda proof: proof.q_lcb_5pct, default=None)
+    executable = list(
+        _selection_scoped_proofs(
+            proofs=proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+        )
+    )
     if not executable:
         return max(proofs, key=lambda proof: proof.q_lcb_5pct, default=None)
     if selector_enabled:
@@ -4054,6 +5170,15 @@ def _selected_candidate_proof(
             family_id=family_id,
             evaluations=tuple(
                 _candidate_evaluation_from_proof(family_id=family_id, proof=proof)
+                if not candidate_kelly_size_usd_by_id
+                else _candidate_evaluation_from_proof(
+                    family_id=family_id,
+                    proof=proof,
+                    kelly_size_usd=candidate_kelly_size_usd_by_id.get(
+                        _candidate_evaluation_id(proof),
+                        0.0,
+                    ),
+                )
                 for proof in executable
             ),
             event_id=str(payload.get("event_id") or "event"),
@@ -4062,6 +5187,7 @@ def _selected_candidate_proof(
             selected = evaluations_by_id.get(book.selected_candidate_id)
             if selected is not None:
                 return selected
+        return None
     return max(
         executable,
         key=lambda proof: (
@@ -4069,6 +5195,37 @@ def _selected_candidate_proof(
             proof.q_lcb_5pct,
         ),
     )
+
+
+def _native_direction(value: object) -> str:
+    return str(value or "").split(":", 1)[0]
+
+
+def _replacement_live_authority_proof_for_direction(
+    *,
+    proofs: tuple[_CandidateProof, ...],
+    baseline_proof: _CandidateProof,
+    effective_direction: str,
+) -> _CandidateProof | None:
+    target_direction = _native_direction(effective_direction)
+    if target_direction == baseline_proof.direction:
+        return baseline_proof
+    condition_id = str(baseline_proof.candidate.condition_id or "")
+    for proof in proofs:
+        if str(proof.candidate.condition_id or "") != condition_id:
+            continue
+        if proof.direction != target_direction:
+            continue
+        if proof.execution_price is None:
+            continue
+        if _candidate_limit_price_untradeable_reason(proof) is not None:
+            continue
+        return proof
+    return None
+
+
+def _replacement_primary_authority_already_applied(proof: _CandidateProof) -> bool:
+    return str(getattr(proof, "q_source", "") or "") == "replacement_0_1"
 
 
 def _locked_candidate_no_price_improvement_reason(
@@ -4141,6 +5298,16 @@ def _live_yes_probabilities(
     # hypothesis-family scan + evaluate_live_bins). Gated by the acceptance suite in
     # tests/engine/test_event_reactor_no_bypass.py; SHADOW until #24 bias. See task Break-4.
     if event.event_type == "FORECAST_SNAPSHOT_READY":
+        replacement = _replacement_authority_probability_and_fdr_proof(
+            event=event,
+            payload=payload,
+            family=family,
+            conn=conn,
+            native_costs=native_costs,
+            decision_time=decision_time,
+        )
+        if replacement is not None:
+            return replacement
         return _canonical_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -4176,6 +5343,178 @@ def _live_yes_probabilities(
             ),
         }
     raise ValueError(f"unsupported EDLI event type for inference: {event.event_type}")
+
+
+def _replacement_authority_enabled() -> bool:
+    try:
+        flags = settings["feature_flags"]
+    except Exception:
+        return False
+    return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled", False))
+
+
+def _wilson_lower_bound(successes: float, trials: float, *, z: float = 1.645) -> float:
+    if trials <= 0.0:
+        return 0.0
+    successes = min(max(float(successes), 0.0), float(trials))
+    p_hat = successes / float(trials)
+    z2 = z * z
+    denom = 1.0 + z2 / float(trials)
+    center = p_hat + z2 / (2.0 * float(trials))
+    margin = z * float(np.sqrt((p_hat - (p_hat * p_hat) + z2 / (4.0 * float(trials))) / float(trials)))
+    return max(0.0, min(1.0, (center - margin) / denom))
+
+
+def _candidate_replacement_bin_id(candidate: object, replacement_bundle: object) -> str | None:
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    topology = provenance.get("bin_topology")
+    if not isinstance(topology, list) or not topology:
+        return None
+    bin_obj = getattr(candidate, "bin", None)
+    unit = str(getattr(bin_obj, "unit", "") or "")
+    if not unit:
+        return None
+    lower_c = _replacement_bound_to_c(getattr(bin_obj, "low", None), unit=unit)
+    upper_c = _replacement_bound_to_c(getattr(bin_obj, "high", None), unit=unit)
+    matches: list[str] = []
+    for item in topology:
+        if not isinstance(item, Mapping):
+            continue
+        bin_id = str(item.get("bin_id") or "").strip()
+        if not bin_id:
+            continue
+        item_lower = item.get("lower_c")
+        item_upper = item.get("upper_c")
+        lower_ok = (item_lower is None and lower_c is None) or (
+            item_lower is not None and lower_c is not None and math.isclose(float(item_lower), float(lower_c), rel_tol=0.0, abs_tol=1e-9)
+        )
+        upper_ok = (item_upper is None and upper_c is None) or (
+            item_upper is not None and upper_c is not None and math.isclose(float(item_upper), float(upper_c), rel_tol=0.0, abs_tol=1e-9)
+        )
+        if lower_ok and upper_ok:
+            matches.append(bin_id)
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _replacement_bound_to_c(value: object, *, unit: str) -> float | None:
+    if value is None:
+        return None
+    number = float(value)
+    if unit == "C":
+        return number
+    if unit == "F":
+        return (number - 32.0) * 5.0 / 9.0
+    raise ValueError("replacement candidate bin unit must be C or F")
+
+
+def _replacement_yes_lcb_for_bin(replacement_bundle: object, *, bin_id: str, q_yes: float) -> float:
+    q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
+    if isinstance(q_lcb, Mapping) and bin_id in q_lcb:
+        return min(max(float(q_lcb[bin_id]), 0.0), max(0.0, min(float(q_yes), 1.0)))
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    aifs_probabilities = provenance.get("aifs_probabilities") if isinstance(provenance, Mapping) else None
+    if isinstance(aifs_probabilities, Mapping) and bin_id in aifs_probabilities:
+        try:
+            member_count = float(provenance.get("aifs_member_count") or 51.0)
+            successes = float(aifs_probabilities[bin_id]) * member_count
+            return min(max(float(q_yes), 0.0), _wilson_lower_bound(successes, member_count))
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
+def _replacement_authority_probability_and_fdr_proof(
+    *,
+    event: OpportunityEvent,
+    payload: dict[str, object],
+    family,
+    conn: sqlite3.Connection,
+    native_costs: dict[tuple[str, str], tuple[dict[str, Any] | None, ExecutionPrice | None, float, float | None, str | None]],
+    decision_time: datetime,
+) -> tuple[
+    dict[str, float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], float],
+    dict[tuple[str, str], bool],
+    dict[str, str],
+] | None:
+    if not _replacement_authority_enabled():
+        return None
+    from src.calibration.qlcb_provenance import QlcbByDirection, _set_qlcb_provenance
+    from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle
+    from src.engine.replacement_forecast_hook_factory import _latest_replacement_readiness
+
+    readiness = _latest_replacement_readiness(
+        conn,
+        city=str(family.city),
+        target_date=str(family.target_date),
+        temperature_metric=str(family.metric),
+    )
+    if readiness is None:
+        raise ValueError("REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING")
+    bundle_result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=None,
+        readiness=readiness,
+        city=str(family.city),
+        target_date=str(family.target_date),
+        temperature_metric=str(family.metric),
+        decision_time=decision_time,
+        require_baseline_bundle=False,
+    )
+    if not bundle_result.ok or bundle_result.bundle is None:
+        raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED:{bundle_result.reason_code}")
+    replacement_bundle = bundle_result.bundle
+    q_by_condition: dict[str, float] = {}
+    lcb_by_direction: QlcbByDirection = QlcbByDirection()
+    p_values: dict[tuple[str, str], float] = {}
+    prefilter: dict[tuple[str, str], bool] = {}
+    q_map = replacement_bundle.q
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
+        if not bin_id or bin_id not in q_map:
+            raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BIN_BINDING_MISSING:{condition_id}")
+        q_yes = min(max(float(q_map[bin_id]), 0.0), 1.0)
+        yes_lcb = _replacement_yes_lcb_for_bin(replacement_bundle, bin_id=bin_id, q_yes=q_yes)
+        q_by_condition[condition_id] = q_yes
+        _set_qlcb_provenance(
+            lcb_by_direction,
+            (condition_id, "buy_yes"),
+            yes_lcb,
+            source="FORECAST_BOOTSTRAP",
+        )
+        _set_qlcb_provenance(
+            lcb_by_direction,
+            (condition_id, "buy_no"),
+            0.0,
+            source="FORECAST_BOOTSTRAP",
+        )
+        yes_price = native_costs.get((condition_id, "buy_yes"), (None, None, 0.0, None, None))[1]
+        yes_cost = float(yes_price.value) if yes_price is not None else 1.0
+        yes_edge_lcb_positive = yes_price is not None and yes_lcb > yes_cost
+        p_values[(condition_id, "buy_yes")] = 0.0 if yes_edge_lcb_positive else 1.0
+        prefilter[(condition_id, "buy_yes")] = bool(yes_edge_lcb_positive)
+        p_values[(condition_id, "buy_no")] = 1.0
+        prefilter[(condition_id, "buy_no")] = False
+    payload["_edli_q_source"] = "replacement_0_1"
+    return q_by_condition, lcb_by_direction, p_values, prefilter, {
+        "probability_authority": "replacement_0_1",
+        "posterior_id": str(replacement_bundle.posterior_id),
+        "replacement_product_id": replacement_bundle.product_id,
+        "p_cal_vector_hash": _probability_vector_hash(
+            q_by_condition[str(candidate.condition_id or "")]
+            for candidate in family.candidates
+        ),
+        "p_live_vector_hash": _probability_vector_hash(
+            q_by_condition[str(candidate.condition_id or "")]
+            for candidate in family.candidates
+        ),
+    }
 
 
 def _forecast_snapshot_probability_and_fdr_proof(
@@ -4323,7 +5662,7 @@ def _canonical_probability_and_fdr_proof(
                 # non-executable). Emit neutral, non-actionable values: the direction is then
                 # rejected downstream by the missing native execution price
                 # (EXECUTABLE_NATIVE_ASK_MISSING), not by a family-level fail-closed raise.
-                q_point = yes_posterior if direction == "buy_yes" else (1.0 - yes_posterior)
+                q_point = yes_posterior if direction == "buy_yes" else 0.0
                 p_values[(condition_id, direction)] = 1.0
                 _set_qlcb_provenance(
                     lcb_by_direction,
@@ -4655,6 +5994,9 @@ def _market_analysis_from_event_snapshot(
         _apply_settlement_floor = bool(
             settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False)
         )
+        _require_settlement_floor = bool(
+            settings["edli_v1"].get("edli_settlement_sigma_floor_required", True)
+        )
         try:
             from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
             _emos_q = _build_emos_q(
@@ -4662,6 +6004,7 @@ def _market_analysis_from_event_snapshot(
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
                 apply_settlement_floor=_apply_settlement_floor,
+                require_settlement_floor=_require_settlement_floor,
             )
         except Exception as _emos_exc:
             # DE-SILENCED ANTIBODY (#149 / live-diagnosis 2026-06-04): a bare
@@ -4721,6 +6064,7 @@ def _market_analysis_from_event_snapshot(
                 lead_days=_snapshot_lead_days(snapshot=snapshot, family=family, payload=payload),
                 members_native=raw_members, unit=unit, bins=bins,
                 apply_settlement_floor=_apply_settlement_floor,
+                require_settlement_floor=_require_settlement_floor,
             )
         except Exception as _hr_exc:  # noqa: BLE001 — best-effort floor; degrade to raw analytic, LOUD
             _hr = None
@@ -5030,6 +6374,7 @@ def _maybe_bias_decay_kelly_haircut(
     kelly_multiplier: float,
     *,
     family,
+    q_source: str | None = None,
 ) -> tuple[float, bool, float | None, str]:
     """INTERIM (data-insufficient phase) pre-submit Kelly haircut on high-bias cities.
 
@@ -5047,6 +6392,8 @@ def _maybe_bias_decay_kelly_haircut(
     WARN (never crash or zero a live size). Flag-gated: edli_v1.bias_decay_kelly_haircut_enabled.
     """
     try:
+        if str(q_source or "").strip().lower() in {"emos", "raw_honest"}:
+            return kelly_multiplier, False, None, "one_calibrator_regime"
         ev = settings["edli_v1"]
         if not bool(ev.get("bias_decay_kelly_haircut_enabled", False)):
             return kelly_multiplier, False, None, "disabled"
@@ -5834,7 +7181,7 @@ def _write_emos_shadow_ledger(
 
         # Robust edge scores (replicate trade_score.py:48-52 using q_live, NOT raw_q).
         # buy_yes: q_posterior = q_live, q_5pct = raw_q_lcb_buy_yes, cost = cost_buy_yes
-        # buy_no:  q_posterior = 1 - q_live, q_5pct = raw_q_lcb_buy_no, cost = cost_buy_no
+        # buy_no:  q_posterior = native NO posterior, q_5pct = raw_q_lcb_buy_no, cost = cost_buy_no
         #          (INV/#106: buy_no lcb is independent, NOT negation of buy_yes lcb)
         _PENALTY = 0.01  # mirror adapter:4525-4526
 
@@ -5848,12 +7195,7 @@ def _write_emos_shadow_ledger(
                 penalty=_PENALTY,
             )
         if q_live is not None and raw_q_lcb_buy_no is not None and cost_buy_no is not None:
-            robust_score_raw_buy_no = compute_robust_edge(
-                q_posterior=1.0 - q_live,
-                q_5pct=raw_q_lcb_buy_no,
-                cost=cost_buy_no,
-                penalty=_PENALTY,
-            )
+            robust_score_raw_buy_no = None
 
         robust_score_emos_buy_yes: float | None = None
         robust_score_emos_buy_no: float | None = None
@@ -5866,15 +7208,7 @@ def _write_emos_shadow_ledger(
                 penalty=_PENALTY,
             )
         if emos_q is not None and emos_q_lcb is not None and cost_buy_no is not None:
-            # buy_no emos q is the complement: 1 - emos_q (binary complement of YES bin mass)
-            emos_q_no = 1.0 - emos_q
-            emos_q_lcb_no = 1.0 - emos_q  # k_cov=1: lcb = emos_q complement
-            robust_score_emos_buy_no = compute_robust_edge(
-                q_posterior=emos_q_no,
-                q_5pct=emos_q_lcb_no,
-                cost=cost_buy_no,
-                penalty=_PENALTY,
-            )
+            robust_score_emos_buy_no = None
 
         # Clearing booleans
         would_clear_emos_buy_yes = (
@@ -5970,10 +7304,7 @@ def _maybe_override_lcb_with_emos_ci(
         emos_q          = bin_probability(mu_native, sigma_native, low, high)
         q_inflated      = bin_probability(mu_native, k_cov * sigma_native, low, high)
         buy_yes lcb     = min(emos_q, q_inflated)            # never optimistic (widening σ lowers a peaked bin)
-        buy_no  lcb     = min(1 - emos_q, 1 - q_inflated)    # = 1 - max(emos_q, q_inflated); the INDEPENDENT
-                                                              #   honest NO-mass lower bound (mirrors the shadow
-                                                              #   hook's 1 - emos_q at k_cov=1, never optimistic
-                                                              #   for NO at k_cov>1). NOT 1 - yes_lcb (#106).
+        buy_no  lcb     = native NO lower bound only; absent native NO evidence means no live NO authority.
 
     Native unit: °F cities convert (mu_c, sigma_c) to °F exactly as
     _write_emos_shadow_ledger does (mirror EXACTLY). k_cov comes from the per-city
@@ -6064,9 +7395,8 @@ def _maybe_override_lcb_with_emos_ci(
             q_inflated = bin_probability(mu_native, k_cov * sigma_native, b.low, b.high)
             # buy_yes: never-optimistic lower bound on the YES (in-bin) mass.
             emos_q_lcb_yes = min(emos_q, q_inflated)
-            # buy_no: independent honest lower bound on the NO (complement) mass.
-            # = 1 - max(emos_q, q_inflated); equals the shadow hook's (1 - emos_q) at k_cov=1.
-            emos_q_lcb_no = min(1.0 - emos_q, 1.0 - q_inflated)
+            # Buy-NO requires an explicit NO-side posterior/LCB, not a YES complement.
+            emos_q_lcb_no = 0.0
         except Exception as exc:
             log.warning(
                 "EMOS-CI live override skipped bin %s/%s (non-fatal, MC lcb kept): %s",
@@ -6568,7 +7898,7 @@ def _apply_day0_mask_to_generated_probabilities(
         _set_qlcb_provenance(
             masked_lcb_by_direction,
             (condition_id, "buy_no"),
-            min(no_lcb, 1.0 - q_value),
+            0.0,
             source="FORECAST_BOOTSTRAP",
         )
     return masked_q_by_condition, masked_lcb_by_direction
@@ -6611,6 +7941,30 @@ def _snapshot_rows_by_condition(rows: list[dict[str, Any]]) -> dict[str, dict[st
         condition_id = _nonnull(row.get("condition_id"))
         if condition_id and condition_id not in out:
             out[condition_id] = row
+    return out
+
+
+def _snapshot_rows_by_condition_and_direction(rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        condition_id = _nonnull(row.get("condition_id"))
+        if not condition_id:
+            continue
+        yes_token_id = _nonnull(row.get("yes_token_id"))
+        no_token_id = _nonnull(row.get("no_token_id"))
+        selected_token_id = _nonnull(row.get("selected_outcome_token_id"))
+        selected_label = _nonnull(row.get("outcome_label")).upper()
+        for token_id, label, direction in (
+            (yes_token_id, "YES", "buy_yes"),
+            (no_token_id, "NO", "buy_no"),
+        ):
+            if not token_id:
+                continue
+            if selected_token_id and selected_token_id != token_id:
+                continue
+            if selected_label and selected_label != label:
+                continue
+            out.setdefault((condition_id, direction), row)
     return out
 
 
@@ -7047,7 +8401,7 @@ def _wilson_depth_fill_lcb(*, coverage: float, depth_cushion: float) -> float:
     z2 = z * z
     denom = 1.0 + z2 / n
     center = p_hat + z2 / (2.0 * n)
-    margin = z * float(np.sqrt((p_hat * (1.0 - p_hat) / n) + (z2 / (4.0 * n * n))))
+    margin = z * float(np.sqrt(((p_hat - (p_hat * p_hat)) / n) + (z2 / (4.0 * n * n))))
     lower = (center - margin) / denom
     return max(0.0, min(1.0, lower))
 
@@ -7106,9 +8460,11 @@ def _runtime_bankroll_usd(*, cached_only: bool = False) -> float:
         raise ValueError("bankroll_provider_unavailable")
     if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
         raise ValueError("bankroll_provider_not_canonical")
-    if bankroll.value_usd <= 0:
+    spendable_cash = getattr(bankroll, "spendable_cash_usd", None)
+    bankroll_usd = float(spendable_cash) if spendable_cash is not None else float(bankroll.value_usd)
+    if bankroll_usd <= 0:
         raise ValueError("bankroll_provider_nonpositive")
-    return float(bankroll.value_usd)
+    return bankroll_usd
 
 
 def _runtime_kelly_multiplier() -> float:
@@ -7236,17 +8592,17 @@ def _native_costs_by_candidate_direction(
     Value tuple: (quote_book_dict, execution_price, max_size_at_price, slippage_bps, source_kind)
     Only index [1] (ExecutionPrice) is consumed by downstream callers.
     """
-    rows_by_condition = _snapshot_rows_by_condition(snapshot_rows)
+    rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
     result: dict[tuple[str, str], tuple[dict[str, Any] | None, Any, float, float | None, str | None]] = {}
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         if not condition_id:
             continue
-        row = rows_by_condition.get(condition_id)
         for token_id, direction in (
             (str(candidate.yes_token_id or ""), "buy_yes"),
             (str(candidate.no_token_id or ""), "buy_no"),
         ):
+            row = rows_by_direction.get((condition_id, direction))
             source_kind = _native_cost_source_for_direction(direction)
             if row is None or not token_id:
                 result[(condition_id, direction)] = (None, None, 0.0, None, source_kind)

@@ -1,0 +1,5 @@
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+ARCH_PLAN_EVIDENCE = "/Users/leofitz/.openclaw/workspace-venus/zeus/architecture/world_mutex_io_offmutex_refactor_2026_06_04.md"

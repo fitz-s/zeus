@@ -10,7 +10,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ANCHOR_SCRIPT = SCRIPT_DIR / "backfill_tigge_anchor_dates_resilient.py"
-ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/51 source data")
+ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "docs" / "tigge_city_coordinate_manifest_20260330.json"
 TMP_DIR = ROOT / "tmp"
 

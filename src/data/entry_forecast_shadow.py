@@ -20,7 +20,6 @@ from typing import Any
 from src.config import EntryForecastConfig
 from src.control.entry_forecast_rollout import EntryForecastRolloutDecision
 from src.data.calibration_transfer_policy import (
-    evaluate_calibration_transfer_policy,
     evaluate_calibration_transfer_policy_with_evidence,
 )
 from src.data.executable_forecast_reader import read_executable_forecast_snapshot

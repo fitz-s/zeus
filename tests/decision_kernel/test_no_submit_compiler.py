@@ -779,6 +779,29 @@ def test_no_submit_rejects_observed_members_below_expected():
     assert "observed_members" in (result.failures[0].reason_detail or "")
 
 
+def test_no_submit_accepts_source_run_partial_when_window_complete():
+    event = _event()
+    decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)
+    bundle = build_test_no_submit_proof_bundle(event, _receipt(event.event_id), decision_time=decision_time)
+    partial_run_window_complete = replace(
+        bundle.forecast_authority,
+        payload={
+            **bundle.forecast_authority.payload,
+            "source_run_status": "PARTIAL",
+            "source_run_completeness_status": "PARTIAL",
+            "coverage_completeness_status": "COMPLETE",
+            "coverage_readiness_status": "LIVE_ELIGIBLE",
+        },
+    )
+    result = DecisionCompiler().compile_no_submit(
+        event,
+        decision_time=decision_time,
+        proof_bundle=replace(bundle, forecast_authority=partial_run_window_complete),
+    )
+
+    assert result.status == "VERIFIED"
+
+
 def test_no_submit_rejects_forecast_empty_applied_validations():
     event = _event()
     decision_time = datetime(2026, 5, 25, 10, 3, tzinfo=timezone.utc)

@@ -24,6 +24,7 @@ CANONICAL_POSITION_CURRENT_COLUMNS = (
     "cost_basis_usd",
     "entry_price",
     "p_posterior",
+    "entry_ci_width",
     "last_monitor_prob",
     "last_monitor_edge",
     "last_monitor_market_price",

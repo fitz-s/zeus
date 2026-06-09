@@ -1,1 +1,0 @@
-"""Calibration authority adapter boundary."""

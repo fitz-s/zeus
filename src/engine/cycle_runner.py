@@ -43,14 +43,13 @@ from src.engine.discovery_mode import DiscoveryMode
 from src.engine.evaluator import EdgeDecision, MarketCandidate, evaluate_candidate
 from src.execution.command_bus import IdempotencyKey, IntentKind
 from src.execution.executor import (
-    _persist_pre_submit_envelope,
     create_execution_intent,
     execute_intent,
+    _persist_pre_submit_envelope,
 )
 from src.riskguard.risk_level import RiskLevel
 from src.riskguard.riskguard import get_current_level, get_force_exit_review, tick_with_portfolio
 from src.state.canonical_write import commit_then_export
-from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.db import (
     _zeus_trade_db_path,
     connect_or_degrade,
@@ -90,20 +89,17 @@ def get_connection():
     except sqlite3.OperationalError as exc:
         logger.warning("ATTACH world/forecasts failed (non-fatal): %r", exc)
     return conn
+from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact
 from src.state.portfolio import (
     Position,
     PortfolioState,
     add_position,
-    close_position,
     load_portfolio,
     portfolio_heat_for_bankroll,
     save_portfolio,
-    total_exposure_usd,
-    void_position,
 )
 from src.state.strategy_tracker import get_tracker, save_tracker
-from src.strategy.oracle_penalty import reload as oracle_penalty_reload
 from src.strategy.risk_limits import RiskLimits
 
 logger = logging.getLogger(__name__)

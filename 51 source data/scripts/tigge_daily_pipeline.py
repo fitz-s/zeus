@@ -9,7 +9,7 @@ Must run with conda base python:
 
 Cron:
     0 3 * * * /Users/leofitz/miniconda3/bin/python \\
-      "/Users/leofitz/.openclaw/workspace-venus/51 source data/scripts/tigge_daily_pipeline.py" \\
+      "/Users/leofitz/zeus/51 source data/scripts/tigge_daily_pipeline.py" \\
       >> /Users/leofitz/.openclaw/logs/tigge-daily.log 2>&1
 """
 from __future__ import annotations
@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-ZEUS_ROOT = Path("/Users/leofitz/.openclaw/workspace-venus/zeus")
+ZEUS_ROOT = Path(__file__).resolve().parents[2]
 ZEUS_PYTHON = str(ZEUS_ROOT / ".venv" / "bin" / "python")
 CONDA_PYTHON = "/Users/leofitz/miniconda3/bin/python"
 

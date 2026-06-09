@@ -6,6 +6,7 @@
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
+import ast
 from dataclasses import dataclass
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -477,6 +478,63 @@ def _buy_no_exit_context_for_quote_split(*, p_market_quote: float) -> EdgeContex
         market_velocity_1h=0.0,
         divergence_score=0.0,
     )
+
+
+def test_buy_no_monitor_refresh_never_hardcodes_zero_probability():
+    """buy_no monitor authority must be independent evidence, not a synthetic 0.0."""
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (repo_root / "src" / "engine" / "monitor_refresh.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    offenders: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        try:
+            test_src = ast.unparse(node.test)
+        except Exception:
+            test_src = ""
+        if "buy_no" not in test_src:
+            continue
+        for child in ast.walk(ast.Module(body=list(node.body), type_ignores=[])):
+            if not isinstance(child, ast.Assign):
+                continue
+            if not any(isinstance(target, ast.Name) and target.id == "p_cal_native" for target in child.targets):
+                continue
+            if isinstance(child.value, ast.Constant) and float(child.value.value) == 0.0:
+                offenders.append(child.lineno)
+    assert not offenders, (
+        "buy_no monitor probability must not be hardcoded to 0.0; missing "
+        f"independent NO authority must fail closed. Offending lines: {offenders}"
+    )
+    assert "buy_no_independent_monitor_probability_missing" in source
+
+
+def test_buy_no_missing_monitor_probability_cannot_trigger_divergence_panic_exit():
+    pos = _position(
+        direction="buy_no",
+        entry_price=0.61,
+        p_posterior=0.80,
+        entry_ci_width=0.03,
+    )
+    ctx = ExitContext(
+        fresh_prob=None,
+        fresh_prob_is_fresh=False,
+        current_market_price=0.55,
+        current_market_price_is_fresh=True,
+        best_bid=0.54,
+        hours_to_settlement=40.0,
+        position_state="active",
+        whale_toxicity=False,
+        chain_is_fresh=True,
+        divergence_score=0.90,
+        market_velocity_1h=-0.50,
+    )
+
+    decision = pos.evaluate_exit(ctx)
+
+    assert decision.should_exit is False
+    assert decision.trigger != "MODEL_DIVERGENCE_PANIC"
+    assert decision.reason.startswith("INCOMPLETE_EXIT_CONTEXT")
 
 
 def test_buy_no_exit_ev_gate_uses_held_token_best_bid_not_p_market_vector():

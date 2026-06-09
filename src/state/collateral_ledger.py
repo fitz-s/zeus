@@ -28,7 +28,6 @@ from src.contracts import ExecutionIntent
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.contracts.fx_classification import (
     FXClassification,
-    FXClassificationPending,
     require_fx_classification,
 )
 

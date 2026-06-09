@@ -7,7 +7,12 @@ from src.config import sizing_defaults
 
 @dataclass(frozen=True)
 class RiskLimits:
-    """Hard caps from settings.json. Spec §5.4."""
+    """Legacy risk knobs.
+
+    Live sizing uses continuous Kelly pressure, not hard cap rejection. The
+    fields remain for config compatibility and telemetry, but
+    ``check_position_allowed`` does not use them as submit blockers.
+    """
     max_single_position_pct: float | None = None
     max_portfolio_heat_pct: float | None = None
     max_correlated_pct: float | None = None
@@ -29,37 +34,17 @@ def check_position_allowed(
     current_portfolio_heat: float,
     limits: RiskLimits,
 ) -> tuple[bool, str]:
-    """Check if a proposed position passes all risk limits.
+    """Check non-strategy execution preconditions for a proposed position.
 
     Returns: (allowed, reason). If not allowed, reason explains why.
-    Removed: cluster/max_region_pct check (K3 cluster collapse — no regional tier).
+    Removed: cluster/max_region_pct check (K3 cluster collapse — no regional
+    tier). Single-position, heat, and city percentage caps are intentionally not
+    hard gates here; portfolio exposure belongs in continuous Kelly pressure.
     """
     if size_usd < limits.min_order_usd:
         return False, f"Size ${size_usd:.2f} below minimum ${limits.min_order_usd:.2f}"
 
     if bankroll <= 0:
         return False, "Bankroll is zero or negative"
-
-    position_pct = size_usd / bankroll
-
-    if position_pct > limits.max_single_position_pct:
-        return False, (
-            f"Position {position_pct:.1%} exceeds single position limit "
-            f"{limits.max_single_position_pct:.1%}"
-        )
-
-    new_heat = current_portfolio_heat + position_pct
-    if new_heat > limits.max_portfolio_heat_pct:
-        return False, (
-            f"Portfolio heat would be {new_heat:.1%}, "
-            f"exceeds limit {limits.max_portfolio_heat_pct:.1%}"
-        )
-
-    new_city = current_city_exposure + position_pct
-    if new_city > limits.max_city_pct:
-        return False, (
-            f"City {city} exposure would be {new_city:.1%}, "
-            f"exceeds limit {limits.max_city_pct:.1%}"
-        )
 
     return True, "OK"

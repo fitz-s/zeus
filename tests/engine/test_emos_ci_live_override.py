@@ -13,7 +13,7 @@ Cases (per task spec §5):
   (b) flag ON + city licensed + emos cell → lcb == emos_q_lcb(k_cov) for that city
   (c) flag ON + city NOT in license → MC lcb unchanged
   (d) flag ON + licensed city WITHOUT an emos cell → MC lcb (fail-closed)
-  (e) buy_no override is INDEPENDENT (not 1 - yes_lcb)
+  (e) buy_no override requires native NO-side evidence; EMOS YES evidence alone fail-closes.
 plus the season-pin boot-guard drop-and-warn behavior.
 """
 from __future__ import annotations
@@ -152,8 +152,8 @@ def _set_flag(monkeypatch, enabled: bool):
     monkeypatch.setitem(settings._data, "edli_v1", edli)
 
 
-def _expected_emos_lcb(unit, k_cov):
-    """Compute the expected (buy_yes, buy_no) EMOS lcb per bin, mirroring the helper.
+def _expected_emos_yes_lcb(unit, k_cov):
+    """Compute the expected buy_yes EMOS lcb per bin, mirroring the helper.
 
     Uses bin_probability_settlement to match the live override path.
     """
@@ -176,7 +176,6 @@ def _expected_emos_lcb(unit, k_cov):
         emos_q = bin_probability_settlement(mu_n, sig_n, b.low, b.high)
         q_inf = bin_probability_settlement(mu_n, k_cov * sig_n, b.low, b.high)
         out[(cand.condition_id, "buy_yes")] = min(emos_q, q_inf)
-        out[(cand.condition_id, "buy_no")] = min(1.0 - emos_q, 1.0 - q_inf)
     return out
 
 
@@ -231,12 +230,14 @@ class TestFlagOnLicensedOverrides:
         _set_flag(monkeypatch, True)
 
         after = _run_override(monkeypatch, unit=unit)
-        expected = _expected_emos_lcb(unit, k_cov)
+        expected = _expected_emos_yes_lcb(unit, k_cov)
         for key, exp in expected.items():
             assert key in after
             assert abs(after[key] - exp) < 1e-12, (
                 f"key={key} unit={unit} k_cov={k_cov}: got {after[key]}, expected {exp}"
             )
+        for condition_id in ("cond0", "cond1"):
+            assert after[(condition_id, "buy_no")] == 0.0
 
     def test_k_cov_clamped_below_1(self, emos_env, monkeypatch):
         """A license k_cov < 1.0 is clamped to 1.0 (never tightens sigma)."""
@@ -245,9 +246,11 @@ class TestFlagOnLicensedOverrides:
         _set_flag(monkeypatch, True)
 
         after = _run_override(monkeypatch, unit="C")
-        expected = _expected_emos_lcb("C", 1.0)  # clamped to 1.0
+        expected = _expected_emos_yes_lcb("C", 1.0)  # clamped to 1.0
         for key, exp in expected.items():
             assert abs(after[key] - exp) < 1e-12, f"k_cov<1 not clamped: {key}"
+        for condition_id in ("cond0", "cond1"):
+            assert after[(condition_id, "buy_no")] == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -328,53 +331,32 @@ class TestFlagOnLicensedNoEmosCell:
 
 
 # ---------------------------------------------------------------------------
-# (e) buy_no override is INDEPENDENT (not 1 - yes_lcb)
+# (e) buy_no override requires native NO-side evidence.
 # ---------------------------------------------------------------------------
 
 class TestBuyNoIndependent:
-    def test_buy_no_is_not_one_minus_yes_lcb(self, emos_env, monkeypatch):
-        """buy_no lcb must be the honest NO-mass lower bound, NOT 1 - yes_lcb (#106).
-
-        With k_cov > 1 on a peaked bin: yes_lcb = min(emos_q, q_inf) = q_inf (< emos_q),
-        but buy_no lcb = min(1-emos_q, 1-q_inf) = 1-emos_q (since q_inf < emos_q).
-        Therefore buy_no lcb != 1 - yes_lcb whenever emos_q != q_inf.
-        """
+    def test_buy_no_fail_closes_without_native_no_lcb(self, emos_env, monkeypatch):
+        """EMOS YES evidence alone must not mint NO-side live authority."""
         _make_license_file(emos_env.tmp_path, {CITY: {"k_cov": 2.5}})
         lic_mod.reset_emos_ci_license_cache()
         _set_flag(monkeypatch, True)
 
         # Use °F bins: bin1 [82,83) straddles mu≈82.5°F → peaked, non-degenerate mass.
         after = _run_override(monkeypatch, unit="F")
-        yes_lcb = after[("cond1", "buy_yes")]
-        no_lcb = after[("cond1", "buy_no")]
-        naive_complement = 1.0 - yes_lcb
-        assert abs(no_lcb - naive_complement) > 1e-6, (
-            f"buy_no lcb={no_lcb} equals naive 1-yes_lcb={naive_complement} — NOT independent"
-        )
-        # And it must equal the honest construction 1 - max(emos_q, q_inf)
-        expected = _expected_emos_lcb("F", 2.5)
-        assert abs(no_lcb - expected[("cond1", "buy_no")]) < 1e-12
+        expected = _expected_emos_yes_lcb("F", 2.5)
+        assert abs(after[("cond1", "buy_yes")] - expected[("cond1", "buy_yes")]) < 1e-12
+        assert after[("cond0", "buy_no")] == 0.0
+        assert after[("cond1", "buy_no")] == 0.0
 
     def test_buy_no_never_optimistic(self, emos_env, monkeypatch):
-        """The NO lcb must never exceed the k=1 NO mass (never optimistic for NO)."""
-        from src.calibration.emos import emos_predictive, bin_probability
+        """Without native NO-side evidence the EMOS live override cannot raise NO lcb."""
         _make_license_file(emos_env.tmp_path, {CITY: {"k_cov": 3.0}})
         lic_mod.reset_emos_ci_license_cache()
         _set_flag(monkeypatch, True)
 
         after = _run_override(monkeypatch, unit="F")
-        members = np.array([82.4] * 25 + [83.0] * 26, dtype=float)
-        members_c = (members - 32.0) * 5.0 / 9.0
-        mu_c, sigma_c = emos_predictive(CITY, SEASON, 1.0, members_c)
-        mu_n = mu_c * 9.0 / 5.0 + 32.0
-        sig_n = sigma_c * 9.0 / 5.0
         for cand in _make_family("F").candidates:
-            b = cand.bin
-            emos_q = bin_probability(mu_n, sig_n, b.low, b.high)
-            no_k1 = 1.0 - emos_q
-            assert after[(cand.condition_id, "buy_no")] <= no_k1 + 1e-12, (
-                f"NO lcb optimistic for {cand.condition_id}"
-            )
+            assert after[(cand.condition_id, "buy_no")] == 0.0
 
 
 # ---------------------------------------------------------------------------

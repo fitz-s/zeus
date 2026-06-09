@@ -1733,6 +1733,95 @@ def test_live_exit_uses_expired_snapshot_identity_when_static_topology_lacks_no_
     assert context["executable_snapshot_hash"] == _snapshot_hash(conn, "snap-exit-refreshed-from-seed")
 
 
+def test_live_exit_static_topology_identity_seed_marks_clob_reconstructed_tradability(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        outcome_label="NO",
+        snapshot_id="snap-expired-static-identity-seed",
+        captured_at=_NOW - timedelta(minutes=10),
+        freshness_deadline=_NOW - timedelta(minutes=9),
+        accepting_orders=True,
+    )
+    position = Position(
+        trade_id="pos-exit-static-reconstructed",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="NYC",
+        cluster="northeast",
+        target_date="2026-04-28",
+        bin_label="50-51°F",
+        direction="buy_no",
+        token_id="",
+        no_token_id=NO_TOKEN,
+        entry_price=0.50,
+        size_usd=10.0,
+        shares=20.0,
+    )
+
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_sibling_outcomes",
+        lambda market_id: [
+            {
+                "market_id": market_id,
+                "condition_id": market_id,
+                "token_id": YES_TOKEN,
+            }
+        ],
+    )
+    monkeypatch.setattr("src.data.market_scanner.get_last_scan_authority", lambda: "VERIFIED")
+
+    def fake_capture_snapshot(
+        conn_arg,
+        *,
+        market,
+        decision,
+        clob,
+        captured_at,
+        scan_authority,
+        execution_side,
+    ):
+        seeded = market["outcomes"][0]
+        assert seeded["no_token_id"] == NO_TOKEN
+        assert seeded["gamma_market_raw"]["tradability_authority"] == "persisted_snapshot_reconstruction"
+        assert "accepting_orders" not in seeded
+        assert "acceptingOrders" not in seeded["gamma_market_raw"]
+        return {
+            "executable_snapshot_id": _ensure_snapshot(
+                conn_arg,
+                token_id=YES_TOKEN,
+                no_token_id=NO_TOKEN,
+                selected_outcome_token_id=NO_TOKEN,
+                outcome_label="NO",
+                snapshot_id="snap-exit-static-reconstructed",
+                captured_at=captured_at,
+            ),
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+        }
+
+    monkeypatch.setattr("src.data.market_scanner.capture_executable_market_snapshot", fake_capture_snapshot)
+
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn,
+        object(),
+        position,
+        NO_TOKEN,
+        now=_NOW,
+    )
+
+    assert context["executable_snapshot_id"] == "snap-exit-static-reconstructed"
+
+
 def test_live_exit_identity_seed_does_not_reuse_stale_accepting_orders_as_tradability(
     conn,
     monkeypatch,

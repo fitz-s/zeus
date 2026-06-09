@@ -33,6 +33,8 @@ from src.contracts import (
     recompute_native_probability,
     SettlementSemantics,
 )
+from src.contracts.day0_observation_context import BoundClassification, classify_bound
+from src.contracts.exceptions import ObservationUnavailableError
 from src.contracts.settlement_semantics import round_wmo_half_up_value
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.executable_forecast_reader import read_executable_forecast
@@ -79,6 +81,7 @@ _WHALE_TOXICITY_SEVERE_PRICE_MARGIN = 0.15
 _WHALE_TOXICITY_LOOKBACK_HOURS = 1.0
 _WHALE_TOXICITY_MIN_NOTIONAL_USD = 25.0
 _NOWCAST_PERSISTENT_FAILURE_THRESHOLD = 3
+_DAY0_LOW_EXTREME_AUTHORITY_HOURS = 6.0
 _nowcast_consecutive_write_failures = 0
 
 
@@ -113,12 +116,161 @@ def _model_only_native_posterior(p_native: float) -> float:
     p = float(p_native)
     if not np.isfinite(p) or not 0.0 <= p <= 1.0:
         raise ValueError(f"native monitor probability must be in [0, 1], got {p!r}")
-    posterior = compute_posterior(
-        np.array([p, 1.0 - p], dtype=float),
-        None,
-        posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+    return p
+
+
+@dataclass(frozen=True)
+class MonitorOneCalibratorQ:
+    q_vector: np.ndarray
+    q_source: str
+    bootstrap_probability_sampler: object | None
+
+
+def _monitor_emos_regime_enabled() -> bool:
+    try:
+        return bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))
+    except Exception:
+        return False
+
+
+def _monitor_emos_season(target_d: date) -> str:
+    month = int(target_d.month)
+    if month in (12, 1, 2):
+        return "DJF"
+    if month in (3, 4, 5):
+        return "MAM"
+    if month in (6, 7, 8):
+        return "JJA"
+    return "SON"
+
+
+def _monitor_normal_bootstrap_sampler(mu_native: float, sigma_native: float):
+    def _sampler(analysis, n_members):
+        draws = analysis._rng.normal(float(mu_native), float(sigma_native), int(n_members))
+        measured = analysis._settle(draws)
+        vec = np.array(
+            [analysis._bin_probability(measured, bb) for bb in analysis.bins],
+            dtype=float,
+        )
+        if not np.all(np.isfinite(vec)):
+            return np.asarray(analysis.p_cal, dtype=float)
+        total = float(vec.sum())
+        if total <= 0.0:
+            return np.asarray(analysis.p_cal, dtype=float)
+        return vec / total
+
+    return _sampler
+
+
+def _build_monitor_one_calibrator_q(
+    *,
+    city,
+    target_d: date,
+    metric: str,
+    lead_days: float,
+    member_extrema: np.ndarray,
+    semantics: SettlementSemantics,
+    all_bins: list,
+) -> MonitorOneCalibratorQ:
+    """Mirror the live entry EMOS/honest-raw q seam for non-Day0 monitor refresh."""
+
+    from src.calibration.emos import SettlementSigmaFloorError
+    from src.calibration.emos_q_builder import build_emos_q, build_honest_raw_q
+
+    season = _monitor_emos_season(target_d)
+    unit = str(city.settlement_unit)
+    apply_settlement_floor = bool(
+        settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False)
     )
-    return float(posterior[0])
+    require_settlement_floor = bool(
+        settings["edli_v1"].get("edli_settlement_sigma_floor_required", True)
+    )
+    q_result = None
+    try:
+        q_result = build_emos_q(
+            city=city.name,
+            season=season,
+            metric=metric,
+            lead_days=float(lead_days),
+            members_native=member_extrema,
+            unit=unit,
+            bins=all_bins,
+            apply_settlement_floor=apply_settlement_floor,
+            require_settlement_floor=require_settlement_floor,
+        )
+    except SettlementSigmaFloorError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "MONITOR_EMOS_SERVE_FAILED cell=%s|%s|%s unit=%s exc=%s: %s",
+            city.name,
+            season,
+            metric,
+            unit,
+            type(exc).__name__,
+            exc,
+        )
+        q_result = None
+    if q_result is not None:
+        q_vector, mu_native, sigma_native = q_result
+        return MonitorOneCalibratorQ(
+            q_vector=np.asarray(q_vector, dtype=float),
+            q_source="emos",
+            bootstrap_probability_sampler=_monitor_normal_bootstrap_sampler(
+                mu_native,
+                sigma_native,
+            ),
+        )
+
+    honest_raw = None
+    try:
+        honest_raw = build_honest_raw_q(
+            city=city.name,
+            season=season,
+            metric=metric,
+            lead_days=float(lead_days),
+            members_native=member_extrema,
+            unit=unit,
+            bins=all_bins,
+            apply_settlement_floor=apply_settlement_floor,
+            require_settlement_floor=require_settlement_floor,
+        )
+    except SettlementSigmaFloorError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "MONITOR_HONEST_RAW_FLOOR_FAILED cell=%s|%s|%s unit=%s exc=%s: %s",
+            city.name,
+            season,
+            metric,
+            unit,
+            type(exc).__name__,
+            exc,
+        )
+        honest_raw = None
+    if honest_raw is not None:
+        q_vector, mu_native, sigma_native = honest_raw
+        return MonitorOneCalibratorQ(
+            q_vector=np.asarray(q_vector, dtype=float),
+            q_source="raw_honest",
+            bootstrap_probability_sampler=_monitor_normal_bootstrap_sampler(
+                mu_native,
+                sigma_native,
+            ),
+        )
+
+    raw_q = p_raw_vector_from_maxes(
+        member_extrema,
+        city,
+        semantics,
+        all_bins,
+        n_mc=ensemble_n_mc(),
+    )
+    return MonitorOneCalibratorQ(
+        q_vector=np.asarray(raw_q, dtype=float),
+        q_source="raw_honest",
+        bootstrap_probability_sampler=None,
+    )
 
 
 def _set_monitor_probability_fresh(position: Position, is_fresh: bool) -> None:
@@ -650,15 +802,17 @@ def _refresh_ens_member_counting(
             str(exc),
         ]
 
-    # D2 bias-family unify (2026-06-03): EXIT-side mirror of the LIVE EDLI reactor entry
-    # bias correction. Flag-gated (exit_bias_family_unify_enabled, default OFF → None →
-    # byte-identical to today). When applied, BOTH branches below subtract the bias-shift
-    # from member_extrema (NO residual widening — matches entry's _maybe_apply_edli_bias_correction)
-    # and the calibration step uses identity-Platt (A4 lockstep). Resolved once here so both
-    # the period_extrema and ens-signal branches share one consistent treatment.
-    _unified_exit_bias_native = _resolve_unified_exit_bias_native(
-        conn, city, target_d, _position_metric_str,
-    )
+    _monitor_emos_regime = _monitor_emos_regime_enabled()
+    _monitor_q_source: str | None = None
+    _bootstrap_probability_sampler = None
+    # D2 bias-family unify (2026-06-03): legacy EXIT-side mirror. In the
+    # EMOS sole regime this must be skipped entirely; otherwise monitor and
+    # entry would use different probability builders for the same held market.
+    _unified_exit_bias_native = None
+    if not _monitor_emos_regime:
+        _unified_exit_bias_native = _resolve_unified_exit_bias_native(
+            conn, city, target_d, _position_metric_str,
+        )
 
     if using_period_extrema:
         expected_members_unit = "degC" if city.settlement_unit == "C" else "degF"
@@ -685,12 +839,55 @@ def _refresh_ens_member_counting(
                 "period_extrema_members_invalid",
             ]
         _member_unit = expected_members_unit  # already validated above
-        # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
-        _ft_model = _resolve_ft_error_model(
-            conn, city, target_d, _position_metric_str,
-            lead_hours=lead_days * 24.0,
-        )
-        if _unified_exit_bias_native is not None:
+        if _monitor_emos_regime:
+            try:
+                _monitor_q = _build_monitor_one_calibrator_q(
+                    city=city,
+                    target_d=target_d,
+                    metric=_position_metric_str,
+                    lead_days=float(lead_days),
+                    member_extrema=member_extrema,
+                    semantics=semantics,
+                    all_bins=all_bins,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "monitor_emos_sole_calibrator unavailable for %s %s %s: %s",
+                    city.name,
+                    target_d,
+                    _position_metric_str,
+                    exc,
+                )
+                _set_monitor_probability_fresh(position, False)
+                return position.p_posterior, [
+                    "fresh_ens_fetch",
+                    *forecast_source_validations,
+                    "entry_forecast_reader",
+                    "period_extrema_members_adapter",
+                    f"monitor_emos_sole_calibrator_failed:{type(exc).__name__}",
+                ]
+            p_raw_vector = _monitor_q.q_vector
+            p_cal_full = np.asarray(_monitor_q.q_vector, dtype=float)
+            p_cal_yes = float(p_cal_full[held_idx])
+            _monitor_q_source = _monitor_q.q_source
+            _bootstrap_probability_sampler = _monitor_q.bootstrap_probability_sampler
+            base_applied = [
+                "fresh_ens_fetch",
+                *forecast_source_validations,
+                "entry_forecast_reader",
+                "period_extrema_members_adapter",
+                "monitor_emos_sole_calibrator",
+                f"q_source:{_monitor_q_source}",
+            ]
+        else:
+            # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
+            _ft_model = _resolve_ft_error_model(
+                conn, city, target_d, _position_metric_str,
+                lead_hours=lead_days * 24.0,
+            )
+        if _monitor_q_source is not None:
+            pass
+        elif _unified_exit_bias_native is not None:
             # D2 unify: bias-SHIFT only (no residual widening), then plain p_raw — the
             # exact entry treatment. Calibration step uses identity-Platt (set below).
             member_extrema = member_extrema - float(_unified_exit_bias_native)
@@ -753,12 +950,51 @@ def _refresh_ens_member_counting(
         else:
             _ens_member_extrema = ens.member_maxes
         _member_unit = "degC" if city.settlement_unit == "C" else "degF"
-        # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
-        _ft_model = _resolve_ft_error_model(
-            conn, city, target_d, _position_metric_str,
-            lead_hours=lead_days * 24.0,
-        )
-        if _unified_exit_bias_native is not None:
+        if _monitor_emos_regime:
+            try:
+                _monitor_q = _build_monitor_one_calibrator_q(
+                    city=city,
+                    target_d=target_d,
+                    metric=_position_metric_str,
+                    lead_days=float(lead_days),
+                    member_extrema=np.asarray(_ens_member_extrema, dtype=float),
+                    semantics=ens.settlement_semantics,
+                    all_bins=all_bins,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "monitor_emos_sole_calibrator unavailable for %s %s %s: %s",
+                    city.name,
+                    target_d,
+                    _position_metric_str,
+                    exc,
+                )
+                _set_monitor_probability_fresh(position, False)
+                return position.p_posterior, [
+                    "fresh_ens_fetch",
+                    *forecast_source_validations,
+                    f"monitor_emos_sole_calibrator_failed:{type(exc).__name__}",
+                ]
+            p_raw_vector = _monitor_q.q_vector
+            p_cal_full = np.asarray(_monitor_q.q_vector, dtype=float)
+            p_cal_yes = float(p_cal_full[held_idx])
+            _monitor_q_source = _monitor_q.q_source
+            _bootstrap_probability_sampler = _monitor_q.bootstrap_probability_sampler
+            base_applied = [
+                "fresh_ens_fetch",
+                *forecast_source_validations,
+                "monitor_emos_sole_calibrator",
+                f"q_source:{_monitor_q_source}",
+            ]
+        else:
+            # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
+            _ft_model = _resolve_ft_error_model(
+                conn, city, target_d, _position_metric_str,
+                lead_hours=lead_days * 24.0,
+            )
+        if _monitor_q_source is not None:
+            pass
+        elif _unified_exit_bias_native is not None:
             # D2 unify: bias-SHIFT only (no residual widening), then plain p_raw via the
             # shared p_raw_vector_from_maxes path (same path ens.p_raw_vector and the ft
             # branch use). Calibration step uses identity-Platt (set below).
@@ -815,14 +1051,25 @@ def _refresh_ens_member_counting(
     # operators can audit silent-HIGH events.
     # Phase 2.6 (2026-05-04, critic-opus MAJOR 4): thread Phase 2 stratification
     # axes so monitor exit calibration uses the same bucket the entry side did.
-    cal, cal_level = _monitor_calibrator_for_ens_result(
-        conn=conn,
-        city=city,
-        target_date=position.target_date,
-        temperature_metric=_position_metric_str,  # hoisted (P2-fix5)
-        ens_result=ens_result,
-    )
-    if _unified_exit_bias_native is not None:
+    if _monitor_q_source is not None:
+        cal = None
+        cal_level = 1
+        applied = [
+            *base_applied,
+            "identity_one_calibrator",
+            "vector_normalization",
+        ]
+    else:
+        cal, cal_level = _monitor_calibrator_for_ens_result(
+            conn=conn,
+            city=city,
+            target_date=position.target_date,
+            temperature_metric=_position_metric_str,  # hoisted (P2-fix5)
+            ens_result=ens_result,
+        )
+    if _monitor_q_source is not None:
+        pass
+    elif _unified_exit_bias_native is not None:
         # D2 unify A4 lockstep: the member maxes were bias-SHIFTED above, so the existing
         # Platt models (fit on the UNCORRECTED p_raw domain) would mis-calibrate the shifted
         # domain. Use identity Platt (p_cal = normalized p_raw) — EXACT mirror of the entry
@@ -892,8 +1139,8 @@ def _refresh_ens_member_counting(
     # cross-metric noise doesn't trigger false-positive stale-probability
     # warnings. Resolver from P2-C1 already determined position metric
     # for this monitor cycle (post-P2-C2 routing); reuse it here.
-    _authority_verified = False
-    if conn is not None and hasattr(conn, 'execute'):
+    _authority_verified = _monitor_q_source is not None
+    if _monitor_q_source is None and conn is not None and hasattr(conn, 'execute'):
         from src.calibration.store import get_pairs_for_bucket as _get_pairs
         _cal_season = season_from_date(target_d.isoformat(), lat=city.lat)
         _gate_metric = "high" if _position_metric_str == "high" else None  # hoisted (P2-fix5)
@@ -936,16 +1183,23 @@ def _refresh_ens_member_counting(
     )
     if anomaly_discount < 1.0:
         alpha *= anomaly_discount
+        anomaly_removed = (
+            1.0 if anomaly_discount <= 0.0
+            else ((1.0 / anomaly_discount) - 1.0) * anomaly_discount
+        )
         applied.append("persistence_anomaly_discount")
         logger.info(
             "Persistence anomaly for %s: α discounted by %.0f%%",
-            city.name, (1.0 - anomaly_discount) * 100,
+            city.name, anomaly_removed * 100,
         )
 
     if position.direction == "buy_no":
-        p_cal_native = 1.0 - p_cal_yes
-    else:
-        p_cal_native = p_cal_yes
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            *applied,
+            "buy_no_independent_monitor_probability_missing",
+        ]
+    p_cal_native = p_cal_yes
 
     current_p_posterior = _model_only_native_posterior(p_cal_native)
 
@@ -960,6 +1214,12 @@ def _refresh_ens_member_counting(
         "calibrator": cal,
         "lead_days": float(lead_days),
         "unit": city.settlement_unit,
+        "bootstrap_probability_sampler": _bootstrap_probability_sampler,
+        "bootstrap_signal_type": (
+            "monitor_emos_sole_calibrator"
+            if _monitor_q_source is not None
+            else "monitor_forecast"
+        ),
     })
 
     _set_monitor_probability_fresh(position, True)
@@ -1209,6 +1469,24 @@ def _refresh_day0_observation(
             "fresh_ens_fetch",
             "observation_quality_gate",
         ]
+    member_extrema_for_metric = extrema.mins if temperature_metric.is_low() else extrema.maxes
+    observed_extreme_for_metric = observed_low_so_far if temperature_metric.is_low() else observed_high_so_far
+    maturity_rejection = _day0_extreme_authority_rejection_reason(
+        temperature_metric=temperature_metric,
+        temporal_context=temporal_context,
+        hours_remaining=hours_remaining,
+        observed_extreme_so_far=observed_extreme_for_metric,
+        member_extrema_remaining=member_extrema_for_metric,
+    )
+    if maturity_rejection is not None:
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            "day0_observation",
+            "fresh_ens_fetch",
+            *forecast_source_validations,
+            "day0_extreme_maturity_gate",
+            maturity_rejection,
+        ]
     day0 = Day0Router.route(Day0SignalInputs(
         temperature_metric=temperature_metric,
         observed_high_so_far=observed_high_so_far,
@@ -1343,7 +1621,13 @@ def _refresh_day0_observation(
         hours_since_open=hours_since_open,
         authority_verified=_authority_verified,
     ).value_for_consumer("ev")
-    p_cal_native = 1.0 - p_cal_yes if position.direction == "buy_no" else p_cal_yes
+    if position.direction == "buy_no":
+        _set_monitor_probability_fresh(position, False)
+        return position.p_posterior, [
+            *applied,
+            "buy_no_independent_monitor_probability_missing",
+        ]
+    p_cal_native = p_cal_yes
     current_p_posterior = _model_only_native_posterior(p_cal_native)
 
     # A1: Stash bootstrap-relevant data for fresh CI computation in refresh_position
@@ -1375,6 +1659,52 @@ def _refresh_day0_observation(
     )
 
     return current_p_posterior, [*applied, "model_only_posterior", "alpha_posterior"]
+
+
+def _day0_extreme_authority_rejection_reason(
+    *,
+    temperature_metric: MetricIdentity,
+    temporal_context,
+    hours_remaining: float,
+    observed_extreme_so_far: float | None,
+    member_extrema_remaining,
+) -> str | None:
+    """Reject Day0 observation authority before the daily extreme is causal.
+
+    Running high/low observations are useful signal inputs, but they are not
+    automatically exit authority. A non-deterministic HIGH running max before
+    the peak and a non-terminal LOW running min near local midnight are both
+    early-day bounds, not settlement-grade reversals.
+    """
+    try:
+        classification = classify_bound(
+            observed_extreme_so_far=observed_extreme_so_far,
+            member_extremes_remaining=list(member_extrema_remaining)
+            if member_extrema_remaining is not None
+            else None,
+            is_high_market=temperature_metric.is_high(),
+        )
+    except ValueError as exc:
+        return f"day0_extreme_maturity_unavailable:{exc}"
+
+    if classification == BoundClassification.UNBOUNDED_NO_OBS_YET:
+        return "day0_extreme_maturity_unavailable:no_intraday_extreme"
+    if classification == BoundClassification.DETERMINISTIC:
+        return None
+
+    if temperature_metric.is_high():
+        daypart = str(getattr(temporal_context, "daypart", "") or "")
+        post_peak_confidence = float(getattr(temporal_context, "post_peak_confidence", 0.0) or 0.0)
+        if daypart != "post_peak" or post_peak_confidence < 0.5:
+            return (
+                "day0_high_extreme_not_mature:"
+                f"daypart={daypart or 'unknown'},post_peak_confidence={post_peak_confidence:.3f}"
+            )
+        return None
+
+    if float(hours_remaining) > _DAY0_LOW_EXTREME_AUTHORITY_HOURS:
+        return f"day0_low_extreme_not_terminal:hours_remaining={float(hours_remaining):.1f}"
+    return None
 
 
 def _maybe_write_day0_nowcast(
@@ -1568,7 +1898,7 @@ def _check_persistence_anomaly(
                 return 1.0  # Too few samples to trust the frequency estimate
             # Scale discount: 10% at n=30, grows linearly to 30% at n>=100
             discount_magnitude = min(0.30, 0.10 + 0.20 * (n - 30) / 70.0)
-            return 1.0 - discount_magnitude
+            return (1.0 / discount_magnitude - 1.0) * discount_magnitude
         else:
             logger.debug(
                 "PERSISTENCE_NO_DATA: world.temp_persistence has no row for %s/%s/bucket=%s — returning 1.0 (no discount)",
@@ -1773,22 +2103,55 @@ def monitor_probability_refresh(
         EntryMethod.DAY0_OBSERVATION.value: _refresh_day0_observation,
     }
     refresh_pos = pos
-    if pos.state == "day0_window" and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value:
-        refresh_pos = replace(pos, entry_method=EntryMethod.DAY0_OBSERVATION.value)
+    day0_unsupported_forecast_fallback = False
+    day0_observation_unavailable_forecast_fallback = False
+    if (
+        _position_state_value(pos) == "day0_window"
+        and pos.entry_method != EntryMethod.DAY0_OBSERVATION.value
+    ):
+        if str(getattr(city, "settlement_source_type", "") or "") == "wu_icao":
+            refresh_pos = replace(pos, entry_method=EntryMethod.DAY0_OBSERVATION.value)
+        else:
+            day0_unsupported_forecast_fallback = True
     setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
 
     # recompute_native_probability still carries a legacy current_p_market
     # parameter for dispatch compatibility. Do not pass the just-refreshed
     # executable quote through this seam.
     probability_reference_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
-    current_p_posterior = recompute_native_probability(
-        refresh_pos,
-        current_p_market=probability_reference_price,
-        registry=registry,
-        conn=conn,
-        city=city,
-        target_d=target_d,
-    )
+    try:
+        current_p_posterior = recompute_native_probability(
+            refresh_pos,
+            current_p_market=probability_reference_price,
+            registry=registry,
+            conn=conn,
+            city=city,
+            target_d=target_d,
+        )
+    except ObservationUnavailableError:
+        if refresh_pos is pos or pos.entry_method == EntryMethod.DAY0_OBSERVATION.value:
+            raise
+        day0_observation_unavailable_forecast_fallback = True
+        refresh_pos = pos
+        setattr(refresh_pos, _MONITOR_PROBABILITY_FRESH_ATTR, None)
+        current_p_posterior = recompute_native_probability(
+            refresh_pos,
+            current_p_market=probability_reference_price,
+            registry=registry,
+            conn=conn,
+            city=city,
+            target_d=target_d,
+        )
+    if day0_observation_unavailable_forecast_fallback:
+        _append_monitor_validation(
+            refresh_pos,
+            "day0_observation_unavailable:forecast_monitor_fallback",
+        )
+    if day0_unsupported_forecast_fallback:
+        _append_monitor_validation(
+            refresh_pos,
+            "day0_observation_unsupported:forecast_monitor_fallback",
+        )
     return (
         current_p_posterior,
         refresh_pos,
@@ -1965,7 +2328,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 # Binary buy_no may still use complement price semantics. In
                 # multi-bin buy_no, native NO quote below is the only executable
                 # cost and model-only posterior never consumes this vector.
-                p_market_yes = current_p_market if pos.direction == "buy_yes" else 1.0 - current_p_market
+                p_market_yes = current_p_market if pos.direction == "buy_yes" else 0.0
                 p_market_arr[held_idx] = p_market_yes
             p_market_no_arr = None
             buy_no_quote_available = None
@@ -1988,6 +2351,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
                 lead_days=bootstrap_ctx["lead_days"],
                 unit=bootstrap_ctx["unit"],
                 posterior_mode=MODEL_ONLY_POSTERIOR_MODE,
+                bootstrap_probability_sampler=bootstrap_ctx.get("bootstrap_probability_sampler"),
+                bootstrap_signal_type=bootstrap_ctx.get("bootstrap_signal_type", "monitor_forecast"),
                 # K1: this path recomputes CI for a HELD position via _bootstrap_bin
                 # (never find_edges), so the sharpness gate is moot — exempt evidence
                 # keeps the required ctor contract satisfied without affecting CI.

@@ -30,6 +30,7 @@ import json
 import logging
 import math
 import os
+import sqlite3
 import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
@@ -323,6 +324,12 @@ FILL_AUTHORITY_RANK = {
     FILL_AUTHORITY_VENUE_CONFIRMED_FULL: 3,
     FILL_AUTHORITY_SETTLED: 4,
 }
+
+# Real-submit decision_audit was introduced with the live aggregate hotfix on
+# 2026-06-07. Earlier fills are real exposure but cannot be retroactively given
+# a q/selector proof without fabrication. They stay unscorable for settlement
+# attribution, but must remain manageable by the exit/risk plane.
+EDLI_DECISION_AUDIT_REQUIRED_FROM = datetime(2026, 6, 7, 3, 0, tzinfo=timezone.utc)
 
 # PR D2 (Finding 9, 2026-05-27): authorities that MAY produce training rows.
 # `is_training_eligible_position(pos)` is the type-boundary that downstream
@@ -1129,6 +1136,17 @@ class Position:
             current_held = float(exit_context.fresh_prob)
             below = current_held < float(exit_context.entry_posterior) - _CI_SEP_EPS
             if separated and below:
+                if forward_edge > 0.0:
+                    self.neg_edge_count = 0
+                    applied.append("ci_separated_positive_edge_hold")
+                    self.applied_validations = _dedupe_validations(applied)
+                    return ExitDecision(
+                        False,
+                        "CI_SEPARATED_POSITIVE_EDGE_HOLD",
+                        selected_method=self.selected_method or self.entry_method,
+                        applied_validations=list(self.applied_validations),
+                        trigger="CI_SEPARATED_POSITIVE_EDGE_HOLD",
+                    )
                 # Disjoint AND moved against the held side → genuine evidence reversal → EXIT.
                 self.neg_edge_count = 0
                 applied.append("ci_separated_reversal")
@@ -1266,15 +1284,21 @@ class Position:
                     selected_method=self.selected_method or self.entry_method,
                     applied_validations=list(self.applied_validations),
                 )
+            # Day0 observation posterior can move abruptly right after the
+            # local day opens, before enough of the settlement day has elapsed
+            # to prove a real reversal. The CI-separation gate above owns
+            # evidence-backed belief reversals; settlement-imminent remains a
+            # separate force-exit below. Do not turn a point-estimate day0
+            # swing plus a tiny cash-out improvement into an immediate sell.
             self.neg_edge_count = 0
+            applied.append("day0_observation_reversal_requires_ci_separation")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
-                True,
-                f"DAY0_OBSERVATION_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
-                "immediate",
+                False,
+                f"DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
-                trigger="DAY0_OBSERVATION_REVERSAL",
+                trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE",
             )
         applied.append("consecutive_cycle_check")
         if evidence_edge >= edge_threshold:
@@ -1426,15 +1450,18 @@ class Position:
                         selected_method=self.selected_method or self.entry_method,
                         applied_validations=list(self.applied_validations),
                     )
+            # Same evidence rule as buy-YES: a day0 point-estimate reversal is
+            # not enough to liquidate. CI-separated reversal and
+            # settlement-imminent exits are handled outside this flat EV gate.
             self.neg_edge_count = 0
+            applied.append("day0_observation_reversal_requires_ci_separation")
             self.applied_validations = _dedupe_validations(applied)
             return ExitDecision(
-                True,
-                f"DAY0_OBSERVATION_REVERSAL (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
-                "immediate",
+                False,
+                f"DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE (ci_lower={evidence_edge:.4f}, point={forward_edge:.4f})",
                 selected_method=self.selected_method or self.entry_method,
                 applied_validations=list(self.applied_validations),
-                trigger="DAY0_OBSERVATION_REVERSAL",
+                trigger="DAY0_OBSERVATION_REVERSAL_HELD_FOR_EVIDENCE",
             )
 
         # Near-settlement hold (unless deeply negative)
@@ -1710,6 +1737,446 @@ def _load_d6_field(row: dict, field_name: str, default: float = 0.0) -> float:
     return float(value)
 
 
+def _runtime_strategy_key_from_projection_row(row: dict) -> str:
+    """Repair only the legacy EDLI forecast bridge label that predates strategy certs."""
+
+    strategy_key = str(row.get("strategy_key") or "")
+    if strategy_key != "settlement_capture":
+        return strategy_key
+    if str(row.get("entry_method") or "") != "ens_member_counting":
+        return strategy_key
+    if str(row.get("direction") or "").strip().lower() != "buy_no":
+        return strategy_key
+    metric = str(row.get("temperature_metric") or "").strip().lower()
+
+    from src.strategy.strategy_profile import try_get
+
+    profile = try_get("opening_inertia")
+    if (
+        profile is not None
+        and profile.is_runtime_live()
+        and profile.is_direction_allowed("buy_no")
+        and (not metric or profile.metric_is_live(metric))
+    ):
+        logger.warning(
+            "runtime repaired legacy EDLI forecast strategy label: position_id=%s "
+            "settlement_capture -> opening_inertia metric=%s",
+            row.get("position_id") or row.get("trade_id") or "",
+            metric,
+        )
+        return "opening_inertia"
+    return strategy_key
+
+
+def _strategy_profile_rejection_for_position(pos: "Position") -> str | None:
+    strategy_key = str(getattr(pos, "strategy_key", "") or "").strip()
+    if not strategy_key:
+        return "STRATEGY_KEY_MISSING"
+
+    from src.strategy.strategy_profile import try_get
+
+    profile = try_get(strategy_key)
+    if profile is None:
+        return f"STRATEGY_UNKNOWN:{strategy_key}"
+    if not profile.is_runtime_live():
+        return f"STRATEGY_NOT_RUNTIME_LIVE:{strategy_key}"
+
+    direction = _semantic_value(getattr(pos, "direction", "")).strip().lower()
+    if direction and not profile.is_direction_allowed(direction):
+        return f"STRATEGY_DIRECTION_BLOCKED:{strategy_key}:direction={direction}"
+
+    metric = str(getattr(pos, "temperature_metric", "") or "").strip().lower()
+    if metric and not profile.metric_is_live(metric):
+        return f"STRATEGY_METRIC_BLOCKED:{strategy_key}:metric={metric}"
+
+    return None
+
+
+def _invalid_strategy_review_fact_from_position(pos: "Position") -> ChainOnlyFact | None:
+    if not _is_runtime_open_position(pos):
+        return None
+    reason = _strategy_profile_rejection_for_position(pos)
+    if reason is None:
+        return None
+    token_id = str(getattr(pos, "no_token_id", "") or getattr(pos, "token_id", "") or "")
+    if not token_id:
+        token_id = f"invalid-strategy:{getattr(pos, 'trade_id', '')}"
+    observed_at = str(getattr(pos, "entered_at", "") or getattr(pos, "updated_at", "") or "")
+    logger.error(
+        "active position blocks new entries due to invalid runtime strategy: "
+        "position_id=%s city=%s target_date=%s metric=%s direction=%s strategy_key=%s reason=%s",
+        getattr(pos, "trade_id", ""),
+        getattr(pos, "city", ""),
+        getattr(pos, "target_date", ""),
+        getattr(pos, "temperature_metric", ""),
+        getattr(pos, "direction", ""),
+        getattr(pos, "strategy_key", ""),
+        reason,
+    )
+    return ChainOnlyFact(
+        token_id=token_id,
+        condition_id=str(getattr(pos, "condition_id", "") or ""),
+        size=float(getattr(pos, "shares", 0.0) or 0.0),
+        avg_price=float(getattr(pos, "entry_price", 0.0) or 0.0),
+        cost_basis=float(getattr(pos, "cost_basis_usd", 0.0) or 0.0),
+        first_seen_at=observed_at,
+        last_seen_at=observed_at,
+        review_state=ChainOnlyReviewState.UNRESOLVED,
+        entry_block_scope="position_only",
+    )
+
+
+def _is_open_edli_entry_position_row(row: dict) -> bool:
+    phase = str(row.get("phase") or row.get("state") or "").strip()
+    if phase not in {
+        "pending_entry",
+        "pending_tracked",
+        "active",
+        "entered",
+        "holding",
+        "day0_window",
+        "pending_exit",
+    }:
+        return False
+    trade_id = str(row.get("trade_id") or row.get("position_id") or "")
+    if trade_id.startswith("edli"):
+        return True
+    decision_snapshot_id = str(row.get("decision_snapshot_id") or "")
+    if decision_snapshot_id.startswith("ems2-"):
+        return True
+    return str(row.get("entry_method") or "") == "ens_member_counting"
+
+
+def _held_token_id_from_position_row(row: dict) -> str:
+    direction = str(row.get("direction") or "").strip().lower()
+    if direction == "buy_no":
+        return str(row.get("no_token_id") or row.get("token_id") or "")
+    return str(row.get("token_id") or row.get("no_token_id") or "")
+
+
+def _edli_event_id_from_execution_decision_id(decision_id: str) -> str:
+    parts = str(decision_id or "").split(":")
+    if len(parts) >= 2 and parts[0] == "edli_exec_cmd":
+        return parts[1]
+    return ""
+
+
+def _attached_schema_names(conn: sqlite3.Connection) -> set[str]:
+    try:
+        return {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _attached_table_exists(conn: sqlite3.Connection, schema: str, table: str) -> bool:
+    try:
+        row = conn.execute(
+            f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+
+
+def _entry_receipt_authority_rejection(receipt_json: str | None) -> str | None:
+    if not receipt_json:
+        return "EDLI_ENTRY_RECEIPT_MISSING"
+    try:
+        receipt = json.loads(receipt_json)
+    except (TypeError, json.JSONDecodeError):
+        return "EDLI_ENTRY_RECEIPT_JSON_INVALID"
+    if str(receipt.get("q_source") or "").strip() == "":
+        return "EDLI_ENTRY_Q_SOURCE_MISSING"
+    book = receipt.get("opportunity_book")
+    if not isinstance(book, dict):
+        return "EDLI_ENTRY_OPPORTUNITY_BOOK_MISSING"
+    selected = str(book.get("selected_candidate_id") or "").strip()
+    actual = str(book.get("actual_receipt_selected_candidate_id") or "").strip()
+    if not selected:
+        return "EDLI_ENTRY_OPPORTUNITY_BOOK_SELECTED_MISSING"
+    if actual and actual != selected:
+        return "EDLI_ENTRY_OPPORTUNITY_BOOK_SELECTION_MISMATCH"
+    return None
+
+
+def _entry_decision_audit_authority_rejection(audit_json: str | None) -> str | None:
+    if not audit_json:
+        return "EDLI_ENTRY_DECISION_AUDIT_MISSING"
+    try:
+        audit = json.loads(audit_json)
+    except (TypeError, json.JSONDecodeError):
+        return "EDLI_ENTRY_DECISION_AUDIT_JSON_INVALID"
+    if str(audit.get("strategy_key") or "").strip() == "":
+        return "EDLI_ENTRY_DECISION_AUDIT_STRATEGY_KEY_MISSING"
+    if str(audit.get("q_source") or "").strip() == "":
+        return "EDLI_ENTRY_DECISION_AUDIT_Q_SOURCE_MISSING"
+    book = audit.get("opportunity_book")
+    if not isinstance(book, dict):
+        return "EDLI_ENTRY_DECISION_AUDIT_OPPORTUNITY_BOOK_MISSING"
+    selected = str(book.get("selected_candidate_id") or "").strip()
+    actual = str(book.get("actual_receipt_selected_candidate_id") or "").strip()
+    if not selected:
+        return "EDLI_ENTRY_DECISION_AUDIT_OPPORTUNITY_BOOK_SELECTED_MISSING"
+    if actual and actual != selected:
+        return "EDLI_ENTRY_DECISION_AUDIT_OPPORTUNITY_BOOK_SELECTION_MISMATCH"
+    return None
+
+
+def _actionable_entry_authority_rejection(payload_json: str | None) -> str | None:
+    if not payload_json:
+        return "EDLI_ENTRY_ACTIONABLE_CERT_MISSING"
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, json.JSONDecodeError):
+        return "EDLI_ENTRY_ACTIONABLE_CERT_JSON_INVALID"
+    if str(payload.get("strategy_key") or "").strip() == "":
+        return "EDLI_ENTRY_ACTIONABLE_STRATEGY_KEY_MISSING"
+    if str(payload.get("q_source") or "").strip() == "":
+        return "EDLI_ENTRY_ACTIONABLE_Q_SOURCE_MISSING"
+    if not isinstance(payload.get("opportunity_book"), dict):
+        return "EDLI_ENTRY_ACTIONABLE_OPPORTUNITY_BOOK_MISSING"
+    return None
+
+
+def _calibration_entry_authority_rejection(payload_json: str | None) -> str | None:
+    if not payload_json:
+        return "EDLI_ENTRY_CALIBRATION_CERT_MISSING"
+    try:
+        payload = json.loads(payload_json)
+    except (TypeError, json.JSONDecodeError):
+        return "EDLI_ENTRY_CALIBRATION_CERT_JSON_INVALID"
+    authority = str(payload.get("authority") or "").strip().upper()
+    if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
+        return "EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK"
+    n_samples_raw = payload.get("n_samples")
+    try:
+        n_samples = int(n_samples_raw) if n_samples_raw is not None else None
+    except (TypeError, ValueError):
+        n_samples = None
+    if n_samples is not None and n_samples <= 0:
+        return "EDLI_ENTRY_CALIBRATION_EMPTY_SAMPLE"
+    return None
+
+
+def _entry_proof_rejection_from_evidence(
+    *,
+    decision_audit_json: str | None = None,
+    receipt_json: str | None,
+    actionable_payload_json: str | None,
+    calibration_payload_json: str | None,
+) -> str | None:
+    if decision_audit_json:
+        audit_rejection = _entry_decision_audit_authority_rejection(decision_audit_json)
+        if audit_rejection is not None:
+            return audit_rejection
+        return None
+    actionable_rejection = _actionable_entry_authority_rejection(actionable_payload_json)
+    calibration_rejection = _calibration_entry_authority_rejection(calibration_payload_json)
+    if receipt_json:
+        receipt_rejection = _entry_receipt_authority_rejection(receipt_json)
+        if receipt_rejection is not None:
+            return receipt_rejection
+    if actionable_rejection is not None:
+        return actionable_rejection
+    if calibration_rejection is not None:
+        return calibration_rejection
+    return None
+
+
+def _legacy_entry_audit_gap_is_manageable(decision_proof_occurred_at: str | None) -> bool:
+    parsed = _parse_iso_datetime(decision_proof_occurred_at)
+    return parsed is not None and parsed < EDLI_DECISION_AUDIT_REQUIRED_FROM
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _query_edli_entry_proof_review_reasons(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+) -> dict[str, str]:
+    if not rows:
+        return {}
+    if "world" not in _attached_schema_names(conn):
+        return {
+            str(row.get("trade_id") or row.get("position_id") or ""): "EDLI_ENTRY_PROOF_WORLD_DB_UNAVAILABLE"
+            for row in rows
+            if _is_open_edli_entry_position_row(row)
+        }
+    required_world_tables = ("edli_no_submit_receipts", "decision_certificates", "edli_live_order_events")
+    if any(not _attached_table_exists(conn, "world", table) for table in required_world_tables):
+        return {
+            str(row.get("trade_id") or row.get("position_id") or ""): "EDLI_ENTRY_PROOF_WORLD_TABLE_MISSING"
+            for row in rows
+            if _is_open_edli_entry_position_row(row)
+        }
+    if not _attached_table_exists(conn, "main", "venue_commands"):
+        return {
+            str(row.get("trade_id") or row.get("position_id") or ""): "EDLI_ENTRY_PROOF_COMMAND_TABLE_MISSING"
+            for row in rows
+            if _is_open_edli_entry_position_row(row)
+        }
+
+    reasons: dict[str, str] = {}
+    for row in rows:
+        if not _is_open_edli_entry_position_row(row):
+            continue
+        trade_id = str(row.get("trade_id") or row.get("position_id") or "")
+        token_id = _held_token_id_from_position_row(row)
+        order_id = str(row.get("order_id") or "")
+        command_row = None
+        if order_id:
+            command_row = conn.execute(
+                """
+                SELECT decision_id
+                  FROM venue_commands
+                 WHERE venue_order_id = ?
+                   AND intent_kind = 'ENTRY'
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT 1
+                """,
+                (order_id,),
+            ).fetchone()
+        if command_row is None and token_id:
+            command_row = conn.execute(
+                """
+                SELECT decision_id
+                  FROM venue_commands
+                 WHERE token_id = ?
+                   AND intent_kind = 'ENTRY'
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT 1
+                """,
+                (token_id,),
+            ).fetchone()
+        if command_row is None:
+            reasons[trade_id] = "EDLI_ENTRY_PROOF_COMMAND_MISSING"
+            continue
+        event_id = _edli_event_id_from_execution_decision_id(str(command_row["decision_id"] or ""))
+        if not event_id:
+            reasons[trade_id] = "EDLI_ENTRY_PROOF_EVENT_ID_MISSING"
+            continue
+        decision_audit_row = conn.execute(
+            """
+            SELECT
+                json_extract(payload_json, '$.decision_audit') AS decision_audit_json,
+                occurred_at
+              FROM world.edli_live_order_events
+             WHERE event_type = 'DecisionProofAccepted'
+               AND aggregate_id >= ?
+               AND aggregate_id < ?
+             ORDER BY event_sequence ASC
+             LIMIT 1
+            """,
+            (f"{event_id}:", f"{event_id}:~"),
+        ).fetchone()
+        decision_audit_json = (
+            str(decision_audit_row["decision_audit_json"])
+            if decision_audit_row is not None and decision_audit_row["decision_audit_json"] is not None
+            else None
+        )
+        if decision_audit_row is not None and not decision_audit_json:
+            if _legacy_entry_audit_gap_is_manageable(str(decision_audit_row["occurred_at"] or "")):
+                logger.warning(
+                    "legacy EDLI entry lacks decision_audit but predates audit requirement; "
+                    "position remains manageable but settlement attribution is unscorable: "
+                    "position_id=%s event_id=%s",
+                    trade_id,
+                    event_id,
+                )
+                continue
+            reasons[trade_id] = "EDLI_ENTRY_DECISION_AUDIT_MISSING"
+            continue
+        receipt_row = conn.execute(
+            """
+            SELECT receipt_json
+              FROM world.edli_no_submit_receipts
+             WHERE event_id = ?
+               AND token_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (event_id, token_id),
+        ).fetchone()
+        actionable_row = conn.execute(
+            """
+            SELECT payload_json
+              FROM world.decision_certificates
+             WHERE certificate_type = 'ActionableTradeCertificate'
+               AND semantic_key LIKE ?
+               AND json_extract(payload_json, '$.token_id') = ?
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (f"actionable:{event_id}:%", token_id),
+        ).fetchone()
+        calibration_row = conn.execute(
+            """
+            SELECT payload_json
+              FROM world.decision_certificates
+             WHERE certificate_type = 'CalibrationCertificate'
+               AND semantic_key LIKE ?
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            (f"calibration:{event_id}:%",),
+        ).fetchone()
+        rejection = _entry_proof_rejection_from_evidence(
+            decision_audit_json=decision_audit_json,
+            receipt_json=str(receipt_row["receipt_json"]) if receipt_row is not None else None,
+            actionable_payload_json=str(actionable_row["payload_json"]) if actionable_row is not None else None,
+            calibration_payload_json=str(calibration_row["payload_json"]) if calibration_row is not None else None,
+        )
+        if rejection is not None:
+            reasons[trade_id] = rejection
+    return reasons
+
+
+def _invalid_entry_proof_review_fact_from_position(
+    pos: "Position",
+    *,
+    reason: str | None,
+) -> ChainOnlyFact | None:
+    if reason is None or not _is_runtime_open_position(pos):
+        return None
+    token_id = str(getattr(pos, "no_token_id", "") or getattr(pos, "token_id", "") or "")
+    if not token_id:
+        token_id = f"invalid-entry-proof:{getattr(pos, 'trade_id', '')}"
+    observed_at = str(getattr(pos, "entered_at", "") or getattr(pos, "updated_at", "") or "")
+    logger.error(
+        "active EDLI position requires position-only review due to invalid entry proof: "
+        "position_id=%s city=%s target_date=%s metric=%s direction=%s strategy_key=%s reason=%s",
+        getattr(pos, "trade_id", ""),
+        getattr(pos, "city", ""),
+        getattr(pos, "target_date", ""),
+        getattr(pos, "temperature_metric", ""),
+        getattr(pos, "direction", ""),
+        getattr(pos, "strategy_key", ""),
+        reason,
+    )
+    return ChainOnlyFact(
+        token_id=token_id,
+        condition_id=str(getattr(pos, "condition_id", "") or ""),
+        size=float(getattr(pos, "shares", 0.0) or 0.0),
+        avg_price=float(getattr(pos, "entry_price", 0.0) or 0.0),
+        cost_basis=float(getattr(pos, "cost_basis_usd", 0.0) or 0.0),
+        first_seen_at=observed_at,
+        last_seen_at=observed_at,
+        review_state=ChainOnlyReviewState.UNRESOLVED,
+        entry_block_scope="position_only",
+    )
+
+
 def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
     state = str(row.get("state") or "")
     if not state:
@@ -1717,6 +2184,7 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
     entered_at = str(row.get("entered_at") or row.get("updated_at") or "")
     order_posted_at = str(row.get("order_posted_at") or entered_at or "")
     day0_entered_at = str(row.get("day0_entered_at") or "") if state == "day0_window" else ""
+    runtime_strategy_key = _runtime_strategy_key_from_projection_row(row)
     payload = dict(
         trade_id=str(row.get("trade_id") or row.get("position_id") or ""),
         market_id=str(row.get("market_id") or ""),
@@ -1738,12 +2206,13 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
         cost_basis_usd=_load_d6_field(row, "cost_basis_usd"),
         entry_price=_load_d6_field(row, "entry_price"),
         p_posterior=float(row.get("p_posterior") or 0.0),
+        entry_ci_width=float(row.get("entry_ci_width") or 0.0),
         entered_at=entered_at if state != "pending_tracked" else "",
         day0_entered_at=day0_entered_at,
         decision_snapshot_id=str(row.get("decision_snapshot_id") or ""),
         entry_method=str(row.get("entry_method") or ""),
-        strategy_key=str(row.get("strategy_key") or ""),
-        strategy=str(row.get("strategy") or row.get("strategy_key") or ""),
+        strategy_key=runtime_strategy_key,
+        strategy=runtime_strategy_key,
         edge_source=str(row.get("edge_source") or ""),
         discovery_mode=str(row.get("discovery_mode") or ""),
         state=state,
@@ -1915,6 +2384,7 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     bankroll = 0.0
 
     from src.state.db import (
+        ZEUS_WORLD_DB_PATH,
         get_connection,
         get_trade_connection_with_world,
         query_chain_only_quarantine_rows,
@@ -1959,8 +2429,22 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
     settlement_rows: list[dict] = []
     ignored_tokens: list[str] = []
     chain_only_quarantines: list[dict] = []
+    entry_proof_review_reasons: dict[str, str] = {}
     try:
+        attached = _attached_schema_names(conn)
+        if "world" not in attached and ZEUS_WORLD_DB_PATH.exists():
+            try:
+                conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+            except sqlite3.OperationalError:
+                logger.warning(
+                    "load_portfolio could not attach world DB for EDLI entry-proof audit",
+                    exc_info=True,
+                )
         snapshot = query_portfolio_loader_view(conn)
+        entry_proof_review_reasons = _query_edli_entry_proof_review_reasons(
+            conn,
+            list(snapshot.get("positions", [])),
+        )
         ignored_tokens = query_token_suppression_tokens(conn)
         chain_only_quarantines = query_chain_only_quarantine_rows(conn)
         if snapshot.get("status") in ("ok", "partial_stale", "empty"):
@@ -2029,6 +2513,34 @@ def load_portfolio(path: Optional[Path] = None) -> PortfolioState:
         for row in chain_only_quarantines
         if str(row.get("token_id") or "") not in represented_tokens
     ]
+    chain_only_facts.extend(
+        fact
+        for fact in (
+            _invalid_strategy_review_fact_from_position(pos)
+            for pos in positions
+        )
+        if fact is not None
+    )
+    chain_only_facts.extend(
+        fact
+        for fact in (
+            _invalid_entry_proof_review_fact_from_position(
+                pos,
+                reason=entry_proof_review_reasons.get(str(getattr(pos, "trade_id", "") or "")),
+            )
+            for pos in positions
+        )
+        if fact is not None
+    )
+    deduped_chain_only_facts: list[ChainOnlyFact] = []
+    seen_chain_only_keys: set[tuple[str, str]] = set()
+    for fact in chain_only_facts:
+        key = (str(fact.token_id or ""), str(fact.condition_id or ""))
+        if key in seen_chain_only_keys:
+            continue
+        seen_chain_only_keys.add(key)
+        deduped_chain_only_facts.append(fact)
+    chain_only_facts = deduped_chain_only_facts
     return PortfolioState(
         positions=positions,
         bankroll=bankroll,
@@ -3114,9 +3626,8 @@ def flash_crash_should_fire(
     A single-cycle quote wiggle on a thin book / single seller / data gap, with the
     belief unchanged, satisfies neither path and therefore does NOT exit.
 
-    This is the single source of truth shared by both trigger sites
-    (``exit_triggers.evaluate_exit_triggers`` and ``Position.evaluate_exit``) so they
-    cannot diverge.
+    This is the single source of truth shared by both legacy trigger and
+    ``Position.evaluate_exit`` call sites so they cannot diverge.
     """
     arming = flash_crash_velocity()
     try:

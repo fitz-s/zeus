@@ -1,0 +1,248 @@
+"""Runtime policy resolver for the replacement forecast shadow/veto path."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import math
+from typing import Mapping
+
+
+STRATEGY_KEY = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor"
+SHADOW_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled"
+VETO_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_veto_enabled"
+TRADE_AUTHORITY_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"
+KELLY_INCREASE_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled"
+DIRECTION_FLIP_FLAG = "openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled"
+REQUIRED_FLAGS = (
+    SHADOW_FLAG,
+    VETO_FLAG,
+    TRADE_AUTHORITY_FLAG,
+    KELLY_INCREASE_FLAG,
+    DIRECTION_FLIP_FLAG,
+)
+SAFE_DEFAULT_STATUS = "DISABLED"
+SHADOW_ONLY_STATUS = "SHADOW_ONLY"
+SHADOW_VETO_ONLY_STATUS = "SHADOW_VETO_ONLY"
+BLOCKED_STATUS = "BLOCKED"
+LIVE_AUTHORITY_STATUS = "LIVE_AUTHORITY"
+EXPECTED_ANCHOR_WEIGHT = 0.80
+EXPECTED_ANCHOR_SIGMA_C = 3.00
+MIN_PROMOTION_GUARDRAIL_BUCKET_ROWS = 20
+EXPECTED_CAPITAL_OBJECTIVE_LABEL = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00"
+
+
+@dataclass(frozen=True)
+class ReplacementForecastPromotionEvidence:
+    official_days: int
+    official_rows: int
+    after_cost_pnl: float
+    q_lcb_coverage: float
+    anti_lookahead_violations: int
+    source_availability_violations: int
+    unresolved_regression_clusters: int
+    same_clob_replay_passed: bool
+    nested_walk_forward_passed: bool
+    same_clob_replay_scored_rows: int = 0
+    same_clob_replay_blocked_rows: int = 0
+    fee_depth_fill_evidence_passed: bool = False
+    unit_pnl_only: bool = True
+    nested_holdout_brier: float | None = None
+    nested_holdout_log_loss: float | None = None
+    nested_selected_anchor_weight: float | None = None
+    nested_selected_anchor_sigma_c: float | None = None
+    nested_guardrail_bucket_count: int = 0
+    nested_guardrail_bucket_min_rows: int = 0
+    product_specific_refit_passed: bool = False
+
+    def blocking_reason_codes(self) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if self.official_days < 5:
+            reasons.append("REPLACEMENT_PROMOTION_INSUFFICIENT_OFFICIAL_DAYS")
+        if self.official_rows < 250:
+            reasons.append("REPLACEMENT_PROMOTION_INSUFFICIENT_OFFICIAL_ROWS")
+        if self.after_cost_pnl <= 0.0:
+            reasons.append("REPLACEMENT_PROMOTION_AFTER_COST_PNL_NOT_POSITIVE")
+        if self.q_lcb_coverage < 0.95:
+            reasons.append("REPLACEMENT_PROMOTION_Q_LCB_COVERAGE_TOO_LOW")
+        if self.anti_lookahead_violations != 0:
+            reasons.append("REPLACEMENT_PROMOTION_ANTI_LOOKAHEAD_VIOLATIONS")
+        if self.source_availability_violations != 0:
+            reasons.append("REPLACEMENT_PROMOTION_SOURCE_AVAILABILITY_VIOLATIONS")
+        if self.unresolved_regression_clusters != 0:
+            reasons.append("REPLACEMENT_PROMOTION_UNRESOLVED_REGRESSION_CLUSTERS")
+        if not self.same_clob_replay_passed:
+            reasons.append("REPLACEMENT_PROMOTION_SAME_CLOB_REPLAY_NOT_PASSED")
+        if self.same_clob_replay_scored_rows < self.official_rows:
+            reasons.append("REPLACEMENT_PROMOTION_SAME_CLOB_REPLAY_INCOMPLETE")
+        if self.same_clob_replay_blocked_rows != 0:
+            reasons.append("REPLACEMENT_PROMOTION_SAME_CLOB_REPLAY_BLOCKED_ROWS")
+        if not self.fee_depth_fill_evidence_passed:
+            reasons.append("REPLACEMENT_PROMOTION_FEE_DEPTH_FILL_EVIDENCE_MISSING")
+        if self.unit_pnl_only:
+            reasons.append("REPLACEMENT_PROMOTION_UNIT_PNL_ONLY")
+        if not self.nested_walk_forward_passed:
+            reasons.append("REPLACEMENT_PROMOTION_NESTED_WALK_FORWARD_NOT_PASSED")
+        if not _finite_nonnegative(self.nested_holdout_brier):
+            reasons.append("REPLACEMENT_PROMOTION_NESTED_BRIER_MISSING")
+        if not _finite_nonnegative(self.nested_holdout_log_loss):
+            reasons.append("REPLACEMENT_PROMOTION_NESTED_LOG_LOSS_MISSING")
+        if not _matches_expected(self.nested_selected_anchor_weight, EXPECTED_ANCHOR_WEIGHT):
+            reasons.append("REPLACEMENT_PROMOTION_ANCHOR_WEIGHT_MISMATCH")
+        if not _matches_expected(self.nested_selected_anchor_sigma_c, EXPECTED_ANCHOR_SIGMA_C):
+            reasons.append("REPLACEMENT_PROMOTION_ANCHOR_SIGMA_MISMATCH")
+        if self.nested_guardrail_bucket_count < 1:
+            reasons.append("REPLACEMENT_PROMOTION_GUARDRAIL_BUCKETS_MISSING")
+        if self.nested_guardrail_bucket_min_rows < MIN_PROMOTION_GUARDRAIL_BUCKET_ROWS:
+            reasons.append("REPLACEMENT_PROMOTION_GUARDRAIL_BUCKET_ROWS_INSUFFICIENT")
+        if not self.product_specific_refit_passed:
+            reasons.append("REPLACEMENT_PROMOTION_PRODUCT_SPECIFIC_REFIT_MISSING")
+        return tuple(reasons)
+
+    def promotion_allowed(self) -> bool:
+        return not self.blocking_reason_codes()
+
+
+@dataclass(frozen=True)
+class ReplacementForecastCapitalObjectiveEvidence:
+    selected_label: str
+    replay_status: str
+    after_cost_pnl: float
+    source_availability_observed: bool
+    source_availability_violations: int
+    anti_lookahead_violations: int
+    same_clob_replay_passed: bool
+    fee_depth_fill_evidence_passed: bool
+    unit_pnl_only: bool
+    product_specific_refit_passed: bool
+
+    def blocking_reason_codes(self) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if self.selected_label != EXPECTED_CAPITAL_OBJECTIVE_LABEL:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_SELECTED_LABEL_MISMATCH")
+        if self.replay_status != "EMPIRICAL_WINNER":
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_REPLAY_NOT_EMPIRICAL_WINNER")
+        if self.after_cost_pnl <= 0.0:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_AFTER_COST_PNL_NOT_POSITIVE")
+        if not self.source_availability_observed:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_SOURCE_AVAILABILITY_NOT_OBSERVED")
+        if self.source_availability_violations != 0:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_SOURCE_AVAILABILITY_VIOLATIONS")
+        if self.anti_lookahead_violations != 0:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_ANTI_LOOKAHEAD_VIOLATIONS")
+        if not self.same_clob_replay_passed:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_SAME_CLOB_REPLAY_NOT_PASSED")
+        if not self.fee_depth_fill_evidence_passed:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_FEE_DEPTH_FILL_EVIDENCE_MISSING")
+        if self.unit_pnl_only:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_UNIT_PNL_ONLY")
+        if not self.product_specific_refit_passed:
+            reasons.append("REPLACEMENT_CAPITAL_OBJECTIVE_PRODUCT_SPECIFIC_REFIT_MISSING")
+        return tuple(reasons)
+
+    def capital_objective_allowed(self) -> bool:
+        return not self.blocking_reason_codes()
+
+
+def _finite_nonnegative(value: float | None) -> bool:
+    return value is not None and math.isfinite(float(value)) and float(value) >= 0.0
+
+
+def _matches_expected(value: float | None, expected: float) -> bool:
+    return value is not None and math.isfinite(float(value)) and abs(float(value) - expected) <= 1e-9
+
+
+@dataclass(frozen=True)
+class ReplacementForecastRuntimePolicy:
+    status: str
+    reason_codes: tuple[str, ...]
+    shadow_enabled: bool
+    veto_enabled: bool
+    trade_authority_enabled: bool
+    kelly_increase_enabled: bool
+    direction_flip_enabled: bool
+    strategy_key: str = STRATEGY_KEY
+
+    @property
+    def can_read_shadow_posterior(self) -> bool:
+        return self.status in {SHADOW_ONLY_STATUS, SHADOW_VETO_ONLY_STATUS, LIVE_AUTHORITY_STATUS}
+
+    @property
+    def can_apply_veto(self) -> bool:
+        return self.status in {SHADOW_VETO_ONLY_STATUS, LIVE_AUTHORITY_STATUS}
+
+    @property
+    def can_initiate_trade(self) -> bool:
+        return self.status == LIVE_AUTHORITY_STATUS and self.trade_authority_enabled
+
+    @property
+    def can_increase_kelly(self) -> bool:
+        return self.status == LIVE_AUTHORITY_STATUS and self.kelly_increase_enabled
+
+    @property
+    def can_flip_direction(self) -> bool:
+        return self.status == LIVE_AUTHORITY_STATUS and self.direction_flip_enabled
+
+
+def _strict_bool(flags: Mapping[str, object], key: str) -> bool:
+    if key not in flags:
+        raise KeyError(f"missing replacement forecast feature flag: {key}")
+    value = flags[key]
+    if not isinstance(value, bool):
+        raise TypeError(f"replacement forecast feature flag {key} must be bool")
+    return value
+
+
+def resolve_replacement_forecast_runtime_policy(
+    flags: Mapping[str, object],
+    *,
+    promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
+) -> ReplacementForecastRuntimePolicy:
+    """Resolve the only allowed runtime authority state from strict feature flags."""
+
+    shadow = _strict_bool(flags, SHADOW_FLAG)
+    veto = _strict_bool(flags, VETO_FLAG)
+    trade_authority = _strict_bool(flags, TRADE_AUTHORITY_FLAG)
+    kelly_increase = _strict_bool(flags, KELLY_INCREASE_FLAG)
+    direction_flip = _strict_bool(flags, DIRECTION_FLIP_FLAG)
+
+    reasons: list[str] = []
+    if not shadow and (veto or trade_authority or kelly_increase or direction_flip):
+        reasons.append("REPLACEMENT_SHADOW_FLAG_REQUIRED")
+    if not veto and (trade_authority or kelly_increase or direction_flip):
+        reasons.append("REPLACEMENT_VETO_FLAG_REQUIRED_BEFORE_AUTHORITY")
+    if not trade_authority and (kelly_increase or direction_flip):
+        reasons.append("REPLACEMENT_TRADE_AUTHORITY_REQUIRED_FOR_DANGEROUS_FLAGS")
+    if direction_flip and not kelly_increase:
+        reasons.append("REPLACEMENT_DIRECTION_FLIP_REQUIRES_KELLY_AUTHORITY")
+    if reasons:
+        return ReplacementForecastRuntimePolicy(
+            status=BLOCKED_STATUS,
+            reason_codes=tuple(reasons),
+            shadow_enabled=shadow,
+            veto_enabled=veto,
+            trade_authority_enabled=False,
+            kelly_increase_enabled=False,
+            direction_flip_enabled=False,
+        )
+    if not shadow:
+        status = SAFE_DEFAULT_STATUS
+        reason_codes = ("REPLACEMENT_DISABLED_BY_FLAG",)
+    elif not veto:
+        status = SHADOW_ONLY_STATUS
+        reason_codes = ("REPLACEMENT_SHADOW_ONLY",)
+    elif not trade_authority:
+        status = SHADOW_VETO_ONLY_STATUS
+        reason_codes = ("REPLACEMENT_SHADOW_VETO_ONLY",)
+    else:
+        status = LIVE_AUTHORITY_STATUS
+        reason_codes = ("REPLACEMENT_NEW_DATA_LIVE_AUTHORITY",)
+    return ReplacementForecastRuntimePolicy(
+        status=status,
+        reason_codes=reason_codes,
+        shadow_enabled=shadow,
+        veto_enabled=veto,
+        trade_authority_enabled=trade_authority if status == LIVE_AUTHORITY_STATUS else False,
+        kelly_increase_enabled=kelly_increase if status == LIVE_AUTHORITY_STATUS else False,
+        direction_flip_enabled=direction_flip if status == LIVE_AUTHORITY_STATUS else False,
+    )

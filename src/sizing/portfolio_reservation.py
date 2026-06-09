@@ -92,6 +92,16 @@ class PortfolioReservationLedger:
         city, stake, _ = entry
         self._entries[key] = (city, stake, True)
 
+    def seed_committed(self, reservation_id: str, city: str, stake_usd: float) -> None:
+        """Seed already-emitted durable in-flight capital at cycle start.
+
+        Used for cross-cycle live submissions that have left the process-local
+        ledger but have not yet materialized into ``position_current``. These
+        rows are already emitted, so they enter as terminal COMMITTED entries and
+        cannot be removed by a later per-event rollback.
+        """
+        self._entries[str(reservation_id)] = (str(city), float(stake_usd), True)
+
     def rollback(self, event_id: str) -> None:
         """Remove the reservation for ``event_id`` IF it is still PROVISIONAL.
 

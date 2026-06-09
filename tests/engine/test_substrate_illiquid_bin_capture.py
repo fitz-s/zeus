@@ -236,7 +236,7 @@ def test_illiquid_bins_complete_fdr_family_identity_proof(conn):
 
     event = SimpleNamespace(event_id="evt", causal_snapshot_id="csid")
     family_rows = _latest_snapshot_rows_for_event_family(
-        conn, event, condition_ids=family_condition_ids, fresh_at=NOW
+        conn, event, condition_ids=family_condition_ids, require_fresh=False
     )
     token_maps = _snapshot_token_maps_by_condition(family_rows)
 
@@ -298,3 +298,34 @@ def test_liquid_bin_remains_tradeable(conn):
         pytest.fail("liquid bin must not be blocked as non-tradeable")
     except MarketSnapshotMismatchError:
         pass  # tolerated: selection/label axis, not the illiquidity axis under test
+
+
+def test_synthetic_clob_substrate_identity_is_nontradeable_even_with_liquidity(conn, monkeypatch):
+    monkeypatch.setenv("ZEUS_PENDING_SUBSTRATE_SYNTHETIC_CLOB_MARKET_INFO", "true")
+
+    _capture(conn, condition_id="condition-1", has_asks=True, tolerate=True)
+
+    row = conn.execute(
+        "SELECT snapshot_id FROM executable_market_snapshots WHERE condition_id = ?",
+        ("condition-1",),
+    ).fetchone()
+    snap = get_snapshot(conn, row["snapshot_id"])
+    assert snap.orderbook_top_ask == Decimal("0.40")
+    assert snap.tradeability_status.executable_allowed is False
+    assert snap.tradeability_status.reason == "synthetic_clob_market_info_substrate_only"
+
+
+def test_default_substrate_fee_identity_is_nontradeable_when_explicitly_enabled(conn, monkeypatch):
+    monkeypatch.setenv("ZEUS_PENDING_SUBSTRATE_DEFAULT_FEE_DETAILS", "true")
+
+    _capture(conn, condition_id="condition-1", has_asks=True, tolerate=True)
+
+    row = conn.execute(
+        "SELECT snapshot_id, fee_details_json FROM executable_market_snapshots WHERE condition_id = ?",
+        ("condition-1",),
+    ).fetchone()
+    snap = get_snapshot(conn, row["snapshot_id"])
+    assert snap.orderbook_top_ask == Decimal("0.40")
+    assert snap.tradeability_status.executable_allowed is False
+    assert snap.tradeability_status.reason == "default_substrate_fee_details_not_final_intent_authority"
+    assert "submit_boundary_revalidates_fee" in row["fee_details_json"]
