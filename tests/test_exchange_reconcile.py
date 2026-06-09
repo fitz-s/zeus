@@ -2412,6 +2412,41 @@ def test_position_drift_finding_distinguishes_legitimate_from_real(conn):
     assert "exchange_size" in position_findings[0].evidence_json
 
 
+def test_position_drift_honors_token_suppression_registry(conn):
+    """ONE-TRUTH (rule 4): a token already in token_suppression (chain-only / settled holding,
+    e.g. the operator's manual chain position) must NOT be re-flagged as a blocking position_drift.
+
+    chain_reconciliation quarantines chain-only / operator-manual holdings into token_suppression
+    ('chain_only_quarantined'); the harvester suppresses settled winners there ('settled_position').
+    If exchange_reconcile ignores that registry and re-flags those tokens as position_drift, the M5
+    submit latch stays CLOSED on positions the system never owned and live trading halts -- the
+    multi-system-infighting zero-trade fault. A genuinely unsuppressed drift must still be flagged.
+    """
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    suppressed = "operator-manual-chain-token"
+    real_drift = "genuine-unsuppressed-drift-token"
+    conn.execute(
+        """
+        INSERT INTO token_suppression (token_id, condition_id, suppression_reason, source_module, created_at, updated_at)
+        VALUES (?, '0xcond', 'chain_only_quarantined', 'src.state.chain_reconciliation', ?, ?)
+        """,
+        (suppressed, NOW.isoformat(), NOW.isoformat()),
+    )
+
+    # Both are chain positions with no system trade facts -> both would normally be position_drift.
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[position(token_id=suppressed, size="797"), position(token_id=real_drift, size="15")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    drift_subjects = [finding.subject_id for finding in result if finding.kind == "position_drift"]
+    assert suppressed not in drift_subjects, "a suppressed (chain-only/manual) token must not gate the submit latch"
+    assert real_drift in drift_subjects, "a genuinely unsuppressed drift must still be flagged"
+
+
 def test_position_drift_compares_exchange_to_confirmed_not_optimistic(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

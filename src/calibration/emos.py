@@ -1,9 +1,16 @@
 # Created: 2026-06-02
-# Last reused or audited: 2026-06-02
+# Last reused or audited: 2026-06-07
 # Authority basis: EMOS shadow-ledger task; PIECE 1 spec.
 #   Model: mu=a+b*xbar; sigma2=exp(c+d*log(S2)+e*lead_days).
 #   Table: state/emos_calibration.json, schema _meta + cells{"City|SEASON": {params,n,served}}.
 #   served=="raw" or missing cell → return None (caller falls back to raw ensemble).
+# 2026-06-07 ITEM 3 (path provenance): _SIGMA_FLOOR_PATH + _EMOS_TABLE_PATH now resolve via
+#   the SINGLE canonical state-dir resolver (src.config.state_path -> STATE_DIR) instead of a
+#   module-local recomputed `Path(__file__).parent.parent.parent / "state"`, so the artifacts
+#   follow the daemon's runtime state dir (a recomputed path is a silent-divergence hazard that
+#   made the q_lcb settlement-σ floor no-op when the file was absent). load_sigma_floor_table
+#   now FAILS LOUD (logger.warning) on an absent floor file in the legacy required=False path
+#   rather than a quiet debug, so an operator sees the floor is inert.
 """EMOS predictive-serve helpers.
 
 Provides:
@@ -24,16 +31,25 @@ import logging
 import math
 import threading
 from datetime import date
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
 from scipy.stats import norm as _scipy_norm
 
+from src.config import state_path as _state_path
+
 logger = logging.getLogger(__name__)
 
-_STATE_DIR = Path(__file__).parent.parent.parent / "state"
-_EMOS_TABLE_PATH = _STATE_DIR / "emos_calibration.json"
+# PROVENANCE (ITEM 3, 2026-06-07): resolve state artifacts through the SINGLE canonical
+# state-dir resolver the rest of the daemon uses (src.config.state_path -> STATE_DIR), NOT
+# a module-local recomputed dir. The old `Path(__file__).parent.parent.parent / "state"`
+# happened to coincide with STATE_DIR, but a recomputed path is a silent-divergence hazard:
+# if the daemon's state dir ever relocates, this loader would keep pointing at the dead path
+# and the settlement σ-floor would silently no-op (0 cells -> q_lcb floor inert). Reusing the
+# canonical resolver makes the floor file move WITH the daemon's runtime state. (Fitz #4:
+# code provenance — one resolver, no parallel path computation.)
+_STATE_DIR = _state_path("")  # canonical runtime state dir (parent of the artifacts below)
+_EMOS_TABLE_PATH = _state_path("emos_calibration.json")
 
 _emos_table_cache: dict | None = None
 _emos_table_lock = threading.Lock()
@@ -42,7 +58,7 @@ _emos_table_lock = threading.Lock()
 # The EMOS σ-model is systemically under-dispersed (median σ_emos/σ_settled = 0.49). The correct
 # dispersion FLOOR is the DETRENDED trailing-window settlement std per (city, season, metric),
 # precomputed offline by scripts/fit_settlement_sigma_floor.py into this table.
-_SIGMA_FLOOR_PATH = _STATE_DIR / "settlement_sigma_floor.json"
+_SIGMA_FLOOR_PATH = _state_path("settlement_sigma_floor.json")
 _sigma_floor_cache: dict | None = None
 _sigma_floor_lock = threading.Lock()
 
@@ -114,7 +130,17 @@ def load_sigma_floor_table(*, required: bool = False) -> dict:
                 raise SettlementSigmaFloorError(
                     f"SETTLEMENT_SIGMA_FLOOR_MISSING_ARTIFACT:{_SIGMA_FLOOR_PATH}"
                 )
-            logger.debug("state/settlement_sigma_floor.json not found; settlement σ-floor disabled")
+            # FAIL-LOUD (ITEM 3, 2026-06-07): an ABSENT floor file silently returning {}
+            # makes the q_lcb settlement-σ floor INERT (0 cells -> max(model_σ, floor) never
+            # widens). The legacy (required=False) path must NOT crash, but it MUST warn loud
+            # so an operator sees the floor is disabled — not a quiet debug that hides the
+            # provenance gap. (Memory: the floor only worked when repointed at the live state
+            # dir's 232-cell table; a missing file at runtime is an operator-visible event.)
+            logger.warning(
+                "settlement_sigma_floor.json not found at %s; settlement σ-floor is DISABLED "
+                "(q_lcb floor inert, 0 cells). Runtime widening will rely on model σ only.",
+                _SIGMA_FLOOR_PATH,
+            )
             _sigma_floor_cache = {}
         except SettlementSigmaFloorError:
             raise

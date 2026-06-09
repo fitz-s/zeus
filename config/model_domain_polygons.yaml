@@ -1,0 +1,134 @@
+# Created: 2026-06-08
+# Last reused or audited: 2026-06-08
+# Authority basis: U0R_BAYES_SPEC.md §3 source identities ("ICON-D2 2km EU Central-Europe
+#   polygon <=48h; AROME France polygon"), §7 antibody "regional-outside-domain (polygon)";
+#   U0R_PROOF_RESULT.md open question #3 ("in_icon_d2_box polygon is LOOSE ... tighten to the
+#   true Central-Europe polygon so the domain gate and the data-presence gate AGREE before any
+#   wiring"). The proof's loose bounding box [37..71N, -17..37E] flagged Madrid/Warsaw/Helsinki/
+#   Istanbul in_box with no ICON-D2 data; this file uses the TIGHTENED physical model domains.
+#
+# THE STRUCTURAL DECISION (Fitz #1/#4): the regional gate is a polygon, not 15 if-statements.
+# Out-of-domain regionals are made absent at config level (antibody), composed with the runtime
+# data-presence gate (fail-soft drop) so a regional can ONLY enter fusion when BOTH agree.
+# Polygon membership is point-in-polygon over (lat, lon) of the city's settlement coordinate.
+#
+# IMPORTANT: presence here is domain plumbing only. It does NOT enable any source, fetch, or
+# trade authority. ICON-D2/AROME stay shadow-only / deferred per U0R_PROOF_RESULT.md until an
+# ingest+calibration path exists. The U0R fusion flag (replacement_0_1_u0r_fusion_enabled) is
+# default-OFF; with it OFF this file is inert.
+
+schema: model_domain_polygons_v1
+
+domains:
+  # DWD ICON-D2 2km rapid-update nest. Tightened to the official DWD ICON-D2 regular-grid
+  # bounding extent (the rotated-pole nest's lat/lon hull), NOT the proof's loose box. Cities
+  # outside this hull (Madrid -3.56E/40.47N, Helsinki 60.33N, Istanbul 28.74E/41.26N, Moscow
+  # 37.26E) are OUT-OF-DOMAIN -> regional ABSENT (zero-leak). Paris/London/Milan/Munich/
+  # Amsterdam/Warsaw fall inside.
+  icon_d2:
+    model_name: icon_d2
+    region_label: central_europe
+    max_lead_days: 1          # spec §3: regional expert <=48h; gate at lead<=1 (D1 proven lead-1 only)
+    # Closed ring (lon, lat) pairs, last == first. Rectangular hull of the DWD ICON-D2 nest.
+    polygon:
+      - [-3.94, 43.18]
+      - [20.34, 43.18]
+      - [20.34, 58.08]
+      - [-3.94, 58.08]
+      - [-3.94, 43.18]
+    bounding_box:
+      lat_min: 43.18
+      lat_max: 58.08
+      lon_min: -3.94
+      lon_max: 20.34
+
+  # Météo-France AROME-France-HD 1.3km. Official AROME-France domain hull (metropolitan France
+  # + near surroundings). Proof france_cities == [Paris] only; this polygon keeps the France gate
+  # explicit and physical rather than a string match on city name.
+  # MILAN RETENTION VERDICT (2026-06-09 audit, CURRENT_REUSABLE): a wiring-audit note claimed
+  # Milan (45.43N, 9.28E) sits "outside the true AROME nest" and the ring should be tightened.
+  # REFUTED by settlement truth: the physical AROME-France domain extends past the Po valley,
+  # open-meteo serves real values there (384 previous_runs rows), and at fixed lead-1 HIGH
+  # (n=76) arome is Milan's 3rd-best instrument — MAE 0.868 / bias +0.18 vs anchor ecmwf_ifs
+  # 1.304 / icon_global 1.097. Milan STAYS in. Do not tighten on geometric speculation; the
+  # domain gate must agree with data presence AND settlement-graded skill.
+  meteofrance_arome_france_hd:
+    model_name: meteofrance_arome_france_hd
+    region_label: france
+    max_lead_days: 1
+    polygon:
+      - [-5.20, 41.30]
+      - [9.60, 41.30]
+      - [9.60, 51.10]
+      - [-5.20, 51.10]
+      - [-5.20, 41.30]
+    bounding_box:
+      lat_min: 41.30
+      lat_max: 51.10
+      lon_min: -5.20
+      lon_max: 9.60
+
+  # DWD ICON-EU 7km nest. 2026-06-09 FIX: icon_eu previously had NO own domain and wrongly
+  # inherited the TIGHTENED icon_d2 Central-EU box in BOTH the download fetch gate and the
+  # model_selection fusion gate -> icon_eu was fetched/admitted only for the 5 Central-EU cities
+  # (and even there dropped as an ICON-family provider_dup of icon_d2), so 7 EU/Mid-East cities
+  # with REAL icon_eu data (Madrid, Moscow, Istanbul, Ankara, Helsinki, Tel Aviv, Warsaw) lost
+  # their 7km regional. Exp O CONFIRMED icon_eu beats ECMWF-9km on settled WU (-0.22 MAE). This
+  # hull is the operational ICON-EU regular-grid extent (Europe + W-Asia/Middle East), which
+  # contains exactly the 12 COVERED cities, so the domain gate and the data-presence gate AGREE.
+  # max_lead_days=3 matches the persisted icon_eu lead coverage (leads 0-3).
+  icon_eu:
+    model_name: icon_eu
+    region_label: europe_west_asia
+    max_lead_days: 3
+    polygon:
+      - [-24.00, 29.00]
+      - [45.00, 29.00]
+      - [45.00, 71.00]
+      - [-24.00, 71.00]
+      - [-24.00, 29.00]
+    bounding_box:
+      lat_min: 29.00
+      lat_max: 71.00
+      lon_min: -24.00
+      lon_max: 45.00
+
+  # NOAA/NCEP NBM CONUS (statistical blend). CANDIDATE-ACCRUAL ONLY (2026-06-09 survey,
+  # settlement-graded n=1029: pooled MAE 1.193 vs ecmwf_ifs 1.395, -14.4%). Role candidate:
+  # CONUS ANCHOR replacement — NBM blends NCEP models incl. GFS, so it must NEVER enter the
+  # decorrelated-globals likelihood set alongside gfs_global. Domain: CONUS + S-Canada
+  # (covers Toronto; previous-runs verified). NOT in REGIONAL_MODELS — never selected today.
+  ncep_nbm_conus:
+    model_name: ncep_nbm_conus
+    region_label: conus
+    max_lead_days: 3
+    polygon:
+      - [-125.00, 23.00]
+      - [-66.00, 23.00]
+      - [-66.00, 50.00]
+      - [-125.00, 50.00]
+      - [-125.00, 23.00]
+    bounding_box:
+      lat_min: 23.00
+      lat_max: 50.00
+      lon_min: -125.00
+      lon_max: -66.00
+
+  # UK Met Office UKV 2km deterministic. CANDIDATE-ACCRUAL ONLY (2026-06-09 survey: London
+  # MAE 0.919 vs ecmwf_ifs 1.039, near-zero bias, n=112). Role candidate: London regional
+  # expert (icon_d2 pattern). Domain strictly UK (API 400s outside). NOT in REGIONAL_MODELS.
+  ukmo_uk_deterministic_2km:
+    model_name: ukmo_uk_deterministic_2km
+    region_label: uk
+    max_lead_days: 2
+    polygon:
+      - [-9.00, 49.00]
+      - [2.50, 49.00]
+      - [2.50, 61.00]
+      - [-9.00, 61.00]
+      - [-9.00, 49.00]
+    bounding_box:
+      lat_min: 49.00
+      lat_max: 61.00
+      lon_min: -9.00
+      lon_max: 2.50

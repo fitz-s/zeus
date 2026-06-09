@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 from src.data.replacement_forecast_current_target_plan import (
     build_replacement_forecast_current_target_plan,
@@ -58,7 +59,8 @@ def _create_db(path) -> None:
                 strategy_key TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'SHADOW_ONLY',
                 dependency_json TEXT NOT NULL DEFAULT '{}',
-                provenance_json TEXT NOT NULL
+                provenance_json TEXT NOT NULL,
+                expires_at TEXT
             )
             """
         )
@@ -178,6 +180,10 @@ def _create_db(path) -> None:
                 json.dumps({"city": "Madrid", "target_date": "2026-06-09", "temperature_metric": "high"}),
             ),
         )
+        # An artifact only counts as coverage if its file is actually on disk (DB<->disk
+        # provenance antibody). Write a real file for the "present" London artifacts.
+        present_artifact = Path(path).parent / "present_artifact.grib2"
+        present_artifact.write_bytes(b"GRIB")
         for source_id, product_id, data_version in (
             (
                 "ecmwf_aifs_ens",
@@ -194,12 +200,13 @@ def _create_db(path) -> None:
                 """
                 INSERT INTO raw_forecast_artifacts (
                     source_id, product_id, data_version, artifact_path, product_metadata_json
-                ) VALUES (?, ?, ?, '/tmp/artifact', ?)
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     source_id,
                     product_id,
                     data_version,
+                    str(present_artifact),
                     json.dumps({"cities": ["London"], "target_dates": ["2026-06-09"]}),
                 ),
             )
@@ -212,7 +219,10 @@ def test_current_target_plan_classifies_covered_seedable_and_missing_manifest_ta
     db = tmp_path / "forecasts.db"
     _create_db(db)
 
-    plan = build_replacement_forecast_current_target_plan(db)
+    # Fixed evaluation time before the 2026-06-09 target so day0 logic does not lock the targets
+    # (the fixture dates are static; real wall-clock has since advanced past them).
+    now_utc = datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc)
+    plan = build_replacement_forecast_current_target_plan(db, now_utc=now_utc)
     download_plan = replacement_forecast_download_plan_from_current_targets(plan)
 
     assert plan.status == "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE"
@@ -232,6 +242,7 @@ def test_current_target_plan_does_not_treat_blocked_replacement_readiness_as_cov
     conn = sqlite3.connect(db)
     try:
         conn.execute("UPDATE readiness_state SET status = 'BLOCKED' WHERE readiness_id = 'ready-paris'")
+        present_artifact = Path(db).parent / "present_artifact.grib2"  # written by _create_db
         for source_id, product_id, data_version in (
             (
                 "ecmwf_aifs_ens",
@@ -248,12 +259,13 @@ def test_current_target_plan_does_not_treat_blocked_replacement_readiness_as_cov
                 """
                 INSERT INTO raw_forecast_artifacts (
                     source_id, product_id, data_version, artifact_path, product_metadata_json
-                ) VALUES (?, ?, ?, '/tmp/artifact', ?)
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     source_id,
                     product_id,
                     data_version,
+                    str(present_artifact),
                     json.dumps({"cities": ["Paris"], "target_dates": ["2026-06-09"]}),
                 ),
             )
@@ -261,13 +273,51 @@ def test_current_target_plan_does_not_treat_blocked_replacement_readiness_as_cov
     finally:
         conn.close()
 
-    plan = build_replacement_forecast_current_target_plan(db)
+    plan = build_replacement_forecast_current_target_plan(
+        db,
+        now_utc=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+    )
     paris = next(row for row in plan.rows if row.city == "Paris")
 
     assert paris.posterior_count == 1
     assert paris.readiness_count == 0
     assert paris.covered is False
     assert paris.can_seed is True
+
+
+def test_current_target_plan_ignores_artifact_rows_whose_file_is_deleted(tmp_path) -> None:
+    """DB<->disk provenance relationship (Fitz #4): when a raw_forecast_artifacts FILE is
+    deleted but its DB row survives, the plan must NOT keep reporting the target as covered/
+    seedable. Otherwise the download-skip gate believes raw inputs are present and never
+    re-fetches, while disk-based seed discovery finds nothing -> the ~30h zero-trade stall.
+
+    Models the real incident exactly: London is seedable with files on disk; delete the file
+    (leave the DB row) and London must flip to missing_aifs_manifest so the gate re-downloads.
+    """
+    db = tmp_path / "forecasts.db"
+    _create_db(db)
+    now_utc = datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc)
+
+    # Baseline: London has artifacts on disk -> seedable, no missing manifest.
+    before = build_replacement_forecast_current_target_plan(db, now_utc=now_utc)
+    london_before = next(row for row in before.rows if row.city == "London")
+    assert london_before.can_seed is True
+    assert london_before.aifs_manifest_count == 1
+    assert london_before.openmeteo_manifest_count == 1
+    assert london_before.missing_aifs_manifest is False
+
+    # The cleanup deletes the GRIB/manifest FILE but the DB row survives (dangling pointer).
+    present_artifact = Path(db).parent / "present_artifact.grib2"
+    present_artifact.unlink()
+
+    after = build_replacement_forecast_current_target_plan(db, now_utc=now_utc)
+    london_after = next(row for row in after.rows if row.city == "London")
+    assert london_after.aifs_manifest_count == 0, "a deleted artifact file must not count as coverage"
+    assert london_after.openmeteo_manifest_count == 0
+    assert london_after.missing_aifs_manifest is True, "gate must see missing -> re-download"
+    assert london_after.missing_openmeteo_manifest is True
+    assert london_after.can_seed is False
+    assert after.missing_aifs_manifest_count >= 1
 
 
 def test_current_target_plan_does_not_seed_after_local_target_day_starts(tmp_path) -> None:
@@ -302,6 +352,7 @@ def test_current_target_plan_does_not_seed_after_local_target_day_starts(tmp_pat
 
     plan = build_replacement_forecast_current_target_plan(
         db,
+        min_target_date="2026-06-07",
         now_utc=datetime(2026, 6, 7, 1, 0, tzinfo=timezone.utc),
     )
     london = next(row for row in plan.rows if row.city == "London")

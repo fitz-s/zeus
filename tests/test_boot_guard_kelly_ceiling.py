@@ -193,17 +193,27 @@ def _size_with_mult(*, new_city, extra_reserved, kelly_multiplier, p_posterior=0
 
 def test_breach_is_real_when_kelly_mult_above_ceiling():
     """DOCUMENTS the breach: with kelly_multiplier=0.5 > max_correlated_pct=0.25,
-    3 same-cycle same-city bets sum ABOVE max_correlated_pct·B=$42.50.
+    6 same-cycle same-city bets sum ABOVE max_correlated_pct·B=$42.50.
 
-    This is WHY the boot guard exists — it proves the over-size the guard makes
-    unreachable. (Not an assertion that the sizing path is wrong; the sizing
-    path is correct given its inputs. The defect is that an operator can supply
-    a kelly_multiplier the corr ceiling cannot absorb — the guard closes that.)
+    Each individual bet is AT the single-position ceiling (0.05×B=$8.50) — the
+    INV-K3 single-cap antibody IS working. The corr-ceiling breach comes from
+    ACCUMULATION: 6 × $8.50 = $51 > $42.50. This is the structural gap the boot
+    guard closes: when kelly_multiplier > max_correlated_pct, each same-city bet
+    saturates the single cap and the corr budget overflows. The guard makes
+    kelly_multiplier > max_correlated_pct FATAL at boot, closing the door.
+
+    (Not an assertion that the sizing path is wrong; it is correct given its inputs.
+    The defect is an operator supplying a kelly_multiplier the corr ceiling cannot
+    absorb when bets accumulate. The 3-bet version (pre-2026-06-08) failed because
+    with the restored single-position ceiling 3×$8.50=$25.50 < $42.50 ceiling —
+    6 bets are needed to reproduce the accumulation breach in the live config.)
     """
     MAX_CORRELATED_PCT = 0.25  # config default
     reserved: list[tuple[str, float]] = []
     sizes: list[float] = []
-    for _ in range(3):
+    # 6 bets required: each capped at max_single_position_pct×B=$8.50 by INV-K3,
+    # and 6×$8.50=$51 > max_correlated_pct×B=$42.50 proves the corr-ceiling breach.
+    for _ in range(6):
         s = _size_with_mult(
             new_city=NEAR_CITY,
             extra_reserved=list(reserved),

@@ -33,8 +33,25 @@ from src.data.replacement_forecast_runtime_policy import (
     SHADOW_FLAG,
     TRADE_AUTHORITY_FLAG,
     VETO_FLAG,
+    ReplacementForecastCapitalObjectiveEvidence,
     resolve_replacement_forecast_runtime_policy,
 )
+
+
+def _passing_capital_objective_evidence() -> ReplacementForecastCapitalObjectiveEvidence:
+    # FIX-1 AND (ITEM B): second proof required alongside promotion evidence.
+    return ReplacementForecastCapitalObjectiveEvidence(
+        selected_label="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00",
+        replay_status="EMPIRICAL_WINNER",
+        after_cost_pnl=97.65,
+        source_availability_observed=True,
+        source_availability_violations=0,
+        anti_lookahead_violations=0,
+        same_clob_replay_passed=True,
+        fee_depth_fill_evidence_passed=True,
+        unit_pnl_only=False,
+        product_specific_refit_passed=True,
+    )
 from src.strategy.openmeteo_ecmwf_ifs9_aifs_finetune import (
     SoftAnchorFineTuneRow,
     SoftAnchorParameter,
@@ -159,9 +176,14 @@ def test_promotion_evidence_composes_runtime_admissible_evidence_from_reports() 
 
     assert report.status == "PROMOTION_EVIDENCE_READY"
     assert report.promotion_evidence.promotion_allowed() is True
+    # FIX-1 AND (ITEM B): LIVE_AUTHORITY now requires BOTH a passing promotion
+    # evidence AND a passing capital-objective evidence. This test's load-bearing
+    # subject is the composed promotion evidence; supply a passing capital-objective
+    # evidence so the resolver reaches LIVE_AUTHORITY under the conjunction law.
     policy = resolve_replacement_forecast_runtime_policy(
         {SHADOW_FLAG: True, VETO_FLAG: True, TRADE_AUTHORITY_FLAG: True, "openmeteo_ecmwf_ifs9_aifs_soft_anchor_kelly_increase_enabled": False, "openmeteo_ecmwf_ifs9_aifs_soft_anchor_direction_flip_enabled": False},
         promotion_evidence=report.promotion_evidence,
+        capital_objective_evidence=_passing_capital_objective_evidence(),
     )
     assert policy.status == "LIVE_AUTHORITY"
 

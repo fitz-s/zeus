@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-06-08
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -14,6 +14,12 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   try/finally to guarantee conn.close() on every exit path.
 #   2026-05-17 live lock remediation: trade/world metric lock loss degrades to
 #   a fresh DATA_DEGRADED risk_state row, not stale RED force-exit.
+#   2026-06-08 thepath/audit-realign iron #4/#6 fix: (1) init_risk_db re-applies
+#   busy_timeout after executescript (Fitz #5 strip-trap); (2) lock-attestation
+#   FAILS CONSERVATIVE — max(previous_level, DATA_DEGRADED), never re-stamps a
+#   fail-open GREEN, never weakens RED; (3) get_current_level() floors a degraded
+#   row (riskguard_degraded_reason) to DATA_DEGRADED so the SINGLE authority never
+#   surfaces a degraded GREEN as clean — kills the status-vs-gate split-brain.
 """
 
 import json
@@ -21,6 +27,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -588,6 +595,100 @@ def _trailing_loss_snapshot(
     }
 
 
+def _realized_window_loss_snapshot(
+    realized_exits: list[dict] | None,
+    *,
+    now: str,
+    lookback: timedelta,
+    initial_bankroll: float,
+    threshold_pct: float,
+    degraded: bool,
+    source: str,
+) -> dict:
+    """Daily/weekly loss breaker on REALIZED SETTLED PnL within the window.
+
+    Operator directive 2026-06-08 ("settlement = only truth", iron rule #3):
+    the loss circuit-breaker must fire on realized settled losses, NOT on a
+    mark-to-market `effective_bankroll` delta. The retired delta breaker
+    conflated three economically-distinct moves into "loss":
+      (a) capital deployment            wallet cash -> open-position equity,
+      (b) projection-pipeline reshuffle unprojected entry fill -> projected,
+      (c) mark-to-market swings         of open prediction-market positions.
+    None of those is a realized loss; on 2026-06-08 (b) alone (the transient
+    `unprojected_entry_fill_equity` bucket reconciling 61->37) produced a
+    phantom -19.25 "daily loss" that held the daemon RED while realized PnL was
+    flat and total PnL had IMPROVED — halting 100% of trading (iron rule #1).
+
+    STRUCTURAL antibody (Fitz: make the wrong code unwritable): this function
+    accepts NO equity / effective_bankroll argument, so mark-to-market is
+    *unconstructable* as an input. The loss is `max(0, -sum(pnl))` over exits
+    whose settlement timestamp lies inside [now - lookback, now].
+
+    Fail-conservative: when realized settlement truth is `degraded`, return
+    DATA_DEGRADED (block new entries, preserve held positions) — never a silent
+    GREEN over an unmeasurable loss, never RED without an attested breach.
+    """
+    if degraded:
+        return {
+            "loss": None,
+            "level": RiskLevel.DATA_DEGRADED,
+            "degraded": True,
+            "status": "degraded:realized_settlement_unavailable",
+            "source": source,
+            "reference": None,
+        }
+
+    now_dt = datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=timezone.utc)
+    cutoff_dt = now_dt - lookback
+
+    windowed_pnl = 0.0
+    counted = 0
+    skipped_unparseable = 0
+    for exit_row in realized_exits or []:
+        ts = str(exit_row.get("exited_at") or "")
+        if not ts:
+            skipped_unparseable += 1
+            continue
+        try:
+            exit_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            skipped_unparseable += 1
+            continue
+        if exit_dt.tzinfo is None:
+            exit_dt = exit_dt.replace(tzinfo=timezone.utc)
+        if cutoff_dt <= exit_dt <= now_dt:
+            pnl = _coerce_finite_float(exit_row.get("pnl"))
+            if pnl is None:
+                skipped_unparseable += 1
+                continue
+            windowed_pnl += float(pnl)
+            counted += 1
+
+    loss = round(max(0.0, -windowed_pnl), 2)
+    level = (
+        RiskLevel.RED
+        if loss > float(initial_bankroll) * float(threshold_pct)
+        else RiskLevel.GREEN
+    )
+    return {
+        "loss": loss,
+        "level": level,
+        "degraded": False,
+        "status": "ok" if counted else "no_settlements_in_window",
+        "source": source,
+        "reference": {
+            "basis": "realized_settled_pnl",
+            "window_start": cutoff_dt.isoformat(),
+            "window_end": now_dt.isoformat(),
+            "settlement_count": counted,
+            "realized_pnl_window": round(windowed_pnl, 2),
+            "skipped_unparseable": skipped_unparseable,
+        },
+    }
+
+
 def _append_reason(bucket: dict[str, list[str]], key: str, reason: str) -> None:
     reasons = bucket.setdefault(key, [])
     if reason not in reasons:
@@ -938,6 +1039,18 @@ def init_risk_db(conn: sqlite3.Connection) -> None:
             checked_at TEXT NOT NULL
         );
     """)
+    # CATEGORY ANTIBODY (Fitz #5): executescript() can NULL the C-level busy
+    # handler on some Python/SQLite builds, leaving this risk_state.db handle at a
+    # 0 ms wait budget so the immediately-following reads/writes (every tick(),
+    # get_current_level(), lock-attestation) raise "database is locked" instead of
+    # waiting. Re-apply the SQL-level busy_timeout here so the factory's wait
+    # budget survives the schema-ensure. Best-effort: a stub conn in tests may not
+    # implement execute(), so failure is swallowed (the factory already set it).
+    try:
+        from src.state.db import _apply_busy_timeout as _apply_db_busy_timeout
+        _apply_db_busy_timeout(conn)
+    except Exception:  # noqa: BLE001 - never let timeout re-apply break schema init
+        pass
     # B5: Add force_exit_review column if missing (code-level migration, no raw ALTER)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(risk_state)").fetchall()}
     if "force_exit_review" not in cols:
@@ -949,6 +1062,64 @@ def init_risk_db(conn: sqlite3.Connection) -> None:
 
 def _is_sqlite_database_locked(exc: BaseException) -> bool:
     return isinstance(exc, sqlite3.OperationalError) and "database is locked" in str(exc).lower()
+
+
+def _riskguard_dependency_lock_retries() -> int:
+    """Within-tick retry budget for a transient dependency-DB lock.
+
+    Fitz #5 lock-CATEGORY kill (2026-06-08): the metrics read on zeus_trades +
+    ATTACHed world/forecasts (all WAL, written concurrently by live-trading and
+    the forecast/data-ingest daemons) loses a transient WAL/checkpoint window on
+    ~half of ticks even with the 30s busy_timeout (a bulk forecast write can hold
+    the single WAL write lock past the wait). Giving up on the FIRST lock made the
+    daemon fail ~half its ticks, so genuine fresh full_risk rows aged past the
+    5-min freshness window and get_current_level flapped to DATA_DEGRADED — the
+    GREEN-only entry gate then blocked ALL new entries (operator zero-trade
+    2026-06-08). Retrying the read within the same tick recovers a genuine fresh
+    row on nearly every tick. Default 3 (4 attempts); 0 restores the pre-fix
+    single-attempt behavior.
+    """
+    try:
+        return max(0, int(os.environ.get("ZEUS_RISKGUARD_DEP_LOCK_RETRIES", "3")))
+    except ValueError:
+        return 3
+
+
+def _riskguard_dependency_lock_backoff_seconds(attempt: int) -> float:
+    """Backoff before re-attempting a lock-failed tick read (attempt is 0-based).
+
+    Linear 1.5s, 3.0s, 4.5s ... capped at 8s. Total worst-case wait across the
+    default 3 retries is ~9s — well inside the 60s tick cadence — so a contended
+    tick still completes long before the next one is due.
+    """
+    try:
+        base = float(os.environ.get("ZEUS_RISKGUARD_DEP_LOCK_BACKOFF_BASE_S", "1.5"))
+    except ValueError:
+        base = 1.5
+    if base < 0.0:
+        base = 1.5
+    return min(base * (attempt + 1), 8.0)
+
+
+def _riskguard_dependency_busy_timeout_ms() -> int:
+    """Short per-attempt busy_timeout for the metrics dependency read.
+
+    Fitz #5 follow-up (2026-06-08): the within-tick retry fixed the lock-DEGRADE
+    flap, but combined with the global 30s busy_timeout a locked tick waited up to
+    ~2 min (30s x retries) before producing ANY risk_state row. That pushed the
+    inter-row gap past the 5-min get_current_level staleness floor and created a
+    SECOND flap (stale row -> RISK_GUARD_BLOCKED on the entry gate). A SHORT
+    per-attempt wait makes a contended attempt FAIL FAST so the retry loop — or the
+    fast preserve-GREEN attestation — completes in seconds, keeping risk_state rows
+    well inside the freshness window. A genuine read between WAL spikes needs only a
+    brief uncontended lock window (sub-second when uncontended), so genuine GREEN
+    rows still land; sustained spikes fall to the preserve-GREEN attestation, which
+    is the correct conservative behaviour. Default 4000ms; floored at 500ms.
+    """
+    try:
+        return max(500, int(os.environ.get("ZEUS_RISKGUARD_DEP_BUSY_TIMEOUT_MS", "4000")))
+    except ValueError:
+        return 4000
 
 
 def _close_conn(conn: sqlite3.Connection | None) -> None:
@@ -1021,7 +1192,23 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
                 "full_metrics_status": "unavailable_no_fresh_full_risk_row",
             }
         else:
-            level = RiskLevel(previous_full["level"])
+            # A TRANSIENT dependency lock does NOT mean risk is unknowable. The
+            # branch is reached ONLY when a FULL risk attestation exists within the
+            # freshness window (_full_risk_row_is_fresh = 5 min); daily-loss,
+            # settlement-quality and Brier are slow-moving and do not change in that
+            # window, so that fresh level is still valid. Preserve it VERBATIM so a
+            # momentary lock cannot block the GREEN-only entry gate — this is the
+            # weeks-stable behavior; the prior max(previous_level, DATA_DEGRADED)
+            # floor downgraded a fresh GREEN to DATA_DEGRADED on EVERY transient lock
+            # and blocked all entries (operator-reported regression 2026-06-08).
+            # Safety is preserved by the freshness window itself: once the last full
+            # row ages past 5 min (persistent lock / genuine truth gap), previous_full
+            # is None above and this path degrades to DATA_DEGRADED. RED/ORANGE/YELLOW
+            # are unaffected (they are >= DATA_DEGRADED; only GREEN was downgraded).
+            previous_level = RiskLevel(previous_full["level"])
+            level = previous_level
+            # force_exit_review is a halt signal — carry it forward (never clear it
+            # under degraded truth); a previous RED keeps its force-exit posture.
             force_exit_review = int(previous_full["force_exit_review"] or 0)
             details = {
                 "status": "dependency_db_locked_previous_risk_level_preserved",
@@ -1031,6 +1218,7 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
                 "full_metrics_status": "locked_previous_fresh_level_preserved",
                 "previous_full_risk_level": previous_full["level"],
                 "previous_full_risk_checked_at": previous_full["checked_at"],
+                "conservative_floor_applied": False,
             }
         risk_conn.execute(
             """
@@ -1055,11 +1243,18 @@ def _persist_dependency_db_locked_attestation(exc: sqlite3.OperationalError) -> 
     return level
 
 
-def tick() -> RiskLevel:
-    """Run one RiskGuard evaluation tick. Spec §7: 60-second cycle.
+def _tick_once() -> RiskLevel:
+    """Run one RiskGuard evaluation attempt. Spec §7: 60-second cycle.
 
     Reads recent trade data from zeus.db, computes metrics,
     determines risk level, writes to risk_state.db.
+
+    RAISES ``sqlite3.OperationalError('database is locked')`` on a transient
+    dependency-DB lock instead of degrading inline — the ``tick()`` wrapper
+    retries this within the same tick (see ``_riskguard_dependency_lock_retries``)
+    and only persists the lock-attestation after the retries exhaust. This keeps
+    the lock-degrade decision in ONE place while letting a momentary lock be
+    waited out rather than immediately flipping the GREEN-only entry gate.
 
     Connection discipline (2026-05-10 leak fix): zeus_conn and risk_conn are
     opened once and closed in a finally block. Prior to this fix, any
@@ -1071,6 +1266,13 @@ def tick() -> RiskLevel:
     risk_conn: sqlite3.Connection | None = None
     try:
         zeus_conn = _get_runtime_trade_connection()
+        # Short per-attempt wait so a contended metrics read FAILS FAST and the
+        # tick() retry loop (or the fast preserve-GREEN attestation) keeps risk_state
+        # rows inside the 5-min staleness floor — see _riskguard_dependency_busy_timeout_ms.
+        try:
+            zeus_conn.execute("PRAGMA busy_timeout = %d" % _riskguard_dependency_busy_timeout_ms())
+        except Exception:  # noqa: BLE001 — best-effort PRAGMA; a stub conn in tests may lack it
+            pass
         risk_conn = get_connection(RISK_DB_PATH, write_class="live")
         init_risk_db(risk_conn)
 
@@ -1133,7 +1335,17 @@ def tick() -> RiskLevel:
         for row in settlement_rows:
             authority_level = str(row.get("authority_level", "unknown"))
             settlement_authority_levels[authority_level] = settlement_authority_levels.get(authority_level, 0) + 1
-            if row.get("is_degraded", False):
+            # Settlement QUALITY gates on settlement TRUTH, not learning-lineage
+            # completeness. A row whose canonical settlement payload is complete
+            # (outcome + value recorded) is truth-sound even if it carries a
+            # learning-attribution gap such as missing_decision_snapshot_id — that
+            # gap correctly excludes it from LEARNING (learning_snapshot_ready=False)
+            # but must NOT flip settlement_quality_level to YELLOW and block ALL new
+            # entries on the GREEN-only reactor gate. Operator directive 2026-06-08:
+            # only genuine settlement-TRUTH degradation (incomplete canonical payload)
+            # may gate trading; a single learning-lineage gap on one settled position
+            # (e.g. Warsaw 2026-06-07) is not a trade-blocking settlement defect.
+            if row.get("is_degraded", False) and not row.get("canonical_payload_complete", False):
                 degraded_rows += 1
             if row.get("learning_snapshot_ready", False):
                 learning_snapshot_ready_count += 1
@@ -1252,21 +1464,31 @@ def tick() -> RiskLevel:
             portfolio=portfolio,
         )
         current_total_value = account_equity["effective_equity_usd"]
-        daily_loss_snapshot = _trailing_loss_snapshot(
-            risk_conn,
+        # Loss breaker fires on REALIZED settled PnL in the window, NOT on a
+        # mark-to-market effective_bankroll delta (operator directive
+        # 2026-06-08, "settlement = only truth"). `current_total_value` /
+        # effective_bankroll are still recorded below for observability, but the
+        # LOSS LEVEL decision must not read them — see
+        # `_realized_window_loss_snapshot` for the full rationale and the
+        # 2026-06-08 phantom-RED root cause.
+        loss_source = f"realized_settlement_window:{realized_truth_source}"
+        daily_loss_snapshot = _realized_window_loss_snapshot(
+            realized_exits,
             now=now,
             lookback=timedelta(hours=24),
-            current_equity=current_total_value,
             initial_bankroll=current_bankroll_usd,
             threshold_pct=float(thresholds["max_daily_loss_pct"]),
+            degraded=realized_degraded,
+            source=loss_source,
         )
-        weekly_loss_snapshot = _trailing_loss_snapshot(
-            risk_conn,
+        weekly_loss_snapshot = _realized_window_loss_snapshot(
+            realized_exits,
             now=now,
             lookback=timedelta(days=7),
-            current_equity=current_total_value,
             initial_bankroll=current_bankroll_usd,
             threshold_pct=float(thresholds["max_weekly_loss_pct"]),
+            degraded=realized_degraded,
+            source=loss_source,
         )
         daily_loss = daily_loss_snapshot["loss"]
         weekly_loss = weekly_loss_snapshot["loss"]
@@ -1406,18 +1628,30 @@ def tick() -> RiskLevel:
                         "detail": f"storage_source={settlement_storage_source}",
                     })
                 if daily_loss_level == RiskLevel.RED:
+                    _dref = daily_loss_snapshot.get("reference") or {}
                     failed_rules.append({
                         "name": "daily_loss_pct",
                         "value": round(float(daily_loss or 0.0), 4),
                         "threshold": thresholds["max_daily_loss_pct"],
-                        "detail": f"effective_bankroll={current_total_value:.2f}",
+                        "detail": (
+                            "realized_settled_loss_24h="
+                            f"{float(daily_loss or 0.0):.2f} "
+                            f"(n={_dref.get('settlement_count', 0)}, "
+                            f"window_pnl={_dref.get('realized_pnl_window', 0.0)})"
+                        ),
                     })
                 if weekly_loss_level == RiskLevel.RED:
+                    _wref = weekly_loss_snapshot.get("reference") or {}
                     failed_rules.append({
                         "name": "weekly_loss_pct",
                         "value": round(float(weekly_loss or 0.0), 4),
                         "threshold": thresholds["max_weekly_loss_pct"],
-                        "detail": f"effective_bankroll={current_total_value:.2f}",
+                        "detail": (
+                            "realized_settled_loss_7d="
+                            f"{float(weekly_loss or 0.0):.2f} "
+                            f"(n={_wref.get('settlement_count', 0)}, "
+                            f"window_pnl={_wref.get('realized_pnl_window', 0.0)})"
+                        ),
                     })
                 alert_halt(failed_rules or [{
                     "name": "riskguard",
@@ -1457,14 +1691,53 @@ def tick() -> RiskLevel:
     except sqlite3.OperationalError as exc:
         if not _is_sqlite_database_locked(exc):
             raise
+        # Roll back + close BEFORE re-raising so a failed attempt never leaves an
+        # open read txn / dangling WAL reader handle across the tick() retry sleep
+        # (the 2026-05-10 leak that accumulated 51+ reader handles). The tick()
+        # wrapper owns the retry/lock-attestation decision.
         _rollback_and_close(risk_conn)
         risk_conn = None
         _rollback_and_close(zeus_conn)
         zeus_conn = None
-        return _persist_dependency_db_locked_attestation(exc)
+        raise
     finally:
         _close_conn(zeus_conn)
         _close_conn(risk_conn)
+
+
+def tick() -> RiskLevel:
+    """Run one RiskGuard tick, retrying a transient dependency-DB lock.
+
+    Wrapper around ``_tick_once`` (the actual evaluation). A locked dependency
+    surface (zeus_trades + ATTACHed world/forecasts, all WAL) is RETRIED within
+    this same tick before the daemon gives up: ~half of single reads lose a
+    transient WAL/checkpoint window, so retrying recovers a GENUINE fresh
+    full_risk row on nearly every tick and the 5-min freshness window that
+    get_current_level depends on never lapses. Only after the retries exhaust
+    does ``_persist_dependency_db_locked_attestation`` run (preserve a fresh
+    <5min level, else DATA_DEGRADED) — so a PERSISTENT lock still degrades and no
+    safety boundary is weakened. ``tick()`` is the public daemon entry; its API
+    is unchanged.
+    """
+    retries = _riskguard_dependency_lock_retries()
+    last_exc: sqlite3.OperationalError | None = None
+    for attempt in range(retries + 1):
+        try:
+            return _tick_once()
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_database_locked(exc):
+                raise
+            last_exc = exc
+            if attempt >= retries:
+                break
+            logger.warning(
+                "RiskGuard tick dependency lock (attempt %d/%d); retrying read after backoff",
+                attempt + 1,
+                retries + 1,
+            )
+            time.sleep(_riskguard_dependency_lock_backoff_seconds(attempt))
+    assert last_exc is not None  # only reached via the locked break above
+    return _persist_dependency_db_locked_attestation(last_exc)
 
 
 def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
@@ -1514,21 +1787,32 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
         )["effective_equity_usd"]
         initial_bankroll = current_bankroll_usd
 
-        daily_loss_snapshot = _trailing_loss_snapshot(
-            risk_conn,
+        # Realized-settled-PnL loss breaker (operator directive 2026-06-08) —
+        # same basis as tick(). Mark-to-market `current_equity` is computed above
+        # for the degraded-path equity attestation but must NOT decide the loss
+        # level (see `_realized_window_loss_snapshot`).
+        realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
+            zeus_conn,
+            settlement_rows=settlement_rows,
+        )
+        loss_source = f"realized_settlement_window:{realized_truth_source}"
+        daily_loss_snapshot = _realized_window_loss_snapshot(
+            realized_exits,
             now=now,
             lookback=timedelta(hours=24),
-            current_equity=current_equity,
             initial_bankroll=initial_bankroll,
             threshold_pct=float(thresholds["max_daily_loss_pct"]),
+            degraded=realized_degraded,
+            source=loss_source,
         )
-        weekly_loss_snapshot = _trailing_loss_snapshot(
-            risk_conn,
+        weekly_loss_snapshot = _realized_window_loss_snapshot(
+            realized_exits,
             now=now,
             lookback=timedelta(days=7),
-            current_equity=current_equity,
             initial_bankroll=initial_bankroll,
             threshold_pct=float(thresholds["max_weekly_loss_pct"]),
+            degraded=realized_degraded,
+            source=loss_source,
         )
 
         daily_loss_level = daily_loss_snapshot["level"]
@@ -1553,12 +1837,23 @@ def get_current_level() -> RiskLevel:
     """Read current risk level from risk_state.db.
 
     R4: Fail-closed — if DB error or stale (>5 min), return RED.
+
+    SINGLE AUTHORITY (AGENTS.md iron #4): this is the ONE level both the daemon
+    entry gate (riskguard_allows_new_entries) and the status risk block consume.
+    A risk_state row that carries a ``riskguard_degraded_reason`` is a degraded
+    attestation — RiskGuard could NOT compute fresh full metrics when it was
+    written. Surfacing such a row's stored level verbatim would let a degraded
+    GREEN read as a clean GREEN and admit entries (the split-brain / read-side
+    fail-open). Apply the conservative floor max(level, DATA_DEGRADED) to any
+    degraded row so the authority NEVER reports clean GREEN when truth is
+    degraded, while never weakening a stronger halt (RED/ORANGE/YELLOW survive).
     """
     try:
         conn = get_connection(RISK_DB_PATH, write_class="live")
         init_risk_db(conn)
         row = conn.execute(
-            "SELECT level, checked_at FROM risk_state ORDER BY checked_at DESC LIMIT 1"
+            "SELECT level, checked_at, details_json "
+            "FROM risk_state ORDER BY checked_at DESC LIMIT 1"
         ).fetchone()
         conn.close()
 
@@ -1575,7 +1870,35 @@ def get_current_level() -> RiskLevel:
                            int(age_seconds))
             return RiskLevel.RED
 
-        return RiskLevel(row["level"])
+        stored_level = RiskLevel(row["level"])
+
+        # Conservative floor for degraded attestations (read-side split-brain kill).
+        try:
+            details = json.loads(row["details_json"]) if row["details_json"] else {}
+        except (json.JSONDecodeError, TypeError):
+            details = {}
+        if isinstance(details, dict) and details.get("riskguard_degraded_reason"):
+            # A dependency_db_locked attestation already carries the CORRECT level:
+            # _persist_dependency_db_locked_attestation preserves a FRESH (<5 min)
+            # full level verbatim and stamps DATA_DEGRADED only when no fresh full row
+            # exists. Re-flooring it here would re-block the GREEN-only entry gate on
+            # every transient lock (the 2026-06-08 regression). Trust the attestation's
+            # level for the transient-lock reason; keep the conservative split-brain
+            # floor for ALL OTHER degraded reasons (genuine metric/truth degradation).
+            if details.get("riskguard_degraded_reason") == "dependency_db_locked":
+                return stored_level
+            floored = overall_level(stored_level, RiskLevel.DATA_DEGRADED)
+            if floored != stored_level:
+                logger.warning(
+                    "RiskGuard latest row is degraded (reason=%s) with level=%s; "
+                    "surfacing conservative floor %s to the entry gate / status.",
+                    details.get("riskguard_degraded_reason"),
+                    stored_level.value,
+                    floored.value,
+                )
+            return floored
+
+        return stored_level
 
     except Exception as e:
         # R4: DB error = fail closed → RED

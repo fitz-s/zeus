@@ -78,6 +78,15 @@ class ReplacementForecastCandidateView:
                 raise ValueError("q values must be in [0, 1]")
         if self.baseline_kelly_fraction < 0.0 or self.candidate_kelly_fraction < 0.0:
             raise ValueError("kelly fractions must be non-negative")
+        # FIX-3 (§0.5) structural guard: the directional tokens must be well-formed
+        # so the posterior-derived DIRECTION LAW recheck at the flip boundary has a
+        # parseable side+bin to validate. A malformed direction is unconstructable.
+        for field_name in ("baseline_direction", "candidate_direction"):
+            side, bin_id = _split_direction(str(getattr(self, field_name)))
+            if side not in {"buy_yes", "buy_no"}:
+                raise ValueError(f"{field_name} side must be buy_yes or buy_no")
+            if not bin_id:
+                raise ValueError(f"{field_name} must carry a bin id as side:bin")
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "ReplacementForecastCandidateView":
@@ -137,6 +146,45 @@ class ReplacementForecastReactorHookResult:
         if self.receipt_provenance is None:
             return None
         return self.receipt_provenance.as_dict()
+
+
+def _selected_bin_id(replacement_bundle: ReplacementForecastPosteriorBundle) -> str | None:
+    """Return argmax(q) bin id from the replacement posterior, or None if empty."""
+
+    q = getattr(replacement_bundle, "q", None) or {}
+    if not isinstance(q, Mapping) or not q:
+        return None
+    return max((str(key) for key in q), key=lambda key: (float(q[key]), key))
+
+
+def _split_direction(direction: str) -> tuple[str, str | None]:
+    """Split a directional token 'buy_yes:bin' -> ('buy_yes', 'bin')."""
+
+    text = str(direction or "")
+    if ":" in text:
+        side, _, bin_id = text.partition(":")
+        return side.strip(), bin_id.strip() or None
+    return text.strip(), None
+
+
+def _lawful_direction_for_candidate(
+    candidate_direction: str, replacement_bundle: ReplacementForecastPosteriorBundle
+) -> str | None:
+    """Re-derive the lawful direction from (candidate bin vs argmax(replacement.q)).
+
+    DIRECTION LAW (FIX-3, §0.5): buy_yes <=> the candidate's bin IS the posterior
+    argmax bin; otherwise buy_no. Returns the lawful 'side:bin' token, or None when
+    the candidate carries no bin id (then no posterior-derived law can be asserted).
+    """
+
+    _side, bin_id = _split_direction(candidate_direction)
+    if bin_id is None:
+        return None
+    selected = _selected_bin_id(replacement_bundle)
+    if selected is None:
+        return None
+    lawful_side = "buy_yes" if selected == bin_id else "buy_no"
+    return f"{lawful_side}:{bin_id}"
 
 
 def _no_change(candidate: ReplacementForecastCandidateView, *, status: str, reason_codes: tuple[str, ...]) -> ReplacementForecastReactorHookResult:
@@ -241,13 +289,52 @@ def apply_replacement_forecast_reactor_hook(
         return _no_change(candidate_view, status="BLOCKED", reason_codes=("REPLACEMENT_REACTOR_HOOK_DEPENDENCY_MISSING",))
 
     if mode == "LIVE_AUTHORITY":
+        # Authorization gates: a flip vs the baseline direction requires explicit
+        # flip authority; a Kelly increase requires explicit kelly authority.
+        if candidate_view.candidate_direction != candidate_view.baseline_direction and not policy.can_flip_direction:
+            return _no_change(
+                candidate_view,
+                status="BLOCKED",
+                reason_codes=("REPLACEMENT_REACTOR_DIRECTION_FLIP_NOT_AUTHORIZED",),
+            )
+        if candidate_view.candidate_kelly_fraction > candidate_view.baseline_kelly_fraction + 1e-15 and not policy.can_increase_kelly:
+            return _no_change(
+                candidate_view,
+                status="BLOCKED",
+                reason_codes=("REPLACEMENT_REACTOR_KELLY_INCREASE_NOT_AUTHORIZED",),
+            )
+        # FIX-3 (§0.5): re-assert DIRECTION LAW at the flip/consuming boundary.
+        # Do NOT trust the upstream candidate_direction string. Re-derive the
+        # lawful side from (candidate bin vs argmax(replacement.q)); if the claimed
+        # side disagrees, refuse the flip with the typed law-violation receipt.
+        lawful_direction = _lawful_direction_for_candidate(
+            candidate_view.candidate_direction, replacement_bundle
+        )
+        if lawful_direction is not None and lawful_direction != candidate_view.candidate_direction:
+            return _no_change(
+                candidate_view,
+                status="BLOCKED",
+                reason_codes=("REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION",),
+            )
+        decision_payload = _forecast_decision_payload(
+            replacement_bundle=replacement_bundle,
+            candidate=candidate_view,
+            status="LIVE_AUTHORITY",
+            reasons=("REPLACEMENT_LIVE_AUTHORITY_APPLIED",),
+        )
+        live_receipt_provenance = build_replacement_forecast_receipt_provenance(
+            veto_decision=decision_payload,
+            readiness=readiness,
+            guardrail_report=guardrail_report,
+        )
         return ReplacementForecastReactorHookResult(
             status="LIVE_AUTHORITY",
-            reason_codes=policy.reason_codes,
+            reason_codes=("REPLACEMENT_LIVE_AUTHORITY_APPLIED",),
             effective_direction=candidate_view.candidate_direction,
             effective_q_posterior=candidate_view.candidate_q_posterior,
             effective_q_lcb=candidate_view.candidate_q_lcb,
             effective_kelly_fraction=candidate_view.candidate_kelly_fraction,
+            receipt_provenance=live_receipt_provenance,
         )
 
     veto_decision = apply_replacement_forecast_shadow_veto(

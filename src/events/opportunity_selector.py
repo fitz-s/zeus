@@ -1,4 +1,28 @@
-"""Pure selection for family opportunity books."""
+# Last reused or audited: 2026-06-08
+# Authority basis: "bin selection.md" §6 (best-candidate selection) + §9 Hidden
+#   #10 (central NO is broad correlated exposure with low marginal utility) +
+#   §14.7/§14.8 (single-primary-live; rank by robust marginal utility) +
+#   operator directive 2026-06-08.
+"""Display-only ranking for family opportunity books (NOT the live decision).
+
+SINGLE DECISION SURFACE (S4, operator directive 2026-06-08). The LIVE selection
+is the robust-marginal-expected-log-utility (ΔU) ranker
+(``event_reactor_adapter._select_proof_by_robust_marginal_utility``). This module
+NO LONGER decides anything — ``select_best_family_candidate`` produces ONLY the
+display ordering + loser-reason annotations the receipt serializes (provenance).
+``opportunity_book.build_family_opportunity_book`` records the upstream ΔU
+decision verbatim; this scalar ranking never gates the live leg.
+
+REMOVED 2026-06-08 (S4): the ``_family_structure_rejection_reasons`` buy_no-on-
+forecast-modal-bin guard. It was a bolted-on side-specific exclusion subsumed by
+the single FamilyPayoffMatrix / effective_outcome_pi comparison: a central/modal-
+bin NO simply scores LOWER ΔU than the modal YES (its honest robust NO q_lcb =
+1 - q_ucb_yes is small on a high-YES-mass bin, so its robust edge is negative),
+so the matrix dominates it WITHOUT a side-specific gate (Hidden #10). Antibody:
+tests/engine/test_s4_subsumed_gates.py::
+test_modal_bin_no_dominated_by_modal_yes_through_one_matrix. A redundant gate is
+the regression disease the directive abolishes.
+"""
 
 from __future__ import annotations
 
@@ -17,15 +41,15 @@ class SelectionResult:
 def select_best_family_candidate(
     evaluations: tuple[CandidateEvaluation, ...] | list[CandidateEvaluation],
 ) -> SelectionResult:
-    """Select the best admitted sibling candidate without treating volume as a gate."""
+    """Display ordering + loser reasons for the receipt (NOT the live decision).
+
+    Ranks admitted siblings by the legacy objective tuple for the receipt's
+    display ``family_rank`` and loser-reason annotations only. The LIVE leg is the
+    ΔU winner chosen upstream; this function is provenance, never selection.
+    """
 
     material = tuple(evaluations)
-    family_rejections = _family_structure_rejection_reasons(material)
-    admitted = [
-        evaluation
-        for evaluation in material
-        if evaluation.admitted and evaluation.candidate_id not in family_rejections
-    ]
+    admitted = [evaluation for evaluation in material if evaluation.admitted]
     ranked = tuple(
         sorted(
             admitted,
@@ -37,9 +61,8 @@ def select_best_family_candidate(
     loser_reasons: dict[str, str] = {}
     if selected is None:
         for evaluation in material:
-            loser_reasons[evaluation.candidate_id] = family_rejections.get(
-                evaluation.candidate_id,
-                _admission_rejection_reason(evaluation),
+            loser_reasons[evaluation.candidate_id] = _admission_rejection_reason(
+                evaluation
             )
         return SelectionResult(selected=None, ranked=ranked, loser_reasons=loser_reasons)
 
@@ -59,48 +82,8 @@ def select_best_family_candidate(
     for evaluation in material:
         if evaluation.admitted or evaluation.candidate_id in loser_reasons:
             continue
-        loser_reasons[evaluation.candidate_id] = family_rejections.get(
-            evaluation.candidate_id,
-            _admission_rejection_reason(evaluation),
-        )
-    for candidate_id, reason in family_rejections.items():
-        loser_reasons.setdefault(candidate_id, reason)
+        loser_reasons[evaluation.candidate_id] = _admission_rejection_reason(evaluation)
     return SelectionResult(selected=selected, ranked=ranked, loser_reasons=loser_reasons)
-
-
-def _family_structure_rejection_reasons(
-    evaluations: tuple[CandidateEvaluation, ...],
-) -> dict[str, str]:
-    yes_posterior_by_condition: dict[str, float] = {}
-    for evaluation in evaluations:
-        condition_id = str(evaluation.condition_id or "").strip()
-        if not condition_id:
-            continue
-        if evaluation.direction != "buy_yes":
-            continue
-        yes_posterior_by_condition[condition_id] = max(
-            yes_posterior_by_condition.get(condition_id, 0.0),
-            float(evaluation.q_posterior),
-        )
-    if not yes_posterior_by_condition:
-        return {}
-    modal_yes = max(yes_posterior_by_condition.values())
-    reasons: dict[str, str] = {}
-    for evaluation in evaluations:
-        if evaluation.direction != "buy_no":
-            continue
-        condition_id = str(evaluation.condition_id or "").strip()
-        yes_posterior = yes_posterior_by_condition.get(condition_id)
-        if yes_posterior is None:
-            continue
-        if not evaluation.admitted:
-            continue
-        if yes_posterior >= modal_yes:
-            reasons[evaluation.candidate_id] = (
-                "ADMISSION_BUY_NO_ON_FORECAST_MODAL_BIN:"
-                f"yes_posterior={yes_posterior:.8f}:modal_yes_posterior={modal_yes:.8f}"
-            )
-    return reasons
 
 
 def _admission_rejection_reason(evaluation: CandidateEvaluation) -> str:

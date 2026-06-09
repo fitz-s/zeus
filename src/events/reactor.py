@@ -171,6 +171,13 @@ class EventSubmissionReceipt:
     replacement_forecast: dict[str, Any] | None = None
     unit: str | None = None
     q_lcb_calibration_source: str | None = None
+    # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order
+    # is SQL-reconstructable forecast(posterior_id) -> ... -> fill WITHOUT
+    # JSON_EXTRACT. None on canonical/legacy receipts (observability only — these
+    # never change a trading decision and are omitted-when-None from receipt_json
+    # so existing-row hashes stay byte-stable).
+    posterior_id: int | None = None
+    probability_authority: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
@@ -185,10 +192,6 @@ class ReactorConfig:
     reactor_mode: str = "live_no_submit"
     real_order_submit_enabled: bool = False
     taker_fok_fak_live_enabled: bool = False
-    tiny_live_max_notional_usd: float = 5.0
-    tiny_live_max_orders_per_day: int = 1
-    # BUG #99 antibody: order-emission rate limit, independent of the notional cap.
-    tiny_live_max_orders_per_window: int = 1
     # Task #102 (BEST-ORDER SELECTION): book-wide edge-zone admission gate, the
     # LAST step in the money-path. DEFAULT FALSE => byte-identical to today (the
     # gate is computed only when this flag is True). When True, a candidate is

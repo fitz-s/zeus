@@ -1,6 +1,8 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
+# Last reused/audited: 2026-06-08
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Audit 2026-06-08: STALE_TEST update — _bundle() supplied q_ucb/bin_topology_hash/family_id
+#   (required dataclass fields added in 014408394f); provenance intent unchanged.
 # Purpose: Protect replacement forecast receipt provenance as forecast-only attribution with no settlement authority.
 # Reuse: Run before attaching replacement shadow/veto provenance to no-submit receipts or attribution reports.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
@@ -41,6 +43,9 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         data_version=HIGH_DATA_VERSION,
         q={"cool": 0.25, "warm": 0.75},
         q_lcb={"cool": 0.20, "warm": 0.65},
+        q_ucb={"cool": 0.30, "warm": 0.85},
+        bin_topology_hash="bin-topology-hash",
+        family_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         source_cycle_time="2026-06-06T00:00:00+00:00",
         source_available_at="2026-06-06T03:00:00+00:00",

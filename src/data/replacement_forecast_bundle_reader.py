@@ -23,6 +23,28 @@ HIGH_DATA_VERSION = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_high_v1"
 LOW_DATA_VERSION = "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_low_v1"
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
+# H3 (REAUDIT_0_1.md §2): fail-closed staleness horizon. ``readiness.expires_at``
+# was loaded but NEVER compared to decision_time; a forecast cycle this many hours
+# (or older) before the decision is treated as DEAD and refused live authority.
+# Conservative default; operator-tunable via the env override below. The gate
+# lives in the ONE bundle reader so the live 0.1 path AND the legacy hook inherit
+# a single freshness gate (no second per-path gate).
+REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT = 30.0
+
+
+def _replacement_source_cycle_max_age_hours() -> float:
+    import os
+
+    raw = os.environ.get("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS")
+    if raw is None or not raw.strip():
+        return REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+    # Fail-closed: a non-positive horizon would disable the gate; ignore it.
+    return value if value > 0.0 else REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+
 
 @dataclass(frozen=True)
 class ReplacementForecastPosteriorBundle:
@@ -352,12 +374,29 @@ def _topology_core(value: object) -> list[dict[str, object]] | None:
         bin_id = str(item.get("bin_id") or "").strip()
         if not bin_id:
             return None
+        # H4 (REAUDIT_0_1.md §2): topology-core IS the SETTLEMENT identity, not just
+        # physical geometry. Two posteriors with identical Celsius geometry but
+        # different rounding_rule (wmo_half_up vs the hko oracle_truncate) or
+        # settlement_unit settle to DIFFERENT integers at a bin boundary — they are
+        # NOT the same market and must NOT be treated as equivalent by the
+        # hash-mismatch fallback (_topology_core_equivalent). Only display_unit is
+        # excluded: it is pure presentation and never changes the settlement outcome.
         row = {
             "bin_id": bin_id,
             "lower_c": item.get("lower_c"),
             "upper_c": item.get("upper_c"),
             "center_c": item.get("center_c"),
             "settlement_step_c": item.get("settlement_step_c"),
+            "settlement_unit": (
+                str(item.get("settlement_unit")).strip().upper()
+                if item.get("settlement_unit") is not None
+                else None
+            ),
+            "rounding_rule": (
+                str(item.get("rounding_rule")).strip()
+                if item.get("rounding_rule") is not None
+                else None
+            ),
         }
         for key in ("lower_c", "upper_c", "center_c", "settlement_step_c"):
             if row[key] is not None:
@@ -421,6 +460,16 @@ def read_replacement_forecast_bundle(
         raise ValueError("decision_time must be timezone-aware")
     decision_utc = decision_utc.astimezone(timezone.utc)
 
+    # H3 (REAUDIT_0_1.md §2) — HARD staleness gate, fail-closed. readiness.expires_at
+    # was previously loaded but never compared. A READY posterior whose expiry is at
+    # or before decision_time is DEAD; binding it as live authority is the inverse of
+    # the zero-trade fault (trading a stale forecast as live). This gate is in the
+    # ONE bundle reader so both the live 0.1 path and the legacy hook inherit it.
+    if readiness.expires_at is not None and readiness.expires_at <= decision_utc:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+        )
+
     row = conn.execute(
         """
         SELECT * FROM forecast_posteriors
@@ -444,6 +493,17 @@ def read_replacement_forecast_bundle(
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_AFTER_DECISION_TIME")
     if _parse_utc(str(row_map["computed_at"]), field_name="computed_at") > decision_utc:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_COMPUTED_AFTER_DECISION_TIME")
+    # H3 (REAUDIT_0_1.md §2) — upper age bound on the underlying forecast cycle.
+    # The reader already rejects FUTURE posteriors; this adds the missing STALE
+    # bound: a source_cycle_time older than the fail-closed horizon means the data
+    # the posterior was built on is too old to trade as live, even if expires_at is
+    # still in the future. Same single-gate location, inherited by both paths.
+    _source_cycle_utc = _parse_utc(str(row_map["source_cycle_time"]), field_name="source_cycle_time")
+    _max_age_hours = _replacement_source_cycle_max_age_hours()
+    if (decision_utc - _source_cycle_utc).total_seconds() > _max_age_hours * 3600.0:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+        )
 
     posterior_dependency = _readiness_dependency_by_role(readiness, "soft_anchor_posterior")
     if posterior_dependency is None or int(posterior_dependency.get("posterior_id") or -1) != int(row_map["posterior_id"]):

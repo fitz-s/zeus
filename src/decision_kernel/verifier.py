@@ -394,14 +394,10 @@ def _verify_execution_command_payload(
         raise CertificateVerificationError("execution command size must be positive")
     if size < min_order_size:
         raise CertificateVerificationError("execution command size below min_order_size")
-    notional_cap_enabled = (
-        live_cap.get("notional_cap_enabled", actionable.get("live_cap_notional_cap_enabled", True)) is not False
-        and actionable.get("live_cap_notional_cap_enabled", True) is not False
-    )
-    if notional_cap_enabled:
-        max_notional = _finite_float(live_cap.get("max_notional_usd"), "live cap max_notional_usd")
-        if size * limit_price > max_notional:
-            raise CertificateVerificationError("execution command size exceeds live cap notional")
+    # 2026-06-08: the tiny_live notional cap is DELETED. Order size is governed
+    # solely by structural fractional-Kelly sizing; there is no max_notional_usd
+    # ceiling to verify here. The order<=reserved integrity guard still runs on
+    # the FINAL_INTENT (see _verify_final_intent_payload).
     if limit_price <= 0.0 or limit_price >= 1.0:
         raise CertificateVerificationError("execution command limit_price must be in (0, 1)")
     if tick_size <= 0.0:
@@ -558,11 +554,14 @@ def _verify_final_intent_payload(
         raise CertificateVerificationError("final intent limit_price must be in (0, 1)")
     if notional <= 0:
         raise CertificateVerificationError("final intent notional_usd must be positive")
+    # Integrity guard (NOT a cap): the order notional must not exceed the
+    # Kelly-sized notional that was reserved for this event. This runs
+    # unconditionally now that the tiny_live cap-enabled flag is deleted — it is a
+    # cert-chain consistency check (order size matches the reservation), not a
+    # dollar limit.
     reserved_notional = actionable.get("live_cap_reserved_notional_usd")
-    notional_cap_enabled = actionable.get("live_cap_notional_cap_enabled", True) is not False
     if (
-        notional_cap_enabled
-        and reserved_notional is not None
+        reserved_notional is not None
         and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd")
     ):
         raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")

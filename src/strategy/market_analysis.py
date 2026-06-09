@@ -1,3 +1,12 @@
+# Last reused or audited: 2026-06-08
+# Authority basis: legacy edge-scan module (origin); bin-selection S2 audit
+#   2026-06-08 — "bin selection.md" §5.6 / §9 Hidden #2 / §14.4 + operator directive
+#   2026-06-08. Added bin_yes_probability_samples (the ONE per-bin YES probability-
+#   sample producer) and refactored _bootstrap_bin to consume it, so the FDR edge CI
+#   and the q_lcb probability authority draw the SAME samples (no parallel mechanism).
+#   Bootstrap edge/CI output is byte-identical to the prior implementation (verified
+#   against tests/test_representativeness_sigma_widens_q_lcb.py + test_bug129_* +
+#   test_R5_bootstrap_c_b_uncertainty_widens_ci.py). Verdict: CURRENT_REUSABLE.
 """MarketAnalysis: full-distribution edge scan with double bootstrap CI.
 
 Spec §4.1: For each bin, compute edge = p_posterior - p_market.
@@ -288,6 +297,10 @@ class MarketAnalysis:
         if self._representativeness_sigma < 0 or not np.isfinite(self._representativeness_sigma):
             raise ValueError("representativeness_sigma must be a finite, non-negative std dev")
         self._bootstrap_cache: dict[tuple, tuple[float, float, float]] = {}
+        # bin-selection §5.6: per-bin YES *probability* samples q_yes^(b), produced once
+        # by bin_yes_probability_samples and shared by the FDR edge CI (_bootstrap_bin)
+        # and the q_lcb probability authority — keyed (("yes_samples", bin_idx, n)).
+        self._yes_sample_cache: dict[tuple, np.ndarray] = {}
         self._rng = np.random.default_rng(rng_seed)
         self._transfer_logit_sigma = float(transfer_logit_sigma)
         self._bootstrap_probability_sampler = bootstrap_probability_sampler
@@ -891,42 +904,42 @@ class MarketAnalysis:
             getattr(self, "_precision", 1.0),
         )
 
-    def _bootstrap_bin(
-        self, bin_idx: int, n: int
-    ) -> tuple[float, float, float]:
-        """Double bootstrap CI for buy_yes direction on one bin.
+    def bin_yes_probability_samples(self, bin_idx: int, n: int) -> np.ndarray:
+        """Per-bin YES *probability* samples q_yes^(b) for ``bin_idx`` (length ``n``).
 
-        Three σ layers:
-        1. Resample ENS members (σ_ensemble)
-        2. Add instrument noise (σ_instrument)
-        3. Sample Platt params (σ_parameter)
+        bin-selection §4 / §5.6 / §14.4: the q_lcb authority is the lower quantile of
+        the PROBABILITY samples ``q_yes^(b) = p_post[bin_idx]^(b)`` ALONE — NOT
+        ``edge_ci_lower + cost`` (Hidden #2). These are exactly the forecast-uncertainty
+        samples ``_bootstrap_bin`` draws (member resampling σ_ensemble + σ_repr in
+        quadrature, instrument/transfer noise, MAP Platt), BEFORE the executable cost
+        ``c_b`` is subtracted to form the edge. ``_bootstrap_bin`` (the FDR edge CI)
+        consumes the SAME array minus c_b, so there is ONE sample-producing path here
+        — no parallel mechanism. The native-NO authority (Hidden #3) is then the lower
+        quantile of ``1 - q_yes^(b)`` (= ``1 - q_ucb_yes``), taken at the seam by
+        :func:`probability_uncertainty.no_side_samples`, never ``1 - q_lcb_yes``.
 
-        Returns: (ci_lower, ci_upper, p_value)
-        p_value = np.mean(edges <= 0) — exact, NOT approximated.
+        RNG: only ``self._rng`` is touched (member resample + transfer noise). The cost
+        RNG ``self._cost_rng`` is NOT drawn here — c_b sampling stays in
+        ``_bootstrap_bin`` — so existing bit-identical CI tests are preserved.
         """
         if self.p_market is None:
             raise ValueError("buy_yes bootstrap requires executable YES-side market prices")
         if not self.is_executable_bin(bin_idx):
             raise ValueError(f"buy_yes bootstrap requires executable support index {bin_idx}")
-        cache_key = ("yes", bin_idx, n)
-        if cache_key in self._bootstrap_cache:
-            return self._bootstrap_cache[cache_key]
-        b = self.bins[bin_idx]
+        cache_key = ("yes_samples", bin_idx, n)
+        cached = self._yes_sample_cache.get(cache_key)
+        if cached is not None:
+            return cached
         members = self._member_maxes
         n_members = len(members)
-
         has_platt = (
             self._calibrator is not None
             and self._calibrator.fitted
             and len(self._calibrator.bootstrap_params) >= 1
         )
-
         rng = self._rng
-        bootstrap_edges = np.zeros(n)
-
         input_space = getattr(self._calibrator, "input_space", "raw_probability") if self._calibrator else "raw_probability"
         is_wnd = input_space == "width_normalized_density"
-
         # BUG #129 (estimator-mismatch fix, symmetric with _bootstrap_bin_no): use the SAME
         # current/MAP Platt params (A, B, C) as the point estimate self.p_cal, NOT a random
         # historical bootstrap-param triple per sample. The historical-param distribution is a
@@ -937,7 +950,7 @@ class MarketAnalysis:
         map_A = float(self._calibrator.A) if has_platt else 0.0
         map_B = float(self._calibrator.B) if has_platt else 0.0
         map_C = float(self._calibrator.C) if has_platt else 0.0
-
+        samples = np.zeros(n)
         for i in range(n):
             # Layer 1: sample the configured signal probability object for all
             # bins. Generic ENS uses member resampling; Day0 injects the
@@ -963,6 +976,45 @@ class MarketAnalysis:
                 p_cal_boot_all = p_raw_all
 
             p_post = self._compute_posterior(p_cal_boot_all)
+            samples[i] = float(p_post[bin_idx])
+        # q_yes^(b) is a probability — clamp to [0,1] so the lower/upper quantiles at the
+        # q_lcb seam are valid probability bounds (compute_posterior already yields
+        # normalised mass; the clamp is a cheap defence against float drift).
+        samples = np.clip(samples, 0.0, 1.0)
+        self._yes_sample_cache[cache_key] = samples
+        return samples
+
+    def _bootstrap_bin(
+        self, bin_idx: int, n: int
+    ) -> tuple[float, float, float]:
+        """Double bootstrap CI for buy_yes direction on one bin.
+
+        Three σ layers:
+        1. Resample ENS members (σ_ensemble)
+        2. Add instrument noise (σ_instrument)
+        3. Sample Platt params (σ_parameter)
+
+        Returns: (ci_lower, ci_upper, p_value)
+        p_value = np.mean(edges <= 0) — exact, NOT approximated.
+
+        The per-bin YES *probability* samples ``q_yes^(b)`` come from the ONE
+        sample-producing path :meth:`bin_yes_probability_samples`; this method subtracts
+        the (possibly cost-sampled) executable cost ``c_b`` to form the EDGE CI the FDR
+        gate consumes. The q_lcb PROBABILITY authority (bin-selection §5.6) reads the
+        SAME ``q_yes^(b)`` samples directly via :meth:`bin_yes_probability_samples`, never
+        ``edge_ci_lower + cost`` (Hidden #2).
+        """
+        if self.p_market is None:
+            raise ValueError("buy_yes bootstrap requires executable YES-side market prices")
+        if not self.is_executable_bin(bin_idx):
+            raise ValueError(f"buy_yes bootstrap requires executable support index {bin_idx}")
+        cache_key = ("yes", bin_idx, n)
+        if cache_key in self._bootstrap_cache:
+            return self._bootstrap_cache[cache_key]
+
+        q_yes_samples = self.bin_yes_probability_samples(bin_idx, n)
+        bootstrap_edges = np.zeros(n)
+        for i in range(n):
             # Wave 5: σ_market sampling. When EntryQuoteEvidence is provided
             # for this bin, draw c_b ~ N(all_in_entry_price, cost_uncertainty);
             # otherwise fall back to the fixed-p_market path (legacy bit-
@@ -984,7 +1036,7 @@ class MarketAnalysis:
                     c_b = float(np.clip(c_b, P_CLAMP_LOW, P_CLAMP_HIGH))
                 elif eqe is not None:
                     c_b = float(eqe.all_in_entry_price)
-            bootstrap_edges[i] = p_post[bin_idx] - c_b
+            bootstrap_edges[i] = q_yes_samples[i] - c_b
 
         # Spec: p-value = np.mean(edges <= 0), NOT approximated
         p_value = float(np.mean(bootstrap_edges <= 0))

@@ -1,6 +1,11 @@
 # Created: prior to 2026-04-26
-# Last reused or audited: 2026-06-04
+# Last reused or audited: 2026-06-08
 # Authority basis: Zeus DB schema + world_write_mutex CATEGORY ANTIBODY.
+#   2026-06-08 thepath/audit-realign Fitz #5 lock-CATEGORY kill: _apply_busy_timeout
+#   helper + SQL-level PRAGMA busy_timeout in _connect()/get_connection() so a
+#   factory handle's wait budget is durable (un-strippable by executescript) — a
+#   writer that loses the WAL write lock WAITS, not raises "database is locked".
+#   Connection PRAGMA only; INV-37 ATTACH+SAVEPOINT + txn semantics unchanged.
 #   2026-06-04 Phase 1: thread-local held depth (_GuardedWorldMutex) — eliminates
 #   cross-thread false positives that caused background venue I/O to trip the guard
 #   (283× advisory/2min in prod → WAL re-bloat). Phase 2: guard armed fatal (always
@@ -111,6 +116,38 @@ def _db_busy_timeout_s() -> float:
     return ms / 1000.0
 
 
+def _db_busy_timeout_ms() -> int:
+    """Return the configured busy-timeout in MILLISECONDS for PRAGMA busy_timeout.
+
+    Mirrors ``_db_busy_timeout_s`` (same env var, same default, same negative-value
+    rejection) but in the unit PRAGMA busy_timeout expects. Kept as the single
+    integer-ms source so the factory's SQL-level wait budget can never drift from
+    the connect-time ``timeout=`` seconds value.
+    """
+    return int(round(_db_busy_timeout_s() * 1000.0))
+
+
+def _apply_busy_timeout(conn: sqlite3.Connection) -> None:
+    """Set ``PRAGMA busy_timeout`` at the SQL level on ``conn``.
+
+    CATEGORY ANTIBODY (Fitz #5 — make "database is locked" unconstructable):
+    ``sqlite3.connect(timeout=N)`` installs only a C-level busy handler, which
+    some Python/SQLite builds NULL on the first ``executescript()`` (init_schema,
+    init_risk_db, any schema-ensure), dropping the wait budget to 0 ms so the
+    next write fails INSTANTLY with "database is locked" instead of waiting. The
+    only durable fix is to set the budget at the SQL level here AND re-apply it
+    after every executescript that hands the connection back. The value is
+    normalized to int before interpolation (PRAGMA forbids bound parameters), so
+    no untrusted text can enter the statement.
+
+    Behavior-preserving: this only WIDENS the wait budget; it never changes
+    transaction semantics, write ordering, or the ATTACH+SAVEPOINT cross-DB path
+    (INV-37). It is a pure connection PRAGMA.
+    """
+    busy_ms = _db_busy_timeout_ms()
+    conn.execute("PRAGMA busy_timeout = %d" % busy_ms)
+
+
 def _zeus_trade_db_path() -> Path:
     """Physical path for the trade database."""
     return STATE_DIR / "zeus_trades.db"
@@ -184,6 +221,12 @@ def _connect(
     mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
     conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
     _install_connection_functions(conn)
+    # CATEGORY ANTIBODY (Fitz #5): set the SQL-level wait budget so a writer that
+    # loses the WAL write lock WAITS up to busy_timeout instead of raising
+    # "database is locked" instantly. sqlite3.connect(timeout=) alone only sets a
+    # C-level handler that executescript() can null; this PRAGMA is the durable
+    # budget. Connection PRAGMA only — INV-37 / txn semantics unchanged.
+    _apply_busy_timeout(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_connect_write_class_{resolved.value}_total")
@@ -1195,6 +1238,11 @@ def get_connection(
     mmap_bytes = int(os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024)))
     conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
     _install_connection_functions(conn)
+    # CATEGORY ANTIBODY (Fitz #5): same SQL-level wait budget as _connect(). Every
+    # get_connection() handle (riskguard reads/writes, schema-ensure callers) now
+    # carries the busy_timeout so transient WAL contention WAITS instead of raising
+    # "database is locked". Connection PRAGMA only — INV-37 / txn semantics intact.
+    _apply_busy_timeout(conn)
     resolved = _resolve_write_class(write_class)
     if resolved is not None:
         _cnt_inc(f"db_get_connection_{resolved.value}_total")
@@ -3584,8 +3632,17 @@ def _create_day0_nowcast_runs(conn: sqlite3.Connection) -> None:
             hours_remaining     REAL NOT NULL,
             daypart             TEXT NOT NULL
                 CHECK (daypart IN ('pre_sunrise','morning','afternoon','post_peak')),
-            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4, 5)),
+            schema_version      INTEGER NOT NULL CHECK (schema_version IN (3, 4, 5, 7)),
             source              TEXT NOT NULL CHECK (source IN ('live_nowcast', 'replay')),
+            -- ThePath P1 ITEM 1 (2026-06-07): forward-only obs-availability instrumentation.
+            -- observation_available_at = wall-clock time Zeus could query the obs that fed
+            -- this run (Day0ObservationContext.observation_available_at = now()-at-fetch).
+            -- NEVER synthesized from now() in the writer; absent => NULL + 'UNVERIFIED'.
+            -- obs_availability_provenance enumerated; CHECK permits NULL for legacy rows.
+            observation_available_at    TEXT,
+            obs_availability_provenance TEXT
+                CHECK (obs_availability_provenance IS NULL OR obs_availability_provenance IN
+                    ('live_fetch','rolling_hourly_imported_at','archive_dissemination_lag','UNVERIFIED')),
             PRIMARY KEY (market_slug, temperature_metric, target_date, observation_time, run_seq)
         )
     """)
@@ -3975,6 +4032,14 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     for _alter_sql in (
         "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_grid_id TEXT",
         "ALTER TABLE day0_nowcast_runs ADD COLUMN bin_schema_id TEXT",
+        # ThePath P1 ITEM 1 (2026-06-07): obs-availability instrumentation on the
+        # Day0 nowcast lane. Nullable TEXT, no default — ADD COLUMN is non-rewriting,
+        # idempotent on already-migrated DBs (duplicate-column swallow below).
+        # SQLite cannot ADD a CHECK constraint via ALTER, so the provenance vocab
+        # CHECK is enforced at the writer (write_nowcast_run) for existing DBs and
+        # in the CREATE TABLE above for fresh DBs.
+        "ALTER TABLE day0_nowcast_runs ADD COLUMN observation_available_at TEXT",
+        "ALTER TABLE day0_nowcast_runs ADD COLUMN obs_availability_provenance TEXT",
     ):
         try:
             conn.execute(_alter_sql)
@@ -4224,7 +4289,12 @@ CREATE TABLE IF NOT EXISTS execution_fact (
     latency_seconds REAL,
     venue_status TEXT,
     terminal_exec_status TEXT,
-    command_id TEXT
+    command_id TEXT,
+    -- H2_E2E (REAUDIT_0_1.md §2/§4): fill->posterior link. Nullable, no DEFAULT;
+    -- populated in FILL reconciliation by joining edli_no_submit_receipts on
+    -- final_intent_id (replacement_0_1 orders only). NULL on every other order so
+    -- this never alters mainline/canonical execution facts (observability only).
+    posterior_id INTEGER
 );
 
 -- trade_decisions (from src/state/db.py:init_schema executescript block)
@@ -4646,6 +4716,16 @@ def init_schema_trade_only(conn: sqlite3.Connection) -> None:
     _ensure_decision_integrity_quarantine_table(conn)
     try:
         conn.execute("ALTER TABLE trade_decisions ADD COLUMN env TEXT NOT NULL DEFAULT 'live';")
+    except sqlite3.OperationalError:
+        pass
+
+    # H2_E2E (REAUDIT_0_1.md §2/§4): execution_fact gains the fill->posterior link.
+    # Fresh DBs get it from _TRADE_CLASS_DDL above; legacy live DBs need this ALTER.
+    # Nullable, no DEFAULT — preserves every existing execution_fact row unchanged
+    # (observability only; never alters mainline/canonical fills). Duplicate-column
+    # OperationalError is the expected fresh-DB no-op path.
+    try:
+        conn.execute("ALTER TABLE execution_fact ADD COLUMN posterior_id INTEGER;")
     except sqlite3.OperationalError:
         pass
 
@@ -5557,6 +5637,170 @@ def log_executable_snapshot_market_price_linkage(
         "token_id": token_id,
         "recorded_at": recorded_at_value,
     }
+
+
+def capture_intraday_orderbook_depth_from_snapshots(
+    conn: sqlite3.Connection | None,
+    *,
+    condition_ids: "Iterable[str]",
+    recorded_at: str,
+    as_of: str | None = None,
+) -> dict:
+    """ThePath P1 ITEM 3 (2026-06-07): additive, fail-soft intraday depth capture.
+
+    The intraday Gamma scanner writes mid-only ``market_price_history`` rows
+    (best_bid/best_ask/raw_orderbook_hash are 100% NULL on the price_only plane).
+    This helper closes the order-book depth gap for the fill model WITHOUT adding
+    any new high-frequency external poll: it taps the ``executable_market_snapshots``
+    rows the executor/scanner has ALREADY captured (which carry the full CLOB
+    ladder + top-of-book + raw_orderbook_hash), selects the most-recent snapshot
+    at-or-before ``as_of`` (default ``recorded_at``) per condition_id, and writes a
+    ``market_price_linkage='full'`` row with best_bid/best_ask/raw_orderbook_hash.
+
+    Design properties (iron rules):
+      - ADDITIVE: only writes new full-linkage rows; never updates/rewrites the
+        existing mid-only price_only rows. Columns already exist (no schema change).
+      - FAIL-SOFT: every per-condition failure (no snapshot, crossed book, missing
+        facts) is recorded as a typed counter and skipped — this function NEVER
+        raises and NEVER aborts the caller's cycle. A missing EMS table degrades
+        to a no-op status.
+      - NO NEW POLL: reads only already-persisted EMS rows; performs no network I/O.
+      - ANTI-LOOKAHEAD: ``captured_at <= as_of`` strictly (uses already-captured
+        snapshots only); never a future snapshot.
+      - Caller owns the transaction boundary (no commit, no default-DB open),
+        mirroring ``log_executable_snapshot_market_price_linkage``.
+
+    Returns a status dict with per-condition outcome counters.
+    """
+    table = "market_price_history"
+    snapshot_table = "executable_market_snapshots"
+    counts = {
+        "rows_inserted": 0,
+        "rows_unchanged": 0,
+        "rows_conflicted": 0,
+        "skipped_no_snapshot": 0,
+        "skipped_crossed_book": 0,
+        "skipped_missing_facts": 0,
+        "conditions_seen": 0,
+    }
+    if conn is None:
+        return {"status": "skipped_no_connection", "tables": (table, snapshot_table), **counts}
+
+    recorded_at_value = _forward_clean_str(recorded_at)
+    if recorded_at_value is None:
+        return {"status": "refused_missing_recorded_at", "tables": (table, snapshot_table), **counts}
+    as_of_value = _forward_clean_str(as_of) or recorded_at_value
+
+    # Fail-soft schema guard: if EMS or mph is absent (or mph lacks the depth
+    # columns), degrade to a no-op rather than raising.
+    if not _table_exists(conn, snapshot_table) or not _table_exists(conn, table):
+        return {"status": "skipped_missing_tables", "tables": (table, snapshot_table), **counts}
+    missing_columns = tuple(
+        sorted(set(_FULL_LINKAGE_PRICE_REQUIRED_COLUMNS) - _table_columns(conn, table))
+    )
+    if missing_columns:
+        return {
+            "status": "skipped_invalid_schema",
+            "table": table,
+            "missing_columns": missing_columns,
+            **counts,
+        }
+
+    seen: set[str] = set()
+    saved_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        for raw_condition in condition_ids or ():
+            condition_id = _forward_clean_str(raw_condition)
+            if condition_id is None or condition_id in seen:
+                continue
+            seen.add(condition_id)
+            counts["conditions_seen"] += 1
+
+            # Most-recent already-captured snapshot at-or-before as_of (anti-lookahead).
+            try:
+                row = conn.execute(
+                    """
+                    SELECT snapshot_id, event_slug, condition_id,
+                           selected_outcome_token_id,
+                           orderbook_top_bid, orderbook_top_ask, raw_orderbook_hash,
+                           captured_at
+                    FROM executable_market_snapshots
+                    WHERE condition_id = ? AND captured_at <= ?
+                    ORDER BY captured_at DESC
+                    LIMIT 1
+                    """,
+                    (condition_id, as_of_value),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                # EMS query failed (e.g. schema mismatch) — fail soft for this cond.
+                counts["skipped_no_snapshot"] += 1
+                continue
+            if row is None:
+                counts["skipped_no_snapshot"] += 1
+                continue
+
+            market_slug = _forward_clean_str(row["event_slug"])
+            token_id = _forward_clean_str(row["selected_outcome_token_id"])
+            best_bid = _forward_price(row["orderbook_top_bid"])
+            best_ask = _forward_price(row["orderbook_top_ask"])
+            raw_orderbook_hash = _forward_clean_str(row["raw_orderbook_hash"])
+            snapshot_id_value = _forward_clean_str(row["snapshot_id"])
+            if not (
+                market_slug
+                and token_id
+                and best_bid is not None
+                and best_ask is not None
+                and raw_orderbook_hash
+                and snapshot_id_value
+            ):
+                counts["skipped_missing_facts"] += 1
+                continue
+
+            price = _mid_price(best_bid, best_ask)
+            if price is None:
+                counts["skipped_crossed_book"] += 1
+                continue
+
+            values = {
+                "market_slug": market_slug,
+                "token_id": token_id,
+                "price": price,
+                # recorded_at is the SCAN time (the intraday cadence), not the
+                # snapshot capture time — so the depth row aligns with the
+                # mid-only row written by the same scan cycle. snapshot_id +
+                # raw_orderbook_hash retain the provenance back to the EMS book.
+                "recorded_at": recorded_at_value,
+                "hours_since_open": None,
+                "hours_to_resolution": None,
+                "market_price_linkage": "full",
+                "source": "CLOB_ORDERBOOK_EMS_TAP",
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "raw_orderbook_hash": raw_orderbook_hash,
+                "snapshot_id": snapshot_id_value,
+                "condition_id": condition_id,
+            }
+            try:
+                result = _insert_full_linkage_price_history(conn, values)
+            except sqlite3.Error:
+                # UNIQUE(token_id, recorded_at) collision or any insert error:
+                # fail soft, count as conflict, never abort the cycle.
+                counts["rows_conflicted"] += 1
+                continue
+            if result == "inserted":
+                counts["rows_inserted"] += 1
+            elif result == "unchanged":
+                counts["rows_unchanged"] += 1
+            else:
+                counts["rows_conflicted"] += 1
+    finally:
+        conn.row_factory = saved_factory
+
+    status = "ok"
+    if counts["rows_conflicted"]:
+        status = "ok_with_conflicts"
+    return {"status": status, "table": table, **counts}
 
 
 def log_forward_market_substrate(
@@ -7962,6 +8206,7 @@ def log_execution_fact(
     venue_status: str | None = None,
     terminal_exec_status: str | None = None,
     clear_fill_fields: bool = False,
+    posterior_id: int | None = None,
 ) -> dict:
     if conn is None:
         logger.info("Execution fact write skipped: no connection")
@@ -7972,6 +8217,12 @@ def log_execution_fact(
 
     if order_role not in {"entry", "exit"}:
         raise ValueError(f"execution_fact order_role must be entry/exit, got {order_role!r}")
+
+    # H2_E2E: posterior_id is an additive column; legacy DBs that have not yet run
+    # the ALTER may lack it. Guard so the write stays robust either way (when the
+    # column is absent the posterior link simply is not persisted — fail-soft).
+    _exec_fact_cols = {row[1] for row in conn.execute("PRAGMA table_info(execution_fact)").fetchall()}
+    _has_posterior_id = "posterior_id" in _exec_fact_cols
 
     current = conn.execute(
         """
@@ -8015,62 +8266,77 @@ def log_execution_fact(
                 latency_seconds = max(0.0, (filled_dt - posted_dt).total_seconds())
         stored_latency_seconds = latency_seconds if latency_seconds is not None else (current["latency_seconds"] if current else None)
 
-    conn.execute(
-        """
-        INSERT INTO execution_fact (
-            intent_id,
-            position_id,
-            decision_id,
-            order_role,
-            strategy_key,
-            posted_at,
-            filled_at,
-            voided_at,
-            submitted_price,
-            fill_price,
-            shares,
-            fill_quality,
-            latency_seconds,
-            venue_status,
-            terminal_exec_status,
-            command_id
+    _base_columns = [
+        "intent_id",
+        "position_id",
+        "decision_id",
+        "order_role",
+        "strategy_key",
+        "posted_at",
+        "filled_at",
+        "voided_at",
+        "submitted_price",
+        "fill_price",
+        "shares",
+        "fill_quality",
+        "latency_seconds",
+        "venue_status",
+        "terminal_exec_status",
+        "command_id",
+    ]
+    _base_values = [
+        intent_id,
+        position_id,
+        stored_decision_id,
+        order_role,
+        stored_strategy_key,
+        stored_posted_at,
+        stored_filled_at,
+        stored_voided_at,
+        stored_submitted_price,
+        stored_fill_price,
+        stored_shares,
+        stored_fill_quality,
+        stored_latency_seconds,
+        stored_venue_status,
+        stored_terminal_status,
+        stored_command_id,
+    ]
+    _update_clauses = [
+        "position_id=excluded.position_id",
+        "decision_id=excluded.decision_id",
+        "order_role=excluded.order_role",
+        "strategy_key=excluded.strategy_key",
+        "posted_at=excluded.posted_at",
+        "filled_at=excluded.filled_at",
+        "voided_at=excluded.voided_at",
+        "submitted_price=excluded.submitted_price",
+        "fill_price=excluded.fill_price",
+        "shares=excluded.shares",
+        "fill_quality=excluded.fill_quality",
+        "latency_seconds=excluded.latency_seconds",
+        "venue_status=excluded.venue_status",
+        "terminal_exec_status=excluded.terminal_exec_status",
+        "command_id=COALESCE(excluded.command_id, execution_fact.command_id)",
+    ]
+    if _has_posterior_id:
+        # H2_E2E: persist the fill->posterior link when the column exists. COALESCE
+        # so a later reconcile pass that does not carry posterior_id never NULLs an
+        # already-recorded link. NULL on every non-replacement order.
+        _base_columns.append("posterior_id")
+        _base_values.append(posterior_id)
+        _update_clauses.append(
+            "posterior_id=COALESCE(excluded.posterior_id, execution_fact.posterior_id)"
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    _placeholders = ", ".join("?" for _ in _base_columns)
+    conn.execute(
+        f"""
+        INSERT INTO execution_fact ({", ".join(_base_columns)})
+        VALUES ({_placeholders})
         ON CONFLICT(intent_id) DO UPDATE SET
-            position_id=excluded.position_id,
-            decision_id=excluded.decision_id,
-            order_role=excluded.order_role,
-            strategy_key=excluded.strategy_key,
-            posted_at=excluded.posted_at,
-            filled_at=excluded.filled_at,
-            voided_at=excluded.voided_at,
-            submitted_price=excluded.submitted_price,
-            fill_price=excluded.fill_price,
-            shares=excluded.shares,
-            fill_quality=excluded.fill_quality,
-            latency_seconds=excluded.latency_seconds,
-            venue_status=excluded.venue_status,
-            terminal_exec_status=excluded.terminal_exec_status,
-            command_id=COALESCE(excluded.command_id, execution_fact.command_id)
+            {", ".join(_update_clauses)}
         """,
-        (
-            intent_id,
-            position_id,
-            stored_decision_id,
-            order_role,
-            stored_strategy_key,
-            stored_posted_at,
-            stored_filled_at,
-            stored_voided_at,
-            stored_submitted_price,
-            stored_fill_price,
-            stored_shares,
-            stored_fill_quality,
-            stored_latency_seconds,
-            stored_venue_status,
-            stored_terminal_status,
-            stored_command_id,
-        ),
+        tuple(_base_values),
     )
     return {"status": "written", "table": "execution_fact"}
 

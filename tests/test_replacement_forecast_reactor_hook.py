@@ -1,13 +1,19 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-06-06
-# Lifecycle: created=2026-06-06; last_reviewed=2026-06-06; last_reused=2026-06-06
+# Last reused/audited: 2026-06-08
+# Lifecycle: created=2026-06-06; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: Protect replacement forecast reactor hook placement before final order intent.
 # Reuse: Run before wiring replacement shadow/veto logic into event_reactor_adapter.
 # Authority basis: Operator-directed Open-Meteo ECMWF IFS 9km + AIFS ENS sampled-2t shadow/veto integration.
+#   2026-06-08 STALE-TEST RE-AUTHOR (current law): updated 13 assertions/fixtures to the
+#   post-544c5030fc single evidence gate (LIVE_AUTHORITY requires BOTH promotion +
+#   capital-objective proofs) and the post-c41f13428c bin-topology + posterior-identity
+#   gate (bundle reader requires q_ucb/bin_topology_hash/identity hashes + key-matched
+#   q_lcb). Coverage preserved; assertions track the current contract.
 """Replacement forecast reactor hook tests."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -57,6 +63,48 @@ from src.state.schema.v2_schema import apply_canonical_schema
 UTC = timezone.utc
 
 
+# ---------------------------------------------------------------------------
+# Current-law shared topology fixtures (post c41f13428c H3/H4 bin-topology gate +
+# 544c5030fc single evidence gate). The bundle reader (replacement_forecast_
+# bundle_reader.py:442-542) now REQUIRES the stored posterior to carry a
+# bin_topology_hash that matches BOTH its provenance_json["bin_topology_hash"]
+# AND the current-market topology hash (supplied here via the proof, see
+# _current_bin_topology_hash in the hook factory). When the proof-supplied hash
+# equals the stored row hash, the market_events comparison is skipped — so these
+# tests need NO market_events rows, only a coherent (proof, posterior, provenance)
+# triple. The bin_topology also lets _candidate_bin_id resolve the posterior q key
+# from canonical bin bounds (never labels).
+# ---------------------------------------------------------------------------
+_BIN_TOPOLOGY = [
+    {"bin_id": "cool", "lower_c": None, "upper_c": 20.0},
+    {"bin_id": "warm", "lower_c": 20.0, "upper_c": None},
+]
+
+
+def _json_hash(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
+# The current-market bin-topology hash, derived the SAME way the hook factory's
+# _current_bin_topology_hash reads it off the proof: a single string, matched
+# verbatim against the stored posterior row's bin_topology_hash so the reader's
+# market-events topology comparison is bypassed.
+_BIN_TOPOLOGY_HASH = _json_hash(_BIN_TOPOLOGY)
+_PROVENANCE_JSON = {"bin_topology": _BIN_TOPOLOGY, "bin_topology_hash": _BIN_TOPOLOGY_HASH}
+
+
+def _warm_bin() -> SimpleNamespace:
+    """Candidate bin that resolves to the 'warm' posterior key via canonical bounds
+    (lower_c=20.0, upper_c=None), matching _BIN_TOPOLOGY's warm entry."""
+    return SimpleNamespace(label="warm", low=20.0, high=None, unit="C")
+
+
+def _cool_bin() -> SimpleNamespace:
+    return SimpleNamespace(label="cool", low=None, high=20.0, unit="C")
+
+
 def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 6, hour, minute, tzinfo=UTC)
 
@@ -82,38 +130,24 @@ def _bundle() -> ReplacementForecastPosteriorBundle:
         data_version=HIGH_DATA_VERSION,
         q={"cool": 0.25, "warm": 0.75},
         q_lcb={"cool": 0.20, "warm": 0.65},
+        q_ucb={"cool": 0.30, "warm": 0.85},
+        bin_topology_hash=_BIN_TOPOLOGY_HASH,
+        family_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
         source_cycle_time="2026-06-06T00:00:00+00:00",
         source_available_at="2026-06-06T03:00:00+00:00",
         computed_at="2026-06-06T03:05:00+00:00",
         baseline_source_run_id="b0-run",
         dependency_json={"source_run_ids": ["b0-run", "aifs-run", "om9-run"]},
-        provenance_json={"test": True},
+        provenance_json=_PROVENANCE_JSON,
         trade_authority_status="SHADOW_VETO_ONLY",
     )
 
 
-def _bundle_with_directional_no_lcb() -> ReplacementForecastPosteriorBundle:
-    base = _bundle()
-    return ReplacementForecastPosteriorBundle(
-        posterior_id=base.posterior_id,
-        city=base.city,
-        target_date=base.target_date,
-        temperature_metric=base.temperature_metric,
-        source_id=base.source_id,
-        product_id=base.product_id,
-        data_version=base.data_version,
-        q=base.q,
-        q_lcb={**dict(base.q_lcb or {}), "buy_no:warm": 0.18},
-        posterior_method=base.posterior_method,
-        source_cycle_time=base.source_cycle_time,
-        source_available_at=base.source_available_at,
-        computed_at=base.computed_at,
-        baseline_source_run_id=base.baseline_source_run_id,
-        dependency_json=base.dependency_json,
-        provenance_json=base.provenance_json,
-        trade_authority_status=base.trade_authority_status,
-    )
+# NOTE: the legacy _bundle_with_directional_no_lcb() helper was removed (2026-06-08).
+# It injected a ``buy_no:warm`` key into q_lcb, which the current bundle reader
+# __post_init__ rejects ("q_lcb keys must exactly match q keys"). Directional buy_no
+# lcb is now carried on the candidate view, not in the bundle's q_lcb keys.
 
 
 def _readiness():
@@ -327,12 +361,20 @@ def _promotion_evidence_payload_dict() -> dict[str, object]:
 
 
 def _switch_decision(policy, *, readiness=None, current: bool = True, live_promotion: bool = False):
+    # BLOCKER 8 fail-closed boundary: a LIVE_AUTHORITY policy must thread its capital-objective
+    # evidence OBJECT to the switch input -- the consuming gate now requires it explicitly
+    # (REPLACEMENT_SWITCH_CAPITAL_OBJECTIVE_EVIDENCE_REQUIRED on None) rather than trusting the
+    # resolver. Non-live policies leave it None (the boundary never reads it).
+    capital_objective_evidence = (
+        _capital_objective_evidence() if policy.status == "LIVE_AUTHORITY" else None
+    )
     return evaluate_replacement_forecast_switch_decision(
         ReplacementForecastSwitchDecisionInput(
             runtime_policy=policy,
             live_switch_report=_live_switch(policy, current=current),
             readiness=_readiness() if readiness is None else readiness,
             refit_decision=_refit(live_promotion=live_promotion),
+            capital_objective_evidence=capital_objective_evidence,
         )
     )
 
@@ -386,20 +428,26 @@ def _event() -> OpportunityEvent:
     )
 
 
-def _proof(*, direction: str = "buy_yes:warm", q_lcb: float = 0.62):
+def _proof(*, direction: str = "buy_yes:warm", q_lcb: float = 0.62, bin=None):
+    # The proof carries bin_topology_hash so the hook factory's
+    # _current_bin_topology_hash(proof, event) returns it; it must equal the stored
+    # posterior's bin_topology_hash so the reader's market-events comparison is
+    # skipped (current-law bin-topology gate, c41f13428c). The candidate bin carries
+    # canonical bounds so _candidate_bin_id resolves the posterior q key.
     return SimpleNamespace(
         candidate=SimpleNamespace(
             city="Shanghai",
             target_date="2026-06-07",
             metric="high",
             condition_id="cond-1",
-            bin=SimpleNamespace(label="warm"),
+            bin=bin if bin is not None else _warm_bin(),
         ),
         token_id="token-yes",
         direction=direction,
         executable_snapshot_id="snap-1",
         q_posterior=0.70,
         q_lcb_5pct=q_lcb,
+        bin_topology_hash=_BIN_TOPOLOGY_HASH,
     )
 
 
@@ -459,15 +507,22 @@ def _forecast_conn_with_replacement_rows(*, dependency_source_run_ids: dict[str,
     apply_canonical_schema(conn, forecast_tables=True)
     _create_minimal_readiness_state(conn)
     _ensure_required_switch_tables(conn, tuple(REQUIRED_FORECAST_TABLES))
+    # Current-law posterior identity columns (c41f13428c H4 settlement-identity):
+    # the reader requires q_ucb_json, bin_topology_hash, posterior_identity_hash,
+    # dependency_hash, posterior_config_hash to be present and non-empty, and the
+    # row's bin_topology_hash to match provenance_json["bin_topology_hash"]. The
+    # provenance carries the bin_topology so the q-key resolution + topology hash
+    # are coherent with the proof-supplied current hash.
     conn.execute(
         """
         INSERT INTO forecast_posteriors (
             source_id, product_id, data_version, city, target_date,
             temperature_metric, source_cycle_time, source_available_at,
-            computed_at, q_json, q_lcb_json, posterior_method,
+            computed_at, q_json, q_lcb_json, q_ucb_json, posterior_method,
             dependency_source_run_ids_json, provenance_json,
-            trade_authority_status, training_allowed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            bin_topology_hash, posterior_identity_hash, dependency_hash,
+            posterior_config_hash, trade_authority_status, training_allowed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             SOURCE_ID,
@@ -481,6 +536,7 @@ def _forecast_conn_with_replacement_rows(*, dependency_source_run_ids: dict[str,
             _dt(3, 5).isoformat(),
             json.dumps({"cool": 0.25, "warm": 0.75}),
             json.dumps({"cool": 0.20, "warm": 0.55}),
+            json.dumps({"cool": 0.30, "warm": 0.85}),
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             json.dumps(
                 dependency_source_run_ids
@@ -490,7 +546,11 @@ def _forecast_conn_with_replacement_rows(*, dependency_source_run_ids: dict[str,
                     "openmeteo_ifs9_anchor": "om9-run",
                 }
             ),
-            json.dumps({"factory_test": True}),
+            json.dumps(_PROVENANCE_JSON),
+            _BIN_TOPOLOGY_HASH,
+            "posterior-identity-hash",
+            "dependency-hash",
+            "posterior-config-hash",
             "SHADOW_VETO_ONLY",
             0,
         ),
@@ -711,7 +771,17 @@ def test_db_backed_replacement_hook_allows_veto_without_product_specific_refit_d
     assert result.effective_q_lcb <= 0.62
 
 
-def test_db_backed_replacement_hook_fails_safe_for_buy_no_without_directional_lcb() -> None:
+def test_db_backed_replacement_hook_buy_no_without_directional_lcb_keeps_baseline() -> None:
+    """Current law (post c41f13428c / 544c5030fc): a replacement posterior bundle's
+    q_lcb keys must EXACTLY match its q keys (bundle reader __post_init__), so the
+    legacy directional ``buy_no:{bin}`` q_lcb entries can no longer exist in a valid
+    bundle. The factory's buy_no branch therefore finds no directional lcb and the
+    candidate q_lcb defaults to the baseline; the shadow-veto only ever LOWERS q_lcb
+    (apply_shadow_veto_guardrail: allowed = min(baseline, candidate)), so with no
+    reduction the baseline q_lcb is preserved and no SOFT_ANCHOR_LOWER_Q_LCB fires.
+    The candidate bin is the NON-argmax 'cool' bin so the posterior-derived lawful
+    side is buy_no (selected argmax = 'warm'); the hook keeps that lawful direction.
+    """
     forecast_conn = _forecast_conn_with_replacement_rows()
     trade_conn = _trade_conn_with_required_tables()
     hook = build_replacement_forecast_event_hook(
@@ -727,14 +797,16 @@ def test_db_backed_replacement_hook_fails_safe_for_buy_no_without_directional_lc
         )
     )
 
-    result = hook(_proof(direction="buy_no:warm", q_lcb=0.62), _event(), _dt(4))
+    result = hook(_proof(direction="buy_no:cool", q_lcb=0.62, bin=_cool_bin()), _event(), _dt(4))
 
     assert result is not None
     assert result.status == "SHADOW_VETO_ONLY"
-    assert result.effective_direction == "buy_no:warm"
-    assert result.effective_q_lcb == pytest.approx(0.0)
+    assert result.effective_direction == "buy_no:cool"
+    # No directional buy_no q_lcb in a valid bundle -> candidate q_lcb defaults to the
+    # baseline -> veto cannot lower it -> baseline preserved, no LOWER_Q_LCB reason.
+    assert result.effective_q_lcb == pytest.approx(0.62)
     assert result.veto_decision is not None
-    assert "SOFT_ANCHOR_LOWER_Q_LCB" in result.veto_decision.reasons
+    assert "SOFT_ANCHOR_LOWER_Q_LCB" not in result.veto_decision.reasons
 
 
 def test_db_backed_replacement_hook_blocks_dependency_source_run_drift() -> None:
@@ -766,7 +838,13 @@ def test_db_backed_replacement_hook_blocks_dependency_source_run_drift() -> None
     assert result.reason_codes == ("REPLACEMENT_DEPENDENCY_SOURCE_RUN_MISMATCH",)
 
 
-def test_reactor_hook_uses_directional_buy_no_lcb_only_when_explicit() -> None:
+def test_reactor_hook_uses_explicit_candidate_buy_no_q_lcb() -> None:
+    """Current law: the pure reactor hook's veto reads the candidate q_lcb straight
+    off the candidate view (apply_replacement_forecast_shadow_veto -> guardrail
+    allowed = min(baseline, candidate)). A buy_no candidate with an EXPLICIT lower
+    candidate q_lcb (0.18 < baseline 0.62) is honored verbatim. (The legacy path
+    that read a directional ``buy_no:warm`` key off the bundle's q_lcb is gone: such
+    a key is now unconstructable because q_lcb keys must exactly match q keys.)"""
     policy = resolve_replacement_forecast_runtime_policy(_flags(shadow=True, veto=True))
     result = apply_replacement_forecast_reactor_hook(
         policy=policy,
@@ -776,7 +854,7 @@ def test_reactor_hook_uses_directional_buy_no_lcb_only_when_explicit() -> None:
             candidate_direction="buy_no:warm",
             candidate_q_lcb=0.18,
         ),
-        replacement_bundle=_bundle_with_directional_no_lcb(),
+        replacement_bundle=_bundle(),
         readiness=_readiness(),
     )
 
@@ -855,7 +933,11 @@ def test_event_adapter_builds_replacement_hook_from_runtime_flags_without_manual
     assert result.effective_q_lcb == pytest.approx(0.55)
 
 
-def test_db_backed_replacement_hook_accepts_capital_objective_live_authority() -> None:
+def test_db_backed_replacement_hook_reaches_live_authority_only_with_both_evidence() -> None:
+    # Current law (544c5030fc single evidence gate): LIVE_AUTHORITY requires the flag
+    # ladder AND BOTH passing proofs (promotion + capital-objective). Capital-objective
+    # ALONE is no longer sufficient. Supplying both lets the DB-backed hook reach
+    # LIVE_AUTHORITY; the q_posterior/q_lcb come from the stored posterior (uncapped).
     forecast_conn = _forecast_conn_with_replacement_rows()
     trade_conn = _trade_conn_with_required_tables()
     hook = build_replacement_forecast_event_hook(
@@ -864,7 +946,10 @@ def test_db_backed_replacement_hook_accepts_capital_objective_live_authority() -
             trade_conn=trade_conn,
             runtime_flags=_flags(shadow=True, veto=True, trade=True),
             baseline_bundle_provider=lambda proof, event, decision_time: _BaselineBundle(_Evidence("b0-run")),
-            refit_decision=_refit(),
+            # Switch admission also requires the refit handoff to authorize live
+            # promotion (REPLACEMENT_SWITCH_REFIT_LIVE_PROMOTION_REQUIRED).
+            refit_decision=_refit(live_promotion=True),
+            promotion_evidence=_promotion_evidence(),
             capital_objective_evidence=_capital_objective_evidence(),
             world_tables=tuple(REQUIRED_WORLD_TABLES),
             source_fact_status="CURRENT_FOR_LIVE",
@@ -892,7 +977,10 @@ def test_db_backed_live_authority_uses_readiness_baseline_when_baseline_bundle_l
             trade_conn=trade_conn,
             runtime_flags=_flags(shadow=True, veto=True, trade=True),
             baseline_bundle_provider=None,
-            refit_decision=_refit(),
+            # Current law: LIVE_AUTHORITY needs BOTH proofs (544c5030fc evidence gate)
+            # AND a refit handoff that authorizes live promotion.
+            refit_decision=_refit(live_promotion=True),
+            promotion_evidence=_promotion_evidence(),
             capital_objective_evidence=_capital_objective_evidence(),
             world_tables=tuple(REQUIRED_WORLD_TABLES),
             source_fact_status="CURRENT_FOR_LIVE",
@@ -1042,9 +1130,15 @@ def test_replacement_promotion_evidence_is_read_from_settings_payload(monkeypatc
     )
 
     evidence = main_module._replacement_forecast_promotion_evidence_from_settings()
+    # FIX-1 AND (ITEM B): LIVE_AUTHORITY now requires BOTH proofs. This test's load-
+    # bearing subject is that the promotion evidence is READ from settings (the
+    # `evidence == _promotion_evidence()` assertion); resolve with both evidence
+    # objects so the incidental LIVE_AUTHORITY assertion reflects the conjunction law.
+    capital_evidence = main_module._replacement_forecast_capital_objective_evidence_from_settings()
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
         promotion_evidence=evidence,
+        capital_objective_evidence=capital_evidence,
     )
 
     assert evidence == _promotion_evidence()
@@ -1074,8 +1168,14 @@ def test_replacement_capital_objective_evidence_is_read_from_settings_payload(mo
     )
 
     evidence = main_module._replacement_forecast_capital_objective_evidence_from_settings()
+    # FIX-1 AND (ITEM B): this test's load-bearing subject is that the capital-
+    # objective evidence is READ from settings (the `evidence == _capital_objective_
+    # evidence()` assertion); resolve with both evidence objects so the incidental
+    # LIVE_AUTHORITY assertion reflects the conjunction law (single proof => BLOCKED).
+    promotion_evidence = main_module._replacement_forecast_promotion_evidence_from_settings()
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
+        promotion_evidence=promotion_evidence,
         capital_objective_evidence=evidence,
     )
 
@@ -1150,9 +1250,12 @@ def test_reactor_hook_blocks_stale_switch_decision_before_veto_logic() -> None:
 
 
 def test_reactor_hook_live_authority_can_apply_same_direction_replacement_q_lcb() -> None:
+    # Current law (544c5030fc): LIVE_AUTHORITY needs BOTH promotion + capital-objective
+    # evidence; a single proof resolves to BLOCKED.
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
         promotion_evidence=_promotion_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
     )
     candidate = _candidate(candidate_q_lcb=0.95, candidate_kelly_fraction=0.04)
 
@@ -1178,9 +1281,13 @@ def test_reactor_hook_live_authority_can_apply_same_direction_replacement_q_lcb(
 
 
 def test_reactor_hook_live_authority_blocks_unauthorized_kelly_increase_and_direction_flip() -> None:
+    # Current law (544c5030fc): LIVE_AUTHORITY needs BOTH proofs. With LIVE_AUTHORITY
+    # reached, the per-action authority gates (kelly-increase / direction-flip) still
+    # require their own flags, which are OFF here -> each action is BLOCKED.
     policy = resolve_replacement_forecast_runtime_policy(
         _flags(shadow=True, veto=True, trade=True),
         promotion_evidence=_promotion_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
     )
 
     kelly = apply_replacement_forecast_reactor_hook(
@@ -1202,3 +1309,67 @@ def test_reactor_hook_live_authority_blocks_unauthorized_kelly_increase_and_dire
     assert "REPLACEMENT_REACTOR_KELLY_INCREASE_NOT_AUTHORIZED" in kelly.reason_codes
     assert flip.status == "BLOCKED"
     assert "REPLACEMENT_REACTOR_DIRECTION_FLIP_NOT_AUTHORIZED" in flip.reason_codes
+
+
+def test_reactor_hook_live_authority_refuses_direction_law_violating_candidate() -> None:
+    """FIX-3 (§0.5): under LIVE_AUTHORITY the flip site re-derives the lawful
+    direction from the replacement posterior (selected bin vs argmax(q)) and
+    refuses any candidate whose claimed side disagrees, with the typed
+    REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION receipt. The bug this guards
+    against: trusting the upstream candidate_direction string verbatim at the
+    consuming boundary (Fitz #2 cross-module semantic drop).
+
+    Bundle q = {cool: 0.25, warm: 0.75} -> argmax = warm. A candidate on the
+    'cool' bin is lawfully buy_no:cool; claiming buy_yes:cool is unlawful.
+    Both baseline and candidate are buy_yes:cool so the flip-vs-baseline gate is
+    NOT what blocks it -- the posterior-derived law is.
+    """
+
+    policy = resolve_replacement_forecast_runtime_policy(
+        _flags(shadow=True, veto=True, trade=True, kelly=True, flip=True),
+        promotion_evidence=_promotion_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
+    )
+
+    result = apply_replacement_forecast_reactor_hook(
+        policy=policy,
+        switch_decision=_switch_decision(policy, live_promotion=True),
+        candidate=_candidate(
+            baseline_direction="buy_yes:cool",
+            candidate_direction="buy_yes:cool",
+        ),
+        replacement_bundle=_bundle(),
+        readiness=_readiness(),
+    )
+
+    assert result.status == "BLOCKED"
+    assert "REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION" in result.reason_codes
+    # Fail-safe: a law-violating candidate never mutates the baseline.
+    assert result.effective_direction == "buy_yes:cool"
+
+
+def test_reactor_hook_live_authority_admits_direction_law_consistent_candidate() -> None:
+    """FIX-3 positive case: a candidate whose claimed side agrees with the
+    posterior-derived lawful direction (buy_no on a non-argmax bin) is admitted.
+    """
+
+    policy = resolve_replacement_forecast_runtime_policy(
+        _flags(shadow=True, veto=True, trade=True, kelly=True, flip=True),
+        promotion_evidence=_promotion_evidence(),
+        capital_objective_evidence=_capital_objective_evidence(),
+    )
+
+    result = apply_replacement_forecast_reactor_hook(
+        policy=policy,
+        switch_decision=_switch_decision(policy, live_promotion=True),
+        candidate=_candidate(
+            baseline_direction="buy_no:cool",
+            candidate_direction="buy_no:cool",
+        ),
+        replacement_bundle=_bundle(),
+        readiness=_readiness(),
+    )
+
+    assert result.status == "LIVE_AUTHORITY"
+    assert "REPLACEMENT_FORECAST_DIRECTION_LAW_VIOLATION" not in result.reason_codes
+    assert result.effective_direction == "buy_no:cool"

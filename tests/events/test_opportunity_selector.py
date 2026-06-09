@@ -285,49 +285,27 @@ def test_selector_excludes_buy_no_on_material_yes_bin():
     assert result.loser_reasons["cand-manila-like"].startswith("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE_MISSING:")
 
 
-def test_selector_rejects_buy_no_on_own_forecast_modal_bin():
-    modal_no = _evaluation(
-        candidate_id="cand-tokyo-24-no",
-        condition_id="condition-24",
-        token_id="token-24-no",
-        direction="buy_no",
-        bin_label="24C",
-        execution_price=0.67122,
-        q_posterior=0.8517906004683493,
-        q_lcb_5pct=0.7647058823529412,
-        trade_score=0.059585820330533314,
-        q_lcb_calibration_source="EMOS_ANALYTIC",
-    )
-    modal_yes = _evaluation(
-        candidate_id="cand-tokyo-24-yes",
-        condition_id="condition-24",
-        token_id="token-24-yes",
-        direction="buy_yes",
-        bin_label="24C",
-        execution_price=0.361375,
-        q_posterior=0.1482093995316507,
-        q_lcb_5pct=0.0784313725490196,
-        trade_score=0.0,
-    )
-    lower_tail_yes = _evaluation(
-        candidate_id="cand-tokyo-20-yes",
-        condition_id="condition-20",
-        token_id="token-20-yes",
-        direction="buy_yes",
-        bin_label="20C",
-        execution_price=0.0083968,
-        q_posterior=0.05795923193321588,
-        q_lcb_5pct=0.0196078431372549,
-        trade_score=0.00008969061458657835,
-    )
-
-    result = select_best_family_candidate((modal_no, modal_yes, lower_tail_yes))
-
-    assert result.selected is lower_tail_yes
-    assert result.loser_reasons["cand-tokyo-24-no"].startswith("ADMISSION_BUY_NO_ON_FORECAST_MODAL_BIN:")
+# REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #10 + operator directive):
+# test_selector_rejects_buy_no_on_own_forecast_modal_bin pinned the now-removed
+# _family_structure_rejection_reasons ADMISSION_BUY_NO_ON_FORECAST_MODAL_BIN guard.
+# That bolted-on side-specific exclusion is SUBSUMED by the marginal-utility ranker:
+# a modal-bin NO scores lower ΔU than the modal YES through ONE FamilyPayoffMatrix
+# (its honest robust NO q_lcb = 1 - q_ucb_yes is small on a high-YES-mass bin), so
+# the matrix dominates it without a guard. The replacement relationship test is
+# tests/engine/test_s4_subsumed_gates.py::
+# test_modal_bin_no_dominated_by_modal_yes_through_one_matrix. select_best_family_
+# candidate is now display-only and no longer the live decision, so a modal-bin
+# loser-reason is no longer emitted.
 
 
 def test_opportunity_book_receipt_contains_ranks_and_loser_reasons():
+    # SINGLE-PATH update 2026-06-08 (operator directive; "bin selection.md"
+    # §14.7/§14.8): the book no longer SELF-SELECTS via the legacy scalar-Kelly
+    # select_best_family_candidate. The DECISION is the bin-selection ΔU ranker
+    # upstream; the book RECORDS it via decided_candidate_id. select_best_family_
+    # candidate is retained ONLY for the receipt's display ranks + loser reasons
+    # (provenance), which this test still verifies. We pass the decided id ("selected")
+    # so the book records the ΔU decision rather than re-deriving it.
     selected = _evaluation(candidate_id="selected", execution_price=0.2, trade_score=0.02)
     loser = _evaluation(candidate_id="loser", execution_price=0.80, trade_score=0.02)
 
@@ -335,12 +313,19 @@ def test_opportunity_book_receipt_contains_ranks_and_loser_reasons():
         family_id="family-1",
         evaluations=(loser, selected),
         event_id="event-1",
-        cache_summary={"price_cache": "snapshot_rows_refreshed_for_family"},
+        decided_candidate_id="selected",
+        cache_summary={
+            "price_cache": "snapshot_rows_refreshed_for_family",
+            "selector_enabled": True,
+        },
     )
     receipt = book.to_receipt_dict()
 
-    assert receipt["selected_candidate_id"] is None
+    # The book records the upstream ΔU decision verbatim (no second selection surface).
+    assert receipt["selected_candidate_id"] == "selected"
     assert receipt["proposed_selected_candidate_id"] == "selected"
+    # Display ranks + loser reasons still come from select_best_family_candidate
+    # (provenance only, not the decision).
     assert receipt["family_rank"]["selected"] == 1
     assert receipt["loser_reasons"]["loser"].startswith("FAMILY_RANK_LOST:")
     assert "robust_kelly_growth_score" in receipt["loser_reasons"]["loser"]

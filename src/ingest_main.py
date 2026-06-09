@@ -1,7 +1,9 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-20; last_reused=2026-05-20
+# Lifecycle: created=2026-04-30; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon; 2026-05-20
 #   live stability hotfix keeps SIGTERM scheduler shutdown exit code clean.
+#   2026-06-08 thepath/audit-realign Fitz #5: bare no-timeout sqlite3.connect on
+#   the K2 BULK hko_tick write path now carries the configured busy_timeout.
 """Zeus data-ingest daemon entry point.
 
 Runs all K2 ingest jobs and supporting cycles on an independent APScheduler.
@@ -465,10 +467,16 @@ def _k2_hko_tick():
             DEFAULT_LOG_PATH,
         )
         from src.state.db_writer_lock import WriteClass, db_writer_lock
+        import os as _os
         import sqlite3 as _sqlite3
         data_version = "v1.wu-native"
+        # CATEGORY ANTIBODY (Fitz #5): bare no-timeout connect was a lock-loser on
+        # this BULK ingest write path. Apply the configured busy_timeout (ms→s) so
+        # WAL contention WAITS instead of raising "database is locked".
+        _busy_ms = int(_os.environ.get("ZEUS_DB_BUSY_TIMEOUT_MS", "30000"))
         with db_writer_lock(db_path, WriteClass.BULK):
-            conn = _sqlite3.connect(str(db_path))
+            conn = _sqlite3.connect(str(db_path), timeout=_busy_ms / 1000.0)
+            conn.execute("PRAGMA busy_timeout = %d" % _busy_ms)
             try:
                 tick_result = tick_accumulator(conn, DEFAULT_LOG_PATH)
                 project_result = project_accumulator_to_v2(
@@ -763,6 +771,17 @@ def _etl_recalibrate_body():
                     WriteClass.BULK,
                     capture_output=True, text=True, timeout=300,
                 )
+                # ANTI-SILENT-SINK (2026-06-09, same class as the materializer-queue fix):
+                # capture_output=True swallowed every WARNING the ETL emitted on rc==0 —
+                # a degradation antibody that warns into a void is structurally deaf.
+                # Re-emit WARNING/ERROR lines at the daemon level (fail-soft).
+                try:
+                    for stream in (r.stderr or "", r.stdout or ""):
+                        for line in stream.splitlines():
+                            if "WARNING" in line or "ERROR" in line:
+                                logger.warning("etl[%s] %s", script, line.strip()[:500])
+                except Exception:
+                    pass
                 results[script] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
             except Exception as e:
                 results[script] = f"ERROR: {e}"

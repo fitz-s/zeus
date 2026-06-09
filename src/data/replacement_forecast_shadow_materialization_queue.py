@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -77,6 +78,26 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+_LOG = logging.getLogger("zeus.replacement_shadow_materialization_queue")
+
+
+def _surface_subprocess_warnings(input_name: str, completed: "subprocess.CompletedProcess[str]") -> None:
+    """ANTI-SILENT-SINK (2026-06-09): each materialization runs as a SUBPROCESS with
+    capture_output=True, so every WARNING the materializer emits (e.g. the K3 fusion
+    degradation antibodies) lands ONLY in the per-request sidecar JSON — invisible to the
+    daemon log, where an operator actually looks. The K3 'decorrelated-provider INCOMPLETE'
+    warnings fired 19/40 recent cells and reached no log. Re-emit subprocess WARNING/ERROR
+    lines at the queue level so a degradation antibody can never again warn into a void.
+    Fail-soft: never raises into the queue loop."""
+    try:
+        for stream in (completed.stderr or "", completed.stdout or ""):
+            for line in stream.splitlines():
+                if "WARNING" in line or "ERROR" in line:
+                    _LOG.warning("materialize[%s] %s", input_name, line.strip()[:500])
+    except Exception:
+        pass
+
+
 def _receipt_name(path: Path) -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{path.stem}.{stamp}{path.suffix}"
@@ -98,16 +119,86 @@ def _write_sidecar(path: Path, payload: dict[str, object]) -> None:
     )
 
 
+def _read_lock_holder_pid(lock_path: Path) -> int | None:
+    """Parse ``pid=<n>`` from a queue lock file; None if missing/unreadable/garbled."""
+    try:
+        content = lock_path.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, OSError):
+        return None
+    marker = "pid="
+    idx = content.find(marker)
+    if idx < 0:
+        return None
+    digits = ""
+    for ch in content[idx + len(marker):]:
+        if ch.isdigit():
+            digits += ch
+        else:
+            break
+    return int(digits) if digits else None
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """True iff a process with this PID currently exists (signal-0 liveness probe)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but owned by another user — still a live holder.
+        return True
+    return True
+
+
+def _quarantine_stale_lock(lock_path: Path, *, holder_pid: int | None) -> Path | None:
+    """Move an orphaned lock into ``quarantined_stale_locks/`` (audit trail; never silent-delete)."""
+    qdir = lock_path.parent / "quarantined_stale_locks"
+    qdir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    pid_tag = holder_pid if holder_pid is not None else "unknown"
+    dest = qdir / f"{lock_path.name.lstrip('.')}.{stamp}.pid{pid_tag}"
+    try:
+        os.replace(lock_path, dest)
+        return dest
+    except FileNotFoundError:
+        return None  # another acquirer cleared it first — fine
+
+
 @contextmanager
 def _queue_lock(lock_path: Path):
+    """Exclusive single-writer lock for the materialization queue, with STALE-LOCK SELF-HEAL.
+
+    ANTIBODY (rules 5 + 3 — make the orphaned-lock stall UNCONSTRUCTABLE): the lock is released
+    only by this contextmanager's ``finally`` unlink. A holder process SIGKILL'd mid-run skips
+    ``finally`` entirely, so its lock file would block every future acquirer FOREVER (the ~12h
+    live stall: materializer dark -> readiness expired -> reactor READINESS_EXPIRED -> zero
+    trades). On ``FileExistsError`` we now probe the recorded holder PID: a DEAD (or
+    unparseable) holder means the lock is orphaned, so we quarantine it for audit and steal the
+    lock by retrying the exclusive create once; a genuinely ALIVE holder still blocks (no
+    concurrent double-run). ``fd`` stays None on the blocked path, so we never unlink a live
+    holder's lock.
+    """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
     try:
-        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            holder_pid = _read_lock_holder_pid(lock_path)
+            if holder_pid is not None and _pid_is_alive(holder_pid):
+                yield False
+                return
+            _quarantine_stale_lock(lock_path, holder_pid=holder_pid)
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                # Lost a race to another acquirer that grabbed the freed lock first.
+                yield False
+                return
         os.write(fd, f"pid={os.getpid()} acquired_at={datetime.now(timezone.utc).isoformat()}\n".encode("utf-8"))
         yield True
-    except FileExistsError:
-        yield False
     finally:
         if fd is not None:
             os.close(fd)
@@ -183,12 +274,22 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         readiness_status_clause = ""
         if "status" in readiness_columns:
             readiness_status_clause = "AND status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'READY')"
+        # Only a readiness row whose expires_at is still in the future counts as
+        # live coverage. An expired row must NOT mark the seed already-covered,
+        # otherwise the queue skips it forever and fresh readiness can never be
+        # produced (the stale row both blocks the request and never refreshes).
+        readiness_freshness_clause = ""
+        if "expires_at" in readiness_columns:
+            readiness_freshness_clause = (
+                "AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))"
+            )
         readiness = conn.execute(
             f"""
             SELECT 1
             FROM readiness_state
             WHERE strategy_key = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
               {readiness_status_clause}
+              {readiness_freshness_clause}
               AND json_extract(provenance_json, '$.city') = ?
               AND json_extract(provenance_json, '$.target_date') = ?
               AND json_extract(provenance_json, '$.temperature_metric') = ?
@@ -441,6 +542,7 @@ def _process_replacement_forecast_shadow_materialization_queue_locked(
             "--commit",
         )
         completed = runner(command)
+        _surface_subprocess_warnings(input_json.name, completed)
         payload = {
             "command": list(command),
             "returncode": int(completed.returncode),

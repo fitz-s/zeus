@@ -107,17 +107,20 @@ def test_execution_command_rejects_size_below_min_order():
         verify_execution_command(command, parents)
 
 
-def test_execution_command_reserved_notional_ceiling_applies_when_cap_enabled():
+def test_execution_command_has_no_max_notional_ceiling():
+    # 2026-06-08: the tiny_live max_notional cap is DELETED. The execution command
+    # verifier no longer rejects a size whose notional exceeds any max_notional —
+    # order size is governed solely by structural fractional-Kelly sizing upstream.
+    # A size that the old cap would have rejected (20 * 0.40 = 8.0) now verifies.
     parents, command = execution_graph(command_payload={"size": 20.0, "limit_price": 0.40})
 
-    with pytest.raises(CertificateVerificationError, match="exceeds live cap notional"):
-        verify_execution_command(command, parents)
+    verify_execution_command(command, parents)
 
 
-def test_execution_command_reserved_notional_not_ceiling_when_cap_disabled():
+def test_execution_command_verifies_without_cap_flag():
+    # The cap-enabled flag is gone from both the live_cap and actionable payloads;
+    # verification does not depend on it and still passes.
     parents, command = execution_graph(
-        actionable_payload={"live_cap_notional_cap_enabled": False},
-        live_cap_payload={"notional_cap_enabled": False},
         command_payload={"size": 20.0, "limit_price": 0.40},
     )
 
@@ -193,14 +196,17 @@ def test_final_intent_rejects_venue_order_id_before_submit():
         verify_final_intent(final_intent, parents)
 
 
-def test_final_intent_reserved_notional_ceiling_applies_when_cap_enabled():
+def test_final_intent_notional_must_not_exceed_reserved_integrity_guard():
+    # PRESERVED guarantee (NOT a cap): the order notional must never exceed the
+    # Kelly-sized notional that was reserved for this event. This integrity guard
+    # now runs UNCONDITIONALLY (no cap-enabled flag gates it). notional 4.0 >
+    # reserved 3.0 must raise.
     actionable = _cert(
         claims.ACTIONABLE_TRADE,
         "actionable:event-1",
         {
             **_actionable_payload(),
             "live_cap_reserved_notional_usd": 3.0,
-            "live_cap_notional_cap_enabled": True,
         },
     )
     final_intent = _cert(
@@ -214,14 +220,15 @@ def test_final_intent_reserved_notional_ceiling_applies_when_cap_enabled():
         verify_final_intent(final_intent, (actionable,))
 
 
-def test_final_intent_reserved_notional_not_ceiling_when_cap_disabled():
+def test_final_intent_notional_at_or_below_reserved_passes_integrity_guard():
+    # The order≤reserved integrity guard admits an order whose notional matches the
+    # reserved Kelly notional. No cap-enabled flag is consulted.
     actionable = _cert(
         claims.ACTIONABLE_TRADE,
         "actionable:event-1",
         {
             **_actionable_payload(),
-            "live_cap_reserved_notional_usd": 3.0,
-            "live_cap_notional_cap_enabled": False,
+            "live_cap_reserved_notional_usd": 5.0,
         },
     )
     final_intent = _cert(

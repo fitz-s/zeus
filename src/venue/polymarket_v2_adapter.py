@@ -1196,6 +1196,123 @@ class PolymarketV2Adapter:
             "gas_limit": gas_limit,
         }
 
+    def get_negrisk_winning_position_balance(
+        self,
+        condition_id: str,
+        index_set: int,
+        *,
+        holder: str | None = None,
+    ) -> dict[str, Any]:
+        """Read the Safe's live ERC1155 balance of the winning negRisk position.
+
+        Chain-truth provenance (2026-06-09, operator redeem directive): the
+        recorded ``token_amounts_json`` amount is a SNAPSHOT taken at settlement
+        time, not chain truth at submit time. The redeem amount/inputs MUST come
+        from chain truth — a position that has already been redeemed (or never
+        materialised under the recorded id) carries a stale recorded amount that
+        exceeds the live balance, so the inner negRisk ``redeemPositions`` burn
+        reverts → Safe execTransaction GS013.
+
+        Derivation (no web3 lib — uses self._rpc_call, the same urllib JSON-RPC
+        seam every other on-chain read in this adapter uses):
+          1. wcol = NegRiskAdapter.wcol()  (wrapped collateral; negRisk position
+             ERC1155 ids derive from WCOL, NOT pUSD).
+          2. collectionId = CTF.getCollectionId(0x00..00, conditionId, indexSet).
+          3. positionId   = CTF.getPositionId(wcol, collectionId).
+          4. balance      = CTF.balanceOf(holder_safe, positionId).
+
+        Returns a dict:
+          {"ok": True, "balance_micro": int, "position_id": int,
+           "wcol": str, "holder": str}
+        on success, or {"ok": False, "errorCode": ..., "errorMessage": ...}
+        on any RPC/derivation failure (caller fails closed: does NOT submit
+        when balance cannot be established).
+        """
+        holder_addr = holder or self.funder_address
+        if not self.polygon_rpc_url:
+            return {
+                "ok": False,
+                "errorCode": "REDEEM_RPC_URL_MISSING",
+                "errorMessage": "polygon_rpc_url required for chain-truth balance probe",
+            }
+        try:
+            condition_bytes = _normalize_condition_id_bytes32(condition_id)
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
+                "errorMessage": f"invalid condition_id for balance probe: {exc}",
+            }
+        if int(index_set) not in (1, 2):
+            return {
+                "ok": False,
+                "errorCode": "REDEEM_CALLDATA_BUILD_FAILED",
+                "errorMessage": (
+                    f"negRisk binary balance probe supports indexSet 1 (NO) or "
+                    f"2 (YES); got {index_set!r}"
+                ),
+            }
+        try:
+            # 1. wcol()
+            wcol_raw = _eth_call_uint(
+                self.polygon_rpc_url,
+                self._rpc_call,
+                to=POLYGON_NEGRISK_ADAPTER_ADDRESS,
+                data=NEGRISK_WCOL_SELECTOR,
+            )
+            wcol_addr = "0x" + format(wcol_raw, "040x")[-40:]
+            # 2. getCollectionId(parentCollectionId=0, conditionId, indexSet)
+            collection_data = (
+                CTF_GET_COLLECTION_ID_SELECTOR
+                + ("00" * 32)
+                + condition_bytes.hex()
+                + format(int(index_set), "064x")
+            )
+            collection_raw = self._rpc_call(
+                self.polygon_rpc_url,
+                "eth_call",
+                [{"to": POLYGON_CTF_ADDRESS, "data": collection_data}, "latest"],
+            )
+            collection_hex = str(collection_raw or "0x").removeprefix("0x").rjust(64, "0")[:64]
+            # 3. getPositionId(collateralToken=wcol, collectionId)
+            position_data = (
+                CTF_GET_POSITION_ID_SELECTOR
+                + _abi_address(wcol_addr)
+                + collection_hex
+            )
+            position_id = _eth_call_uint(
+                self.polygon_rpc_url,
+                self._rpc_call,
+                to=POLYGON_CTF_ADDRESS,
+                data=position_data,
+            )
+            # 4. balanceOf(holder, positionId)
+            balance_data = (
+                ERC1155_BALANCE_OF_SELECTOR
+                + _abi_address(holder_addr)
+                + format(int(position_id), "064x")
+            )
+            balance_micro = _eth_call_uint(
+                self.polygon_rpc_url,
+                self._rpc_call,
+                to=POLYGON_CTF_ADDRESS,
+                data=balance_data,
+            )
+        except Exception as exc:  # noqa: BLE001 — any RPC failure → fail-closed
+            return {
+                "ok": False,
+                "errorCode": "REDEEM_BALANCE_PROBE_FAILED",
+                "errorMessage": f"chain-truth balance probe failed: {exc}",
+                "condition_id": condition_id,
+            }
+        return {
+            "ok": True,
+            "balance_micro": int(balance_micro),
+            "position_id": int(position_id),
+            "wcol": wcol_addr,
+            "holder": holder_addr,
+        }
+
     def _redeem_via_safe(
         self,
         condition_id: str,
@@ -2696,6 +2813,21 @@ def _build_redeem_calldata(condition_id: str, index_sets: list[int]) -> str:
         ],
     )
     return CTF_REDEEM_POSITIONS_SELECTOR + encoded_args.hex()
+
+
+# getPositionId(address collateralToken, bytes32 collectionId) selector.
+# keccak256('getPositionId(address,bytes32)')[:4] — verified 2026-06-09.
+CTF_GET_POSITION_ID_SELECTOR = "0x39dd7530"
+# getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet) selector.
+# keccak256('getCollectionId(bytes32,bytes32,uint256)')[:4] — verified 2026-06-09.
+CTF_GET_COLLECTION_ID_SELECTOR = "0x856296f7"
+# balanceOf(address account, uint256 id) ERC1155 selector.
+# keccak256('balanceOf(address,uint256)')[:4] — verified 2026-06-09.
+ERC1155_BALANCE_OF_SELECTOR = "0x00fdd58e"
+# wcol() — NegRiskAdapter's wrapped-collateral token used as the CTF collateral
+# for ALL negRisk positions. negRisk position ERC1155 ids are derived from WCOL,
+# NOT pUSD. keccak256('wcol()')[:4] — verified 2026-06-09.
+NEGRISK_WCOL_SELECTOR = "0x7e3b74c3"
 
 
 def _build_negrisk_redeem_calldata(

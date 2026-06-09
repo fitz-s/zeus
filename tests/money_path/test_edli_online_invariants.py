@@ -55,46 +55,48 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["edli_live_min_canary_count"] == 1
     assert edli["edli_live_max_unresolved_unknowns"] == 0
     assert edli["edli_live_min_realized_edge_bps"] == 0
-    # BUG #99 antibody: the notional cap and the daily order count are operator-owned
-    # values (config/settings.json) and may be raised for live operation. They are NOT
-    # re-pinned to the old 5.0/1 here — that would erase the real safety property. The
-    # invariant we assert instead is STRUCTURAL: an order-emission RATE limiter exists
-    # that is DECOUPLED from the notional cap, so raising the notional cap can never
-    # silently uncap order frequency. The notional and day-count values must remain
-    # positive and finite (sane), and the decoupled rate-limit must be wired with a
-    # conservative default.
-    assert float(edli["tiny_live_max_notional_usd"]) > 0
-    assert int(edli["tiny_live_max_orders_per_day"]) >= 1
 
-    # (1) The rate-limiter is a real, independent control on the ledger: reserve()
-    #     accepts a max_orders_per_window argument SEPARATE from max_notional_usd and
-    #     max_orders_per_day, and it fails closed to a conservative canary default.
+
+def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
+    # 2026-06-08 operator directive antibody: the tiny_live mechanism is DELETED.
+    # Order size is governed SOLELY by structural fractional-Kelly sizing. Assert
+    # the cap is GONE at every layer (config, ledger API, source), and that the
+    # exactly-once reservation knobs are NOT replaced by any new dollar/count cap.
+    edli = json.loads(Path("config/settings.json").read_text())["edli_v1"]
+    for forbidden_key in (
+        "tiny_live_max_notional_usd",
+        "tiny_live_max_orders_per_day",
+        "tiny_live_max_orders_per_window",
+        "tiny_live_notional_cap_enabled",
+        "tiny_live_daily_order_cap_enabled",
+    ):
+        assert forbidden_key not in edli, forbidden_key
+
+    # (1) The ledger reserve() API carries NO cap parameter — exactly-once only.
     import inspect
 
-    from src.events.live_cap import DEFAULT_MAX_ORDERS_PER_WINDOW, LiveCapLedger
+    from src.events.live_cap import LiveCapLedger
 
-    reserve_params = inspect.signature(LiveCapLedger.reserve).parameters
-    assert "max_orders_per_window" in reserve_params, (
-        "SAFETY: order-emission rate limit must be a SEPARATE knob from the notional cap"
-    )
-    assert reserve_params["max_orders_per_window"].default == DEFAULT_MAX_ORDERS_PER_WINDOW
-    assert DEFAULT_MAX_ORDERS_PER_WINDOW == 1, "SAFETY: rate-limit default must be conservative (1/window)"
+    reserve_params = set(inspect.signature(LiveCapLedger.reserve).parameters)
+    for forbidden_param in (
+        "max_notional_usd",
+        "max_orders_per_day",
+        "max_orders_per_window",
+        "notional_cap_enabled",
+        "daily_order_cap_enabled",
+    ):
+        assert forbidden_param not in reserve_params, forbidden_param
 
-    # (2) The ledger reserves an independent rate-window slot pool, distinct from the
-    #     notional-coupled day-slot pool.
+    # (2) The cap-sentinel + slot-reservation helpers are deleted from the module.
     cap_source = Path("src/events/live_cap.py").read_text()
-    assert "_reserve_window_slot" in cap_source
-    assert "edli_live_cap_rate_window" in cap_source
-    schema_source = Path("src/state/schema/edli_live_cap_usage_schema.py").read_text()
-    assert "edli_live_cap_rate_window" in schema_source
+    assert "cap_explicitly_disabled" not in cap_source
+    assert "_reserve_window_slot" not in cap_source
+    assert "_reserve_day_slot" not in cap_source
 
-    # (3) The daemon threads the decoupled rate-limit config key through to the ledger
-    #     with a conservative .get default (operator sets the live value; we never write
-    #     config/settings.json here).
+    # (3) The daemon no longer threads any tiny_live cap config key to the ledger.
     main_source = Path("src/main.py").read_text()
-    assert 'edli_cfg.get("tiny_live_max_orders_per_window", 1)' in main_source
-    adapter_source = Path("src/engine/event_reactor_adapter.py").read_text()
-    assert "max_orders_per_window=" in adapter_source
+    assert "tiny_live_max_notional_usd" not in main_source
+    assert "tiny_live_max_orders_per_window" not in main_source
 
 
 def test_day0_shadow_scope_admits_day0_but_keeps_market_channel_disabled():

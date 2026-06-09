@@ -8,8 +8,22 @@ It converts atmospheric data into sized limit orders with positive expectation, 
 The pipeline is causal and linear. Every component evaluates against this chain:
 `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
-**THE PROBABILITY CHAIN (How We Trade):**
-The mathematical construction of an edge:
+**THE PROBABILITY CHAIN (How We Trade) — FINAL FORM (2026-06-09, operator-ratified):**
+The replacement chain is the strategy of record (authority:
+`docs/authority/replacement_final_form_2026_06_09.md`):
+`per-model walk-forward de-bias (z = x − b̂, settlement residuals) -> T2 Bayesian precision
+fusion over 5 decorrelated providers + in-domain regional experts (weights = inverse
+walk-forward residual variance, Ledoit-Wolf shrunk Σ; provider families ICON/NCEP/UKMO are
+single-rep, most-specific-first) -> μ*, then σ_pred = sqrt(V* + walk-forward fused-center
+residual var, floor 1.0°C) -> q = settlement-preimage bin integration of N(μ*, σ_pred)
+(emos.bin_probability_settlement; q_shape=fused_normal_direct) -> q_lcb conservative floor ->
+Edge -> Fractional Kelly -> Position Size`
+Key theorems/results backing it (all settlement-graded): prior-label is algebraically
+irrelevant under diagonal Σ (n=4492 inversion experiment); precision weights beat equal
+weights by 12× SE; the legacy AIFS member-vote shape put ZERO probability on the winning bin
+in 28% of settled cells and is replaced (LogLoss 11.07→1.51, n=39).
+
+The LEGACY BASELINE chain (still live as the independent baseline / LCB cap):
 `51 ENS members -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly -> Position Size`
 
 **TOPOLOGY NAVIGATION:**

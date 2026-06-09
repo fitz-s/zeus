@@ -267,7 +267,6 @@ def test_live_cap_certificate_is_backed_by_usage_row():
             final_intent_id="intent-1",
         ),
         decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
-        max_notional_usd=5.0,
         live_cap_conn=conn,
     )
 
@@ -288,16 +287,13 @@ def test_live_cap_certificate_is_backed_by_usage_row():
     assert row["final_intent_id"] == "intent-1"
 
 
-def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypatch):
-    from copy import deepcopy
-
+def test_live_cap_provisional_and_durable_share_uncapped_notional(monkeypatch):
+    # 2026-06-08: the tiny_live cap is DELETED. The provisional (persist=False)
+    # and durable (persist=True) certificates record the SAME full Kelly notional
+    # with no clamp and no notional-cap flag — proving the order size flows from
+    # fractional Kelly, not from any $5 cap.
     from src.engine import event_reactor_adapter as adapter
     from src.events.reactor import EventSubmissionReceipt
-
-    settings_copy = deepcopy(adapter.settings)
-    settings_copy["edli_v1"]["tiny_live_notional_cap_enabled"] = False
-    settings_copy["edli_v1"]["tiny_live_daily_order_cap_enabled"] = False
-    monkeypatch.setattr(adapter, "settings", settings_copy)
 
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -315,7 +311,6 @@ def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypat
         event=event,
         receipt=receipt,
         decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc),
-        max_notional_usd=5.0,
         live_cap_conn=conn,
     )
 
@@ -325,9 +320,11 @@ def test_live_cap_provisional_and_durable_share_uncapped_normalization(monkeypat
     assert provisional.payload["reserved_notional_usd"] == 800.0
     assert durable.payload["reserved_notional_usd"] == 800.0
     assert durable.payload["reserved_notional_usd"] == provisional.payload["reserved_notional_usd"]
+    # max_notional_usd is now an inert mirror of the reserved notional, not a cap.
     assert durable.payload["max_notional_usd"] == provisional.payload["max_notional_usd"] == 800.0
-    assert provisional.payload["notional_cap_enabled"] is False
-    assert durable.payload["notional_cap_enabled"] is False
+    # No notional-cap flag exists in the payload anymore.
+    assert "notional_cap_enabled" not in provisional.payload
+    assert "notional_cap_enabled" not in durable.payload
 
 
 def test_submit_disabled_live_bridge_releases_live_cap_row(monkeypatch):
@@ -386,7 +383,6 @@ def test_submit_disabled_live_bridge_writes_live_order_aggregate_without_command
         event=event,
         receipt=accepted,
         decision_time=decision_time,
-        tiny_live_max_notional_usd=5.0,
         live_cap_conn=conn,
         pre_submit_authority_provider=_pre_submit_authority_provider,
         taker_fok_fak_live_enabled=True,
@@ -730,7 +726,6 @@ def test_live_execution_command_build_fails_without_pre_submit_authority_witness
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             taker_fok_fak_live_enabled=True,
         )
@@ -766,7 +761,6 @@ def test_live_execution_command_blocks_identity_fallback_calibration():
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             taker_fok_fak_live_enabled=True,
@@ -789,7 +783,6 @@ def test_live_execution_command_requires_q_source_provenance():
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             taker_fok_fak_live_enabled=True,
@@ -851,7 +844,6 @@ def test_live_execution_command_requires_opportunity_book_selection_match():
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             taker_fok_fak_live_enabled=True,
@@ -890,7 +882,6 @@ def test_crossing_post_only_pre_submit_witness_blocks_command():
             event=event,
             receipt=accepted,
             decision_time=decision_time,
-            tiny_live_max_notional_usd=5.0,
             live_cap_conn=conn,
             pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(current_best_ask=0.39),
         )
@@ -929,7 +920,6 @@ def test_fresh_pre_submit_book_promotes_stale_maker_candidate_to_taker():
         event=event,
         receipt=accepted,
         decision_time=decision_time,
-        tiny_live_max_notional_usd=5.0,
         live_cap_conn=conn,
         pre_submit_authority_provider=lambda *_args: _pre_submit_authority_witness(
             current_best_bid=0.39,
@@ -987,7 +977,6 @@ def test_live_command_reuses_single_pre_submit_authority_witness():
         event=event,
         receipt=accepted,
         decision_time=decision_time,
-        tiny_live_max_notional_usd=5.0,
         live_cap_conn=conn,
         pre_submit_authority_provider=_provider,
         taker_fok_fak_live_enabled=True,
@@ -1083,6 +1072,7 @@ def test_live_adapter_submit_enabled_canary_enabled_calls_executor_mock(monkeypa
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
             taker_fok_fak_live_enabled=True,
@@ -1130,6 +1120,7 @@ def test_live_submit_aggregate_persists_decision_audit_payload(monkeypatch):
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="SUBMITTED",
                 reason_code="OK",
@@ -1262,6 +1253,7 @@ def test_live_adapter_records_rejected_fixture_response(monkeypatch):
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="REJECTED",
                 reason_code="VENUE_REJECTED",
@@ -1343,6 +1335,7 @@ def test_pre_venue_depth_rejection_terminates_aggregate_and_releases_cap(monkeyp
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             taker_fok_fak_live_enabled=True,
             executor_submit=_boundary_submit,
             pre_submit_authority_provider=_pre_submit_authority_provider,
@@ -1409,6 +1402,7 @@ def test_live_adapter_records_timeout_unknown_fixture_response(monkeypatch):
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="TIMEOUT_UNKNOWN",
                 reason_code="SUBMIT_TIMEOUT",
@@ -1472,6 +1466,7 @@ def test_live_adapter_records_post_submit_unknown_as_pending_reconcile(monkeypat
             real_order_submit_enabled=True,
             live_canary_enabled=True,
             durable_submit_outbox_enabled=True,
+            operator_arm=_operator_arm(),
             executor_submit=lambda _final_intent, _command: EventBoundExecutorSubmitResult(
                 status="POST_SUBMIT_UNKNOWN",
                 reason_code="SDK_EXCEPTION_AFTER_SEND",
@@ -2000,7 +1995,6 @@ def _command_bundle_with_real_cap(**kwargs):
         event=kwargs["event"],
         receipt=kwargs["receipt"],
         decision_time=kwargs["decision_time"],
-        max_notional_usd=kwargs["tiny_live_max_notional_usd"],
         live_cap_conn=kwargs["live_cap_conn"],
     )
     actionable, final_intent, expressibility, _old_live_cap, command = _command_cert_bundle()
@@ -2148,6 +2142,16 @@ def _cap_transition_status(receipt):
 
 def _cap_transition_projection_status(receipt):
     return _cap_transition_cert(receipt).payload["projection_status"]
+
+
+def _operator_arm():
+    # FIX-2b (PR_SPEC.md §2): the EDLI live submit adapter now requires the operator-
+    # arm capability token for ANY real submit. Tests that exercise the executor path
+    # mint the token exactly as main.py does (require_operator_arm with the operator
+    # flag True), so they continue to reach the executor seam under the new gate.
+    from src.main import require_operator_arm
+
+    return require_operator_arm({"edli_live_operator_authorized": True})
 
 
 def _forecast_event():

@@ -429,6 +429,179 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             ON replacement_shadow_decisions(condition_id, token_id, decision_time)
     """)
 
+    # ------------------------------------------------------------------------
+    # raw_model_forecasts  (U0R_BAYES_SPEC.md §6 F1 raw capture)
+    # ------------------------------------------------------------------------
+    # The spec-named SHADOW-ONLY multi-model walk-forward capture table. One row per
+    # (model, city, target_date, metric, source_cycle_time, endpoint): the decorrelated
+    # globals (gfs_global/icon_global/gem_global/jma_seamless/icon_eu) + in-domain regionals
+    # (icon_d2/arome) fetched ALONGSIDE the single ECMWF anchor. forecast_value_c is ALWAYS
+    # degC (SPEC §7 "C/F unit mix" antibody — the residual against settlement is taken in C).
+    # endpoint distinguishes single_runs (live capture, variable-lead, replay) from
+    # previous_runs (fixed-lead, the ONLY rows that train walk-forward history; SPEC §3
+    # causality run_time != source_available_at). SHADOW_ONLY + training_allowed=0 are
+    # CHECK-pinned exactly like raw_forecast_artifacts: this is a research-accrual surface,
+    # NEVER an order/training truth table. Lives ONLY on zeus-forecasts.db (FORECAST_CLASS,
+    # INV-37 single-DB). The walk-forward history JOIN (src/data/u0r_history_provider.py)
+    # reads endpoint='previous_runs' rows JOINed to settlement_outcomes (same DB) with
+    # target_date < decision_date and authority='VERIFIED' (no-leak, IRON RULE #3).
+    # BLOCKER 4 (live-money data provenance, Fitz Constraint #4): the original capture columns
+    # could NOT prove the PHYSICAL product behind forecast_value_c. The product-identity columns
+    # below make a stored value reconstructable to its exact Open-Meteo product:
+    #   source_id/source_family/product_id/provider/model_name — WHICH feed/model id served it
+    #     (e.g. anchor stored model='ecmwf_ifs' but model_name='ecmwf_ifs025' is the OM product);
+    #   request_params_json/request_url_hash — the exact request that produced the value;
+    #   latitude_requested/longitude_requested/timezone_requested — requested point (city vs
+    #     station) and the tz the local-day window was taken in;
+    #   cell_selection/elevation_param/downscaling_policy — OM grid-cell + elevation/downscaling
+    #     choices that change the returned 2m temperature (a different cell = a different product);
+    #   endpoint_mode — daily vs hourly-agg / single_runs vs previous_runs physical endpoint;
+    #   model_domain_hash — fingerprint binding (provider, model_name, cell_selection,
+    #     elevation_param, downscaling_policy, endpoint_mode) so two physical cells never conflate;
+    #   coverage_status — whether the requested point was actually covered by the product;
+    #   raw_sha256 / artifact_id (both NULLABLE) — link to the immutable raw artifact when present
+    #     (capture may precede artifact persistence).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_model_forecasts (
+            raw_model_forecast_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL CHECK (metric IN ('high', 'low')),
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            lead_days INTEGER NOT NULL CHECK (lead_days >= 0),
+            forecast_value_c REAL NOT NULL,
+            endpoint TEXT NOT NULL CHECK (endpoint IN ('single_runs', 'previous_runs')),
+            source_id TEXT,
+            source_family TEXT,
+            product_id TEXT,
+            provider TEXT,
+            model_name TEXT,
+            request_params_json TEXT NOT NULL DEFAULT '{}',
+            request_url_hash TEXT,
+            raw_sha256 TEXT,
+            latitude_requested REAL,
+            longitude_requested REAL,
+            timezone_requested TEXT,
+            cell_selection TEXT,
+            elevation_param TEXT,
+            downscaling_policy TEXT,
+            endpoint_mode TEXT,
+            model_domain_hash TEXT,
+            coverage_status TEXT,
+            artifact_id INTEGER REFERENCES raw_forecast_artifacts(artifact_id),
+            trade_authority_status TEXT NOT NULL DEFAULT 'SHADOW_ONLY'
+                CHECK (trade_authority_status IN ('SHADOW_ONLY')),
+            training_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (training_allowed = 0),
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            -- BLOCKER 4 (operator-sharpened): the uniqueness MUST include the physical request
+            -- identity (product_id, request_url_hash). The pre-fix UNIQUE keyed ONLY on the
+            -- logical (model,city,target_date,metric,source_cycle_time,endpoint) tuple, so a Run-2
+            -- with the SAME logical key but a DIFFERENT request (changed timezone/cell_selection/
+            -- elevation/product_id) collided with the stale row and -- under INSERT OR IGNORE --
+            -- was silently discarded, leaving a wrong forecast_value_c to contaminate
+            -- bias/MAE/sigma/covariance/q in the walk-forward history JOIN. Including
+            -- product_id + request_url_hash makes a changed request a NEW row, never an ignore.
+            -- The persist layer additionally REJECTS a same-logical-key/different-request_hash
+            -- insert (RawModelForecastRequestConflict + an audit row) so a corrected request is a
+            -- LOUD, attributable event rather than two silently-coexisting rows the history JOIN
+            -- (which keys on model/city/metric/lead/endpoint/target_date, NOT on the hash) would
+            -- conflate. See src/data/u0r_multimodel_download.py::_persist_rows.
+            UNIQUE(model, product_id, request_url_hash, city, target_date, metric,
+                   source_cycle_time, endpoint)
+        )
+    """)
+    # Idempotent forward-only migration for pre-existing DBs created before the product-identity
+    # extension: ADD each column only if absent (guards on PRAGMA table_info). Forward-only, no
+    # DROP. New columns are nullable (or DEFAULT '{}') so existing rows remain valid.
+    _existing_rmf_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(raw_model_forecasts)").fetchall()
+    }
+    _rmf_product_identity_alters = (
+        ("source_id", "TEXT"),
+        ("source_family", "TEXT"),
+        ("product_id", "TEXT"),
+        ("provider", "TEXT"),
+        ("model_name", "TEXT"),
+        ("request_params_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("request_url_hash", "TEXT"),
+        ("raw_sha256", "TEXT"),
+        ("latitude_requested", "REAL"),
+        ("longitude_requested", "REAL"),
+        ("timezone_requested", "TEXT"),
+        ("cell_selection", "TEXT"),
+        ("elevation_param", "TEXT"),
+        ("downscaling_policy", "TEXT"),
+        ("endpoint_mode", "TEXT"),
+        ("model_domain_hash", "TEXT"),
+        ("coverage_status", "TEXT"),
+        ("artifact_id", "INTEGER"),
+    )
+    for _col, _decl in _rmf_product_identity_alters:
+        if _col not in _existing_rmf_cols:
+            conn.execute(f"ALTER TABLE raw_model_forecasts ADD COLUMN {_col} {_decl}")
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_history_join
+            ON raw_model_forecasts(city, metric, lead_days, endpoint, model, target_date)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_captured_at
+            ON raw_model_forecasts(captured_at)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_product_identity
+            ON raw_model_forecasts(city, metric, lead_days, endpoint, model_domain_hash, target_date)
+    """)
+    # BLOCKER 4 (operator-sharpened) — forward-only widened uniqueness for PRE-EXISTING DBs.
+    # SQLite cannot ALTER the table-level UNIQUE constraint of an already-created table without a
+    # full table rebuild; a CREATE UNIQUE INDEX IF NOT EXISTS adds the SAME widened uniqueness
+    # (logical key + product_id + request_url_hash) forward-only, no DROP/rebuild. On a fresh DB
+    # this is redundant with the table-level UNIQUE above (both pin the identical column set); on
+    # a legacy DB it is the only way the widened key reaches the physical table. The persist layer
+    # (src/data/u0r_multimodel_download.py::_persist_rows) is the PRIMARY antibody — it REJECTS a
+    # same-logical-key/different-request-hash insert before it is attempted — and this index is
+    # defense-in-depth for any write path that bypasses _persist_rows.
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_raw_model_forecasts_logical_plus_request
+            ON raw_model_forecasts(model, product_id, request_url_hash, city, target_date,
+                                   metric, source_cycle_time, endpoint)
+    """)
+    # BLOCKER 4 audit lane — the conflict ledger. When a same-logical-key insert arrives with a
+    # DIFFERENT physical request identity (a corrected request: changed timezone / cell_selection
+    # / elevation / product_id / request_url_hash), the persist layer raises
+    # RawModelForecastRequestConflict AND writes one row here, recording BOTH the existing and the
+    # incoming request identity. This converts the pre-fix SILENT INSERT-OR-IGNORE drop into a
+    # loud, forensically-attributable event (Fitz Constraint #3 immune system: an antibody, not an
+    # alert). SHADOW research surface only — never an order/training truth table.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_model_forecast_request_conflicts (
+            conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            detected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            model TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            existing_product_id TEXT,
+            incoming_product_id TEXT,
+            existing_request_url_hash TEXT,
+            incoming_request_url_hash TEXT,
+            existing_forecast_value_c REAL,
+            incoming_forecast_value_c REAL,
+            existing_cell_selection TEXT,
+            incoming_cell_selection TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_rmf_request_conflicts_logical_key
+            ON raw_model_forecast_request_conflicts(model, city, target_date, metric,
+                                                    source_cycle_time, endpoint)
+    """)
+
 
 def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
     """Create calibration_pairs table + indexes + ALTERs. Idempotent.

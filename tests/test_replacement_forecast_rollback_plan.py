@@ -19,9 +19,27 @@ from src.data.replacement_forecast_runtime_policy import (
     SHADOW_FLAG,
     TRADE_AUTHORITY_FLAG,
     VETO_FLAG,
+    ReplacementForecastCapitalObjectiveEvidence,
     ReplacementForecastPromotionEvidence,
     resolve_replacement_forecast_runtime_policy,
 )
+
+
+def _passing_capital_objective_evidence() -> ReplacementForecastCapitalObjectiveEvidence:
+    # FIX-1 AND (ITEM B): the second proof required (alongside promotion evidence)
+    # before the resolver can reach LIVE_AUTHORITY.
+    return ReplacementForecastCapitalObjectiveEvidence(
+        selected_label="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_w0.80_sigma3.00",
+        replay_status="EMPIRICAL_WINNER",
+        after_cost_pnl=97.65,
+        source_availability_observed=True,
+        source_availability_violations=0,
+        anti_lookahead_violations=0,
+        same_clob_replay_passed=True,
+        fee_depth_fill_evidence_passed=True,
+        unit_pnl_only=False,
+        product_specific_refit_passed=True,
+    )
 
 
 def _flags(*, shadow: bool = False, veto: bool = False, trade: bool = False, kelly: bool = False, flip: bool = False) -> dict[str, bool]:
@@ -105,6 +123,7 @@ def test_rollback_plan_can_describe_live_authority_shutdown_without_authorizing_
             nested_guardrail_bucket_min_rows=20,
             product_specific_refit_passed=True,
         ),
+        capital_objective_evidence=_passing_capital_objective_evidence(),
     )
     plan = build_replacement_forecast_rollback_plan(
         current_policy=policy,

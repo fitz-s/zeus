@@ -99,6 +99,7 @@ from src.contracts import (
     EpistemicContext,
     SettlementSemantics,
 )
+from src.contracts.probability_arithmetic import one_minus
 from src.data.ensemble_client import fetch_ensemble, validate_ensemble
 from src.data.polymarket_client import PolymarketClient
 from src.engine.discovery_mode import DiscoveryMode
@@ -6339,7 +6340,9 @@ def evaluate_candidate(
         # AFTER oracle penalty so the two compose multiplicatively. ddd_discount
         # is 0.0 unless Rail 2 fired (Rail 1 already short-circuited with HALT).
         if ddd_discount > 0.0:
-            km *= max(0.0, (1.0 / ddd_discount - 1.0) * ddd_discount)
+            # Remaining Kelly multiplier after the discount is (1 - ddd_discount);
+            # de-obfuscated from the value-identical (1/x - 1) * x (§0.2 / FIX-5a).
+            km *= max(0.0, one_minus(ddd_discount))
         km *= source_quality_haircut
         
         # F2/D3: ExecutionPrice contract — compute fee-adjusted entry cost.

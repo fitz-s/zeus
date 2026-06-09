@@ -11,8 +11,8 @@
         "amsterdam"
       ],
       "noaa": null,
-      "lat": 52.315,
-      "lon": 4.79,
+      "lat": 52.3086,
+      "lon": 4.7639,
       "wu_station": "EHAM",
       "wu_pws": null,
       "meteostat_station": null,
@@ -243,8 +243,8 @@
         "chengdu"
       ],
       "noaa": null,
-      "lat": 30.576,
-      "lon": 103.95,
+      "lat": 30.5783,
+      "lon": 103.9469,
       "wu_station": "ZUUU",
       "wu_pws": null,
       "meteostat_station": null,
@@ -489,8 +489,8 @@
         "istanbul"
       ],
       "noaa": null,
-      "lat": 41.262,
-      "lon": 28.74,
+      "lat": 41.2753,
+      "lon": 28.7519,
       "wu_station": "LTFM",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1139,8 +1139,8 @@
         "shanghai"
       ],
       "noaa": null,
-      "lat": 31.146,
-      "lon": 121.8,
+      "lat": 31.1433,
+      "lon": 121.8053,
       "wu_station": "ZSPD",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1388,8 +1388,8 @@
         "zhengzhou"
       ],
       "noaa": null,
-      "lat": 34.52,
-      "lon": 113.834,
+      "lat": 34.5197,
+      "lon": 113.8408,
       "wu_station": "ZHCC",
       "wu_pws": null,
       "meteostat_station": null,
@@ -1406,6 +1406,76 @@
   ],
   "_source_contract_pending_conversions": [],
   "_changelog": [
+    {
+      "timestamp": "2026-06-09T21:30:00+00:00",
+      "city": "Amsterdam",
+      "field": "lat / lon",
+      "old": {
+        "lat": 52.315,
+        "lon": 4.79
+      },
+      "new": {
+        "lat": 52.3086,
+        "lon": 4.7639
+      },
+      "reason": "Coordinate precision breakpoint (operator 2026-06-09): <3-decimal coords are up to ~1.9km off the WU/METAR station — at 2km regional grids (icon_d2 covers Amsterdam) that can select the WRONG forecast cell. Re-pinned to the web-verified airport station/ARP (OurAirports / AIP ARP cross-checked). NOTE: previously-accrued previous_runs history rows were fetched at the old coords; new captures use the new coords (BLOCKER-4 conflict audit guards same-cycle re-fetch identity changes). The walk-forward window purifies as new rows accrue; only Amsterdam sits in a 2km domain where the delta is material."
+    },
+    {
+      "timestamp": "2026-06-09T21:30:00+00:00",
+      "city": "Chengdu",
+      "field": "lat / lon",
+      "old": {
+        "lat": 30.576,
+        "lon": 103.95
+      },
+      "new": {
+        "lat": 30.5783,
+        "lon": 103.9469
+      },
+      "reason": "Coordinate precision breakpoint (operator 2026-06-09): <3-decimal coords are up to ~1.9km off the WU/METAR station — at 2km regional grids (icon_d2 covers Amsterdam) that can select the WRONG forecast cell. Re-pinned to the web-verified airport station/ARP (OurAirports / AIP ARP cross-checked). NOTE: previously-accrued previous_runs history rows were fetched at the old coords; new captures use the new coords (BLOCKER-4 conflict audit guards same-cycle re-fetch identity changes). The walk-forward window purifies as new rows accrue; only Amsterdam sits in a 2km domain where the delta is material."
+    },
+    {
+      "timestamp": "2026-06-09T21:30:00+00:00",
+      "city": "Istanbul",
+      "field": "lat / lon",
+      "old": {
+        "lat": 41.262,
+        "lon": 28.74
+      },
+      "new": {
+        "lat": 41.2753,
+        "lon": 28.7519
+      },
+      "reason": "Coordinate precision breakpoint (operator 2026-06-09): <3-decimal coords are up to ~1.9km off the WU/METAR station — at 2km regional grids (icon_d2 covers Amsterdam) that can select the WRONG forecast cell. Re-pinned to the web-verified airport station/ARP (OurAirports / AIP ARP cross-checked). NOTE: previously-accrued previous_runs history rows were fetched at the old coords; new captures use the new coords (BLOCKER-4 conflict audit guards same-cycle re-fetch identity changes). The walk-forward window purifies as new rows accrue; only Amsterdam sits in a 2km domain where the delta is material."
+    },
+    {
+      "timestamp": "2026-06-09T21:30:00+00:00",
+      "city": "Shanghai",
+      "field": "lat / lon",
+      "old": {
+        "lat": 31.146,
+        "lon": 121.8
+      },
+      "new": {
+        "lat": 31.1433,
+        "lon": 121.8053
+      },
+      "reason": "Coordinate precision breakpoint (operator 2026-06-09): <3-decimal coords are up to ~1.9km off the WU/METAR station — at 2km regional grids (icon_d2 covers Amsterdam) that can select the WRONG forecast cell. Re-pinned to the web-verified airport station/ARP (OurAirports / AIP ARP cross-checked). NOTE: previously-accrued previous_runs history rows were fetched at the old coords; new captures use the new coords (BLOCKER-4 conflict audit guards same-cycle re-fetch identity changes). The walk-forward window purifies as new rows accrue; only Amsterdam sits in a 2km domain where the delta is material."
+    },
+    {
+      "timestamp": "2026-06-09T21:30:00+00:00",
+      "city": "Zhengzhou",
+      "field": "lat / lon",
+      "old": {
+        "lat": 34.52,
+        "lon": 113.834
+      },
+      "new": {
+        "lat": 34.5197,
+        "lon": 113.8408
+      },
+      "reason": "Coordinate precision breakpoint (operator 2026-06-09): <3-decimal coords are up to ~1.9km off the WU/METAR station — at 2km regional grids (icon_d2 covers Amsterdam) that can select the WRONG forecast cell. Re-pinned to the web-verified airport station/ARP (OurAirports / AIP ARP cross-checked). NOTE: previously-accrued previous_runs history rows were fetched at the old coords; new captures use the new coords (BLOCKER-4 conflict audit guards same-cycle re-fetch identity changes). The walk-forward window purifies as new rows accrue; only Amsterdam sits in a 2km domain where the delta is material."
+    },
     {
       "timestamp": "2026-05-01T00:00:00+00:00",
       "city": "Paris",

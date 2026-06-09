@@ -1830,7 +1830,7 @@ def test_receipt_without_money_path_proof_is_rejected():
         riskguard_gate=lambda _event: True,
         final_intent_submit=_submit,
         reject=lambda event, stage, reason: rejected.append((event.event_id, stage, reason)),
-        config=ReactorConfig(tiny_live_max_orders_per_day=1),
+        config=ReactorConfig(),
     )
 
     result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
@@ -1892,7 +1892,7 @@ def test_no_submit_day0_does_not_consume_tiny_cap():
     store.insert_or_ignore(_forecast_event("bin-b"))
     reactor, rejected, submitted = _reactor(
         store,
-        config=ReactorConfig(tiny_live_max_orders_per_day=1),
+        config=ReactorConfig(),
     )
     result = reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
     assert len(submitted) == 2
@@ -1908,7 +1908,7 @@ def test_no_submit_day0_tiny_cap_does_not_persist_across_reactor_instances():
     store.insert_or_ignore(first)
     reactor, _rejected, submitted = _reactor(
         store,
-        config=ReactorConfig(tiny_live_max_orders_per_day=1),
+        config=ReactorConfig(),
     )
     reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
     assert submitted == [first.event_id]
@@ -1916,7 +1916,7 @@ def test_no_submit_day0_tiny_cap_does_not_persist_across_reactor_instances():
     store.insert_or_ignore(second)
     second_reactor, rejected, second_submitted = _reactor(
         store,
-        config=ReactorConfig(tiny_live_max_orders_per_day=1),
+        config=ReactorConfig(),
     )
     result = second_reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 11, tzinfo=timezone.utc))
 
@@ -1933,7 +1933,7 @@ def test_no_submit_day0_tiny_notional_cap_does_not_persist_across_reactor_instan
     store.insert_or_ignore(first)
     reactor, _rejected, submitted = _reactor(
         store,
-        config=ReactorConfig(tiny_live_max_orders_per_day=2, tiny_live_max_notional_usd=5.0),
+        config=ReactorConfig(),
     )
     reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc))
     assert submitted == [first.event_id]
@@ -1941,7 +1941,7 @@ def test_no_submit_day0_tiny_notional_cap_does_not_persist_across_reactor_instan
     store.insert_or_ignore(second)
     second_reactor, rejected, second_submitted = _reactor(
         store,
-        config=ReactorConfig(tiny_live_max_orders_per_day=2, tiny_live_max_notional_usd=5.0),
+        config=ReactorConfig(),
     )
     result = second_reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 11, tzinfo=timezone.utc))
 

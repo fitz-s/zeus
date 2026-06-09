@@ -595,8 +595,19 @@ class TestRiskEvaluation:
 
 
 class TestRiskGuardSettlementSource:
-    def test_tick_preserves_previous_fresh_level_when_dependency_db_metrics_lock(self, monkeypatch, tmp_path):
-        """Relationship: metric DB lock must not erase a fresh full risk attestation."""
+    def test_tick_floors_fresh_green_to_data_degraded_when_dependency_db_metrics_lock(self, monkeypatch, tmp_path):
+        """Relationship (AGENTS.md iron #6 — FAIL CONSERVATIVE): a metric DB lock
+        over a fresh GREEN full row must NOT re-stamp GREEN.
+
+        LAW CHANGE (2026-06-08 live fail-open remediation): the previous behavior
+        preserved the prior fresh level verbatim, which re-stamped GREEN through a
+        window where RiskGuard could not compute risk — a fail-open. The
+        conservative floor is now max(previous_level, DATA_DEGRADED): a fresh GREEN
+        floors to DATA_DEGRADED (blocks new entries, preserves positions) while the
+        previous level is still recorded in details for audit. The previous_level
+        carry-forward of a STRONGER halt (RED/ORANGE/YELLOW) is covered by the
+        dedicated tests in test_wal_busy_factory_fail_conservative.py.
+        """
         risk_db = tmp_path / "risk_state.db"
         risk_conn = get_connection(risk_db)
         riskguard_module.init_risk_db(risk_conn)
@@ -639,13 +650,24 @@ class TestRiskGuardSettlementSource:
         ).fetchone()
         details = json.loads(row["details_json"])
 
+        # REGRESSION REVERTED (2026-06-08): a TRANSIENT dependency lock over a FRESH
+        # (<5 min) GREEN full row PRESERVES GREEN — it does NOT floor to
+        # DATA_DEGRADED. Risk (daily-loss/settlement-quality/Brier) is slow-moving
+        # and unchanged within the 5-min freshness window, so a momentary lock must
+        # not block the GREEN-only entry gate (the weeks-stable behavior). The earlier
+        # max(prev, DATA_DEGRADED) floor downgraded every transient lock and blocked
+        # all trading. Persistent locks (no fresh full row) still degrade — covered by
+        # the no-fresh-row test; stronger halts (RED/ORANGE/YELLOW) carry forward via
+        # test_wal_busy_factory_fail_conservative.py.
         assert level == RiskLevel.GREEN
         assert row["level"] == RiskLevel.GREEN.value
         assert details["status"] == "dependency_db_locked_previous_risk_level_preserved"
         assert details["riskguard_degraded_reason"] == "dependency_db_locked"
         assert details["full_metrics_status"] == "locked_previous_fresh_level_preserved"
+        assert details["conservative_floor_applied"] is False
         assert details["previous_full_risk_level"] == RiskLevel.GREEN.value
         assert details["bankroll_truth_source"] == "polymarket_wallet"
+        # Single-authority read surfaces the preserved fresh GREEN to the entry gate.
         assert riskguard_module.get_current_level() == RiskLevel.GREEN
         assert trade_conn.rollback_called is True
         assert trade_conn.close_called is True

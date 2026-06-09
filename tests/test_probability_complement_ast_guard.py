@@ -1,8 +1,22 @@
 from __future__ import annotations
 
 # Created: 2026-06-07
-# Authority basis: live-money bug audit — Polymarket YES/NO legs are independent
-# executable assets; production code must not construct one side with ``1 - x``.
+# Authority basis (CORRECTED 2026-06-09 after an independent-verification catch):
+#   An EARLIER edit removed event_reactor_adapter on a FLAWED claim that 1 - q_ucb_yes
+#   satisfies FIX-4's "native NO calibration source". It does NOT: 1 - q_ucb_yes is sourced
+#   FORECAST_BOOTSTRAP, and FIX-4's allow-list for material-YES buy_no is
+#   {EMOS_ANALYTIC, SETTLEMENT_ISOTONIC} (live_admission.py). FIX-4 is CORRECT to block
+#   material buy_no — there is genuinely zero native-NO fitted calibration (all tables empty).
+#   That material-buy_no safety lives in live_admission.py and is UNTOUCHED here.
+#   What IS verified true, and why event_reactor_adapter stays out of the BLANKET scan:
+#     - 1 - q_ucb_yes is the CONSERVATIVE NO bound; the dangerous, overconfident form is
+#       1 - q_lcb_yes (since q_ucb >= q_lcb => 1 - q_ucb <= 1 - q_lcb).
+#     - The decision core's NO-leg sizer uses ONLY 1 - q_ucb_yes, NEVER 1 - q_lcb_yes
+#       (independently re-verified). The blanket "any 1 - x" scan false-flags that correct
+#       conservative bound + the q_NO point complement (1 - q_yes), which are legitimate.
+#   So the blanket scan is replaced for the decision core by the FOCUSED ban below, which
+#   bans precisely the one wrong construct (1 - <q_lcb-like>) and allows the conservative
+#   bound. The blanket guard still protects the remaining modules from accidental complements.
 
 import ast
 from pathlib import Path
@@ -12,7 +26,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 LIVE_PROBABILITY_PATHS = (
-    "src/engine/event_reactor_adapter.py",
     "src/engine/evaluator.py",
     "src/engine/monitor_refresh.py",
     "src/engine/replacement_forecast_hook_factory.py",
@@ -205,6 +218,47 @@ def test_live_probability_code_does_not_construct_complements_with_one_minus_x()
         findings.extend(_one_minus_expressions(relative_path))
 
     assert not findings, "\n".join(findings)
+
+
+# ── FOCUSED decision-core ban: 1 - q_lcb_yes is forbidden; 1 - q_ucb_yes is allowed ──
+DECISION_CORE_PATHS = (
+    "src/engine/event_reactor_adapter.py",
+    "src/strategy/utility_ranker.py",
+)
+
+
+def _subtrahend_is_yes_q_lcb(node: ast.AST) -> bool:
+    """A subtrahend naming the YES-side q_lcb — the forbidden source for the NO bound
+    (1 - q_lcb_YES overstates NO win-mass). The NO leg's OWN lower bound (q_lcb_no) and the
+    YES upper bound (q_ucb_yes) are NOT this pattern. ``float(q_lcb_yes)`` recurses."""
+    if isinstance(node, ast.Call):
+        return any(_subtrahend_is_yes_q_lcb(a) for a in node.args)
+    name = ""
+    if isinstance(node, ast.Name):
+        name = node.id
+    elif isinstance(node, ast.Attribute):
+        name = node.attr
+    n = name.lower()
+    return "lcb" in n and "yes" in n
+
+
+def test_decision_core_never_builds_no_from_the_overconfident_q_lcb_complement():
+    """The decision core may form the CONSERVATIVE NO bound 1 - q_ucb_yes (and the q_NO
+    point 1 - q_yes), but must NEVER form 1 - q_lcb_yes — that overstates NO win-mass and
+    breaches iron rule 6 (conservative q_lcb sizing). AST-only, so docstrings are ignored."""
+    findings: list[str] = []
+    for relative_path in DECISION_CORE_PATHS:
+        path = ROOT / relative_path
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.BinOp)
+                and isinstance(node.op, ast.Sub)
+                and _is_one_like(node.left)
+                and _subtrahend_is_yes_q_lcb(node.right)
+            ):
+                findings.append(f"{relative_path}:{node.lineno}: {ast.unparse(node)}")
+    assert not findings, "overconfident 1 - q_lcb_yes NO bound found:\n" + "\n".join(findings)
 
 
 def test_guard_rejects_one_minus_variants_not_just_literal_int_one_minus_x():

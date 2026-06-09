@@ -157,6 +157,14 @@ OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP: dict[str, str] = {
     "ecmwf_ifs025": "ecmwf_previous_runs",
     "icon_global": "icon_previous_runs",
     "ukmo_global_deterministic_10km": "ukmo_previous_runs",
+    # U0R-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6).
+    # OM previous-runs API supports these model ids; the U0R fixed-lead walk-forward train
+    # reads them via the temperature_2m_previous_dayN hourly var. icon_eu has NO previous-runs
+    # entry: it is dedup-folded to icon_d2 in-EU / icon_global out (SPEC §3 alias dedup).
+    "gem_global": "gem_previous_runs",
+    "jma_seamless": "jma_previous_runs",
+    "icon_d2": "icon_d2_previous_runs",
+    "meteofrance_arome_france_hd": "arome_previous_runs",
 }
 
 # Phase 3 routing fix (2026-05-04): training/serving alignment.
@@ -207,6 +215,37 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         tier="secondary",
         kind="forecast_table",
         model_name="icon_global",
+        allowed_roles=("diagnostic",),
+    ),
+    # U0R-Bayes F1 decorrelated globals + in-domain regionals (2026-06-08, SPEC §3/§6 F0/F1).
+    # diagnostic-only (SHADOW capture train): these feed the fixed-lead walk-forward history
+    # for u0r_bayes fusion, never a live serve path on their own.
+    "gem_previous_runs": ForecastSourceSpec(
+        source_id="gem_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="gem_global",
+        allowed_roles=("diagnostic",),
+    ),
+    "jma_previous_runs": ForecastSourceSpec(
+        source_id="jma_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="jma_seamless",
+        allowed_roles=("diagnostic",),
+    ),
+    "icon_d2_previous_runs": ForecastSourceSpec(
+        source_id="icon_d2_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="icon_d2",
+        allowed_roles=("diagnostic",),
+    ),
+    "arome_previous_runs": ForecastSourceSpec(
+        source_id="arome_previous_runs",
+        tier="secondary",
+        kind="forecast_table",
+        model_name="meteofrance_arome_france_hd",
         allowed_roles=("diagnostic",),
     ),
     "ukmo_previous_runs": ForecastSourceSpec(
@@ -312,6 +351,79 @@ SOURCES: dict[str, ForecastSourceSpec] = {
         kind="experimental_ingest",
         enabled_by_default=False,
         model_name="ecmwf_ifs_control_0p1",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    # ---- The Path U0R-Bayes fusion sources (F0) -------------------------------------
+    # Authority: U0R_BAYES_SPEC.md §6 F0 (source registry); U0R_PROOF_RESULT.md (core
+    # PROMOTE, regionals SHADOW-ONLY/DEFER). These are Open-Meteo previous-runs /
+    # single-runs decorrelated globals + in-domain regional experts that feed the U0R
+    # multi-model posterior. They are DISABLED plumbing rows until the U0R fusion flag
+    # (replacement_0_1_u0r_fusion_enabled, default-OFF) AND an ingest path activate them;
+    # the per-model live capture is fail-soft (a missing source is simply dropped).
+    "openmeteo_gfs_global": ForecastSourceSpec(
+        source_id="openmeteo_gfs_global",
+        tier="disabled",
+        kind="forecast_table",
+        enabled_by_default=False,
+        model_name="gfs_global",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    "openmeteo_icon_global": ForecastSourceSpec(
+        source_id="openmeteo_icon_global",
+        tier="disabled",
+        kind="forecast_table",
+        enabled_by_default=False,
+        model_name="icon_global",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    "openmeteo_gem_global": ForecastSourceSpec(
+        source_id="openmeteo_gem_global",
+        tier="disabled",
+        kind="forecast_table",
+        enabled_by_default=False,
+        model_name="gem_global",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    "openmeteo_jma_seamless": ForecastSourceSpec(
+        source_id="openmeteo_jma_seamless",
+        tier="disabled",
+        kind="forecast_table",
+        enabled_by_default=False,
+        model_name="jma_seamless",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    # Regional experts (conditional, in-domain only) — SHADOW-ONLY/DEFER per proof verdict.
+    "openmeteo_icon_d2_eu": ForecastSourceSpec(
+        source_id="openmeteo_icon_d2_eu",
+        tier="disabled",
+        kind="forecast_table",
+        enabled_by_default=False,
+        model_name="icon_d2",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    "openmeteo_arome_fr_hd": ForecastSourceSpec(
+        source_id="openmeteo_arome_fr_hd",
+        tier="disabled",
+        kind="forecast_table",
+        enabled_by_default=False,
+        model_name="meteofrance_arome_france_hd",
+        allowed_roles=("diagnostic",),
+        degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
+    ),
+    # The fused derived posterior product (replaces the single-anchor center/spread when
+    # the U0R flag is ON; shadow-only until settlement evidence promotes it).
+    "the_path_u0r_fusion": ForecastSourceSpec(
+        source_id="the_path_u0r_fusion",
+        tier="disabled",
+        kind="derived_posterior",
+        enabled_by_default=False,
+        model_name="the_path_u0r_fusion",
         allowed_roles=("diagnostic",),
         degradation_level="DIAGNOSTIC_NON_EXECUTABLE",
     ),

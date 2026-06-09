@@ -41,6 +41,27 @@ FORECAST_LIVE_STARTUP_JOB_ID = "forecast_live_opendata_startup_catch_up"
 FORECAST_LIVE_SAFE_CYCLE_POLL_JOB_ID = "forecast_live_opendata_safe_cycle_poll"
 FORECAST_LIVE_HEARTBEAT_JOB_ID = "forecast_live_heartbeat"
 FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
+# Operator Point-1 directive 2026-06-08: U0R/replacement forecast PRODUCTION jobs moved here
+# from the live-trading daemon. The heavy ~365MB AIFS ensemble download must run on THIS data
+# daemon, never on the trading process. These ids are registered OUTSIDE the OpenData registry
+# job-set (after the registry/cutover/legacy scheduler is built), on their own dedicated
+# executor lane, so they ALWAYS run (they ARE the replacement production — under the OpenData
+# cutover they MUST run, not be filtered out) and never contend with the heartbeat or OpenData
+# lanes. The functions themselves are flag-gated (no-op when the shadow flag is off).
+REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
+REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_shadow_materialize"
+REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
+REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
+# SEPARATE lane for the heavy download (publish-time cron + boot catch-up). The download
+# runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
+# 400-retries on short-range models). On a SHARED max_workers=1 lane it serialized AHEAD of
+# the 5-min materialize, starving readiness production for the whole download (observed
+# 2026-06-08: a 75-min download blocked the materialize so U0R readiness aged out -> the
+# replacement-forecast hook BLOCKED every live FSR event -> zero trades). A dedicated
+# download lane makes "a long download starves the materialize" structurally impossible:
+# the materialize keeps its own worker and refreshes readiness every interval regardless of
+# download duration.
+REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE = "replacement_download"
 FORECAST_LIVE_HEARTBEAT_SECONDS = 30
 FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
@@ -873,6 +894,139 @@ def forecast_live_job_specs(
     return tuple(spec for spec in specs if spec[2]["id"] in FORECAST_LIVE_HEARTBEAT_ONLY_JOB_IDS)
 
 
+# ---------------------------------------------------------------------------
+# Replacement-forecast PRODUCTION jobs (operator Point-1 directive 2026-06-08).
+# Moved here from the live-trading daemon (src/main.py). The heavy ~365MB AIFS
+# ensemble download (~11.5 min) must run on THIS data daemon, on a dedicated lane,
+# event-driven at publish time — never inline on the trading process.
+# ---------------------------------------------------------------------------
+
+
+def _replacement_forecast_shadow_enabled() -> bool:
+    """The single shadow flag the moved production functions already check. Used here only to
+    log whether the registered jobs will do work; the functions THEMSELVES re-check this flag
+    and no-op when it is off, so registration is always safe."""
+    try:
+        from src.data.replacement_forecast_production import (
+            _replacement_forecast_runtime_flags_from_settings,
+        )
+
+        flags = _replacement_forecast_runtime_flags_from_settings()
+        return bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False))
+    except Exception as exc:  # noqa: BLE001 - never block boot on a flag read
+        logger.warning("replacement-forecast shadow flag read failed (treating as off): %s", exc)
+        return False
+
+
+@_scheduler_job(REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID)
+def _replacement_forecast_download_job() -> None:
+    """EVENT-DRIVEN raw-input PRE-FETCH (the heavy ~365MB AIFS ensemble + OpenMeteo download).
+
+    Fires at each cycle's publish time (00Z/12Z + release_lag) plus once shortly after boot.
+    Delegates to the shared production function, which is flag-gated and fail-soft. This is the
+    ONLY place the heavy AIFS fetch runs now (moved off the live-trading daemon)."""
+    from src.data.replacement_forecast_production import _replacement_forecast_download_cycle
+
+    # Call the undecorated inner so the moved function's own @_scheduler_job (which records
+    # health under its legacy job_name) does not double-write health alongside THIS wrapper.
+    _replacement_forecast_download_cycle.__wrapped__()
+
+
+@_scheduler_job(REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID)
+def _replacement_forecast_materialize_job() -> None:
+    """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
+
+    Interval-driven; delegates to the shared production function, which is flag-gated and
+    fail-soft."""
+    from src.data.replacement_forecast_production import (
+        _replacement_forecast_shadow_materialize_cycle,
+    )
+
+    _replacement_forecast_shadow_materialize_cycle()
+
+
+def _replacement_forecast_shadow_cfg() -> dict:
+    """The ``replacement_forecast_shadow`` settings section via the shared production module's
+    single config reader (one source for ``download_release_lag_hours`` /
+    ``materialization_interval_min``, identical to the values the moved production functions
+    resolve)."""
+    from src.data.replacement_forecast_production import _settings_section
+
+    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _replacement_forecast_publish_cron_hours() -> tuple[int, int]:
+    """The two daily UTC hours when a cycle becomes available = (00Z + release_lag) and
+    (12Z + release_lag), modulo 24. With the default 14h release lag that is 14:00 and 02:00
+    UTC (matching scripts.download_replacement_forecast_current_targets._source_available_at)."""
+    release_lag_hours = float(_replacement_forecast_shadow_cfg().get("download_release_lag_hours") or 14.0)
+    hour_00z = int((0 + release_lag_hours) % 24)
+    hour_12z = int((12 + release_lag_hours) % 24)
+    return hour_00z, hour_12z
+
+
+def _replacement_forecast_materialize_interval_minutes() -> int:
+    return int(_replacement_forecast_shadow_cfg().get("materialization_interval_min") or 5)
+
+
+def _register_replacement_forecast_production_jobs(
+    scheduler: object, *, startup_run_date: datetime | None = None
+) -> None:
+    """Register the replacement-forecast download (publish-time cron + boot catch-up) and the
+    light materialize (interval) jobs on their own dedicated executor lane. Called AFTER the
+    registry/cutover/legacy scheduler is built, so these jobs are OUTSIDE the registry boot-
+    assert's expected set (they are not OpenData jobs) and SURVIVE the OpenData cutover (under
+    cutover the legacy OpenData jobs are filtered out but the replacement production — which IS
+    the cutover target — must run)."""
+    startup_at = (startup_run_date or _utcnow())
+    hour_00z, hour_12z = _replacement_forecast_publish_cron_hours()
+    materialize_minutes = _replacement_forecast_materialize_interval_minutes()
+    cron_hours = f"{hour_00z},{hour_12z}"
+
+    # Heavy download: publish-time cron (fires twice daily when each cycle is released).
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _replacement_forecast_download_job,
+        "cron",
+        hour=cron_hours,
+        minute=10,
+        id=REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID,
+        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    # Boot catch-up: fetch the current cycle immediately on a fresh boot (a single date trigger
+    # a short delay after startup, on the same dedicated lane).
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _replacement_forecast_download_job,
+        "date",
+        run_date=startup_at + timedelta(seconds=90),
+        id=REPLACEMENT_FORECAST_STARTUP_JOB_ID,
+        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=None,
+    )
+    # Light materialize: interval (consumes already-downloaded manifests; no download).
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _replacement_forecast_materialize_job,
+        "interval",
+        minutes=materialize_minutes,
+        id=REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,
+        executor=REPLACEMENT_FORECAST_EXECUTOR_LANE,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=120,
+    )
+    logger.info(
+        "replacement-forecast production jobs registered (download cron hour=%s min=10 + boot "
+        "catch-up; materialize interval=%dmin; lane=%s; shadow_enabled=%s)",
+        cron_hours, materialize_minutes, REPLACEMENT_FORECAST_EXECUTOR_LANE,
+        _replacement_forecast_shadow_enabled(),
+    )
+
+
 # spec->job_defs derivation is shared across both ingest daemons (one implementation, see
 # src.data.scheduler_adapter) so the trigger-param stripping can never diverge between them.
 from src.data.scheduler_adapter import (  # noqa: E402
@@ -893,25 +1047,46 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
 
     specs = forecast_live_job_specs(startup_run_date=startup_run_date)
 
+    # Operator Point-1 directive 2026-06-08: a DEDICATED executor lane for the replacement-
+    # forecast production jobs, present in EVERY scheduler branch below, so the heavy ~365MB
+    # AIFS ensemble download never contends with the heartbeat or OpenData lanes. The
+    # replacement jobs are registered (after each branch builds its scheduler) on this lane.
+    def _replacement_production_executor() -> dict[str, object]:
+        # Two SEPARATE single-worker lanes: the heavy download must never serialize ahead of
+        # (and starve) the light materialize that refreshes readiness — see
+        # REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE.
+        return {
+            REPLACEMENT_FORECAST_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
+            REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE: _APSchedulerThreadPoolExecutor(max_workers=1),
+        }
+
     if _opendata_jobs_disabled_by_replacement_cutover():
         scheduler = BlockingScheduler(
             timezone=timezone.utc,
-            executors={"heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1)},
+            executors={
+                "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
+                **_replacement_production_executor(),
+            },
         )
         for func, trigger, kwargs in specs:
             scheduler.add_job(func, trigger, **kwargs)
         logger.info("Forecast-live OpenData jobs disabled by replacement cutover; heartbeat-only scheduler active")
+        _register_replacement_forecast_production_jobs(scheduler, startup_run_date=startup_run_date)
         return scheduler
 
     # REGISTRY mode (default, PR #329 A): build jobs FROM the registry with executor-lane routing +
     # a fail-fast boot assert. The hand-coded loop below is the LEGACY (rollback) path only.
     if data_collection_mode() == "registry":
-        scheduler = BlockingScheduler(timezone=timezone.utc, executors=registry_executor_pools())
+        scheduler = BlockingScheduler(
+            timezone=timezone.utc,
+            executors={**registry_executor_pools(), **_replacement_production_executor()},
+        )
         build_registry_scheduler(
             scheduler, "forecast_live_daemon", _job_defs_from_specs(specs),
             forecast_live_owner_env=os.environ.get("ZEUS_FORECAST_LIVE_OWNER", ""),
             logger=logger,
         )
+        _register_replacement_forecast_production_jobs(scheduler, startup_run_date=startup_run_date)
         return scheduler
 
     # LEGACY mode (ZEUS_USE_LEGACY_DATA_COLLECTION=1 / ZEUS_DATA_COLLECTION_MODE=legacy): the
@@ -923,10 +1098,12 @@ def build_scheduler(*, startup_run_date: datetime | None = None):
             "fast": _APSchedulerThreadPoolExecutor(max_workers=1),
             "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
             "source_health": _APSchedulerThreadPoolExecutor(max_workers=1),
+            **_replacement_production_executor(),
         },
     )
     for func, trigger, kwargs in specs:
         scheduler.add_job(func, trigger, **kwargs)
+    _register_replacement_forecast_production_jobs(scheduler, startup_run_date=startup_run_date)
     return scheduler
 
 

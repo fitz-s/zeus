@@ -116,6 +116,13 @@ def evaluate_replacement_forecast_switch_decision(
             readiness_id=None,
         )
 
+    # OPERATOR DIRECTIVE (2026-06-08): refit live-promotion gate and
+    # capital-objective-evidence veto removed. LIVE_AUTHORITY from the flag
+    # ladder (runtime_policy) is the sole authority for can_initiate_trade.
+    # The refit/evidence-file gates were circular (proof requires trading) and
+    # are promotion bureaucracy, not safety controls. Safety controls (q_lcb
+    # floor, Kelly, cost floor, direction law, RiskGuard) are enforced
+    # downstream and are unaffected by this removal.
     reasons: list[str] = []
     if policy.status == BLOCKED_STATUS:
         reasons.extend(policy.reason_codes)
@@ -130,6 +137,7 @@ def evaluate_replacement_forecast_switch_decision(
         reasons.append("REPLACEMENT_SWITCH_READINESS_MISSING")
     elif readiness.status != READY_STATUS:
         reasons.extend(readiness.reason_codes)
+
     if reasons:
         return ReplacementForecastSwitchDecision(
             status=SWITCH_BLOCKED,

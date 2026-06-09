@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -339,8 +340,13 @@ def build_replacement_forecast_current_target_plan(
                   )
             """
         if "status" in readiness_columns:
+            # Expired readiness must NOT count as coverage (else a city stays "covered"
+            # forever after its first posterior and the downloader never re-fetches its
+            # raw inputs once the 3h TTL lapses — the stale-after-first-cycle bug). Only
+            # a row whose expires_at is still in the future counts as live coverage.
             readiness_status_clause = """
                           AND r.status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY', 'READY')
+                          AND (r.expires_at IS NULL OR r.expires_at > strftime('%Y-%m-%dT%H:%M:%S', 'now'))
             """
         sql_limit = "" if limit is None else f" LIMIT {int(limit)}"
         if source_run_targets:
@@ -516,9 +522,9 @@ def build_replacement_forecast_current_target_plan(
                 aifs_count = 1
                 openmeteo_count = 1
             elif metadata_column is not None:
-                manifest_counts = conn.execute(
+                manifest_rows = conn.execute(
                     f"""
-                    SELECT source_id, data_version, COUNT(*) AS count
+                    SELECT source_id, data_version, artifact_path
                     FROM raw_forecast_artifacts
                     WHERE (
                         source_id = ? AND data_version = ?
@@ -542,7 +548,6 @@ def build_replacement_forecast_current_target_plan(
                             WHERE value = ?
                         )
                       )
-                    GROUP BY source_id, data_version
                     """,
                     (
                         aifs_expected.source_id,
@@ -555,13 +560,24 @@ def build_replacement_forecast_current_target_plan(
                         target_date,
                     ),
                 ).fetchall()
-                for manifest in manifest_counts:
+                # DB<->disk provenance antibody (Fitz #4): a raw_forecast_artifacts row whose
+                # artifact_path file no longer exists on disk must NOT count as coverage. The
+                # download-skip gate (replacement_forecast_production._download_replacement_
+                # forecast_current_targets_if_needed) skips fetching when
+                # missing_*_manifest_count == 0; trusting a dangling DB row (file deleted, row
+                # survived) makes it skip the fetch while disk-based seed discovery finds
+                # nothing -> deadlock -> readiness expires -> zero trades. Count only artifacts
+                # actually present on disk, the same authority seed discovery uses.
+                for manifest in manifest_rows:
+                    artifact_path = str(manifest["artifact_path"] or "")
+                    if not artifact_path or not os.path.exists(artifact_path):
+                        continue
                     source_id = str(manifest["source_id"])
                     data_version = str(manifest["data_version"])
                     if source_id == aifs_expected.source_id and data_version == aifs_expected.data_version:
-                        aifs_count += int(manifest["count"])
+                        aifs_count += 1
                     if source_id == openmeteo_expected.source_id and data_version == openmeteo_expected.data_version:
-                        openmeteo_count += int(manifest["count"])
+                        openmeteo_count += 1
             out.append(
                 ReplacementForecastCurrentTargetPlanRow(
                     city=city,

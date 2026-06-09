@@ -221,6 +221,65 @@ def evaluate_kelly(
         kelly_mult=effective_multiplier,
     )
 
+    # ── Single-position concentration ceiling — the "total-portfolio layer" ──
+    # INV-K3 antibody, RESTORED. Task #107's 2026-06-07 live-flow fix correctly
+    # removed the depleting effective-bankroll GATE (``f_cap·B − committed``
+    # sized Kelly against a budget that shrank to zero as the book filled and
+    # hard-zeroed positive-edge candidates). But it ALSO dropped the
+    # single-position concentration CEILING, leaving INV-K3/K1/K8 in
+    # tests/test_portfolio_kelly_relationships.py RED and the live path able to
+    # size one bet at 22-27% of bankroll. This restores the ceiling.
+    #
+    # Why this is NOT a re-introduction of the #107 bug (the distinction is
+    # load-bearing — do not "simplify" it away):
+    #   * The gate #107 removed was a SUBTRACTION (B_eff = cap·B − committed)
+    #     that DEPLETES toward zero, so kelly_size(B_eff)→0 for positive edges.
+    #   * This is a pure UPPER BOUND: ``min(size, ceiling)`` on an
+    #     already-positive ``size`` can never reach 0 (ceiling = pct·equity > 0
+    #     whenever equity > 0). It only clips the strong-edge TAIL; weak/modest
+    #     edges sit below the ceiling and keep their full Kelly proportionality.
+    #     Set ``max_single_position_pct`` loose enough that typical fractional-
+    #     Kelly bets fall under it → a genuine tail-limit, NOT a flat cash rule.
+    #
+    # Why a FRACTION (not the deleted tiny_live fixed-dollar cap): the ceiling
+    # scales with wealth — pct·B is $50 at $1k, $500 at $10k — so it is a
+    # structural concentration limit, not a one-off special-case dollar clamp.
+    #
+    # Base = the SIZING bankroll (free spendable cash, "可用现金一层"), NOT total
+    # equity. This is required by two established antibodies:
+    #   * INV-K8 (no-amplify): portfolio-aware size ≤ single-Kelly size always.
+    #     An equity (cash+committed) base would make the ceiling GROW with the
+    #     book (pct·(cash+committed) > pct·cash), letting the portfolio path
+    #     exceed the single path — amplification.
+    #   * INV-K4 (monotone): adding committed capital must never increase the
+    #     next bet. A ceiling that rises with committed capital would raise a
+    #     ceiling-bound bet. A cash base instead SHRINKS as cash converts to
+    #     open positions (live), keeping the ceiling monotone-safe.
+    # The total-PORTFOLIO dimension ("总portfolio一层") is already carried by the
+    # separate portfolio-heat attenuation above (raw+corr committed → smaller
+    # ``effective_multiplier``); it must not also re-enter as a larger ceiling.
+    # Applies ONLY in the portfolio-aware path. The legacy/bare no-context path
+    # (from_candidate_proof, or callers that pass only a flat kelly_multiplier)
+    # stays pure fractional Kelly with single_cap_usd=None — the concentration
+    # ceiling is a PORTFOLIO-level control. This is safe for live: the reactor's
+    # real-submit path fails CLOSED unless portfolio context is present
+    # (src/main.py:5106 → live_submit_effective=False), so every real order is
+    # portfolio-aware and therefore capped, while bare-adapter tests/tools keep
+    # single-asset semantics.
+    _has_portfolio_ctx = (
+        sizing_context is not None and sizing_context.has_portfolio_context
+    )
+    _single_pos_pct = float(sizing_defaults()["max_single_position_pct"])
+    single_cap_usd: float | None = (
+        _single_pos_pct * sizing_bankroll
+        if (_has_portfolio_ctx and _single_pos_pct > 0.0)
+        else None
+    )
+    _capped_by_single_position = False
+    if single_cap_usd is not None and size_usd > single_cap_usd:
+        size_usd = single_cap_usd
+        _capped_by_single_position = True
+
     # ── Diagnostic: compute binding_constraint (purely observational) ────────
     # Determines WHICH limit drove size to 0 (or which path produced the result).
     # Does NOT alter size_usd or passed.
@@ -264,6 +323,8 @@ def evaluate_kelly(
             # Positive-edge sizing should not collapse solely because portfolio
             # heat is high; heat is continuous multiplier pressure.
             _binding = "positive_edge_unexpected_zero"
+    elif _capped_by_single_position:
+        _binding = "single_position_ceiling"
     else:
         _binding = "sized_ok"
 
@@ -281,7 +342,7 @@ def evaluate_kelly(
         ci_width=_ci_w,
         lead_days=_lead,
         portfolio_heat=float(portfolio_heat),
-        single_cap_usd=None,
+        single_cap_usd=single_cap_usd,
         binding_constraint=_binding,
     )
 

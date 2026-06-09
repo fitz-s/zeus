@@ -1171,6 +1171,16 @@ def _record_position_drift_findings(
     )
     findings: list[ReconcileFinding] = []
     for token in tokens:
+        # ONE-TRUTH (rule 4): a token already in the suppression registry (chain-only / settled)
+        # is not a system open-position drift. Resolve any open finding and never gate the latch.
+        if _token_is_suppressed_external(conn, token):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_token_suppressed_external",
+                resolved_at=observed_at,
+            )
+            continue
         exchange_size = exchange.get(token, Decimal("0"))
         confirmed_size = confirmed_journal.get(token, Decimal("0"))
         confirmed_wallet_size = _nonnegative_wallet_size(confirmed_size)
@@ -1436,6 +1446,16 @@ def _resolve_position_drift_tokens_from_current_truth(
     closed_position_holdings = _closed_position_token_holdings_by_token(conn)
     open_sell_locked = _live_open_sell_locked_tokens_by_token(conn, open_orders=open_orders)
     for token in sorted(str(item) for item in token_ids):
+        # ONE-TRUTH (rule 4): honor the suppression registry — a chain-only / settled token is
+        # not a system drift; resolve its finding so the latch can clear.
+        if _token_is_suppressed_external(conn, token):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_token_suppressed_external",
+                resolved_at=observed_at,
+            )
+            continue
         exchange_size = exchange.get(token, Decimal("0"))
         confirmed_size = confirmed_journal.get(token, Decimal("0"))
         confirmed_wallet_size = _nonnegative_wallet_size(confirmed_size)
@@ -3243,6 +3263,27 @@ def _has_recent_filled_suppression(
         if abs((observed_at - updated).total_seconds()) <= seconds:
             return True
     return False
+
+
+def _token_is_suppressed_external(conn: sqlite3.Connection, token_id: str) -> bool:
+    """True iff the token is in the token_suppression registry (chain-only / settled holding).
+
+    ONE-TRUTH (rule 4 — stop multi-system infighting): token_suppression is the single registry
+    of tokens the system does NOT own as an open trading concern. chain_reconciliation quarantines
+    chain-only / operator-manual holdings there ('chain_only_quarantined'); the harvester suppresses
+    settled winners after redeem ('settled_position'). A suppressed token is provably not a system
+    open-position drift, so it MUST NOT be re-flagged as position_drift and gate the submit latch —
+    exactly the conflict that halted live trading on the operator's manual chain positions. Such a
+    token resolves naturally on settlement (win -> redeem); the reconciler just stops fighting it."""
+    if not _table_exists(conn, "token_suppression"):
+        return False
+    return (
+        conn.execute(
+            "SELECT 1 FROM token_suppression WHERE token_id = ? LIMIT 1",
+            (str(token_id),),
+        ).fetchone()
+        is not None
+    )
 
 
 def _row_by_id(conn: sqlite3.Connection, finding_id: str) -> Optional[sqlite3.Row]:

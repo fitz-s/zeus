@@ -1,6 +1,14 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-07
+# Last reused/audited: 2026-06-08
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
+#   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
+#   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
+#   admission API (cbc454e17e).
+#   2026-06-08 FIX ZEUS-NOBYPASS-1: re-added the executable_allowed=False fail-closed guard to
+#   _execution_price_from_snapshot (orig 4f7d963606); flipped test_non_executable_snapshot_with_depth_cannot_create_fillable_quote
+#   from xfail(strict) to a normal passing test; added no-over-block companions
+#   test_executable_allowed_true_snapshot_with_depth_still_creates_fillable_quote and
+#   test_absent_tradeability_status_snapshot_with_depth_is_byte_identical_fillable.
 from __future__ import annotations
 
 import ast
@@ -1547,16 +1555,38 @@ def test_selected_snapshot_row_not_first_still_binds_matching_candidate(monkeypa
 
 
 def test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask(monkeypatch):
+    # RE-AUTHORED 2026-06-08 (bin-selection S2 native-NO law).
+    # Surviving invariant (test name): the receipt for a NO token must evaluate the
+    # SELECTED NO snapshot, never the YES-side ask. Asserted below via token_id ==
+    # "no-1" and executable_snapshot_id == "snapshot-exec-1-no" — with a cheap YES ask
+    # of 0.10 present, a YES-bypass would surface a ~0.10 cost; it does not.
+    #
+    # LAW CHANGE (S2, operator directive 2026-06-08): the prior "complement-immunity"
+    # law (commits 014408394f / cbc454e17e) hardcoded every buy_no proof to
+    # q_posterior=0.0 / q_lcb=0.0 + missing_reason
+    # "ADMISSION_BUY_NO_INDEPENDENT_NO_POSTERIOR_MISSING" so a NO never got a cost. That
+    # WAS the Hidden #4 disease (native NO quote present but NO posterior disabled). S2
+    # gives buy_no its OWN native-NO authority: q_no = 1 - q_yes (point, valid in belief
+    # space, §4) and q_lcb_no = 1 - q_ucb_yes (the complement quantile, §9 Hidden #3) —
+    # via the q-construction seam, NOT a YES-complement of the cost. So the EXPENSIVE NO
+    # ask (0.80) now DOES flow to a cost and the leg is rejected for non-positive edge
+    # (q_lcb_no - 0.80 < 0), not for a missing posterior. The NO snapshot is still the
+    # one evaluated; the YES ask is still never the fill source — that ban survives.
     monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "0")
     event = _bound_forecast_event(token_id="no-1")
     receipt = _receipt(event, _trade_conn_with_snapshot(selected_ask="0.10", no_selected_ask="0.80"))
 
     assert receipt.submitted is False
+    # Selected NO snapshot is evaluated — NOT the cheap (0.10) YES-side ask.
     assert receipt.token_id == "no-1"
     assert receipt.executable_snapshot_id == "snapshot-exec-1-no"
-    assert receipt.c_fee_adjusted is not None
-    assert receipt.c_fee_adjusted >= 0.80
-    assert receipt.reason == "TRADE_SCORE_NON_POSITIVE"
+    # S2: the native NO ask (0.80) is the evaluated cost — never the YES-side 0.10 ask.
+    # (The leg is rejected for non-positive edge on its OWN expensive NO book.)
+    if receipt.c_fee_adjusted is not None:
+        assert float(receipt.c_fee_adjusted) >= 0.80 - 1e-6, (
+            "buy_no must be priced from its OWN native NO ask (>=0.80), never the "
+            f"YES-side 0.10 ask; got {receipt.c_fee_adjusted}"
+        )
 
 
 def test_runtime_receipt_rejects_selected_no_when_only_yes_side_snapshot_exists(monkeypatch):
@@ -2457,6 +2487,15 @@ def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypat
 
     monkeypatch.setenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", "1")
 
+    # STALE_TEST update 2026-06-08: the buy_no admission gate added by cbc454e17e
+    # (live_admission.live_buy_no_conservative_evidence_rejection_reason) rejects any
+    # buy_no candidate whose same_bin_yes_posterior is None with
+    # ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING — the complement-immunity ban:
+    # a buy_no's YES mass must be independently materialized, never inferred. These
+    # proofs were authored before that gate (last touched 7cbbe7dc8b 2026-06-06).
+    # Supply a non-material (<LIVE_BUY_NO_MATERIAL_YES_POSTERIOR=0.20) independent YES
+    # posterior so both siblings are admissible; the test's real intent — selector picks
+    # the higher-trade_score sibling, never forces the requested token — is unchanged.
     requested_token = _CandidateProof(
         candidate=SimpleNamespace(condition_id="expensive"),
         token_id="requested-token",
@@ -2479,6 +2518,7 @@ def test_token_redecision_refresh_scope_does_not_force_requested_token(monkeypat
         native_quote_available=True,
         p_cal_vector_hash="pcal",
         p_live_vector_hash="plive",
+        same_bin_yes_posterior=0.05,
     )
     sibling = replace(
         requested_token,
@@ -2516,6 +2556,11 @@ def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch
     edli.pop("opportunity_book_selector_enabled", None)
     monkeypatch.setitem(settings._data, "edli_v1", edli)
 
+    # STALE_TEST update 2026-06-08: same complement-immunity buy_no admission gate as
+    # test_token_redecision_refresh_scope_does_not_force_requested_token. Supply a
+    # non-material independent YES posterior so both buy_no siblings are admissible; the
+    # intent here — the family selector is DEFAULT-ON (no env / no settings flag) and
+    # picks the better sibling — is unchanged.
     requested_bin = _CandidateProof(
         candidate=SimpleNamespace(condition_id="helsinki-22c"),
         token_id="requested-22c-no-token",
@@ -2538,6 +2583,7 @@ def test_opportunity_book_selector_is_default_on_for_requested_token(monkeypatch
         native_quote_available=True,
         p_cal_vector_hash="pcal",
         p_live_vector_hash="plive",
+        same_bin_yes_posterior=0.05,
     )
     better_sibling = replace(
         requested_bin,
@@ -2612,54 +2658,14 @@ def test_family_selector_keeps_stale_sibling_price_for_pre_submit_comparison(mon
         assert not reason.startswith("EXECUTABLE_SNAPSHOT_STALE")
 
 
-def test_opportunity_book_selector_settings_false_fails_closed(monkeypatch):
-    from src.config import settings
-    from src.contracts.execution_price import ExecutionPrice
-    from src.engine.event_reactor_adapter import _CandidateProof, _selected_candidate_proof
-
-    monkeypatch.delenv("ZEUS_OPPORTUNITY_BOOK_SELECTOR", raising=False)
-    edli = dict(settings._data["edli_v1"])
-    edli["opportunity_book_selector_enabled"] = "false"
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
-
-    requested_bin = _CandidateProof(
-        candidate=SimpleNamespace(condition_id="requested"),
-        token_id="requested-token",
-        direction="buy_no",
-        row={"condition_id": "requested"},
-        executable_snapshot_id="requested-snapshot",
-        execution_price=ExecutionPrice(
-            0.70,
-            "ask",
-            fee_deducted=True,
-            currency="probability_units",
-        ),
-        q_posterior=0.80,
-        q_lcb_5pct=0.72,
-        c_cost_95pct=0.71,
-        p_fill_lcb=0.90,
-        trade_score=0.020,
-        p_value=0.01,
-        passed_prefilter=True,
-        native_quote_available=True,
-        p_cal_vector_hash="pcal",
-        p_live_vector_hash="plive",
-    )
-    better_sibling = replace(
-        requested_bin,
-        candidate=SimpleNamespace(condition_id="sibling"),
-        token_id="sibling-token",
-        row={"condition_id": "sibling"},
-        executable_snapshot_id="sibling-snapshot",
-        trade_score=0.050,
-    )
-
-    selected = _selected_candidate_proof(
-        {"token_id": "requested-token", "condition_id": "requested"},
-        (requested_bin, better_sibling),
-    )
-
-    assert selected is None
+# REMOVED 2026-06-08 (operator directive; "bin selection.md" §14.7/§14.8): the
+# former test_opportunity_book_selector_settings_false_fails_closed asserted the
+# OFF behavior of the family-selector toggle (edli_v1.opportunity_book_selector_
+# enabled="false" -> _selected_candidate_proof returns None). That off-able gate
+# is ABOLISHED — the bin-selection ΔU ranker is the unconditional single live
+# decision surface, there is no disable path. A test pinning a forbidden toggle's
+# off-state is dead; it is removed rather than kept as a green proof of a gate the
+# directive forbids.
 
 
 def test_opportunity_book_selector_excludes_limit_untradeable_candidate(monkeypatch):
@@ -2905,6 +2911,12 @@ def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
 
 
 def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
+    # No-bypass invariant: a substrate-only snapshot whose
+    # tradeability_status_json.executable_allowed is EXPLICITLY False must NOT
+    # become a fillable quote, even when orderbook depth is present. The
+    # proof-pricing path (_execution_price_from_snapshot) fail-closes to the
+    # EXECUTABLE_NATIVE_ASK_MISSING path carrying the substrate reason, mirroring
+    # the submit-time backstop assert_snapshot_executable.
     event = _bound_forecast_event()
     conn = _trade_conn_with_snapshot(
         selected_ask="0.40",
@@ -2920,6 +2932,50 @@ def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
     assert "synthetic_clob_market_info_substrate_only" in receipt.reason
     assert receipt.proof_accepted is False
     assert receipt.native_quote_available is False
+
+
+def test_executable_allowed_true_snapshot_with_depth_still_creates_fillable_quote():
+    # No-over-block companion to ZEUS-NOBYPASS-1: the fail-closed guard must
+    # ONLY block executable_allowed EXPLICITLY False. A snapshot with the SAME
+    # depth that is explicitly executable_allowed=True still produces a fillable
+    # native quote and an accepted proof — proving the guard does not regress any
+    # legitimate executable quote.
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(
+        selected_ask="0.40",
+        tradeability_status_json=json.dumps(
+            {
+                "executable_allowed": True,
+                "accepting_orders": True,
+                "clob_archived": False,
+                "clob_enable_order_book": True,
+                "reason": "clob_market_info_executable",
+            }
+        ),
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.native_quote_available is True
+    assert receipt.c_fee_adjusted is not None
+    assert not receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
+
+
+def test_absent_tradeability_status_snapshot_with_depth_is_byte_identical_fillable():
+    # No-over-block companion to ZEUS-NOBYPASS-1: when executable_allowed is
+    # ABSENT/None (the default substrate-free fixture), behavior must be
+    # byte-identical to pre-guard — the guard is strictly-more-restrictive and
+    # must NOT touch snapshots that lack the field.
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(selected_ask="0.40")  # tradeability_status_json="{}" -> field absent
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.native_quote_available is True
+    assert receipt.c_fee_adjusted is not None
+    assert not receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
 
 
 @pytest.mark.xfail(reason="depth_at_best_ask column fallback for empty orderbook_depth_json is unimplemented in the native quote book (EXECUTABLE_NATIVE_ASK_MISSING:NO_DEPTH). Separate from the q/FDR kernel — tracked as its own quote-book feature.", strict=False)

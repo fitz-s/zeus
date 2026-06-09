@@ -73,6 +73,24 @@ _market_discovery_lock = threading.Lock()
 _market_substrate_refresh_lock = threading.Lock()
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
+# Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
+# APScheduler interval. The refresh wall-clock budget
+# (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS, _refresh_pending_family_snapshots) MUST be
+# strictly less than this so a cycle finishes before its next trigger; otherwise
+# max_instances=1 skips every overlapping run ("maximum number of running instances
+# reached"), the executable substrate is never refreshed, and the armed daemon is
+# starved of candidates. The interval also stays within the 30s executable-price
+# freshness window. The invariant is asserted at job registration.
+_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
+
+# FUNNEL-STARVATION FIX (2026-06-09): rotating cursor for the pending-family
+# substrate refresh. The warm cycle cannot reconstruct all live families in one
+# wall-clock budget (~150 families × ~225ms ≈ 34s > 17s budget), so each cycle
+# refreshes a SLICE; this offset advances by the slice size actually processed so
+# consecutive cycles cover disjoint families and the whole live set is swept
+# within a bounded number of cycles. See _refresh_pending_family_snapshots.
+_SUBSTRATE_REFRESH_CURSOR = 0
+
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
     "edli_shadow_no_submit",
@@ -566,8 +584,12 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
     # scale-out knob. Renamed so the name matches the control it actually performs.
     if not bool(edli_cfg.get("edli_live_operator_authorized", False)):
         raise RuntimeError("EDLI_LIVE_REQUIRES_EDLI_LIVE_OPERATOR_AUTHORIZED")
+    # OPERATOR DIRECTIVE (2026-06-08): promotion-artifact/canary gate is
+    # promotion bureaucracy. When edli_live_promotion_artifact_required is
+    # False, bypass the rest of this function (artifact file + canary checks).
+    # edli_live_operator_authorized above is the operator ARM switch — kept.
     if not bool(edli_cfg.get("edli_live_promotion_artifact_required", True)):
-        raise RuntimeError("EDLI_LIVE_REQUIRES_PROMOTION_ARTIFACT_REQUIRED")
+        return
 
     artifact_path = str(edli_cfg.get("edli_live_promotion_artifact_path") or "").strip()
     if not artifact_path:
@@ -598,6 +620,40 @@ def _assert_edli_live_promotion_artifact(edli_cfg: dict) -> None:
         conn.close()
     if not verified.ok:
         raise RuntimeError(verified.reason)
+
+
+@dataclass(frozen=True)
+class OperatorArm:
+    """FIX-2b (PR_SPEC.md §2) operator-arm token for the EDLI live-submit boundary.
+
+    A capability token that is constructible ONLY through ``require_operator_arm``
+    after asserting ``edli_live_operator_authorized is True``. The EDLI live submit
+    adapter requires this token (regardless of mode — canary included) before any
+    real venue submit. Absent the token, the live adapter's submit guard fails closed
+    with ``OPERATOR_ARM_REQUIRED`` and main.py selects the no-submit adapter.
+
+    Frozen + presence-typed so "armed without operator authorization" is
+    unconstructable rather than merely flag-OFF. The token is applied EXACTLY at the
+    EDLI boundary; the mainline executor (execute_final_intent / _live_order) never
+    constructs this adapter and so is untouched by this gate.
+    """
+
+    authorized: bool = True
+
+
+def require_operator_arm(edli_cfg: dict) -> "OperatorArm | None":
+    """Mint an ``OperatorArm`` token IFF the operator has explicitly authorized live.
+
+    Mirrors the strict assert pattern at ``_assert_edli_live_promotion_artifact``
+    (main.py:567): only the literal ``True`` for ``edli_live_operator_authorized``
+    authorizes — any other value (missing, False, truthy-non-bool) returns ``None``.
+    Returning ``None`` (rather than raising) lets the live-builder selector degrade to
+    the no-submit adapter fail-closed instead of crashing the daemon boot.
+    """
+
+    if edli_cfg.get("edli_live_operator_authorized") is True:
+        return OperatorArm(authorized=True)
+    return None
 
 
 def _assert_edli_arm_gate_artifact(edli_cfg: dict) -> None:
@@ -2923,15 +2979,42 @@ def _topology_lookup_deadline_for_snapshot_refresh(
     refresh_budget_s: float,
     snapshot_reserve_s: float,
 ) -> float:
-    """Stop topology reconstruction early enough to attempt direct Gamma lookup."""
+    """Stop topology reconstruction early enough to attempt direct Gamma lookup.
+
+    FUNNEL-STARVATION FIX (2026-06-09): the topology/reconstruction phase is the
+    phase that SELECTS which families' books to capture this cycle. The prior math
+    reserved a FIXED 15s gamma slice on top of the 12s snapshot reserve, out of a
+    17s budget — i.e. 27s reserved for downstream phases out of 17s, clamping the
+    topology deadline to ``refresh_deadline - refresh_budget_s`` = CYCLE START.
+    With a 0s topology budget the loop time-boxed after 1-2 of ~150 live families
+    every cycle, so only ONE family's executable books were refreshed per ~20s
+    tick. The other ~150 FORECAST_SNAPSHOT_READY events found no fresh snapshot,
+    requeued EXECUTABLE_SNAPSHOT_PENDING, and after 8 cycles dead-lettered as
+    EXECUTABLE_SNAPSHOT_BLOCKED — the visible funnel starvation (the substrate was
+    never swept).
+
+    Gamma HTTP is only needed for families with NO cached topology
+    (``gamma_refresh_families``); in steady state that set is EMPTY (every live
+    family already has market_events topology), so a fixed 15s gamma reserve is
+    pure waste that starves the dominant topology phase. The reserve is now a SMALL
+    FLOOR (default 2s, env-overridable) AND capped to at most half of the
+    available pre-capture window, so the topology/reconstruction phase keeps the
+    MAJORITY of the budget and can sweep its rotating family slice (see the
+    rotating cursor in _refresh_pending_family_snapshots). When a cycle genuinely
+    has gamma families, that small floor still lets the gamma phase begin; it just
+    no longer pre-empts topology before topology has done any work.
+    """
 
     pre_capture_deadline = refresh_deadline - snapshot_reserve_s
+    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
     gamma_min_slice_s = max(
         0.0,
-        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "15.0")),
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_LOOKUP_MIN_SECONDS", "2.0")),
     )
-    available_pre_capture_s = max(0.0, refresh_budget_s - snapshot_reserve_s)
-    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s)
+    # Never let the gamma floor consume more than half the pre-capture window —
+    # the topology phase (which selects the capture set) must always keep the
+    # majority share so it makes real progress through the rotating family slice.
+    gamma_min_slice_s = min(gamma_min_slice_s, available_pre_capture_s * 0.5)
     return max(refresh_deadline - refresh_budget_s, pre_capture_deadline - gamma_min_slice_s)
 
 
@@ -3059,9 +3142,51 @@ def _refresh_pending_family_snapshots(
     if not families:
         return {"status": "no_pending_families"}
 
+    # FUNNEL-STARVATION FIX (2026-06-09): rotate the per-cycle starting offset so
+    # EVERY live family is refreshed within one SWEEP PERIOD instead of the newest
+    # 1-2 being re-refreshed forever while the rest starve.
+    #
+    # Root cause this completes: the warm cycle's wall-clock budget (~17s) cannot
+    # reconstruct all ~150 live families in one tick — each family's
+    # reconstruct_weather_market_from_static_topology is ~225ms (a sort over the
+    # 1.5M-row executable_market_snapshots IN-list), so a full sweep is ~34s, two
+    # cycles' worth. The pending-family query (_pending_family_rows_for_refresh)
+    # returns families target_date DESC, so without rotation the SAME front slice
+    # is processed every cycle and the tail (older target_dates / cities reached
+    # later in the deterministic order) NEVER gets fresh books. Those families'
+    # FORECAST_SNAPSHOT_READY events then retry EXECUTABLE_SNAPSHOT_PENDING until
+    # the 8-attempt cap dead-letters them (EXECUTABLE_SNAPSHOT_BLOCKED) — the
+    # operator-observed "25 events cycle in retried forever / dead=25" funnel.
+    #
+    # The fix is a fair rotating cursor: advance a module-global offset by the
+    # number of families ACTUALLY processed last cycle so consecutive cycles cover
+    # disjoint slices and the whole live set is swept within
+    # ceil(len(families) / families_per_cycle) cycles — bounded minutes, not the
+    # never-completing tail starvation. The order WITHIN the rotated list is still
+    # the freshness-first deterministic order; we only choose a different *start*.
+    # No family is dropped — rotation reorders, it does not filter — so a True from
+    # the freshness check still captures and no candidate is starved.
+    global _SUBSTRATE_REFRESH_CURSOR
+    n_families = len(families)
+    start_offset = _SUBSTRATE_REFRESH_CURSOR % n_families
+    families = families[start_offset:] + families[:start_offset]
+
+    # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
+    # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
+    # INTERVAL_SECONDS, 20s) and MUST stay within the 30s executable-price freshness
+    # window. The prior 29.0 default predated the reactor→warm-cycle split (blame
+    # 014408394f, sized for the old 1-min reactor interval) and was never re-aligned:
+    # a 29s budget on a 20s interval guarantees the cycle overruns its own trigger,
+    # so every subsequent run is "skipped: maximum number of running instances
+    # reached (1)" (zeus-live.err 2026-06-08) and the universe-wide executable
+    # substrate is never refreshed — coverage NONE, daemon starved of candidates.
+    # The default now fits inside the interval with headroom for scheduler dispatch
+    # and connection teardown; the internal capture reserve (snapshot_reserve_s) and
+    # Gamma slice scale down off this budget below. Env-overridable, but the
+    # interval-fit invariant is asserted at job registration (see add_job below).
     refresh_budget_s = max(
         5.0,
-        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "29.0")),
+        float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
     )
     refresh_deadline = time.monotonic() + refresh_budget_s
     snapshot_reserve_s = min(
@@ -3100,6 +3225,11 @@ def _refresh_pending_family_snapshots(
     cached_topology_incomplete = 0
     topology_budget_exhausted = False
     topology_deferred_families = 0
+    # FUNNEL-STARVATION FIX (2026-06-09): how many families this cycle actually
+    # reached in the topology phase. Advances the rotating cursor so the NEXT
+    # cycle resumes from where this one stopped, sweeping every live family within
+    # a bounded number of cycles instead of re-processing the same front slice.
+    families_processed_this_cycle = len(families)
 
     write_conn = get_trade_connection(write_class="live")
     try:
@@ -3109,6 +3239,8 @@ def _refresh_pending_family_snapshots(
             ):
                 topology_budget_exhausted = True
                 topology_deferred_families = len(families) - index
+                # Resume from the first UNPROCESSED family next cycle.
+                families_processed_this_cycle = index
                 logger.info(
                     "refresh_pending_family_snapshots: topology time-box hit after %d/%d "
                     "families; reserving %.1fs for CLOB capture",
@@ -3162,6 +3294,18 @@ def _refresh_pending_family_snapshots(
                     gamma_refresh_families.append((city, target_date, metric))
             else:
                 fresh_skipped += 1
+
+        # FUNNEL-STARVATION FIX (2026-06-09): advance the rotating cursor by the
+        # families actually processed this cycle so the next cycle resumes at the
+        # first family this one did not reach. This is what converts "always the
+        # newest 1-2 families" into a fair round-robin that sweeps the whole live
+        # set within ceil(n_families / families_per_cycle) cycles. Advanced HERE
+        # (after the topology loop, before any downstream return) so every exit
+        # path — all_fresh, refreshed, or a later gamma/capture error — advances
+        # the cursor identically and no slice is ever skipped or double-swept.
+        _SUBSTRATE_REFRESH_CURSOR = (
+            start_offset + max(1, families_processed_this_cycle)
+        ) % n_families
 
         if not gamma_refresh_families and not cached_topology_markets:
             logger.info(
@@ -3606,24 +3750,17 @@ def _market_discovery_cycle() -> None:
     if not acquired:
         logger.warning("market_discovery skipped: previous market_discovery still running")
         return
-    if pending_count > 0 and defer_when_pending and edli_cfg.get("enabled"):
-        try:
-            from src.data.market_scanner import find_weather_markets_or_raise
-
-            events = find_weather_markets_or_raise(
-                min_hours_to_resolution=0.0,
-                include_slug_pattern=True,
-            )
-            logger.info(
-                "market_discovery: topology-only refresh for %d weather events while "
-                "%d EDLI pending events keep executable substrate priority",
-                len(events),
-                pending_count,
-            )
-            _market_discovery_last_completed_monotonic = time.monotonic()
-            return
-        finally:
-            _market_discovery_lock.release()
+    # ANTIBODY (2026-06-08, operator directive — kill the regression CATEGORY, not the instance):
+    # executable-substrate capture is NEVER gated by the EDLI pending backlog. The old
+    # "pending>0 -> topology-only (skip snapshot capture)" branch here was the coverage-collapse
+    # regression: a growing pending working set (e.g. the channel-event flood when the prune
+    # flag is off) kept market_discovery doing topology-only FOREVER, so families went
+    # uncaptured, FSR events dead-lettered on the snapshot gate, and the system silently stopped
+    # trading — with nothing connecting cause (a backlog) to effect (no coverage). Substrate
+    # capture is gated ONLY by substrate STALENESS (the fairness early-return above, keyed on
+    # _market_discovery_last_completed_monotonic), never by queue depth. Reaching here means the
+    # substrate is stale (the fresh case already returned at the fairness check), so capture the
+    # universe regardless of how many events are pending.
     substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
     if not substrate_acquired:
         _market_discovery_lock.release()
@@ -4659,14 +4796,22 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
         }
 
 
-def _replacement_forecast_runtime_flags_from_settings() -> dict[str, bool]:
-    from src.data.replacement_forecast_runtime_policy import REQUIRED_FLAGS
-
-    try:
-        flags = settings["feature_flags"]
-    except Exception:
-        flags = {}
-    return {key: bool(flags.get(key, False)) for key in REQUIRED_FLAGS}
+# WIRING FIX (operator Point-1 directive 2026-06-08): the U0R/replacement forecast
+# PRODUCTION functions (raw-input download + light shadow materialization) were moved
+# VERBATIM to src/data/replacement_forecast_production.py and are now SCHEDULED on the
+# forecast-live (data) daemon, NOT here. The ~365MB AIFS ensemble fetch must never run
+# inside the live-trading process (it monopolized disk I/O -> DATA_DEGRADED flap). They
+# are imported back into this module ONLY so the in-cycle runtime-flags read below and
+# existing by-name references (tests, runtime-wiring-audit anchors) keep resolving — the
+# live-trading scheduler no longer registers the download/materialize jobs.
+from src.data.replacement_forecast_production import (  # noqa: E402
+    _download_replacement_forecast_current_targets_if_needed,
+    _download_u0r_extra_raw_inputs_if_needed,
+    _replacement_forecast_download_cycle,
+    _replacement_forecast_runtime_flags_from_settings,
+    _replacement_forecast_shadow_materialization_queue_config,
+    _replacement_forecast_shadow_materialize_cycle,
+)
 
 
 def _replacement_forecast_refit_decision_from_settings():
@@ -4751,84 +4896,6 @@ def _replacement_forecast_capital_objective_evidence_from_settings():
         return None
 
 
-def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, object]:
-    from src.config import PROJECT_ROOT
-
-    cfg = _settings_section("replacement_forecast_shadow", {}) or {}
-    base_dir = PROJECT_ROOT / "state" / "replacement_forecast_shadow"
-    raw_manifest_dir = cfg.get("raw_manifest_dir")
-    forecast_db = cfg.get("forecast_db")
-
-    def _rooted_path(value, fallback: Path | None = None) -> Path | None:
-        raw = value if value not in (None, "") else fallback
-        if raw in (None, ""):
-            return None
-        path = Path(str(raw))
-        return path if path.is_absolute() else PROJECT_ROOT / path
-
-    return {
-        "seed_dir": _rooted_path(cfg.get("seed_dir"), base_dir / "seeds"),
-        "seed_processed_dir": _rooted_path(cfg.get("seed_processed_dir"), base_dir / "seed_processed"),
-        "seed_failed_dir": _rooted_path(cfg.get("seed_failed_dir"), base_dir / "seed_failed"),
-        "forecast_db": _rooted_path(forecast_db),
-        "raw_manifest_dir": _rooted_path(raw_manifest_dir),
-        "seed_discovery_limit": int(cfg.get("seed_discovery_limit_per_cycle") or cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
-        "request_dir": _rooted_path(cfg.get("request_dir"), base_dir / "requests"),
-        "processed_dir": _rooted_path(cfg.get("processed_dir"), base_dir / "processed"),
-        "failed_dir": _rooted_path(cfg.get("failed_dir"), base_dir / "failed"),
-        "seed_limit": int(cfg.get("seed_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
-        "limit": int(cfg.get("materialization_limit_per_cycle") or 10),
-        "download_current_targets_enabled": bool(cfg.get("download_current_targets_enabled", False)),
-        "download_output_dir": _rooted_path(cfg.get("download_output_dir"), _rooted_path(raw_manifest_dir, base_dir / "raw_manifests")),
-        "download_limit": int(cfg.get("download_limit_per_cycle") or cfg.get("seed_discovery_limit_per_cycle") or cfg.get("materialization_limit_per_cycle") or 10),
-        "download_release_lag_hours": float(cfg.get("download_release_lag_hours") or 14.0),
-        "download_anchor_sigma_c": float(cfg.get("download_anchor_sigma_c") or 3.0),
-        "download_aifs_retries": int(cfg.get("download_aifs_retries") or 4),
-    }
-
-
-def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    if not bool(cfg.get("download_current_targets_enabled", False)):
-        return None
-    forecast_db = cfg.get("forecast_db")
-    output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
-    if forecast_db is None or output_dir is None:
-        raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
-    from scripts.download_replacement_forecast_current_targets import (
-        _parse_cycle,
-        download_current_target_raw_inputs,
-    )
-    from src.data.replacement_forecast_current_target_plan import (
-        build_replacement_forecast_current_target_plan,
-    )
-
-    plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-    if plan.ready:
-        return {
-            "status": "CURRENT_TARGETS_ALREADY_COVERED",
-            "coverage": plan.as_dict(),
-        }
-    if plan.missing_aifs_manifest_count <= 0 and plan.missing_openmeteo_manifest_count <= 0:
-        return {
-            "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
-            "coverage": plan.as_dict(),
-        }
-    release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-    cycle = _parse_cycle(None, now=datetime.now(timezone.utc), release_lag_hours=release_lag_hours)
-    return download_current_target_raw_inputs(
-        forecast_db=Path(str(forecast_db)),
-        output_dir=Path(str(output_dir)),
-        cycle=cycle,
-        limit=int(cfg.get("download_limit") or 10),
-        write_db=True,
-        skip_aifs=False,
-        skip_openmeteo=False,
-        release_lag_hours=release_lag_hours,
-        anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-        aifs_retries=int(cfg.get("download_aifs_retries") or 4),
-    )
-
-
 def _sqlite_table_names(conn) -> tuple[str, ...]:
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
     names: list[str] = []
@@ -4854,39 +4921,12 @@ def _current_live_fact_status(relative_path: str) -> str:
     return "STALE_FOR_LIVE"
 
 
-@_scheduler_job("replacement_forecast_shadow_materialize")
-def _replacement_forecast_shadow_materialize_cycle() -> None:
-    flags = _replacement_forecast_runtime_flags_from_settings()
-    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
-        return
-    from src.data.replacement_forecast_shadow_materialization_queue import (
-        process_replacement_forecast_shadow_materialization_queue,
-    )
-
-    cfg = _replacement_forecast_shadow_materialization_queue_config()
-    download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
-    if download_report is not None and download_report.get("status") not in {
-        "CURRENT_TARGETS_ALREADY_COVERED",
-        "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
-    }:
-        logger.info("replacement forecast current-target download report: %s", download_report)
-    report = process_replacement_forecast_shadow_materialization_queue(
-        request_dir=cfg["request_dir"],
-        processed_dir=cfg["processed_dir"],
-        failed_dir=cfg["failed_dir"],
-        seed_dir=cfg["seed_dir"],
-        seed_processed_dir=cfg["seed_processed_dir"],
-        seed_failed_dir=cfg["seed_failed_dir"],
-        forecast_db=cfg["forecast_db"],
-        raw_manifest_dir=cfg["raw_manifest_dir"],
-        seed_discovery_limit=int(cfg["seed_discovery_limit"]),
-        seed_limit=int(cfg["seed_limit"]),
-        limit=int(cfg["limit"]),
-    )
-    if report.failed_count:
-        logger.warning("replacement forecast shadow materialization queue failures: %s", report.as_dict())
-    elif report.processed_count:
-        logger.info("replacement forecast shadow materialization queue processed: %s", report.as_dict())
+# WIRING FIX (operator Point-1 directive 2026-06-08): _replacement_forecast_download_cycle
+# and _replacement_forecast_shadow_materialize_cycle were MOVED VERBATIM to
+# src/data/replacement_forecast_production.py and are now SCHEDULED on the forecast-live
+# (data) daemon (src/ingest/forecast_live_daemon.py). They are imported back into this
+# module (top of file) for by-name resolution only; the live-trading scheduler no longer
+# registers them.
 
 
 @_scheduler_job("edli_event_reactor")
@@ -4975,8 +5015,21 @@ def _edli_event_reactor_cycle() -> None:
             edli_cfg, "forecast_snapshot_emit_limit", default=20, maximum=50
         )
         day0_emit_limit = _edli_bounded_positive_int(edli_cfg, "day0_catchup_emit_limit", default=20, maximum=100)
+        # FUNNEL-STARVATION FIX (2026-06-09): raise the per-cycle evaluation ceiling
+        # so the reactor can sweep the FULL live FORECAST_SNAPSHOT_READY set
+        # (~200 events across ~50 cities × 3 target dates) within one or two cycles
+        # once the substrate warmer (now round-robin, see _SUBSTRATE_REFRESH_CURSOR)
+        # keeps books fresh. The prior maximum=50 capped a cycle at 50 evaluations
+        # regardless of config, so even with fresh books the live family set could
+        # not be fully swept per cadence — a throttle on EVALUATION COVERAGE, the
+        # exact thing the operator directive forbids (every live family must be
+        # evaluated, honest no-edge only after a FULL evaluation). The reactor's own
+        # 30s wall-clock budget (ZEUS_REACTOR_CYCLE_BUDGET_SECONDS, in reactor.py)
+        # remains the real safety bound on cycle length; this ceiling just stops
+        # truncating the admissible queue below the live family count. Economic
+        # gates (q_lcb, cost floor, Kelly, depth) are untouched.
         proof_limit = _edli_positive_int_or_unbounded(
-            edli_cfg, "no_submit_proof_limit", default=10, maximum=50
+            edli_cfg, "no_submit_proof_limit", default=10, maximum=400
         )
         store = EventStore(conn)
         # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
@@ -5172,6 +5225,12 @@ def _edli_event_reactor_cycle() -> None:
 
         replacement_forecast_source_fact_status = _current_live_fact_status(CURRENT_SOURCE_FACT_FILE)
         replacement_forecast_data_fact_status = _current_live_fact_status(CURRENT_DATA_FACT_FILE)
+        # FIX-2b (PR_SPEC.md §2): mint the operator-arm token IFF edli_live_operator_authorized
+        # is True. The live submit adapter is selected ONLY when (live_submit_effective AND
+        # operator_arm is not None); otherwise the no-submit adapter is chosen. This gates
+        # EVERY real submit (canary included) at the EDLI boundary by TYPE. The mainline
+        # executor never constructs this adapter, so the 293-order mainline is untouched.
+        operator_arm = require_operator_arm(edli_cfg)
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5187,7 +5246,6 @@ def _edli_event_reactor_cycle() -> None:
                 # Real submit/canary still requires the explicit config flag.
                 taker_fok_fak_live_enabled=taker_fok_fak_effective,
                 durable_submit_outbox_enabled=bool(edli_cfg.get("durable_submit_outbox_enabled", False)),
-                tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
                 live_cap_conn=conn,
                 replacement_forecast_runtime_flags=replacement_forecast_runtime_flags,
                 replacement_forecast_baseline_bundle_provider=replacement_forecast_baseline_bundle_provider,
@@ -5216,8 +5274,9 @@ def _edli_event_reactor_cycle() -> None:
                     snapshot_conn=trade_conn,
                     decision_time=process_pending_decision_time,
                 ),
+                operator_arm=operator_arm,
             )
-            if live_submit_effective
+            if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(
                 trade_conn,
                 forecast_conn=forecasts_conn,
@@ -5251,9 +5310,6 @@ def _edli_event_reactor_cycle() -> None:
                 reactor_mode=reactor_mode,
                 real_order_submit_enabled=real_order_submit_enabled,
                 taker_fok_fak_live_enabled=bool(edli_cfg.get("taker_fok_fak_live_enabled", False)),
-                tiny_live_max_notional_usd=float(edli_cfg.get("tiny_live_max_notional_usd", 5.0)),
-                tiny_live_max_orders_per_day=int(edli_cfg.get("tiny_live_max_orders_per_day", 1)),
-                tiny_live_max_orders_per_window=int(edli_cfg.get("tiny_live_max_orders_per_window", 1)),
                 # Task #102 book-wide edge-zone admission. Absent key => default
                 # False => byte-identical legacy money-path (the operator owns
                 # config/settings.json; this reads it without writing it).
@@ -5608,6 +5664,17 @@ def _arm_gate_emit_cycle() -> None:
         )
         return
 
+    # ANTI-SILENT-SINK (2026-06-09, same class as the materializer-queue fix): on SUCCESS the
+    # producer's captured output was discarded entirely, so any WARNING it emitted (degraded
+    # inputs, partial settlement coverage) reached no log. Re-emit WARNING/ERROR lines.
+    try:
+        for _stream in (completed.stderr or "", completed.stdout or ""):
+            for _line in _stream.splitlines():
+                if "WARNING" in _line or "ERROR" in _line:
+                    logger.warning("arm_gate_emit[producer] %s", _line.strip()[:500])
+    except Exception:
+        pass
+
     logger.info(
         "arm_gate_emit: re-emitted ARM-gate artifact → %s (commit_sha re-stamped to "
         "running HEAD; verdict remains the producer's honest settlement-grounded "
@@ -5786,8 +5853,15 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
 
     global _EDLI_LAST_PRUNE_MONOTONIC
     edli_cfg = _settings_section("edli_v1", {})
-    if not bool(edli_cfg.get("reactor_prune_enabled", False)):
-        return
+    # ANTIBODY (2026-06-08, operator directive): the working-set prune is NON-OPTIONAL.
+    # It is the ONLY drain of the pending opportunity_event_processing set (archive_expired_
+    # candidates + archive_superseded_channel_events). Gating it behind an off-able flag
+    # (reactor_prune_enabled, default off) is exactly what let the working set grow unbounded
+    # when the flag was off — slowing fetch_pending and (before the market_discovery
+    # decoupling) silently collapsing executable-substrate coverage -> zero trades, with
+    # nothing connecting cause to effect. A necessary maintenance sweep must not be silently
+    # switchable off. It now ALWAYS runs, bounded only by its own interval/batch limits below;
+    # the legacy reactor_prune_enabled flag is ignored.
     interval_s = _edli_prune_interval_seconds(edli_cfg)
     now_mono = time.monotonic()
     if (
@@ -7253,6 +7327,29 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                 )
                 summary["chain_sync_error"] = str(exc)
 
+            # WAL WRITE-LOCK RELEASE (2026-06-08 riskguard-flaps structural fix):
+            # Phase 1 (chain sync) opened an implicit DEFERRED txn on the first DML
+            # (chain_shares / chain_state updates) which upgrades to the exclusive WAL
+            # write lock on zeus_trades.db. With a single trailing commit the lock was
+            # held across ALL of Phase 2's per-position HTTP monitor calls — up to 5+
+            # minutes — starving riskguard.tick() (30s busy_timeout → DATA_DEGRADED),
+            # CollateralLedger heartbeat, and market_scanner snapshot inserts.
+            # Fix: commit chain-sync writes HERE, before Phase 2 HTTP calls begin, so
+            # the WAL write lock is released between the two phases. The world_write_lock
+            # docstring (db.py:295) establishes the same invariant: MUST NOT hold a DB
+            # write lock across blocking network/HTTP calls.
+            # INV-17 / DT#1 is preserved: chain-sync state is committed atomically
+            # before monitoring state, and the final commit_then_export below commits
+            # monitoring state before JSON export. The two phases are logically
+            # independent — chain_state is ground-truth from the REST API and does not
+            # need to be co-transactional with the monitoring state transitions.
+            try:
+                conn.commit()
+            except Exception as exc:
+                logger.warning(
+                    "chain_sync_and_exit_monitor: chain-sync interim commit failed (non-fatal): %s", exc
+                )
+
             # Phase 2: exit-lifecycle monitoring — resolves exit_pending_missing,
             # checks pending exit fills, runs monitor refresh for active positions.
             # exit_order_submit_enabled=False in shadow/no-submit modes: state
@@ -7277,10 +7374,10 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                 )
                 summary["monitoring_error"] = str(exc)
 
-        # INV-17 / DT#1: commit the DB transaction (chain-sync + monitoring state
-        # transitions) FIRST, then export the derived portfolio/tracker JSON with the
-        # committed artifact id — so canonical_write.detect_stale_portfolio's marker
-        # stays valid and JSON can never lead the DB.
+        # INV-17 / DT#1: commit the DB transaction (monitoring state transitions) FIRST,
+        # then export the derived portfolio/tracker JSON with the committed artifact id —
+        # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can
+        # never lead the DB. (Chain-sync writes were already committed above.)
         from src.state.canonical_write import commit_then_export
         from src.state.decision_chain import store_artifact
         _aid_box: list = [None]
@@ -7686,10 +7783,27 @@ def main():
         # rejects as EXECUTABLE_SNAPSHOT_STALE. The refresh is scoped to pending families
         # (not a global weather scan) and max_instances=1/coalesce prevents stacked venue
         # I/O. Data-only (no orders); fail-soft.
+        # Fitz #5 interval-fit invariant: the refresh budget MUST be strictly less
+        # than the interval so the cycle cannot overrun its own trigger (the live
+        # "skipped: maximum number of running instances reached" starvation). Asserted
+        # here at registration so a future env/default drift that re-breaks the
+        # relationship fails LOUDLY at boot instead of silently re-starving coverage.
+        _warm_refresh_budget_s = max(
+            5.0,
+            float(os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")),
+        )
+        if _warm_refresh_budget_s >= _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS:
+            raise RuntimeError(
+                "EDLI market-substrate warm budget-vs-interval misconfiguration: "
+                f"ZEUS_REACTOR_REFRESH_BUDGET_SECONDS={_warm_refresh_budget_s}s must be "
+                f"STRICTLY LESS than the {_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS}s warm "
+                "interval, else every overlapping cycle is skipped and the executable "
+                "substrate is never refreshed (coverage NONE, daemon starved)."
+            )
         scheduler.add_job(
             _edli_market_substrate_warm_cycle,
             "interval",
-            seconds=20,
+            seconds=_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS,
             id="edli_market_substrate_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 1.0),
             max_instances=1,
@@ -7715,15 +7829,14 @@ def main():
             max_instances=1,
             coalesce=True,
         )
-        scheduler.add_job(
-            _replacement_forecast_shadow_materialize_cycle,
-            "interval",
-            minutes=int((_settings_section("replacement_forecast_shadow", {}) or {}).get("materialization_interval_min") or 5),
-            id="replacement_forecast_shadow_materialize",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 95.0),
-            max_instances=1,
-            coalesce=True,
-        )
+        # WIRING FIX (operator Point-1 directive 2026-06-08): the replacement-forecast
+        # download + shadow-materialize jobs were REMOVED from this live-trading scheduler
+        # and moved to the forecast-live (data) daemon. The ~365MB AIFS ensemble fetch
+        # (~11.5 min) monopolized disk I/O on the trading process, starving the reactor +
+        # market_scanner and locking riskguard dependency reads -> DATA_DEGRADED flap that
+        # blocked all trades. They now run on the forecast-live daemon's lane, download
+        # cron-driven at publish time (00Z/12Z + release_lag) — see
+        # src/ingest/forecast_live_daemon.py and src/data/replacement_forecast_production.py.
         # IRON-RULE-4 ANTIBODY (2026-06-04): AUTO-RE-EMIT the settlement-grounded
         # ARM-gate artifact (state/edli_arm_gate_artifact.json). The producer/consumer
         # loop existed but was never AUTOMATED — nothing RAN the producer, so the

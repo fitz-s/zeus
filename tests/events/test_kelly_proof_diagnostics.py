@@ -24,15 +24,22 @@ def _fee_adjusted_price(value: float = 0.50) -> ExecutionPrice:
 # ── Test (a): corr pressure soft-damps but does not hard-zero ────────────────
 
 def test_kelly_corr_budget_pressure_stays_positive_for_positive_edge():
-    """Corr budget pressure is a multiplier haircut, not a hard rejection."""
+    """Corr budget pressure is a multiplier haircut, not a hard rejection.
+
+    Fixture operates BELOW the restored INV-K3 single-position ceiling (0.05×B=$5).
+    With p=0.65, price=0.50: f*=0.30, heat=1.0 (corr_committed exhausts corr budget),
+    effective_multiplier=F_CAP/(1+1.0)=0.125, size=0.30×0.125×100=$3.75 < $5 ceiling.
+    The binding_constraint stays 'sized_ok' (ceiling does not bind), isolating the
+    corr-budget soft-haircut signal (effective_multiplier < F_CAP, heat≈1.0).
+    """
     B = 100.0
     F_CAP = 0.25
     corr_committed = F_CAP * B  # == 25.0; exhausts corr ceiling
     raw_committed = 0.0
 
     ctx = SizingContext.from_candidate_proof_with_portfolio(
-        q_posterior=0.80,
-        q_lcb_5pct=0.79,
+        q_posterior=0.65,
+        q_lcb_5pct=0.63,
         lead_days=1.0,
         bankroll_usd=B,
         corr_committed_usd=corr_committed,
@@ -40,7 +47,7 @@ def test_kelly_corr_budget_pressure_stays_positive_for_positive_edge():
     )
     proof = evaluate_kelly(
         kelly_decision_id="kelly-corr-budget-test",
-        p_posterior=0.80,
+        p_posterior=0.65,
         execution_price=_fee_adjusted_price(0.50),
         bankroll_usd=B,
         sizing_context=ctx,
@@ -61,13 +68,20 @@ def test_kelly_corr_budget_pressure_stays_positive_for_positive_edge():
 
 
 def test_kelly_raw_heat_over_soft_budget_stays_positive_for_positive_edge():
-    """Raw heat above the old 50% line is not a KELLY_REJECTED hard cap."""
+    """Raw heat above the old 50% line is not a KELLY_REJECTED hard cap.
+
+    Fixture operates BELOW the restored INV-K3 single-position ceiling (0.05×185=$9.25).
+    raw_committed=98 is KEPT (mirrors live 52.9% raw-heat symptom). heat≈1.06 (raw budget
+    pressure dominates), effective_multiplier≈0.25/2.06≈0.121. With p=0.72, price=0.55+fee:
+    f*≈0.37, size≈$8.48 < $9.25 ceiling. binding_constraint stays 'sized_ok', isolating
+    the soft-haircut signal (effective_multiplier<0.25, heat>1.0).
+    """
     B = 185.0
     raw_committed = 98.0  # Mirrors live symptom: 52.9% raw heat.
 
     ctx = SizingContext.from_candidate_proof_with_portfolio(
-        q_posterior=0.78,
-        q_lcb_5pct=0.76,
+        q_posterior=0.72,
+        q_lcb_5pct=0.70,
         lead_days=1.0,
         bankroll_usd=B,
         corr_committed_usd=20.0,
@@ -75,7 +89,7 @@ def test_kelly_raw_heat_over_soft_budget_stays_positive_for_positive_edge():
     )
     proof = evaluate_kelly(
         kelly_decision_id="kelly-raw-heat-soft-budget-test",
-        p_posterior=0.78,
+        p_posterior=0.72,
         execution_price=_fee_adjusted_price(0.55),
         bankroll_usd=B,
         sizing_context=ctx,
