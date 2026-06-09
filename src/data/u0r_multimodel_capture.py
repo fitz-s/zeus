@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-09
 # Authority basis: U0R_BAYES_SPEC.md §6 F1 (fail-soft multi-model live capture), §4 algorithm
 #   step (1) eligible / (4) EB bias-correct; §7 antibodies (source-disagreement, lowN). The
 #   capture reuses the existing Open-Meteo single-runs fetch pattern
@@ -200,8 +200,11 @@ def _default_live_fetch(
 class U0RCaptureResult:
     """The fail-soft capture output, ready for u0r_bayes.fuse_u0r_posterior.
 
-    ``anchor_z`` / ``anchor_tau0`` are the EB-corrected anchor center + walk-forward residual
-    std (the prior); None when the anchor lacks a trusted >=MIN_TRAIN history (-> equal-weight).
+    ``anchor_z`` is the EB-corrected anchor center — ALWAYS set (the anchor product feeds every
+    cell on this path). ``anchor_tau0`` is the anchor's walk-forward residual std (the TRUSTED
+    prior spread); None when the anchor lacks a >=MIN_TRAIN history, which demotes the anchor
+    from T2 prior to ONE equal member in the fusion's EQUAL_WEIGHT fallback (thin-anchor
+    retention, 2026-06-09 — the center is never silently dropped).
     ``likelihood`` are the surviving, gated, deduped, bias-corrected instruments.
     ``disagree_var`` is the cross-source spread term added (widen-only) into the fusion sigma.
     ``selection`` is the F4 provenance (dropped aliases / excluded regionals / used models).
@@ -372,9 +375,16 @@ def capture_u0r_instruments(
         else:
             anchor_tau0 = float(raw_tau0)
     else:
-        # No trusted anchor history -> still use the anchor center as the prior mean, with a
-        # conservative None tau0 only when there is truly no history; the fusion floors tau0.
-        anchor_z = float(anchor_z_corrected) if anchor_hist else None
+        # THIN/ZERO anchor history (2026-06-09 anchor-drop fix): the anchor CENTER is the
+        # materializer's own EB-corrected anchor product and is ALWAYS available — it must
+        # always reach the fusion, exactly like a zero-history global participates
+        # LOWN-inflated in equal-weight. anchor_tau0=None is the explicit "no TRUSTED prior"
+        # signal: fuse_u0r_posterior then stays EQUAL_WEIGHT and blends the center as ONE
+        # equal member at the conservative thin variance (TAU0_FLOOR * LOWN_INFLATE)^2.
+        # (The old `if anchor_hist else None` deleted the strongest model for zero-history
+        # cells, and the old comment claimed "the fusion floors tau0" — it never did: the
+        # fusion required BOTH non-None, so the center was silently dropped.)
+        anchor_z = float(anchor_z_corrected)
         anchor_tau0 = None
 
     # ---- source-disagreement term (widen-only): variance of corrected z over anchor+globals ----

@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-09
 # Authority basis: U0R_BAYES_SPEC.md §1 observation model, §2 T2 fusion, §4 algorithm,
 #   §6 F5 (u0r_bayes). PORTED VERBATIM from the proven proof engine
 #   /Users/leofitz/zeus/.omc/research/polyweather_eval/scripts/run_u0r_bayes_fusion.py
@@ -297,19 +297,29 @@ def fuse_u0r_posterior(
       4. T2 posterior: mu* / V* via bayes_fuse, with extra_var = disagree_var (widen-only).
 
     FAIL-SOFT:
-      - anchor_z is None (no trusted >=MIN_TRAIN anchor) AND likelihood present
-        -> EQUAL_WEIGHT of the corrected reps (no reliable prior; shrink-to-equal).
-      - likelihood empty AND anchor present -> ANCHOR_FALLBACK (posterior == anchor prior).
-      - both empty -> ValueError (the caller must not invoke fusion with zero sources; the
-        flag-OFF byte-identical path handles the no-extras production case upstream).
+      - anchor_tau0 is None (anchor history < MIN_TRAIN -> no TRUSTED prior) but anchor_z
+        finite -> EQUAL_WEIGHT with the anchor CENTER blended as ONE equal member at the
+        conservative thin variance (TAU0_FLOOR * LOWN_INFLATE)^2. THIN-ANCHOR RETENTION
+        (2026-06-09 fix): a thin history demotes the anchor from T2 prior to equal member;
+        it NEVER silently deletes the strongest model. (Consistency law: a zero-history
+        global participates LOWN-inflated — the anchor gets the same treatment.)
+      - anchor_z absent/non-finite AND likelihood present -> EQUAL_WEIGHT of the corrected
+        reps only (no anchor member).
+      - likelihood empty AND trusted anchor present -> ANCHOR_FALLBACK (posterior == prior).
+      - likelihood empty AND only a thin anchor center -> degenerate one-member EQUAL_WEIGHT.
+      - nothing finite at all -> ValueError (the caller must not invoke fusion with zero
+        sources; the flag-OFF byte-identical path handles the no-extras case upstream).
     """
     instruments = list(likelihood)
-    have_anchor = anchor_z is not None and anchor_tau0 is not None
+    anchor_center: float | None = None
+    if anchor_z is not None and math.isfinite(float(anchor_z)):
+        anchor_center = float(anchor_z)
+    have_anchor = anchor_center is not None and anchor_tau0 is not None
 
-    if not have_anchor and not instruments:
+    if anchor_center is None and not instruments:
         raise ValueError("U0R fusion requires at least an anchor prior or one instrument")
 
-    # ---- no reliable prior: equal-weight the corrected reps (shrink-to-equal) ----
+    # ---- no TRUSTED prior: equal-weight; thin anchor center joins as one equal member ----
     if not have_anchor:
         z = np.array([ins.z for ins in instruments], dtype=float)
         sds = []
@@ -319,16 +329,21 @@ def fuse_u0r_posterior(
             if ins.n_train < MIN_TRAIN:
                 s *= LOWN_INFLATE
             sds.append(max(s, SIGMA_FLOOR))
-        mu, sd = equal_weight(z, np.array(sds), disagree_var, None, None)
+        # THIN-ANCHOR RETENTION: the anchor center participates with the conservative thin
+        # variance; tau0 here is the MEMBER std, not a trusted prior (method stays EQUAL_WEIGHT).
+        thin_tau0 = TAU0_FLOOR * LOWN_INFLATE if anchor_center is not None else None
+        mu, sd = equal_weight(z, np.array(sds), disagree_var, anchor_center, thin_tau0)
+        lik_models = tuple(ins.model for ins in instruments)
+        used = ((ANCHOR_MODEL,) + lik_models) if anchor_center is not None else lik_models
         return FusedPosterior(
             mu=mu, sd=sd, method="EQUAL_WEIGHT",
-            used_models=tuple(ins.model for ins in instruments),
-            anchor_model=None,
-            likelihood_models=tuple(ins.model for ins in instruments),
+            used_models=used,
+            anchor_model=ANCHOR_MODEL if anchor_center is not None else None,
+            likelihood_models=lik_models,
             regional_models=tuple(ins.model for ins in instruments if ins.is_regional),
         )
 
-    mu0 = float(anchor_z)
+    mu0 = float(anchor_center)
     tau0 = max(TAU0_FLOOR, float(anchor_tau0))
 
     # ---- all extras absent: posterior is the anchor prior (fail-soft fallback) ----
