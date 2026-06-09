@@ -1,6 +1,9 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-06-07
-# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-07
+# Last reused/audited: 2026-06-09
+# Lifecycle: created=2026-06-07; last_reviewed=2026-06-09; last_reused=2026-06-09
+# 2026-06-09 audit: reconciled the zero-prior-veto assertion (b16) with the unconditional
+#   STRUCTURAL_PRIOR_FLOOR=1e-12 introduced by 86ad9380f6 (vetoed bin is now ~1e-12, not 0.0).
+#   See also tests/test_replacement_0_1_anchor_eb_bias_source_match.py (source-match antibody).
 # Purpose: Protect per-city EB bias-correction of the replacement_0_1 (AIFS soft-anchor)
 #   forecast: flag-OFF byte-identity, flag-ON member/center shift (unit-correct, degC cells),
 #   fail-closed on no VERIFIED bias row, layering (correction BEFORE the zero-prior veto and
@@ -159,9 +162,12 @@ def test_correction_lifts_zero_prior_veto_on_warm_bin() -> None:
     base = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=_extraction(), openmeteo_anchor=_anchor(high_c=16.0), metric="high", bins=_bins()
     )
-    # Raw: b16 has zero member votes -> zero-prior veto nails it to posterior 0
-    # even though the anchor sits warm at 16.0.
-    assert base.posterior.probabilities["b16"] == pytest.approx(0.0)
+    # Raw: b16 has zero member votes -> the zero-prior veto drives it to the structural prior
+    # floor, i.e. effectively zero. NOTE (2026-06-09 audit): commit 86ad9380f6 replaced the
+    # -inf zero-prior veto with an unconditional STRUCTURAL_PRIOR_FLOOR=1e-12, so the vetoed
+    # bin now normalizes to ~1.7e-12, not exactly 0.0. Assert effectively-zero (< 1e-9); the
+    # discriminating power vs the corrected case (which is materially > 0, below) is intact.
+    assert base.posterior.probabilities["b16"] < 1e-9
     corrected = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=_extraction(), openmeteo_anchor=_anchor(high_c=16.0), metric="high", bins=_bins(),
         bias_shift_c=-2.0,
