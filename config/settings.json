@@ -310,7 +310,7 @@
     "download_current_targets_enabled": true,
     "download_output_dir": "state/replacement_forecast_shadow/raw_manifests",
     "download_limit_per_cycle": 200,
-    "download_release_lag_hours": 14.0,
+    "download_release_lag_hours": 10.0,
     "download_anchor_sigma_c": 3.0,
     "download_aifs_retries": 4,
     "disable_legacy_opendata_forecast_live_jobs": true,
