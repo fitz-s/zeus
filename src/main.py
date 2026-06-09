@@ -35,6 +35,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 # Live-hang diagnostics (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
