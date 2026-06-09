@@ -382,6 +382,13 @@ def _check_replacement_current_target_coverage(forecasts_db: Path, world_db: Pat
             PASS,
             f"covered={plan.covered_count}/{plan.target_count}",
         )
+    if plan.status == "NO_CURRENT_TARGETS":
+        # market_events table exists but is empty: no live targets → nothing to cover → pass
+        return GateResult(
+            "replacement_current_target_coverage",
+            PASS,
+            "no_current_targets",
+        )
     if plan.status == "CURRENT_TARGETS_REQUIRE_DAY0_OBSERVED_EXTREME":
         ok, detail = _day0_observed_extreme_coverage_detail(plan, world_db)
         if ok:

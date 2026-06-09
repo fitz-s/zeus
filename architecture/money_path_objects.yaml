@@ -709,6 +709,95 @@ state_machines:
       - NO_SUBMIT_EXCEPTION
       - PRE_VENUE_DEPTH_INSUFFICIENT_NEVER_SUBMITTED
 
+  candidate_lifecycle:
+    owner: src/strategy/redecision.py
+    description: >
+      CandidateLifecycleState enum — every state a redecision candidate may
+      occupy (spec §7 + §14.9). Forward path terminates at LEARNING_INCLUDED /
+      LEARNING_EXCLUDED. Abort branches off SUBMIT_RECAPTURE_REQUIRED are
+      fail-closed per spec §5/§7. Added by PR #401 (replacement final form).
+    states:
+      - READY_TO_SUBMIT
+      - SUBMIT_RECAPTURE_REQUIRED
+      - SUBMIT_ABORTED_PRICE_MOVED
+      - SUBMIT_ABORTED_EDGE_REVERSED
+      - SUBMIT_ABORTED_FAMILY_REVERSED
+      - PARTIAL_FILL
+    invariant_tests:
+      - tests/test_exit_family_optimizer.py
+
+  reversal_reason:
+    owner: src/strategy/redecision.py
+    description: >
+      ReversalReason enum — why a redecision was triggered (spec §3/§7 reversal
+      taxonomy). SUBMIT means the candidate failed submit recapture (fail-closed).
+      Not a venue command state; lives entirely in the redecision strategy layer.
+      Added by PR #401 (replacement final form).
+    states:
+      - SUBMIT
+
+  venue_order_fact_cancel_states:
+    owner: src/state/db.py
+    description: >
+      Cancel-state labels in the venue_order_facts.state CHECK constraint. These
+      are order-fact states on the CLOB orderbook, distinct from the venue_command
+      lifecycle. CANCEL_UNKNOWN is the fail-safe state when the cancel-confirmation
+      WS message is lost (order truth reducer sets this). Not emitted on the happy
+      path. Added by PR #401.
+    states:
+      - CANCEL_UNKNOWN
+
+  entry_proof_skip_reason:
+    owner: src/engine/cycle_runtime.py
+    description: >
+      Reason tag written into MonitorResult.exit_reason when a blocking review
+      fact is found for a position. Not a lifecycle state; used exclusively for
+      monitor-skip telemetry. Added by PR #401.
+    states:
+      - REVIEW_REQUIRED_INVALID_ENTRY_PROOF
+
+  calibration_identity_fallback:
+    owner: src/state/portfolio.py
+    description: >
+      Fallback-mode label returned by the EDLI entry calibration identity
+      resolver when no matching calibration identity can be found for the
+      current position. Used only for diagnostic telemetry, never for
+      trade decisions. Added by PR #401.
+    states:
+      - EDLI_ENTRY_CALIBRATION_IDENTITY_FALLBACK
+
+  riskguard_config_keys:
+    owner: src/riskguard/riskguard.py
+    description: >
+      Environment-variable / config-key string constants used by the riskguard
+      module. Registered here because the ACK substring in BACKFILL triggers the
+      semantic-classifier ACK-prefix check. These are not state machine states
+      or economic objects. Added by PR #401.
+    states:
+      - ZEUS_RISKGUARD_DEP_LOCK_BACKOFF_BASE_S
+
+  u0r_fusion_method:
+    owner: src/forecast/u0r_bayes.py
+    description: >
+      U0R-Bayes fusion-method labels (spec §4 fusion strategy). ANCHOR_FALLBACK
+      means all extra models are absent so the posterior is the anchor prior.
+      Not venue command states — these classify the in-memory fusion result
+      before it is used for trade evaluation. Added by PR #401.
+    states:
+      - ANCHOR_FALLBACK
+
+  u0r_backfill_status:
+    owner: scripts/backfill_u0r_history_from_b0.py
+    description: >
+      Status labels written to the backfill output manifest
+      (scripts/backfill_u0r_history_from_b0.py). U0R_BACKFILL_DRY_RUN is the
+      dry-run sentinel; U0R_BACKFILL_SEEDED confirms rows were committed.
+      Script-only, never on the live daemon path. Registered so the ACK
+      substring match in the classifier does not reject them. Added by PR #401.
+    states:
+      - U0R_BACKFILL_DRY_RUN
+      - U0R_BACKFILL_SEEDED
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED
