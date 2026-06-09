@@ -515,6 +515,27 @@ def _replacement_eb_bias_shift_c(
         return None
 
 
+def _replacement_fused_q_shape_enabled() -> bool:
+    """Flag gate for the FUSED-Q SHAPE replacement (2026-06-09 AIFS-replacement experiment).
+
+    When ``replacement_0_1_fused_q_shape_enabled`` is true AND the U0R fusion produced an
+    override with a predictive sigma, the posterior q is built DIRECTLY from
+    N(mu*, sigma_pred) via the ONE settlement bin integrator (bin_probability_settlement) —
+    fully replacing the AIFS member-vote shape. Experiment verdict (n=39 settled cells,
+    /tmp/aifs_replacement_experiment.md): the AIFS shape put EXACTLY ZERO probability on the
+    winning bin in 11/39 cells (member votes truncate support; the soft-anchor can only shift
+    that mass, never create coverage) — LogLoss 11.07 vs fused-N 1.51, hit 25.6% vs 46.2%.
+    A Normal has full support: the zero-coverage CATEGORY is unconstructable under this shape.
+    FAIL-CLOSED: any config error -> False (AIFS-shape q, today's behavior).
+    """
+    try:
+        from src.config import settings  # noqa: PLC0415
+
+        return bool(settings["edli_v1"].get("replacement_0_1_fused_q_shape_enabled", False))
+    except Exception:
+        return False
+
+
 def _replacement_member_vote_smoothing_alpha() -> float | None:
     """Flag-gated additive (Laplace/Dirichlet) smoothing alpha for the AIFS member-vote prior.
 
@@ -571,6 +592,13 @@ class _U0RFusionOverride:
     raw_model_forecast_ids: tuple[int, ...] = ()
     # BLOCKER 3: the ifs025->ifs9 anchor bridge provenance applied to the anchor prior.
     anchor_bridge: Mapping[str, object] | None = None
+    # FUSED-Q SHAPE (2026-06-09 AIFS-replacement experiment): the PREDICTIVE sigma for building
+    # q directly from N(mu*, sigma_pred) — sigma_pred^2 = fused.sd^2 + sigma_resid^2, where
+    # sigma_resid is the walk-forward std of the fused-center residual series (common-date mean
+    # of the instruments' de-biased residuals), conservatively floored. None when the residual
+    # substrate is too thin AND no conservative default applies (caller falls back to the
+    # AIFS-shape soft-anchor q).
+    predictive_sigma_c: float | None = None
 
 
 def _read_persisted_current_capture(
@@ -896,6 +924,32 @@ def _replacement_u0r_fusion_override(
             stored_model_name=OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME
         )
 
+        # FUSED-Q PREDICTIVE SIGMA (2026-06-09): sigma for the settlement VALUE, not the mean.
+        # fused.sd is the posterior sd of mu* (V* + widenings) — far too tight as a predictive
+        # spread (the AIFS-replacement experiment's tight-sigma caveat). The irreducible part is
+        # measured from the walk-forward FUSED-CENTER residual series: per common target_date,
+        # the mean of the instruments' de-biased residuals; its std IS the historical error of
+        # an equal-weight fused center at this cell. sigma_pred = sqrt(fused.sd^2 + sigma_resid^2),
+        # floored at 1.0C (conservative: settlement-graded fused-center MAE ran 0.85-1.31C at
+        # real leads; never narrower than the evidence). Thin substrate (<5 common dates) ->
+        # conservative default sigma_resid = 1.5C.
+        _date_sets = [set(ins.residuals_by_date) for ins in capture.likelihood if ins.residuals_by_date]
+        _sigma_resid = 1.5
+        if _date_sets:
+            _common = sorted(set.intersection(*_date_sets)) if len(_date_sets) > 1 else sorted(_date_sets[0])
+            if len(_common) >= 5:
+                _series = [
+                    sum(ins.residuals_by_date[d] for ins in capture.likelihood if ins.residuals_by_date) /
+                    max(1, sum(1 for ins in capture.likelihood if ins.residuals_by_date))
+                    for d in _common
+                ]
+                import statistics  # noqa: PLC0415
+                try:
+                    _sigma_resid = float(statistics.stdev(_series))
+                except statistics.StatisticsError:
+                    _sigma_resid = 1.5
+        predictive_sigma_c = max(1.0, (float(fused.sd) ** 2 + _sigma_resid ** 2) ** 0.5)
+
         return _U0RFusionOverride(
             anchor_value_c=float(fused.mu),
             anchor_sigma_c=float(fused.sd),
@@ -909,6 +963,7 @@ def _replacement_u0r_fusion_override(
             dropped_aliases=capture.selection.dropped_aliases,
             raw_model_forecast_ids=raw_model_forecast_ids,
             anchor_bridge=anchor_bridge,
+            predictive_sigma_c=predictive_sigma_c,
         )
     except Exception as exc:  # fail-soft: never break shadow materialization
         try:
@@ -967,6 +1022,53 @@ def _insert_posterior(
     computed_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
     data_version = _data_version(metric)
     q = {key: float(value) for key, value in result.posterior.probabilities.items()}
+    q_shape = "aifs_member_votes_soft_anchor"
+    # FUSED-Q SHAPE (2026-06-09, flag-gated): build q DIRECTLY from N(mu*, sigma_pred) over the
+    # SAME settlement bins, replacing the AIFS member-vote shape. The experiment showed the AIFS
+    # shape assigns EXACTLY ZERO to the winning bin on 28% of settled cells (vote-support
+    # truncation) — a Normal makes that category unconstructable. Uses the ONE settlement bin
+    # integrator (emos.bin_probability_settlement, the same preimage math as the live analytic
+    # vector). Bin bounds are CELSIUS (lower_c/upper_c) and so are mu*/sigma_pred; half_step =
+    # settlement_step_c/2 (the C-scaled rounding half-width). FAIL-CLOSED: key-set mismatch or
+    # any error -> keep the soft-anchor q (loud warning), never a silent half-shape.
+    if (
+        u0r_override is not None
+        and u0r_override.predictive_sigma_c is not None
+        and _replacement_fused_q_shape_enabled()
+    ):
+        try:
+            from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
+
+            _half_step = float(request.settlement_step_c) / 2.0
+            _fused_q = {
+                b.bin_id: bin_probability_settlement(
+                    mu=float(u0r_override.anchor_value_c),
+                    sigma=float(u0r_override.predictive_sigma_c),
+                    bin_low=(None if b.lower_c is None else float(b.lower_c)),
+                    bin_high=(None if b.upper_c is None else float(b.upper_c)),
+                    half_step=_half_step,
+                )
+                for b in request.bins
+            }
+            if set(_fused_q) != set(q):
+                raise ValueError(
+                    f"fused-q bin keys != soft-anchor q keys ({sorted(_fused_q)[:3]}... vs "
+                    f"{sorted(q)[:3]}...)"
+                )
+            _total = sum(_fused_q.values())
+            if not (_total > 0.0 and math.isfinite(_total)):
+                raise ValueError(f"fused-q mass not positive-finite: {_total}")
+            q = {key: float(value) / _total for key, value in _fused_q.items()}
+            q_shape = "fused_normal_direct"
+        except Exception as _exc:
+            try:
+                import logging  # noqa: PLC0415
+                logging.getLogger("zeus.replacement_u0r_fusion").warning(
+                    "replacement_0_1 fused-q shape skipped (fail-closed to soft-anchor q): %s",
+                    _exc,
+                )
+            except Exception:
+                pass
     bin_topology_payload = _bin_topology_payload(request.bins, settlement_step_c=float(request.settlement_step_c))
     bin_topology_hash = _json_hash(bin_topology_payload)
     dependency_payload = {
@@ -1020,6 +1122,7 @@ def _insert_posterior(
         "aifs_probabilities": dict(result.aifs_probabilities.probabilities),
         "aifs_member_count": len(result.aifs_probabilities.member_values_c),
         "q_point_json_role": "shadow_point_probability_only",
+        "q_shape": q_shape,
         "q_lcb_json_role": "absent_no_calibrated_lcb_available",
         "q_ucb_json_role": "absent_no_calibrated_ucb_available",
         "bin_topology": bin_topology_payload,
@@ -1041,6 +1144,10 @@ def _insert_posterior(
             "lead_bucket": u0r_override.lead_bucket,
             "anchor_value_c": float(u0r_override.anchor_value_c),
             "anchor_sigma_c": float(u0r_override.anchor_sigma_c),
+            "predictive_sigma_c": (
+                None if u0r_override.predictive_sigma_c is None
+                else float(u0r_override.predictive_sigma_c)
+            ),
             "dropped_models": list(u0r_override.dropped_models),
             "excluded_regionals": list(u0r_override.excluded_regionals),
             "dropped_aliases": list(u0r_override.dropped_aliases),
