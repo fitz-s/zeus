@@ -73,7 +73,8 @@ def _run(args) -> int:
         PolymarketV2Adapter,
     )
 
-    positions = json.load(open(args.positions))
+    with open(args.positions) as fh:
+        positions = json.load(fh)
     targets = [
         p for p in positions
         if p.get("redeemable") and float(p.get("curPrice") or 0) > args.min_price
