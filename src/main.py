@@ -1446,6 +1446,69 @@ def _redeem_submitter_cycle() -> None:
                     "redeem_submitter: promoted %d stub-deferred rows to RETRYING",
                     promoted,
                 )
+
+            def _build_adapter(creds_: dict) -> PolymarketV2Adapter:
+                q1_egress_evidence = _resolve_q1_egress_evidence_path(
+                    default=DEFAULT_Q1_EGRESS_EVIDENCE,
+                    env_name=Q1_EGRESS_EVIDENCE_ENV,
+                )
+                return PolymarketV2Adapter(
+                    host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
+                    funder_address=creds_["funder_address"],
+                    signer_key=creds_["private_key"],
+                    chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+                    signature_type=_resolve_clob_v2_signature_type(),
+                    polygon_rpc_url=os.environ.get(
+                        "POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL
+                    ),
+                    api_creds=creds_.get("api_creds"),
+                    q1_egress_evidence_path=q1_egress_evidence,
+                )
+
+            # ── Inventory-truth auto-collect sweep (2026-06-09) ──────────────
+            # Operator directive: the system must auto-collect with no operator
+            # hands. The redeem trigger is the Safe's ACTUAL chain inventory
+            # (data-api positions + per-candidate chain-truth verification),
+            # NEVER the internal portfolio ledger — the ledger missed real
+            # winners (pending_exit/admin_closed phases) and could not see
+            # ledger-invisible holdings (London-16C YES ~$798, zero
+            # position_current rows). See src/execution/inventory_redeem_sweep.py.
+            # Fail-soft: any sweep failure logs and defers to the next tick;
+            # the submit loop below is unaffected. Kill switch:
+            # ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED=1.
+            creds = None
+            adapter = None
+            _sweep_disabled = os.environ.get(
+                "ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED", ""
+            ).strip().lower() in ("1", "true", "yes", "on")
+            if not _sweep_disabled:
+                try:
+                    creds = resolve_polymarket_credentials()
+                except RuntimeError:
+                    # Idle daemon without Keychain stays quiet (Codex P2 PR #145
+                    # posture preserved): only raise when submit work exists.
+                    creds = None
+                if creds is not None:
+                    from src.execution.inventory_redeem_sweep import (
+                        sweep_chain_inventory_for_redeems,
+                    )
+                    adapter = _build_adapter(creds)
+                    try:
+                        swept = sweep_chain_inventory_for_redeems(
+                            conn, adapter, creds["funder_address"],
+                        )
+                    except Exception as exc:  # noqa: BLE001 — fail-soft per tick
+                        logger.warning(
+                            "redeem_submitter: inventory sweep failed (fail-soft): %s",
+                            exc,
+                        )
+                        swept = []
+                    if swept:
+                        conn.commit()
+                        logger.info(
+                            "redeem_submitter: inventory sweep enqueued/active %d command(s)",
+                            len(swept),
+                        )
             # Poll ALL submittable states (INTENT_CREATED + RETRYING).
             placeholders = ",".join("?" * len(_SUBMITTABLE_STATES))
             state_values = tuple(s.value for s in _SUBMITTABLE_STATES)
@@ -1463,28 +1526,15 @@ def _redeem_submitter_cycle() -> None:
             # Credentials resolved only when actual work exists — fail-closed:
             # if Keychain is unavailable here, raise so the scheduler records
             # FAILED and the operator sees a clear provisioning gap.
-            try:
-                creds = resolve_polymarket_credentials()
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    f"redeem_submitter: credentials unavailable (fail-closed): {exc}"
-                ) from exc
-            q1_egress_evidence = _resolve_q1_egress_evidence_path(
-                default=DEFAULT_Q1_EGRESS_EVIDENCE,
-                env_name=Q1_EGRESS_EVIDENCE_ENV,
-            )
-            adapter = PolymarketV2Adapter(
-                host=os.environ.get("POLYMARKET_CLOB_V2_HOST", DEFAULT_V2_HOST),
-                funder_address=creds["funder_address"],
-                signer_key=creds["private_key"],
-                chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
-                signature_type=_resolve_clob_v2_signature_type(),
-                polygon_rpc_url=os.environ.get(
-                    "POLYGON_RPC_URL", DEFAULT_POLYGON_RPC_URL
-                ),
-                api_creds=creds.get("api_creds"),
-                q1_egress_evidence_path=q1_egress_evidence,
-            )
+            if creds is None:
+                try:
+                    creds = resolve_polymarket_credentials()
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"redeem_submitter: credentials unavailable (fail-closed): {exc}"
+                    ) from exc
+            if adapter is None:
+                adapter = _build_adapter(creds)
             submitted = 0
             failed = 0
             for row in rows:  # already capped at 32 via SQL LIMIT
