@@ -61,6 +61,11 @@ OPENMETEO_MODEL_IDS: dict[str, str] = {
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
     # icon_seamless is fetched only to run the alias-dedup test against icon_d2.
     "icon_seamless": "icon_seamless",
+    # 2026-06-09 promotion (universality sweep P5): explicit entries so a future open-meteo id
+    # rename can never silently break the identity fallback (`.get(model, model)`).
+    "ncep_nbm_conus": "ncep_nbm_conus",
+    "ukmo_global_deterministic_10km": "ukmo_global_deterministic_10km",
+    "ukmo_uk_deterministic_2km": "ukmo_uk_deterministic_2km",
 }
 
 # BLOCKER 3: the OM product that actually serves the ANCHOR walk-forward history via the

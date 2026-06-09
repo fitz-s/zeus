@@ -5567,6 +5567,17 @@ def _arm_gate_emit_cycle() -> None:
         )
         return
 
+    # ANTI-SILENT-SINK (2026-06-09, same class as the materializer-queue fix): on SUCCESS the
+    # producer's captured output was discarded entirely, so any WARNING it emitted (degraded
+    # inputs, partial settlement coverage) reached no log. Re-emit WARNING/ERROR lines.
+    try:
+        for _stream in (completed.stderr or "", completed.stdout or ""):
+            for _line in _stream.splitlines():
+                if "WARNING" in _line or "ERROR" in _line:
+                    logger.warning("arm_gate_emit[producer] %s", _line.strip()[:500])
+    except Exception:
+        pass
+
     logger.info(
         "arm_gate_emit: re-emitted ARM-gate artifact → %s (commit_sha re-stamped to "
         "running HEAD; verdict remains the producer's honest settlement-grounded "

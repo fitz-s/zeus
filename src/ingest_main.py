@@ -771,6 +771,17 @@ def _etl_recalibrate_body():
                     WriteClass.BULK,
                     capture_output=True, text=True, timeout=300,
                 )
+                # ANTI-SILENT-SINK (2026-06-09, same class as the materializer-queue fix):
+                # capture_output=True swallowed every WARNING the ETL emitted on rc==0 —
+                # a degradation antibody that warns into a void is structurally deaf.
+                # Re-emit WARNING/ERROR lines at the daemon level (fail-soft).
+                try:
+                    for stream in (r.stderr or "", r.stdout or ""):
+                        for line in stream.splitlines():
+                            if "WARNING" in line or "ERROR" in line:
+                                logger.warning("etl[%s] %s", script, line.strip()[:500])
+                except Exception:
+                    pass
                 results[script] = "OK" if r.returncode == 0 else f"FAIL: {r.stderr[-200:]}"
             except Exception as e:
                 results[script] = f"ERROR: {e}"
