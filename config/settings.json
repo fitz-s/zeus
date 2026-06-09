@@ -314,7 +314,7 @@
     "download_release_lag_hours": 14.0,
     "download_anchor_sigma_c": 3.0,
     "download_aifs_retries": 4,
-    "disable_legacy_opendata_forecast_live_jobs": true,
+    "disable_legacy_opendata_forecast_live_jobs": false,
     "materialization_interval_min": 5,
     "seed_discovery_limit_per_cycle": 10,
     "seed_limit_per_cycle": 10,
