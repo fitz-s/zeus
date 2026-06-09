@@ -195,3 +195,23 @@ def test_disabled_flag_still_short_circuits(tmp_path, monkeypatch) -> None:
     cfg["download_current_targets_enabled"] = False
     assert _download_replacement_forecast_current_targets_if_needed(cfg) is None
     assert calls == []
+
+
+def test_stale_cycle_download_includes_covered_targets(tmp_path, monkeypatch) -> None:
+    # K-ROOT INSTANCE #3 (2026-06-09): the downloader filtered its target list to
+    # NOT-covered rows, so a fully-covered window never received the NEW cycle's raw
+    # inputs — re-materialization at the fresh cycle could only bind OLD manifests
+    # (observed live: 06-11 targets re-pinned to 06-08T18 manifests). When the download
+    # fires because the cycle is stale, it must pass include_covered=True.
+    db = _make_db(tmp_path, {
+        "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+        "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+    })
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=True), calls=calls)
+    _download_replacement_forecast_current_targets_if_needed(_cfg(db, tmp_path))
+    assert len(calls) == 1
+    assert calls[0].get("include_covered") is True, (
+        "a stale-cycle download must fetch raw inputs for ALL current targets — filtering "
+        "to uncovered rows self-perpetuates staleness (coverage never implies currency)"
+    )

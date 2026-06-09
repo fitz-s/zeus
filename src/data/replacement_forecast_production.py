@@ -215,6 +215,11 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
         release_lag_hours=release_lag_hours,
         anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
         aifs_retries=int(cfg.get("download_aifs_retries") or 4),
+        # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
+        # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
+        # needed for ALL current targets — coverage ("a posterior exists") must not filter
+        # the target list, or covered targets can never re-materialize on the fresh cycle.
+        include_covered=not cycle_is_current,
     )
 
 

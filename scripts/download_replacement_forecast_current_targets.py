@@ -156,15 +156,26 @@ def download_current_target_raw_inputs(
     release_lag_hours: float,
     anchor_sigma_c: float,
     aifs_retries: int,
+    include_covered: bool = False,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
     # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
     # to uncovered rows only — otherwise a limit of 10 on an alphabetically-ordered
     # result that happens to start with 10 covered cities returns an empty target
     # list and the downloader silently produces zero manifests every cycle.
+    #
+    # CYCLE-CURRENCY (2026-06-09, K-root instance #3): "covered" means a posterior EXISTS —
+    # it says NOTHING about which cycle that posterior was built on. Filtering the download
+    # targets to uncovered rows therefore self-perpetuates staleness: a fully-covered window
+    # never receives the NEW cycle's raw inputs, so re-materialization at the fresh cycle can
+    # only ever bind old manifests (observed live: 06-11 targets re-pinned to the 06-08T18
+    # manifests because the 06-09T00 download had skipped every covered target).
+    # ``include_covered=True`` (passed by the production wrapper when the available cycle is
+    # ahead of the downloaded high-water mark, and by the CLI when --cycle is explicit)
+    # downloads raw inputs for ALL current targets at the requested cycle.
     plan = build_replacement_forecast_current_target_plan(forecast_db)
-    _uncovered = [row for row in plan.rows if not row.covered]
-    targets = _uncovered[:limit] if limit else _uncovered
+    _rows = list(plan.rows) if include_covered else [row for row in plan.rows if not row.covered]
+    targets = _rows[:limit] if limit else _rows
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -345,6 +356,9 @@ def main(argv: list[str] | None = None) -> int:
             release_lag_hours=args.release_lag_hours,
             anchor_sigma_c=args.anchor_sigma_c,
             aifs_retries=args.aifs_retries,
+            # An EXPLICIT --cycle is an operator instruction to (re)download THAT cycle's
+            # raw inputs for the whole current window — coverage must not filter it.
+            include_covered=bool(args.cycle),
         )
         if args.output_json is not None:
             args.output_json.parent.mkdir(parents=True, exist_ok=True)
