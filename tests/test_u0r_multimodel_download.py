@@ -246,6 +246,160 @@ def test_download_includes_anchor_and_stores_ecmwf_ifs_identity(tmp_path) -> Non
     )
 
 
+# =====================================================================================
+# DOMAIN GATE RELATIONSHIP TESTS (FAULT-B fix: no constructable 400 for regional models)
+#
+# Relationship under test: for each configured model the download request is only built
+# and sent when the city coordinate is inside the model's geographic domain, so "No data
+# is available for this location" HTTP 400s become structurally impossible. A
+# domain-excluded model is recorded in domain_excluded (loud), not silently absent.
+# =====================================================================================
+
+def _tokyo_target():
+    """A city outside icon_eu/icon_d2/arome domains (Tokyo)."""
+    from src.data.u0r_multimodel_download import U0RDownloadTarget
+    return [
+        U0RDownloadTarget(city="Tokyo", metric="high", target_date="2026-06-09",
+                          lead_days=1, latitude=35.553, longitude=139.781,
+                          timezone_name="Asia/Tokyo"),
+    ]
+
+
+def _paris_target():
+    """A city inside all EU domains (Paris)."""
+    from src.data.u0r_multimodel_download import U0RDownloadTarget
+    return [
+        U0RDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
+                          lead_days=1, latitude=48.967, longitude=2.428,
+                          timezone_name="Europe/Paris"),
+    ]
+
+
+def test_domain_gate_no_request_for_regional_at_out_of_domain_city(tmp_path) -> None:
+    """icon_eu, icon_d2, meteofrance_arome_france_hd MUST NOT be fetched for Tokyo.
+
+    The single-runs and previous-runs APIs return HTTP 400 for out-of-domain coords;
+    this gate prevents those requests from ever being built, making the 400 category
+    structurally impossible.
+    """
+    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+
+    db = _forecast_db(tmp_path)
+    fetched_models: list[str] = []
+
+    def _single(*, model, **k):
+        fetched_models.append(model)
+        return 20.0
+
+    def _previous(*, model, **k):
+        fetched_models.append(model)
+        return 19.0
+
+    report = download_u0r_extra_raw_inputs(
+        forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC),
+        targets=_tokyo_target(),
+        single_runs_fetch=_single, previous_runs_fetch=_previous,
+    )
+
+    # No request must be built for domain-limited models at Tokyo.
+    assert "icon_eu" not in fetched_models, (
+        "icon_eu must not be requested for Tokyo (out-of-EU domain)"
+    )
+    assert "icon_d2" not in fetched_models, (
+        "icon_d2 must not be requested for Tokyo (out-of-Central-EU domain)"
+    )
+    assert "meteofrance_arome_france_hd" not in fetched_models, (
+        "meteofrance_arome_france_hd must not be requested for Tokyo (out-of-France domain)"
+    )
+
+    # The skips must be loudly recorded in domain_excluded.
+    excluded_set = set(report["domain_excluded"])
+    assert any("icon_eu" in e and "Tokyo" in e for e in excluded_set), (
+        "icon_eu:Tokyo must appear in domain_excluded"
+    )
+    assert any("icon_d2" in e and "Tokyo" in e for e in excluded_set), (
+        "icon_d2:Tokyo must appear in domain_excluded"
+    )
+    assert any("meteofrance_arome_france_hd" in e and "Tokyo" in e for e in excluded_set), (
+        "meteofrance_arome_france_hd:Tokyo must appear in domain_excluded"
+    )
+
+    # Global models (gfs_global, icon_global, gem_global, jma_seamless, ecmwf_ifs) MUST
+    # still be fetched — the domain gate must not touch globals.
+    from src.forecast.model_selection import ANCHOR_MODEL, DECORR_GLOBALS
+    for global_model in list(DECORR_GLOBALS) + [ANCHOR_MODEL]:
+        assert global_model in fetched_models, (
+            f"global model {global_model} must still be fetched for out-of-domain city"
+        )
+
+
+def test_domain_gate_all_models_fetched_for_in_domain_city(tmp_path) -> None:
+    """All configured models including icon_eu/icon_d2/arome MUST be fetched for Paris.
+
+    The gate must not over-exclude: in-domain cities should request every model.
+    """
+    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+
+    db = _forecast_db(tmp_path)
+    fetched_models: list[str] = []
+
+    def _single(*, model, **k):
+        fetched_models.append(model)
+        return 20.0
+
+    def _previous(*, model, **k):
+        return 19.0
+
+    download_u0r_extra_raw_inputs(
+        forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC),
+        targets=_paris_target(),
+        single_runs_fetch=_single, previous_runs_fetch=_previous,
+    )
+
+    for regional in ("icon_eu", "icon_d2", "meteofrance_arome_france_hd"):
+        assert regional in fetched_models, (
+            f"{regional} must be fetched for Paris (in-domain)"
+        )
+
+
+def test_domain_gate_unavailable_global_is_loud_not_silent(tmp_path) -> None:
+    """A global model (always in-domain) that fails to fetch must appear in `dropped`,
+    NOT in `domain_excluded`. The ensemble-completeness report must flag it.
+
+    This guards STEP 4: real upstream failures on global models are distinguishable
+    from expected domain-exclusion absences.
+    """
+    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.forecast.model_selection import ANCHOR_MODEL
+
+    db = _forecast_db(tmp_path)
+
+    def _single(*, model, **k):
+        if model == "gfs_global":
+            return None  # simulate upstream unavailability
+        return 20.0
+
+    report = download_u0r_extra_raw_inputs(
+        forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC),
+        targets=_paris_target(),
+        single_runs_fetch=_single, previous_runs_fetch=lambda **k: 19.0,
+    )
+
+    # gfs_global (global model, always in-domain) failure must be in `dropped`.
+    assert "gfs_global:single_runs" in report["dropped"], (
+        "unavailable global model must be in dropped, not silently absent"
+    )
+    # It must NOT be in domain_excluded (that is reserved for domain-geographic skips).
+    excluded_set = set(report["domain_excluded"])
+    assert not any("gfs_global" in e for e in excluded_set), (
+        "gfs_global must never appear in domain_excluded (it is a global model)"
+    )
+    # global_models_unavailable must flag it.
+    assert "gfs_global" in report["global_models_unavailable"], (
+        "gfs_global single_runs failure must appear in global_models_unavailable"
+    )
+
+
 def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) -> None:
     """FIX 1 mapping: the DEFAULT previous-runs fetch for the anchor must send the OM
     ECMWF previous-runs model id (ecmwf_ifs025) to the OM API, even though the stored

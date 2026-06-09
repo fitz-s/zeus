@@ -46,7 +46,9 @@ from src.data.u0r_multimodel_capture import (
 from src.forecast.model_selection import (
     ANCHOR_MODEL,
     GLOBAL_LIKELIHOOD_MODELS,
+    ICON_EU_MODEL,
     REGIONAL_MODELS,
+    regional_eligible,
 )
 
 _LOG = logging.getLogger("zeus.u0r_multimodel_download")
@@ -247,6 +249,37 @@ OPENMETEO_PREVIOUS_RUNS_MODEL_IDS: dict[str, str] = {
     # the anchor history.
     ANCHOR_MODEL: OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
 }
+
+# Domain-limited models: fetching these for an out-of-domain coordinate yields HTTP 400
+# ("No data is available for this location"). The gate below uses the existing polygon config
+# so the download and the fusion's selection gate are driven by the SAME polygon shapes.
+#
+#   icon_d2, meteofrance_arome_france_hd  — regional in REGIONAL_MODELS; gated directly.
+#   icon_eu                               — EU-only 7km nest; not in REGIONAL_MODELS but IS
+#     domain-limited. We reuse the icon_d2 polygon as the EU-presence gate (model_selection
+#     already does this: icon_eu_in_eu_domain = regional_eligible("icon_d2", ...)).
+#
+# Globals (gfs_global, icon_global, gem_global, jma_seamless, ecmwf_ifs) are worldwide;
+# they are never skipped here.
+_DOMAIN_GATED_MODELS: frozenset[str] = frozenset(REGIONAL_MODELS) | frozenset({ICON_EU_MODEL})
+
+
+def _model_in_domain(model: str, *, lat: float, lon: float, lead_days: int) -> bool:
+    """Return True when it is safe to request ``model`` for the given coordinate.
+
+    Regional models are gated by their own polygon.  icon_eu uses the icon_d2 polygon
+    (same Central-EU domain; aligned with model_selection.select_models). Global models
+    always return True (no domain restriction).
+    """
+    if model not in _DOMAIN_GATED_MODELS:
+        return True  # global model — worldwide coverage
+    # icon_eu: eligible iff the city is inside the Central-EU (icon_d2) polygon.
+    gate_model = "icon_d2" if model == ICON_EU_MODEL else model
+    # Pass lead_days=0 to bypass the lead-day cap: we want geographic eligibility only.
+    # The fusion's model_selection already applies the correct lead gate; the download
+    # should fetch for ALL leads when the city is in-domain so the history accrues.
+    return regional_eligible(gate_model, lat=lat, lon=lon, lead_days=0)
+
 
 # A single-runs (forward) fetch: today's local-day extremum (degC) for the metric, or None.
 SingleRunsFetchFn = Callable[..., float | None]
@@ -534,10 +567,25 @@ def download_u0r_extra_raw_inputs(
     target_list = list(targets)
     rows: list[tuple] = []
     dropped: list[str] = []
+    domain_excluded: list[str] = []
 
     for t in target_list:
         target_local_date = date.fromisoformat(t.target_date)
         for model in U0R_EXTRA_MODELS:
+            # Domain gate: skip domain-limited models for out-of-domain cities. The API
+            # returns HTTP 400 "No data is available for this location" for these, which
+            # would be retried (wasting time) and then fail-soft dropped (silent absence).
+            # An explicit skip here makes the absence LOUD and avoids the wasted retries.
+            if not _model_in_domain(model, lat=t.latitude, lon=t.longitude, lead_days=int(t.lead_days)):
+                key = f"{model}:{t.city}"
+                domain_excluded.append(key)
+                _LOG.info(
+                    "U0R download domain-excluded %s for %s (%.3fN, %.3fE) — "
+                    "out-of-domain, no request sent",
+                    model, t.city, t.latitude, t.longitude,
+                )
+                continue
+
             # (1) FORWARD single_runs (live capture).
             try:
                 sv = single_fetch(
@@ -613,6 +661,31 @@ def download_u0r_extra_raw_inputs(
     finally:
         conn.close()
 
+    if domain_excluded:
+        _LOG.info(
+            "U0R download domain-excluded %d model×city combos (expected — regional models "
+            "not requested for out-of-domain cities): %s",
+            len(domain_excluded),
+            ", ".join(sorted(set(domain_excluded))[:20]),
+        )
+
+    # Ensemble-completeness: global models (always in-domain) that were unexpectedly dropped
+    # are the signal of a real upstream problem. Distinguish them from domain-excluded
+    # (expected absence) so the operator can tell "complete global ensemble" from "degraded".
+    global_models_expected = frozenset(
+        m for m in U0R_EXTRA_MODELS
+        if m not in frozenset(REGIONAL_MODELS) | frozenset({ICON_EU_MODEL})
+    )
+    global_single_dropped = {
+        d.split(":")[0] for d in dropped if d.endswith(":single_runs")
+    } & global_models_expected
+    if global_single_dropped:
+        _LOG.warning(
+            "U0R download: GLOBAL model(s) single_runs UNAVAILABLE (not domain-excluded — "
+            "real upstream failure): %s",
+            sorted(global_single_dropped),
+        )
+
     return {
         "status": "U0R_EXTRA_RAW_INPUTS_DOWNLOADED",
         "cycle": cycle_iso,
@@ -622,4 +695,8 @@ def download_u0r_extra_raw_inputs(
         "written_row_count": written,
         "pruned_row_count": pruned,
         "dropped": tuple(dropped),
+        "domain_excluded": tuple(sorted(set(domain_excluded))),
+        # Ensemble-completeness markers: how many global (always-in-domain) models succeeded.
+        "global_models_expected": len(global_models_expected),
+        "global_models_unavailable": sorted(global_single_dropped),
     }
