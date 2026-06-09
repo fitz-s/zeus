@@ -157,18 +157,17 @@ providers:
     client: src/data/u0r_history_provider.py
     why: >
       Walk-forward historical forecast residuals for U0R-Bayes fusion (previous_runs
-      endpoint only, target_date < decision_date, VERIFIED settlement).  Intra-DB JOIN
-      on zeus-forecasts.db (raw_model_forecasts + settlement_outcomes).  Not an
-      external network source; reads Zeus's own persisted forecast history.  Added by
-      PR #401 (replacement final form). (PR #401)
+      endpoint only, target_date < decision_date, VERIFIED settlement). Intra-DB JOIN
+      on zeus-forecasts.db (raw_model_forecasts + settlement_outcomes). Not an
+      external network source; reads Zeus's own persisted forecast history.
   polymarket_gamma:
     role: internal_probe
     client: src/data/station_migration_probe.py
     why: >
       Polymarket gamma API probe for station-migration drift detection only.
       Compares Polymarket market resolution URLs against config/cities.json::wu_station;
-      writes alerts when they diverge.  Operator-only tooling — not on any live daemon
-      hot-path and never a forecast/settlement/calibration source.  Added 2026-05-01. (PR #401)
+      writes alerts when they diverge. Operator-only tooling — not on any live daemon
+      hot-path and never a forecast/settlement/calibration source.
 package_defaults:
   src/contracts:
     zone: K0_frozen_kernel
