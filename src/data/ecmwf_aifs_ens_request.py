@@ -16,7 +16,12 @@ STREAM = "enfo"
 TYPES = ("cf", "pf")
 PARAMS = ("2t",)
 LEVTYPE = "sfc"
-SOURCE = "aws"
+SOURCE = "azure"
+# ECMWF open-data is replicated across these mirrors (per ECMWF's own portal notice). AWS S3
+# throttles our IP with HTTP 503 SlowDown under the 39-manifest cycle load — which starved the
+# AIFS anchor download, leaving the materializer with no fresh posterior (the live stall). Default
+# off AWS to Azure (verified un-throttled). Any of these mirrors is a valid switchable source.
+_VALID_AIFS_SOURCES = frozenset({"azure", "ecmwf", "aws"})
 DEFAULT_STEPS = tuple(range(0, 361, 6))
 UTC = timezone.utc
 _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
@@ -76,8 +81,11 @@ class AifsEnsOpenDataRequest:
             raise ValueError("AIFS ENS request requires at least one step")
         if any(step < 0 or step % 6 != 0 or step > 360 for step in self.steps):
             raise ValueError("AIFS ENS sampled-2t steps must be 6-hourly in 0..360")
-        if self.source != SOURCE:
-            raise ValueError("AIFS ENS OpenData shadow request currently supports source=aws")
+        if self.source not in _VALID_AIFS_SOURCES:
+            raise ValueError(
+                f"AIFS ENS OpenData source must be one of {sorted(_VALID_AIFS_SOURCES)} "
+                f"(ECMWF open-data mirrors); got {self.source!r}"
+            )
         if self.model != MODEL or self.ecmwf_class != ECMWF_CLASS:
             raise ValueError("AIFS ENS product identity must use class=ai and model=aifs-ens")
         if self.stream != STREAM or set(self.types) != set(TYPES):
