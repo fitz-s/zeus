@@ -797,6 +797,28 @@ state_machines:
       - U0R_BACKFILL_DRY_RUN
       - U0R_BACKFILL_SEEDED
 
+  autonomous_redeem_config_keys:
+    owner: src/execution/settlement_commands.py
+    description: >
+      Environment-variable string constants gating the autonomous redemption
+      path (src/execution/settlement_commands.py, src/venue/polymarket_v2_adapter.py,
+      scripts/redeem_real_winners_2026_06_09.py). ZEUS_AUTONOMOUS_REDEEM_ENABLED
+      arms the chain-truth redeem flow; ZEUS_AUTONOMOUS_REDEEM_DRY_RUN forces
+      simulate-only. Config keys, not state machine states or economic objects.
+    states:
+      - ZEUS_AUTONOMOUS_REDEEM_ENABLED
+      - ZEUS_AUTONOMOUS_REDEEM_DRY_RUN
+
+  inventory_redeem_sweep_config_keys:
+    owner: src/main.py
+    description: >
+      Environment-variable kill switch for the inventory-truth redeem sweep
+      (src/execution/inventory_redeem_sweep.py wired in src/main.py).
+      ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED=1 disables the sweep cycle entirely.
+      Config key, not a state machine state or economic object.
+    states:
+      - ZEUS_INVENTORY_REDEEM_SWEEP_DISABLED
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED
@@ -939,6 +961,15 @@ external_truth_sources:
     authority_tier: chain_truth
     endpoint_patterns: [polygon-rpc, eth_sendRawTransaction, eth_call]
     required_tests: [tests/test_polymarket_v2_adapter_negrisk_redeem.py]
+  polymarket_data_api:
+    # Read-only venue position-inventory truth (data-api.polymarket.com/positions)
+    # used by the redeem balance probe and the inventory-truth auto-collect sweep
+    # to discover redeemable CTF holdings. Never an order-submission or
+    # forecast/settlement source; chain truth (polygon_rpc) remains the
+    # redemption authority — this endpoint only seeds the candidate list.
+    authority_tier: venue_position_inventory
+    endpoint_patterns: [data-api.polymarket.com, /positions]
+    required_tests: [tests/test_inventory_redeem_sweep.py, tests/test_polymarket_v2_adapter_balance_probe.py]
   open_meteo_mainstream:
     # Independent mainstream-forecast cross-check for the #135 direction-agreement
     # gate. Distinct authority from `ecmwf` (our own primary forecast): this is the

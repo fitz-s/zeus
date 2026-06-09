@@ -97,12 +97,178 @@ class BankrollOfRecord:
     staleness_seconds: float = 0.0  # 0.0 = fresh fetch this call
     cached: bool = False  # True iff returned from cache without re-fetching
     spendable_cash_usd: float | None = None
+    # Provenance of the position-value leg of equity (2026-06-09 blip guard).
+    # "verified" = venue affirmatively reported holdings (or genuinely none);
+    # "blip_held" = the /positions read returned EMPTY while contradicting a
+    # recent verified nonzero position value — last-known-good value held.
+    positions_read_verdict: str = "verified"
 
 
 _lock = threading.Lock()
 _last_value_usd: Optional[float] = None
 _last_spendable_cash_usd: Optional[float] = None
 _last_fetched_at: Optional[datetime] = None
+# Positions-blip guard state (2026-06-09): anchor of the last VERIFIED nonzero
+# position value, used to detect an empty /positions read that contradicts
+# recent reality. Updated only under _lock (all writers run inside current()).
+_last_position_value_usd: Optional[float] = None
+_last_nonzero_positions_at: Optional[datetime] = None
+_last_positions_read_verdict: str = "verified"
+
+# An empty /positions response that contradicts a verified nonzero position
+# value younger than this bound is treated as a transient venue blip: the
+# last-known-good position value is HELD (with a WARN) instead of silently
+# collapsing account equity by the full open-position notional. Past the bound,
+# a persistently-empty read is accepted as truth (genuine closure persists;
+# blips do not). The 2026-06-09 live incident blipped for 13+ consecutive
+# minutes, so the default mirrors the 30-min resilient cached() bound.
+_DEFAULT_POSITIONS_EMPTY_HOLD_SECONDS = 1800.0
+# Equity below this is "no position value worth defending" — no hold applies.
+_POSITION_VALUE_EPSILON_USD = 0.01
+# Cash corroboration: positions legitimately vanish via settlement/redemption,
+# which pays winners INTO free cash. If free cash jumped by at least this
+# fraction of the vanished position value in the same read, the empty list is
+# corroborated as a genuine redemption and accepted immediately (no hold).
+_REDEMPTION_CASH_CORROBORATION_FRACTION = 0.25
+
+
+def _positions_empty_hold_seconds() -> float:
+    raw = os.environ.get("ZEUS_BANKROLL_POSITIONS_EMPTY_HOLD_S")
+    if raw is None:
+        return _DEFAULT_POSITIONS_EMPTY_HOLD_SECONDS
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "ZEUS_BANKROLL_POSITIONS_EMPTY_HOLD_S=%r is not a float; using default %.0fs",
+            raw, _DEFAULT_POSITIONS_EMPTY_HOLD_SECONDS,
+        )
+        return _DEFAULT_POSITIONS_EMPTY_HOLD_SECONDS
+    if parsed < 0:
+        logger.warning(
+            "ZEUS_BANKROLL_POSITIONS_EMPTY_HOLD_S=%r is negative; using default %.0fs",
+            raw, _DEFAULT_POSITIONS_EMPTY_HOLD_SECONDS,
+        )
+        return _DEFAULT_POSITIONS_EMPTY_HOLD_SECONDS
+    return parsed
+
+
+def _classify_positions_read(
+    *,
+    free_pusd: float,
+    raw_position_value: float,
+    positions_count: int,
+    prev_spendable_cash: float | None,
+    prev_position_value: float | None,
+    prev_nonzero_positions_at: datetime | None,
+    now: datetime,
+    hold_bound_seconds: float,
+) -> tuple[str, float]:
+    """Classify a /positions read and return (verdict, effective_position_value).
+
+    PROVENANCE ANTIBODY (Fitz #4, live incident 2026-06-09 22:15-22:28Z): the
+    Polymarket positions endpoint intermittently returned an EMPTY list while
+    ~$857 of open positions existed. ``free + 0`` collapsed account equity
+    10x ($951 -> $94), the riskguard daily-loss threshold base collapsed with
+    it ($76 -> $7.53), and an otherwise-fine $10.44 realized loss tripped a
+    false RED that blocked ALL new entries. The defect: an empty response was
+    treated as the TRUE STATE "no positions" rather than as a possibly-failed
+    READ. This classifier distinguishes the two by internal consistency:
+
+    - positions list NON-EMPTY: the venue affirmatively reported holdings —
+      trust the value VERBATIM, including a collapsed one. A genuine
+      mark-to-market drawdown (positions present, values down) MUST still
+      tighten gates; no hold ever applies here. -> "verified"
+    - EMPTY with no recent verified nonzero position value: nothing is
+      contradicted (cold start / genuinely flat account). -> "verified"
+    - EMPTY contradicting a recent nonzero value, with free cash jumped by
+      >= 25% of the vanished value in the same read: settlement/redemption
+      pays winners into cash, so the closure is corroborated — accept
+      immediately. -> "redemption_corroborated"
+    - EMPTY contradicting a recent nonzero value, no cash corroboration,
+      within the hold bound: transient venue blip — HOLD the last verified
+      value (caller WARNs). -> "blip_held"
+    - EMPTY persisting beyond the hold bound: genuine closure persists, blips
+      do not — accept zero (caller WARNs once accepting). ->
+      "persistent_empty_accepted"
+
+    NOT gate weakening: the hold only refuses to let a single contradicted
+    empty READ silently delete equity; every affirmative venue report passes
+    through verbatim, and a genuine catastrophic loss also surfaces through
+    the realized-settled-PnL loss numerator independent of this base.
+    """
+    if positions_count > 0:
+        return "verified", raw_position_value
+    if prev_position_value is None or prev_position_value <= _POSITION_VALUE_EPSILON_USD:
+        return "verified", 0.0
+    if prev_nonzero_positions_at is None:
+        return "verified", 0.0
+    age_seconds = (now - prev_nonzero_positions_at).total_seconds()
+    if age_seconds > hold_bound_seconds:
+        return "persistent_empty_accepted", 0.0
+    if (
+        prev_spendable_cash is not None
+        and (free_pusd - prev_spendable_cash)
+        >= _REDEMPTION_CASH_CORROBORATION_FRACTION * prev_position_value
+    ):
+        return "redemption_corroborated", 0.0
+    return "blip_held", prev_position_value
+
+
+def _resolve_position_value(
+    free_pusd: float,
+    raw_position_value: float,
+    positions_count: int,
+    *,
+    now: datetime | None = None,
+) -> float:
+    """Apply the blip classifier against module state and update the anchors.
+
+    Runs inside current()'s _lock (the only `_fetch_balance` call site), so the
+    module-global reads/writes here are lock-safe. On "blip_held" the anchors
+    are deliberately NOT advanced: the hold window is measured from the last
+    VERIFIED nonzero read, so a sustained empty streak ages out at the bound
+    instead of self-renewing forever.
+    """
+    global _last_position_value_usd, _last_nonzero_positions_at, _last_positions_read_verdict
+
+    moment = now or _now_utc()
+    verdict, effective_value = _classify_positions_read(
+        free_pusd=free_pusd,
+        raw_position_value=raw_position_value,
+        positions_count=positions_count,
+        prev_spendable_cash=_last_spendable_cash_usd,
+        prev_position_value=_last_position_value_usd,
+        prev_nonzero_positions_at=_last_nonzero_positions_at,
+        now=moment,
+        hold_bound_seconds=_positions_empty_hold_seconds(),
+    )
+    _last_positions_read_verdict = verdict
+    if verdict == "blip_held":
+        held_age = (
+            (moment - _last_nonzero_positions_at).total_seconds()
+            if _last_nonzero_positions_at
+            else 0.0
+        )
+        logger.warning(
+            "bankroll positions-read BLIP: /positions returned empty but a verified "
+            "nonzero position value %.2f USD is only %.0fs old and free cash did not "
+            "corroborate a redemption — HOLDING last-known-good position value "
+            "(hold bound %.0fs). Equity base will NOT silently collapse to free cash.",
+            effective_value, held_age, _positions_empty_hold_seconds(),
+        )
+        return effective_value
+
+    if verdict == "persistent_empty_accepted":
+        logger.warning(
+            "bankroll positions-read: /positions empty has persisted beyond the "
+            "%.0fs hold bound — accepting position value 0.0 as truth.",
+            _positions_empty_hold_seconds(),
+        )
+    _last_position_value_usd = effective_value
+    if effective_value > _POSITION_VALUE_EPSILON_USD:
+        _last_nonzero_positions_at = moment
+    return effective_value
 
 
 def _now_utc() -> datetime:
@@ -119,13 +285,19 @@ def _fetch_balance() -> float | tuple[float, float]:
 
     client = PolymarketClient()
     free_pusd = float(client.get_wallet_balance())
+    # NOTE: `or []` also coerces a None (failed/declined read) to empty — both
+    # routes flow through the blip classifier below, which is the point: an
+    # empty/failed positions read must not silently zero the equity base.
     positions = client.get_positions_from_api() or []
-    position_value = 0.0
+    raw_position_value = 0.0
     for position in positions:
         try:
-            position_value += max(0.0, float(position.get("current_value", 0.0) or 0.0))
+            raw_position_value += max(0.0, float(position.get("current_value", 0.0) or 0.0))
         except (AttributeError, TypeError, ValueError):
             raise ValueError(f"bankroll_position_value_malformed:{position!r}")
+    position_value = _resolve_position_value(
+        free_pusd, raw_position_value, len(positions)
+    )
     return (free_pusd + position_value, free_pusd)
 
 
@@ -171,6 +343,7 @@ def current(
                 fetched_at=cached_fetched_at.isoformat(),
                 staleness_seconds=cached_age,
                 cached=True,
+                positions_read_verdict=_last_positions_read_verdict,
             )
 
         # 2. Cache miss or stale — try a live fetch.
@@ -185,6 +358,7 @@ def current(
                 fetched_at=now.isoformat(),
                 staleness_seconds=0.0,
                 cached=False,
+                positions_read_verdict=_last_positions_read_verdict,
             )
         except Exception as exc:
             logger.warning("bankroll_provider live fetch failed: %s", exc)
@@ -204,6 +378,7 @@ def current(
                 fetched_at=cached_fetched_at.isoformat(),
                 staleness_seconds=cached_age,
                 cached=True,
+                positions_read_verdict=_last_positions_read_verdict,
             )
 
 
@@ -250,13 +425,18 @@ def cached(*, max_age_seconds: Optional[float] = None) -> Optional[BankrollOfRec
             fetched_at=_last_fetched_at.isoformat(),
             staleness_seconds=age,
             cached=True,
+            positions_read_verdict=_last_positions_read_verdict,
         )
 
 
 def reset_cache_for_tests() -> None:
     """Clear the module-level cache. Tests only — not part of the public contract."""
     global _last_value_usd, _last_spendable_cash_usd, _last_fetched_at
+    global _last_position_value_usd, _last_nonzero_positions_at, _last_positions_read_verdict
     with _lock:
         _last_value_usd = None
         _last_spendable_cash_usd = None
         _last_fetched_at = None
+        _last_position_value_usd = None
+        _last_nonzero_positions_at = None
+        _last_positions_read_verdict = "verified"
