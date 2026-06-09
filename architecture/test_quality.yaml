@@ -109,3 +109,9 @@ tests:
     falsifying_proof:
       type: negative_fixture
       description: "The durable fill->position_current bridge scan must materialise position_current for every FILL_CONFIRMED aggregate even when the transient in-memory trigger set is empty (post-restart or post-swallowed-exception), and must be idempotent across repeated scan invocations."
+  tests/money_path/test_operator_arm_gates_edli_submit.py:
+    category: money_path
+    protects: [MP-ORD-001, MP-ORD-002]
+    falsifying_proof:
+      type: negative_fixture
+      description: "OperatorArm (FIX-2b) must gate every EDLI live-submit: require_operator_arm returns None unless edli_live_operator_authorized is the literal True, and the live adapter enforces the arm token at the EDLI boundary. The mainline executor (execute_final_intent) path is unaffected."
