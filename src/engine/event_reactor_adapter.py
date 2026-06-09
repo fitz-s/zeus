@@ -2087,6 +2087,11 @@ def build_event_bound_no_submit_receipt(
                 # of which already returned a no-submit receipt on any flip/block
                 # above — so the proof carried here is forecast-current at recapture.
                 forecast_still_current=True,
+                # S6 scope-set invariant: the recapture family re-rank must scope the
+                # candidate set EXACTLY as selection did (`_selected_candidate_proof` was
+                # called with this same conn at selection) — else a locked / below-min-tick
+                # leg scoped OUT of selection falsely reverses the chosen leg.
+                locked_opportunity_conn=locked_opportunity_conn,
             )
         )
         kelly = dataclass_replace(
@@ -5898,7 +5903,7 @@ def _family_rank_reversed_at_recapture(
     family_key: str,
     selected_proof: _CandidateProof,
     all_proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
-    extra_exposure_by_bin_id: Mapping[str, float] | None,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> bool:
     """True iff the FRESH-curve re-rank no longer makes ``selected_proof`` primary.
 
@@ -5918,12 +5923,28 @@ def _family_rank_reversed_at_recapture(
     selected leg it is its own edge reversal (utility <= 0), which the EDGE gate owns.
     Conflating the two would mislabel a plain edge collapse as a family switch.
     """
+    # S6 SCOPE-SET INVARIANT (2026-06-09): the fresh-curve re-rank MUST be computed over
+    # the SAME scoped candidate set SELECTION ranked over — `_selection_scoped_proofs`
+    # (limit-tradeable AND unlocked-with-price-improvement only), with `per_bin_yes_q_lcb`
+    # over the full set, EXACTLY as `_selected_candidate_proof` (era:6219/6233/6254). Ranking
+    # the raw full set let a SCOPED-OUT leg (locked-no-improvement / below-min-tick) — which
+    # still materializes is_tradeable — become the ΔU argmax and FALSELY reverse the
+    # genuinely-best selected leg (SUBMIT_ABORTED_FAMILY_REVERSED). Mirroring selection's
+    # scope is STRICTER, never looser: a scoped-out leg can never be the family primary.
     per_bin_yes_q_lcb = _per_bin_yes_q_lcb(tuple(all_proofs))
+    scoped = _selection_scoped_proofs(
+        proofs=tuple(all_proofs),
+        locked_opportunity_conn=locked_opportunity_conn,
+    )
+    if not scoped:
+        # Nothing survives selection scoping on the fresh set (all locked / untradeable):
+        # selection itself would no-trade — handled by the selected leg's own EDGE gate,
+        # not a family-rank *reversal*.
+        return False
     fresh_primary = _select_proof_by_robust_marginal_utility(
-        executable=list(all_proofs),
+        executable=list(scoped),
         family_key=family_key,
         per_bin_yes_q_lcb=per_bin_yes_q_lcb,
-        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
     )
     if fresh_primary is None:
         # Whole family no-trades on the fresh curves -> not a rank reversal; the
@@ -5943,6 +5964,7 @@ def _evaluate_submit_recapture_for_selected(
     bankroll_usd: float,
     kelly_multiplier: float,
     forecast_still_current: bool,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> tuple[SubmitRecaptureDecision, float, ExecutionPrice | None]:
     """THE single fail-closed submit-recapture gate (spec §5 / §7 / §14.9 / §14.10).
 
@@ -6028,7 +6050,7 @@ def _evaluate_submit_recapture_for_selected(
         family_key=family_key,
         selected_proof=selected_proof,
         all_proofs=all_proofs,
-        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+        locked_opportunity_conn=locked_opportunity_conn,
     ):
         return (
             SubmitRecaptureDecision(

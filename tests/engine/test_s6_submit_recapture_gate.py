@@ -376,7 +376,6 @@ def test_fallback_cannot_auto_submit_without_full_rerank():
     # the selected proof's rank reversed.
     assert era._family_rank_reversed_at_recapture(
         family_key="fam", selected_proof=selected, all_proofs=all_proofs,
-        extra_exposure_by_bin_id={},
     ) is True
 
     decision, stake, price = _recapture(selected, all_proofs)
@@ -524,3 +523,69 @@ def test_abort_receipt_reason_is_derived_from_lifecycle_state():
     assert era._SUBMIT_ABORT_RECEIPT_REASON[
         CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED
     ] == "SUBMIT_ABORTED_FAMILY_REVERSED"
+
+
+# ===========================================================================
+# RELATIONSHIP ANTIBODY (2026-06-09): the submit-recapture family-rank check MUST
+# re-rank the SAME scoped candidate set that SELECTION ranked over.
+#
+# Root cause (wf edge-reversal-diagnosis 2026-06-09, CONFIRMED high-confidence):
+# selection ranks ΔU over `_selection_scoped_proofs(proofs, locked_opportunity_conn)`
+# (limit-tradeable AND unlocked-with-price-improvement only), but
+# `_family_rank_reversed_at_recapture` re-ranked the RAW full `all_proofs` with no
+# conn and no scope filter. A leg correctly SCOPED OUT of selection (locked-no-
+# improvement here; also below-min-tick in prod) still materializes is_tradeable and
+# can be the ΔU argmax over the full set, so recapture declared a 'different fresh
+# primary' and aborted the genuinely-best SELECTED leg as a FALSE
+# SUBMIT_ABORTED_FAMILY_REVERSED at top precedence — the cause of proof_accepted>0
+# but 0 submits for days. Fitz boundary bug: selection's scope semantics lost when
+# its output set crosses into recapture. Fix: recapture re-ranks
+# `_selection_scoped_proofs(all_proofs, locked_opportunity_conn)` — STRICTER, never
+# looser (a scoped-out leg is untradeable/locked and must never be primary).
+# ===========================================================================
+def test_recapture_family_rank_honors_selection_scoping_no_false_reversal(monkeypatch):
+    import sqlite3
+
+    # Leg A: selected, tradeable, modest edge. Leg B: tradeable with HIGHER ΔU (cheaper)
+    # but LOCKED with no price improvement -> SELECTION scopes it OUT. Recapture must
+    # re-rank the SAME scoped set, so A stays primary -> NOT a family reversal.
+    row_a = _snapshot_row(yes_asks=(("0.50", "1000000"),), condition_id="cond-A",
+                          yes_token_id="yes-A", no_token_id="no-A", snapshot_id="snapA")
+    row_b = _snapshot_row(yes_asks=(("0.20", "1000000"),), condition_id="cond-B",
+                          yes_token_id="yes-B", no_token_id="no-B", snapshot_id="snapB")
+    a = _proof_from_row(direction="buy_yes", row=row_a, token_id="yes-A",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_X)
+    b = _proof_from_row(direction="buy_yes", row=row_b, token_id="yes-B",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_Y)
+    # B is LOCKED with no price improvement (one of selection's scope-out conditions).
+    monkeypatch.setattr(
+        era, "_locked_candidate_no_price_improvement_reason",
+        lambda conn, proof: ("LOCKED_NO_IMPROVEMENT"
+                             if str(getattr(proof, "token_id", "")) == "yes-B" else None),
+    )
+    conn = sqlite3.connect(":memory:")
+    # selection's scoped set excludes the locked B (the set the rank must be computed over):
+    scoped = era._selection_scoped_proofs(proofs=(a, b), locked_opportunity_conn=conn)
+    assert {p.token_id for p in scoped} == {"yes-A"}
+    # recapture must honor that scoping: the locked higher-ΔU leg is invisible, A stays primary.
+    assert era._family_rank_reversed_at_recapture(
+        family_key="fam", selected_proof=a, all_proofs=(a, b), locked_opportunity_conn=conn,
+    ) is False
+
+
+def test_recapture_family_rank_still_detects_a_real_tradeable_sibling_reversal():
+    # Regression guard: the scope fix is STRICTER, not broken. A genuinely tradeable,
+    # UNLOCKED sibling that out-ranks the selected leg on the fresh curves STILL yields a
+    # real family reversal — true reversals must be preserved.
+    row_a = _snapshot_row(yes_asks=(("0.50", "1000000"),), condition_id="cond-A",
+                          yes_token_id="yes-A", no_token_id="no-A", snapshot_id="snapA")
+    row_b = _snapshot_row(yes_asks=(("0.20", "1000000"),), condition_id="cond-B2",
+                          yes_token_id="yes-B2", no_token_id="no-B2", snapshot_id="snapB2")
+    a = _proof_from_row(direction="buy_yes", row=row_a, token_id="yes-A",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_X)
+    b = _proof_from_row(direction="buy_yes", row=row_b, token_id="yes-B2",
+                        q_posterior=0.62, q_lcb_5pct=0.58, bin_obj=_BIN_Y)
+    # No lock, default conn -> both legs in scope; B out-ranks A on ΔU -> TRUE reversal.
+    assert era._family_rank_reversed_at_recapture(
+        family_key="fam", selected_proof=a, all_proofs=(a, b),
+    ) is True
