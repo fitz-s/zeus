@@ -119,6 +119,42 @@ def _replacement_forecast_shadow_materialization_queue_config() -> dict[str, obj
     }
 
 
+# The two raw-artifact sources this downloader owns. The cycle high-water mark is the MIN over
+# BOTH of MAX(source_cycle_time): a half-downloaded cycle (one source lagging) is NOT current.
+_CURRENT_TARGET_ARTIFACT_SOURCE_IDS = ("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km")
+
+
+def _max_downloaded_current_target_cycle(forecast_db: Path) -> datetime | None:
+    """High-water mark of downloaded current-target raw-input cycles, or None when unknown.
+
+    None (no rows for either source, or any read error) means "cannot prove currency" ->
+    the caller treats the cycle as stale and fires the idempotent download. The currency
+    check must FAIL OPEN toward downloading; it must never freeze freshness.
+    """
+    from src.state.db import _connect  # noqa: PLC0415
+
+    try:
+        conn = _connect(Path(forecast_db))
+        try:
+            maxes: list[datetime] = []
+            for sid in _CURRENT_TARGET_ARTIFACT_SOURCE_IDS:
+                row = conn.execute(
+                    "SELECT MAX(source_cycle_time) FROM raw_forecast_artifacts"
+                    " WHERE source_id = ?",
+                    (sid,),
+                ).fetchone()
+                if row is None or row[0] is None:
+                    return None
+                maxes.append(
+                    datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+                )
+            return min(maxes)
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
 def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
@@ -134,19 +170,40 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
         build_replacement_forecast_current_target_plan,
     )
 
+    # CYCLE-CURRENCY ANTIBODY (2026-06-09): coverage ("a posterior exists for every target")
+    # NEVER implies currency ("the currently-available IFS cycle's raw inputs exist"). The old
+    # gates short-circuited on plan.ready alone, so once ANY cycle fully materialized the cron
+    # could never advance the anchor again — deterministic_forecast_anchors froze at 06-08T18
+    # for ~24h while Open-Meteo was serving 06-09T00 (it answered 200 OK to the U0R leg of the
+    # SAME job run). Both early returns now additionally require the downloaded high-water mark
+    # to have reached the currently-available cycle.
+    release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
+    available_cycle = _parse_cycle(
+        None, now=datetime.now(timezone.utc), release_lag_hours=release_lag_hours
+    )
+    downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
+    cycle_is_current = downloaded_cycle is not None and downloaded_cycle >= available_cycle
+
     plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-    if plan.ready:
+    if plan.ready and cycle_is_current:
         return {
             "status": "CURRENT_TARGETS_ALREADY_COVERED",
             "coverage": plan.as_dict(),
+            "available_cycle": available_cycle.isoformat(),
+            "downloaded_cycle": downloaded_cycle.isoformat(),
         }
-    if plan.missing_aifs_manifest_count <= 0 and plan.missing_openmeteo_manifest_count <= 0:
+    if (
+        plan.missing_aifs_manifest_count <= 0
+        and plan.missing_openmeteo_manifest_count <= 0
+        and cycle_is_current
+    ):
         return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "coverage": plan.as_dict(),
+            "available_cycle": available_cycle.isoformat(),
+            "downloaded_cycle": downloaded_cycle.isoformat(),
         }
-    release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-    cycle = _parse_cycle(None, now=datetime.now(timezone.utc), release_lag_hours=release_lag_hours)
+    cycle = available_cycle
     return download_current_target_raw_inputs(
         forecast_db=Path(str(forecast_db)),
         output_dir=Path(str(output_dir)),
@@ -246,11 +303,26 @@ def _replacement_forecast_download_cycle() -> None:
         return
     cfg = _replacement_forecast_shadow_materialization_queue_config()
     download_report = _download_replacement_forecast_current_targets_if_needed(cfg)
-    if download_report is not None and download_report.get("status") not in {
-        "CURRENT_TARGETS_ALREADY_COVERED",
-        "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
-    }:
-        logger.info("replacement forecast current-target download report: %s", download_report)
+    if download_report is not None:
+        _dl_status = download_report.get("status")
+        if _dl_status in {
+            "CURRENT_TARGETS_ALREADY_COVERED",
+            "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+        }:
+            # ANTI-SILENT-SKIP (2026-06-09): the suppressed skip is what made the frozen-anchor
+            # failure invisible for 24h. A skip must self-declare its cycle facts (compact, the
+            # download job runs ~2x/day so this is cheap).
+            logger.info(
+                "replacement current-target download skipped (%s): available_cycle=%s "
+                "downloaded_cycle=%s",
+                _dl_status,
+                download_report.get("available_cycle"),
+                download_report.get("downloaded_cycle"),
+            )
+        else:
+            logger.info(
+                "replacement forecast current-target download report: %s", download_report
+            )
     # THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (forward + fixed-lead), gated by the
     # SEPARATE replacement_0_1_u0r_multimodel_capture_enabled flag. Pure side-effect on
     # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
