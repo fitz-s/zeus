@@ -62,6 +62,20 @@
 #   edli_v1.opportunity_book_selector_enabled gate is REMOVED (the ranker is
 #   unconditional). q_lcb > q_point is a §13/Hidden #2 Q_LCB_INVALID no-trade. One
 #   ranking surface, one decision, one truth. No flag, no shadow branch.
+#   S5 (2026-06-08, "bin selection.md" §5.1-§5.3/§5.2/§14.7/§14.10/§9 Hidden #6+#15/
+#   §12.C.2/.3/.4 + operator directive 2026-06-08): the live decision body now sizes
+#   from RobustCandidateScore.optimal_stake_usd AND reprices the Kelly cost-of-entry
+#   at the CHOSEN stake — execution_price = ExecutableCostCurve.avg_cost(optimal_stake)
+#   on the selected leg's OWN native curve (typed, fee-deducted, probability_units;
+#   passes assert_kelly_safe), REPLACING S1's cheap min-order/top-ask scalar as the
+#   boundary the intent + receipt carry. Scalar Kelly on a single top-ask over-bets
+#   into thin levels (Hidden #6); the cost-curve optimizer already maximized ΔU over
+#   the feasible depth-bounded stake interval, so size and price now come from ONE
+#   scored candidate + ONE curve and cannot drift. The fractional/CI/lead/portfolio-
+#   heat haircut remains the multiplier bounding the ΔU stake (max_stake_usd), NOT a
+#   second scalar Kelly. New seam: _robust_marginal_utility_stake_and_price (returns
+#   stake + chosen-stake price) + _chosen_stake_execution_price; the float-only
+#   _robust_marginal_utility_optimal_stake_usd wraps the kernel. No flag, no shadow.
 """Engine adapter for EDLI opportunity reactor construction.
 
 The adapter connects EDLI events to the event-bound no-submit proof kernel. It
@@ -84,7 +98,7 @@ from typing import Any, Callable
 import numpy as np
 
 from src.contracts.execution_intent import ExecutableCostBasis
-from src.contracts.execution_price import ExecutionPrice
+from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
 from src.contracts.executable_cost_curve import (
     BookLevel,
     ExecutableCostCurve,
@@ -1988,7 +2002,8 @@ def build_event_bound_no_submit_receipt(
             sizing_context=sizing_context,
             kelly_multiplier=kelly_multiplier,
         )
-        # ROBUST-LOWER-BOUND SIZING (S4; spec §3/§5.2/§5.3, money-path iron law).
+        # ROBUST-LOWER-BOUND SIZING + CHOSEN-STAKE PRICE (S4+S5; spec §3/§5.2/§5.3/
+        # §14.7/§14.10, money-path iron law).
         # ``evaluate_kelly`` is NO LONGER the size authority: it sizes on
         # ``p_posterior`` (q_point) via the scalar binary-Kelly formula. The
         # bin-selection size authority is the marginal-utility ranker's
@@ -1998,13 +2013,23 @@ def build_event_bound_no_submit_receipt(
         # Kelly haircut ``evaluate_kelly`` already derived (CI-width / lead /
         # portfolio-heat — variance is NOT dropped). We keep ``evaluate_kelly`` for
         # the typed-price assert, the receipt fields, and that haircut multiplier;
-        # we OVERRIDE only the size with the q_lcb-grounded ΔU stake.
+        # we OVERRIDE the size with the q_lcb-grounded ΔU stake.
+        #
+        # S5 (operator directive 2026-06-08): we ALSO override ``execution_price``
+        # with the CHOSEN-STAKE boundary — ``ExecutableCostCurve.avg_cost(optimal_
+        # stake)`` on the selected leg's OWN native curve (typed, fee-deducted,
+        # probability_units; passes ``assert_kelly_safe``). Scalar Kelly on the
+        # cheap min-order top-ask over-bets into thin levels (Hidden #6); the cost-
+        # curve optimizer in ``score_candidate`` already maximized ΔU over the
+        # feasible depth-bounded stake interval, so the Kelly cost-of-entry the
+        # intent + receipt carry MUST be that same curve at that same stake — the
+        # depth-walked cost the order actually pays, not S1's top-of-book scalar.
         _fractional_kelly_mult = float(
             kelly.effective_multiplier
             if kelly.effective_multiplier is not None
             else kelly_multiplier
         )
-        _robust_stake_usd = _robust_marginal_utility_optimal_stake_usd(
+        _robust_stake_usd, _chosen_stake_price = _robust_marginal_utility_stake_and_price(
             family_key=str(family.family_id or ""),
             selected_proof=proof,
             all_proofs=proofs,
@@ -2023,6 +2048,14 @@ def build_event_bound_no_submit_receipt(
             size_usd=float(_robust_stake_usd),
             passed=float(_robust_stake_usd) > 0.0,
         )
+        # Rebind the Kelly cost-of-entry to the chosen-stake boundary when sizing
+        # cleared (so the intent's ``execution_price`` / the receipt's
+        # ``c_fee_adjusted`` / the executor limit reflect the depth walk). When the
+        # ΔU stake is a no-trade (no chosen-stake price) we leave ``execution_price``
+        # as the S1 boundary — the not-passed receipt below reports it for audit and
+        # builds no intent.
+        if float(_robust_stake_usd) > 0.0 and _chosen_stake_price is not None:
+            execution_price = _chosen_stake_price
     except (TypeError, ValueError) as exc:
         return EventSubmissionReceipt(
             False,
@@ -5678,7 +5711,44 @@ def _select_proof_by_robust_marginal_utility(
     return None
 
 
-def _robust_marginal_utility_optimal_stake_usd(
+def _chosen_stake_execution_price(
+    curve: "ExecutableCostCurve", stake_usd: Decimal | float
+) -> ExecutionPrice:
+    """Typed Kelly cost-of-entry at the CHOSEN stake (spec §5.3 / §14.10 / Hidden #6).
+
+    S5 (operator directive 2026-06-08). THE boundary recomputation: given the
+    selected candidate's OWN native :class:`ExecutableCostCurve` and the ΔU
+    optimizer's chosen stake, return the DEPTH-WALKED average all-in cost AT THAT
+    STAKE as a typed :class:`ExecutionPrice`. This is the price the live order is
+    actually sized against — NOT the cheap min-order / top-of-book scalar the proof
+    was first priced at (S1's ``avg_cost_for_shares(min_order_size)``).
+
+    WHY (Hidden #6 — "scalar VWMP hides the convex cost curve"). Scalar Kelly on a
+    single top-ask price over-bets into thin levels: the order's true fill cost is
+    the convex depth walk, which on a thin book is strictly worse than the top ask.
+    The §5.3 optimizer already chose the stake against that convex curve; the Kelly
+    boundary the intent carries MUST be the same curve evaluated at the same stake,
+    or the realized cost-of-entry (and therefore the executor's limit price and the
+    receipt's ``c_fee_adjusted``) would understate cost and the size+price would be
+    internally inconsistent.
+
+    The returned ``ExecutionPrice`` is ``fee_adjusted`` / ``fee_deducted=True`` in
+    ``probability_units`` (``ExecutableCostCurve.avg_cost`` guarantees this), so it
+    passes :meth:`ExecutionPrice.assert_kelly_safe` (R1/R2 identity preserved); we
+    assert it here so a corrupt boundary fails closed at this seam rather than
+    laundering an unsafe price into the intent.
+
+    Raises ``ValueError`` (fail closed, spec §13) when the stake is below min order
+    or above executable depth — but the ΔU optimizer's feasible interval is exactly
+    ``[min_order_notional, depth]`` and the fractional haircut only shrinks the
+    stake, so on the live path a positive chosen stake is always fillable.
+    """
+    price = curve.avg_cost(Decimal(str(stake_usd)))
+    price.assert_kelly_safe()
+    return price
+
+
+def _robust_marginal_utility_stake_and_price(
     *,
     family_key: str,
     selected_proof: _CandidateProof,
@@ -5686,33 +5756,41 @@ def _robust_marginal_utility_optimal_stake_usd(
     extra_exposure_by_bin_id: Mapping[str, float] | None,
     bankroll_usd: float,
     kelly_multiplier: float,
-) -> float:
-    """Exposure-aware FRACTIONAL-Kelly stake for the selected leg (spec §3 / §5.2 / §5.3).
+) -> tuple[float, ExecutionPrice | None]:
+    """Chosen FRACTIONAL-Kelly stake AND its typed chosen-stake price (spec §5.3 / §14.10).
 
-    The size authority for the live intent (S4): the ΔU optimizer
-    (:meth:`utility_ranker.score_candidate`) returns ``optimal_stake_usd`` — the
-    LOG-OPTIMAL (full-Kelly) stake on the candidate's OWN robust q_lcb-based π,
-    scored against the family payoff matrix and the EXISTING per-outcome exposure
-    (so existing exposure already shrinks it — Hidden #10). This is then scaled by
-    the FRACTIONAL-Kelly multiplier ``kelly_multiplier`` (the CI-width / lead /
+    S5 (operator directive 2026-06-08). THE single sizing+pricing kernel for the
+    live intent: the ΔU optimizer (:meth:`utility_ranker.score_candidate`) returns
+    ``optimal_stake_usd`` — the LOG-OPTIMAL (full-Kelly) stake on the candidate's
+    OWN robust q_lcb-based π, scored against the family payoff matrix and the
+    EXISTING per-outcome exposure (Hidden #10) — which is then scaled by the
+    FRACTIONAL-Kelly multiplier ``kelly_multiplier`` (the CI-width / lead /
     portfolio-heat haircut, spec §5.2 ``x_final = x_raw · f_kelly · h_*``) so a
-    wider-CI edge sizes strictly smaller — variance is never silently dropped.
+    wider-CI edge sizes strictly smaller (variance is never silently dropped).
+
+    Then — the S5 boundary — it RE-PRICES the selected leg at that CHOSEN stake on
+    the SAME scored candidate's native :class:`ExecutableCostCurve`
+    (:func:`_chosen_stake_execution_price`). Size and price come from ONE scored
+    candidate and ONE curve, so the Kelly boundary the intent carries is the
+    depth-walked cost the order actually pays (Hidden #6), not S1's cheap min-order
+    scalar. There is no second scalar Kelly and no shadow branch.
 
     ROBUST-LOWER-BOUND SIZING (money-path iron law): the stake derives from
     ``q_lcb`` (via the q_lcb-based π inside ``score_candidate``), NEVER from
     ``q_point``. Two proofs with equal q_lcb but different q_posterior size
-    identically — the legacy ``evaluate_kelly`` (which sized on ``p_posterior =
+    identically — the legacy ``evaluate_kelly`` (sized on ``p_posterior =
     q_posterior``) is no longer the size authority.
 
-    Returns the stake in USD (``0.0`` when no positive-ΔU stake clears min order /
-    depth, i.e. a no-trade). The selected proof is scored within the WHOLE family
-    so the π / exposure / OUTSIDE geometry matches the ranking decision exactly.
+    Returns ``(stake_usd, chosen_stake_execution_price)``. ``(0.0, None)`` when no
+    positive-ΔU stake clears min order / depth (a no-trade) or the boundary cannot
+    be priced. The selected proof is scored within the WHOLE family so the π /
+    exposure / OUTSIDE geometry matches the ranking decision exactly.
     """
     if bankroll_usd <= 0.0 or selected_proof.execution_price is None:
-        return 0.0
+        return 0.0, None
     mult = float(kelly_multiplier)
     if not (mult > 0.0):
-        return 0.0
+        return 0.0, None
 
     per_bin_yes_q_lcb = _per_bin_yes_q_lcb(tuple(all_proofs))
     selected_hypothesis_id = _candidate_evaluation_id(selected_proof)
@@ -5735,13 +5813,56 @@ def _robust_marginal_utility_optimal_stake_usd(
         ) != selected_hypothesis_id:
             continue
         if score.is_no_trade:
-            return 0.0
+            return 0.0, None
         # full-Kelly log-optimal stake on robust q_lcb-based π, scaled to fractional
         # Kelly by the haircut multiplier (spec §5.2). Bounded by the fractional cap.
         full_kelly_stake = float(score.optimal_stake_usd)
         fractional = full_kelly_stake * mult
-        return float(min(Decimal(str(fractional)), max_stake))
-    return 0.0
+        chosen = Decimal(str(min(Decimal(str(fractional)), max_stake)))
+        if chosen <= Decimal("0"):
+            return 0.0, None
+        # S5 boundary: reprice the SELECTED leg at the CHOSEN stake on its OWN curve
+        # (the depth-walked avg cost — Hidden #6), as the typed Kelly cost-of-entry.
+        curve = score.candidate.executable_cost_curve
+        if curve is None:
+            return float(chosen), None
+        try:
+            price = _chosen_stake_execution_price(curve, chosen)
+        except (ValueError, ArithmeticError, ExecutionPriceContractError):
+            # Chosen stake not fillable at this curve (depth/min-order/off-grid) or
+            # the boundary is Kelly-unsafe -> no priced stake (fail closed, §13).
+            return 0.0, None
+        return float(chosen), price
+    return 0.0, None
+
+
+def _robust_marginal_utility_optimal_stake_usd(
+    *,
+    family_key: str,
+    selected_proof: _CandidateProof,
+    all_proofs: tuple[_CandidateProof, ...] | list[_CandidateProof],
+    extra_exposure_by_bin_id: Mapping[str, float] | None,
+    bankroll_usd: float,
+    kelly_multiplier: float,
+) -> float:
+    """Exposure-aware FRACTIONAL-Kelly stake for the selected leg (spec §3 / §5.2 / §5.3).
+
+    Thin wrapper over :func:`_robust_marginal_utility_stake_and_price` that returns
+    only the stake (USD). The size authority for the live intent (S4): the ΔU
+    optimizer's ``optimal_stake_usd`` on the candidate's OWN robust q_lcb-based π,
+    scaled by the fractional-Kelly haircut. ``0.0`` when no positive-ΔU stake clears
+    min order / depth (a no-trade). See the kernel for the full derivation; the live
+    decision body uses the kernel directly so it also gets the chosen-stake price.
+    """
+    stake_usd, _price = _robust_marginal_utility_stake_and_price(
+        family_key=family_key,
+        selected_proof=selected_proof,
+        all_proofs=all_proofs,
+        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+        bankroll_usd=bankroll_usd,
+        kelly_multiplier=kelly_multiplier,
+    )
+    return stake_usd
 
 
 def _family_existing_exposure_by_bin_id(
