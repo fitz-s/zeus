@@ -337,10 +337,18 @@ def refresh_unresolved_reconcile_findings(
     _validate_context(context)
     init_exchange_reconcile_schema(conn)
     observed = _coerce_dt(observed_at)
+    # Foreign-wallet ghost findings are resolvable from local evidence alone (no venue
+    # read): run the migration pass here too so the kill switch clears on the next
+    # 1-minute refresh instead of waiting for the next full ws-gap sweep.
+    foreign_resolved = _resolve_foreign_wallet_ghost_findings(conn, observed_at=observed)
     token_ids = _unresolved_position_drift_tokens(conn)
     trade_ids = _unresolved_unrecorded_trade_ids(conn)
     if not token_ids and not trade_ids:
-        return {"status": "not_required", "resolved": 0, "remaining": 0}
+        return {
+            "status": "not_required",
+            "resolved": foreign_resolved,
+            "remaining": len(list_unresolved_findings(conn)),
+        }
 
     order_ids = _local_order_ids_for_tokens(conn, token_ids) | _order_ids_for_unrecorded_trade_findings(conn)
     snapshot = fresh_reconcile_snapshot(

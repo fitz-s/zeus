@@ -169,6 +169,36 @@ def test_existing_unresolved_foreign_findings_resolved_by_sweep() -> None:
     assert row["resolution"] == _FOREIGN_WALLET_GHOST_RESOLUTION
 
 
+def test_refresh_path_resolves_foreign_findings_without_venue_reads() -> None:
+    # The 1-minute runtime refresh (refresh_unresolved_reconcile_findings) must clear
+    # foreign findings from local evidence alone — the live kill switch should not wait
+    # for the next full ws-gap sweep.
+    from src.execution.exchange_reconcile import refresh_unresolved_reconcile_findings
+
+    conn = _conn()
+    record_finding(
+        conn,
+        kind="exchange_ghost_order",
+        subject_id="0xincident2",
+        context="ws_gap",
+        evidence={
+            "exchange_order": _order("0xincident2", FOREIGN_MARKET),
+            "reason": "exchange_open_order_absent_from_venue_commands",
+        },
+        recorded_at=NOW,
+    )
+    assert count_open_reconcile_findings(conn) == 1
+
+    class _NoReadAdapter:  # any venue read would explode — none must happen
+        def __getattr__(self, name):
+            raise AssertionError(f"venue read attempted: {name}")
+
+    result = refresh_unresolved_reconcile_findings(_NoReadAdapter(), conn, observed_at=NOW)
+    assert result["status"] == "not_required"
+    assert result["resolved"] == 1
+    assert count_open_reconcile_findings(conn) == 0
+
+
 def test_repeated_sweeps_do_not_churn_duplicate_audit_rows() -> None:
     conn = _conn()
     for _ in range(3):
