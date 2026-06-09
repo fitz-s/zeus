@@ -44,11 +44,31 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 POLYGON_CONFIG_PATH = PROJECT_ROOT / "config" / "model_domain_polygons.yaml"
 
 # Spec §3 source identities. The anchor is the prior; the rest are likelihood instruments.
+# 2026-06-09 PROMOTION (operator-directed, settlement-graded evidence
+# /tmp/uncovered_cities_regional_report.md — same evidence class as the icon_eu promotion):
+#   ukmo_global_deterministic_10km — 5th decorrelated global (UK Met Office dynamical core,
+#     distinct from NOAA/DWD/CMC/JMA physics). Pooled MAE 1.266 vs ecmwf_ifs 1.411 (-10.3%,
+#     n=1099, 16 non-EU cities; strongest SE-Asia/tropics). The EB walk-forward de-bias
+#     (backfilled previous-runs history) absorbs its South-Asia warm bias at member level.
+#   ncep_nbm_conus — NCEP-family CONUS representative via the family single-rep contest
+#     (NBM blends NCEP models incl. GFS -> it must REPLACE gfs_global in-domain, never ride
+#     alongside it). Pooled MAE 1.193 vs ecmwf_ifs 1.395 (-14.4%, n=1029).
+#   ukmo_uk_deterministic_2km — London regional expert (icon_d2 pattern; UKMO-family rep
+#     in-domain so ukmo_global is suppressed there). MAE 0.919 vs 1.039, n=112.
 ANCHOR_MODEL = "ecmwf_ifs"
-DECORR_GLOBALS = ("gfs_global", "icon_global", "gem_global", "jma_seamless")
+UKMO_GLOBAL_MODEL = "ukmo_global_deterministic_10km"
+NBM_MODEL = "ncep_nbm_conus"
+UKMO_UK_MODEL = "ukmo_uk_deterministic_2km"
+DECORR_GLOBALS = (
+    "gfs_global",
+    "icon_global",
+    "gem_global",
+    "jma_seamless",
+    UKMO_GLOBAL_MODEL,
+)
 ICON_EU_MODEL = "icon_eu"
-GLOBAL_LIKELIHOOD_MODELS = DECORR_GLOBALS + (ICON_EU_MODEL,)
-REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd")
+GLOBAL_LIKELIHOOD_MODELS = DECORR_GLOBALS + (ICON_EU_MODEL, NBM_MODEL)
+REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd", UKMO_UK_MODEL)
 
 # Spec §4(2) provider representatives. Each PHYSICAL provider family contributes exactly ONE
 # instrument to a fusion — the same single-rep doctrine that already governs "icon_d2 in-domain
@@ -60,6 +80,15 @@ REGIONAL_MODELS = ("icon_d2", "meteofrance_arome_france_hd")
 # Whichever wins, the OTHER ICON-family members are suppressed as provider duplicates. The
 # tuple is ordered highest-resolution-first; selection walks it and keeps the first eligible.
 ICON_FAMILY = ("icon_d2", ICON_EU_MODEL, "icon_global")
+# 2026-06-09: the SAME single-rep mechanism, two more instances (one mechanism, K<<N):
+#   NCEP family — NBM is an NCEP blend INCLUDING GFS; in-CONUS it is the family rep and
+#   gfs_global is suppressed as a provider duplicate; outside CONUS NBM is ineligible and
+#   gfs_global carries the family. This kills the NBM<->GFS correlation double-count.
+NCEP_FAMILY = (NBM_MODEL, "gfs_global")
+#   UKMO family — the UKV 2km nest and the 10km global are the same Met Office physics; in
+#   the UK the 2km nest is the rep (ukmo_global suppressed), elsewhere the global carries it.
+UKMO_FAMILY = (UKMO_UK_MODEL, UKMO_GLOBAL_MODEL)
+PROVIDER_FAMILIES = (ICON_FAMILY, NCEP_FAMILY, UKMO_FAMILY)
 
 # Alias dedup thresholds (spec §3: corr > 0.995 AND mean|delta| < eps).
 ALIAS_CORR_THRESHOLD = 0.995
@@ -72,12 +101,9 @@ _REGIONAL_DOMAIN_KEY = {
     "icon_d2": "icon_d2",
     "meteofrance_arome_france_hd": "meteofrance_arome_france_hd",
     ICON_EU_MODEL: ICON_EU_MODEL,
-    # CANDIDATE-ACCRUAL DOMAIN GATING ONLY (2026-06-09 regional survey, settlement-graded):
-    # these two are domain-limited models the DOWNLOAD job accrues data for. They are NOT in
-    # REGIONAL_MODELS / GLOBAL_LIKELIHOOD_MODELS, so select_models can NEVER admit them into a
-    # fusion — entries here only let the download's _model_in_domain gate skip out-of-domain
-    # requests (the API 400-storm guard). Promotion into the fusion requires its own
-    # forward-shadow validation + an explicit selection change (no in-sample promote).
+    # 2026-06-09 PROMOTION (operator-directed): ncep_nbm_conus is the domain-gated NCEP-family
+    # CONUS rep (suppresses gfs_global in-domain); ukmo_uk_deterministic_2km is the London
+    # regional expert (UKMO-family rep in the UK). Both gated by their own config polygons.
     "ncep_nbm_conus": "ncep_nbm_conus",
     "ukmo_uk_deterministic_2km": "ukmo_uk_deterministic_2km",
 }
@@ -310,33 +336,39 @@ def select_models(
     #     correctly dropped there. Out of the ICON-EU domain entirely, icon_global remains the rep.
     #   - icon_global is always eligible (global scope) and is the conservative default rep
     #     used outside the ICON-EU domain (spec §3: "use icon_d2 in-EU, icon_global out").
-    icon_eu_in_eu_domain = regional_eligible(
-        "icon_eu", lat=lat, lon=lon, lead_days=lead_days, polygons=polygons
-    )
-
-    def _icon_member_eligible(member: str) -> bool:
+    # 2026-06-09 GENERALIZATION (one mechanism, K<<N): the family single-rep contest now runs
+    # for EVERY declared provider family (ICON, NCEP, UKMO) with one eligibility rule:
+    #   - a REGIONAL family member (icon_d2, ukmo_uk_2km) is eligible iff it already qualified
+    #     as a regional expert above (own polygon + lead ok);
+    #   - a DOMAIN-GATED global-scope member (icon_eu 7km nest, ncep_nbm CONUS blend) is
+    #     eligible iff present AND inside its own config polygon at this lead;
+    #   - a pure global member is eligible whenever present.
+    # The FIRST eligible member (most-specific-first) is the family rep; every other PRESENT
+    # global-scope member of the family is suppressed as a provider duplicate — a second
+    # eligible rep AND a present-but-ineligible member both count (e.g. icon_eu out-of-EU must
+    # never ride alongside icon_global; NBM must never ride alongside gfs_global). Regional
+    # non-reps are simply absent (out-of-polygon -> excluded_regionals), never "global dups".
+    def _family_member_eligible(member: str) -> bool:
         if member in dropped_aliases:
             return False
-        if member == "icon_d2":
+        if member in REGIONAL_MODELS:
             return member in regional_experts  # in-domain + lead ok (already gated above)
-        if member == ICON_EU_MODEL:
-            return member in present and icon_eu_in_eu_domain
-        return member in present  # icon_global: always eligible when present
+        if member in _REGIONAL_DOMAIN_KEY:
+            return member in present and regional_eligible(
+                member, lat=lat, lon=lon, lead_days=lead_days, polygons=polygons
+            )
+        return member in present  # pure global: always eligible when present
 
-    icon_family_rep: str | None = next(
-        (m for m in ICON_FAMILY if _icon_member_eligible(m)), None
-    )
-    # Every OTHER present ICON-family member is a provider duplicate: suppressed from the fusion
-    # and recorded for provenance. This covers both a second ELIGIBLE rep (e.g. icon_eu in-EU
-    # when icon_d2 already won) and a present-but-ineligible member (e.g. icon_eu out-of-EU,
-    # which must still never ride alongside icon_global). icon_d2 is never a "global dup": when
-    # it is not the rep it is simply absent (out-of-polygon -> excluded_regionals), so we only
-    # list the global ICON members (icon_eu / icon_global) here.
-    dropped_provider_dups: list[str] = [
-        m
-        for m in GLOBAL_LIKELIHOOD_MODELS
-        if m in ICON_FAMILY and m in present and m != icon_family_rep and m not in dropped_aliases
-    ]
+    dropped_provider_dups: list[str] = []
+    for family in PROVIDER_FAMILIES:
+        family_rep: str | None = next(
+            (m for m in family if _family_member_eligible(m)), None
+        )
+        dropped_provider_dups.extend(
+            m
+            for m in GLOBAL_LIKELIHOOD_MODELS
+            if m in family and m in present and m != family_rep and m not in dropped_aliases
+        )
 
     # ---- decorrelated global likelihood reps (spec order), minus aliases and provider dups ----
     suppressed_globals = set(dropped_provider_dups)

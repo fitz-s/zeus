@@ -252,11 +252,13 @@ U0R_EXTRA_MODELS: tuple[str, ...] = (
 #                                  London regional expert (icon_d2 pattern).
 # Domain gating: nbm + ukmo_uk have their own polygons (config/model_domain_polygons.yaml);
 # ukmo_global is worldwide. Promotion requires forward-shadow validation, never in-sample.
-U0R_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = (
-    "ncep_nbm_conus",
-    "ukmo_global_deterministic_10km",
-    "ukmo_uk_deterministic_2km",
-)
+# 2026-06-09 SAME-DAY PROMOTION (operator-directed): all three candidates were promoted into
+# the selection sets (model_selection.py — ukmo_global into DECORR_GLOBALS, ncep_nbm into
+# GLOBAL_LIKELIHOOD_MODELS via the NCEP family contest, ukmo_uk into REGIONAL_MODELS), so they
+# now ride U0R_EXTRA_MODELS automatically. The lane stays for FUTURE candidates; keep it empty
+# rather than deleting the mechanism (any model listed here must NOT also be in the selection
+# sets, or the download loop would fetch it twice).
+U0R_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = ()
 
 # K2 (2026-06-09, curl-verified): models the open-meteo single-runs API STRUCTURALLY cannot
 # serve. cmc_gem_gdps_15km returns modelRunUnavailable even for cadence-valid 00z/12z runs —

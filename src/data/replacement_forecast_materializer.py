@@ -839,22 +839,31 @@ def _replacement_u0r_fusion_override(
         # cycles (12h cadence) so the ensemble silently ran as 3 -> a permanently-unservable model
         # must never masquerade as a transient drop. Log expected-vs-served providers per cell.
         _missing_providers = []
-        if "gfs_global" not in used_models:
-            _missing_providers.append("NOAA/gfs_global")
+        # 2026-06-09 promotion: provider families are rep-based — NBM is the NCEP rep in-CONUS
+        # (replacing gfs_global) and the UKV 2km nest is the UKMO rep in the UK, so each family
+        # check accepts ANY of its members. 5 declared decorrelated providers since the
+        # ukmo_global promotion.
+        if not any(m in used_models for m in ("gfs_global", "ncep_nbm_conus")):
+            _missing_providers.append("NCEP/gfs_global|nbm")
         if not any(m in used_models for m in ("icon_d2", "icon_eu", "icon_global")):
             _missing_providers.append("DWD/icon")
         if "gem_global" not in used_models:
             _missing_providers.append("CMC/gem_global")
         if "jma_seamless" not in used_models:
             _missing_providers.append("JMA/jma_seamless")
+        if not any(
+            m in used_models
+            for m in ("ukmo_global_deterministic_10km", "ukmo_uk_deterministic_2km")
+        ):
+            _missing_providers.append("UKMO/global|uk2km")
         if _missing_providers:
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_u0r_fusion").warning(
                     "replacement_0_1 U0R fusion decorrelated-provider INCOMPLETE for %s %s: served "
-                    "%d/4, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
+                    "%d/5, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
                     "cadence single_runs) must be resolved explicitly, not silently dropped.",
-                    request.city, metric, 4 - len(_missing_providers), _missing_providers,
+                    request.city, metric, 5 - len(_missing_providers), _missing_providers,
                     list(used_models),
                 )
             except Exception:
