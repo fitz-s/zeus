@@ -5765,8 +5765,15 @@ def _edli_event_reactor_cycle() -> None:
         # adapter and any legacy adapter do not, so getattr returns [0] for both
         # → live_submit_attempts=0 and live_venue_acks=0 (correct for no-submit
         # cycles).
+        # FAIL-SOFT counter read (Copilot PR#404): honor the FIX-4 closure
+        # counter when it has the expected 1-element-list shape; any other
+        # shape (legacy adapter, int, empty list, None) reads as 0 instead of
+        # crashing the status-pulse write.
         _live_submit_count_ref = getattr(submit_adapter, "_live_submit_count", [0])
-        _live_submit_attempts = int(_live_submit_count_ref[0])
+        try:
+            _live_submit_attempts = int(_live_submit_count_ref[0])
+        except (TypeError, IndexError, KeyError, ValueError):
+            _live_submit_attempts = 0
         _live_ack_count_ref = getattr(submit_adapter, "_live_ack_count", [0])
         _live_venue_acks = int(_live_ack_count_ref[0])
         try:

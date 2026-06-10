@@ -99,6 +99,20 @@ class TestRegeneratedTableShape:
     @pytest.fixture(scope="class")
     def conn(self):
         conn = sqlite3.connect(f"file:{WORLD_DB}?mode=ro", uri=True, timeout=15)
+        # DATA-PRESENCE GUARD: scratch worktrees / CI sandboxes can carry an
+        # EMPTY state DB created as a side effect of other test runs
+        # (init_schema on the relative state path). The shape antibody is only
+        # meaningful against a POPULATED regenerated table — an empty table is
+        # 'not present', not 'non-monotone'.
+        try:
+            populated = conn.execute(
+                "SELECT COUNT(*) FROM diurnal_peak_prob"
+            ).fetchone()[0] >= 1000
+        except sqlite3.Error:
+            populated = False
+        if not populated:
+            conn.close()
+            pytest.skip("diurnal_peak_prob not populated in this state DB")
         yield conn
         conn.close()
 

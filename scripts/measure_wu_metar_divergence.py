@@ -1,4 +1,7 @@
 # Created: 2026-06-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Offline measurement: same-station timestamp-matched WU-vs-METAR divergence -> config/wu_metar_divergence.json (anomaly thresholds + faithfulness).
+# Reuse: Re-run to extend city coverage or refresh thresholds (IEM-cached, paced); read-only (mode=ro URIs), writes config/docs artifacts only.
 # Last reused or audited: 2026-06-10
 # Authority basis: operator correction 2026-06-10 (the 1.5F/1.0C anomaly-guard
 #   threshold was A GUESS — measure the actual WU-vs-METAR divergence per
