@@ -1031,6 +1031,12 @@ def event_bound_live_adapter_from_trade_conn(
     # no real submit can ever reach the venue for a day0 event under this scope.
     # The guard lives here (not at admission) so future admission changes cannot
     # bypass it. Fail-closed: unknown event_type is treated as day0 (rejected).
+    #
+    # forecast_plus_day0 (operator directive 2026-06-09 '全部打开'): day0-lane
+    # events PASS this boundary (real submit allowed, subject to all OTHER
+    # proofs/gates/arm downstream). The unknown-event-type fail-closed posture is
+    # preserved under both shadow-style scopes — an event type that is neither
+    # the known forecast lane nor the known day0 lane is rejected.
     _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
 
     # FIX-4 (P2): per-cycle live submit call counter. Incremented ONLY when
@@ -1071,19 +1077,26 @@ def event_bound_live_adapter_from_trade_conn(
         # BEFORE any venue interaction. Fail-closed: an event_type that is not
         # in the known forecast lane while scope is day0_shadow is treated as
         # day0 (rejected), with a loud log to surface the anomaly.
-        if edli_live_scope == "day0_shadow":
+        if edli_live_scope in ("day0_shadow", "forecast_plus_day0"):
             event_type = getattr(event, "event_type", None)
             _FORECAST_LANE_EVENT_TYPES: frozenset[str] = frozenset({"FORECAST_SNAPSHOT_READY"})
             is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
             is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
+            # forecast_plus_day0 admits day0-lane events through this boundary;
+            # day0_shadow rejects them. In BOTH scopes, an event type that is
+            # neither known lane is fail-closed (treated as day0, rejected).
+            day0_lane_blocked_here = edli_live_scope == "day0_shadow"
             if not is_forecast_lane and not is_day0_lane:
                 import logging as _logging
                 _logging.getLogger(__name__).error(
                     "DAY0_SCOPE_SHADOW_ONLY: unknown event_type=%r treated as day0 (fail-closed) "
-                    "while edli_live_scope='day0_shadow'",
+                    "while edli_live_scope=%r",
                     event_type,
+                    edli_live_scope,
                 )
-            if is_day0_lane or (not is_forecast_lane):
+            reject_day0_lane = is_day0_lane and day0_lane_blocked_here
+            reject_unknown = not is_forecast_lane and not is_day0_lane
+            if reject_day0_lane or reject_unknown:
                 return EventSubmissionReceipt(
                     False,
                     event.event_id,

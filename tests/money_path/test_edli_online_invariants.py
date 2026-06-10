@@ -24,7 +24,7 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
     assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
     assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
-    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_authority_catchup_scanner_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
@@ -47,7 +47,10 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["market_channel_refresh_max_actions_per_window"] <= 5
     assert edli["market_channel_refresh_window_seconds"] >= 1
     assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
-    assert edli["stale_book_directional_trading_enabled"] is False
+    # stale_book_directional_trading_enabled DELETED 2026-06-09 (zero consumers in
+    # src/; OpeningStaleQuoteFOK was never instantiated in the live pipeline). The
+    # key must be ABSENT — not merely false — so a future reintroduction is caught.
+    assert "stale_book_directional_trading_enabled" not in edli
     assert edli["real_order_submit_enabled"] is False
     assert edli["taker_fok_fak_live_enabled"] is False
     assert edli["edli_live_operator_authorized"] is False
@@ -103,7 +106,7 @@ def test_day0_shadow_scope_admits_day0_but_keeps_market_channel_disabled():
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
 
-    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["day0_authority_catchup_scanner_enabled"] is True
@@ -122,7 +125,7 @@ def test_pr_scope_document_matches_settings_flags():
     assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
     assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
     assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
-    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["market_channel_ingestor_enabled"] is False
     assert edli["real_order_submit_enabled"] is False
