@@ -111,8 +111,8 @@ class TestPersistence:
     def test_roundtrip_and_idempotency(self):
         conn = _conn()
         v = _vector()
-        assert persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn) == 1
-        assert persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn) == 0  # idempotent
+        assert persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test") == 1
+        assert persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test") == 0  # idempotent
         out = read_freshest_day0_hourly_vectors(
             city="Paris", target_date="2026-06-10",
             now=datetime(2026, 6, 10, 10, 0, tzinfo=UTC), conn=conn,
@@ -124,7 +124,7 @@ class TestPersistence:
         conn = _conn()
         old = _vector(captured_at=datetime(2026, 6, 10, 7, 0, tzinfo=UTC), temps=[10.0] * 24)
         new = _vector(captured_at=datetime(2026, 6, 10, 9, 0, tzinfo=UTC), temps=[20.0] * 24)
-        persist_day0_hourly_vectors([old, new], target_date="2026-06-10", conn=conn)
+        persist_day0_hourly_vectors([old, new], target_date="2026-06-10", conn=conn, request_hash="sha256:test")
         out = read_freshest_day0_hourly_vectors(
             city="Paris", target_date="2026-06-10",
             now=datetime(2026, 6, 10, 9, 30, tzinfo=UTC), conn=conn,
@@ -136,7 +136,7 @@ class TestPersistence:
         remaining-day distribution (fail-closed to the legacy path)."""
         conn = _conn()
         v = _vector(captured_at=datetime(2026, 6, 10, 4, 0, tzinfo=UTC))
-        persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn)
+        persist_day0_hourly_vectors([v], target_date="2026-06-10", conn=conn, request_hash="sha256:test")
         out = read_freshest_day0_hourly_vectors(
             city="Paris", target_date="2026-06-10",
             now=datetime(2026, 6, 10, 9, 30, tzinfo=UTC), max_age_hours=3.0, conn=conn,
@@ -146,9 +146,9 @@ class TestPersistence:
     def test_retention_prunes_old_rows(self):
         conn = _conn()
         ancient = _vector(captured_at=datetime(2026, 6, 1, 0, 0, tzinfo=UTC))
-        persist_day0_hourly_vectors([ancient], target_date="2026-06-01", conn=conn)
+        persist_day0_hourly_vectors([ancient], target_date="2026-06-01", conn=conn, request_hash="sha256:test")
         fresh = _vector()
-        persist_day0_hourly_vectors([fresh], target_date="2026-06-10", conn=conn)
+        persist_day0_hourly_vectors([fresh], target_date="2026-06-10", conn=conn, request_hash="sha256:test")
         n = conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0]
         assert n == 1  # the 9-day-old row was pruned on the second write pass
 
@@ -268,3 +268,78 @@ class TestRemainingDayMembers:
             payload={"metric": "high", "rounded_value": 25.0}, family=self._family(),
             unit="C", decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
         ) is None
+
+
+# ===========================================================================
+# R22 — replayable provenance identity on persisted vectors (PR#404 P1)
+# ===========================================================================
+
+class TestRequestHashProvenance:
+    def test_persisted_rows_carry_non_empty_request_hash(self):
+        conn = _conn()
+        v = _vector()
+        persist_day0_hourly_vectors(
+            [v], target_date="2026-06-10", conn=conn, request_hash="sha256:abc123"
+        )
+        rows = conn.execute("SELECT request_hash FROM day0_hourly_vectors").fetchall()
+        assert rows and all(r[0] == "sha256:abc123" for r in rows)
+
+    def test_empty_request_hash_is_rejected_in_code_and_schema(self):
+        conn = _conn()
+        v = _vector()
+        with pytest.raises(ValueError, match="request_hash"):
+            persist_day0_hourly_vectors(
+                [v], target_date="2026-06-10", conn=conn, request_hash=""
+            )
+        # schema-level CHECK on fresh DBs (defense in depth)
+        from src.data.day0_hourly_vectors import _ensure_schema
+
+        _ensure_schema(conn)
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO day0_hourly_vectors (vector_id, model, city, target_date,"
+                " timezone_name, captured_at, provider, endpoint, request_hash,"
+                " times_json, temps_c_json, source_run_meta_json)"
+                " VALUES ('x','m','c','d','tz','t','openmeteo','e','','[]','[]',NULL)"
+            )
+
+    def test_request_hash_is_replayable_and_idempotent(self):
+        from src.data.day0_hourly_vectors import build_request_hash
+
+        kwargs = dict(
+            endpoint="https://api.open-meteo.com/v1/forecast",
+            params={"latitude": 48.8566, "longitude": 2.3522, "models": "icon_d2"},
+            models=["icon_d2"],
+            captured_at="2026-06-10T09:00:12+00:00",
+            payload={"hourly": {"time": ["2026-06-10T00:00"], "temperature_2m": [15.1]}},
+        )
+        h1 = build_request_hash(**kwargs)
+        h2 = build_request_hash(**kwargs)
+        assert h1 == h2 and h1.startswith("sha256:") and len(h1) > 20
+        # any input change changes the identity
+        changed = dict(kwargs, models=["meteofrance_arome_france_hd"])
+        assert build_request_hash(**changed) != h1
+        changed_payload = dict(kwargs, payload={"hourly": {"time": [], "temperature_2m": []}})
+        assert build_request_hash(**changed_payload) != h1
+
+    def test_refresh_pass_threads_real_hash(self, monkeypatch):
+        """maybe_refresh persists with the fetch's request hash, never ''."""
+        import src.data.day0_hourly_vectors as hv
+
+        captured = {}
+
+        def fake_fetch(city, *, models=None, now=None):
+            return [_vector()], "sha256:realhash"
+
+        def fake_persist(vectors, *, target_date, request_hash, **kw):
+            captured["request_hash"] = request_hash
+            return len(vectors)
+
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
+        monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
+        hv._LAST_REFRESH_MONOTONIC.clear()
+        n = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()], decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        )
+        assert n == 1 and captured["request_hash"] == "sha256:realhash"

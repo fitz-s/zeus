@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS day0_hourly_vectors (
     captured_at TEXT NOT NULL,
     provider TEXT NOT NULL DEFAULT 'openmeteo',
     endpoint TEXT NOT NULL,
-    request_hash TEXT NOT NULL,
+    request_hash TEXT NOT NULL CHECK (request_hash <> ''),
     times_json TEXT NOT NULL,
     temps_c_json TEXT NOT NULL,
     source_run_meta_json TEXT
@@ -126,22 +126,49 @@ def _vector_id(model: str, city: str, target_date: str, captured_at: str) -> str
     return "d0hv" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:24]
 
 
+def build_request_hash(
+    *,
+    endpoint: str,
+    params: dict,
+    models: list[str],
+    captured_at: str,
+    payload: object,
+) -> str:
+    """Replayable provenance identity for one hourly-vector capture
+    (PR#404 P1): canonicalized request params + endpoint + model list +
+    captured_at bucket + response payload hash. A persisted vector row can
+    always answer 'which exact request and response produced you'."""
+    canonical_params = json.dumps(params, sort_keys=True, separators=(",", ":"))
+    payload_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    canonical = "|".join((
+        "d0hv_req_v1", endpoint, canonical_params, ",".join(sorted(models)),
+        str(captured_at)[:16],  # minute bucket: idempotent within a capture pass
+        payload_hash,
+    ))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def fetch_day0_hourly_vectors(
     city: Any,
     *,
     models: Optional[list[str]] = None,
     now: Optional[datetime] = None,
-) -> list[Day0HourlyVector]:
+) -> tuple[list[Day0HourlyVector], str]:
     """Fetch the freshest hourly temperature curves for in-domain high-res models.
 
     One open-meteo forecast-API call per city (all models batched). degC
-    forced. Fail-soft: [] on any transport/shape error.
+    forced. Returns (vectors, request_hash) — the hash is the replayable
+    provenance identity persisted with every row (PR#404 P1: empty provenance
+    identity is not acceptable for q-construction inputs). Fail-soft:
+    ([], "") on any transport/shape error.
     """
     from src.data.openmeteo_client import fetch
 
     chosen = models if models is not None else in_domain_models_for_city(city)
     if not chosen:
-        return []
+        return [], ""
     captured_at = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
     params = {
         "latitude": float(getattr(city, "lat")),
@@ -163,12 +190,16 @@ def fetch_day0_hourly_vectors(
             "DAY0_HOURLY_VECTORS_FETCH_FAILED city=%s exc=%s: %s",
             getattr(city, "name", "?"), type(exc).__name__, exc,
         )
-        return []
-    return parse_openmeteo_hourly_payload(
-        payload,
-        city=city,
-        models=chosen,
-        captured_at=captured_at,
+        return [], ""
+    request_hash = build_request_hash(
+        endpoint=OPENMETEO_FORECAST_URL, params=params, models=chosen,
+        captured_at=captured_at, payload=payload,
+    )
+    return (
+        parse_openmeteo_hourly_payload(
+            payload, city=city, models=chosen, captured_at=captured_at,
+        ),
+        request_hash,
     )
 
 
@@ -235,22 +266,32 @@ def persist_day0_hourly_vectors(
     *,
     target_date: str,
     conn: Optional[sqlite3.Connection] = None,
-    request_hash: str = "",
+    request_hash: str,
     endpoint: str = OPENMETEO_FORECAST_URL,
     retention_days: float = DAY0_VECTOR_RETENTION_DAYS,
 ) -> int:
     """Persist vectors (idempotent on (model,city,date,captured_at)) + prune.
 
-    conn=None -> zeus-forecasts.db under db_writer_lock(LIVE) per INV-37.
+    conn=None -> zeus-forecasts.db under db_writer_lock(LIVE) per INV-37; the
+    connection is OPENED INSIDE the flock (lock-order hygiene: connection-open
+    contention stays under the same writer lock — Copilot PR#404 finding).
+
+    request_hash is REQUIRED non-empty (PR#404 P1: rows feeding the
+    remaining-day q must carry a replayable provenance identity; the table
+    CHECK enforces the same on fresh DBs).
     """
     if not vectors:
         return 0
+    if not str(request_hash or "").strip():
+        raise ValueError(
+            "persist_day0_hourly_vectors requires a non-empty request_hash "
+            "(replayable provenance identity; see build_request_hash)"
+        )
     own_conn = conn is None
     if own_conn:
         from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection
         from src.state.db_writer_lock import WriteClass, db_writer_lock
 
-        conn = get_forecasts_connection(write_class=WriteClass.LIVE)
         lock_ctx = db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE)
     else:
         from contextlib import nullcontext
@@ -259,6 +300,8 @@ def persist_day0_hourly_vectors(
     written = 0
     try:
         with lock_ctx:
+            if own_conn:
+                conn = get_forecasts_connection(write_class=WriteClass.LIVE)
             _ensure_schema(conn)
             for vector in vectors:
                 row_id = _vector_id(vector.model, vector.city, target_date, vector.captured_at)
@@ -286,7 +329,10 @@ def persist_day0_hourly_vectors(
             )
             conn.commit()
     finally:
-        if own_conn:
+        # conn can be None when the connection-open itself failed inside the
+        # flock — guard so the original exception is never masked (Copilot
+        # PR#404 finding).
+        if own_conn and conn is not None:
             conn.close()
     return written
 
@@ -430,9 +476,13 @@ def maybe_refresh_day0_hourly_vectors(
                 continue
             tz = ZoneInfo(str(getattr(city, "timezone")))
             target_date = decision_time.astimezone(tz).date().isoformat()
-            vectors = fetch_day0_hourly_vectors(city, models=models, now=decision_time)
-            if vectors:
-                written += persist_day0_hourly_vectors(vectors, target_date=target_date)
+            vectors, request_hash = fetch_day0_hourly_vectors(
+                city, models=models, now=decision_time
+            )
+            if vectors and request_hash:
+                written += persist_day0_hourly_vectors(
+                    vectors, target_date=target_date, request_hash=request_hash
+                )
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
             logger.warning(
                 "DAY0_HOURLY_VECTORS_REFRESH_FAILED city=%s exc=%s: %s",
