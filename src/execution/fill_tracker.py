@@ -43,6 +43,12 @@ OPTIMISTIC_FILL_STATUSES = frozenset({"MATCHED", "MINED", "FILLED"})
 PARTIAL_FILL_STATUSES = frozenset({"PARTIAL", "PARTIALLY_MATCHED", "PARTIALLY_FILLED"})
 TRADE_FILL_ECONOMICS_STATUSES = frozenset({"MATCHED", "MINED", "CONFIRMED"})
 CANCEL_STATUSES = frozenset({"CANCELLED", "CANCELED", "EXPIRED", "REJECTED"})
+# Resting-open statuses: a post_only/GTC maker order that has reached the venue
+# and is RESTING on the book (not yet filled). These must land a LIVE
+# venue_order_facts row linked by command_id so resting fills/partials/cancels
+# can be tracked — without it the command_id join yields NO_FACT for post_only
+# GTC orders and the maker fill-rate measurement loop is blind.
+RESTING_OPEN_STATUSES = frozenset({"LIVE", "RESTING", "OPEN", "ACCEPTED"})
 FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED = "FILL_AUTHORITY_QUARANTINE_REVIEW_REQUIRED"
 FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED = "FILL_LEDGER_QUARANTINE_REVIEW_REQUIRED"
 FILL_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED = "FILL_CANONICAL_WRITE_QUARANTINE_REVIEW_REQUIRED"
@@ -613,6 +619,107 @@ def _maybe_append_venue_fill_observation(
     except Exception as exc:
         logger.error("Venue fill fact append failed for %s: %s", pos.trade_id, exc)
         return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def _latest_order_fact_state_for_command(conn: Any, command_id: str) -> str | None:
+    row = conn.execute(
+        """
+        SELECT state
+          FROM venue_order_facts
+         WHERE command_id = ?
+         ORDER BY local_sequence DESC, fact_id DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return str(row["state"] or "").upper()
+    except (KeyError, TypeError, IndexError):
+        try:
+            return str(row[0] or "").upper()
+        except (TypeError, IndexError):
+            return None
+
+
+def _maybe_append_resting_order_fact(
+    pos: Position,
+    payload: Any,
+    *,
+    observed_at: datetime,
+    deps=None,
+) -> None:
+    """Record a LIVE venue_order_fact for a resting post_only/GTC maker order.
+
+    A resting maker order that polls as LIVE/OPEN/RESTING never reaches the
+    fill/partial/cancel branches that write order facts, so the command_id join
+    used to be NO_FACT for every post_only GTC order (the maker fill-rate loop
+    was blind to resting/partial/cancel lifecycle). This writes the LIVE order
+    fact so the resting order is linked by command_id; subsequent fill / partial
+    / cancel facts then chain off it.
+
+    Idempotent: skipped when the latest fact for this command is already an open
+    state (LIVE / RESTING / PARTIALLY_MATCHED) so a multi-cycle rest does not
+    append a LIVE row every poll. Never raises into the poll loop (resting-fact
+    tracking is observational and must not abort fill verification).
+    """
+
+    if deps is None or not hasattr(deps, "get_connection"):
+        return
+    order_id = str(getattr(pos, "entry_order_id", "") or getattr(pos, "order_id", "") or "").strip()
+    if not order_id:
+        return
+
+    conn = None
+    try:
+        from src.state.venue_command_repo import append_order_fact
+
+        conn = deps.get_connection()
+        row = conn.execute(
+            """
+            SELECT *
+              FROM venue_commands
+             WHERE venue_order_id = ?
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT 1
+            """,
+            (order_id,),
+        ).fetchone()
+        if row is None:
+            return
+
+        command = dict(row)
+        command_id = str(command.get("command_id") or "")
+        if not command_id:
+            return
+        latest_state = _latest_order_fact_state_for_command(conn, command_id)
+        if latest_state in {"LIVE", "RESTING", "PARTIALLY_MATCHED"}:
+            return  # already recorded as open; do not duplicate each poll.
+
+        payload_dict = payload if isinstance(payload, dict) else {"raw": payload}
+        append_order_fact(
+            conn,
+            venue_order_id=order_id,
+            command_id=command_id,
+            state="LIVE",
+            remaining_size=_remaining_size(command, None),
+            matched_size=None,
+            source="REST",
+            observed_at=observed_at,
+            venue_timestamp=_payload_timestamp(payload_dict),
+            raw_payload_hash=_payload_hash(payload_dict),
+            raw_payload_json=payload_dict,
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("Resting order-fact append failed for %s: %s", pos.trade_id, exc)
     finally:
         if conn is not None:
             try:
@@ -1309,6 +1416,12 @@ def _check_entry_fill(
         return "still_pending", False, False
 
     if status:
+        if status in RESTING_OPEN_STATUSES:
+            # Resting post_only/GTC maker order: record the LIVE order fact so it
+            # is linked by command_id (FIX: post_only GTC orders used to yield
+            # NO_FACT, blinding the maker fill-rate measurement loop). Idempotent
+            # and non-raising; the order stays still_pending.
+            _maybe_append_resting_order_fact(pos, payload, observed_at=now, deps=deps)
         return _update_pending_status(pos, status.lower())
     return "still_pending", False, False
 
