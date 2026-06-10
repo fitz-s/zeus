@@ -155,6 +155,10 @@ class DivergenceVerdict:
 class _AnomalyRecord:
     flagged_at: datetime
     detail: str
+    # PR#404 round-2 P1-A: the TTL travels WITH the record (persisted in the
+    # durable row), so a custom flag TTL survives restart and the pause check
+    # honors the flag-time TTL — never the reader's call-site default.
+    ttl_hours: float = DEFAULT_PAUSE_TTL_HOURS
 
 
 _REGISTRY: dict[tuple[str, str], _AnomalyRecord] = {}
@@ -177,9 +181,13 @@ CREATE TABLE IF NOT EXISTS day0_oracle_anomaly_flags (
     PRIMARY KEY (city, target_date)
 )
 """
-#: Keys confirmed ABSENT in the DB this process-lifetime (negative cache so the
-#: hot paths don't re-query the DB every call). Cleared on flag/clear/reset.
-_DB_MISS_CACHE: set[tuple[str, str]] = set()
+#: Keys recently confirmed ABSENT in the DB -> {key: monotonic_checked_at}.
+#: TTL'd (PR#404 round-2 P1-A): a PERMANENT negative cache would hide a flag
+#: written later by the operator or another process until restart — defeating
+#: the cross-process durability the DB backing exists for. Entries older than
+#: _DB_MISS_TTL_S are re-checked against the DB.
+_DB_MISS_TTL_S = 10.0
+_DB_MISS_CACHE: dict[tuple[str, str], float] = {}
 
 
 def _persist_flag(
@@ -195,7 +203,10 @@ def _persist_flag(
             from src.state.db_writer_lock import WriteClass, db_writer_lock
 
             conn = get_world_connection(write_class=WriteClass.LIVE)
-            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE)
+            # NON-BLOCKING flock (PR#404 round-2): durability is best-effort
+            # BY DESIGN (the in-process pause already holds); a contended
+            # LIVE writer flock must never stall the prefetch/monitor path.
+            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE, blocking=False)
         else:
             from contextlib import nullcontext
 
@@ -239,7 +250,14 @@ def _load_flag_from_db(city: str, target_date: str, *, conn=None) -> Optional[_A
         flagged_at = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
         if flagged_at.tzinfo is None:
             flagged_at = flagged_at.replace(tzinfo=UTC)
-        return _AnomalyRecord(flagged_at=flagged_at.astimezone(UTC), detail=str(row[2]))
+        try:
+            row_ttl = float(row[1])
+        except (TypeError, ValueError):
+            row_ttl = DEFAULT_PAUSE_TTL_HOURS
+        return _AnomalyRecord(
+            flagged_at=flagged_at.astimezone(UTC), detail=str(row[2]),
+            ttl_hours=row_ttl if row_ttl > 0.0 else DEFAULT_PAUSE_TTL_HOURS,
+        )
     except Exception:  # noqa: BLE001 — missing table / locked DB -> no durable flag
         return None
     finally:
@@ -260,8 +278,10 @@ def flag_day0_oracle_anomaly(
     to the world DB so the pause SURVIVES daemon restarts (PR#404 P1)."""
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     with _REGISTRY_LOCK:
-        _REGISTRY[(str(city), str(target_date))] = _AnomalyRecord(flagged_at=moment, detail=str(detail))
-        _DB_MISS_CACHE.discard((str(city), str(target_date)))
+        _REGISTRY[(str(city), str(target_date))] = _AnomalyRecord(
+            flagged_at=moment, detail=str(detail), ttl_hours=float(ttl_hours)
+        )
+        _DB_MISS_CACHE.pop((str(city), str(target_date)), None)
     logger.warning(
         "DAY0_ORACLE_ANOMALY_FLAGGED city=%s target_date=%s detail=%s — day0 entries PAUSED (fail-closed)",
         city, target_date, detail,
@@ -275,9 +295,11 @@ def clear_day0_oracle_anomaly(city: str, target_date: str, *, conn=None) -> bool
     """Operator/cleanup hook. Returns True when a record was removed (memory
     or durable). Clears BOTH surfaces."""
     key = (str(city), str(target_date))
+    import time as _time
+
     with _REGISTRY_LOCK:
         removed = _REGISTRY.pop(key, None) is not None
-        _DB_MISS_CACHE.add(key)
+        _DB_MISS_CACHE[key] = _time.monotonic()
     own = conn is None
     try:
         if own:
@@ -285,7 +307,7 @@ def clear_day0_oracle_anomaly(city: str, target_date: str, *, conn=None) -> bool
             from src.state.db_writer_lock import WriteClass, db_writer_lock
 
             conn = get_world_connection(write_class=WriteClass.LIVE)
-            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE)
+            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE, blocking=False)
         else:
             from contextlib import nullcontext
 
@@ -316,28 +338,74 @@ def is_day0_family_paused(
     ttl_hours: float = DEFAULT_PAUSE_TTL_HOURS,
     conn=None,
 ) -> bool:
+    import time as _time
+
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     key = (str(city), str(target_date))
+    monotonic_now = _time.monotonic()
     with _REGISTRY_LOCK:
         record = _REGISTRY.get(key)
         memory_miss = record is None
-        cached_db_miss = key in _DB_MISS_CACHE
+        miss_checked_at = _DB_MISS_CACHE.get(key)
+        cached_db_miss = (
+            miss_checked_at is not None
+            and monotonic_now - miss_checked_at < _DB_MISS_TTL_S
+        )
     if memory_miss and not cached_db_miss:
-        # PR#404 P1: restart resilience — read-through to the durable flags.
+        # PR#404 P1: restart + cross-process resilience — read-through to the
+        # durable flags; misses are cached only for _DB_MISS_TTL_S so a flag
+        # written by another process becomes visible within seconds.
         record = _load_flag_from_db(city, target_date, conn=conn)
         with _REGISTRY_LOCK:
             if record is not None:
                 _REGISTRY[key] = record
+                _DB_MISS_CACHE.pop(key, None)
             else:
-                _DB_MISS_CACHE.add(key)
+                _DB_MISS_CACHE[key] = monotonic_now
     if record is None:
         return False
-    if moment - record.flagged_at > timedelta(hours=float(ttl_hours)):
+    # The record's OWN TTL (persisted with the flag) is the authority; the
+    # call-site ttl_hours is only a fallback for records without one
+    # (PR#404 round-2 P1-A: a custom flag TTL must survive restart).
+    effective_ttl = float(getattr(record, "ttl_hours", 0.0) or 0.0) or float(ttl_hours)
+    if moment - record.flagged_at > timedelta(hours=effective_ttl):
         with _REGISTRY_LOCK:
             _REGISTRY.pop(key, None)
-            _DB_MISS_CACHE.add(key)
+            _DB_MISS_CACHE[key] = monotonic_now
+        _delete_expired_flag_best_effort(key[0], key[1], conn=conn)
         return False
     return True
+
+
+def _delete_expired_flag_best_effort(city: str, target_date: str, *, conn=None) -> None:
+    """Remove an expired durable flag row so restarts cannot re-hydrate it.
+    Best-effort: any failure is silent (the TTL check rejects it anyway)."""
+    own = conn is None
+    try:
+        if own:
+            from src.state.db import ZEUS_WORLD_DB_PATH, get_world_connection
+            from src.state.db_writer_lock import WriteClass, db_writer_lock
+
+            conn = get_world_connection(write_class=WriteClass.LIVE)
+            lock_ctx = db_writer_lock(ZEUS_WORLD_DB_PATH, WriteClass.LIVE, blocking=False)
+        else:
+            from contextlib import nullcontext
+
+            lock_ctx = nullcontext()
+        with lock_ctx:
+            conn.execute(
+                "DELETE FROM day0_oracle_anomaly_flags WHERE city = ? AND target_date = ?",
+                (str(city), str(target_date)),
+            )
+            conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        if own and conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def active_day0_anomalies() -> dict[tuple[str, str], str]:

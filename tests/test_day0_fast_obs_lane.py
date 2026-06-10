@@ -972,3 +972,53 @@ class TestAnomalyFreshnessGates:
             wu_last_obs_time=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),  # 3 min ahead
         )
         assert verdict.compared is True and verdict.diverged is False
+
+
+class TestTtlMissCacheAndPersistedTtl:
+    """Round-2 P1-A: the negative-miss cache is TTL'd (cross-process flags
+    become visible without restart) and the persisted TTL is the authority."""
+
+    def test_flag_from_another_process_visible_after_miss_cache_ttl(self, monkeypatch):
+        from src.data import day0_oracle_anomaly as oa
+
+        conn = sqlite3.connect(":memory:")
+        # process A reads -> negative miss cached
+        assert oa.is_day0_family_paused("Tokyo", "2026-06-10", conn=conn) is False
+        # external process/operator writes the durable flag directly
+        conn.execute(oa._FLAGS_TABLE_DDL)
+        conn.execute(
+            "INSERT OR REPLACE INTO day0_oracle_anomaly_flags VALUES (?,?,?,?,?)",
+            ("Tokyo", "2026-06-10", datetime(2026, 6, 10, 4, 0, tzinfo=UTC).isoformat(),
+             24.0, "external"),
+        )
+        conn.commit()
+        # within the miss-cache TTL the stale negative may persist…
+        # …but once the TTL lapses the flag MUST become visible (no restart).
+        monkeypatch.setattr(oa, "_DB_MISS_TTL_S", 0.0)
+        assert oa.is_day0_family_paused(
+            "Tokyo", "2026-06-10",
+            now=datetime(2026, 6, 10, 12, 0, tzinfo=UTC), conn=conn,
+        ) is True
+
+    def test_persisted_custom_ttl_survives_restart_and_governs_expiry(self):
+        from src.data import day0_oracle_anomaly as oa
+
+        conn = sqlite3.connect(":memory:")
+        oa.flag_day0_oracle_anomaly(
+            "Tokyo", "2026-06-10", detail="short-lived",
+            now=datetime(2026, 6, 10, 4, 0, tzinfo=UTC),
+            ttl_hours=2.0, conn=conn,
+        )
+        oa._reset_registry_for_tests()  # simulated restart
+        # +1h: paused (within the persisted 2h TTL)
+        assert oa.is_day0_family_paused(
+            "Tokyo", "2026-06-10", now=datetime(2026, 6, 10, 5, 0, tzinfo=UTC), conn=conn,
+        ) is True
+        oa._reset_registry_for_tests()
+        # +3h: the PERSISTED 2h TTL governs — NOT the 24h call-site default
+        assert oa.is_day0_family_paused(
+            "Tokyo", "2026-06-10", now=datetime(2026, 6, 10, 7, 0, tzinfo=UTC), conn=conn,
+        ) is False
+        # expired durable row was best-effort deleted (no restart re-hydration)
+        rows = conn.execute("SELECT COUNT(*) FROM day0_oracle_anomaly_flags").fetchone()[0]
+        assert rows == 0
