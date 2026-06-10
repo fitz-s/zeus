@@ -563,7 +563,15 @@ class Day0FastObsEmitter:
     _last_attempt_monotonic: float = field(default=0.0, init=False)
     _cache_fetched_monotonic: float = field(default=0.0, init=False)
     _cached_reports: list[MetarReport] = field(default_factory=list, init=False)
-    _last_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
+    # SPLIT MEMOS (PR#404 round-2 P0-1): the KILL memo (hard-fact exit source,
+    # advanced by any memo-safe value incl. stale-withheld ones) and the LIVE
+    # memo (emit moved-check, advanced ONLY by an INSERTED live event) were one
+    # dict — a stale-after-failure withholding advanced it without emitting, so
+    # a later FRESH confirmation of the same rounded extreme saw moved=False
+    # and the live event NEVER emitted (entry lane silently diverged from the
+    # exit lane's state). Two memos, two consumers, two update rules.
+    _last_kill_memo_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
+    _last_live_emitted_rounded: dict[tuple[str, str, str], int] = field(default_factory=dict, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def _reports_with_status(self, stations: list[str]) -> tuple[list[MetarReport], str, Optional[float]]:
@@ -611,11 +619,12 @@ class Day0FastObsEmitter:
         observation-build time (publication-clock or fetch-staleness may have
         been degraded — monotone kills are safe under staleness; entries are
         gated separately). Consumed by src/execution/day0_hard_fact_exit.py.
-        None when nothing recorded in this process (restart, lane disabled,
-        city excluded).
+        Reads the KILL memo (round-2 P0-1 split: independent of whether a live
+        event was emitted). None when nothing recorded in this process
+        (restart, lane disabled, city excluded).
         """
         with self._lock:
-            return self._last_emitted_rounded.get((str(city_name), str(target_date), str(metric)))
+            return self._last_kill_memo_rounded.get((str(city_name), str(target_date), str(metric)))
 
     def prefetch(
         self,
@@ -709,13 +718,25 @@ class Day0FastObsEmitter:
                         continue
                     rounded = int(semantics.round_single(float(value)))
                     key = (city_name, target_date, metric)
-                    previous = self._last_emitted_rounded.get(key)
-                    moved = (
-                        previous is None
-                        or (metric == "high" and rounded > previous)
-                        or (metric == "low" and rounded < previous)
-                    )
-                    if not moved:
+                    # SPLIT MEMO movement checks (round-2 P0-1): the live emit
+                    # decision compares against the LIVE memo (last INSERTED
+                    # event), never the kill memo — a kill-memo-only update
+                    # from a withheld pass must not suppress the later live
+                    # event for the same rounded extreme.
+                    with self._lock:
+                        kill_previous = self._last_kill_memo_rounded.get(key)
+                        live_previous = self._last_live_emitted_rounded.get(key)
+
+                    def _moved(previous: Optional[int]) -> bool:
+                        return (
+                            previous is None
+                            or (metric == "high" and rounded > previous)
+                            or (metric == "low" and rounded < previous)
+                        )
+
+                    kill_moved = _moved(kill_previous)
+                    live_moved = _moved(live_previous)
+                    if not kill_moved and not live_moved:
                         continue
                     observation = fast_obs_to_day0_observation(
                         city=city, extremes=extremes, metric=metric, source=source
@@ -732,18 +753,21 @@ class Day0FastObsEmitter:
                         observation["live_authority_status"] == "LIVE_AUTHORITY"
                         and not stale_blocked
                     )
-                    if memo_safe:
-                        self._last_emitted_rounded[key] = rounded
+                    if memo_safe and kill_moved:
+                        with self._lock:
+                            self._last_kill_memo_rounded[key] = rounded
                     if not live_ok:
-                        if memo_safe:
+                        if memo_safe and kill_moved:
                             logger.warning(
                                 "DAY0_FAST_OBS_LIVE_AUTHORITY_WITHHELD city=%s date=%s metric=%s "
                                 "rounded=%s freshness=%s cache_age_s=%s authority=%s "
-                                "(kill memo updated; no live event emitted)",
+                                "(kill memo updated; no live event emitted; live memo untouched)",
                                 city_name, target_date, metric, rounded,
                                 prefetch.freshness_status, prefetch.cache_age_s,
                                 observation["live_authority_status"],
                             )
+                        continue
+                    if not live_moved:
                         continue
                     result = trigger.emit_from_observation(
                         observation=observation,
@@ -752,6 +776,13 @@ class Day0FastObsEmitter:
                         received_at=received_at,
                     )
                     if result.inserted:
+                        # ONLY an INSERTED live event advances the live memo
+                        # (round-2 P0-1); it may also refresh the kill memo
+                        # (an inserted live value is memo-safe by live_ok).
+                        with self._lock:
+                            self._last_live_emitted_rounded[key] = rounded
+                            if memo_safe and _moved(self._last_kill_memo_rounded.get(key)):
+                                self._last_kill_memo_rounded[key] = rounded
                         emitted += 1
                         logger.info(
                             "DAY0_FAST_OBS_EMIT city=%s date=%s metric=%s rounded=%s "

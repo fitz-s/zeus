@@ -797,3 +797,88 @@ class TestAnomalyPausePersistence:
             oa._WU_CHECK_FAILURE_MEMO["Tokyo"] = _time.monotonic() - 200.0
         oa.wu_metar_anomaly_check(city, extremes, [])
         assert calls["n"] == 2, "WU must be retried after the short failure throttle"
+
+
+# ===========================================================================
+# R24 — PR#404 ROUND-2: split memos, anomaly freshness gates, TTL'd miss cache
+# ===========================================================================
+
+class TestSplitMemos:
+    """Round-2 P0-1: the kill memo (hard-fact exits) and the live-emission memo
+    are SEPARATE state with separate update rules — a stale-withheld kill-memo
+    advance must never suppress the later fresh live event."""
+
+    def _flaky_emitter(self, reports):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        plan = {"fail": False, "calls": 0}
+
+        def fetcher(stations, **kw):
+            plan["calls"] += 1
+            return [] if plan["fail"] else list(reports)
+
+        return Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=0.0), plan
+
+    def test_operator_scenario_stale_withholding_does_not_suppress_fresh_live_emit(self):
+        """THE mandated scenario: (1) fresh prefetch fills the cache but the
+        write phase never runs; (2) fetch fails, cache aged beyond budget ->
+        emit pass updates the KILL memo only (no live event); (3) a later
+        FRESH fetch confirms the SAME rounded extreme -> the live event MUST
+        still emit (the old coupled memo saw moved=False and never emitted)."""
+        import time as _time
+
+        conn = _world_conn()
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        emitter, plan = self._flaky_emitter(reports)
+
+        # (1) fresh prefetch fills the cache; write phase intentionally not run
+        pf1 = emitter.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=5))
+        assert pf1.freshness_status == "fresh_fetch"
+
+        # (2) outage + cache aged beyond Tokyo's 60-min budget -> kill memo only
+        plan["fail"] = True
+        emitter._cache_fetched_monotonic = _time.monotonic() - 7200.0
+        pf2 = emitter.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=10))
+        assert pf2.freshness_status == "stale_cache_after_failure"
+        n2 = emitter.emit_prefetched(
+            world_conn=conn, prefetch=pf2,
+            received_at=(t0 + timedelta(minutes=10)).isoformat(), limit=20,
+        )
+        assert n2 == 0
+        assert emitter.latest_rounded_extreme("Tokyo", "2026-06-10", "high") == 21
+
+        # (3) recovery: fresh fetch, SAME rounded extreme -> live event STILL emits
+        plan["fail"] = False
+        pf3 = emitter.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=15))
+        assert pf3.freshness_status == "fresh_fetch"
+        n3 = emitter.emit_prefetched(
+            world_conn=conn, prefetch=pf3,
+            received_at=(t0 + timedelta(minutes=15)).isoformat(), limit=20,
+        )
+        assert n3 == 2, (
+            "fresh confirmation of a kill-memo-only extreme must STILL emit the "
+            f"live events (entry/exit lane state divergence) — emitted {n3}"
+        )
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED'"
+        ).fetchone()[0]
+        assert rows == 2
+
+    def test_only_inserted_live_events_advance_the_live_memo(self):
+        conn = _world_conn()
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        emitter, _plan = self._flaky_emitter(reports)
+        pf = emitter.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=5))
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=pf, received_at=t0.isoformat(), limit=20,
+        ) == 2
+        key = ("Tokyo", "2026-06-10", "high")
+        assert emitter._last_live_emitted_rounded[key] == 21
+        assert emitter._last_kill_memo_rounded[key] == 21
+        # unchanged extreme: neither memo moves, nothing emits
+        pf2 = emitter.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=8))
+        assert emitter.emit_prefetched(
+            world_conn=conn, prefetch=pf2, received_at=t0.isoformat(), limit=20,
+        ) == 0
