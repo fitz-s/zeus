@@ -321,6 +321,108 @@ def _order_field(order: dict, *names: str) -> str:
     return ""
 
 
+def _row_get(row: Any, key: str, index: int) -> Any:
+    return row[key] if hasattr(row, "keys") else row[index]
+
+
+def _resolve_order_bin_identity(conn: Any, token_id: str) -> Optional[dict]:
+    """Token -> (city, target_date, metric, range bounds, direction) using the
+    PRODUCTION topology surfaces (PR#404 P1 fix — the prior single
+    market_events.token_id lookup missed every NO token, because market_events
+    stores only the YES token; and the metric was guessed from the slug).
+
+    Resolution chain (all fail-soft per source):
+      1. executable_market_snapshots (trades main schema): yes_token_id /
+         no_token_id -> condition_id + DIRECTION (asset==no_token -> buy_no).
+      2. market_events by condition_id OR token_id (main / world. / forecasts.
+         schemas): city, target_date, range_low/high, and — where the schema
+         carries it — the TYPED temperature_metric column.
+      3. market_topology_state by condition_id (trades main schema): the TYPED
+         temperature_metric + city_id + target_local_date authority.
+    The metric is NEVER derived from slug substrings: a row whose metric
+    cannot be typed is SKIPPED (no cancel — fail-soft, never wrong-direction).
+    """
+    import sqlite3 as _sqlite3
+
+    condition_id = ""
+    direction = ""
+    try:
+        row = conn.execute(
+            """
+            SELECT condition_id, yes_token_id, no_token_id
+            FROM executable_market_snapshots
+            WHERE yes_token_id = ? OR no_token_id = ?
+            ORDER BY captured_at DESC LIMIT 1
+            """,
+            (token_id, token_id),
+        ).fetchone()
+        if row is not None:
+            condition_id = str(_row_get(row, "condition_id", 0) or "")
+            no_token = str(_row_get(row, "no_token_id", 2) or "")
+            direction = "buy_no" if token_id == no_token else "buy_yes"
+    except _sqlite3.Error:
+        pass
+
+    identity: dict = {}
+    for table_ref in ("market_events", "world.market_events", "forecasts.market_events"):
+        try:
+            if condition_id:
+                me_row = conn.execute(
+                    f"SELECT * FROM {table_ref} WHERE condition_id = ? OR token_id = ? LIMIT 1",
+                    (condition_id, token_id),
+                ).fetchone()
+            else:
+                me_row = conn.execute(
+                    f"SELECT * FROM {table_ref} WHERE token_id = ? LIMIT 1",
+                    (token_id,),
+                ).fetchone()
+        except _sqlite3.Error:
+            continue
+        if me_row is None:
+            continue
+        me = dict(me_row) if hasattr(me_row, "keys") else {}
+        identity = {
+            "city": str(me.get("city") or ""),
+            "target_date": str(me.get("target_date") or ""),
+            "range_low": me.get("range_low"),
+            "range_high": me.get("range_high"),
+            "metric": str(me.get("temperature_metric") or ""),
+            "condition_id": condition_id or str(me.get("condition_id") or ""),
+        }
+        if not direction:
+            # market_events stores the YES token; matching by token_id here
+            # means the order IS the YES side.
+            direction = "buy_yes" if str(me.get("token_id") or "") == token_id else ""
+        break
+    if not identity:
+        return None
+
+    if not identity.get("metric") and identity.get("condition_id"):
+        # TYPED metric authority: market_topology_state (never slug guessing).
+        try:
+            mts = conn.execute(
+                """
+                SELECT temperature_metric, city_id, target_local_date
+                FROM market_topology_state
+                WHERE condition_id = ?
+                ORDER BY recorded_at DESC LIMIT 1
+                """,
+                (identity["condition_id"],),
+            ).fetchone()
+            if mts is not None:
+                identity["metric"] = str(_row_get(mts, "temperature_metric", 0) or "")
+                identity.setdefault("city", str(_row_get(mts, "city_id", 1) or ""))
+                if not identity.get("target_date"):
+                    identity["target_date"] = str(_row_get(mts, "target_local_date", 2) or "")
+        except _sqlite3.Error:
+            pass
+
+    if identity.get("metric") not in {"high", "low"} or not direction:
+        return None
+    identity["direction"] = direction
+    return identity
+
+
 def cancel_day0_dead_bin_resting_entries(
     *,
     clob: Any,
@@ -332,8 +434,8 @@ def cancel_day0_dead_bin_resting_entries(
     """Cancel our OPEN resting entry orders whose day0 bin is hard-fact dead
     (for the order's side) or whose family is anomaly-paused.
 
-    Token -> bin identity via the market_events topology (token_id, outcome,
-    range_low/high, city, target_date, market_slug). Fail-soft per order; a
+    Token -> bin identity via _resolve_order_bin_identity (EMS yes/no tokens +
+    market_events bounds + TYPED metric — PR#404 P1). Fail-soft per order; a
     cancel failure is loud but never raises. Returns cancels issued.
     """
     moment = (now or datetime.now(UTC)).astimezone(UTC)
@@ -360,21 +462,15 @@ def cancel_day0_dead_bin_resting_entries(
             token_id = _order_field(order, "asset_id", "token_id", "tokenID", "market")
             if not order_id or not token_id:
                 continue
-            row = conn.execute(
-                """
-                SELECT city, target_date, range_low, range_high, outcome, market_slug
-                FROM market_events WHERE token_id = ? LIMIT 1
-                """,
-                (token_id,),
-            ).fetchone()
-            if row is None:
+            identity = _resolve_order_bin_identity(conn, token_id)
+            if identity is None:
                 continue
-            city_name = str(row["city"] if hasattr(row, "keys") else row[0])
-            target_date = str(row["target_date"] if hasattr(row, "keys") else row[1])
-            range_low = row["range_low"] if hasattr(row, "keys") else row[2]
-            range_high = row["range_high"] if hasattr(row, "keys") else row[3]
-            outcome = str(row["outcome"] if hasattr(row, "keys") else row[4]).strip().lower()
-            market_slug = str(row["market_slug"] if hasattr(row, "keys") else row[5] or "")
+            city_name = identity["city"]
+            target_date = identity["target_date"]
+            range_low = identity["range_low"]
+            range_high = identity["range_high"]
+            metric = identity["metric"]
+            direction = identity["direction"]
             city = cities_by_name.get(city_name)
             if city is None:
                 continue
@@ -382,8 +478,6 @@ def cancel_day0_dead_bin_resting_entries(
             local_today = moment.astimezone(ZoneInfo(str(city.timezone))).date().isoformat()
             if str(target_date)[:10] != local_today:
                 continue
-            metric = "low" if "lowest" in market_slug else "high"
-            direction = "buy_no" if outcome == "no" else "buy_yes"
 
             paused = is_day0_family_paused(city_name, target_date, now=moment)
             verdict = None

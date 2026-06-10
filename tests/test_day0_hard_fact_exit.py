@@ -295,6 +295,10 @@ class _FakeClob:
 
 
 def _orders_conn():
+    """PRODUCTION-LIKE topology (PR#404 P1): market_events stores ONLY the YES
+    token and NO temperature_metric column (the trades-DB shape);
+    executable_market_snapshots carries yes_token_id/no_token_id;
+    market_topology_state carries the TYPED temperature_metric."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -303,26 +307,39 @@ def _orders_conn():
             condition_id TEXT, token_id TEXT, range_label TEXT,
             range_low REAL, range_high REAL, outcome TEXT, created_at TEXT)"""
     )
-    rows = [
-        # dead 25-bin YES token (extreme 26): MUST cancel
-        ("highest-temperature-in-tokyo-on-june-10", "Tokyo", "2026-06-10",
-         "c1", "tok-dead-yes", "25°C", 25.0, 25.0, "Yes"),
-        # alive 27-bin YES token: keep
-        ("highest-temperature-in-tokyo-on-june-10", "Tokyo", "2026-06-10",
-         "c2", "tok-alive-yes", "27°C", 27.0, 27.0, "Yes"),
-        # dead 25-bin NO token: structural WIN — keep resting
-        ("highest-temperature-in-tokyo-on-june-10", "Tokyo", "2026-06-10",
-         "c1", "tok-dead-no", "25°C", 25.0, 25.0, "No"),
-        # non-day0 date: keep
-        ("highest-temperature-in-tokyo-on-june-11", "Tokyo", "2026-06-11",
-         "c3", "tok-tomorrow", "25°C", 25.0, 25.0, "Yes"),
+    conn.execute(
+        """CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT, condition_id TEXT, yes_token_id TEXT,
+            no_token_id TEXT, captured_at TEXT)"""
+    )
+    conn.execute(
+        """CREATE TABLE market_topology_state (
+            condition_id TEXT, temperature_metric TEXT, city_id TEXT,
+            target_local_date TEXT, recorded_at TEXT)"""
+    )
+    families = [
+        # (cond, yes_token, no_token, city, date, lo, hi)
+        ("c1", "tok-dead-yes", "tok-dead-no", "Tokyo", "2026-06-10", 25.0, 25.0),
+        ("c2", "tok-alive-yes", "tok-alive-no", "Tokyo", "2026-06-10", 27.0, 27.0),
+        ("c3", "tok-tomorrow", "tok-tomorrow-no", "Tokyo", "2026-06-11", 25.0, 25.0),
+        # the buy_no death-ride family: open-high shoulder ('27 or higher')
+        ("c4", "tok-shoulder-yes", "tok-shoulder-no", "Tokyo", "2026-06-10", 27.0, None),
     ]
-    for r in rows:
+    for cond, yes_t, no_t, city, date, lo, hi in families:
         conn.execute(
             "INSERT INTO market_events (market_slug, city, target_date, condition_id,"
             " token_id, range_label, range_low, range_high, outcome, created_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,'')",
-            r,
+            (f"highest-temperature-in-tokyo-on-{date}", city, date, cond, yes_t,
+             "bin", lo, hi, ""),
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?,?,?,?,?)",
+            (f"ems-{cond}", cond, yes_t, no_t, "2026-06-10T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO market_topology_state VALUES (?,?,?,?,?)",
+            (cond, "high", city, date, "2026-06-10T00:00:00+00:00"),
         )
     return conn
 
@@ -374,6 +391,43 @@ class TestRestingOrderCancel:
             cities_by_name={"Tokyo": _tokyo()}, now=self.NOW_TOKYO_DAY,
         )
         assert n == 0  # no successful cancel, no exception
+
+    def test_no_token_resolves_via_ems_and_shoulder_no_order_is_cancelled(self, monkeypatch):
+        """PR#404 P1 production-topology case: the open order's asset is the
+        NO token, which exists ONLY in executable_market_snapshots.no_token_id
+        (market_events stores the YES token). The shoulder family (27-or-
+        higher) with extreme 27 means buy_no is structurally DEAD -> the
+        resting BUY-NO entry on the shoulder must be found AND cancelled,
+        while the dead-bin NO order (structural WIN) is kept."""
+        _set_metar_memo(monkeypatch, 27)
+        clob = _FakeClob([
+            {"orderID": "oN1", "asset_id": "tok-shoulder-no", "side": "BUY"},  # NO lost -> cancel
+            {"orderID": "oN2", "asset_id": "tok-dead-no", "side": "BUY"},      # NO won -> keep
+            {"orderID": "oN3", "asset_id": "tok-alive-no", "side": "BUY"},     # alive -> keep
+        ])
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob, conn=_orders_conn(),
+            cities_by_name={"Tokyo": _tokyo()}, now=self.NOW_TOKYO_DAY,
+        )
+        assert n == 1
+        assert clob.cancelled == ["oN1"]
+
+    def test_metric_is_typed_never_slug_guessed(self):
+        """The metric comes from market_topology_state.temperature_metric /
+        market_events.temperature_metric — never from slug substrings. A token
+        whose metric cannot be typed is SKIPPED (no wrong-direction cancel)."""
+        from src.execution.day0_hard_fact_exit import _resolve_order_bin_identity
+
+        conn = _orders_conn()
+        identity = _resolve_order_bin_identity(conn, "tok-shoulder-no")
+        assert identity is not None
+        assert identity["metric"] == "high" and identity["direction"] == "buy_no"
+        # drop the typed-metric authority -> resolution refuses (None), even
+        # though the slug contains 'highest'
+        conn.execute("DELETE FROM market_topology_state")
+        assert _resolve_order_bin_identity(conn, "tok-shoulder-no") is None
+        source = open("src/execution/day0_hard_fact_exit.py", encoding="utf-8").read()
+        assert '"lowest" in market_slug' not in source
 
 
 # ===========================================================================
