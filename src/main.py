@@ -5452,8 +5452,15 @@ def _edli_event_reactor_cycle() -> None:
         # after FIX-4; the no-submit adapter and any legacy adapter do not, so
         # getattr returns the default [0] → live_submit_attempts=0 (correct for
         # no-submit cycles).
+        # FAIL-SOFT counter read (Copilot PR#404): honor the FIX-4 closure
+        # counter when it has the expected 1-element-list shape; any other
+        # shape (legacy adapter, int, empty list, None) reads as 0 instead of
+        # crashing the status-pulse write.
         _live_submit_count_ref = getattr(submit_adapter, "_live_submit_count", [0])
-        _live_submit_attempts = int(_live_submit_count_ref[0])
+        try:
+            _live_submit_attempts = int(_live_submit_count_ref[0])
+        except (TypeError, IndexError, KeyError, ValueError):
+            _live_submit_attempts = 0
         try:
             from src.observability.status_summary import write_cycle_pulse
 

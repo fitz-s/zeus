@@ -1,4 +1,7 @@
 # Created: 2026-06-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Tests for the day0 hourly-vector lane (persist/retention/freshness/request-hash) and the flag-gated remaining-day members.
+# Reuse: Run when day0_hourly_vectors.py or the era remaining-day q mode changes.
 # Last reused or audited: 2026-06-10
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector); day0 first-principles review §2.4

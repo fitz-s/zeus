@@ -1,4 +1,7 @@
 # Created: 2026-06-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Panic-sell-category antibodies: absorbing boundary, stale-obs guard, transition monotonicity, day0 bootstrap LCB, lcb-transform identity.
+# Reuse: Run when portfolio exit logic, the day0 mask/guards, or monitor maturity gating change.
 # Last reused or audited: 2026-06-10
 # Authority basis: day0 first-principles review 2026-06-10
 #   (/tmp/day0_first_principles_review.md); panic-sell incident evidence:

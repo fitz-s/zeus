@@ -1,4 +1,7 @@
 # Created: 2026-06-09
+# Lifecycle: created=2026-06-09; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Pins proof_accepted vs live_submit_attempts separation in the EDLI status pulse (FIX-4).
+# Reuse: Run when event_reactor_adapter submit counters or main.py status-pulse fields change.
 # Last reused/audited: 2026-06-09
 # Authority basis: FIX-4 (P2) — separate proof_accepted from live_submit_attempts
 #   in the EDLI reactor status pulse. No-submit / degraded cycles must report

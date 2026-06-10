@@ -1,4 +1,7 @@
 # Created: 2026-06-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Antibody: diurnal_peak_prob.p_high_set must be survival-shaped (monotone, ~1 by evening) — the day0 maturity gate's substrate.
+# Reuse: Run after any etl_diurnal_curves.py change or diurnal table regeneration; live-table checks skip when state DB absent.
 # Last reused or audited: 2026-06-10
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md finding 3
 #   (diurnal_peak_prob.p_high_set was PMF-shaped — per-hour bucket max vs daily

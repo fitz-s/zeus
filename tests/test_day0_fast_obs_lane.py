@@ -1,4 +1,7 @@
 # Created: 2026-06-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Relationship tests for the METAR fast obs lane: unit law, monotone emission, fetch-failure discipline, oracle anomaly pause.
+# Reuse: Run when day0_fast_obs.py / day0_oracle_anomaly.py or the main.py fast-lane wiring change.
 # Last reused or audited: 2026-06-10
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0

@@ -1,4 +1,7 @@
 # Created: 2026-06-09
+# Lifecycle: created=2026-06-09; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Relationship tests for the DAY0_SCOPE_SHADOW_ONLY final-adapter boundary and forecast_plus_day0 scope expansion.
+# Reuse: Run whenever edli_live_scope values or the adapter boundary gate change.
 # Last reused/audited: 2026-06-09
 # Authority basis: FIX-3 (P1) — day0_shadow scope must not permit real submit
 #   for day0-lane events, enforced at the final adapter/submit BOUNDARY.

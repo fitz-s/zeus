@@ -1,4 +1,7 @@
 # Created: 2026-06-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Antibody suite for the day0 hard-fact bin-death exit lane, resting-order cancel sweep, METAR plausibility bound, exposure cap.
+# Reuse: Run when day0_hard_fact_exit.py, the cycle_runtime exit wiring, or the day0 cap/quarantine semantics change.
 # Last reused or audited: 2026-06-10
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),

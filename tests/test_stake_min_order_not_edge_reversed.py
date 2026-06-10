@@ -1,4 +1,7 @@
 # Created: 2026-06-09
+# Lifecycle: created=2026-06-09; last_reviewed=2026-06-10; last_reused=2026-06-10
+# Purpose: Antibody: positive-edge candidates below venue min order are BELOW_MIN_ORDER (or bumped), never false EDGE_REVERSED.
+# Reuse: Run with the money-path suites whenever the sizing kernel / recapture gate / min-order semantics change.
 # Last reused or audited: 2026-06-09
 # Authority basis: /tmp/edge_reversed_audit.md (2026-06-09 REGRESSION_BUG verdict) +
 #   "bin selection.md" §5.2/§5.3 (fractional-Kelly haircut after the ΔU optimizer) +
