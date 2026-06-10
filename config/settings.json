@@ -214,8 +214,8 @@
     "opening_alpha_bonus": 0.15
   },
   "sizing": {
-    "kelly_multiplier": 0.0625,
-    "_kelly_multiplier_note": "HARDCODED. Replace after 500+ settlements using empirical edge-estimation error and optimal Kelly fraction. 2026-06-08 operator: 0.25->0.125 proving phase. 2026-06-09 operator: 0.125->0.0625 (1/16 Kelly) — realized stakes $10-40 ran above the intended $5-15 proving envelope; halved again. FINAL fractional-Kelly layer; composes with cash sizing base, portfolio-heat, correlation, DeltaU concavity.",
+    "kelly_multiplier": 0.125,
+    "_kelly_multiplier_note": "HARDCODED. Replace after 500+ settlements using empirical edge-estimation error and optimal Kelly fraction. 2026-06-08 operator: 0.25->0.125 proving phase. 2026-06-09 operator: 0.125->0.0625 (realized 10-40 above envelope). 2026-06-10 operator: 0.0625->0.125 RESTORED — 1/16 was over-weakened: realized stakes ~3.5 USD fell below the 5-share venue min order on mid-price NO bins, blocking even good edges; 5-15 envelope unreachable at 1/16. FINAL fractional-Kelly layer; composes with cash sizing base, portfolio-heat, correlation, DeltaU concavity (stacking audit 2026-06-10 pending).",
     "max_single_position_pct": 0.0,
     "_max_single_position_pct_note": "2026-06-09 operator directive: NO concentration CAP. A hard dollar/percent cap is NOT the system's sizing mechanism and BREAKS Kelly (it overrides the structural portfolio-heat + correlation + DeltaU-concavity attenuation that the K4/K5/K6 relationship tests enforce) -- same one-off-cap anti-pattern as the deleted tiny_live. 0.0 disables the ceiling on BOTH money_path_adapters.evaluate_kelly AND the bin-selection DeltaU choke point. Position size is determined SOLELY by the layered fractional Kelly: kelly_multiplier(0.125) x cash-sizing-base x portfolio-heat-attenuation x correlation-reduction x DeltaU-marginal-log-utility-with-existing-exposure. The proving-phase ~$5-15 envelope comes from the small 0.125 fractional Kelly on a ~$1k wallet, NOT a cap. Revisit kelly_multiplier (not a cap) after the first forward-settled fills.",
     "max_portfolio_heat_pct": 0.5,

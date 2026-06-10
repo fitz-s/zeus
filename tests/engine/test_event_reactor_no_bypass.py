@@ -3125,7 +3125,42 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch)
     assert receipt.reason == "KELLY_PROOF_MISSING:bankroll_provider_unavailable"
 
 
-def test_runtime_bankroll_for_sizing_uses_spendable_cash_not_equity(monkeypatch):
+def test_runtime_bankroll_for_sizing_uses_total_equity_not_spendable_cash(monkeypatch):
+    """Operator single-Kelly directive 2026-06-10 (spec point 2 = "从1000开始不是241"):
+    the Kelly sizing BASIS is TOTAL portfolio equity (the phantom-safe
+    equity_for_new_entry_sizing_usd ≈ free cash + corroborated position equity),
+    applied ONCE; free cash is a SEPARATE one-time bound (_runtime_free_cash_usd),
+    NOT the basis. This SUPERSEDES the prior "size off spendable_cash" law which
+    collapsed the deployed fraction ~4.3x (audit /tmp/kelly_stack_audit.md Part 1)."""
+    from src.engine.event_reactor_adapter import (
+        _runtime_bankroll_usd,
+        _runtime_free_cash_usd,
+    )
+    from src.runtime import bankroll_provider
+    from src.runtime.bankroll_provider import BankrollOfRecord
+
+    monkeypatch.setattr(
+        bankroll_provider,
+        "cached",
+        lambda **_kwargs: BankrollOfRecord(
+            value_usd=1043.0,
+            spendable_cash_usd=241.0,
+            equity_for_new_entry_sizing_usd=1043.0,
+            fetched_at="2026-06-10T00:00:00+00:00",
+        ),
+    )
+
+    # Sizing basis = TOTAL equity (1043), not free cash (241).
+    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(1043.0)
+    # Free cash is the SEPARATE one-time bound the kernel clamps to.
+    assert _runtime_free_cash_usd(cached_only=True) == pytest.approx(241.0)
+
+
+def test_runtime_bankroll_basis_excludes_blip_held_phantom(monkeypatch):
+    """Data-provenance antibody (Fitz #4): under a positions blip the basis uses the
+    phantom-EXCLUDED equity_for_new_entry_sizing_usd, NOT value_usd (which HOLDS the
+    blip_held phantom for the loss-threshold base). The 2026-06-10 basis switch to
+    total equity must not re-arm Kelly on possibly-vanished equity."""
     from src.engine.event_reactor_adapter import _runtime_bankroll_usd
     from src.runtime import bankroll_provider
     from src.runtime.bankroll_provider import BankrollOfRecord
@@ -3134,13 +3169,16 @@ def test_runtime_bankroll_for_sizing_uses_spendable_cash_not_equity(monkeypatch)
         bankroll_provider,
         "cached",
         lambda **_kwargs: BankrollOfRecord(
-            value_usd=177.3,
-            spendable_cash_usd=90.0,
-            fetched_at="2026-06-07T00:00:00+00:00",
+            value_usd=951.0,  # HOLDS ~857 phantom under blip_held (loss-threshold base)
+            spendable_cash_usd=94.0,
+            equity_for_new_entry_sizing_usd=94.0,  # phantom excluded -> free cash only
+            positions_read_verdict="blip_held",
+            fetched_at="2026-06-10T00:00:00+00:00",
         ),
     )
 
-    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(90.0)
+    # Must NOT size off the phantom-holding value_usd (951); uses the safe field (94).
+    assert _runtime_bankroll_usd(cached_only=True) == pytest.approx(94.0)
 
 
 def test_forecast_receipt_uses_attached_forecasts_market_topology():

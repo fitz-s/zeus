@@ -2185,6 +2185,17 @@ def build_event_bound_no_submit_receipt(
             if bankroll_usd_provider is not None
             else _runtime_bankroll_usd(cached_only=True)
         )
+        # FREE-CASH ONE-TIME BOUND (operator single-Kelly directive 2026-06-10, spec
+        # point 2): ``bankroll_usd`` above is now TOTAL portfolio equity (the sizing
+        # basis, applied once); free available cash bounds the chosen stake ONCE in the
+        # kernel (min, never a multiplicative haircut). When the bankroll comes from an
+        # injected provider (tests/tools), free cash is unknown -> None (bound no-ops,
+        # equity-basis behavior). On the live cached path, read the SAME wallet record.
+        free_cash_usd = (
+            None
+            if bankroll_usd_provider is not None
+            else _runtime_free_cash_usd(cached_only=True)
+        )
         kelly_multiplier = _runtime_kelly_multiplier()
         (
             kelly_multiplier,
@@ -2361,6 +2372,7 @@ def build_event_bound_no_submit_receipt(
                 locked_opportunity_conn=locked_opportunity_conn,
                 stake_floor_out=_stake_floor_provenance,
                 day0_headroom_usd=_day0_headroom_usd,
+                free_cash_usd=free_cash_usd,
             )
         )
         kelly = dataclass_replace(
@@ -6644,6 +6656,7 @@ def _robust_marginal_utility_stake_and_price(
     kelly_multiplier: float,
     stake_floor_out: dict[str, object] | None = None,
     day0_headroom_usd: float | None = None,
+    free_cash_usd: float | None = None,
 ) -> tuple[float, ExecutionPrice | None]:
     """Chosen FRACTIONAL-Kelly stake AND its typed chosen-stake price (spec §5.3 / §14.10).
 
@@ -6688,6 +6701,20 @@ def _robust_marginal_utility_stake_and_price(
     ``stake_floor_out`` (optional): a caller-owned dict the kernel writes the stake-floor
     provenance into on a bump. Left unset by callers that don't need provenance (the
     behavior is otherwise identical), so existing 2-tuple call sites are unaffected.
+
+    FREE-CASH ONE-TIME BOUND (operator single-Kelly directive 2026-06-10, spec point 2).
+    ``bankroll_usd`` is now the TOTAL portfolio equity basis (free cash + open position
+    equity) so the fractional-Kelly stake scales off ~1000 USD, not the ~241 USD free-cash
+    floor (the prior ``spendable_cash`` basis silently triple-counted the cash constraint
+    as a multiplicative shrink). Free available cash is applied SEPARATELY as a FINAL
+    ``min(...)`` BOUND on the chosen stake — a one-time clamp, never another multiplicative
+    haircut. When the equity-scaled stake exceeds free cash, the stake is clamped to free
+    cash and the provenance ``stake_floor="FREE_CASH_BOUND"`` is recorded in
+    ``stake_floor_out`` (loud, never silent). ``free_cash_usd=None`` (the default / legacy
+    call sites) disables the bound so existing behavior is byte-identical until the live
+    decision body threads the free-cash value. The bound is applied to the chosen stake
+    BEFORE the min-order admissibility check, so a cash-bounded stake that lands below the
+    venue min order still routes through the existing BELOW_MIN_ORDER / bump logic.
     """
     if bankroll_usd <= 0.0 or selected_proof.execution_price is None:
         return 0.0, None
@@ -6776,6 +6803,26 @@ def _robust_marginal_utility_stake_and_price(
         chosen = Decimal(str(min(Decimal(str(fractional)), max_stake)))
         if chosen <= Decimal("0"):
             return 0.0, None
+
+        # FREE-CASH ONE-TIME BOUND (operator single-Kelly directive 2026-06-10, spec
+        # point 2). ``bankroll_usd`` (= equity basis) scaled the fractional-Kelly stake
+        # above; free available CASH now bounds it ONCE via min(...), never as another
+        # multiplicative haircut. A bet cannot spend more than the wallet's free BUY
+        # collateral. When the equity-scaled stake exceeds free cash, clamp to free cash
+        # and record the provenance loudly (so the receipt shows the stake equals the cash
+        # bound, not a silent shrink). ``free_cash_usd=None`` (legacy / proof-only callers)
+        # disables the bound. Applied BEFORE the min-order admissibility check so a
+        # cash-bounded stake below the venue floor still routes through the bump /
+        # BELOW_MIN_ORDER logic unchanged.
+        if free_cash_usd is not None and float(free_cash_usd) >= 0.0:
+            _free_cash = Decimal(str(free_cash_usd))
+            if chosen > _free_cash:
+                chosen = _free_cash
+                if stake_floor_out is not None:
+                    stake_floor_out["stake_floor"] = "FREE_CASH_BOUND"
+                    stake_floor_out["stake_floor_free_cash_usd"] = float(_free_cash)
+                if chosen <= Decimal("0"):
+                    return 0.0, None
 
         # MIN-ORDER-AWARE STAKE FLOOR (2026-06-09 false-EDGE_REVERSED fix). The ΔU
         # optimizer sizes ``optimal_stake_usd`` on the full bankroll; the fractional-
@@ -6972,6 +7019,7 @@ def _evaluate_submit_recapture_for_selected(
     stake_floor_out: dict[str, object] | None = None,
     order_rests_at_admitted_price: bool = False,
     day0_headroom_usd: float | None = None,
+    free_cash_usd: float | None = None,
 ) -> tuple[SubmitRecaptureDecision, float, ExecutionPrice | None]:
     """THE single fail-closed submit-recapture gate (spec §5 / §7 / §14.9 / §14.10).
 
@@ -7094,6 +7142,7 @@ def _evaluate_submit_recapture_for_selected(
             kelly_multiplier=kelly_multiplier,
             stake_floor_out=stake_floor_out,
             day0_headroom_usd=day0_headroom_usd,
+            free_cash_usd=free_cash_usd,
         )
     except _Day0CapExhausted as exc:
         # DAY0 cap GATE (PR#404 P0-1): family notional headroom exhausted —
@@ -11809,27 +11858,81 @@ def _runtime_bankroll_usd(*, cached_only: bool = False) -> float:
         raise ValueError("bankroll_provider_unavailable")
     if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
         raise ValueError("bankroll_provider_not_canonical")
-    # NEW-ENTRY sizing base (dual-bankroll, 2026-06-09 P1). Preference order:
-    #   1. spendable_cash_usd — free BUY collateral (architect memo §2: live
-    #      entry sizing uses spendable cash so open positions never inflate the
-    #      next order's cap). This is already phantom-free (free cash only).
-    #   2. equity_for_new_entry_sizing_usd — conservative equity that EXCLUDES
-    #      the blip_held phantom. Used only when spendable_cash is unavailable.
-    #   3. value_usd — LAST resort. Under blip_held this HOLDS a phantom position
-    #      value (defends the loss threshold) and MUST NOT seed Kelly; it is the
-    #      final fallback only for legacy/degraded records that carry neither
-    #      conservative field.
+    sizing_equity, _free_cash = _bankroll_sizing_basis_and_free_cash(bankroll)
+    return sizing_equity
+
+
+def _bankroll_sizing_basis_and_free_cash(bankroll) -> tuple[float, float | None]:
+    """Resolve (sizing_equity_basis, free_cash) from one BankrollOfRecord.
+
+    Operator single-Kelly directive 2026-06-10 (spec point 2 = "从1000开始不是241"):
+    the Kelly sizing BASIS is TOTAL portfolio equity (free cash + open position
+    equity ≈ 1000), applied ONCE; free available CASH is a SEPARATE one-time
+    bound on the chosen stake (kernel ``free_cash_usd``), NOT a multiplicative
+    haircut. The PRIOR law sized off ``spendable_cash`` (~241) — that silently
+    triple-counted the cash constraint as the basis, collapsing the deployed
+    fraction ~4.3x below intent (audit /tmp/kelly_stack_audit.md Part 1).
+
+    SIZING BASIS preference (data-provenance, Fitz #4 — pick the phantom-SAFE
+    total equity, never the loss-threshold ``value_usd`` which HOLDS the
+    blip_held phantom):
+      1. equity_for_new_entry_sizing_usd — free cash + ONLY corroborated position
+         value (under blip_held EXCLUDES the phantom). This IS the operator's
+         "total portfolio equity" that is safe to size on (dual-bankroll antibody
+         2026-06-09, bankroll_provider.py:105-115).
+      2. value_usd — fallback for legacy/degraded records lacking the conservative
+         field. Under blip_held this holds the phantom; only used when the safe
+         field is absent (the antibody's own fail-soft).
+      3. spendable_cash_usd — LAST resort (free cash only) when neither equity
+         field exists.
+
+    FREE CASH (the one-time bound) = spendable_cash_usd (free BUY collateral).
+    Returns ``None`` when unavailable so the kernel's free-cash bound no-ops
+    (legacy behavior) rather than fabricating a zero cash clamp.
+    """
     spendable_cash = getattr(bankroll, "spendable_cash_usd", None)
     sizing_equity = getattr(bankroll, "equity_for_new_entry_sizing_usd", None)
-    if spendable_cash is not None:
-        bankroll_usd = float(spendable_cash)
-    elif sizing_equity is not None:
-        bankroll_usd = float(sizing_equity)
+    if sizing_equity is not None:
+        basis = float(sizing_equity)
+    elif getattr(bankroll, "value_usd", None) is not None:
+        basis = float(bankroll.value_usd)
+    elif spendable_cash is not None:
+        basis = float(spendable_cash)
     else:
-        bankroll_usd = float(bankroll.value_usd)
-    if bankroll_usd <= 0:
+        raise ValueError("bankroll_provider_no_sizing_basis")
+    if basis <= 0:
         raise ValueError("bankroll_provider_nonpositive")
-    return bankroll_usd
+    free_cash = float(spendable_cash) if spendable_cash is not None else None
+    return basis, free_cash
+
+
+def _runtime_free_cash_usd(*, cached_only: bool = True) -> float | None:
+    """Free available BUY collateral (the one-time cash bound), or None if absent.
+
+    Companion to :func:`_runtime_bankroll_usd` (which now returns the TOTAL equity
+    sizing basis): the live decision body threads this into the sizing kernel's
+    ``free_cash_usd`` bound so the equity-scaled fractional-Kelly stake is clamped
+    to free cash ONCE (min), never shrunk multiplicatively (operator single-Kelly
+    directive 2026-06-10). Reads the SAME cached BankrollOfRecord; never live-fetches
+    on the no-submit/cached path. Returns ``None`` (bound no-ops) when the wallet or
+    the cash field is unavailable, rather than fail-closing the whole sizing path.
+    """
+    from src.runtime import bankroll_provider
+
+    bankroll = (
+        bankroll_provider.cached()
+        if cached_only and hasattr(bankroll_provider, "cached")
+        else bankroll_provider.current()
+    )
+    if bankroll is None:
+        return None
+    if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
+        return None
+    try:
+        _basis, free_cash = _bankroll_sizing_basis_and_free_cash(bankroll)
+    except ValueError:
+        return None
+    return free_cash
 
 
 def _runtime_kelly_multiplier() -> float:
