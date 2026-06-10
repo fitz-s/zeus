@@ -2214,6 +2214,27 @@ def build_event_bound_no_submit_receipt(
                 stake_floor_out=_stake_floor_provenance,
             )
         )
+        # DAY0 EXPOSURE CAP (adversarial review 2026-06-10 fix 5 — interim risk
+        # bound while the day0 flip/exit machinery is young). The remaining NEW
+        # stake for a DAY0-lane event is clamped so (existing family exposure +
+        # new stake) <= edli_v1.day0_family_notional_cap_usd (default modest).
+        # Reduce-only: the cap can only SHRINK a stake, never enable one. Remove
+        # after forward evidence; forecast-lane sizing untouched.
+        if (
+            event.event_type == "DAY0_EXTREME_UPDATED"
+            and _recapture.may_submit
+            and _robust_stake_usd > 0.0
+        ):
+            _existing_family_usd = float(
+                sum(float(v) for v in (_recapture_exposure or {}).values())
+            )
+            _capped = _apply_day0_exposure_cap(
+                stake_usd=float(_robust_stake_usd),
+                existing_family_usd=_existing_family_usd,
+                cap_usd=_day0_family_notional_cap_usd(),
+                family_id=str(family.family_id or ""),
+            )
+            _robust_stake_usd = _capped
         kelly = dataclass_replace(
             kelly,
             size_usd=float(_robust_stake_usd),
@@ -9902,6 +9923,61 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
         return bool(settings["edli_v1"].get("day0_stale_obs_boundary_guard_enabled", True))
     except Exception:
         return True
+
+
+#: DAY0 per-family notional cap default (USD) — adversarial review fix 5.
+#: Interim risk bound while the day0 flip/exit machinery is young; modest by
+#: design, operator-overridable via edli_v1.day0_family_notional_cap_usd
+#: (set <= 0 to disable once forward evidence exists).
+_DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD = 25.0
+
+
+def _day0_family_notional_cap_usd() -> float | None:
+    """Per-family day0 notional cap in USD, or None when disabled (<= 0)."""
+    try:
+        raw = settings["edli_v1"].get(
+            "day0_family_notional_cap_usd", _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
+        )
+        value = float(raw)
+    except Exception:
+        return _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
+    if not (value > 0.0):
+        return None
+    return value
+
+
+def _apply_day0_exposure_cap(
+    *,
+    stake_usd: float,
+    existing_family_usd: float,
+    cap_usd: float | None,
+    family_id: str,
+) -> float:
+    """Clamp a DAY0-lane stake so (existing family exposure + new stake) <= cap.
+
+    Reduce-only (never raises a stake). Headroom < 1 USD (exhausted / below any
+    plausible venue min order) raises ValueError -> the caller's existing
+    ValueError boundary converts it to a deterministic no-submit receipt
+    (fail-closed). cap_usd None = cap disabled (stake unchanged).
+    """
+    if cap_usd is None or stake_usd <= 0.0:
+        return stake_usd
+    headroom = max(0.0, float(cap_usd) - max(0.0, float(existing_family_usd)))
+    if stake_usd <= headroom:
+        return stake_usd
+    if headroom < 1.0:
+        raise ValueError(
+            f"DAY0_EXPOSURE_CAP_EXHAUSTED: family notional cap {float(cap_usd):.2f} USD, "
+            f"existing exposure {float(existing_family_usd):.2f} USD, headroom "
+            f"{headroom:.2f} USD"
+        )
+    import logging as _logging
+
+    _logging.getLogger("zeus.day0_exposure_cap").warning(
+        "DAY0_EXPOSURE_CAP_APPLIED family=%s stake=%.2f -> %.2f (cap=%.2f existing=%.2f)",
+        family_id, stake_usd, headroom, float(cap_usd), float(existing_family_usd),
+    )
+    return headroom
 
 
 def _day0_remaining_day_q_enabled() -> bool:
