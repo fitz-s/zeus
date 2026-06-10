@@ -192,6 +192,7 @@ from src.strategy.market_phase import (
     market_phase_admits,
 )
 from src.strategy.live_inference.live_admission import (
+    coverage_unlicensed_tail_rejection_reason,
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
 )
@@ -5693,6 +5694,20 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = direction_law_reason
+            # FIX B — COVERAGE_UNLICENSED_TAIL (fail-closed tail licensing): the
+            # K3 coverage gate leaves INSUFFICIENT_DATA bands UNCHANGED (fail-open),
+            # so an unlicensed (FORECAST_BOOTSTRAP) q_lcb could overrule the market
+            # in a longshot. price < 0.05 with q_lcb > 2x price now requires a
+            # settlement-licensed source (EMOS_ANALYTIC / SETTLEMENT_ISOTONIC).
+            coverage_unlicensed_tail_reason = coverage_unlicensed_tail_rejection_reason(
+                q_lcb=q_lcb,
+                execution_price=execution_price.value if execution_price is not None else None,
+                q_lcb_calibration_source=q_lcb_source,
+            )
+            if coverage_unlicensed_tail_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = coverage_unlicensed_tail_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A structurally non-tradeable candidate must not enter the FDR family
@@ -5704,6 +5719,7 @@ def _generate_candidate_proofs(
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
+                or coverage_unlicensed_tail_reason is not None
             ):
                 passed_prefilter = False
             proofs.append(
