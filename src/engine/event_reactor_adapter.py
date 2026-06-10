@@ -1010,6 +1010,7 @@ def event_bound_live_adapter_from_trade_conn(
     canary_force_taker_provider: Callable[[], bool] | None = None,
     taker_fok_fak_live_enabled: bool = False,
     operator_arm: "OperatorArm | None" = None,
+    edli_live_scope: str = "forecast_only",
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -1023,6 +1024,21 @@ def event_bound_live_adapter_from_trade_conn(
     reservation accumulator is CLOSURE-held (test-isolation safe), fresh per
     adapter instance (== per reactor cycle).
     """
+
+    # FIX-3 (P1): day0_shadow scope → structural no-submit at the FINAL ADAPTER
+    # BOUNDARY for day0-lane events. edli_live_scope="day0_shadow" ADMITS day0
+    # events (the mask and shadow certs run) but the word "shadow" must not lie:
+    # no real submit can ever reach the venue for a day0 event under this scope.
+    # The guard lives here (not at admission) so future admission changes cannot
+    # bypass it. Fail-closed: unknown event_type is treated as day0 (rejected).
+    _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+
+    # FIX-4 (P2): per-cycle live submit call counter. Incremented ONLY when
+    # executor_submit() is actually called (i.e., real_order_submit_enabled and
+    # all gates pass). Exposed on the adapter callable so main.py can read it
+    # after process_pending and populate live_submit_attempts accurately.
+    # No-submit / degraded cycles always read 0.
+    _live_submit_count: list[int] = [0]
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
@@ -1048,6 +1064,33 @@ def event_bound_live_adapter_from_trade_conn(
     )
 
     def _submit_inner(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
+        # FIX-3 (P1) DAY0_SCOPE_SHADOW_ONLY boundary gate.
+        # When edli_live_scope is "day0_shadow", any event whose type belongs to
+        # the day0 lane gets a deterministic no-submit rejection here at the
+        # FINAL ADAPTER boundary — BEFORE the no-submit proof chain runs and
+        # BEFORE any venue interaction. Fail-closed: an event_type that is not
+        # in the known forecast lane while scope is day0_shadow is treated as
+        # day0 (rejected), with a loud log to surface the anomaly.
+        if edli_live_scope == "day0_shadow":
+            event_type = getattr(event, "event_type", None)
+            _FORECAST_LANE_EVENT_TYPES: frozenset[str] = frozenset({"FORECAST_SNAPSHOT_READY"})
+            is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
+            is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
+            if not is_forecast_lane and not is_day0_lane:
+                import logging as _logging
+                _logging.getLogger(__name__).error(
+                    "DAY0_SCOPE_SHADOW_ONLY: unknown event_type=%r treated as day0 (fail-closed) "
+                    "while edli_live_scope='day0_shadow'",
+                    event_type,
+                )
+            if is_day0_lane or (not is_forecast_lane):
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="DAY0_SCOPE_SHADOW_ONLY",
+                    proof_accepted=False,
+                )
         no_submit_receipt = build_event_bound_no_submit_receipt(
             event,
             trade_conn=trade_conn,
@@ -1151,6 +1194,7 @@ def event_bound_live_adapter_from_trade_conn(
                     command,
                     decision_time=decision_time.astimezone(UTC),
                 )
+                _live_submit_count[0] += 1  # FIX-4: count actual venue submit calls
                 submit_result = executor_submit(final_intent, command)
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
@@ -1311,6 +1355,9 @@ def event_bound_live_adapter_from_trade_conn(
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
     # provisional reservations in its post-submit phase.
     _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
+    # FIX-4: expose the live submit call counter so main.py can read it after
+    # process_pending to populate live_submit_attempts in the status pulse.
+    _submit._live_submit_count = _live_submit_count  # type: ignore[attr-defined]
     return _submit
 
 
@@ -5894,6 +5941,7 @@ _SUBMIT_ABORT_RECEIPT_REASON: dict[CandidateLifecycleState, str] = {
     CandidateLifecycleState.SUBMIT_ABORTED_PRICE_MOVED: "SUBMIT_ABORTED_PRICE_MOVED",
     CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED: "SUBMIT_ABORTED_EDGE_REVERSED",
     CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED: "SUBMIT_ABORTED_FAMILY_REVERSED",
+    CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER: "SUBMIT_ABORTED_BELOW_MIN_ORDER",
 }
 
 
@@ -6434,6 +6482,44 @@ def _live_yes_probabilities(
     raise ValueError(f"unsupported EDLI event type for inference: {event.event_type}")
 
 
+# FIX 1 (2026-06-09) — replacement q-mode live eligibility gate. The materializer derives an
+# explicit `replacement_q_mode` into provenance_json (FUSED_NORMAL_FULL/PARTIAL,
+# SOFT_ANCHOR_FALLBACK, U0R_CAPTURE_MISSING, FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY
+# for the two fused-Normal modes (the constructed Normal shape the release evidence assumes).
+# This kills the silent-degradation category: a row that fell back to the legacy member-vote
+# soft-anchor q (or had no fusion at all) must NOT size live Kelly under the wrong probability
+# regime just because all flags were on.
+_REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
+_REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
+_REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
+    {_REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL, _REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL}
+)
+
+
+def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bool, str]:
+    """Return (live_eligible, mode) for a replacement posterior bundle. Fail-closed.
+
+    Reads provenance_json.replacement_q_mode. Eligible ONLY for the two fused-Normal modes.
+
+    GRANDFATHERING: pre-change live rows (the 67 already in the DB) have NO replacement_q_mode key
+    but were built with q_shape=="fused_normal_direct" (the constructed fused-Normal shape) — those
+    are treated as a fused-Normal mode so this change does not brick them; the next materialization
+    adds the explicit key. A row with NO mode key AND q_shape != "fused_normal_direct" is the legacy
+    member-vote soft-anchor shape and is NOT live-eligible (fail-closed).
+    """
+    provenance = getattr(replacement_bundle, "provenance_json", None)
+    if not isinstance(provenance, Mapping):
+        provenance = {}
+    mode = provenance.get("replacement_q_mode")
+    if isinstance(mode, str) and mode:
+        return (mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE, mode)
+    # No explicit mode key: grandfather only the constructed fused-Normal shape.
+    q_shape = str(provenance.get("q_shape") or "")
+    if q_shape == "fused_normal_direct":
+        return (True, "FUSED_NORMAL_GRANDFATHERED")
+    return (False, "NO_Q_MODE_KEY")
+
+
 def _replacement_authority_enabled() -> bool:
     try:
         flags = settings["feature_flags"]
@@ -6787,6 +6873,16 @@ def _replacement_authority_probability_and_fdr_proof(
     if not bundle_result.ok or bundle_result.bundle is None:
         raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED:{bundle_result.reason_code}")
     replacement_bundle = bundle_result.bundle
+    # FIX 1 (2026-06-09) — q-mode live eligibility gate. Real submit is allowed ONLY when the
+    # replacement posterior's q was built as a fused-Normal (FUSED_NORMAL_FULL/PARTIAL, or a
+    # grandfathered q_shape=="fused_normal_direct" row). Every other mode (soft-anchor fallback,
+    # capture missing, fused-q build failed, or a legacy non-fused row without the key) is a
+    # deterministic no-submit: the row sizes Kelly under a DIFFERENT probability regime than the
+    # release evidence assumes. Raising here becomes a LIVE_INFERENCE_INPUTS_MISSING no-submit
+    # receipt at the caller (data-class check; fail-closed).
+    _q_mode_eligible, _q_mode = _replacement_q_mode_live_eligibility(replacement_bundle)
+    if not _q_mode_eligible:
+        raise ValueError(f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#{_q_mode}")
     q_by_condition: dict[str, float] = {}
     lcb_by_direction: QlcbByDirection = QlcbByDirection()
     p_values: dict[tuple[str, str], float] = {}
