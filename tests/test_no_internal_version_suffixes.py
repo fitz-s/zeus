@@ -76,10 +76,6 @@ ALLOWLIST: frozenset[str] = frozenset(
         "_print_rebuild_estimate_v2",
         "_process_snapshot_v2",
         "_write_snapshot_pairs_v2",
-        # backfill_tigge_snapshot_p_raw_v2.py (file rename SKIPPED — a live v1
-        # file exists; cannot clobber it) and its module entry points:
-        "backfill_v2",
-        "backfill_all_v2",
         # observation_instants_v2 ETL / migration helpers (the table whose
         # DST-correctness consolidation antibody is still live):
         "_accumulator_rows_missing_from_v2",
@@ -100,14 +96,13 @@ ALLOWLIST: frozenset[str] = frozenset(
         "InvalidObsV2RowError",
         # --- Internal-churn stats dataclasses NOT in the operator's Phase-3
         #     18-symbol scope. They are the return types of the (already
-        #     suffix-dropped) refit()/rebuild()/backfill scripts and are pinned
-        #     by name in phase{1,5,7} test fixtures. Candidate for a future
+        #     suffix-dropped) refit()/rebuild() scripts and are pinned
+        #     by name in phase{1,5} test fixtures. Candidate for a future
         #     cleanup pass; allowlisted now to keep this antibody truthful
         #     (they are NOT external versions) without exceeding the locked
-        #     Phase-3 scope. ---
+        #     Phase-3 scope. BackfillStatsV2 is now BackfillStats (dropped here). ---
         "RefitStatsV2",
         "RebuildStatsV2",
-        "BackfillStatsV2",
     }
 )
 

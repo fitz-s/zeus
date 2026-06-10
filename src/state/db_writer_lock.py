@@ -752,7 +752,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/backfill_obs.py",                       # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_ogimet_metar.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_outcome_fact.py",                 # already_guarded: writes under db_writer_lock(BULK)
-        "scripts/backfill_tigge_snapshot_p_raw_v2.py",      # already_guarded: writes under db_writer_lock(BULK)
+        "scripts/backfill_tigge_snapshot_p_raw.py",      # already_guarded: writes under db_writer_lock(BULK)
         "scripts/backfill_wu_daily_all.py",                 # already_guarded: writes under db_writer_lock(BULK)
         "scripts/cleanup_ghost_positions.py",               # already_guarded: writes under db_writer_lock(BULK)
         "scripts/fill_obs_dst_gaps.py",                  # already_guarded: writes under db_writer_lock(BULK) when not dry_run

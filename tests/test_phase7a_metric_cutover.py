@@ -3,7 +3,7 @@
 #          _delete_canonical_v2_slice metric scoping, _process_snapshot_v2
 #          write-time metric identity, rebuild main() METRIC_SPECS iteration,
 #          outer SAVEPOINT atomicity, refit_platt main() iteration,
-#          backfill_tigge_snapshot_p_raw_v2 metric-scoped writes.
+#          backfill_tigge_snapshot_p_raw metric-scoped writes.
 # Reuse: Anchors on phase7a_contract.md (commit 9a5ef84) + master plan acceptance
 #        criteria (bucket key / query / unique key 都带 metric; high/low 同城同日共存;
 #        bin lookup 永不跨 metric union). Fails RED until P7A lands.
@@ -262,23 +262,23 @@ class TestR_BK_RefitPlattIteratesSpecs:
 
 
 # ---------------------------------------------------------------------------
-# R-BL: backfill_tigge_snapshot_p_raw_v2 metric-scoped writes
+# R-BL: backfill_tigge_snapshot_p_raw metric-scoped writes
 # ---------------------------------------------------------------------------
 
 class TestR_BL_BackfillMetricScoped:
-    """R-BL: backfill_tigge_snapshot_p_raw_v2 writes p_raw only for rows matching spec metric."""
+    """R-BL: backfill_tigge_snapshot_p_raw writes p_raw only for rows matching spec metric."""
 
     def test_R_BL_1_backfill_script_exists(self):
-        """scripts/backfill_tigge_snapshot_p_raw_v2.py must exist and be importable."""
-        from scripts import backfill_tigge_snapshot_p_raw_v2  # noqa: F401
+        """scripts/backfill_tigge_snapshot_p_raw.py must exist and be importable."""
+        from scripts import backfill_tigge_snapshot_p_raw  # noqa: F401
 
     def test_R_BL_2_backfill_has_metric_specs_iteration(self):
-        """backfill_tigge_snapshot_p_raw_v2 must expose backfill_all_v2 or equivalent."""
-        import scripts.backfill_tigge_snapshot_p_raw_v2 as mod
+        """backfill_tigge_snapshot_p_raw must expose backfill_all or equivalent."""
+        import scripts.backfill_tigge_snapshot_p_raw as mod
 
-        assert hasattr(mod, "backfill_all_v2") or hasattr(mod, "backfill_v2"), (
-            "backfill module must expose backfill_all_v2 (METRIC_SPECS iteration) or "
-            "backfill_v2 (single-spec, iterated by main)"
+        assert hasattr(mod, "backfill_all") or hasattr(mod, "backfill"), (
+            "backfill module must expose backfill_all (METRIC_SPECS iteration) or "
+            "backfill (single-spec, iterated by main)"
         )
         assert hasattr(mod, "METRIC_SPECS"), (
             "backfill module must import/expose METRIC_SPECS for per-spec iteration"
@@ -286,7 +286,7 @@ class TestR_BL_BackfillMetricScoped:
 
     def test_R_BL_3_backfill_writes_only_spec_metric(self, conn):
         """Synthetic-fixture: backfill for spec=HIGH writes p_raw only on HIGH snapshots."""
-        from scripts.backfill_tigge_snapshot_p_raw_v2 import backfill_v2, METRIC_SPECS
+        from scripts.backfill_tigge_snapshot_p_raw import backfill, METRIC_SPECS
 
         _insert_canonical_pair(conn, city="Chicago", target_date="2026-06-15",
                                temperature_metric="high", range_label="80-84")
@@ -320,7 +320,7 @@ class TestR_BL_BackfillMetricScoped:
         )
 
         high_spec = METRIC_SPECS[0]
-        backfill_v2(conn, dry_run=False, force=True, spec=high_spec)
+        backfill(conn, dry_run=False, force=True, spec=high_spec)
 
         high_row = conn.execute(
             "SELECT p_raw_json FROM ensemble_snapshots WHERE temperature_metric = 'high'"
@@ -452,15 +452,15 @@ class TestR_BN_SchemaRefusesMinimalInsert:
 
 
 # ---------------------------------------------------------------------------
-# R-BO: backfill_v2 enforces assert_data_version_allowed (MAJOR-2 antibody)
+# R-BO: backfill enforces assert_data_version_allowed (MAJOR-2 antibody)
 # ---------------------------------------------------------------------------
 
 class TestR_BO_BackfillDataVersionContract:
-    """R-BO: backfill_v2 must call assert_data_version_allowed before UPDATE."""
+    """R-BO: backfill must call assert_data_version_allowed before UPDATE."""
 
     def test_R_BO_1_backfill_rejects_quarantined_data_version(self, conn):
         """Synthetic row with quarantined data_version → backfill raises DataVersionQuarantinedError."""
-        from scripts.backfill_tigge_snapshot_p_raw_v2 import backfill_v2, METRIC_SPECS
+        from scripts.backfill_tigge_snapshot_p_raw import backfill, METRIC_SPECS
         from src.contracts.ensemble_snapshot_provenance import DataVersionQuarantinedError
 
         _insert_canonical_pair(conn, city="Chicago", target_date="2026-06-15",
@@ -487,7 +487,7 @@ class TestR_BO_BackfillDataVersionContract:
 
         high_spec = METRIC_SPECS[0]
         with pytest.raises(DataVersionQuarantinedError, match="tigge_experimental_v99"):
-            backfill_v2(conn, dry_run=False, force=True, spec=high_spec)
+            backfill(conn, dry_run=False, force=True, spec=high_spec)
 
         # Row must not have been updated (rollback / no write)
         row = conn.execute(
