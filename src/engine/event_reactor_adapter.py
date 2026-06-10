@@ -6660,14 +6660,27 @@ def _robust_marginal_utility_stake_and_price(
 ) -> tuple[float, ExecutionPrice | None]:
     """Chosen FRACTIONAL-Kelly stake AND its typed chosen-stake price (spec §5.3 / §14.10).
 
-    S5 (operator directive 2026-06-08). THE single sizing+pricing kernel for the
-    live intent: the ΔU optimizer (:meth:`utility_ranker.score_candidate`) returns
-    ``optimal_stake_usd`` — the LOG-OPTIMAL (full-Kelly) stake on the candidate's
-    OWN robust q_lcb-based π, scored against the family payoff matrix and the
-    EXISTING per-outcome exposure (Hidden #10) — which is then scaled by the
-    FRACTIONAL-Kelly multiplier ``kelly_multiplier`` (the CI-width / lead /
-    portfolio-heat haircut, spec §5.2 ``x_final = x_raw · f_kelly · h_*``) so a
-    wider-CI edge sizes strictly smaller (variance is never silently dropped).
+    S5 (operator directive 2026-06-08, updated 2026-06-10). THE single sizing+pricing
+    kernel for the live intent.
+
+    FAMILY TOTAL (operator single-Kelly directive 2026-06-10, spec point 1):
+    ``family_total = bankroll_usd × kelly_multiplier × f*_binary`` where
+    ``f*_binary = (q_lcb − cost) / (1 − cost)`` is the binary Kelly fraction
+    derived from the selected candidate's certified side-consistent q_lcb and
+    all-in execution cost. Fractional Kelly is applied EXACTLY ONCE at this
+    step. The ΔU optimizer (:meth:`utility_ranker.score_candidate`) provides the
+    SHAPE of allocation across simultaneous legs in a multi-bin family; for
+    single-leg selection (the live default) the shape weight = 1.0 and
+    ``stake = family_total`` exactly.
+
+    The prior law used ``score.optimal_stake_usd × kelly_multiplier`` as the
+    stake. ``optimal_stake_usd`` is the ΔU argmax on the full family payoff
+    matrix, which depends on matrix geometry and existing exposure — in certain
+    live configurations this can be 5–10× below the binary-Kelly total, silently
+    applying the ΔU log-concavity risk-aversion on top of the explicit fractional
+    haircut (the L3 attenuation in /tmp/kelly_stack_audit.md). The fix pins the
+    TOTAL to the certified binary f* and uses ΔU only for the within-family
+    distribution shape.
 
     Then — the S5 boundary — it RE-PRICES the selected leg at that CHOSEN stake on
     the SAME scored candidate's native :class:`ExecutableCostCurve`
@@ -6748,8 +6761,8 @@ def _robust_marginal_utility_stake_and_price(
     # never zero a positive edge — both bounds are pct·bankroll > 0 whenever the
     # wallet has cash): they clamp only the strong-edge TAIL; weak/modest edges sit
     # below both and keep their full ΔU-proportional stake. The base is the SIZING
-    # bankroll (``bankroll_usd`` = free spendable cash; see _runtime_bankroll_usd's
-    # spendable_cash), which scales the ceiling with wealth ($50 at $1k, $500 at $10k)
+    # bankroll (``bankroll_usd`` = total portfolio equity; see _runtime_bankroll_usd /
+    # _bankroll_sizing_basis_and_free_cash), which scales the ceiling with wealth ($50 at $1k, $500 at $10k)
     # — a structural concentration limit, not a fixed-dollar clamp. It bounds the
     # STAKE MAGNITUDE only: the ΔU RANK (which side/bin is primary) is decided by
     # _select_proof_by_robust_marginal_utility BEFORE this sizing call, so clamping
@@ -6794,12 +6807,39 @@ def _robust_marginal_utility_stake_and_price(
             continue
         if score.is_no_trade:
             return 0.0, None
-        # full-Kelly log-optimal stake on robust q_lcb-based π, scaled to fractional
-        # Kelly by the haircut multiplier (spec §5.2). Bounded by ``max_stake`` = the
-        # tighter of the fractional-Kelly budget and the single-position concentration
-        # ceiling (the ONE clamp computed above). Both are pure #107-safe upper bounds.
-        full_kelly_stake = float(score.optimal_stake_usd)
-        fractional = full_kelly_stake * mult
+
+        # FAMILY TOTAL via binary Kelly (operator single-Kelly directive 2026-06-10,
+        # spec point 1): the ΔU family optimizer provides the SHAPE of allocation
+        # across simultaneous legs; the FAMILY TOTAL = bankroll × mult × f*_binary.
+        # f*_binary = (q_lcb − cost) / (1 − cost) derived from the selected candidate's
+        # certified side-consistent q_lcb and all-in execution cost.
+        #
+        # Before this fix the kernel used ``score.optimal_stake_usd * mult`` where
+        # optimal_stake_usd is the ΔU argmax on the full family payoff matrix. That
+        # argmax depends on the matrix geometry and existing exposure: in certain live
+        # configurations (e.g. families with existing correlated exposure, or specific
+        # probability distributions across 22+ bins) the ΔU argmax can be 5–10× lower
+        # than the binary-Kelly total, silently re-applying risk-aversion on top of the
+        # explicit fractional-Kelly haircut (the L3 attenuation documented in
+        # /tmp/kelly_stack_audit.md). The fix pins the TOTAL to the certified f* and
+        # uses the ΔU ratio only to distribute shape across simultaneous bins.
+        #
+        # ΔU SHAPE (multi-leg distribution): when multiple legs from the same family are
+        # simultaneously traded, each leg's stake = family_total × (leg_du / sum_du).
+        # For single-leg selection (the live default: ONE candidate per family decision),
+        # shape_weight = 1.0 exactly, so stake = family_total directly.
+        # execution_price is guaranteed non-None (the guard at line 6719 returned early
+        # if selected_proof.execution_price is None). score.candidate.q_lcb is non-None
+        # for any tradeable candidate (NativeSideCandidate.__post_init__ enforces it).
+        _cost = float(selected_proof.execution_price.value)
+        _q_lcb_sel = float(score.candidate.q_lcb)  # type: ignore[arg-type]
+        f_star = (_q_lcb_sel - _cost) / (1.0 - _cost)
+        if f_star <= 0.0:
+            # q_lcb ≤ cost: no positive edge.
+            return 0.0, None
+        # ΔU shape weight = 1.0 for single-leg selection (the live default).
+        family_total = bankroll_usd * mult * f_star
+        fractional = family_total
         chosen = Decimal(str(min(Decimal(str(fractional)), max_stake)))
         if chosen <= Decimal("0"):
             return 0.0, None

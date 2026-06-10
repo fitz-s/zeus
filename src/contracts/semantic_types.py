@@ -44,6 +44,17 @@ class ChainState(str, Enum):
     QUARANTINED = "quarantined"
     QUARANTINE_EXPIRED = "quarantine_expired"
     SIZE_MISMATCH_UNRESOLVED = "size_mismatch_unresolved"
+    # Terminal closed-class: a position whose CTF tokens left the wallet via an
+    # operator-confirmed EXTERNAL close (the operator manually sold Zeus's position on
+    # the shared proxy wallet — incident chain 2026-06-10). Written by
+    # src.execution.exchange_reconcile._tag_external_operator_closed_position_holdings.
+    # Like other terminal/no-on-chain-holding states it carries NO exposure, NO entry
+    # eligibility, and is EXCLUDED from drift expected-wallet holdings
+    # (_CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES deliberately omits it). Registered
+    # here so every consumer that coerces the chain_state column (Position.__post_init__
+    # -> VenueVisibilityStatus(value)) constructs a valid member instead of raising
+    # "not a valid ChainState" — writer-set MUST be a subset of this enum.
+    EXTERNAL_OPERATOR_CLOSED = "external_operator_closed"
 
 
 # Domain-specific alias (Finding 7 / PR B). Prefer this name in new code.

@@ -255,19 +255,25 @@ def test_T3_family_shape_preserved_and_total_scaled_to_fractional_kelly():
     assert sa <= budget + 1e-6 and sb <= budget + 1e-6
 
 
-def test_T3_existing_correlated_exposure_attenuates_relative_weight():
-    """A correlation leg (existing same-bin exposure) reduces the leg's RELATIVE weight
-    — the ΔU concavity shrinks the marginal stake on a bin already heavily held. This is
-    the family SHAPE doing its job (within-family correlation), distinct from the single
-    fractional scaling."""
+def test_T3_family_total_invariant_to_within_family_exposure():
+    """Under the new single-Kelly law, the FAMILY TOTAL (equity × mult × f*_binary) is
+    invariant to within-family exposure for a single-leg selection — the ΔU concavity
+    affects the SHAPE (how simultaneous multi-leg families distribute across bins), but
+    the total of the selected leg does not shrink due to existing correlated exposure.
+    This tests spec point 1 (operator single-Kelly directive 2026-06-10): ΔU = SHAPE only.
+
+    Note: this is the UPDATED K4/K5 expectation for the new law. The PRE-FIX law had
+    ΔU shrink the stake via concavity on existing exposure — that was the bug.
+    """
     pa, pb, allp = _family_two_bins()
     base = _stake(pa, allp)
-    # Heavy existing exposure on bin A's outcome shrinks A's marginal ΔU stake.
+    # Heavy existing exposure on bin A's outcome must NOT shrink the total for a
+    # single-leg selection — the binary-Kelly total is exposure-invariant.
     bin_a_id = era._candidate_bin_id(pa)
-    attenuated = _stake(pa, allp, exposure={bin_a_id: 500.0})
-    assert attenuated < base, (
-        f"existing correlated exposure must attenuate the marginal stake: "
-        f"with-exposure {attenuated:.4f} not < flat {base:.4f}"
+    with_exposure = _stake(pa, allp, exposure={bin_a_id: 500.0})
+    assert with_exposure == pytest.approx(base, rel=1e-6), (
+        f"single-leg family total must be exposure-invariant (ΔU = SHAPE only): "
+        f"with-exposure {with_exposure:.4f} vs flat {base:.4f} (new law: binary-Kelly total)"
     )
 
 
@@ -324,4 +330,114 @@ def test_T4_cash_bound_never_silently_shrinks_below_basis_size():
     assert on_equity > on_spendable_only * 3.0, (
         f"equity basis must lift the stake materially vs the old spendable-cash basis: "
         f"equity {on_equity:.4f} vs spendable {on_spendable_only:.4f}"
+    )
+
+
+# ===========================================================================
+# T5 — MULTI-BIN FAMILY (22-hypothesis regime): deployed fraction ≥ 0.7 × intent.
+#
+# This is the live failure mode: a NO candidate on bin_i inside a 22-bin weather
+# family. The ΔU log-utility optimizer, when run unconstrained over the 22-outcome
+# payoff matrix on a flat baseline A_y=equity, returns optimal_stake_usd near-zero
+# because the NO-on-bin_i leg "wins" on 21/22 outcomes — marginal utility per dollar
+# is near-zero (the optimizer already "has" a lot of winning wealth). The result is
+# a ~10x collapse in the deployed stake relative to the fractional-Kelly intent.
+#
+# The operator spec: ΔU provides SHAPE only; the TOTAL = equity × mult × f*_scalar
+# where f*_scalar is the binary Kelly derived from the selected candidate's certified
+# q_lcb and cost (not from the 22-outcome ΔU argmax). For single-leg selection
+# (the live case), shape = 1.0, so stake = family_total.
+# ===========================================================================
+
+def _family_n_bins(n=22, *, selected_no_cost=0.70, no_q_lcb=0.74, equity=EQUITY):
+    """Create a NO candidate for bin_0 inside a family with n bins.
+
+    All bins have YES asks at 1/n price (equal-probability scenario) so the
+    22-bin family approximates the live weather market. The selected candidate is
+    buy_no on bin_0 (cost=selected_no_cost, q_lcb_no=no_q_lcb).
+
+    The key: with 22 bins + OUTSIDE outcome, the NO leg wins on 22/23 outcomes.
+    The ΔU log-utility argmax on baseline A_y=equity should return near-zero s*
+    for this geometry — which is WRONG per operator spec. The fix must recover
+    the binary-Kelly total regardless of family width.
+    """
+    # build the selected bin's proof
+    row_selected = _row(
+        condition_id="cond-sel",
+        yes_token="yes-sel",
+        no_token="no-sel",
+        no_asks=((str(round(selected_no_cost, 2)), "1000000"),),
+        yes_asks=(("0.30", "1000000"),),
+        snapshot_id="snap-sel",
+    )
+    bin_selected = _single_yes_bin(60.0)
+    proof_selected = _proof(
+        direction="buy_no",
+        row=row_selected,
+        token_id="no-sel",
+        q_posterior=no_q_lcb,
+        q_lcb_5pct=no_q_lcb,
+        bin_obj=bin_selected,
+    )
+
+    # Build sibling NO proofs for the remaining n-1 bins (family context for ΔU)
+    siblings = []
+    for i in range(1, n):
+        row_sib = _row(
+            condition_id=f"cond-sib{i}",
+            yes_token=f"yes-sib{i}",
+            no_token=f"no-sib{i}",
+            no_asks=(("0.96", "1000000"),),
+            yes_asks=(("0.04", "1000000"),),
+            snapshot_id=f"snap-sib{i}",
+        )
+        bin_sib = _single_yes_bin(61.0 + i)
+        siblings.append(_proof(
+            direction="buy_no",
+            row=row_sib,
+            token_id=f"no-sib{i}",
+            q_posterior=0.97,
+            q_lcb_5pct=0.97,
+            bin_obj=bin_sib,
+        ))
+
+    all_proofs = (proof_selected, *siblings)
+    return proof_selected, all_proofs
+
+
+@pytest.mark.parametrize("n_bins,no_cost,no_q_lcb", [
+    # Live case: ts=0.04, NO at 0.70, 22-bin family
+    (22, 0.70, 0.74),
+    # Simpler: ts=0.08, NO at 0.65, 10-bin family
+    (10, 0.65, 0.73),
+])
+def test_T5_multi_bin_family_no_candidate_deployed_fraction_geq_0_7(n_bins, no_cost, no_q_lcb):
+    """For a buy_no candidate in a multi-bin family, the deployed stake must be ≥ 0.7 ×
+    the binary fractional-Kelly proxy (equity × mult × f*_binary).
+
+    RELATIONSHIP: operator spec point 1 — ΔU provides SHAPE only; the FAMILY TOTAL =
+    equity × mult × f*_binary. For single-leg selection (the live case), shape = 1.0,
+    so deployed ≥ 0.7 × intended regardless of how wide the family is.
+
+    Before the fix: ΔU on a 22-bin payoff matrix returned optimal_stake_usd near-zero
+    (the NO-wins-on-21-outcomes concavity collapse), giving ratio ~ 0.1 — FAIL.
+    After the fix: the kernel uses f*_binary directly for the family total — PASS.
+    """
+    proof, all_proofs = _family_n_bins(n=n_bins, selected_no_cost=no_cost, no_q_lcb=no_q_lcb)
+
+    stake = _stake(proof, list(all_proofs), equity=EQUITY, mult=LIVE_KELLY_MULT)
+    proxy = _binary_fractional_kelly_proxy(no_q_lcb, no_cost)
+
+    assert proxy > 0.0, "proxy must be positive (test setup error)"
+    assert stake > 0.0, f"kernel returned 0 stake for {n_bins}-bin family (no-trade? ts too low?)"
+
+    ratio = stake / proxy
+    assert ratio >= 0.7, (
+        f"T5 FAIL: {n_bins}-bin family deployed/fractional-Kelly ratio={ratio:.4f} < 0.7 "
+        f"(stake={stake:.4f}, proxy={proxy:.4f}, no_cost={no_cost}, no_q_lcb={no_q_lcb}). "
+        f"The ΔU multi-bin concavity collapse is still applying its own risk-aversion "
+        f"on top of fractional Kelly — violates operator spec point 1 (ΔU = SHAPE only)."
+    )
+    assert ratio <= 1.05, (
+        f"ratio {ratio:.4f} > 1.05 — exceeds a single fractional Kelly (amplification)"
     )

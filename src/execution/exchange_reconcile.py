@@ -1,5 +1,14 @@
 # Created: 2026-05 (R3 M5)
 # Last reused or audited: 2026-06-10
+# Authority basis (operator external-close incident chain 2026-06-10): the operator
+#   manually SOLD Zeus's position on the SHARED proxy wallet. When the order FILLED the
+#   void-misbooking double-counted the same 66.25 economic claim (journal buy-claim +
+#   voided-position terminal-holdings = expected_wallet 132.50 vs exchange 0), so
+#   position_drift re-recorded forever. The K=1 absorption (a) books the external close
+#   as a SELL exit fact consuming the journal buy-claim and (b) tags the dangling
+#   terminal position chain_state=external_operator_closed so the closed-holdings view
+#   stops contributing it. STRICTLY gated on an operator-acknowledged resolution row for
+#   the SAME subject token. See _absorb_operator_external_close.
 # Authority basis (2026-06-10 operator-acknowledged ghost antibody): an in-Zeus-domain
 #   resting order the operator manually placed on the SHARED proxy wallet and
 #   explicitly acknowledged (a prior finding resolved_by 'session_operator_confirmed'
@@ -112,6 +121,15 @@ _REDEEM_PENDING_WALLET_HOLDING_STATES = frozenset(
 )
 _CLOSED_POSITION_WALLET_HOLDING_PHASES = frozenset({"settled", "admin_closed", "voided"})
 _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES = frozenset({"synced", "exit_pending_missing"})
+# A terminal position whose CTF tokens left the wallet via an operator-confirmed
+# EXTERNAL close (the operator manually sold Zeus's position on the shared proxy
+# wallet). The tokens are provably no longer on-chain, so this chain_state is
+# DELIBERATELY excluded from _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES: the
+# closed-position-holdings view assumes tokens are still on-chain, and a position
+# tagged here must NOT contribute an expected-wallet holding (that double-count is
+# exactly the 2026-06-10 void-misbooking disease). The historical ``shares`` record
+# is preserved — only the chain reality tag changes.
+_EXTERNAL_OPERATOR_CLOSED_CHAIN_STATE = "external_operator_closed"
 _REDEEM_TERMINAL_WALLET_CONTRADICTION_STATES = frozenset(
     {"REDEEM_CONFIRMED", "REDEEM_FAILED", "REDEEM_REVIEW_REQUIRED"}
 )
@@ -1017,6 +1035,323 @@ def _resolve_operator_acknowledged_ghost_findings(
     return resolved
 
 
+# ---- Operator external-close absorption (the variant-3 antibody) ----------------------
+#
+# 2026-06-10 incident chain: the operator manually SOLD Zeus's Milan position on the
+# shared proxy wallet. While the order rested -> ghost suppression (works). When it
+# FILLED -> position_drift (correct). chain_sync then VOIDED the position, but the void
+# created a "terminal_position_current_chain_holdings" entry (66.25) WITHOUT consuming the
+# journal buy-claim (66.25) with an offsetting sell fact. The drift detector's
+# expected_wallet then DOUBLE-COUNTS the same 66.25 economic claim (journal 66.25 +
+# closed-holdings 66.25 = 132.50) vs exchange 0 -> position_drift re-records forever.
+#
+# K=1 mechanism (make the CATEGORY impossible, not the instance): when a position's
+# tokens leave the wallet via an OPERATOR-CONFIRMED external fill, converge the books by
+#   (a) booking the external close as an exit FACT (a SELL venue_trade_fact, size = the
+#       journal's net long, price = the operator's documented limit, price_basis=
+#       operator_limit) that CONSUMES the journal buy-claim -> journal nets to 0; and
+#   (b) tagging the dangling terminal position's chain_state EXTERNAL_OPERATOR_CLOSED so
+#       the closed-position-holdings view (which assumes tokens are still on-chain) no
+#       longer contributes that 66.25 -> single-count.
+# After absorption expected_wallet == 0 == exchange -> no finding on re-sweep.
+#
+# STRICTNESS (mirrors the operator-acknowledged-ghost antibody): absorption requires an
+# operator-acknowledged RESOLUTION row for the SAME subject token (resolved_by LIKE
+# 'session_operator_confirmed%' OR resolution LIKE 'operator_manual%'). Never automatic
+# for unexplained drifts — an unacknowledged drift stays fail-closed and arms the latch.
+_OPERATOR_EXTERNAL_CLOSE_RESOLUTION = "position_drift_operator_external_close_absorbed"
+_OPERATOR_EXTERNAL_CLOSE_PRICE_BASIS = "operator_limit"
+_OPERATOR_ACK_DRIFT_RESOLVED_BY_PREFIX = "session_operator_confirmed"
+_OPERATOR_ACK_DRIFT_RESOLUTION_PREFIX = "operator_manual"
+
+
+def _operator_acknowledged_drift_resolution(
+    conn: sqlite3.Connection, token_id: str
+) -> Mapping[str, Any] | None:
+    """The operator-acknowledged drift resolution row for ``token_id``, if any.
+
+    Fail-closed: a token is eligible for external-close absorption ONLY when the
+    operator has explicitly acknowledged THIS subject — a prior RESOLVED position_drift
+    finding whose ``resolved_by`` starts with the operator-session marker or whose
+    ``resolution`` carries the ``operator_manual`` prefix. No such row => not eligible =>
+    strict drift path. The stopgap auto-resolver's marker
+    (``session_operator_confirmed_stopgap``) matches the prefix, which is intentional:
+    those rows attest the same operator-confirmed external close.
+    """
+
+    if not token_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT finding_id, resolution, resolved_by, evidence_json
+          FROM exchange_reconcile_findings
+         WHERE kind = 'position_drift'
+           AND subject_id = ?
+           AND resolved_at IS NOT NULL
+           AND (
+                resolved_by LIKE ? || '%'
+             OR resolution LIKE ? || '%'
+           )
+         ORDER BY resolved_at ASC
+         LIMIT 1
+        """,
+        (
+            token_id,
+            _OPERATOR_ACK_DRIFT_RESOLVED_BY_PREFIX,
+            _OPERATOR_ACK_DRIFT_RESOLUTION_PREFIX,
+        ),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _operator_external_close_price(
+    conn: sqlite3.Connection, token_id: str, ack_row: Mapping[str, Any] | None
+) -> Decimal:
+    """The price to book the external close at (price_basis=operator_limit).
+
+    Authority order: the operator's documented limit on the open ENTRY command for this
+    token (the position's own price), else a positive price parsed from the
+    acknowledged-order evidence, else the conservative 0 (proceeds unknown — the size
+    consumes the journal regardless; price only feeds realized economics, never the
+    wallet-size reconciliation that drives the latch).
+    """
+
+    row = conn.execute(
+        """
+        SELECT price
+          FROM venue_commands
+         WHERE token_id = ?
+           AND price IS NOT NULL
+         ORDER BY created_at DESC
+         LIMIT 1
+        """,
+        (token_id,),
+    ).fetchone()
+    if row is not None:
+        price = _positive_decimal_or_none(row["price"])
+        if price is not None:
+            return price
+    if ack_row is not None:
+        evidence = _json_mapping(ack_row.get("evidence_json"))
+        order = evidence.get("exchange_order")
+        if isinstance(order, Mapping):
+            price = _positive_decimal_or_none(order.get("price"))
+            if price is not None:
+                return price
+    return Decimal("0")
+
+
+def _absorb_operator_external_close(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exchange_size: Decimal,
+    confirmed_size: Decimal,
+    closed_position_size: Decimal,
+    observed_at: datetime,
+) -> bool:
+    """Converge the books for an operator-confirmed external close. K=1.
+
+    Returns True iff this token was a double-count external-close drift (operator-
+    acknowledged, exchange below expected, a positive journal long and/or a dangling
+    voided-position holding) and the absorption booked the offsetting state. Idempotent:
+    once booked the journal nets to 0 and the holdings are untagged, so the drift
+    condition no longer triggers and re-sweep does not re-absorb.
+    """
+
+    ack_row = _operator_acknowledged_drift_resolution(conn, token_id)
+    if ack_row is None:
+        return False
+    # The external-close shape: the operator removed the tokens, so the exchange wallet
+    # is BELOW the journal-confirmed long. A drift where the exchange holds MORE than the
+    # journal is a different disease (unrecorded acquisition) and is never absorbed here.
+    journal_long = _nonnegative_wallet_size(confirmed_size)
+    if journal_long <= Decimal("0") and closed_position_size <= Decimal("0"):
+        return False
+    if exchange_size >= journal_long:
+        return False
+
+    booked = False
+    # (a) Book the external close as a SELL exit fact consuming the journal buy-claim.
+    if journal_long > Decimal("0"):
+        booked = _book_external_operator_close_exit_fact(
+            conn,
+            token_id=token_id,
+            close_size=journal_long,
+            close_price=_operator_external_close_price(conn, token_id, ack_row),
+            observed_at=observed_at,
+        ) or booked
+    # (b) Untag the dangling terminal-position chain holdings so they stop double-counting.
+    if closed_position_size > Decimal("0"):
+        booked = _tag_external_operator_closed_position_holdings(
+            conn, token_id=token_id, observed_at=observed_at
+        ) or booked
+    return booked
+
+
+def _book_external_operator_close_exit_fact(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    close_size: Decimal,
+    close_price: Decimal,
+    observed_at: datetime,
+) -> bool:
+    """Append a synthetic SELL exit trade fact that consumes the journal expectation.
+
+    The fact is keyed to a synthetic EXIT/SELL command (reusing the open ENTRY command's
+    snapshot/envelope provenance FKs) so ``_journal_positions_by_token`` nets the buy
+    claim to zero. Append-only: never rewrites the original buy fact. Idempotent on the
+    deterministic command_id / trade_id, so a re-sweep does not double-book.
+    """
+
+    from src.state.venue_command_repo import append_trade_fact
+
+    entry = conn.execute(
+        """
+        SELECT command_id, snapshot_id, envelope_id, position_id, decision_id,
+               market_id, venue_order_id, created_at
+          FROM venue_commands
+         WHERE token_id = ?
+           AND UPPER(COALESCE(intent_kind, '')) = 'ENTRY'
+           AND UPPER(COALESCE(side, '')) = 'BUY'
+         ORDER BY created_at DESC
+         LIMIT 1
+        """,
+        (token_id,),
+    ).fetchone()
+    if entry is None:
+        return False
+    command_id = "external_operator_close:" + sha256(token_id.encode()).hexdigest()[:24]
+    trade_id = "external_operator_close_fact:" + sha256(token_id.encode()).hexdigest()[:24]
+    existing = conn.execute(
+        "SELECT 1 FROM venue_trade_facts WHERE trade_id = ? LIMIT 1",
+        (trade_id,),
+    ).fetchone()
+    if existing is not None:
+        return False
+    # Insert the synthetic EXIT/SELL command via a DIRECT write, NOT insert_command():
+    # insert_command is the U1 pre-side-effect SUBMISSION gate (snapshot freshness, tick
+    # alignment, price-in-(0,1)) — entirely inappropriate for a reconciliation correction
+    # and would CRASH the sweep on a long-stale snapshot. This row is journal-only truth
+    # (a SELL side for _journal_positions_by_token to net the buy claim), never submitted.
+    # It reuses the entry command's valid snapshot/envelope FKs.
+    if conn.execute(
+        "SELECT 1 FROM venue_commands WHERE command_id = ? LIMIT 1", (command_id,)
+    ).fetchone() is None:
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size, price,
+                venue_order_id, state, created_at, updated_at, review_required_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'FILLED', ?, ?, ?)
+            """,
+            (
+                command_id,
+                str(entry["snapshot_id"]),
+                str(entry["envelope_id"]),
+                str(entry["position_id"] or ""),
+                str(entry["decision_id"] or f"dec-{command_id}"),
+                command_id,
+                str(entry["market_id"] or token_id),
+                token_id,
+                float(close_size),
+                float(close_price),
+                str(entry["venue_order_id"] or "") or None,
+                observed_at.isoformat(),
+                observed_at.isoformat(),
+                "operator_external_close_absorption",
+            ),
+        )
+    payload = {
+        "schema_version": 1,
+        "reason": "operator_external_close_absorption",
+        "source_module": "src.execution.exchange_reconcile",
+        "token_id": token_id,
+        "close_size": str(close_size),
+        "close_price": str(close_price),
+        "price_basis": _OPERATOR_EXTERNAL_CLOSE_PRICE_BASIS,
+        "classification": "external_operator_close",
+        "source_entry_command_id": entry["command_id"],
+    }
+    append_trade_fact(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=str(entry["venue_order_id"] or ""),
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=str(close_size),
+        fill_price=str(close_price),
+        source="OPERATOR",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
+        raw_payload_hash=_hash_payload(payload),
+        raw_payload_json=payload,
+    )
+    logger.warning(
+        "operator_external_close: booked external close exit fact for token %s "
+        "(size=%s price=%s price_basis=%s) consuming the journal buy-claim",
+        token_id,
+        close_size,
+        close_price,
+        _OPERATOR_EXTERNAL_CLOSE_PRICE_BASIS,
+    )
+    return True
+
+
+def _tag_external_operator_closed_position_holdings(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    observed_at: datetime,
+) -> bool:
+    """Tag terminal positions holding ``token_id`` as externally closed (single-count).
+
+    The void misbooking left a terminal position with chain_state in
+    _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES, which the closed-position-holdings view
+    reads as an on-chain expected wallet holding. After an operator external close the
+    tokens are GONE, so the chain reality tag is corrected to
+    EXTERNAL_OPERATOR_CLOSED — DELIBERATELY outside the holdings set. The historical
+    ``shares`` record is preserved. Returns True iff any row was corrected.
+    """
+
+    if not _table_exists(conn, "position_current"):
+        return False
+    phase_placeholders = ", ".join("?" for _ in _CLOSED_POSITION_WALLET_HOLDING_PHASES)
+    chain_placeholders = ", ".join("?" for _ in _CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES)
+    cursor = conn.execute(
+        f"""
+        UPDATE position_current
+           SET chain_state = ?,
+               chain_shares = 0,
+               updated_at = ?
+         WHERE (token_id = ? OR no_token_id = ?)
+           AND phase IN ({phase_placeholders})
+           AND chain_state IN ({chain_placeholders})
+        """,
+        (
+            _EXTERNAL_OPERATOR_CLOSED_CHAIN_STATE,
+            observed_at.isoformat(),
+            token_id,
+            token_id,
+            *tuple(sorted(_CLOSED_POSITION_WALLET_HOLDING_PHASES)),
+            *tuple(sorted(_CLOSED_POSITION_WALLET_HOLDING_CHAIN_STATES)),
+        ),
+    )
+    if cursor.rowcount > 0:
+        logger.warning(
+            "operator_external_close: tagged %d terminal position(s) for token %s "
+            "chain_state=%s (tokens left wallet via operator external close; "
+            "removed from expected-wallet closed-holdings to stop the double-count)",
+            cursor.rowcount,
+            token_id,
+            _EXTERNAL_OPERATOR_CLOSED_CHAIN_STATE,
+        )
+        return True
+    return False
+
+
 def reconcile_recorded_maker_fill_economics(
     conn: sqlite3.Connection,
     *,
@@ -1651,6 +1986,26 @@ def _record_position_drift_findings(
                 resolved_at=observed_at,
             )
             continue
+        # Variant-3 antibody: an operator-confirmed EXTERNAL close (the operator manually
+        # sold Zeus's tokens off the shared wallet) converges the books here instead of
+        # re-recording the void-misbooking double-count forever. Strictly gated on an
+        # operator-acknowledged resolution row for THIS subject (see
+        # _operator_acknowledged_drift_resolution). Idempotent on re-sweep.
+        if _absorb_operator_external_close(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_size=confirmed_size,
+            closed_position_size=closed_position_size,
+            observed_at=observed_at,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution=_OPERATOR_EXTERNAL_CLOSE_RESOLUTION,
+                resolved_at=observed_at,
+            )
+            continue
         findings.append(
             record_finding(
                 conn,
@@ -1923,6 +2278,24 @@ def _resolve_position_drift_tokens_from_current_truth(
                 conn,
                 token,
                 resolution="position_drift_recent_fill_suppressed",
+                resolved_at=observed_at,
+            )
+            continue
+        # Variant-3 antibody (refresh path): converge the operator external-close
+        # double-count from current truth too, so the 1-minute refresh clears the latch
+        # without waiting for the next full sweep. Same strict operator-ack gate.
+        if _absorb_operator_external_close(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_size=confirmed_size,
+            closed_position_size=closed_position_size,
+            observed_at=observed_at,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution=_OPERATOR_EXTERNAL_CLOSE_RESOLUTION,
                 resolved_at=observed_at,
             )
 
