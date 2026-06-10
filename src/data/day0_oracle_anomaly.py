@@ -468,8 +468,11 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
     Signature matches Day0FastObsEmitter.prefetch(anomaly_check=...). Any
     WU-side failure is fail-SOFT for emission (the fast lane keeps running)
     but logged — absence of the cross-check is visibility loss, not an anomaly.
-    Only a SUCCESSFUL check arms the 10-min memo; failures arm a short retry
-    throttle (PR#404 P1).
+    Only a CONCLUDED comparison arms the 10-min success memo. WU fetch success
+    with an inconclusive comparison (for example METAR window stale for WU's
+    last obs time) arms only the short retry throttle: the guard must re-check
+    promptly once the METAR window catches up, instead of going dark for the
+    full success interval.
     """
     import time as _time
 
@@ -499,9 +502,6 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
             city_name, target_date, type(exc).__name__, exc, _WU_CHECK_FAILURE_RETRY_S,
         )
         return
-    with _WU_CHECK_MEMO_LOCK:
-        _WU_CHECK_MEMO[city_name] = now_monotonic
-        _WU_CHECK_FAILURE_MEMO.pop(city_name, None)
     wu_time_raw = getattr(wu_obs, "observation_time", None)
     try:
         wu_last_obs_time = (
@@ -519,7 +519,19 @@ def wu_metar_anomaly_check(city: Any, extremes: Any, metar_reports: list) -> Non
         wu_low_so_far=getattr(wu_obs, "low_so_far", None),
         wu_last_obs_time=wu_last_obs_time,
     )
-    if verdict.compared and verdict.diverged:
+    if not verdict.compared:
+        with _WU_CHECK_MEMO_LOCK:
+            _WU_CHECK_FAILURE_MEMO[city_name] = now_monotonic
+        logger.warning(
+            "DAY0_ORACLE_ANOMALY_COMPARISON_INCONCLUSIVE city=%s date=%s detail=%s "
+            "(retry in %ss; success memo NOT consumed)",
+            city_name, target_date, verdict.detail, _WU_CHECK_FAILURE_RETRY_S,
+        )
+        return
+    with _WU_CHECK_MEMO_LOCK:
+        _WU_CHECK_MEMO[city_name] = now_monotonic
+        _WU_CHECK_FAILURE_MEMO.pop(city_name, None)
+    if verdict.diverged:
         flag_day0_oracle_anomaly(city_name, target_date, detail=verdict.detail)
 
 

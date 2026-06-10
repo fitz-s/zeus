@@ -5,7 +5,9 @@
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
 #   API shape verified live 2026-06-10 against aviationweather.gov
 #   /api/data/metar?format=json (KLGA T-group tenths, RKSI whole-C, receiptTime
-#   3-6 min behind obsTime).
+#   3-6 min behind obsTime);
+#   operator patch pr404_live_final_patch.diff 2026-06-10 (fast-lane duplicate
+#   memo fix + inconclusive METAR window retry fix).
 """Relationship tests for the day0 fast METAR lane + oracle anomaly guard.
 
 Contracts:
@@ -800,6 +802,51 @@ class TestAnomalyPausePersistence:
         oa.wu_metar_anomaly_check(city, extremes, [])
         assert calls["n"] == 2, "WU must be retried after the short failure throttle"
 
+    def test_inconclusive_metar_window_does_not_consume_success_memo(self, monkeypatch):
+        """WU fetch success is not enough to arm the 10-min success memo. If
+        the METAR side cannot cover WU's last observation window, the comparison
+        is inconclusive and must retry on the short failure throttle."""
+        from src.data import day0_oracle_anomaly as oa
+
+        calls = {"n": 0}
+
+        def wu_obs(city, target_date=None, **kw):
+            calls["n"] += 1
+            return SimpleNamespace(
+                observation_time="2026-06-10T12:00:00+00:00",
+                high_so_far=26.0,
+                low_so_far=21.0,
+            )
+
+        monkeypatch.setattr(
+            "src.data.observation_client.get_current_observation", wu_obs
+        )
+        city = _tokyo()
+        extremes = SimpleNamespace(target_date="2026-06-10")
+        # METAR window is stale relative to WU's 12:00 observation.
+        stale_reports = [
+            _report("RJTT", datetime(2026, 6, 10, 9, 0, tzinfo=UTC), 21.0, t_group=False),
+            _report("RJTT", datetime(2026, 6, 10, 10, 0, tzinfo=UTC), 22.0, t_group=False),
+        ]
+
+        oa.wu_metar_anomaly_check(city, extremes, stale_reports)
+        assert calls["n"] == 1
+        with oa._WU_CHECK_MEMO_LOCK:
+            assert "Tokyo" not in oa._WU_CHECK_MEMO
+            assert "Tokyo" in oa._WU_CHECK_FAILURE_MEMO
+
+        # Within the short retry throttle: no call.
+        oa.wu_metar_anomaly_check(city, extremes, stale_reports)
+        assert calls["n"] == 1
+
+        # After short retry throttle: WU is called again; the old implementation
+        # would have consumed the 10-min success memo and skipped this.
+        import time as _time
+        with oa._WU_CHECK_MEMO_LOCK:
+            oa._WU_CHECK_FAILURE_MEMO["Tokyo"] = _time.monotonic() - 200.0
+        oa.wu_metar_anomaly_check(city, extremes, stale_reports)
+        assert calls["n"] == 2
+
 
 # ===========================================================================
 # R24 — PR#404 ROUND-2: split memos, anomaly freshness gates, TTL'd miss cache
@@ -884,6 +931,33 @@ class TestSplitMemos:
         assert emitter.emit_prefetched(
             world_conn=conn, prefetch=pf2, received_at=t0.isoformat(), limit=20,
         ) == 0
+
+    def test_duplicate_live_event_after_restart_advances_live_memo(self):
+        """A persisted duplicate is already a live event. After a daemon restart
+        the in-process live memo is empty, so the first write attempt may return
+        duplicate. That duplicate must advance the live memo, or the daemon will
+        retry the same INSERT OR IGNORE forever until the rounded extreme moves."""
+        conn = _world_conn()
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+
+        emitter1, _ = self._flaky_emitter(reports)
+        pf1 = emitter1.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=5))
+        assert emitter1.emit_prefetched(
+            world_conn=conn, prefetch=pf1,
+            received_at=(t0 + timedelta(minutes=5)).isoformat(), limit=20,
+        ) == 2
+
+        # Simulated restart: new emitter has empty in-process memos but the
+        # immutable events already exist in the world DB.
+        emitter2, _ = self._flaky_emitter(reports)
+        pf2 = emitter2.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=6))
+        assert emitter2.emit_prefetched(
+            world_conn=conn, prefetch=pf2,
+            received_at=(t0 + timedelta(minutes=6)).isoformat(), limit=20,
+        ) == 0
+        assert emitter2._last_live_emitted_rounded[("Tokyo", "2026-06-10", "high")] == 21
+        assert emitter2._last_live_emitted_rounded[("Tokyo", "2026-06-10", "low")] == 21
 
 
 class TestAnomalyFreshnessGates:

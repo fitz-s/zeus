@@ -788,14 +788,19 @@ class Day0FastObsEmitter:
                         decision_time=decision_time,
                         received_at=received_at,
                     )
-                    if result.inserted:
-                        # ONLY an INSERTED live event advances the live memo
-                        # (round-2 P0-1); it may also refresh the kill memo
-                        # (an inserted live value is memo-safe by live_ok).
+                    if result.inserted or result.duplicate:
+                        # A PERSISTED live event advances the live memo. `inserted`
+                        # is the normal path; `duplicate` is the restart/dedup path
+                        # where the immutable event already exists in world DB. If a
+                        # duplicate did not advance the in-process live memo, the
+                        # restarted daemon would re-attempt the same INSERT OR IGNORE
+                        # every cycle until the next rounded movement. That is not a
+                        # trading error, but it is not live-stable behavior either.
                         with self._lock:
                             self._last_live_emitted_rounded[key] = rounded
                             if memo_safe and _moved(self._last_kill_memo_rounded.get(key)):
                                 self._last_kill_memo_rounded[key] = rounded
+                    if result.inserted:
                         emitted += 1
                         logger.info(
                             "DAY0_FAST_OBS_EMIT city=%s date=%s metric=%s rounded=%s "
@@ -803,6 +808,14 @@ class Day0FastObsEmitter:
                             city_name, target_date, metric, rounded,
                             observation["observation_time"], observation["observation_available_at"],
                             extremes.sample_count, extremes.skipped_unit_law,
+                            prefetch.freshness_status,
+                        )
+                    elif result.duplicate:
+                        logger.debug(
+                            "DAY0_FAST_OBS_EMIT_DUPLICATE city=%s date=%s metric=%s rounded=%s "
+                            "obs_time=%s available_at=%s freshness=%s (live memo advanced)",
+                            city_name, target_date, metric, rounded,
+                            observation["observation_time"], observation["observation_available_at"],
                             prefetch.freshness_status,
                         )
             except Exception as exc:  # noqa: BLE001 — one city must not kill the lane
