@@ -4,6 +4,10 @@
 #   docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md §3) + operator
 #   directive 2026-06-10: mode-consistent evaluation. The system is structurally
 #   a maker; evaluation must price the mode it will actually execute.
+#   2026-06-10 deep verify (/tmp/deep_verify_report.md Verification B): added the
+#   TAKER_OVER_MAKER_MARGIN hysteresis (knife-edge defaults MAKER) to kill the 93%
+#   SUBMIT_ABORTED_MODE_FLIPPED churn, and marked p_fill_maker basis=GUESS with a
+#   recalibration trigger. Refines the comparison; does NOT weaken FIX C's ratification.
 """Mode-consistent EV: explicit taker and maker formulas, selected per candidate.
 
 The pre-incident hybrid evaluated EVERY candidate at TAKER cost (depth-walked ask
@@ -52,10 +56,34 @@ from dataclasses import dataclass
 # spread, edge measured with an unlicensed tail q). Maker resting stays allowed.
 TAKER_MAX_RELATIVE_SPREAD = 0.25
 
-# Conservative resting-fill prior for maker EV (measured live fill rate ~10.8%,
-# fee study 2026-06; recalibrate from fill_tracker facts as settlement accrues).
+# Conservative resting-fill prior for maker EV. PROVENANCE (2026-06-10 deep verify
+# /tmp/deep_verify_report.md Verification B): this 0.10 is an UNCONDITIONED point prior
+# (basis=GUESS), NOT a recalibrated bid+tick fill rate. The live resting facts are still too
+# thin to certify it — 90 post_only-GTC orders matched to a book snapshot give a 17.8% overall
+# any-fill rate, but bucketed by distance-from-touch the bid+tick bucket is n=13 and noisy
+# (7.7%), so neither 0.10 nor a higher value is statistically licensed. RECALIBRATION TRIGGER:
+# when fill_tracker accumulates N>=MAKER_FILL_RECALIBRATION_MIN_FACTS resting facts at bid+tick,
+# the settlement loop must replace this prior with the measured conditional rate and flip the
+# source off "GUESS". Until then it stays a documented guess fed into a MARGINED comparison
+# (see TAKER_OVER_MAKER_MARGIN) so a thin prior cannot produce knife-edge mode churn.
 MAKER_FILL_PROBABILITY_PRIOR = 0.10
-MAKER_FILL_PROBABILITY_SOURCE = "fee_study_2026_06_prior"
+MAKER_FILL_PROBABILITY_SOURCE = "fee_study_2026_06_prior:basis=GUESS"
+# Minimum bid+tick resting facts before the GUESS prior may be recalibrated by the settlement loop.
+MAKER_FILL_RECALIBRATION_MIN_FACTS = 30
+
+# Mode-decision hysteresis margin (2026-06-10 deep verify Verification B). TAKER is chosen ONLY
+# when EV_taker >= EV_maker * (1 + this margin); a knife-edge (EV gap within the margin) defaults
+# MAKER. WHY: the maker/taker EVs are scaled ~10:1 by the un-recalibrated p_fill_maker guess, so
+# a bare ev_taker >= ev_maker comparison is knife-edge on tight books — a 1-tick book wobble
+# between proof-time and submit-time flips the winner, producing the 93% SUBMIT_ABORTED_MODE_
+# FLIPPED waste (Mission 3) and a survivor bias toward the most taker-aggressive crosses. The
+# margin makes the mode decision STABLE under sub-margin perturbation (proof_mode == fresh_mode
+# holds across a 1-tick wobble), converting knife-edge aborts into stable maker rests. This does
+# NOT weaken any honest gate: it makes the TAKER route STRICTER (taker must clear a margin, not
+# merely tie), fully consistent with FIX C's "tight-spread favorite where EV_taker > EV_maker
+# routes taker" ratification — a genuine favorite (Paris: EV_taker 9.15x EV_maker) clears any
+# sane margin; only the wobble-band ties flip. Refining the comparison, never weakening a gate.
+TAKER_OVER_MAKER_MARGIN = 0.15
 
 # Full half-spread = the standard first-order adverse-selection estimate.
 MAKER_ADVERSE_SELECTION_LAMBDA = 1.0
@@ -172,6 +200,7 @@ class ModeConsistentEv:
     maker_fill_probability: float
     maker_fill_probability_source: str
     placement: str  # PLACEMENT_MAKER | PLACEMENT_TAKER
+    taker_over_maker_margin: float = TAKER_OVER_MAKER_MARGIN  # hysteresis margin applied
 
 
 def select_mode_consistent_ev(
@@ -187,6 +216,7 @@ def select_mode_consistent_ev(
     p_fill_maker_source: str = MAKER_FILL_PROBABILITY_SOURCE,
     lambda_adverse: float = MAKER_ADVERSE_SELECTION_LAMBDA,
     max_relative_spread: float = TAKER_MAX_RELATIVE_SPREAD,
+    taker_over_maker_margin: float = TAKER_OVER_MAKER_MARGIN,
     penalty: float = 0.0,
 ) -> ModeConsistentEv:
     """Compute EV_taker and EV_maker; choose the better ADMISSIBLE one.
@@ -196,6 +226,13 @@ def select_mode_consistent_ev(
     exists. When neither is admissible the result is a MAKER decision with
     chosen_ev = -inf: the candidate cannot be priced in either mode, and the
     non-positive EV blocks it at the trade-score gate.
+
+    HYSTERESIS (Verification B): TAKER is chosen over an admissible MAKER only when
+    ``ev_taker >= ev_maker * (1 + taker_over_maker_margin)``. A knife-edge (the two EVs
+    within the margin) defaults MAKER, so a 1-tick book wobble between proof-time and
+    submit-time cannot flip the mode (kills the 93% SUBMIT_ABORTED_MODE_FLIPPED waste).
+    This only makes the taker route STRICTER (never weakens a gate): a genuine favorite
+    clears any sane margin, consistent with FIX C's tight-spread-taker ratification.
     """
     q = float(q_lcb)
     spread = relative_spread(best_bid, best_ask)
@@ -225,7 +262,15 @@ def select_mode_consistent_ev(
 
     taker_allowed = ev_taker is not None and taker_forbidden is None
     maker_allowed = ev_maker is not None
-    if taker_allowed and (not maker_allowed or ev_taker >= ev_maker):
+    # HYSTERESIS: taker must CLEAR the maker EV by the margin (not merely tie). A knife-edge
+    # ties to MAKER -> mode is stable under a sub-margin (1-tick) book wobble. The margin scales
+    # the maker leg so a negative/zero EV_maker still lets a positive EV_taker win (1+margin on a
+    # non-positive number does not raise the bar above a positive taker EV).
+    _margin = max(0.0, float(taker_over_maker_margin))
+    _taker_clears_maker = (not maker_allowed) or (
+        float(ev_taker) >= float(ev_maker) * (1.0 + _margin)
+    )
+    if taker_allowed and _taker_clears_maker:
         chosen_mode, chosen_ev, placement = "TAKER", float(ev_taker), PLACEMENT_TAKER
     elif maker_allowed:
         chosen_mode, chosen_ev, placement = "MAKER", float(ev_maker), PLACEMENT_MAKER
@@ -242,4 +287,5 @@ def select_mode_consistent_ev(
         maker_fill_probability=float(p_fill_maker),
         maker_fill_probability_source=str(p_fill_maker_source),
         placement=placement,
+        taker_over_maker_margin=_margin,
     )

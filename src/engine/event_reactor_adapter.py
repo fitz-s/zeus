@@ -4402,10 +4402,21 @@ def _ev_boundary_favors_cross(
     reservation: float | None,
     side: str,
 ) -> bool:
-    """§2 boundary: cross iff e*(1-P_fill) >= s/2*(1+P_fill) + f - A.
+    """§2 boundary: cross iff e*(1-P_fill) >= [s/2*(1+P_fill) + f - A] * (1 + margin).
 
     Conservative: returns False (rest as maker) on any missing input.
+
+    HYSTERESIS (2026-06-10 deep verify /tmp/deep_verify_report.md Verification B): the FRESH
+    submit-time mode decider used a BARE ``lhs >= rhs`` indifference boundary while the PROOF-time
+    decider (select_mode_consistent_ev) used an EV ratio — two formulas that disagree at the
+    margin, so a 1-tick book wobble between proof and submit flipped the chosen mode and tripped
+    the 93% SUBMIT_ABORTED_MODE_FLIPPED waste. Requiring the boundary to clear by the SAME
+    TAKER_OVER_MAKER_MARGIN as the proof side makes the fresh decision stable under a sub-margin
+    wobble (knife-edge -> rest as maker). This only makes the cross STRICTER (never weakens a
+    gate); a genuine favorite clears the margin and still crosses (FIX C ratification preserved).
     """
+    from src.strategy.live_inference.mode_consistent_ev import TAKER_OVER_MAKER_MARGIN
+
     e = _optional_float(actionable_payload.get("trade_score"))
     if e is None:
         e = _optional_float(actionable_payload.get("q_live"))
@@ -4424,7 +4435,8 @@ def _ev_boundary_favors_cross(
     a = float(adverse) if adverse is not None else 0.0
     lhs = e - (e * p_fill)
     rhs = (spread / 2.0) * (1.0 + p_fill) + fee - a
-    return lhs >= rhs
+    margin = max(0.0, float(TAKER_OVER_MAKER_MARGIN))
+    return lhs >= rhs * (1.0 + margin)
 
 
 def _release_live_cap_certificate(

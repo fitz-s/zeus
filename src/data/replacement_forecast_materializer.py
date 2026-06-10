@@ -1,7 +1,7 @@
 """Materialize replacement forecast shadow posterior rows into forecast DB.
 
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-10
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md (the probability chain
 #   §1d-§1e fused-N-direct + settlement sigma floor); FIX 1/FIX 2/FIX 5 (operator-reviewed
 #   2026-06-09): explicit replacement_q_mode authority, settlement-sigma-floor coherence in the
@@ -1301,6 +1301,11 @@ def _insert_posterior(
     settlement_sigma_floor_c: float | None = None
     floor_unavailable_reason: str | None = None
     replacement_sigma_basis: str | None = None
+    # Catch-all (open-ended bin) sigma-floor exemption (2026-06-10, Paris >=26C incident). Records
+    # which open-ended bins had their floored mass capped at the un-floored predictive-sigma mass
+    # so the floor could not inflate the tail. Empty tuple when no cap bit (no floor / no open-ended
+    # bin away from center). Defaults defined here so the fail-closed / flag-off paths stay coherent.
+    settlement_sigma_floor_catchall_capped: tuple[str, ...] = ()
     # Q_LCB / Q_UCB bootstrap outputs (NULL unless a fused-q is built AND the bound construction
     # succeeds). FAIL-SOFT: any failure leaves these None -> q_lcb_json/q_ucb_json written as NULL,
     # which the live side treats exactly as today (Wilson fallback) -> never WORSE than status quo.
@@ -1339,16 +1344,50 @@ def _insert_posterior(
                     settlement_sigma_floor_applied = True
                 else:
                     floor_unavailable_reason = _floor_reason
-            _fused_q = {
-                b.bin_id: bin_probability_settlement(
+            # CATCH-ALL EXEMPTION (2026-06-10, Paris >=26C incident /tmp/deep_verify_report.md
+            # Verification A). The settlement sigma floor is calibrated on INTERIOR-bin settlement
+            # dispersion and its contract is "max() only WIDENS -> flatter q -> fewer overconfident
+            # bets". That contract HOLDS for interior bins (widening pulls mass AWAY from the modal
+            # bin) but is VIOLATED on an OPEN-ENDED catch-all on the far side of the center: widening
+            # dumps the whole outward Gaussian tail into the single open-ended bin, INFLATING its
+            # mass (Paris >=26: 0.252 at predictive sigma 1.906 -> 0.384 at floored 4.326 — the exact
+            # over-mass bin the wrong trade bought). RELATIONSHIP INVARIANT: a floor that may only
+            # FLATTEN must never INCREASE any bin's mass. For open-ended (catch-all) bins we therefore
+            # cap the floored mass at the UN-floored (predictive-sigma) mass: min(floored, unfloored).
+            # This is monotone-conservative by construction and makes the inflation category
+            # unconstructable regardless of the floor's magnitude. Interior / distinct-endpoint bins
+            # keep the floored mass (the floor's intended interior flattening). When the floor did NOT
+            # widen sigma (_sigma_used == _sigma_pred) the cap is a no-op (both masses identical).
+            _catchall_capped_bins: list[str] = []
+
+            def _bin_mass(_b) -> float:
+                _lo = None if _b.lower_c is None else float(_b.lower_c)
+                _hi = None if _b.upper_c is None else float(_b.upper_c)
+                _m = bin_probability_settlement(
                     mu=float(u0r_override.anchor_value_c),
                     sigma=_sigma_used,
-                    bin_low=(None if b.lower_c is None else float(b.lower_c)),
-                    bin_high=(None if b.upper_c is None else float(b.upper_c)),
+                    bin_low=_lo,
+                    bin_high=_hi,
                     half_step=_half_step,
                 )
-                for b in request.bins
-            }
+                # Open-ended catch-all bin: exactly one bound is None. Cap floored mass at the
+                # un-floored (predictive-sigma) mass so the floor can never inflate the tail.
+                _is_open_ended = (_lo is None) != (_hi is None)
+                if _is_open_ended and _sigma_used > _sigma_pred:
+                    _m_unfloored = bin_probability_settlement(
+                        mu=float(u0r_override.anchor_value_c),
+                        sigma=_sigma_pred,
+                        bin_low=_lo,
+                        bin_high=_hi,
+                        half_step=_half_step,
+                    )
+                    if _m_unfloored < _m:
+                        _catchall_capped_bins.append(_b.bin_id)
+                        _m = _m_unfloored
+                return _m
+
+            _fused_q = {b.bin_id: _bin_mass(b) for b in request.bins}
+            settlement_sigma_floor_catchall_capped = tuple(_catchall_capped_bins)
             if set(_fused_q) != set(q):
                 raise ValueError(
                     f"fused-q bin keys != soft-anchor q keys ({sorted(_fused_q)[:3]}... vs "
@@ -1420,6 +1459,7 @@ def _insert_posterior(
             settlement_sigma_floor_applied = False
             settlement_sigma_floor_c = None
             replacement_sigma_basis = None
+            settlement_sigma_floor_catchall_capped = ()
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_u0r_fusion").warning(
@@ -1516,6 +1556,9 @@ def _insert_posterior(
         "settlement_sigma_floor_c": settlement_sigma_floor_c,
         "settlement_sigma_floor_unavailable_reason": floor_unavailable_reason,
         "replacement_sigma_basis": replacement_sigma_basis,
+        # Catch-all exemption (2026-06-10): open-ended bins whose floored mass was capped at the
+        # un-floored predictive-sigma mass (the floor may only flatten, never inflate a catch-all).
+        "settlement_sigma_floor_catchall_capped": list(settlement_sigma_floor_catchall_capped),
         # FIX 5 (2026-06-09): capture-status provenance (recording only).
         "capture_status": capture_status,
         # Q_LCB / Q_UCB provenance (2026-06-09). When the fused-center bootstrap succeeded these
