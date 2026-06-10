@@ -6296,16 +6296,30 @@ def _mode_consistent_ev_for_proof(
     """
     if execution_price is None or row is None or c_cost_95pct is None:
         return None
-    from src.strategy.live_inference.mode_consistent_ev import select_mode_consistent_ev
+    from dataclasses import replace as _dataclass_replace
+
+    from src.strategy.live_inference.mode_consistent_ev import (
+        TAKER_FORBIDDEN_NO_ASK_EMPTY,
+        select_mode_consistent_ev,
+    )
 
     try:
         best_bid, best_ask, tick = _native_side_top_of_book(row, direction=direction)
     except Exception:
         return None
+    # MAKER-QUOTE lane discriminator: a bid-type execution_price is a maker quote
+    # produced by _maker_quote_execution_price_from_snapshot (own ask empty/thin).
+    # Taker is STRUCTURALLY impossible (no native ask to cross): pass no taker cost
+    # so ev_taker is None and the mode can only be MAKER, and label the forbidden
+    # reason NO_ASK_EMPTY (not the generic unmeasurable-spread reason). The quote
+    # price IS the complementary-bounded reservation; the maker EV reprices it
+    # against q_lcb (rejecting a quote the belief does not clear — test (c)).
+    _is_maker_quote = str(getattr(execution_price, "price_type", "")) == "bid"
+    taker_all_in_cost = None if _is_maker_quote else c_cost_95pct
     p_fill_maker, p_fill_maker_source = _maker_fill_probability_prior()
-    return select_mode_consistent_ev(
+    mode_ev = select_mode_consistent_ev(
         q_lcb=q_lcb,
-        taker_all_in_cost=c_cost_95pct,
+        taker_all_in_cost=taker_all_in_cost,
         p_fill_taker=p_fill_lcb,
         best_bid=best_bid,
         best_ask=best_ask,
@@ -6316,6 +6330,11 @@ def _mode_consistent_ev_for_proof(
         max_relative_spread=_taker_max_relative_spread(),
         penalty=penalty,
     )
+    if _is_maker_quote:
+        mode_ev = _dataclass_replace(
+            mode_ev, taker_forbidden_reason=TAKER_FORBIDDEN_NO_ASK_EMPTY
+        )
+    return mode_ev
 
 
 def _direction_law_family_center(
@@ -11718,6 +11737,103 @@ def _snapshot_outcome_matches_selected_token(row: dict[str, Any], selected_token
     return not outcome_label or outcome_label == selected_label
 
 
+# The ONLY non-executable tradeability reasons that mean "market is LIVE and
+# accepting orders, but the OWN ask side is empty/illiquid" — i.e. maker-quotable.
+# Every other reason (accepting_orders_not_true / clob_archived / clob_orderbook_
+# disabled / clob_archived_missing / clob_orderbook_status_missing / synthetic_
+# clob_market_info_substrate_only) means the market cannot fill at all and STAYS
+# fail-closed. Source: market_scanner._build_executable_tradeability_status reasons
+# + the illiquid-identity branch (capture_executable_market_snapshot reason=
+# "clob_no_ask_illiquid").
+_MAKER_QUOTABLE_NON_EXECUTABLE_REASONS = frozenset({"clob_no_ask_illiquid"})
+
+
+def _complementary_best_bid_for_direction(book, *, direction: str) -> float | None:
+    """Best bid on the COMPLEMENTARY book for a maker quote into an empty own-ask.
+
+    A resting NO bid at price ``p`` is economically matched (mint/merge) by buyers
+    of the complementary YES outcome at ``1 - p``; the complementary cap that keeps
+    the rest BEHIND that side is ``1 - comp_best_bid - tick``. For ``buy_no`` the
+    complementary book is YES, for ``buy_yes`` it is NO. Returns None when the
+    complementary bid side is empty.
+    """
+    if direction == "buy_no":
+        bids = book.yes_bids
+    elif direction == "buy_yes":
+        bids = book.no_bids
+    else:
+        return None
+    return max((float(level.price) for level in bids), default=None)
+
+
+def _maker_quote_execution_price_from_snapshot(
+    row: dict[str, Any],
+    *,
+    direction: str,
+    book,
+) -> tuple[ExecutionPrice, float, float] | None:
+    """MAKER-QUOTE lane: price a buy whose OWN native ask is empty/thin (no taker
+    entry exists) by RESTING behind the complementary book.
+
+    The system is structurally a maker ("我们的系统本质上是maker制作的"). A certified
+    buy_no candidate whose NO ask side is empty is NOT untradeable — a maker QUOTES
+    into the empty book. The quote price is the candidate's reservation bounded by
+    the complementary book so the rest never crosses the complement via mint
+    (``limit <= min(reservation, 1 - comp_best_bid - tick)``). Returns the typed
+    quote as a ``bid``-type, fee_deducted ExecutionPrice (a maker rest pays zero
+    taker fee, so the limit IS its all-in cost — ``c_cost_95pct == quote``, never a
+    fictitious ask + tick walk). ``price_type == "bid"`` is the discriminator the
+    proof path reads to force ``execution_mode_intent=MAKER`` /
+    ``taker_forbidden_reason=NO_ASK_EMPTY``.
+
+    Returns None (fail-closed) when no complementary bid exists (nothing to quote
+    behind) or the reservation collapses to a non-positive price. The caller then
+    re-raises the original taker-missing ValueError -> NATIVE_ASK_MISSING.
+
+    NOTE on belief: this function does NOT know q_lcb (that lives in the proof gen).
+    It produces the COMPLEMENTARY-bounded reservation only; the belief cap and the
+    maker EV (q_fill_adj vs limit) are applied by the mode-consistent EV seam, which
+    will reject a quote whose belief does not clear it (test (c)). The quote price
+    here is the structural placement bound, not an edge claim.
+
+    SCOPE — buy_no ONLY (operator throughput-unlock directive 2026-06-10). The
+    favorite-longshot buy_no edge into an empty NO ask is the target edge class.
+    buy_yes into an empty YES ask is intentionally NOT maker-quoted here: a far-OTM
+    YES with an empty ask is exactly the Milan-24C incident class the direction law
+    fail-closes (buy_yes must be forecast-ADJACENT), and the EXECUTABLE_NATIVE_ASK_
+    MISSING no-bypass invariant for buy_yes stays intact. Symmetry can be enabled
+    later behind its own direction-law-gated test; today it returns None (no-trade).
+    """
+    if direction != "buy_no":
+        return None
+    comp_best_bid = _complementary_best_bid_for_direction(book, direction=direction)
+    if comp_best_bid is None:
+        return None
+    tick = float(book.min_tick_size)
+    # Complementary non-crossing cap. The reservation belief cap is applied later
+    # by the mode-consistent EV seam (it owns q_lcb); here we land the structural
+    # placement bound on the tick grid.
+    cap = 1.0 - float(comp_best_bid) - tick
+    from src.strategy.live_inference.mode_consistent_ev import tick_round_down
+
+    quote = tick_round_down(cap, tick)
+    if not (quote > 0.0) or quote >= 1.0:
+        return None
+    execution_price = ExecutionPrice(
+        value=float(quote),
+        price_type="bid",
+        fee_deducted=True,
+        currency="probability_units",
+    )
+    # A maker rest fills only when the book comes to it; the conservative resting
+    # prior is applied by mode-consistent EV. p_fill_lcb here is 0.0 (no visible
+    # crossing depth) so the legacy taker fill-LCB never inflates a maker quote.
+    p_fill_lcb = 0.0
+    # All-in cost == the quote (zero taker fee on a rest); NOT ask + tick.
+    c_cost_95pct = float(quote)
+    return execution_price, p_fill_lcb, c_cost_95pct
+
+
 def _execution_price_from_snapshot(
     row: dict[str, Any],
     *,
@@ -11727,16 +11843,24 @@ def _execution_price_from_snapshot(
     # ZEUS-NOBYPASS-1 fail-closed guard (re-added; orig 4f7d963606). Strictly
     # more restrictive: only block when tradeability_status_json.executable_allowed
     # is EXPLICITLY False. Absent/None/True -> byte-identical to pre-guard behavior
-    # (do not block snapshots that lack the field). A non-executable substrate row
-    # can never actually fill (submit-time assert_snapshot_executable already
-    # fail-closes); this removes only the phantom tradeable candidate from the
-    # proof/receipt/opportunity-book layer. Raising ValueError routes to the
-    # caller's EXECUTABLE_NATIVE_ASK_MISSING path (execution_price=None,
-    # native_quote_available=False) carrying the substrate reason.
+    # (do not block snapshots that lack the field).
+    #
+    # MAKER-QUOTE NARROWING (2026-06-10 throughput unlock): the non-executable
+    # marking has MULTIPLE reasons (market_scanner._build_executable_tradeability_
+    # status + the illiquid-identity branch). Exactly ONE of them — clob_no_ask_
+    # illiquid — means "the market is LIVE and accepting orders, but the OWN ask
+    # side is empty". That case is maker-EXECUTABLE: a maker quotes behind the
+    # complementary book (a resting NO bid at p is matched by YES buyers at 1-p).
+    # Every OTHER reason (accepting_orders_not_true / clob_archived / clob_orderbook
+    # _disabled / synthetic_clob_market_info_substrate_only) means the market itself
+    # cannot fill at all — those STAY fail-closed (the snapshot can never become a
+    # fillable quote, taker OR maker). So we route ONLY the illiquid-empty-ask
+    # reason to the maker lane, and only when complementary liquidity actually
+    # exists; otherwise NATIVE_ASK_MISSING as before.
     tradeability_status = _json_object(row.get("tradeability_status_json") or row.get("tradeability_status") or {})
-    if tradeability_status.get("executable_allowed") is False:
-        reason = _nonnull(tradeability_status.get("reason") or "not_executable")
-        raise ValueError(f"EDLI executable snapshot marked non-executable: {reason}")
+    _marked_non_executable = tradeability_status.get("executable_allowed") is False
+    _non_executable_reason = _nonnull(tradeability_status.get("reason") or "not_executable")
+    _maker_quotable_marking = _non_executable_reason in _MAKER_QUOTABLE_NON_EXECUTABLE_REASONS
     if selected_token_id not in {str(row.get("yes_token_id") or ""), str(row.get("no_token_id") or "")}:
         raise ValueError("EDLI executable snapshot selected token mismatch")
     if _nonnull(row.get("selected_outcome_token_id")) == selected_token_id and not _snapshot_outcome_matches_selected_token(row, selected_token_id):
@@ -11760,11 +11884,24 @@ def _execution_price_from_snapshot(
     # The depth-coverage fill-LCB still walks the native quote book; we build it
     # once and reuse its ladder for the curve so both read the SAME row depth.
     book = _native_quote_book_from_snapshot_row(row)
-    shares = book.min_order_size
-    curve = _native_side_cost_curve_from_snapshot_row(
-        row, side=side, token_id=selected_token_id, book=book
-    )
 
+    # Non-executable markings that are NOT the illiquid-empty-ask reason (archived,
+    # not-accepting, orderbook-disabled, synthetic-substrate-only) can never fill in
+    # ANY mode -> fail-closed exactly as the pre-maker-lane guard did (no bypass).
+    if _marked_non_executable and not _maker_quotable_marking:
+        raise ValueError(f"EDLI executable snapshot marked non-executable: {_non_executable_reason}")
+
+    # MAKER-QUOTE lane: a LIVE market whose OWN ask is empty (clob_no_ask_illiquid).
+    # The TAKER cost curve cannot price it; quote behind the complementary book
+    # instead of killing the candidate. Fail-closed to the original NATIVE_ASK_
+    # MISSING when no complementary liquidity exists.
+    if _marked_non_executable and _maker_quotable_marking:
+        maker = _maker_quote_execution_price_from_snapshot(row, direction=direction, book=book)
+        if maker is not None:
+            return maker
+        raise ValueError(f"EDLI executable snapshot marked non-executable: {_non_executable_reason}")
+
+    shares = book.min_order_size
     # The cost-of-entry on the convex curve at the venue min-order QUANTITY (the
     # smallest executable taker order, in SHARES — §13). We price by exact share
     # count, NOT by converting min_order_size shares to a USD stake at the top
@@ -11777,11 +11914,23 @@ def _execution_price_from_snapshot(
     # round-trip — and its loss — never happens; this is byte-identical to the
     # legacy kernel's all-in result for ALL books, not only single-level ones.
     # It raises (depth-exhausted / off-grid / empty / below-min-order) exactly
-    # where the §13 no-trade gates require fail-closed — the caller routes a
-    # ValueError to the EXECUTABLE_NATIVE_ASK_MISSING / NATIVE_QUOTE_MISSING
-    # no-trade path. avg_cost(stake_usd) remains for the future §5.3 USD-stake ELG
-    # optimizer; this path asks the share-parameterized question.
-    execution_price = curve.avg_cost_for_shares(shares)
+    # where the §13 no-trade gates require fail-closed. A taker-missing failure
+    # (empty own ask ladder, or depth below the min order) is NOT terminal: it
+    # routes to the maker-quote fallback (rest behind the complement) before the
+    # candidate is declared NATIVE_ASK_MISSING. avg_cost(stake_usd) remains for
+    # the future §5.3 USD-stake ELG optimizer; this path asks the share question.
+    try:
+        curve = _native_side_cost_curve_from_snapshot_row(
+            row, side=side, token_id=selected_token_id, book=book
+        )
+        execution_price = curve.avg_cost_for_shares(shares)
+    except ValueError:
+        # No taker entry on the own ask (empty ladder / depth-exhausted / off-grid).
+        # The maker QUOTES behind the complementary book instead of dying.
+        maker = _maker_quote_execution_price_from_snapshot(row, direction=direction, book=book)
+        if maker is not None:
+            return maker
+        raise
 
     p_fill_lcb = _p_fill_lcb_for_direction(book, direction=direction, shares=shares)
     c_cost_95pct = min(0.999999, execution_price.value + float(book.min_tick_size))

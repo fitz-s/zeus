@@ -54,6 +54,56 @@ logger = logging.getLogger(__name__)
 RoundingRule = Literal["wmo_half_up", "floor", "ceil", "oracle_truncate"]
 
 
+def settlement_preimage_offsets(
+    rounding_rule: str, *, half_step: float = 0.5
+) -> tuple[float, float]:
+    """Return the (low_offset, high_offset) that expand a bin label to its rounding PREIMAGE.
+
+    THE single declarative source of the per-city settlement PREIMAGE convention.
+    Every q-integration / CDF consumer derives its integration bounds from THIS
+    function so a city-specific rounding convention is declared ONCE and the
+    "scattered preimage assumption" category cannot recur (Fitz Constraint #1 —
+    make the wrong preimage unconstructable, not patched in N call sites).
+
+    For a continuous predicted temperature x ~ N(μ, σ) and a bin whose integer
+    label set is {a, …, b}, the bin probability is
+        Φ((b + high_offset − μ)/σ) − Φ((a + low_offset − μ)/σ)
+    where (low_offset, high_offset) is the preimage of the settlement rounding rule:
+
+      - ``wmo_half_up`` (floor(x + 0.5) == t  ⟺  x ∈ [t − half_step, t + half_step)):
+            (−half_step, +half_step)   ← SYMMETRIC; standard cities.
+      - ``oracle_truncate`` / ``floor`` (floor(x) == t  ⟺  x ∈ [t, t + step)):
+            (0.0, +2·half_step)        ← ASYMMETRIC; Hong Kong (HKO/UMA truncation).
+            Settlement floors decimal °C ("28.7 hasn't reached 29 ⇒ 28"), so the
+            preimage of label t is [t, t+1), NOT the symmetric [t−0.5, t+0.5).
+            Using the symmetric WMO preimage for HK systematically shifts every
+            HK bin's mass UPWARD by ~half a bin — the exact pollution this fixes.
+      - ``ceil`` (ceil(x) == t  ⟺  x ∈ (t − step, t]):
+            (−2·half_step, 0.0)        ← ASYMMETRIC, opposite direction.
+
+    ``half_step`` is the rounding half-width = settlement_step_c / 2 (0.5 for the
+    1°C / 1°F integer grids of all current Zeus markets). The full quantum is
+    ``2 · half_step``; the asymmetric rules span the full quantum on one side.
+
+    Authority: ensemble_signal.analytic_p_raw_vector_from_maxes §preimage
+    derivation (the HK-aware Monte-Carlo-equivalent path); this function lifts
+    that per-rule edge logic into the shared contract so the fused-Normal q path
+    (replacement_forecast_materializer) consumes the SAME rule the bins declare.
+    """
+    if rounding_rule == "wmo_half_up":
+        return (-half_step, half_step)
+    if rounding_rule in ("floor", "oracle_truncate"):
+        # floor(x) == t  ⟺  x ∈ [t, t + step); step = 2·half_step.
+        return (0.0, 2.0 * half_step)
+    if rounding_rule == "ceil":
+        # ceil(x) == t  ⟺  x ∈ (t − step, t]; CDF is continuous so the open edge
+        # is exact.
+        return (-2.0 * half_step, 0.0)
+    raise ValueError(
+        f"settlement_preimage_offsets: unsupported rounding rule {rounding_rule!r}"
+    )
+
+
 def round_wmo_half_up_values(
     values: Any, precision: float = 1.0
 ) -> "np.ndarray[Any, np.dtype[Any]]":

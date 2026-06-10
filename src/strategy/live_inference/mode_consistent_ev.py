@@ -169,6 +169,57 @@ def maker_limit_price(
     return limit
 
 
+TAKER_FORBIDDEN_NO_ASK_EMPTY = "NO_ASK_EMPTY"
+
+
+def complementary_maker_quote_reservation(
+    *,
+    direction: str,
+    q_lcb: float,
+    complement_best_bid: float | None,
+    tick_size: float,
+    penalty: float = 0.0,
+) -> float | None:
+    """Reservation price for a MAKER quote into an EMPTY native ask book.
+
+    A certified candidate whose OWN native ask side is empty/thin is NOT dead: the
+    system is structurally a maker, so it QUOTES into the empty book — a resting
+    NO bid at price ``p`` is economically matched (mint/merge) by buyers of the
+    complementary YES outcome at ``1 - p``. Crossing the complementary book is
+    therefore forbidden the same way crossing the own ask is: the resting limit
+    must stay strictly BEHIND the complement's best bid so the rest never lifts
+    the complementary side via mint.
+
+    Bound (mission spec): ``limit <= min(reservation_belief, 1 - comp_best_bid - tick)``.
+      * ``reservation_belief = q_lcb - penalty`` — the candidate's robust
+        willingness-to-pay (with no native ask, the belief lower bound is the only
+        cost anchor; the same q_lcb leg the taker score uses). Capping the
+        reservation at the belief keeps the maker EV non-positive unless the quote
+        genuinely sits below the certified edge.
+      * ``1 - comp_best_bid - tick`` — the complementary non-crossing cap. With no
+        complementary bid the cap is absent and the reservation is the belief alone.
+
+    Returns the reservation price (a positive probability-units scalar) or ``None``
+    when no admissible quote exists (belief non-positive, or the complementary cap
+    forces the price to/below zero — a book with no resting room).
+
+    Pure: no I/O. ``direction`` is accepted for symmetry / future buy_yes empty-ask
+    quoting; today only ``buy_no`` reaches this path (buy_yes empty-ask stays a
+    no-trade until its complementary NO-bid bound is exercised by a test).
+    """
+    belief = _finite(q_lcb)
+    if belief is None:
+        return None
+    reservation = belief - float(penalty)
+    comp_bid = _finite(complement_best_bid)
+    tick = max(float(tick_size), 0.0)
+    if comp_bid is not None:
+        reservation = min(reservation, 1.0 - comp_bid - tick)
+    if not math.isfinite(reservation) or reservation <= 0.0:
+        return None
+    return reservation
+
+
 def maker_adverse_selection_haircut(
     *,
     best_bid: float | None,
@@ -267,8 +318,14 @@ def select_mode_consistent_ev(
     # the maker leg so a negative/zero EV_maker still lets a positive EV_taker win (1+margin on a
     # non-positive number does not raise the bar above a positive taker EV).
     _margin = max(0.0, float(taker_over_maker_margin))
-    _taker_clears_maker = (not maker_allowed) or (
-        float(ev_taker) >= float(ev_maker) * (1.0 + _margin)
+    # Guard the margin comparison so it never dereferences a None ev_taker: a
+    # candidate with no taker cost at all (taker_all_in_cost None -> ev_taker None,
+    # e.g. the maker-quote-into-empty-ask lane where taker is structurally
+    # impossible) has taker_allowed False, and the comparison must be skipped
+    # entirely rather than coercing None to float.
+    _taker_clears_maker = taker_allowed and (
+        (not maker_allowed)
+        or (float(ev_taker) >= float(ev_maker) * (1.0 + _margin))
     )
     if taker_allowed and _taker_clears_maker:
         chosen_mode, chosen_ev, placement = "TAKER", float(ev_taker), PLACEMENT_TAKER

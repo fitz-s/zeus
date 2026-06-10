@@ -1160,6 +1160,24 @@ _QLCB_BASIS = "fused_center_bootstrap_p05"
 _QLCB_SEED = 0x5EED_F09  # deterministic per-posterior rng (provenance-stable bounds)
 
 
+def _family_rounding_rule(bins: Sequence["AifsTemperatureBin"]) -> str:
+    """Return the single settlement rounding rule shared by a bin family.
+
+    The market bin family is constructed with ONE rounding rule (the seed builder
+    sets oracle_truncate for HKO, wmo_half_up otherwise, on every bin).  A mixed
+    family is a provenance error — the q-integration preimage is a per-CITY
+    property, not per-bin, so all bins MUST agree.  Fail loud rather than silently
+    integrating part of a family under the wrong preimage.
+    """
+    rules = {str(getattr(b, "rounding_rule", "wmo_half_up")) for b in bins}
+    if len(rules) != 1:
+        raise ValueError(
+            f"bin family mixes settlement rounding rules {sorted(rules)} — the "
+            f"settlement preimage is a per-city property and must be uniform"
+        )
+    return next(iter(rules))
+
+
 def _build_fused_q_bounds(
     *,
     mu_star: float,
@@ -1169,6 +1187,7 @@ def _build_fused_q_bounds(
     half_step: float,
     q_point: Mapping[str, float],
     n_draws: int = _QLCB_BOOTSTRAP_DRAWS,
+    rounding_rule: str = "wmo_half_up",
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Vectorized fused-center parameter-uncertainty bootstrap for per-bin q_lcb / q_ucb.
 
@@ -1202,14 +1221,20 @@ def _build_fused_q_bounds(
     mu_draws = rng.normal(loc=float(mu_star), scale=float(center_sigma_c), size=int(n_draws))  # (N,)
     sigma = float(predictive_sigma_c)
 
-    # Per-bin integration bounds in absolute Celsius (preimage expansion by ±half_step), matching
-    # bin_probability_settlement exactly. None shoulder -> -inf / +inf via cdf 0.0 / 1.0.
+    # Per-bin integration bounds in absolute Celsius via the SETTLEMENT PREIMAGE of the
+    # declared rounding rule (the SAME single contract source bin_probability_settlement uses).
+    # wmo_half_up -> symmetric (-half_step, +half_step) [standard cities, byte-identical to the
+    # historical path]; oracle_truncate/floor -> asymmetric (0, +2·half_step) [Hong Kong]. None
+    # shoulder -> -inf / +inf via cdf 0.0 / 1.0.
+    from src.contracts.settlement_semantics import settlement_preimage_offsets  # noqa: PLC0415
+
+    _low_off, _high_off = settlement_preimage_offsets(rounding_rule, half_step=half_step)
     lows = np.array(
-        [(-np.inf if b.lower_c is None else float(b.lower_c) - half_step) for b in bins],
+        [(-np.inf if b.lower_c is None else float(b.lower_c) + _low_off) for b in bins],
         dtype=float,
     )  # (M,)
     highs = np.array(
-        [(np.inf if b.upper_c is None else float(b.upper_c) + half_step) for b in bins],
+        [(np.inf if b.upper_c is None else float(b.upper_c) + _high_off) for b in bins],
         dtype=float,
     )  # (M,)
 
@@ -1324,6 +1349,11 @@ def _insert_posterior(
             from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
 
             _half_step = float(request.settlement_step_c) / 2.0
+            # Per-city settlement preimage: the bins declare the rounding rule (oracle_truncate
+            # for Hong Kong, wmo_half_up otherwise). The integrator MUST consume it so HK's
+            # asymmetric floor() preimage is used instead of the symmetric WMO one. Uniform
+            # across the family (fail-loud if mixed).
+            _rounding_rule = _family_rounding_rule(request.bins)
             # FIX 2 — settlement sigma floor coherence in the fused-q path. The EMOS path floors
             # sigma at the empirical settlement dispersion floor (edli_settlement_sigma_floor_enabled);
             # the fused-q path previously did NOT consult it, so "floor enabled" silently did not
@@ -1369,6 +1399,7 @@ def _insert_posterior(
                     bin_low=_lo,
                     bin_high=_hi,
                     half_step=_half_step,
+                    rounding_rule=_rounding_rule,
                 )
                 # Open-ended catch-all bin: exactly one bound is None. Cap floored mass at the
                 # un-floored (predictive-sigma) mass so the floor can never inflate the tail.
@@ -1380,6 +1411,7 @@ def _insert_posterior(
                         bin_low=_lo,
                         bin_high=_hi,
                         half_step=_half_step,
+                        rounding_rule=_rounding_rule,
                     )
                     if _m_unfloored < _m:
                         _catchall_capped_bins.append(_b.bin_id)
@@ -1413,6 +1445,7 @@ def _insert_posterior(
                     bins=request.bins,
                     half_step=_half_step,
                     q_point=q,
+                    rounding_rule=_rounding_rule,
                 )
                 q_lcb_map = _lcb_map
                 q_ucb_map = _ucb_map

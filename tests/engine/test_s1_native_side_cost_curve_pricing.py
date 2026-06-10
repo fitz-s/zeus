@@ -197,17 +197,29 @@ def test_yes_no_native_asks_are_independent_not_complement():
 # --------------------------------------------------------------------------
 
 def test_offgrid_or_empty_book_yields_no_trade_candidate():
-    """Empty NO ask book -> ValueError on the proof-pricing path (NATIVE_QUOTE_MISSING)."""
-    # Empty NO asks: the native NO side has no executable depth.
-    row_empty = _row(yes_asks=DEEP_YES, no_asks=())
+    """Empty/off-grid NO ask AND no complementary YES bid -> ValueError (NATIVE_
+    QUOTE_MISSING / fail-closed §13).
+
+    NOTE (2026-06-10 maker-quote lane): an empty/thin NO ask is no longer terminal
+    when a live complementary YES bid exists — that case becomes a MAKER quote
+    (tests/engine/test_maker_quote_empty_no_ask.py). This test pins the FAIL-CLOSED
+    end: with the complementary YES bid removed there is nothing to quote behind, so
+    the taker-missing condition stays a hard no-trade. The YES bid is therefore
+    explicitly emptied here.
+    """
+    # Empty NO asks AND empty YES bid: no taker entry and no maker-quote complement.
+    row_empty = _row(yes_asks=DEEP_YES, no_asks=(), yes_bids=(), no_bids=())
     with pytest.raises(ValueError):
         era._execution_price_from_snapshot(
             row_empty, selected_token_id="no-1", direction="buy_no"
         )
 
     # Off-grid NO ask price (0.555 is not on the 0.01 tick grid) -> the curve's
-    # tick-grid guard (Hidden #16) fails closed rather than rounding a limit.
-    row_offgrid = _row(yes_asks=DEEP_YES, no_asks=(("0.555", "1000"),))
+    # tick-grid guard (Hidden #16) fails closed rather than rounding a limit; with
+    # no complementary YES bid the maker lane cannot rescue it either.
+    row_offgrid = _row(
+        yes_asks=DEEP_YES, no_asks=(("0.555", "1000"),), yes_bids=(), no_bids=()
+    )
     with pytest.raises(ValueError):
         era._execution_price_from_snapshot(
             row_offgrid, selected_token_id="no-1", direction="buy_no"
@@ -388,13 +400,26 @@ def test_multi_level_fee_curve_uses_correct_per_level_fee():
 
 
 def test_genuine_depth_exhaustion_below_min_order_still_fails_closed():
-    """A book whose TOTAL ask depth < min_order_size shares still no-trades (§13).
+    """A book whose TOTAL ask depth < min_order_size shares AND no complementary
+    YES bid still no-trades (§13).
 
     The fix must not paper over real un-fillable books: 4 total shares across the
-    whole NO ladder cannot fill a 5-share min order, so the share walk fails closed
-    (depth exhausted) — a true §13 no-trade, not a fabricated price.
+    whole NO ladder cannot fill a 5-share min order, so the TAKER share walk fails
+    closed (depth exhausted). With the complementary YES bid removed the MAKER lane
+    cannot rescue it either -> a true §13 no-trade, not a fabricated price.
+
+    NOTE (2026-06-10 maker-quote lane): a taker-depth-exhausted NO ask DOES compose
+    into a maker quote when a complementary YES bid exists
+    (tests/engine/test_maker_quote_empty_no_ask.py::
+    test_thin_no_ask_depth_exhausted_falls_to_maker_quote). This test pins the
+    fail-closed end with the YES bid explicitly emptied.
     """
-    row = _row(yes_asks=(("0.40", "1000"),), no_asks=(("0.60", "2"), ("0.62", "2")))
+    row = _row(
+        yes_asks=(("0.40", "1000"),),
+        no_asks=(("0.60", "2"), ("0.62", "2")),
+        yes_bids=(),
+        no_bids=(),
+    )
     with pytest.raises(ValueError):
         era._execution_price_from_snapshot(
             row, selected_token_id="no-1", direction="buy_no"
