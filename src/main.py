@@ -6009,6 +6009,43 @@ def _edli_emit_day0_extreme_events(
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
 
+    fast_emitted = 0
+    try:
+        edli_cfg = settings.get("edli_v1", {}) if hasattr(settings, "get") else settings["edli_v1"]
+        fast_lane_enabled = bool(edli_cfg.get("day0_fast_obs_lane_enabled", True))
+    except Exception:
+        fast_lane_enabled = True
+    if fast_lane_enabled:
+        try:
+            from src.config import runtime_cities
+            from src.data.day0_fast_obs import get_fast_obs_emitter
+            from src.data.day0_oracle_anomaly import wu_metar_anomaly_check
+
+            fast_emitted = get_fast_obs_emitter().emit_events(
+                world_conn=world_conn,
+                cities=runtime_cities(),
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=limit,
+                anomaly_check=wu_metar_anomaly_check,
+            )
+        except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
+            logger.warning(
+                "EDLI day0 fast obs lane failed (non-fatal, catch-up lanes continue): %r",
+                _fast_exc,
+            )
+        try:
+            # High-res hourly vector refresh (review item B persistence lane;
+            # 30-min throttle per city inside the module; ~17 in-domain cities).
+            from src.config import runtime_cities as _rc
+            from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+
+            maybe_refresh_day0_hourly_vectors(_rc(), decision_time=decision_time)
+        except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
+            logger.warning(
+                "EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc
+            )
+
     trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
     authority_results = trigger.scan_authority_rows(
         observation_conn=trade_conn,
