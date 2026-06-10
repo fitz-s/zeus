@@ -3607,13 +3607,38 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                     applied_validations=list(pos.applied_validations),
                 )
                 summary["day0_hard_fact_exits"] = summary.get("day0_hard_fact_exits", 0) + 1
+            elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+                # TERMINAL HOLD (PR#404 BLOCKER 2): a structural-win hard fact
+                # (buy_no on a DEAD bin, buy_yes on the entered shoulder) is an
+                # absorbing settlement-authority verdict — do NOT run the normal
+                # estimator-evidence path and do NOT let the ORANGE favorable-exit
+                # layer sell out of a structurally won position.  The hold is
+                # explicit and separately named: only a kill-switch / manual
+                # reduce-only override (which produces an EXIT_DEAD_BIN verdict)
+                # can override it.
+                from src.state.portfolio import ExitDecision as _ExitDecision
+
+                pos.applied_validations = list(
+                    dict.fromkeys([*(pos.applied_validations or []), "day0_hard_fact_structural_win_hold"])
+                )
+                exit_decision = _ExitDecision(
+                    False,
+                    f"DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD ({_hard_fact.reason}; source={_hard_fact.source})",
+                    urgency="normal",
+                    trigger="DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD",
+                    selected_method=pos.selected_method or pos.entry_method,
+                    applied_validations=list(pos.applied_validations),
+                )
+                summary["day0_hard_fact_structural_win_holds"] = (
+                    summary.get("day0_hard_fact_structural_win_holds", 0) + 1
+                )
+                # ORANGE gate intentionally skipped: a favorable exit on a
+                # structurally-won position would defeat the purpose of holding.
             else:
-                if _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
-                    summary["day0_hard_fact_structural_win_holds"] = (
-                        summary.get("day0_hard_fact_structural_win_holds", 0) + 1
-                    )
                 exit_decision = pos.evaluate_exit(exit_context)
-            if _summary_risk_level(summary) == "ORANGE":
+            if _summary_risk_level(summary) == "ORANGE" and not (
+                _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+            ):
                 orange_decision = _orange_favorable_exit_decision(
                     pos,
                     exit_context,

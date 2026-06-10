@@ -631,3 +631,247 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         reasons = [str(getattr(r, "exit_reason", "")) for r in results]
         assert any("MONITOR_CANONICAL_WRITE_FAILED" in reason for reason in reasons)
         assert not any(getattr(r, "should_exit", False) for r in results)
+
+
+# ===========================================================================
+# BLOCKER 2 — HOLD_STRUCTURAL_WIN is a terminal hold: evaluate_exit + ORANGE
+#             must never sell a structurally-won position.
+# ===========================================================================
+
+class TestStructuralWinTerminalHold:
+    """PR#404 BLOCKER 2: HOLD_STRUCTURAL_WIN must produce a hard should_exit=False
+    decision that skips the estimator-evidence path AND the ORANGE favorable-exit
+    layer.  An ORANGE context that would otherwise trigger a favorable exit must
+    be held when a structural-win verdict is present.
+
+    Cross-module invariant: day0_hard_fact.action=HOLD_STRUCTURAL_WIN at
+    cycle_runtime.execute_monitoring_phase → should_exit=False regardless of
+    what pos.evaluate_exit() or the ORANGE gate would return.
+    """
+
+    def _run_structural_win_phase(
+        self, monkeypatch, *, evaluate_exit_says_exit: bool, summary_risk_level: str
+    ):
+        """Run one monitor cycle with:
+        - hard_fact.action=HOLD_STRUCTURAL_WIN
+        - evaluate_exit stubbed to return should_exit=evaluate_exit_says_exit
+        - _summary_risk_level stubbed to return summary_risk_level
+        """
+        import logging as _logging
+        import numpy as np
+
+        from src.contracts import EdgeContext, EntryMethod
+        from src.engine import cycle_runtime
+        from src.state.portfolio import ExitDecision as _ExitDecision, Position, PortfolioState
+
+        monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
+        pos = Position(
+            trade_id="sw_blocker2_001", market_id="mkt_sw", city="Tokyo",
+            cluster="East Asia", target_date="2026-06-10",
+            bin_label="25°C or higher", direction="buy_no",
+            size_usd=10.0, entry_price=0.70, p_posterior=0.80, edge=0.10,
+            shares=14.3, cost_basis_usd=10.0, state="day0_window",
+            token_id="tok_no_sw", no_token_id="tok_no_sw", unit="C", env="live",
+        )
+        portfolio = PortfolioState(positions=[pos])
+
+        class LiveClob:
+            def get_best_bid_ask(self, token_id):
+                return 0.60, 0.62, 100.0, 100.0
+
+        class Tracker:
+            def record_exit(self, position):
+                pass
+
+        def mock_refresh(conn, clob, position):
+            return EdgeContext(
+                p_raw=np.array([]), p_cal=np.array([]),
+                p_market=np.array([position.entry_price]),
+                p_posterior=position.p_posterior,
+                forward_edge=0.0, alpha=0.0,
+                confidence_band_upper=0.0, confidence_band_lower=0.0,
+                entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+                decision_snapshot_id="snap_sw", n_edges_found=1, n_edges_after_fdr=1,
+                market_velocity_1h=0.0, divergence_score=0.0,
+            )
+
+        monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+        monkeypatch.setattr(
+            cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
+            lambda conn, pos, *, deps: True,
+        )
+        # Stub hard-fact verdict: HOLD_STRUCTURAL_WIN (buy_no dead bin)
+        hold_verdict = HardFactVerdict(
+            action="HOLD_STRUCTURAL_WIN",
+            reason="buy_no on dead bin [25.0,25.0] — structural win",
+            metric="high", rounded_extreme=27.0, source="wu_icao",
+        )
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None: hold_verdict,
+        )
+        # Stub evaluate_exit to return the requested should_exit value
+        monkeypatch.setattr(
+            pos,
+            "evaluate_exit",
+            lambda ctx: _ExitDecision(
+                evaluate_exit_says_exit,
+                "STUB_EXIT_FROM_ESTIMATOR",
+                trigger="STUB_ESTIMATOR_EXIT",
+                selected_method=pos.selected_method or pos.entry_method,
+            ),
+        )
+        # Stub _summary_risk_level to simulate ORANGE context
+        monkeypatch.setattr(
+            cycle_runtime, "_summary_risk_level",
+            lambda summary: summary_risk_level,
+        )
+
+        results = []
+
+        class Artifact:
+            def add_monitor_result(self, result):
+                results.append(result)
+
+        deps = type(
+            "Deps", (),
+            {
+                "MonitorResult": type(
+                    "MonitorResult", (),
+                    {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+                ),
+                "logger": _logging.getLogger("test_sw_blocker2"),
+                "cities_by_name": {
+                    "Tokyo": type("City", (), {"timezone": "Asia/Tokyo"})()
+                },
+                "_utcnow": staticmethod(
+                    lambda: datetime(2026, 6, 10, 6, 0, tzinfo=UTC)
+                ),
+            },
+        )
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
+            deps=deps, exit_order_submit_enabled=False,
+        )
+        return results, summary
+
+    def test_structural_win_held_even_when_evaluate_exit_says_exit(self, monkeypatch):
+        """The key invariant: evaluate_exit stub returns should_exit=True, but
+        HOLD_STRUCTURAL_WIN must produce should_exit=False — the structural hold
+        is a terminal decision that skips the estimator-evidence path."""
+        results, summary = self._run_structural_win_phase(
+            monkeypatch, evaluate_exit_says_exit=True, summary_risk_level="GREEN",
+        )
+        assert summary.get("day0_hard_fact_structural_win_holds") == 1
+        assert summary.get("day0_hard_fact_exits") is None
+        assert not any(getattr(r, "should_exit", False) for r in results), (
+            "structural-win hold must block the estimator exit (should_exit must be False)"
+        )
+        # Trigger should be the structural-win hold, not the estimator
+        triggers = [str(getattr(r, "exit_trigger", getattr(r, "exit_reason", ""))) for r in results]
+        assert any("STRUCTURAL_WIN_HOLD" in t for t in triggers), (
+            f"expected DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD trigger, got: {triggers}"
+        )
+
+    def test_orange_favorable_exit_cannot_override_structural_win_hold(self, monkeypatch):
+        """ORANGE context + HOLD_STRUCTURAL_WIN → still held. The ORANGE gate must
+        be skipped entirely when a structural-win verdict is present, so a
+        favorable ORANGE exit cannot sell a structurally won buy_no position."""
+        results, summary = self._run_structural_win_phase(
+            monkeypatch, evaluate_exit_says_exit=False, summary_risk_level="ORANGE",
+        )
+        assert summary.get("day0_hard_fact_structural_win_holds") == 1
+        assert not any(getattr(r, "should_exit", False) for r in results), (
+            "ORANGE gate must not override a structural-win hold"
+        )
+        # ORANGE favorable-exit counter must NOT be incremented
+        assert summary.get("risk_orange_favorable_exits", 0) == 0, (
+            "ORANGE favorable_exits counter must be 0 for a structural-win hold"
+        )
+
+    def test_kill_switch_via_exit_dead_bin_overrides_structural_win(self, monkeypatch):
+        """Separately named: EXIT_DEAD_BIN (kill-switch / manual reduce-only) CAN
+        override the structural hold — it is a stronger verdict on the same axis."""
+        import logging as _logging
+        import numpy as np
+        from src.contracts import EdgeContext, EntryMethod
+        from src.engine import cycle_runtime
+        from src.state.portfolio import Position, PortfolioState
+
+        monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
+        pos = Position(
+            trade_id="sw_ks_001", market_id="mkt_ks", city="Tokyo",
+            cluster="East Asia", target_date="2026-06-10",
+            bin_label="25°C or higher", direction="buy_no",
+            size_usd=10.0, entry_price=0.70, p_posterior=0.80, edge=0.10,
+            shares=14.3, cost_basis_usd=10.0, state="day0_window",
+            token_id="tok_no_ks", no_token_id="tok_no_ks", unit="C", env="live",
+        )
+        portfolio = PortfolioState(positions=[pos])
+
+        class LiveClob:
+            def get_best_bid_ask(self, token_id):
+                return 0.60, 0.62, 100.0, 100.0
+
+        class Tracker:
+            def record_exit(self, position):
+                pass
+
+        def mock_refresh(conn, clob, position):
+            return EdgeContext(
+                p_raw=np.array([]), p_cal=np.array([]),
+                p_market=np.array([position.entry_price]),
+                p_posterior=position.p_posterior,
+                forward_edge=0.0, alpha=0.0,
+                confidence_band_upper=0.0, confidence_band_lower=0.0,
+                entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+                decision_snapshot_id="snap_ks", n_edges_found=1, n_edges_after_fdr=1,
+                market_velocity_1h=0.0, divergence_score=0.0,
+            )
+
+        monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+        monkeypatch.setattr(
+            cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
+            lambda conn, pos, *, deps: True,
+        )
+        exit_verdict = HardFactVerdict(
+            action="EXIT_DEAD_BIN",
+            reason="manual reduce-only override — buy_no exited",
+            metric="high", rounded_extreme=27.0, source="wu_icao",
+        )
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None: exit_verdict,
+        )
+
+        results = []
+
+        class Artifact:
+            def add_monitor_result(self, result):
+                results.append(result)
+
+        deps = type(
+            "Deps", (),
+            {
+                "MonitorResult": type(
+                    "MonitorResult", (),
+                    {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+                ),
+                "logger": _logging.getLogger("test_ks"),
+                "cities_by_name": {
+                    "Tokyo": type("City", (), {"timezone": "Asia/Tokyo"})()
+                },
+                "_utcnow": staticmethod(
+                    lambda: datetime(2026, 6, 10, 6, 0, tzinfo=UTC)
+                ),
+            },
+        )
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
+            deps=deps, exit_order_submit_enabled=False,
+        )
+        assert summary.get("day0_hard_fact_exits") == 1
+        exits = [r for r in results if getattr(r, "should_exit", False)]
+        assert exits, "EXIT_DEAD_BIN verdict must override and produce should_exit=True"
