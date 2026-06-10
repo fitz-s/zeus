@@ -656,3 +656,59 @@ class TestDay0MaturityAuthority:
             metric="low", hours_remaining=20.0,
             observed_extreme_so_far=18.0, member_extrema_remaining=[19.0, 20.0],
         ) is None
+
+
+# ===========================================================================
+# R23 — LCB transform audit identity (PR#404 P1): submit-license changes are
+# hash-visible even when q is unchanged
+# ===========================================================================
+
+class TestLcbTransformAuditIdentity:
+    def _masked(self, obs_age_minutes):
+        from src.calibration.qlcb_provenance import _qlcb_float
+        from src.engine.event_reactor_adapter import (
+            _apply_day0_mask_to_generated_probabilities,
+            _probability_vector_hash,
+        )
+
+        fam = _seoul_high_family()
+        payload = _payload("high", 25.0, obs_age_minutes=obs_age_minutes)
+        q, lcb = _apply_day0_mask_to_generated_probabilities(
+            payload=payload, family=fam,
+            q_by_condition=_uniform_q(fam),
+            lcb_by_condition=_full_lcb(fam),
+            decision_time=NOW,
+        )
+        conditions = [f"cond{i}" for i in range(5)]
+        q_hash = _probability_vector_hash(q[c] for c in conditions)
+        lcb_hash = _probability_vector_hash(
+            _qlcb_float(lcb.get((c, "buy_yes"), 0.0)) for c in conditions
+        )
+        return q_hash, lcb_hash, payload["_edli_day0_lcb_transform"]
+
+    def test_staleness_changes_lcb_hash_but_not_q_hash(self):
+        """The exact audit gap from the review: q identical, submit license
+        revoked by the staleness guard — the q hash CANNOT see it; the lcb
+        vector hash and the transform identity MUST."""
+        import json as _json
+
+        q_fresh, lcb_fresh, t_fresh = self._masked(10.0)
+        q_stale, lcb_stale, t_stale = self._masked(None)  # maximally stale
+        assert q_fresh == q_stale, "the staleness guard must not move q"
+        assert lcb_fresh != lcb_stale, "license revocation must change the lcb vector hash"
+        c_fresh = _json.dumps(t_fresh, sort_keys=True, default=str)
+        c_stale = _json.dumps(t_stale, sort_keys=True, default=str)
+        assert c_fresh != c_stale
+
+    def test_transform_carries_explanation_fields(self):
+        _q, _lcb, transform = self._masked(None)
+        assert transform["staleness_suppressed_conditions"]  # bins suppressed when stale
+        assert transform["metric"] == "high"
+        assert transform["rounded_extreme"] == 25.0
+        assert "staleness_margin" in transform and "staleness_budget_minutes" in transform
+        assert set(transform["yes_lcb_by_condition"]) == {f"cond{i}" for i in range(5)}
+
+    def test_evidence_hash_wiring_present_in_source(self):
+        source = (ROOT / "src" / "engine" / "event_reactor_adapter.py").read_text(encoding="utf-8")
+        assert '"q_lcb_vector_hash"' in source
+        assert '"day0_lcb_transform_hash"' in source
