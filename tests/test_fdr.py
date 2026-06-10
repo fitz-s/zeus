@@ -32,6 +32,15 @@ from src.state.db import get_connection, init_schema, init_schema_forecasts
 from src.state.portfolio import PortfolioState
 from src.strategy.market_analysis_family_scan import FullFamilyHypothesis, scan_full_hypothesis_family
 from src.strategy.fdr_filter import fdr_filter
+# STALE_LAW re-pin 2026-06-09: the NATIVE_MULTIBIN_BUY_NO_* flag-key constants and the
+# *_enabled() readers were relocated from src.engine.evaluator to
+# src.strategy.family_exclusive_dedup (commit 22dba73349 + slim bce3091a0d). Import them
+# from their current home; evaluator re-exports only native_multibin_buy_no_shadow_enabled.
+import src.strategy.family_exclusive_dedup as dedup_module
+from src.strategy.family_exclusive_dedup import (
+    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
+    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
+)
 import src.strategy.market_analysis as market_analysis_module
 from src.strategy.market_analysis import MarketAnalysis
 from src.contracts.forecast_sharpness import ForecastSharpnessEvidence
@@ -140,8 +149,8 @@ def _patch_mature_calibration(monkeypatch) -> None:
 
 def _set_native_multibin_buy_no_flags(monkeypatch, *, shadow: bool, live: bool = False) -> None:
     flags = dict(evaluator_module.settings["feature_flags"])
-    flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = shadow
-    flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = live
+    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = shadow
+    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = live
     monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
 
@@ -606,7 +615,7 @@ class TestSelectionFamilySubstrate:
 
     def test_native_multibin_buy_no_flags_are_strict_boolean(self, monkeypatch):
         flags = dict(evaluator_module.settings["feature_flags"])
-        flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = "yes"
+        flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = "yes"
         monkeypatch.setitem(evaluator_module.settings._data, "feature_flags", flags)
 
         with pytest.raises(ValueError, match="must be boolean"):
@@ -616,7 +625,7 @@ class TestSelectionFamilySubstrate:
         _set_native_multibin_buy_no_flags(monkeypatch, shadow=False, live=True)
 
         with pytest.raises(ValueError, match="requires"):
-            evaluator_module.native_multibin_buy_no_live_enabled()
+            dedup_module.native_multibin_buy_no_live_enabled()
 
     def test_multi_bin_buy_no_bootstrap_uses_native_no_market_price(self, monkeypatch):
         bins = [
@@ -1269,7 +1278,11 @@ class TestSelectionFamilySubstrate:
         monkeypatch.setattr(evaluator_module, "MarketAnalysis", FakeAnalysis)
         monkeypatch.setattr(evaluator_module, "edge_n_bootstrap", lambda: 2)
         monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("family scan down")))
-        monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+        # STALE_LAW 2026-06-09: the legacy fdr_filter call was DELETED from evaluator
+        # (its name no longer exists there). raising=False keeps this defensive trap —
+        # if fdr_filter were ever re-introduced into evaluator and called, this lambda
+        # would still flag the regression — without failing on the now-absent symbol.
+        monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
         monkeypatch.setattr(
             evaluator_module,
             "resolve_strategy_policy",
@@ -1495,7 +1508,11 @@ class TestSelectionFamilySubstrate:
         # Return empty list (not raise) — anomalous but not exception
         monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", lambda *args, **kwargs: [])
         # Legacy filter WOULD pass the edge — but must NOT be used
-        monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+        # STALE_LAW 2026-06-09: the legacy fdr_filter call was DELETED from evaluator
+        # (its name no longer exists there). raising=False keeps this defensive trap —
+        # if fdr_filter were ever re-introduced into evaluator and called, this lambda
+        # would still flag the regression — without failing on the now-absent symbol.
+        monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
         monkeypatch.setattr(
             evaluator_module,
             "resolve_strategy_policy",
