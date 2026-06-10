@@ -956,14 +956,29 @@ def _replacement_forecast_shadow_cfg() -> dict:
     return cfg if isinstance(cfg, dict) else {}
 
 
-def _replacement_forecast_publish_cron_hours() -> tuple[int, int]:
-    """The two daily UTC hours when a cycle becomes available = (00Z + release_lag) and
-    (12Z + release_lag), modulo 24. With the default 14h release lag that is 14:00 and 02:00
-    UTC (matching scripts.download_replacement_forecast_current_targets._source_available_at)."""
+def _replacement_forecast_publish_cron_hours() -> tuple[int, ...]:
+    """The four daily UTC hours when a model cycle becomes available = (cycle + release_lag) %% 24
+    for EACH of the four AIFS-ENS cycles {00Z, 06Z, 12Z, 18Z}. With the default 14h release lag
+    that is 14:00 / 20:00 / 02:00 / 08:00 UTC (matching
+    scripts.download_replacement_forecast_current_targets._source_available_at).
+
+    Previously this returned only the 00Z+12Z hours, so the download cron never fired for the
+    06Z/18Z cycles in steady state — the 06Z/18Z raw inputs only ever arrived via daemon-restart
+    boot catch-ups. That left a ~12h dead zone (02:10Z->14:10Z UTC) where readiness (3h TTL)
+    expired for nearly all scopes and the live engine had zero certified candidates (10h
+    production dead-zone incident 2026-06-10). All four cycles share the SAME publication lag
+    (one AIFS-ENS product), so the per-cycle hour is just (cycle_hour + release_lag) %% 24.
+
+    Scheduling all four is SAFE even if a cron fires before its cycle is actually published: the
+    download job ALWAYS resolves the newest *available* cycle via
+    ``_parse_cycle(None, now, release_lag_hours)`` (floors now-lag to the latest {0,6,12,18}
+    cycle), NOT the trigger hour, and the cycle-currency gate
+    (``cycle_is_current``/coverage in ``_download_replacement_forecast_current_targets_if_needed``)
+    no-ops a fire whose newest-available cycle is already downloaded. A premature fire therefore
+    re-resolves to the current cycle and skips cleanly rather than downloading a not-yet-published
+    cycle."""
     release_lag_hours = float(_replacement_forecast_shadow_cfg().get("download_release_lag_hours") or 14.0)
-    hour_00z = int((0 + release_lag_hours) % 24)
-    hour_12z = int((12 + release_lag_hours) % 24)
-    return hour_00z, hour_12z
+    return tuple(int((cycle_hour + release_lag_hours) % 24) for cycle_hour in (0, 6, 12, 18))
 
 
 def _replacement_forecast_materialize_interval_minutes() -> int:
@@ -980,9 +995,9 @@ def _register_replacement_forecast_production_jobs(
     cutover the legacy OpenData jobs are filtered out but the replacement production — which IS
     the cutover target — must run)."""
     startup_at = (startup_run_date or _utcnow())
-    hour_00z, hour_12z = _replacement_forecast_publish_cron_hours()
+    publish_hours = _replacement_forecast_publish_cron_hours()
     materialize_minutes = _replacement_forecast_materialize_interval_minutes()
-    cron_hours = f"{hour_00z},{hour_12z}"
+    cron_hours = ",".join(str(h) for h in publish_hours)
 
     # Heavy download: publish-time cron (fires twice daily when each cycle is released).
     scheduler.add_job(  # type: ignore[attr-defined]
