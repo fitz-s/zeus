@@ -72,6 +72,17 @@ def _seoul():
     )
 
 
+def _tokyo():
+    # Tokyo: settlement-FAITHFUL C city (measured). Seoul is EXCLUDED from the
+    # fast lane by the faithfulness gate (config/wu_metar_divergence.json), so
+    # emitter tests use Tokyo. JST is UTC+9 like KST — the same UTC fixtures
+    # map to the same local day.
+    return SimpleNamespace(
+        name="Tokyo", timezone="Asia/Tokyo", settlement_unit="C",
+        wu_station="RJTT", settlement_source_type="wu_icao",
+    )
+
+
 def _report(station, obs_time, temp_c, *, t_group=True, receipt_offset_min=4.0):
     raw = f"METAR {station} 101200Z 16008KT 10SM 21/15 A3004"
     if t_group:
@@ -271,7 +282,7 @@ class TestEmitterMonotone:
     def _emit(self, emitter, conn, reports, when):
         return emitter.emit_events(
             world_conn=conn,
-            cities=[_seoul()],
+            cities=[_tokyo()],
             decision_time=when,
             received_at=when.isoformat(),
             limit=20,
@@ -279,8 +290,8 @@ class TestEmitterMonotone:
 
     def test_first_sight_emits_then_unchanged_is_silent_then_move_emits(self):
         conn = _world_conn()
-        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)  # Jun 10 01:00 KST
-        reports = [_report("RKSI", t0, 21.0, t_group=False)]
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)  # Jun 10 01:00 JST
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
         emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: reports, min_fetch_interval_s=0.0)
 
         n1 = self._emit(emitter, conn, reports, t0 + timedelta(minutes=10))
@@ -289,7 +300,7 @@ class TestEmitterMonotone:
         n2 = self._emit(emitter, conn, reports, t0 + timedelta(minutes=20))
         assert n2 == 0  # unchanged extreme -> monotone memo holds emission
 
-        reports.append(_report("RKSI", t0 + timedelta(hours=1), 24.0, t_group=False))
+        reports.append(_report("RJTT", t0 + timedelta(hours=1), 24.0, t_group=False))
         n3 = self._emit(emitter, conn, reports, t0 + timedelta(minutes=80))
         assert n3 == 1  # running max moved 21->24; low unchanged
 
@@ -306,7 +317,7 @@ class TestEmitterMonotone:
     def test_emitted_event_passes_reactor_hard_fact_gate(self):
         conn = _world_conn()
         t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
-        reports = [_report("RKSI", t0, 21.0, t_group=False)]
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
         emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: reports, min_fetch_interval_s=0.0)
         assert self._emit(emitter, conn, reports, t0 + timedelta(minutes=10)) == 2
 
@@ -335,7 +346,7 @@ class TestEmitterMonotone:
         conn = _world_conn()
         emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: [], min_fetch_interval_s=0.0)
         n = emitter.emit_events(
-            world_conn=conn, cities=[_seoul()],
+            world_conn=conn, cities=[_tokyo()],
             decision_time=datetime(2026, 6, 10, 4, 0, tzinfo=UTC),
             received_at="2026-06-10T04:00:00+00:00", limit=20,
         )
@@ -440,3 +451,89 @@ class TestOracleAnomaly:
             assert "DAY0_ORACLE_ANOMALY_PAUSED" not in str(exc)
         except Exception:
             pass  # any non-anomaly failure mode is out of scope here
+
+
+# ===========================================================================
+# R12 — empirical divergence thresholds (operator correction 2026-06-10:
+# the 1.5F/1.0C guess replaced by measured per-city thresholds; provenance
+# recorded; non-settlement-faithful cities excluded from the fast lane)
+# ===========================================================================
+
+class TestEmpiricalThresholds:
+    def test_measured_city_uses_empirical_threshold(self):
+        from src.data.day0_oracle_anomaly import divergence_threshold_for_city
+
+        threshold, provenance = divergence_threshold_for_city("Tokyo", "C")
+        assert provenance == "empirical"
+        assert threshold == pytest.approx(1.0)  # feeds byte-identical post-rounding
+        threshold, provenance = divergence_threshold_for_city("Seoul", "C")
+        assert provenance == "empirical"
+        assert threshold == pytest.approx(2.0)  # real +-1C spread measured
+
+    def test_unmeasured_city_falls_back_to_conservative_default(self):
+        from src.data.day0_oracle_anomaly import (
+            DIVERGENCE_THRESHOLD,
+            divergence_threshold_for_city,
+        )
+
+        threshold, provenance = divergence_threshold_for_city("Wellington", "C")
+        assert provenance == "default_guess"
+        assert threshold == pytest.approx(DIVERGENCE_THRESHOLD["C"])
+        threshold_f, _ = divergence_threshold_for_city("NoSuchCity", "F")
+        assert threshold_f == pytest.approx(DIVERGENCE_THRESHOLD["F"])
+
+    def test_missing_model_file_degrades_to_defaults(self, tmp_path):
+        from src.data.day0_oracle_anomaly import (
+            DIVERGENCE_THRESHOLD,
+            city_metar_settlement_faithful,
+            divergence_threshold_for_city,
+        )
+
+        bogus = tmp_path / "nope.json"
+        threshold, provenance = divergence_threshold_for_city("Tokyo", "C", path=bogus)
+        assert provenance == "default_guess"
+        assert threshold == pytest.approx(DIVERGENCE_THRESHOLD["C"])
+        assert city_metar_settlement_faithful("Seoul", path=bogus) is True
+
+    def test_settlement_faithfulness_verdicts(self):
+        from src.data.day0_oracle_anomaly import city_metar_settlement_faithful
+
+        assert city_metar_settlement_faithful("Seoul") is False   # measured divergence
+        assert city_metar_settlement_faithful("Tokyo") is True
+        assert city_metar_settlement_faithful("NYC") is True
+        assert city_metar_settlement_faithful("UnmeasuredCity") is True
+
+    def test_unfaithful_city_is_excluded_from_fast_lane(self):
+        """Monotone-safe exclusion: Seoul gets NO fast-lane source (its METAR
+        integer is not reliably WU's settlement integer), so METAR can never
+        drive a bin-kill there; faithful cities keep the lane."""
+        assert fast_obs_source_for_city(_seoul()) is None
+        assert fast_obs_source_for_city(_tokyo()) is not None
+        assert fast_obs_source_for_city(_nyc()) is not None
+
+    def test_guard_verdict_records_threshold_provenance(self):
+        verdict = check_wu_metar_divergence(
+            city=_tokyo(), target_date="2026-06-10",
+            metar_reports=[
+                MetarReport(
+                    station_id="RJTT",
+                    obs_time=datetime(2026, 6, 9, 16, 0, tzinfo=UTC),
+                    receipt_time=datetime(2026, 6, 9, 16, 4, tzinfo=UTC),
+                    temp_c=21.0, metar_type="METAR", raw="METAR RJTT 21/15",
+                ),
+            ],
+            wu_high_so_far=21.0, wu_low_so_far=21.0,
+            wu_last_obs_time=datetime(2026, 6, 9, 17, 0, tzinfo=UTC),
+        )
+        assert verdict.compared is True
+        assert "threshold_provenance=empirical" in verdict.detail
+
+    def test_empirical_tightening_one_unit_divergence_now_flags_for_clean_city(self):
+        """For a measured-identical city the threshold tightened from the 1.5F
+        guess to 1.0 — a 1.4F rounded-extreme divergence that the guess would
+        have ignored now flags (sharper tamper detector). Use NYC (F)."""
+        from src.data.day0_oracle_anomaly import divergence_threshold_for_city
+
+        threshold, provenance = divergence_threshold_for_city("NYC", "F")
+        assert provenance == "empirical" and threshold == pytest.approx(1.0)
+        assert 1.4 > threshold  # would NOT have exceeded the old 1.5F guess
