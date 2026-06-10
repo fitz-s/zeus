@@ -337,3 +337,69 @@ def test_family_coverage_verdict_none_when_no_candidate_lcb():
         family=family, forecast_conn=conn, lcb_by_direction=QlcbByDirection()
     )
     assert verdict is None
+
+
+# ---------------------------------------------------------------------------
+# Q5 — v11 defect antibody: compiler carve-out was missing FUSED_BOOTSTRAP
+# ---------------------------------------------------------------------------
+def test_q5_compiler_admits_fused_bootstrap_maturity4():
+    """Antibody for the v11 defect: compiler.py L582 carved out only IDENTITY_FALLBACK,
+    not FUSED_BOOTSTRAP, so a LICENSED credential with maturity_level=4 raised
+    'calibration.maturity_level too low' at compile time, before the verifier ran.
+
+    Root cause: the FUSED credential sets maturity_level=4 (placeholder, not a real Platt
+    maturity) and authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE. The compiler's
+    _validate_calibration_payload check required authority == IDENTITY_FALLBACK only.
+    Fix: extend the carve-out to include FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY.
+
+    This test calls the compiler's _validate_calibration_payload directly to pin the
+    invariant: FUSED_BOOTSTRAP authority with maturity=4 is NOT rejected by the compiler."""
+    from src.decision_kernel.compiler import _validate_calibration_payload  # type: ignore[attr-defined]
+
+    calibration = {
+        "authority": FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+        "maturity_level": 4,
+        "input_space": "fused_center_bootstrap_lcb",
+        "horizon_profile": "full",
+        "training_cutoff": "2026-05-24T18:10:00+00:00",
+        "model_available_at": "2026-05-24T18:10:00+00:00",
+        "model_hash": "abc123",
+        "n_samples": 60,
+    }
+    model_config = {
+        "calibrator_model_key": calibration.get("calibrator_model_key"),
+        "calibrator_model_hash": calibration.get("model_hash"),
+        "calibration_input_space": "fused_center_bootstrap_lcb",
+    }
+    forecast = {
+        "horizon_profile": "full",
+    }
+    # must NOT raise — this was the v11 defect (raises "calibration.maturity_level too low")
+    _validate_calibration_payload(
+        calibration, model_config, forecast, decision_time=DECISION_TIME
+    )
+
+
+def test_q5_unevaluated_rejected_before_maturity_check():
+    """The UNEVALUATED sibling is NOT in APPROVED_CALIBRATION_AUTHORITIES, so the compiler
+    rejects it at the authority check ('calibration.authority is not approved') — NOT with
+    the maturity check. This ensures the error ordering is deterministic: unknown authority
+    fails at the authority gate, not the maturity gate."""
+    from src.decision_kernel.compiler import _validate_calibration_payload  # type: ignore[attr-defined]
+
+    calibration = {
+        "authority": FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY,
+        "maturity_level": 4,
+        "input_space": "fused_center_bootstrap_lcb",
+        "horizon_profile": "full",
+        "training_cutoff": "2026-05-24T18:10:00+00:00",
+        "model_available_at": "2026-05-24T18:10:00+00:00",
+        "model_hash": "abc123",
+        "n_samples": 0,
+    }
+    model_config = {"calibration_input_space": "fused_center_bootstrap_lcb"}
+    forecast = {"horizon_profile": "full"}
+    with pytest.raises(ValueError, match="calibration.authority is not approved"):
+        _validate_calibration_payload(
+            calibration, model_config, forecast, decision_time=DECISION_TIME
+        )
