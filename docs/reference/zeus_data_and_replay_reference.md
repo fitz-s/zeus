@@ -10,22 +10,31 @@ on disagreement with this document.
 
 ## 1. Database Topology
 
-### 1.1 Three-DB split
+### 1.1 The K1 three-DB split
 
-| Database | Physical path | What it stores | Who writes |
-|----------|---------------|---------------|------------|
-| **zeus_trades.db** | `state/zeus_trades.db` | position_events, position_current, trade_decisions, chronicle, shadow_signals, risk_actions, strategy_health, selection facts | cycle_runner, executor, harvester, riskguard |
-| **zeus-world.db** | `state/zeus-world.db` | ensemble_snapshots, calibration_pairs, platt_models, settlements, observations, observation_instants, forecasts, model_bias, solar_daily, diurnal_curves, data_coverage | data ingest, harvester, calibration |
-| **risk_state.db** | `state/risk_state.db` | risk_state (level history) | riskguard only |
+The canonical K1 split (commit `eba80d2b9d`, 2026-05-11; registry `architecture/db_table_ownership.yaml`) is **zeus-world.db + zeus-forecasts.db + zeus_trades.db**. `risk_state.db` is a separate riskguard-only DB, NOT part of the K1 split (see §1.1a).
 
-Connection helpers:
-- `get_trade_connection()` → zeus_trades.db
+| Database | Physical path (env) | What it stores | Who writes |
+|----------|---------------------|---------------|------------|
+| **zeus-world.db** | `state/zeus-world.db` (`ZEUS_WORLD_DB_PATH`) | ensemble_snapshots, calibration_pairs, platt_models, model_bias, solar_daily, diurnal_curves, data_coverage, observation_instants | data ingest, harvester, calibration |
+| **zeus-forecasts.db** | `state/zeus-forecasts.db` (`ZEUS_FORECASTS_DB_PATH`) | forecast-class tables moved out of world.db in K1: settlement_outcomes (canonical settlement truth), observations, source_run, readiness_state, source_run_coverage, raw_forecast_artifacts, raw_model_forecasts | forecast ingest, harvester, calibration |
+| **zeus_trades.db** | `state/zeus_trades.db` (active since K1) | position_events, position_current, trade_decisions, chronicle, shadow_signals, risk_actions, strategy_health, selection facts | cycle_runner, executor, harvester, riskguard |
+
+Connection helpers (`src/state/db.py` / `src/state/connection_pair.py`):
 - `get_world_connection()` → zeus-world.db
-- `get_trade_connection_with_world()` → zeus_trades.db with ATTACH zeus-world.db as "world" for cross-DB joins
+- `get_forecasts_connection()` → zeus-forecasts.db
+- `get_trade_connection()` → zeus_trades.db
+- `get_forecasts_connection_with_world()` → ATTACH + SAVEPOINT for cross-DB writes (INV-37: never independent connections)
 
 All connections use WAL mode and foreign keys ON.
 
-The legacy `zeus.db` path still exists but is not the canonical data surface.
+### 1.1a risk_state.db (riskguard-only, outside the K1 split)
+
+| Database | Physical path | What it stores | Who writes |
+|----------|---------------|---------------|------------|
+| **risk_state.db** | `state/risk_state.db` | risk_state (level history) | riskguard only |
+
+`risk_state.db` exists but is NOT one of the three canonical K1 data DBs. The legacy `zeus.db` path still exists but is not the canonical data surface.
 
 ### 1.2 Authority hierarchy
 
