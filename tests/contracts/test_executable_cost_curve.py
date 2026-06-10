@@ -377,3 +377,37 @@ def test_empty_book_fails_closed():
             min_order_size=Decimal("1"),
             quote_ttl=timedelta(seconds=2),
         )
+
+
+def test_maker_resting_avg_cost_drops_taker_fee():
+    """RELATIONSHIP: a maker-resting projection pays zero taker fee.
+
+    A resting post_only/GTC maker order pays NO taker fee (Fee Structure V2:
+    maker fee = 0). avg_cost(maker_resting=True) must therefore price the SAME
+    book strictly cheaper than the taker projection by exactly the p(1-p) fee,
+    and equal the raw bare-price walk. Charging the taker fee on a maker-resting
+    cost overstates cost and rejects positive-edge maker entries.
+    """
+    # Single deep level at p=0.50 where the fee is maximal.
+    curve = _curve([("0.50", "100")], fee_rate="0.05")
+    stake = Decimal("10")
+
+    taker = float(curve.avg_cost(stake, maker_resting=False).value)
+    maker = float(curve.avg_cost(stake, maker_resting=True).value)
+
+    # Taker pays p + fee*p*(1-p) = 0.50 + 0.05*0.25 = 0.5125.
+    assert taker == pytest.approx(0.5125)
+    # Maker pays the bare price only: 0.50.
+    assert maker == pytest.approx(0.50)
+    assert maker < taker
+    # The difference is exactly the taker fee per share at p=0.50.
+    assert (taker - maker) == pytest.approx(0.05 * 0.5 * 0.5)
+
+
+def test_maker_resting_default_is_taker():
+    """avg_cost defaults to the taker (full-fee) projection."""
+    curve = _curve([("0.50", "100")], fee_rate="0.05")
+    stake = Decimal("10")
+    default = Decimal(str(curve.avg_cost(stake).value))
+    taker = Decimal(str(curve.avg_cost(stake, maker_resting=False).value))
+    assert default == taker

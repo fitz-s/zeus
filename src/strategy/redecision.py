@@ -386,7 +386,16 @@ class RedecisionEngine:
         # A book that cannot fill the stake (depth exhausted / below min order)
         # raises ValueError inside avg_cost — that is itself a fail-closed abort.
         try:
-            all_in_price = curve.avg_cost(Decimal(inputs.stake_usd))
+            # MAKER fee semantics (Fee Structure V2): a resting post-only/GTC
+            # order pays ZERO taker fee, so its all-in cost projection must NOT
+            # carry the p(1-p) taker fee. order_rests_at_admitted_price already
+            # gates the PRICE_MOVED maker/taker branch below; reuse it here so the
+            # edge_lcb the maker is admitted on reflects the maker's true cost.
+            # Taker crossing keeps the full fee model (maker_resting=False).
+            all_in_price = curve.avg_cost(
+                Decimal(inputs.stake_usd),
+                maker_resting=inputs.order_rests_at_admitted_price,
+            )
             all_in_cost = float(all_in_price.value)
         except ValueError as exc:
             return SubmitRecaptureDecision(

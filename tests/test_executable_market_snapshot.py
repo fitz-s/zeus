@@ -31,6 +31,7 @@ from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     StaleMarketSnapshotError,
     canonicalize_fee_details,
+    fee_details_from_gamma_fee_schedule,
     is_fresh,
 )
 from src.contracts.exceptions import EmptyOrderbookError
@@ -729,6 +730,45 @@ def test_fee_details_reject_conflicting_expected_token_or_source():
         canonicalize_fee_details(
             {"base_fee": 30, "source": "stale_source"},
             source="clob_fee_rate",
+        )
+
+
+def test_fee_details_from_gamma_fee_schedule_v2_weather_rate():
+    # Live Gamma weather feeSchedule (verified 2026-06-09):
+    # {exponent: 1, rate: 0.05, takerOnly: true, rebateRate: 0.25}.
+    # Fee Structure V2 (2026-03-30) sets weather taker rate = 0.05, NOT the
+    # stale /fee-rate base_fee=1000 (0.10) — this parse must yield the 5% rate.
+    details = fee_details_from_gamma_fee_schedule(
+        {"exponent": 1, "rate": 0.05, "takerOnly": True, "rebateRate": 0.25},
+        source="gamma_fee_schedule",
+        token_id="weather-token",
+        fee_type="weather_fees",
+    )
+
+    assert details["fee_rate_fraction"] == pytest.approx(0.05)
+    assert details["fee_rate_bps"] == pytest.approx(500.0)
+    assert details["source"] == "gamma_fee_schedule"
+    assert details["token_id"] == "weather-token"
+    assert details["maker_rebate_rate"] == pytest.approx(0.25)
+    assert details["feeSchedule_taker_only"] is True
+    assert details["fee_type"] == "weather_fees"
+
+
+def test_fee_details_from_gamma_fee_schedule_rejects_nonunit_exponent():
+    # fee = rate * p*(1-p) assumes exponent==1; any other exponent must fail
+    # closed so the caller falls back to the (higher) /fee-rate value.
+    with pytest.raises(MarketSnapshotMismatchError, match="exponent"):
+        fee_details_from_gamma_fee_schedule(
+            {"exponent": 2, "rate": 0.05},
+            source="gamma_fee_schedule",
+        )
+
+
+def test_fee_details_from_gamma_fee_schedule_rejects_missing_rate():
+    with pytest.raises(MarketSnapshotMismatchError, match="rate"):
+        fee_details_from_gamma_fee_schedule(
+            {"exponent": 1, "takerOnly": True},
+            source="gamma_fee_schedule",
         )
 
 

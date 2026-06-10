@@ -1,7 +1,10 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-05-20
+# Last reused/audited: 2026-06-09
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
 #                  docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/U1.yaml
+# Audit note 2026-06-09: add fee_details_from_gamma_fee_schedule — Fee Structure
+#   V2 (2026-03-30) serves the authoritative taker rate on the Gamma market
+#   feeSchedule (rate=0.05 weather), superseding the stale /fee-rate base_fee=1000.
 """Executable CLOB market snapshot contract.
 
 U1 makes executable market facts immutable, externally reconcilable, and
@@ -519,6 +522,59 @@ def canonicalize_fee_details(
         source_field=source_field,
         raw_unit=raw_unit,
     )
+
+
+def fee_details_from_gamma_fee_schedule(
+    fee_schedule: Mapping[str, Any],
+    *,
+    source: str,
+    token_id: str | None = None,
+    fee_type: str | None = None,
+) -> dict[str, Any]:
+    """Canonicalize a Gamma market ``feeSchedule`` object into fee_details.
+
+    Fee Structure V2 (effective 2026-03-30) is served on the Gamma market
+    object as ``feeSchedule: {exponent, rate, takerOnly, rebateRate}`` where
+    ``rate`` is the V2 fraction coefficient (0.05 for weather). The standalone
+    CLOB ``/fee-rate`` endpoint still returns the stale pre-V2 ``base_fee``
+    (1000 bps = 0.10 for weather), a 2x overestimate (P10 changelog 2026-03-31).
+    Gamma ``feeSchedule.rate`` is the canonical V2 source.
+
+    The taker fee formula is ``fee = rate * C * p * (1-p)`` (exponent=1); only
+    ``exponent == 1`` schedules are accepted here — any other exponent fails
+    closed so callers fall back to the (higher) /fee-rate value rather than
+    silently mispricing.
+    """
+
+    if not isinstance(fee_schedule, Mapping):
+        raise MarketSnapshotMismatchError("feeSchedule must be a mapping")
+
+    exponent = fee_schedule.get("exponent")
+    if exponent is not None:
+        try:
+            exponent_value = float(exponent)
+        except (TypeError, ValueError) as exc:
+            raise MarketSnapshotMismatchError("feeSchedule.exponent must be numeric") from exc
+        if exponent_value != 1.0:
+            raise MarketSnapshotMismatchError(
+                f"feeSchedule.exponent must be 1 for fee = rate*p*(1-p); got {exponent!r}"
+            )
+
+    rate_value, rate_field = _first_fee_value(fee_schedule, ("rate", "feeRate", "fee_rate"))
+    if rate_field is None:
+        raise MarketSnapshotMismatchError("feeSchedule missing rate/feeRate")
+    rate = _validate_fee_rate_fraction(rate_value, "feeSchedule.rate")
+
+    details: dict[str, Any] = {
+        "fee_rate_fraction": rate,
+        "feeSchedule_taker_only": bool(fee_schedule.get("takerOnly", True)),
+    }
+    rebate = fee_schedule.get("rebateRate")
+    if rebate is not None:
+        details["maker_rebate_rate"] = _validate_fee_rate_fraction(rebate, "feeSchedule.rebateRate")
+    if fee_type:
+        details["fee_type"] = str(fee_type)
+    return canonicalize_fee_details(details, source=source, token_id=token_id)
 
 
 def canonicalize_legacy_fee_rate_value(

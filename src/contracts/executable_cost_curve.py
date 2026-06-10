@@ -1,7 +1,10 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-09
 # Authority basis: "bin selection.md" §14.3 + §5.3 + §5.4 + §3 + Hidden #6/#15/#16
 #                  + §13 (min-order gate) + operator directive 2026-06-08
+# Audit note 2026-06-09: avg_cost gains maker_resting (Fee Structure V2 — a
+#   resting post_only/GTC maker pays ZERO taker fee; the p(1-p) fee is dropped
+#   for the maker-resting cost projection only). Taker crossing unchanged.
 """ExecutableCostCurve — size-dependent all-in cost of a native BUY side.
 
 Spec Phase 3 (§11), §14.3, §5.3-5.4, Hidden issues #6/#15/#16.
@@ -212,8 +215,23 @@ class ExecutableCostCurve:
     # Core depth walk (spec §5.3-5.4).
     # ------------------------------------------------------------------
 
+    def _effective_fee_model(self, *, maker_resting: bool) -> "FeeModel":
+        """Return the fee model that prices this fill.
+
+        A maker order that RESTS as a post-only/GTC limit pays ZERO taker fee
+        (Polymarket Fee Structure V2: maker fee = 0; the 25% rebate is upside,
+        recorded on the envelope provenance, not modelled in the cost here).
+        Charging the taker p(1-p) fee on a maker-resting cost projection
+        overstates the cost and rejects positive-edge maker entries. Taker
+        crossing keeps the full fee model.
+        """
+
+        if maker_resting:
+            return FeeModel(fee_rate=Decimal("0"))
+        return self.fee_model
+
     def _walk_for_stake(
-        self, stake_usd: Decimal
+        self, stake_usd: Decimal, *, fee_model: "FeeModel | None" = None
     ) -> tuple[Decimal, Decimal, Decimal]:
         """Walk asks spending up to ``stake_usd`` USD all-in. Cheapest-first.
 
@@ -236,6 +254,7 @@ class ExecutableCostCurve:
         if stake_usd <= Decimal("0"):
             raise ValueError(f"stake_usd must be > 0, got {stake_usd}")
 
+        effective_fee_model = fee_model if fee_model is not None else self.fee_model
         remaining_usd = stake_usd
         shares_filled = Decimal("0")
         usd_spent = Decimal("0")
@@ -244,7 +263,7 @@ class ExecutableCostCurve:
         for lvl in self.levels:
             if remaining_usd <= _DEPTH_EPS:
                 break
-            all_in_p = self.fee_model.all_in_price(lvl.price)
+            all_in_p = effective_fee_model.all_in_price(lvl.price)
             # Shares this level can provide vs. shares the remaining stake buys.
             shares_at_level_capacity = lvl.size
             shares_affordable = remaining_usd / all_in_p
@@ -262,7 +281,7 @@ class ExecutableCostCurve:
         # the ladder. Fail closed (§13: "Optimal stake above allowed depth").
         if remaining_usd > _DEPTH_EPS:
             max_notional = sum(
-                (self.fee_model.all_in_price(lvl.price) * lvl.size for lvl in self.levels),
+                (effective_fee_model.all_in_price(lvl.price) * lvl.size for lvl in self.levels),
                 Decimal("0"),
             )
             raise ValueError(
@@ -363,7 +382,7 @@ class ExecutableCostCurve:
             currency="probability_units",
         )
 
-    def avg_cost(self, stake_usd: Decimal) -> ExecutionPrice:
+    def avg_cost(self, stake_usd: Decimal, *, maker_resting: bool = False) -> ExecutionPrice:
         """Depth-weighted all-in cost per share for ``stake_usd``, as ExecutionPrice.
 
         Spec §5.3: this is the scalar typed cost boundary at the chosen stake.
@@ -373,11 +392,20 @@ class ExecutableCostCurve:
         caller must NOT call ``with_taker_fee`` again (that would double-charge,
         the inverse of Hidden #15).
 
+        ``maker_resting=True`` prices the fill with ZERO taker fee (a resting
+        post-only/GTC maker pays no taker fee under Fee Structure V2). Use this
+        ONLY for the maker-resting cost projection where the order rests at its
+        admitted limit and never crosses; taker crossing keeps maker_resting
+        False so the p(1-p) fee remains modelled.
+
         Monotone NON-DECREASING in ``stake_usd`` for a BUY (Hidden #6): larger
         stakes walk into higher-priced levels whose all-in g(p) is strictly
         larger, so the depth-weighted average can only rise.
         """
-        shares_filled, usd_spent, _ = self._walk_for_stake(Decimal(stake_usd))
+        shares_filled, usd_spent, _ = self._walk_for_stake(
+            Decimal(stake_usd),
+            fee_model=self._effective_fee_model(maker_resting=maker_resting),
+        )
         all_in_per_share = usd_spent / shares_filled
         return ExecutionPrice(
             value=float(all_in_per_share),
