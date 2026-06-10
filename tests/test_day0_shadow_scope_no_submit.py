@@ -331,3 +331,118 @@ def test_forecast_plus_day0_scope_admits_at_boot(monkeypatch) -> None:
                 "day0_extreme_trigger_enabled": True,
             }
         )
+
+
+# ===========================================================================
+# MAJOR 5 — default scope ("forecast_only") explicitly rejects day0-lane and
+#            unknown event types at the FINAL ADAPTER BOUNDARY (PR#404).
+#            No reliance on the caller passing only the right event types.
+# ===========================================================================
+
+def _build_forecast_only_adapter(monkeypatch, event):
+    """Build a default-scope (forecast_only) adapter with real_order_submit_enabled=True.
+    The no-submit receipt is patched to proof_accepted=True so that WITHOUT the scope
+    gate the adapter would proceed — isolating the boundary gate under test."""
+    from src.engine import event_reactor_adapter as adapter
+    from src.main import require_operator_arm
+
+    monkeypatch.setattr(
+        adapter,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: _accepted_no_submit_receipt(event),
+    )
+    arm = require_operator_arm({"edli_live_operator_authorized": True})
+
+    return adapter.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        executor_submit=lambda *_: (_ for _ in ()).throw(AssertionError("executor_submit must not be reached")),  # type: ignore[arg-type]
+        operator_arm=arm,
+        # edli_live_scope defaults to "forecast_only" — the default constructor
+    )
+
+
+def test_default_forecast_only_adapter_rejects_day0_event(monkeypatch) -> None:
+    """MAJOR 5: default-constructed adapter (forecast_only scope) + DAY0_EXTREME_UPDATED
+    → deterministic rejection with reason DAY0_OUT_OF_SCOPE_AT_BOUNDARY.
+    No reliance on the caller filtering events — the boundary gate fires regardless."""
+    event = _day0_event()
+    submit = _build_forecast_only_adapter(monkeypatch, event)
+
+    receipt = submit(event, _DT)
+
+    assert receipt.proof_accepted is False
+    assert receipt.submitted is False
+    assert receipt.reason == "DAY0_OUT_OF_SCOPE_AT_BOUNDARY", (
+        f"forecast_only default scope must reject day0 event with DAY0_OUT_OF_SCOPE_AT_BOUNDARY, "
+        f"got: {receipt.reason!r}"
+    )
+
+
+def test_default_forecast_only_adapter_rejects_unknown_event_type(monkeypatch) -> None:
+    """MAJOR 5: unknown event_type under forecast_only default scope → rejected
+    with DAY0_OUT_OF_SCOPE_AT_BOUNDARY (fail-closed — unknown is never forecast-lane)."""
+    from src.events.opportunity_event import ForecastSnapshotReadyPayload, make_opportunity_event
+
+    # Build a structurally valid event but with an unrecognized event_type.
+    # We reuse the forecast payload (irrelevant — the boundary gate fires on event_type).
+    payload = ForecastSnapshotReadyPayload(
+        city="Chicago", target_date="2026-06-09", metric="high",
+        source_id="opendata", source_run_id="run-unk", cycle="00", track="live",
+        snapshot_id="snap-unk", snapshot_hash="hash-unk",
+        captured_at="2026-06-09T18:00:00+00:00", available_at="2026-06-09T18:01:00+00:00",
+        required_fields_present=True, required_steps_present=True,
+        member_count=51, min_members_floor=40, completeness_status="COMPLETE",
+        required_steps=[0], observed_steps=[0], expected_members=51,
+        source_run_status="SUCCESS", source_run_completeness_status="COMPLETE",
+        coverage_completeness_status="COMPLETE", coverage_readiness_status="LIVE_ELIGIBLE",
+    )
+    unknown_event = make_opportunity_event(
+        event_type="UNKNOWN_FUTURE_LANE_TYPE",
+        entity_key="Chicago|2026-06-09|high|unknown-test",
+        source="forecast_live",
+        observed_at="2026-06-09T18:00:00+00:00",
+        available_at="2026-06-09T18:01:00+00:00",
+        received_at="2026-06-09T18:02:00+00:00",
+        payload=payload,
+        causal_snapshot_id="snap-unk",
+    )
+    submit = _build_forecast_only_adapter(monkeypatch, unknown_event)
+
+    receipt = submit(unknown_event, _DT)
+
+    assert receipt.proof_accepted is False
+    assert receipt.reason == "DAY0_OUT_OF_SCOPE_AT_BOUNDARY", (
+        f"forecast_only must reject unknown event types fail-closed, got: {receipt.reason!r}"
+    )
+
+
+def test_default_forecast_only_adapter_admits_forecast_event(monkeypatch) -> None:
+    """Regression guard: FORECAST_SNAPSHOT_READY must still pass the scope gate
+    under forecast_only — it is the only lane this scope admits."""
+    event = _forecast_event()
+
+    from src.engine import event_reactor_adapter as adapter
+    from src.main import require_operator_arm
+
+    monkeypatch.setattr(
+        adapter,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: _accepted_no_submit_receipt(event),
+    )
+    arm = require_operator_arm({"edli_live_operator_authorized": True})
+
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=False,  # no-submit mode: avoids live-cert build
+        operator_arm=arm,
+        # default forecast_only scope
+    )
+
+    receipt = submit(event, _DT)
+
+    assert receipt.reason != "DAY0_OUT_OF_SCOPE_AT_BOUNDARY", (
+        "FORECAST_SNAPSHOT_READY must not be rejected by the forecast_only scope gate"
+    )
