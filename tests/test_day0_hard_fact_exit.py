@@ -632,3 +632,66 @@ class TestHardFactExitDespiteCanonicalWriteFailure:
         reasons = [str(getattr(r, "exit_reason", "")) for r in results]
         assert any("MONITOR_CANONICAL_WRITE_FAILED" in reason for reason in reasons)
         assert not any(getattr(r, "should_exit", False) for r in results)
+
+
+# ===========================================================================
+# R25 — PR#404 ROUND-2 P1-B: topology resolver is row-factory-agnostic
+# ===========================================================================
+
+class TestTupleConnectionTopology:
+    """The resolver must not depend on sqlite3.Row being installed — a default
+    tuple connection previously yielded an EMPTY identity dict and the
+    dead-bin resting order silently escaped cancellation."""
+
+    def _tuple_conn(self):
+        # SAME schema/rows as _orders_conn but with NO row_factory (tuples).
+        rows_conn = _orders_conn()
+        rows_conn.commit()  # backup() busy-loops forever on a pending write txn
+        raw = sqlite3.connect(":memory:")  # default: tuple rows
+        rows_conn.backup(raw)
+        rows_conn.close()
+        assert raw.row_factory is None
+        return raw
+
+    def test_resolver_works_on_tuple_rows(self):
+        from src.execution.day0_hard_fact_exit import _resolve_order_bin_identity
+
+        conn = self._tuple_conn()
+        identity = _resolve_order_bin_identity(conn, "tok-dead-yes")
+        assert identity is not None
+        assert identity["city"] == "Tokyo"
+        assert identity["target_date"] == "2026-06-10"
+        assert identity["metric"] == "high"
+        assert identity["direction"] == "buy_yes"
+        assert float(identity["range_high"]) == 25.0
+        # NO token via EMS on tuples too
+        identity_no = _resolve_order_bin_identity(conn, "tok-shoulder-no")
+        assert identity_no is not None and identity_no["direction"] == "buy_no"
+
+    def test_dead_bin_cancel_fires_on_tuple_connection(self, monkeypatch):
+        """End-to-end: the risk-reduction sweep cancels the dead-bin order even
+        when the monitor's connection lacks a Row factory."""
+        _set_metar_memo(monkeypatch, 26)
+        clob = _FakeClob([
+            {"orderID": "o1", "asset_id": "tok-dead-yes", "side": "BUY"},
+            {"orderID": "o2", "asset_id": "tok-alive-yes", "side": "BUY"},
+        ])
+        n = cancel_day0_dead_bin_resting_entries(
+            clob=clob, conn=self._tuple_conn(),
+            cities_by_name={"Tokyo": _tokyo()},
+            now=datetime(2026, 6, 10, 6, 0, tzinfo=UTC),
+        )
+        assert n == 1
+        assert clob.cancelled == ["o1"]
+
+    def test_legacy_schema_without_metric_column_falls_through_to_typed_authority(self):
+        """Two-query fallback: a market_events without temperature_metric (the
+        trades-DB legacy shape, as in the fixture) resolves the metric from
+        market_topology_state — and refuses when no typed authority exists."""
+        from src.execution.day0_hard_fact_exit import _resolve_order_bin_identity
+
+        conn = self._tuple_conn()
+        identity = _resolve_order_bin_identity(conn, "tok-dead-yes")
+        assert identity is not None and identity["metric"] == "high"
+        conn.execute("DELETE FROM market_topology_state")
+        assert _resolve_order_bin_identity(conn, "tok-dead-yes") is None
