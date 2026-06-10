@@ -433,32 +433,25 @@ class TestPlausibilityBound:
 
 
 # ===========================================================================
-# R18 — day0 exposure cap (fix 5)
+# R18 — day0 exposure cap (PR#404 P0-1: a SIZING-KERNEL bound, not a post-clamp)
 # ===========================================================================
 
 class TestDay0ExposureCap:
-    def test_reduce_only_clamp(self):
-        from src.engine.event_reactor_adapter import _apply_day0_exposure_cap
+    """Kernel-integration cases live in tests/test_day0_exposure_cap_kernel.py
+    (real proof -> curve -> kernel path, incl. the operator's headroom-$20 /
+    min-order-$30 boundary). Here: the config surface + the removal antibody."""
 
-        assert _apply_day0_exposure_cap(
-            stake_usd=40.0, existing_family_usd=10.0, cap_usd=25.0, family_id="f",
-        ) == pytest.approx(15.0)
-        # under the cap: unchanged
-        assert _apply_day0_exposure_cap(
-            stake_usd=5.0, existing_family_usd=10.0, cap_usd=25.0, family_id="f",
-        ) == pytest.approx(5.0)
-        # disabled cap: unchanged
-        assert _apply_day0_exposure_cap(
-            stake_usd=500.0, existing_family_usd=0.0, cap_usd=None, family_id="f",
-        ) == pytest.approx(500.0)
+    def test_post_hoc_clamp_is_deleted(self):
+        """PR#404 P0-1: the post-hoc clamp bypassed min-order semantics and could
+        emit a stake below the real venue floor. It must stay deleted — the cap
+        is a kernel bound (day0_headroom_usd) with first-class aborts."""
+        import src.engine.event_reactor_adapter as era
 
-    def test_exhausted_headroom_raises_deterministic_no_submit(self):
-        from src.engine.event_reactor_adapter import _apply_day0_exposure_cap
-
-        with pytest.raises(ValueError, match="DAY0_EXPOSURE_CAP_EXHAUSTED"):
-            _apply_day0_exposure_cap(
-                stake_usd=10.0, existing_family_usd=24.5, cap_usd=25.0, family_id="f",
-            )
+        assert not hasattr(era, "_apply_day0_exposure_cap")
+        source = open("src/engine/event_reactor_adapter.py", encoding="utf-8").read()
+        assert "day0_headroom_usd" in source
+        assert "SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED" in source
+        assert "SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER" in source
 
     def test_default_cap_is_modest_and_configurable(self):
         from src.engine.event_reactor_adapter import (
