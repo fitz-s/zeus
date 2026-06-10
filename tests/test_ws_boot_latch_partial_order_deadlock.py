@@ -155,6 +155,57 @@ def test_clean_m5_sweep_clears_latch_despite_partial_order(conn) -> None:
     )
 
 
+def test_midrun_gap_reconnect_pong_marks_authed_never_fast_clears(conn) -> None:
+    # Leg 5 (2026-06-09 19:20Z incident): after a REAL disconnect
+    # (gap_reason=websocket_disconnect:...), the reconnected channel emits only
+    # protocol pongs (quiet wallet, no data messages). The pong must transition
+    # DISCONNECTED -> AUTHED so the M5 sweep can observe a healthy subscription —
+    # but must NEVER fast-clear (a real gap can hide fills even with an empty
+    # local surface).
+    _seed_partial_command(conn)  # venue order 0xrest is OURS (known command)
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="DISCONNECTED",
+            gap_reason="websocket_disconnect:ConnectionResetError",
+            m5_reconcile_required=True,
+            updated_at=NOW,
+            stale_after_seconds=30,
+        )
+    )
+    status = _ingestor(conn)._record_transport_keepalive(observed_at=NOW)
+    assert status.subscription_state == "AUTHED"
+    assert status.m5_reconcile_required is True, (
+        "a real mid-run gap must never clear on a pong — even with an empty "
+        "local surface; only the M5 sweep proves no fills were missed"
+    )
+    assert not status.to_summary(now=NOW)["entry"]["allow_submit"]
+    # ...and the M5 sweep now CAN clear it (subscription healthy + clean sweep).
+    result = run_ws_gap_reconcile_and_clear(
+        _CleanSweepAdapter(), conn, observed_at=NOW + timedelta(seconds=5)
+    )
+    assert result["status"] == "cleared", result
+    assert ws_gap_guard.summary(now=NOW + timedelta(seconds=6))["entry"]["allow_submit"] is True
+
+
+def test_auth_failed_state_not_revived_by_pong(conn) -> None:
+    ws_gap_guard.configure_status(
+        ws_gap_guard.WSGapStatus(
+            connected=False,
+            last_message_at=None,
+            subscription_state="AUTH_FAILED",
+            gap_reason="auth_failure_frame",
+            m5_reconcile_required=True,
+            updated_at=NOW,
+            stale_after_seconds=30,
+        )
+    )
+    status = _ingestor(conn)._record_transport_keepalive(observed_at=NOW)
+    assert status.subscription_state == "AUTH_FAILED"
+    assert status.m5_reconcile_required is True
+
+
 def test_empty_surface_pong_still_full_clears(conn) -> None:
     # Regression: the original clean-boot fast path is unchanged.
     status = _ingestor(conn)._record_transport_keepalive(observed_at=NOW)

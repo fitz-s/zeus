@@ -658,24 +658,32 @@ class PolymarketUserChannelIngestor:
         clean_boot_age_seconds = (now - clean_boot_reference.astimezone(timezone.utc)).total_seconds()
         if (
             current.subscription_state == "DISCONNECTED"
-            and current.gap_reason == "not_configured"
             and current.m5_reconcile_required
             and clean_boot_age_seconds >= 0
         ):
+            # Transport+auth proof applies to ANY disconnected latched state the
+            # pong can reach (clean boot OR post-reconnect after a real gap).
+            # AUTH_FAILED / MARKET_MISMATCH are not DISCONNECTED and stay latched.
+            was_clean_boot = current.gap_reason == "not_configured"
             ws_gap_guard.record_message(
                 observed_at=now,
                 subscription_state="AUTHED",
                 stale_after_seconds=self.stale_after_seconds,
             )
-            if self._clean_boot_side_effect_surface_empty():
+            if was_clean_boot and self._clean_boot_side_effect_surface_empty():
+                # Only the clean boot may fast-clear: the daemon never had a
+                # connection to lose messages from. A REAL mid-run gap could
+                # hide fills regardless of the local surface — it always waits
+                # for the full M5 sweep (run_ws_gap_reconcile_and_clear).
                 return ws_gap_guard.clear_after_no_local_side_effects(
                     observed_at=now,
                     stale_after_seconds=self.stale_after_seconds,
                 )
             logger.info(
-                "M3 user-channel transport healthy (pong) but local side-effect "
-                "surface is non-empty; M5 latch stays armed pending the full "
-                "ws-gap reconcile sweep"
+                "M3 user-channel transport healthy (pong, %s); M5 latch stays "
+                "armed pending the full ws-gap reconcile sweep",
+                "clean boot, non-empty surface" if was_clean_boot else
+                f"post-gap reconnect ({current.gap_reason})",
             )
             return ws_gap_guard.status()
         if (
