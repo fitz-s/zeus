@@ -708,3 +708,92 @@ class TestMutexNoHttpSplit:
         )
         assert obs["observation_available_at"] == obs["observation_time"]
         assert obs["live_authority_status"] == "NON_LIVE_AUTHORITY"
+
+
+# ===========================================================================
+# R21 — anomaly pause persistence + WU-check memo discipline (PR#404 P1)
+# ===========================================================================
+
+class TestAnomalyPausePersistence:
+    """PR#404 P1: a Paris-CDG-class anomaly is a settlement-authority integrity
+    event — the pause must survive a daemon restart, and a WU outage must not
+    consume the success-check memo."""
+
+    def _flags_conn(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def test_pause_survives_process_restart(self):
+        from src.data import day0_oracle_anomaly as oa
+
+        conn = self._flags_conn()
+        oa.flag_day0_oracle_anomaly(
+            "Tokyo", "2026-06-10", detail="paris-class",
+            now=datetime(2026, 6, 10, 4, 0, tzinfo=UTC), conn=conn,
+        )
+        assert oa.is_day0_family_paused("Tokyo", "2026-06-10", conn=conn) is True
+
+        # SIMULATED RESTART: in-process registry wiped; durable flags remain.
+        oa._reset_registry_for_tests()
+        assert oa.is_day0_family_paused(
+            "Tokyo", "2026-06-10",
+            now=datetime(2026, 6, 10, 12, 0, tzinfo=UTC), conn=conn,
+        ) is True, "pause must be re-hydrated from the durable world-DB flags"
+
+        # TTL is enforced from the DURABLE flagged_at, even post-restart.
+        oa._reset_registry_for_tests()
+        assert oa.is_day0_family_paused(
+            "Tokyo", "2026-06-10",
+            now=datetime(2026, 6, 12, 5, 0, tzinfo=UTC), conn=conn,
+        ) is False
+
+    def test_clear_removes_durable_flag_too(self):
+        from src.data import day0_oracle_anomaly as oa
+
+        conn = self._flags_conn()
+        oa.flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="t", conn=conn)
+        assert oa.clear_day0_oracle_anomaly("Tokyo", "2026-06-10", conn=conn) is True
+        oa._reset_registry_for_tests()
+        assert oa.is_day0_family_paused("Tokyo", "2026-06-10", conn=conn) is False
+
+    def test_persist_failure_is_loud_but_pause_holds_in_process(self):
+        from src.data import day0_oracle_anomaly as oa
+
+        class _BrokenConn:
+            def execute(self, *a, **kw):
+                raise sqlite3.OperationalError("disk full")
+
+        oa.flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="t", conn=_BrokenConn())
+        assert oa.is_day0_family_paused("Tokyo", "2026-06-10", conn=_BrokenConn()) is True
+
+    def test_wu_outage_does_not_consume_success_memo(self, monkeypatch):
+        """The old code armed the 10-min memo BEFORE calling WU — an outage
+        silenced the cross-check for the full window. Now: failure arms only a
+        short retry throttle; the next eligible pass retries WU."""
+        from src.data import day0_oracle_anomaly as oa
+
+        calls = {"n": 0}
+
+        def failing_wu(city, target_date=None, **kw):
+            calls["n"] += 1
+            raise RuntimeError("WU outage")
+
+        monkeypatch.setattr(
+            "src.data.observation_client.get_current_observation", failing_wu
+        )
+        city = _tokyo()
+        extremes = SimpleNamespace(target_date="2026-06-10")
+        oa.wu_metar_anomaly_check(city, extremes, [])
+        assert calls["n"] == 1
+        # within the FAILURE retry throttle: no call
+        oa.wu_metar_anomaly_check(city, extremes, [])
+        assert calls["n"] == 1
+        # past the failure throttle (rewind the failure memo), well within what
+        # the OLD code would have treated as the consumed 10-min success memo:
+        import time as _time
+
+        with oa._WU_CHECK_MEMO_LOCK:
+            oa._WU_CHECK_FAILURE_MEMO["Tokyo"] = _time.monotonic() - 200.0
+        oa.wu_metar_anomaly_check(city, extremes, [])
+        assert calls["n"] == 2, "WU must be retried after the short failure throttle"
