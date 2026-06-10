@@ -241,14 +241,147 @@ def _is_decimal_quantized(value: Decimal, quantum: Decimal) -> bool:
     return value == value.quantize(quantum)
 
 
+# --- SDK-faithful venue amount model ---------------------------------------
+# Authority basis: venue invalid_amount rejection loop 2026-06-10
+#   (live venue_command_events 39517e446ba94b60/5cec15b1de484fbb:
+#    "the market buy orders maker amount supports a max accuracy of 2 decimals,
+#     taker amount a max of 4 decimals").
+#
+# py_clob_client_v2.order_builder.builder.get_order_amounts builds the BUY
+# maker/taker with FLOAT math:
+#     raw_taker = round_down(shares, 2)          # floor(shares*100)/100
+#     raw_maker = raw_taker * round_normal(price, price_dec)
+# floor() on the float product truncates one cent for ~287/5000 cents-grid
+# share values (e.g. round_down(8.7, 2) == 8.69), and the resulting
+# raw_taker*price lands on 3+ decimals -> the venue's market-buy validator
+# (maker <= 2 decimals) rejects it. The PREVIOUS contract modelled
+# maker = Decimal(shares) * Decimal(price) (exact, e.g. 8.7*0.70 == 6.090,
+# cents-aligned) and therefore waved through amounts the SDK actually
+# rejects. We replicate the SDK's float build so the contract's notion of
+# "venue-valid" equals the maker the venue truly receives.
+#
+# round_config.size is 2 for every tick; round_config.price is the tick's
+# decimal count (0.1->1, 0.01->2, 0.001->3, 0.0001->4). The maker grid the
+# venue enforces for a market/marketable BUY is 2 decimals regardless of tick,
+# so the maker check is tick-independent; we use the canonical 0.01 tick for
+# price rounding, which leaves a sub-cent price unchanged for any finer tick.
+_SDK_MARKET_SIZE_DECIMALS = 2
+_SDK_MAKER_VENUE_DECIMALS = 2
+_SDK_TAKER_VENUE_DECIMALS = 4
+_DEFAULT_TICK_SIZE = Decimal("0.01")
+# tick_size -> price decimal precision the SDK round_config applies
+#   (py_clob_client_v2 ROUNDING_CONFIG: 0.1->1, 0.01->2, 0.001->3, 0.0001->4).
+_SDK_PRICE_DECIMALS_BY_TICK = {
+    Decimal("0.1"): 1,
+    Decimal("0.01"): 2,
+    Decimal("0.001"): 3,
+    Decimal("0.0001"): 4,
+}
+
+
+def _sdk_price_decimals_for_tick(tick_size: Decimal) -> int:
+    # The SDK ROUNDING_CONFIG is keyed by the tick string and its price
+    # precision IS the tick's decimal count (0.1->1 ... 0.0001->4). The map
+    # above pins the four supported ticks; any other tick's price precision is
+    # its own decimal count by the same rule.
+    decimals = _SDK_PRICE_DECIMALS_BY_TICK.get(tick_size)
+    if decimals is not None:
+        return decimals
+    return abs(tick_size.normalize().as_tuple().exponent)
+
+
+def _normalize_tick_size(tick_size: Decimal | str | None) -> Decimal:
+    if tick_size is None:
+        return _DEFAULT_TICK_SIZE
+    if isinstance(tick_size, Decimal):
+        return tick_size
+    return Decimal(str(tick_size))
+
+
+def _sdk_round_down(value: float, decimals: int) -> float:
+    """Replicate py_clob_client_v2.order_builder.helpers.round_down (float floor)."""
+    import math
+
+    scale = 10 ** decimals
+    return math.floor(value * scale) / scale
+
+
+def _sdk_round_normal(value: float, decimals: int) -> float:
+    """Replicate py_clob_client_v2.order_builder.helpers.round_normal."""
+    scale = 10 ** decimals
+    return round(value * scale) / scale
+
+
+def _sdk_round_up(value: float, decimals: int) -> float:
+    """Replicate py_clob_client_v2.order_builder.helpers.round_up (float ceil)."""
+    import math
+
+    scale = 10 ** decimals
+    return math.ceil(value * scale) / scale
+
+
+def _sdk_decimal_places(value: float) -> int:
+    return abs(Decimal(repr(value)).as_tuple().exponent)
+
+
+def _sdk_market_buy_maker_taker(
+    *,
+    submitted_shares: Decimal,
+    final_limit_price: Decimal,
+    tick_size: Decimal,
+) -> tuple[float, float]:
+    """The maker/taker the py_clob_client_v2 BUY LIMIT builder actually constructs.
+
+    EXACT replica of OrderBuilder.get_order_amounts (builder.py:61, BUY branch —
+    Zeus submits FOK/FAK as LIMIT orders via client.create_order, so the limit
+    path is the live path):
+
+        raw_price = round_normal(price, rc.price)
+        raw_taker = round_down(size, rc.size)          # rc.size == 2 for all ticks
+        raw_maker = raw_taker * raw_price
+        if decimal_places(raw_maker) > rc.amount:      # rc.amount == rc.price + 2
+            raw_maker = round_up(raw_maker, rc.amount + 4)
+            if decimal_places(raw_maker) > rc.amount:
+                raw_maker = round_down(raw_maker, rc.amount)
+
+    The round_up(+4) RESCUE step matters in BOTH directions and omitting it was
+    itself a model bug (caught against live fills): it rescues pure float noise
+    on an exact-cents product (5.0*0.72 = 3.5999999999999996 -> 3.6, which the
+    venue ACCEPTED live), and it does NOT rescue a genuinely 3-decimal product
+    (8.69*0.7 -> 6.083, which the venue 400-rejected live). Returns the
+    (raw_maker, raw_taker) floats the SDK signs; the venue's marketable-BUY
+    validator then enforces maker <= 2 decimals / taker <= 4 decimals on them.
+    """
+    shares = float(submitted_shares)
+    price = float(final_limit_price)
+    price_dec = _sdk_price_decimals_for_tick(tick_size)
+    amount_dec = price_dec + 2  # ROUNDING_CONFIG: amount = price decimals + 2 (all ticks)
+    raw_price = _sdk_round_normal(price, price_dec)
+    raw_taker = _sdk_round_down(shares, _SDK_MARKET_SIZE_DECIMALS)
+    raw_maker = raw_taker * raw_price
+    if _sdk_decimal_places(raw_maker) > amount_dec:
+        raw_maker = _sdk_round_up(raw_maker, amount_dec + 4)
+        if _sdk_decimal_places(raw_maker) > amount_dec:
+            raw_maker = _sdk_round_down(raw_maker, amount_dec)
+    return raw_maker, raw_taker
+
+
 def venue_submit_amount_precision_error(
     *,
     direction: ExecutionDirection | str,
     final_limit_price: Decimal,
     submitted_shares: Decimal,
     order_type: OrderType | str,
+    tick_size: Decimal | str | None = None,
 ) -> str | None:
-    """Return why a venue submit amount would be rejected before SDK contact."""
+    """Return why a venue submit amount would be rejected before SDK contact.
+
+    Models the maker/taker the py_clob_client_v2 builder actually sends (FLOAT
+    math), not an idealised Decimal product. See _sdk_market_buy_maker_taker.
+    ``tick_size`` defaults to 0.01 (the canonical Polymarket weather-market
+    tick); pass the snapshot's ``min_tick_size`` for finer-tick markets so the
+    SDK price rounding is matched faithfully.
+    """
 
     normalized_direction = str(direction or "")
     normalized_order_type = str(order_type or "").strip().upper()
@@ -262,12 +395,21 @@ def venue_submit_amount_precision_error(
             "immediate BUY taker amount must have at most 4 decimal places: "
             f"submitted_shares={submitted_shares}"
         )
-    maker_amount = submitted_shares * final_limit_price
-    if not _is_decimal_quantized(maker_amount, Decimal("0.01")):
+    raw_maker, raw_taker = _sdk_market_buy_maker_taker(
+        submitted_shares=submitted_shares,
+        final_limit_price=final_limit_price,
+        tick_size=_normalize_tick_size(tick_size),
+    )
+    if _sdk_decimal_places(raw_taker) > _SDK_TAKER_VENUE_DECIMALS:
         return (
-            "immediate BUY maker amount must be cents-aligned: "
+            "immediate BUY taker amount (SDK-built) exceeds 4 decimal places: "
+            f"submitted_shares={submitted_shares} sdk_taker={raw_taker}"
+        )
+    if _sdk_decimal_places(raw_maker) > _SDK_MAKER_VENUE_DECIMALS:
+        return (
+            "immediate BUY maker amount (SDK-built) exceeds 2 decimal places: "
             f"final_limit_price={final_limit_price} submitted_shares={submitted_shares} "
-            f"maker_amount={maker_amount}"
+            f"sdk_maker={raw_maker} (sdk_taker={raw_taker})"
         )
     return None
 
@@ -278,6 +420,7 @@ def quantize_submit_shares_for_venue(
     *,
     final_limit_price: Decimal,
     order_type: OrderType | str,
+    tick_size: Decimal | str | None = None,
 ) -> Decimal:
     """Quantize submitted shares to both Zeus' share grid and venue amount grids."""
 
@@ -294,6 +437,7 @@ def quantize_submit_shares_for_venue(
                 final_limit_price=final_limit_price,
                 submitted_shares=quantized,
                 order_type=order_type,
+                tick_size=tick_size,
             )
             is None
         ):
@@ -310,6 +454,7 @@ def quantize_submit_shares_for_venue_at_most(
     *,
     final_limit_price: Decimal,
     order_type: OrderType | str,
+    tick_size: Decimal | str | None = None,
 ) -> Decimal:
     """Return the largest venue-legal share amount not greater than ``shares``."""
 
@@ -329,6 +474,7 @@ def quantize_submit_shares_for_venue_at_most(
                 final_limit_price=final_limit_price,
                 submitted_shares=quantized,
                 order_type=order_type,
+                tick_size=tick_size,
             )
             is None
         ):
