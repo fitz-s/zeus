@@ -1,5 +1,13 @@
 # Created: 2026-05 (R3 M5)
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-10
+# Authority basis (2026-06-10 operator-acknowledged ghost antibody): an in-Zeus-domain
+#   resting order the operator manually placed on the SHARED proxy wallet and
+#   explicitly acknowledged (a prior finding resolved_by 'session_operator_confirmed'
+#   or resolution prefix 'operator_manual') is record-and-resolved while unfilled
+#   (size_matched == 0), so one acknowledged unwind cannot freeze the engine via the
+#   risk_allocator reconcile_finding_threshold or the WS two-proofs M5 zero-findings
+#   latch. Any matched size voids the acknowledgment (fail-closed, mirrors the
+#   foreign-wallet matched-size tripwire). See _is_operator_acknowledged_resting_order.
 # Authority basis: R3 M5 reconcile + 2026-06-04 M5 mutex-IO antibody. The adapter-
 #   touching entrypoints (fresh_reconcile_snapshot, run_reconcile_sweep) assert
 #   the world write mutex is NOT held before any venue read, so a future caller
@@ -341,6 +349,7 @@ def refresh_unresolved_reconcile_findings(
     # read): run the migration pass here too so the kill switch clears on the next
     # 1-minute refresh instead of waiting for the next full ws-gap sweep.
     foreign_resolved = _resolve_foreign_wallet_ghost_findings(conn, observed_at=observed)
+    foreign_resolved += _resolve_operator_acknowledged_ghost_findings(conn, observed_at=observed)
     token_ids = _unresolved_position_drift_tokens(conn)
     trade_ids = _unresolved_unrecorded_trade_ids(conn)
     if not token_ids and not trade_ids:
@@ -515,6 +524,15 @@ def run_reconcile_sweep(
                     observed_at=observed,
                 )
                 continue
+            if _is_operator_acknowledged_resting_order(conn, order_id, raw):
+                _record_operator_acknowledged_ghost(
+                    conn,
+                    order_id=order_id,
+                    raw=raw,
+                    context=context,
+                    observed_at=observed,
+                )
+                continue
             findings.append(
                 record_finding(
                     conn,
@@ -660,6 +678,7 @@ def run_reconcile_sweep(
             )
         )
     _resolve_foreign_wallet_ghost_findings(conn, observed_at=observed)
+    _resolve_operator_acknowledged_ghost_findings(conn, observed_at=observed)
     _resolve_disappeared_ghost_order_findings(
         adapter, conn, open_order_ids, trades=trades if trades_available else None, observed_at=observed
     )
@@ -816,6 +835,181 @@ def _resolve_foreign_wallet_ghost_findings(
             conn,
             str(row["finding_id"]),
             resolution=_FOREIGN_WALLET_GHOST_RESOLUTION,
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=observed_at,
+        )
+        resolved += 1
+    return resolved
+
+
+# An operator-acknowledged ghost is an in-Zeus-domain resting order the operator
+# manually placed on the SHARED proxy wallet and explicitly declared (2026-06-10:
+# the Milan-high manual unwind). Unlike a foreign-wallet order, this market IS in
+# Zeus's domain, so the foreign-wallet classifier correctly does not apply. The
+# acknowledgment is honored ONLY while the order stays UNFILLED (size_matched == 0):
+# any fill on the shared wallet is never auto-suppressed — mirror the strictness of
+# the foreign-wallet matched-size tripwire (credential-compromise / unexpected-fill
+# kill switch stays armed).
+_OPERATOR_ACK_GHOST_RESOLUTION = "operator_acknowledged_ghost_order_rollforward"
+_OPERATOR_ACK_RESOLVED_BY = "session_operator_confirmed"
+_OPERATOR_ACK_RESOLUTION_PREFIX = "operator_manual"
+
+
+def _has_operator_acknowledgment(conn: sqlite3.Connection, order_id: str) -> bool:
+    """Whether an operator has explicitly acknowledged this ghost subject.
+
+    The acknowledgment is a pre-existing RESOLVED finding for the same subject_id
+    whose resolution marks operator action: either resolved_by the operator-session
+    marker, or a resolution text with the ``operator_manual`` prefix (the manually
+    resolved row's shape), or the rollforward marker this antibody itself writes.
+    Fail-closed: no acknowledgment row => not acknowledged => strict ghost path.
+    """
+
+    if not order_id:
+        return False
+    row = conn.execute(
+        """
+        SELECT 1
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND subject_id = ?
+           AND resolved_at IS NOT NULL
+           AND (
+                resolved_by = ?
+             OR resolution LIKE ? || '%'
+             OR resolution = ?
+           )
+         LIMIT 1
+        """,
+        (
+            order_id,
+            _OPERATOR_ACK_RESOLVED_BY,
+            _OPERATOR_ACK_RESOLUTION_PREFIX,
+            _OPERATOR_ACK_GHOST_RESOLUTION,
+        ),
+    ).fetchone()
+    return row is not None
+
+
+def _is_operator_acknowledged_resting_order(
+    conn: sqlite3.Connection, order_id: str, raw: Mapping[str, Any]
+) -> bool:
+    """An in-domain ghost the operator acknowledged AND that is still unfilled.
+
+    Strictness mirrors the foreign-wallet rules: any matched size on the CURRENT
+    exchange order voids the acknowledgment (a fill on the shared wallet is never
+    auto-suppressed). An unparseable matched size is treated as non-zero by
+    ``_order_matched_size`` and therefore also voids suppression — stay fail-closed.
+    """
+
+    if _order_matched_size(raw) != 0:
+        return False
+    return _has_operator_acknowledgment(conn, order_id)
+
+
+def _record_operator_acknowledged_ghost(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str,
+    raw: Mapping[str, Any],
+    context: ReconcileContext,
+    observed_at: datetime,
+) -> None:
+    """Record-and-immediately-resolve an operator-acknowledged in-domain ghost.
+
+    Mirrors ``_record_foreign_wallet_ghost``: dedup against an existing
+    rollforward-resolved row so repeated sweeps do not churn duplicate audit rows,
+    then record one audit finding and resolve it in the same sweep. The
+    record-and-resolve shape keeps the M5 ws-gap "zero unresolved findings"
+    arithmetic and the governor unresolved-finding count both clean (the resolved
+    row is excluded from the returned ``findings`` list AND from
+    ``list_unresolved_findings``).
+    """
+
+    existing = conn.execute(
+        """
+        SELECT 1 FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND subject_id = ?
+           AND resolution = ?
+         LIMIT 1
+        """,
+        (order_id, _OPERATOR_ACK_GHOST_RESOLUTION),
+    ).fetchone()
+    if existing is not None:
+        return
+    logger.warning(
+        "operator_acknowledged_ghost_order: venue order %s on Zeus-domain market %s "
+        "is an operator-acknowledged unfilled resting order on the shared wallet "
+        "(size_matched=0); recorded for audit, excluded from the reconcile kill "
+        "switch until it fills",
+        order_id,
+        raw.get("market"),
+    )
+    finding = record_finding(
+        conn,
+        kind="exchange_ghost_order",
+        subject_id=order_id,
+        context=context,
+        evidence={
+            "exchange_order": dict(raw),
+            "reason": "exchange_open_order_absent_from_venue_commands",
+            "classification": "operator_acknowledged_ghost_order",
+        },
+        recorded_at=observed_at,
+    )
+    resolve_finding(
+        conn,
+        finding.finding_id,
+        resolution=_OPERATOR_ACK_GHOST_RESOLUTION,
+        resolved_by="src.execution.exchange_reconcile",
+        resolved_at=observed_at,
+    )
+
+
+def _resolve_operator_acknowledged_ghost_findings(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime,
+) -> int:
+    """Resolve pre-existing unresolved ghost findings the operator acknowledged.
+
+    Migration / re-record pass: a re-recorded unresolved ghost row for an
+    operator-acknowledged subject (the whack-a-mole row the live sweep produced
+    after the manual resolution) is resolved from local evidence alone (no venue
+    read), so the 1-minute refresh and the next sweep both clear it. Only honored
+    while the recorded evidence shows the order still unfilled (size_matched == 0).
+    """
+
+    rows = conn.execute(
+        """
+        SELECT finding_id, subject_id, evidence_json
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND resolved_at IS NULL
+        """
+    ).fetchall()
+    resolved = 0
+    for row in rows:
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except (TypeError, ValueError):
+            continue
+        raw = evidence.get("exchange_order") or {}
+        if not isinstance(raw, Mapping):
+            continue
+        if not _is_operator_acknowledged_resting_order(conn, str(row["subject_id"]), raw):
+            continue
+        logger.warning(
+            "operator_acknowledged_ghost_order: resolving re-recorded ghost finding "
+            "%s (subject %s acknowledged by operator, zero matched size)",
+            row["finding_id"],
+            row["subject_id"],
+        )
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution=_OPERATOR_ACK_GHOST_RESOLUTION,
             resolved_by="src.execution.exchange_reconcile",
             resolved_at=observed_at,
         )
