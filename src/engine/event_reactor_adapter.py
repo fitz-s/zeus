@@ -6764,12 +6764,38 @@ def _live_yes_probabilities(
             lcb_by_condition=lcb_by_condition,
             decision_time=decision_time,
         )
+        # LCB AUDIT IDENTITY (PR#404 P1): the staleness guard can revoke submit
+        # licenses (q_lcb -> 0) WITHOUT moving q, so p_live_vector_hash alone
+        # cannot distinguish two receipts with different eligibility. Hash the
+        # buy_yes LCB vector AND the full day0 lcb transform (per-direction
+        # lcbs, mask, suppressed bins, obs age/budget/margin) so receipts can
+        # explain 'q unchanged but submit license revoked'.
+        import hashlib
+
+        from src.calibration.qlcb_provenance import _qlcb_float as _lcbf
+
+        _lcb_transform = payload.get("_edli_day0_lcb_transform") or {}
+        _transform_canonical = json.dumps(
+            _lcb_transform, sort_keys=True, separators=(",", ":"), default=str
+        )
         return masked_q, masked_lcb, p_values, prefilter, {
             **evidence,
             "p_live_vector_hash": _probability_vector_hash(
                 masked_q[str(candidate.condition_id or "")]
                 for candidate in family.candidates
             ),
+            "q_lcb_vector_hash": _probability_vector_hash(
+                _lcbf(masked_lcb.get((str(candidate.condition_id or ""), "buy_yes"), 0.0))
+                for candidate in family.candidates
+            ),
+            "day0_lcb_transform_hash": "sha256:"
+            + hashlib.sha256(_transform_canonical.encode("utf-8")).hexdigest(),
+            "day0_lcb_staleness_suppressed_bins": len(
+                _lcb_transform.get("staleness_suppressed_conditions") or ()
+            ),
+            "day0_lcb_obs_age_minutes": _lcb_transform.get("obs_age_minutes"),
+            "day0_lcb_staleness_budget_minutes": _lcb_transform.get("staleness_budget_minutes"),
+            "day0_lcb_staleness_margin": _lcb_transform.get("staleness_margin"),
         }
     raise ValueError(f"unsupported EDLI event type for inference: {event.event_type}")
 
@@ -10051,6 +10077,7 @@ def _apply_day0_mask_to_generated_probabilities(
     # point estimate); only the submit-licensing LCB is suppressed. Fail-closed:
     # unparseable obs time or unknown city => maximum margin / conservative budget.
     staleness_uncertain: list[bool] = [False] * len(list(family.candidates))
+    _obs_age_min = _budget_min = _margin = None  # audit fields (PR#404 P1 lcb-transform)
     if _day0_stale_obs_boundary_guard_enabled():
         from src.signal.day0_obs_latency import (
             stale_extreme_uncertainty_margin,
@@ -10140,6 +10167,34 @@ def _apply_day0_mask_to_generated_probabilities(
             0.0,
             source="FORECAST_BOOTSTRAP",
         )
+    # LCB-TRANSFORM AUDIT IDENTITY (PR#404 P1): the staleness guard changes
+    # SUBMIT ELIGIBILITY (q_lcb) without changing q — two receipts with equal
+    # p_live_vector_hash can differ in license. Stash the full transform
+    # (per-condition/direction lcb, mask, suppressed bins, obs age, budget,
+    # margin) on the payload so the caller can hash it into belief evidence
+    # and a no-submit receipt can explain 'q unchanged but license revoked'.
+    payload["_edli_day0_lcb_transform"] = {
+        "yes_lcb_by_condition": {
+            str(candidate.condition_id or ""): _qlcb_float(
+                masked_lcb_by_direction.get((str(candidate.condition_id or ""), "buy_yes"), 0.0)
+            )
+            for candidate in family.candidates
+        },
+        "no_lcb_by_condition": {
+            str(candidate.condition_id or ""): 0.0 for candidate in family.candidates
+        },
+        "mask": [float(value) for value in mask],
+        "staleness_suppressed_conditions": [
+            str(candidate.condition_id or "")
+            for index, candidate in enumerate(family.candidates)
+            if staleness_uncertain[index]
+        ],
+        "obs_age_minutes": _obs_age_min,
+        "staleness_budget_minutes": _budget_min,
+        "staleness_margin": _margin,
+        "rounded_extreme": float(rounded),
+        "metric": str(metric),
+    }
     return masked_q_by_condition, masked_lcb_by_direction
 
 
