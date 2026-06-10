@@ -36,6 +36,31 @@ IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
 # it is evidence-only and the live gate rejects it; it is not minted onto an admitted live
 # certificate, so it is not in the approved set.
 FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
+# K1.3 (consolidated overhaul 2026-06-11): the ALT-credential carve-out is ONE constant +
+# ONE predicate, consumed by BOTH the verifier and the compiler. History: the carve-out
+# existed as two independent tuples (verifier + compiler); when FUSED_BOOTSTRAP was added
+# to the verifier only, every replacement-chain certificate was falsely rejected at compile
+# time with "maturity_level too low" (53/h). Pinned by
+# tests/decision_kernel/test_k1_shared_authority_predicates.py.
+ALT_CREDENTIAL_CALIBRATION_AUTHORITIES = frozenset(
+    {
+        IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+    }
+)
+
+
+def calibration_maturity_too_low(maturity: int, authority: object) -> bool:
+    """ONE shared maturity rule (K1.3). True = reject.
+
+    The maturity_level>3 guard protects REAL Platt models (a placeholder maturity means
+    the model never matured past fitting). IDENTITY_FALLBACK and FUSED_BOOTSTRAP are
+    alternative calibration authorities whose q never passes through Platt; they carry
+    maturity_level=4 as a placeholder, so the guard must not apply to them.
+    """
+    return int(maturity) > 3 and str(authority) not in ALT_CREDENTIAL_CALIBRATION_AUTHORITIES
+
+
 APPROVED_CALIBRATION_AUTHORITIES = frozenset(
     {
         "VERIFIED",
@@ -941,15 +966,8 @@ def _validate_calibration_payload(
     maturity = calibration.get("maturity_level")
     if maturity in (None, ""):
         raise CertificateVerificationError("calibration.maturity_level missing")
-    # IDENTITY_FALLBACK and the replacement FUSED_BOOTSTRAP credential are alternative
-    # calibration authorities, NOT Platt maturity levels — their maturity_level field is a
-    # placeholder (4), so the "maturity too low" rule (which guards real Platt models) does
-    # not apply to them. (CERT BRIDGE 2026-06-10: added FUSED_BOOTSTRAP to this carve-out.)
-    _ALT_CREDENTIAL_AUTHORITIES = (
-        IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
-        FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
-    )
-    if int(maturity) > 3 and authority not in _ALT_CREDENTIAL_AUTHORITIES:
+    # K1.3: ONE shared maturity rule — see calibration_maturity_too_low (module level).
+    if calibration_maturity_too_low(int(maturity), authority):
         raise CertificateVerificationError("calibration.maturity_level too low for live/no-submit")
     input_space = calibration.get("input_space")
     expected_input_space = model_config.get("calibration_input_space")

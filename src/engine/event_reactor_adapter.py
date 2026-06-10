@@ -3099,18 +3099,18 @@ def _build_live_execution_command_certificates(
                     or _action_payload.get("kelly_size_usd")
                     or "0"
                 ))
-                # Bug B fix (2026-06-01): compute desired_shares using float arithmetic
-                # so the value matches exactly what the cert builder will compute for
-                # `size = max(float(min_order_size), reserved_notional / limit_price)`.
-                # Using Decimal division here produced a different number of shares than
-                # the cert builder's float division (e.g. 8.333...333 vs 8.333333333333334),
-                # causing the guard's re-sweep to get a different VWAP → parity rejection.
-                _min_order_size_f = float(_min_order_size_d)
-                _reserved_notional_f = float(_reserved_notional)
-                _limit_price_f = float(_limit_price_d)
-                _desired_shares_f = (
-                    max(_min_order_size_f, _reserved_notional_f / _limit_price_f)
-                    if _limit_price_f > 0 else _min_order_size_f
+                # Bug B fix (2026-06-01) + K1.1 unification (consolidated overhaul
+                # 2026-06-11): the share-sizing formula lives ONCE in
+                # desired_shares_for_reserved_notional (decision_kernel cert builder) —
+                # float arithmetic is the contract; this re-sweep must request EXACTLY
+                # the share count the cert builder computes or sweep VWAP diverges and
+                # parity rejects. Previously a byte-parity COPY kept in sync by comment.
+                from src.decision_kernel.certificates.execution import (
+                    desired_shares_for_reserved_notional as _desired_shares_shared,
+                )
+
+                _desired_shares_f = _desired_shares_shared(
+                    float(_min_order_size_d), float(_reserved_notional), float(_limit_price_d)
                 )
                 _desired_shares = Decimal(str(_desired_shares_f))
                 _depth_sweep = simulate_clob_sweep(

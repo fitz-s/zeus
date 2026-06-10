@@ -27,6 +27,23 @@ from src.contracts.execution_intent import quantize_submit_shares_for_venue_at_m
 from src.events.live_order_aggregate import LiveOrderAggregateEvent
 
 
+def desired_shares_for_reserved_notional(
+    min_order_size: float, reserved_notional: float, limit_price: float
+) -> float:
+    """ONE shared share-sizing formula (K1.1, consolidated overhaul 2026-06-11).
+
+    FLOAT arithmetic is the CONTRACT, not an implementation detail: the depth-guard
+    re-sweep in the event reactor must request EXACTLY the share count this cert
+    builder will compute, or the sweep VWAP diverges and parity rejects (Bug B,
+    2026-06-01: Decimal division at one seam produced 8.333...333 vs the builder's
+    float 8.333333333333334). The two sites previously kept byte-parity by COMMENT;
+    now they keep it by dispatching to this one function.
+    """
+    if float(limit_price) > 0:
+        return max(float(min_order_size), float(reserved_notional) / float(limit_price))
+    return float(min_order_size)
+
+
 def build_final_intent_certificate_from_actionable(
     *,
     actionable_cert: DecisionCertificate,
@@ -78,7 +95,7 @@ def build_final_intent_certificate_from_actionable(
             f"(c_fee_adjusted={reservation!r}, tick_size={float(tick_size)!r}); "
             "candidate reservation below minimum tradeable price — skip"
         )
-    size = max(float(min_order_size), reserved_notional / limit_price)
+    size = desired_shares_for_reserved_notional(min_order_size, reserved_notional, limit_price)
     # SIZE-TO-AVAILABLE-DEPTH (Wall B / 2026-06-01): for TAKER FOK orders cap the
     # requested size to the crossable book depth so the FOK can fully fill on a thin
     # book.  available_crossable_shares is computed by the caller (ERA) via
@@ -633,14 +650,15 @@ def _spread_at_entry(best_bid, best_ask, passive_maker_context) -> float | None:
 
 
 def _relative_spread_at_entry(best_bid, best_ask, passive_maker_context) -> float | None:
+    # K1.1 (consolidated overhaul 2026-06-11): the relative-spread FORMULA lives ONCE in
+    # src.strategy.live_inference.mode_consistent_ev.relative_spread (pure module, no I/O).
+    # This site previously re-implemented it line-for-line — the twin-formula category.
+    # Only the passive_maker_context price coercion is local.
+    from src.strategy.live_inference.mode_consistent_ev import relative_spread
+
     bid = _coerce_price(best_bid, passive_maker_context, "best_bid")
     ask = _coerce_price(best_ask, passive_maker_context, "best_ask")
-    if bid is None or ask is None or bid <= 0.0 or ask <= 0.0 or ask < bid:
-        return None
-    mid = (ask + bid) / 2.0
-    if mid <= 0.0:
-        return None
-    return (ask - bid) / mid
+    return relative_spread(bid, ask)
 
 
 def _coerce_price(value, passive_maker_context, key: str) -> float | None:
