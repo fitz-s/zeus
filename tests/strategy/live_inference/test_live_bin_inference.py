@@ -17,7 +17,7 @@ from src.strategy.live_inference.state import (
     LiveBinState,
     LiveInferenceBlocked,
     apply_day0_mask,
-    apply_orderbook_event_v1,
+    apply_orderbook_event,
     assert_available_at,
 )
 
@@ -56,7 +56,7 @@ def test_llr_cap_enforced():
 
 def test_orderbook_event_does_not_change_q():
     state = _state()
-    assert apply_orderbook_event_v1(state, {"best_bid": 0.7, "best_ask": 0.8}) is state
+    assert apply_orderbook_event(state, {"best_bid": 0.7, "best_ask": 0.8}) is state
 
 
 def test_market_prior_requires_validated_for_live():
