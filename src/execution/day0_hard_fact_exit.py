@@ -364,35 +364,60 @@ def _resolve_order_bin_identity(conn: Any, token_id: str) -> Optional[dict]:
         pass
 
     identity: dict = {}
+    # EXPLICIT COLUMN LISTS + tuple-safe access (PR#404 round-2 P1-B): the
+    # prior SELECT * + `dict(row) if hasattr(row, "keys") else {}` silently
+    # produced an EMPTY identity on connections WITHOUT sqlite3.Row factory —
+    # a dead-bin resting order quietly escaped cancellation because of an
+    # implicit connection attribute. A risk-reduction path must be
+    # row-factory-agnostic: explicit columns + positional _row_get, with a
+    # two-query fallback for legacy schemas lacking temperature_metric.
+    _ME_COLS_WITH_METRIC = (
+        "city, target_date, range_low, range_high, temperature_metric, condition_id, token_id"
+    )
+    _ME_COLS_LEGACY = "city, target_date, range_low, range_high, condition_id, token_id"
     for table_ref in ("market_events", "world.market_events", "forecasts.market_events"):
-        try:
-            if condition_id:
-                me_row = conn.execute(
-                    f"SELECT * FROM {table_ref} WHERE condition_id = ? OR token_id = ? LIMIT 1",
-                    (condition_id, token_id),
-                ).fetchone()
-            else:
-                me_row = conn.execute(
-                    f"SELECT * FROM {table_ref} WHERE token_id = ? LIMIT 1",
-                    (token_id,),
-                ).fetchone()
-        except _sqlite3.Error:
-            continue
+        me_row = None
+        has_metric_col = True
+        for columns, with_metric in ((_ME_COLS_WITH_METRIC, True), (_ME_COLS_LEGACY, False)):
+            try:
+                if condition_id:
+                    me_row = conn.execute(
+                        f"SELECT {columns} FROM {table_ref} "
+                        "WHERE condition_id = ? OR token_id = ? LIMIT 1",
+                        (condition_id, token_id),
+                    ).fetchone()
+                else:
+                    me_row = conn.execute(
+                        f"SELECT {columns} FROM {table_ref} WHERE token_id = ? LIMIT 1",
+                        (token_id,),
+                    ).fetchone()
+                has_metric_col = with_metric
+                break  # query shape accepted (row may still be None)
+            except _sqlite3.Error:
+                me_row = None
+                continue  # missing table/schema OR missing temperature_metric column
         if me_row is None:
             continue
-        me = dict(me_row) if hasattr(me_row, "keys") else {}
+        if has_metric_col:
+            metric_value = str(_row_get(me_row, "temperature_metric", 4) or "")
+            cond_value = str(_row_get(me_row, "condition_id", 5) or "")
+            row_token = str(_row_get(me_row, "token_id", 6) or "")
+        else:
+            metric_value = ""
+            cond_value = str(_row_get(me_row, "condition_id", 4) or "")
+            row_token = str(_row_get(me_row, "token_id", 5) or "")
         identity = {
-            "city": str(me.get("city") or ""),
-            "target_date": str(me.get("target_date") or ""),
-            "range_low": me.get("range_low"),
-            "range_high": me.get("range_high"),
-            "metric": str(me.get("temperature_metric") or ""),
-            "condition_id": condition_id or str(me.get("condition_id") or ""),
+            "city": str(_row_get(me_row, "city", 0) or ""),
+            "target_date": str(_row_get(me_row, "target_date", 1) or ""),
+            "range_low": _row_get(me_row, "range_low", 2),
+            "range_high": _row_get(me_row, "range_high", 3),
+            "metric": metric_value,
+            "condition_id": condition_id or cond_value,
         }
         if not direction:
             # market_events stores the YES token; matching by token_id here
             # means the order IS the YES side.
-            direction = "buy_yes" if str(me.get("token_id") or "") == token_id else ""
+            direction = "buy_yes" if row_token == token_id else ""
         break
     if not identity:
         return None
