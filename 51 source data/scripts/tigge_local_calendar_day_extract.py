@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Created: 2026-05-19
+# Last reused or audited: 2026-06-09
+# Authority basis: Addendum 2 §2 (majority threshold + strict-< boundary rule);
+#   rule-drift parity fix 2026-06-09 — mirrors extract_open_ens_localday.py
+#   fix commit 1b77ca94db (same two bugs patched in OpenData extractor tonight).
 """Generic extractor for TIGGE local-calendar-day max/min products."""
 from __future__ import annotations
 
@@ -186,7 +191,11 @@ def _finalize_low_record(record: dict[str, Any], track: TrackConfig) -> dict[str
         boundary_values = record["members"][member]["boundary_values"]
         inner_min = min(inner_values) if inner_values else None
         boundary_min = min(boundary_values) if boundary_values else None
-        boundary_ambiguous = boundary_min is not None and (inner_min is None or boundary_min <= inner_min)
+        # Fix 2026-06-09 (Bug A): strict < — ties (boundary_min == inner_min) are NOT
+        # ambiguous. Pre-fix used <=, quarantining members where temperature is stable
+        # at midnight. Mirrors the same fix applied to extract_open_ens_localday.py
+        # (commit 1b77ca94db, Addendum 2 §2 parity).
+        boundary_ambiguous = boundary_min is not None and (inner_min is None or boundary_min < inner_min)
         if boundary_ambiguous:
             boundary_ambiguous_members.append(member)
         value_native = inner_min if (inner_min is not None and not boundary_ambiguous) else None
@@ -202,7 +211,13 @@ def _finalize_low_record(record: dict[str, Any], track: TrackConfig) -> dict[str
             }
         )
     member_count = len(members_out)
-    training_allowed = len(missing_members) == 0 and len(boundary_ambiguous_members) == 0
+    # Fix 2026-06-09 (Bug B): majority threshold — a minority of ambiguous members
+    # must NOT quarantine the whole snapshot. Pre-fix used len > 0 (any()), which let
+    # a single tie-flagged member quarantine all 51. Threshold = ceil(51/2) = 26.
+    # Mirrors extract_open_ens_localday.py fix (commit 1b77ca94db, Addendum 2 §2).
+    _majority_threshold = max(1, len(members_out) // 2 + 1)
+    any_boundary_ambiguous = len(boundary_ambiguous_members) >= _majority_threshold
+    training_allowed = len(missing_members) == 0 and not any_boundary_ambiguous
     payload = {
         "generated_at": now_utc_iso(),
         "data_version": track.data_version,
@@ -235,7 +250,7 @@ def _finalize_low_record(record: dict[str, Any], track: TrackConfig) -> dict[str
         "causality": {"pure_forecast_valid": True, "status": "OK"},
         "boundary_policy": {
             "training_rule": "use_inner_only_and_exclude_if_boundary_can_win",
-            "boundary_ambiguous": len(boundary_ambiguous_members) > 0,
+            "boundary_ambiguous": any_boundary_ambiguous,
             "ambiguous_member_count": len(boundary_ambiguous_members),
             "boundary_ambiguous_members": boundary_ambiguous_members,
         },

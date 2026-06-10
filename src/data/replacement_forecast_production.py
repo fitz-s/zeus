@@ -343,6 +343,23 @@ def _replacement_forecast_download_cycle() -> None:
         "U0R_EXTRA_NO_TARGETS",
     }:
         logger.info("U0R extra-model shadow capture report: %s", u0r_capture_report)
+    # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails or is
+    # fail-soft skipped, the parent download job still shows OK in scheduler
+    # health (only AIFS/IFS9 success is tracked by the @_scheduler_job wrapper).
+    # Write a distinct component entry so logs/scheduler_jobs_health.json shows
+    # the degradation and an operator/alert can detect multi-day extras outages.
+    if u0r_capture_report is not None:
+        _u0r_status = u0r_capture_report.get("status", "")
+        _u0r_failed = _u0r_status == "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
+        if _u0r_failed or u0r_capture_report.get("global_models_unavailable"):
+            from src.observability.scheduler_health import _write_scheduler_health as _wsh  # noqa: PLC0415
+            _failure_reason = u0r_capture_report.get("error") or str(
+                u0r_capture_report.get("global_models_unavailable", "")
+            )
+            _wsh("u0r_multimodel_capture", failed=True, reason=_failure_reason)
+        elif _u0r_status not in {"U0R_EXTRA_NO_TARGETS", ""}:
+            from src.observability.scheduler_health import _write_scheduler_health as _wsh  # noqa: PLC0415, F811
+            _wsh("u0r_multimodel_capture", failed=False)
 
 
 def _replacement_forecast_shadow_materialize_cycle() -> None:
