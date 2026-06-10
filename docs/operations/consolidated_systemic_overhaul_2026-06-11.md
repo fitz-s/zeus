@@ -79,6 +79,11 @@ Incidents: ChainState 'external_operator_closed' written by reconcile, unknown t
     value preserved for DB compat — `REASON.value`); a CI test fails on any emit site using a
     string literal not in the registry (grep-based AST check). The standing funnel report
     (K5.2) groups by category for free.
+    [STATUS 2026-06-10: DONE, commit 04d621a5d3. 44 declared members; AST CI antibody on
+     every EventSubmissionReceipt(reason=...) literal; runtime once-per-base sensor at
+     the regret-write chokepoint (covers the dead-letter str(exc) lane); unregistered →
+     ARTIFICIAL_SUSPECT by definition. Recorded deviation: emit sites keep CI-pinned
+     literals; mechanical REASON.value rewrite deferred to a calm window.]
 2.2 Enum writer⊆consumer relationship tests, generalized from the ChainState fix: for every
     enum crossing a process/DB boundary (ChainState, CandidateLifecycleState, ReversalReason,
     replacement_q_mode, readiness status, calibration authority, order state machine), one
@@ -122,6 +127,13 @@ independence and "market truth must survive order-daemon death").
        submit_redeem and any redeem-submitting scheduler job hard-refuse (raise) unless an
        operator-only override env is set — a flag flip alone must not be the only barrier.
        Tests pin: no codepath reachable from daemon schedulers can broadcast a redeem tx.
+       [STATUS 2026-06-10: DONE, commit d2a83d4e23. Three layers: submit_redeem raises
+        before any side effect; adapter.redeem raises at the tx-broadcast boundary
+        (autonomous flag alone insufficient); scheduler job calm-skips. Override =
+        ZEUS_OPERATOR_REDEEM_OVERRIDE with EXACT token (truthiness insufficient).
+        7 antibody tests; legacy machinery suites preserved via conftest override
+        context. Code antibody deploys at the NEXT restart window (flag-level
+        protection already active in the running daemon).]
     b) EXTERNAL-REDEMPTION ABSORPTION (extends the operator-activity family — this IS the
        K6.9 "fourth variant as a table row"): third-party redeem looks like (i) winning
        position balance → 0 on-chain without a Zeus order/redeem, (ii) USDC inflow to the
@@ -146,6 +158,15 @@ independence and "market truth must survive order-daemon death").
     (likely cross-daemon long write transactions); fix with bounded busy_timeout + write
     batching or single-writer queueing on zeus_trades hot tables. Measure before/after lock
     error rate. (This was muted in monitors, never fixed.)
+    [ESCALATION 2026-06-10 ~23:30Z: 'database is locked' caused a REAL incident chain
+     tonight — the LA submit's ack write failed with db-locked → SubmitUnknown
+     (venue_call_started=true) → aggregate PENDING_RECONCILE + cap RESERVED → boot
+     readiness gate crash-looped the daemon ~45min until the manual absorb
+     (scripts/absorb_filled_unknown_edli_submit.py, commit 2eb3789787). K3.8 is no
+     longer chronic noise; it produces lost-ack incidents on the submit path.
+     STATUS: OPEN — root-cause + fix deferred (see report); the #28c
+     edli_command_recovery 3-min job (49a8a2090f) now bounds the stuck-row dwell
+     time, and the absorb script handles the FILLED-unknown class.]
 
 # K4 — MEASUREMENT-BASED CONSTANTS (no more guesses)
 Authority: src/contracts/time_semantics.py registry (21 entries, 13 relations, 10 basis=guess).
@@ -272,3 +293,38 @@ Authority: src/contracts/time_semantics.py registry (21 entries, 13 relations, 1
   old PRICE_MOVED ceiling, curPrice prefilter), live DBs only via sanctioned paths.
 - The live daemons during this work: live-trading + forecast-live + riskguard are RUNNING and
   trading. Restart vehicle rules in PRIME DIRECTIVES.
+
+---
+
+## CAMPAIGN STATUS LEDGER (implementing agent, 2026-06-10 night → 2026-06-11)
+
+DONE (commits on fix/opportunity-book-selector, all pushed):
+- Batch 0 / v13 gate+commit+restart: dc01ec632f (cert compiler ALT), b9b4089637 (maker
+  sibling-bid + NC-09 carve-out law), b2c052f8c6 (day0 flag + ledger). Armed-state verified.
+- K1.1/1.2/1.3: aca801dc77 (twin-authority elimination + antibodies).
+- K2.1: 04d621a5d3 (rejection-reason taxonomy). K2.4: law-level DONE (see above).
+- Amount-grid 400-loop: 2bc0b2a936 + (co-agent) 8795f20ec3 — SDK-faithful contract.
+- K4.0 + #28c: 49a8a2090f (REST-THEN-CROSS + escalation job + edli command recovery job).
+- Boot-incident absorb script: 2eb3789787 (FILLED-but-ack-lost lane).
+- K3.6a: d2a83d4e23 (redeem pivot antibody; deploys at next restart window).
+
+DEFERRED (not reached; no code touched):
+- K2.2 (enum writer⊆consumer inventory tests), K2.3 (pipeline file contracts extension).
+- K3.1-3.5/3.7 (process topology phases; single-writer registry test).
+- K3.6b (EXTERNAL_REDEMPTION absorption + EXTERNALLY_REDEEMED enum member — needs K2.2
+  test pattern), K3.6c (confirm-pending-deposit organ, greenfield), K3.6d (legacy-row
+  one-time chain-truth reconcile — 19 rows already annotated by coordinator).
+- K3.8 (db-locked root cause — ESCALATED, see annotation; dwell-time bounded by #28c).
+- K4.1-4.4 (remaining measurement replacements; K4.3 λ recal now feeds from K4.0 receipts).
+- K5.1-5.5 (standing organs; K5.4 spec enriched by Karachi fill evidence + venue-truth
+  chain note: venue_commands→venue_order_facts→forecast_posteriors, NOT trade_decisions;
+  K5.x must include the complement-verdict empirical check — note: first real
+  mint-matched fill OBSERVED 2026-06-10 23:55 tx 0xbd9c9c4d..., partially discharging it).
+- K6.1-6.10 (closures) except: #28 venue-grid (done above); K6.5 branch consolidation =
+  OPERATOR DECISION still needed (merge PR vs reset main; single-worktree end state;
+  delete stale worktrees incl. /tmp/zeus-head-probe used tonight for baselines).
+- Post-fee accounting check (coordinator item 2: verify PnL booking uses post-fee cost).
+
+DECISION-NEEDED (operator):
+- K6.5 branch strategy. - Promotion of day0 (separate, on comparator evidence).
+- Two-agents-one-branch collision risk (see /tmp/overhaul_report.md co-editing incident).
