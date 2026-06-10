@@ -2198,6 +2198,28 @@ def build_event_bound_no_submit_receipt(
         # records WHY the stake equals the venue floor (the fractional-Kelly risk intent
         # was preserved — min order is << the bankroll cap). Empty on the normal path.
         _stake_floor_provenance: dict[str, object] = {}
+        # DAY0 EXPOSURE CAP (PR#404 operator review P0-1: the cap is part of the
+        # SIZING KERNEL'S feasible region, never a post-hoc clamp). The family
+        # headroom — cap minus existing family exposure — is computed HERE
+        # (where the exposure map lives) and threaded INTO the recapture/sizing
+        # kernel as an upper bound on the optimizer's max_stake. The kernel
+        # therefore: re-optimizes within [min_order, min(headroom, fractional
+        # cap, concentration ceiling)], reprices the CHOSEN stake on the same
+        # curve (price/cost-basis consistent by construction), and aborts
+        # first-class when headroom is exhausted or below the SELECTED curve's
+        # REAL venue min order (DAY0_EXPOSURE_CAP_EXHAUSTED /
+        # DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER — the old post-clamp's 'headroom <
+        # $1' constant was a wrong risk boundary: real min orders range $0.15
+        # to $30+). Invariant (asserted in the kernel): final stake +
+        # existing_family_notional <= cap + epsilon.
+        _day0_headroom_usd: float | None = None
+        if event.event_type == "DAY0_EXTREME_UPDATED":
+            _day0_cap = _day0_family_notional_cap_usd()
+            if _day0_cap is not None:
+                _existing_family_usd = float(
+                    sum(float(v) for v in (_recapture_exposure or {}).values())
+                )
+                _day0_headroom_usd = float(_day0_cap) - max(0.0, _existing_family_usd)
         # Maker/taker fill semantics for the S6 PRICE_MOVED ceiling (2026-06-10).
         # A resting maker order rests at the admitted limit and never chases the
         # recaptured ask, so the price-moved ceiling must NOT abort it (it was
@@ -2226,29 +2248,9 @@ def build_event_bound_no_submit_receipt(
                 # leg scoped OUT of selection falsely reverses the chosen leg.
                 locked_opportunity_conn=locked_opportunity_conn,
                 stake_floor_out=_stake_floor_provenance,
+                day0_headroom_usd=_day0_headroom_usd,
             )
         )
-        # DAY0 EXPOSURE CAP (adversarial review 2026-06-10 fix 5 — interim risk
-        # bound while the day0 flip/exit machinery is young). The remaining NEW
-        # stake for a DAY0-lane event is clamped so (existing family exposure +
-        # new stake) <= edli_v1.day0_family_notional_cap_usd (default modest).
-        # Reduce-only: the cap can only SHRINK a stake, never enable one. Remove
-        # after forward evidence; forecast-lane sizing untouched.
-        if (
-            event.event_type == "DAY0_EXTREME_UPDATED"
-            and _recapture.may_submit
-            and _robust_stake_usd > 0.0
-        ):
-            _existing_family_usd = float(
-                sum(float(v) for v in (_recapture_exposure or {}).values())
-            )
-            _capped = _apply_day0_exposure_cap(
-                stake_usd=float(_robust_stake_usd),
-                existing_family_usd=_existing_family_usd,
-                cap_usd=_day0_family_notional_cap_usd(),
-                family_id=str(family.family_id or ""),
-            )
-            _robust_stake_usd = _capped
         kelly = dataclass_replace(
             kelly,
             size_usd=float(_robust_stake_usd),
@@ -6300,6 +6302,27 @@ class _StakeBelowMinOrder(RuntimeError):
     """
 
 
+class _Day0CapExhausted(RuntimeError):
+    """DAY0 family notional headroom is exhausted (PR#404 P0-1).
+
+    Raised by the sizing kernel when ``day0_headroom_usd <= 0`` — the family
+    already carries the configured day0 notional cap. First-class abort
+    (``SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED`` -> receipt reason
+    ``DAY0_EXPOSURE_CAP_EXHAUSTED``), never an edge verdict.
+    """
+
+
+class _Day0CapBelowMinOrder(RuntimeError):
+    """DAY0 family headroom is positive but below the SELECTED curve's REAL
+    venue min-order notional (PR#404 P0-1 — the boundary the old post-hoc
+    clamp got wrong with its 'headroom < $1' constant; real min orders range
+    ~$0.15 to $30+ depending on min_order_size x all-in price). First-class
+    abort (``SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER`` -> receipt reason
+    ``DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER``); the kernel must never emit a
+    stake below the venue floor.
+    """
+
+
 # Operator guard on the auto-bump-to-min-order action (2026-06-09 fix). When the
 # fractional-Kelly haircut shrinks the chosen stake below the venue min order but the
 # ROBUST (q_lcb-based) ΔU at the min-order notional is strictly positive, the sizing
@@ -6319,6 +6342,7 @@ def _robust_marginal_utility_stake_and_price(
     bankroll_usd: float,
     kelly_multiplier: float,
     stake_floor_out: dict[str, object] | None = None,
+    day0_headroom_usd: float | None = None,
 ) -> tuple[float, ExecutionPrice | None]:
     """Chosen FRACTIONAL-Kelly stake AND its typed chosen-stake price (spec §5.3 / §14.10).
 
@@ -6415,6 +6439,19 @@ def _robust_marginal_utility_stake_and_price(
         max_stake = min(_fractional_cap, _concentration_ceiling)
     else:
         max_stake = _fractional_cap
+    # DAY0 EXPOSURE CAP as a KERNEL bound (PR#404 P0-1): the family headroom is
+    # one more upper bound in the same feasible region as the fractional-Kelly
+    # budget and the concentration ceiling — the chosen stake (and therefore
+    # the chosen-stake execution price below) is optimized WITHIN it, never
+    # post-clamped. Exhausted headroom is a first-class abort here.
+    if day0_headroom_usd is not None:
+        _day0_headroom = Decimal(str(day0_headroom_usd))
+        if _day0_headroom <= Decimal("0"):
+            raise _Day0CapExhausted(
+                f"day0 family notional headroom exhausted: headroom="
+                f"{float(_day0_headroom):.6f} USD (cap minus existing family exposure)"
+            )
+        max_stake = min(max_stake, _day0_headroom)
     scored, proof_by_hypothesis = _score_family_candidates_by_robust_marginal_utility(
         executable=list(all_proofs),
         family_key=family_key,
@@ -6456,6 +6493,20 @@ def _robust_marginal_utility_stake_and_price(
         # ranker used (utility_ranker records it on the score), so the min-order edge is
         # robust-consistent, never a looser point estimate.
         min_order_usd = Decimal(str(score.min_order_notional_usd))
+        # DAY0 cap vs REAL venue floor (PR#404 P0-1): when the day0 headroom
+        # cannot even cover the SELECTED curve's min-order notional, no
+        # admissible stake exists — first-class DAY0_CAP_BELOW_MIN_ORDER abort
+        # (the min-order bump below must never bump THROUGH the cap).
+        if (
+            day0_headroom_usd is not None
+            and min_order_usd > Decimal("0")
+            and Decimal(str(day0_headroom_usd)) < min_order_usd
+        ):
+            raise _Day0CapBelowMinOrder(
+                f"day0 family headroom {float(day0_headroom_usd):.6f} USD below the "
+                f"selected market's venue min-order notional "
+                f"{float(min_order_usd):.6f} USD — no admissible stake within the cap"
+            )
         if min_order_usd > Decimal("0") and chosen < min_order_usd:
             delta_u_at_min = float(score.delta_u_at_min_order)
             bankroll_cap = Decimal(str(_MIN_ORDER_BUMP_MAX_BANKROLL_PCT)) * Decimal(
@@ -6507,6 +6558,15 @@ def _robust_marginal_utility_stake_and_price(
             # Arithmetic/contract fault on the boundary -> no priced stake (fail closed,
             # §13). Genuinely unexpected; keep the conservative no-trade behavior.
             return 0.0, None
+        # DAY0 cap INVARIANT (PR#404 P0-1): final stake + existing family
+        # notional <= cap + epsilon, by construction (chosen <= max_stake <=
+        # headroom). Asserted so any future re-ordering of the bounds above
+        # fails loudly instead of leaking notional past the cap.
+        if day0_headroom_usd is not None:
+            assert float(chosen) <= float(day0_headroom_usd) + 1e-6, (
+                f"DAY0 exposure-cap invariant violated: chosen stake {float(chosen):.6f} "
+                f"USD exceeds family headroom {float(day0_headroom_usd):.6f} USD"
+            )
         return float(chosen), price
     return 0.0, None
 
@@ -6530,6 +6590,9 @@ _SUBMIT_ABORT_RECEIPT_REASON: dict[CandidateLifecycleState, str] = {
     CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED: "SUBMIT_ABORTED_EDGE_REVERSED",
     CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED: "SUBMIT_ABORTED_FAMILY_REVERSED",
     CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER: "SUBMIT_ABORTED_BELOW_MIN_ORDER",
+    # PR#404 P0-1 — first-class day0 exposure-cap aborts (operator-named reasons).
+    CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED: "DAY0_EXPOSURE_CAP_EXHAUSTED",
+    CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER: "DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER",
 }
 
 
@@ -6602,6 +6665,7 @@ def _evaluate_submit_recapture_for_selected(
     locked_opportunity_conn: sqlite3.Connection | None = None,
     stake_floor_out: dict[str, object] | None = None,
     order_rests_at_admitted_price: bool = False,
+    day0_headroom_usd: float | None = None,
 ) -> tuple[SubmitRecaptureDecision, float, ExecutionPrice | None]:
     """THE single fail-closed submit-recapture gate (spec §5 / §7 / §14.9 / §14.10).
 
@@ -6723,6 +6787,36 @@ def _evaluate_submit_recapture_for_selected(
             bankroll_usd=bankroll_usd,
             kelly_multiplier=kelly_multiplier,
             stake_floor_out=stake_floor_out,
+            day0_headroom_usd=day0_headroom_usd,
+        )
+    except _Day0CapExhausted as exc:
+        # DAY0 cap GATE (PR#404 P0-1): family notional headroom exhausted —
+        # first-class abort, never an edge verdict, never a post-hoc clamp.
+        return (
+            SubmitRecaptureDecision(
+                state=CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED,
+                may_submit=False,
+                reversal_reason=ReversalReason.DAY0_CAP,
+                detail=str(exc),
+            ),
+            0.0,
+            None,
+        )
+    except _Day0CapBelowMinOrder as exc:
+        # DAY0 cap vs REAL venue floor (PR#404 P0-1): positive headroom that
+        # cannot cover the selected market's min-order notional — no admissible
+        # stake exists within the cap. Distinct from BELOW_MIN_ORDER (which is
+        # the bankroll-cap guard) so the regret ledger separates "cap full" from
+        # "venue floor above sizing intent".
+        return (
+            SubmitRecaptureDecision(
+                state=CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER,
+                may_submit=False,
+                reversal_reason=ReversalReason.DAY0_CAP,
+                detail=str(exc),
+            ),
+            0.0,
+            None,
         )
     except _StakeBelowMinOrder as exc:
         # GATE 3b (BELOW_MIN_ORDER, 2026-06-09 antibody). Edge is positive at min order
@@ -10377,38 +10471,14 @@ def _day0_family_notional_cap_usd() -> float | None:
     return value
 
 
-def _apply_day0_exposure_cap(
-    *,
-    stake_usd: float,
-    existing_family_usd: float,
-    cap_usd: float | None,
-    family_id: str,
-) -> float:
-    """Clamp a DAY0-lane stake so (existing family exposure + new stake) <= cap.
-
-    Reduce-only (never raises a stake). Headroom < 1 USD (exhausted / below any
-    plausible venue min order) raises ValueError -> the caller's existing
-    ValueError boundary converts it to a deterministic no-submit receipt
-    (fail-closed). cap_usd None = cap disabled (stake unchanged).
-    """
-    if cap_usd is None or stake_usd <= 0.0:
-        return stake_usd
-    headroom = max(0.0, float(cap_usd) - max(0.0, float(existing_family_usd)))
-    if stake_usd <= headroom:
-        return stake_usd
-    if headroom < 1.0:
-        raise ValueError(
-            f"DAY0_EXPOSURE_CAP_EXHAUSTED: family notional cap {float(cap_usd):.2f} USD, "
-            f"existing exposure {float(existing_family_usd):.2f} USD, headroom "
-            f"{headroom:.2f} USD"
-        )
-    import logging as _logging
-
-    _logging.getLogger("zeus.day0_exposure_cap").warning(
-        "DAY0_EXPOSURE_CAP_APPLIED family=%s stake=%.2f -> %.2f (cap=%.2f existing=%.2f)",
-        family_id, stake_usd, headroom, float(cap_usd), float(existing_family_usd),
-    )
-    return headroom
+# _apply_day0_exposure_cap REMOVED (PR#404 P0-1): the post-hoc clamp bypassed
+# the min-order-aware sizing kernel's semantics ('headroom < $1' was a wrong
+# risk boundary — real venue min orders range ~$0.15 to $30+) and could emit a
+# stake below the selected market's real venue floor that downstream receipts /
+# cost basis / live-cap reservations would treat as sizing-proven. The cap now
+# lives INSIDE _robust_marginal_utility_stake_and_price as a feasible-region
+# bound (day0_headroom_usd), with first-class aborts
+# SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED / SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER.
 
 
 def _day0_remaining_day_q_enabled() -> bool:

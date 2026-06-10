@@ -116,6 +116,14 @@ class CandidateLifecycleState(StrEnum):
     # with real edge that we declined for sizing reasons must never be recorded as
     # "edge reversed". Antibody for the 2026-06-09 false-EDGE_REVERSED regression.
     SUBMIT_ABORTED_BELOW_MIN_ORDER = auto()
+    # DAY0 exposure-cap aborts (PR#404 P0-1: the per-family day0 notional cap
+    # lives INSIDE the sizing kernel's feasible region). EXHAUSTED: the family
+    # already carries the cap. BELOW_MIN_ORDER: positive headroom but smaller
+    # than the SELECTED market's real venue min-order notional (min_order_size
+    # x all-in price — NOT a $1 constant), so no admissible stake exists within
+    # the cap. Both are sizing/cap aborts, never edge verdicts.
+    SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED = auto()
+    SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER = auto()
 
     SUBMITTED = auto()
     ACKED = auto()
@@ -140,6 +148,8 @@ SUBMIT_ABORT_STATES: frozenset[CandidateLifecycleState] = frozenset(
         CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED,
         CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED,
         CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER,
+        CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED,
+        CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER,
     }
 )
 
@@ -162,6 +172,9 @@ class ReversalReason(StrEnum):
         MIN_ORDER    — edge positive at min order but the sized stake could not clear
                        the venue floor within the bankroll cap (sizing abort, NOT an
                        edge reversal). Keeps EDGE distinct from venue-floor declines.
+        DAY0_CAP     — the per-family day0 notional cap bounded the feasible stake
+                       region (exhausted, or below the venue min order). Cap decline,
+                       not an edge reversal (PR#404 P0-1).
     """
 
     FORECAST = auto()
@@ -173,6 +186,10 @@ class ReversalReason(StrEnum):
     SUBMIT = auto()
     PORTFOLIO = auto()
     MIN_ORDER = auto()
+    # DAY0_CAP — the per-family day0 notional cap (PR#404 P0-1) bounded the
+    # feasible stake region: exhausted headroom, or headroom below the selected
+    # market's venue min-order notional. A cap/sizing decline, never "no edge".
+    DAY0_CAP = auto()
 
 
 # ---------------------------------------------------------------------------

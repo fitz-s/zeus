@@ -491,28 +491,10 @@ class TestPlausibilityBound:
 # ===========================================================================
 
 class TestDay0ExposureCap:
-    def test_reduce_only_clamp(self):
-        from src.engine.event_reactor_adapter import _apply_day0_exposure_cap
-
-        assert _apply_day0_exposure_cap(
-            stake_usd=40.0, existing_family_usd=10.0, cap_usd=25.0, family_id="f",
-        ) == pytest.approx(15.0)
-        # under the cap: unchanged
-        assert _apply_day0_exposure_cap(
-            stake_usd=5.0, existing_family_usd=10.0, cap_usd=25.0, family_id="f",
-        ) == pytest.approx(5.0)
-        # disabled cap: unchanged
-        assert _apply_day0_exposure_cap(
-            stake_usd=500.0, existing_family_usd=0.0, cap_usd=None, family_id="f",
-        ) == pytest.approx(500.0)
-
-    def test_exhausted_headroom_raises_deterministic_no_submit(self):
-        from src.engine.event_reactor_adapter import _apply_day0_exposure_cap
-
-        with pytest.raises(ValueError, match="DAY0_EXPOSURE_CAP_EXHAUSTED"):
-            _apply_day0_exposure_cap(
-                stake_usd=10.0, existing_family_usd=24.5, cap_usd=25.0, family_id="f",
-            )
+    """PR#404 P0-1: post-hoc _apply_day0_exposure_cap removed; cap is now a
+    kernel feasible-region bound.  Full relationship tests live in
+    tests/test_day0_exposure_cap_kernel.py.  These three tests verify the
+    surviving configuration symbols and that the tombstoned function is gone."""
 
     def test_default_cap_is_modest_and_configurable(self):
         from src.engine.event_reactor_adapter import (
@@ -523,6 +505,19 @@ class TestDay0ExposureCap:
         assert 0.0 < _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD <= 100.0
         cap = _day0_family_notional_cap_usd()
         assert cap is None or cap > 0.0
+
+    def test_apply_day0_exposure_cap_is_removed(self):
+        """The post-hoc clamp must not exist; importing it should fail."""
+        import importlib
+        import src.engine.event_reactor_adapter as era
+        assert not hasattr(era, "_apply_day0_exposure_cap"), (
+            "_apply_day0_exposure_cap must be removed (PR#404 P0-1 tombstone)"
+        )
+
+    def test_kernel_cap_states_in_abort_states(self):
+        from src.strategy.redecision import SUBMIT_ABORT_STATES, CandidateLifecycleState
+        assert CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED in SUBMIT_ABORT_STATES
+        assert CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER in SUBMIT_ABORT_STATES
 
 
 # ===========================================================================
