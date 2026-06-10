@@ -70,10 +70,10 @@
   },
   "edli_v1": {
     "enabled": true,
-    "live_execution_mode": "edli_shadow_no_submit",
+    "live_execution_mode": "edli_live_canary",
     "edli_live_scope": "day0_shadow",
     "_edli_live_scope_note_2026_06_09": "Operator directive 2026-06-09 ('全部打开，这些shadow only的策略一辈子都不会主动打开，把这些gate都删了'): promoted from day0_shadow to forecast_plus_day0 — day0-lane events now PASS the DAY0_SCOPE_SHADOW_ONLY adapter boundary (real submit subject to all OTHER proofs/gates/arm). day0 flags (day0_extreme_trigger_enabled, day0_hard_fact_live_enabled) were already true; the shadow-only purgatory gate is the only thing that was blocking day0 real submit. forecast_only (PR-332) and day0_shadow regression behavior are unchanged.",
-    "reactor_mode": "live_no_submit",
+    "reactor_mode": "live",
     "event_writer_enabled": true,
     "forecast_snapshot_trigger_enabled": true,
     "forecast_complete_live_enabled": true,
@@ -121,7 +121,7 @@
     "market_channel_refresh_window_seconds": 60,
     "pre_submit_max_quote_age_ms": 1000,
     "pre_submit_balance_allowance_check_enabled": true,
-    "real_order_submit_enabled": false,
+    "real_order_submit_enabled": true,
     "taker_fok_fak_live_enabled": true,
     "live_canary_enabled": true,
     "durable_submit_outbox_enabled": true,
@@ -152,7 +152,7 @@
     "_mass_enable_note_2026_06_09": "Operator directive 2026-06-09 ('全部打开') + flag-implementation review verdicts (/tmp/flag_implementation_review.md): ENABLED q_lcb_settlement_coverage_gate (verified wired, decision-level, only lowers LCB, fail-open). REVERTED forecast_sharpness_gate_enabled to FALSE — at 1.5x multiplier it suppresses edges for 50/54 cities (season-blended MAE defect, 3 cities fail-closed on missing rows); re-enable only after per-season MAE query + recalibrated multiplier. DELETED stale_book_directional_trading_enabled (zero consumers in src/, dead key; OpeningStaleQuoteFOK never instantiated live) and mainstream_agreement_enforce_on_submit (operator: manual test item). KEPT FALSE pending data-impact review: bias_treatment_v2_enabled (would change DAY0 Kelly sizes), replacement_0_1_eb_bias_correction_enabled (settlement-refuted wrong-set AND silent no-op: data_version key deleted), edli_settlement_sigma_floor_required (LOW floor rows missing for 44/54 cities -> would dead-letter low families). NOTE: legacy edli_bias_correction_enabled + bias_decay haircut are INERT on the primary FORECAST lane while edli_emos_sole_calibrator_enabled=true (bias maze bypassed); they fire only on DAY0/emos-miss.",
     "_redecision_cap_note_2026_06_09": "Throughput audit /tmp/throughput_audit.md: 96 eligible families vs cap 50 = every cycle silently dropped half the universe (2-cycle full coverage). Raised to the code ceiling 200 (_edli_positive_int_or_unbounded maximum=200).",
     "_edli_live_scope_note": "2026-06-10 INTERIM: operator opened day0 (forecast_plus_day0 scope exists and is tested) but commissioned a first-principles day0 review first (WU per-city publication latency 30-40min, panic-sell-on-transition incident, high-res remaining-day indicators). Scope returns to forecast_plus_day0 when that review's fixes land. The forecast lane is unaffected.",
-    "_pause_note_2026_06_10": "Operator emergency pause 03:05Z: first fill Milan high 06-11 @ $0.016 — market prices ~1.6%, severe disagreement; order may contradict WU forecast. Paused pending q-vs-WU audit of the fill."
+    "_pause_note_2026_06_10": "RESOLVED 2026-06-10: operator unpause after the Milan-incident defense stack landed (direction-law admission gate, COVERAGE_UNLICENSED_TAIL, mode-consistent EV with execution_mode_intent as submit authority + SUBMIT_ABORTED_MODE_FLIPPED, fused q_lcb/q_ucb materialization with FUSED_NORMAL_BOUNDS_MISSING live-ineligibility, maker bid-improve + post_only + 25% spread guard, fee V2 source). day0 stays day0_shadow pending remaining-day-q shadow evidence via the comparator."
   },
   "entry_forecast": {
     "source_id": "ecmwf_open_data",
