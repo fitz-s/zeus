@@ -187,6 +187,14 @@ class EventSubmissionReceipt:
     # an unproven mode never defaults to a taker submit.
     execution_mode_intent: str | None = None
     maker_limit_price: float | None = None
+    # K4.0 REST-THEN-CROSS (consolidated overhaul 2026-06-11): the policy verdict
+    # that produced execution_mode_intent (POLICY_* from mode_consistent_ev) and the
+    # escalation deadline for REST decisions. The final command builder's fresh-mode
+    # witness subordinates its EV-override to this policy; the settlement loop
+    # groups fill outcomes by it (hazard-curve + lambda recalibration). None on
+    # legacy receipts (omit-when-None keeps existing hashes stable).
+    rest_then_cross_policy: str | None = None
+    rest_escalation_deadline_minutes: float | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:

@@ -2577,6 +2577,12 @@ def build_event_bound_no_submit_receipt(
                 else None
             ),
             "maker_limit_price": proof.maker_limit_price,
+            # K4.0 REST-THEN-CROSS: the policy verdict that produced the mode and
+            # the escalation deadline. The final command builder's fresh-mode
+            # witness subordinates its EV-override leg to this policy (a fresh
+            # EV preference for crossing is NOT a license to cross a REST proof).
+            "rest_then_cross_policy": proof.rest_then_cross_policy,
+            "rest_escalation_deadline_minutes": proof.rest_escalation_deadline_minutes,
         }
     )
     # Stake-floor provenance (2026-06-09 min-order fix): record when the chosen stake
@@ -2756,6 +2762,11 @@ def _event_submission_receipt_from_typed_receipt_payload(
         # command builder validates (never re-decides) against the proven mode.
         execution_mode_intent=raw_receipt.get("execution_mode_intent"),
         maker_limit_price=_optional_float(raw_receipt.get("maker_limit_price")),
+        # K4.0: policy verdict + escalation deadline ride the receipt end-to-end.
+        rest_then_cross_policy=raw_receipt.get("rest_then_cross_policy"),
+        rest_escalation_deadline_minutes=_optional_float(
+            raw_receipt.get("rest_escalation_deadline_minutes")
+        ),
     )
 
 
@@ -3220,8 +3231,17 @@ def _build_live_execution_command_certificates(
             taker_spread_guard_reason as _taker_spread_guard_reason,
         )
 
+        # K4.0: this tripwire applies ONLY to LEGACY proofs (no rest_then_cross
+        # policy on the payload). Under REST-THEN-CROSS, a REST proof rests
+        # lawfully regardless of any fresh-book EV preference for crossing — the
+        # escalation lane owns any later cross, never an inline one, so the EV
+        # boundary firing on a policy REST proof is NOT a mode divergence.
+        _rtc_policy_present = bool(
+            str(actionable.payload.get("rest_then_cross_policy") or "").strip()
+        )
         if (
-            taker_fok_fak_live_enabled
+            not _rtc_policy_present
+            and taker_fok_fak_live_enabled
             and final_intent.payload.get("post_only") is True
             and _taker_spread_guard_reason(
                 fresh_best_bid,
@@ -3454,6 +3474,10 @@ def _actionable_payload_from_receipt(
         )
     if receipt.maker_limit_price is not None:
         proof_mode_fields["proof_maker_limit_price"] = receipt.maker_limit_price
+    # K4.0: the rest-then-cross policy verdict travels to the final command builder
+    # so the fresh-mode witness subordinates its EV-override leg to the policy.
+    if getattr(receipt, "rest_then_cross_policy", None) is not None:
+        proof_mode_fields["rest_then_cross_policy"] = str(receipt.rest_then_cross_policy)
     return {
         "event_id": receipt.event_id,
         "event_type": event.event_type if event is not None else None,
@@ -4297,15 +4321,24 @@ def _select_edli_order_mode(
     if governor_mode == "TAKER":
         return "TAKER"
 
-    # --- 3. Economic EV override (§2 boundary) ---
-    if _ev_boundary_favors_cross(
-        actionable_payload=actionable_payload,
-        quote_payload=quote_payload,
-        best_bid=best_bid,
-        best_ask=best_ask,
-        reservation=reservation,
-        side=side,
-    ):
+    # --- 3. K4.0 REST-THEN-CROSS policy lane (replaces the §2 EV override as the
+    # fresh-mode witness). The policy verdict was decided PROOF-side
+    # (select_rest_then_cross_mode) and travels on the actionable payload:
+    #
+    # * TAKER_* policy -> fresh witness TAKER. The fresh-book protections that
+    #   remain on the cross are the leg-0 spread guard (already returned MAKER on
+    #   a blown-out fresh book), the SUBMIT_ABORTED_EDGE_REVERSED recapture (re-
+    #   certifies the edge on the fresh curve), and the taker PRICE_MOVED ceiling.
+    #   The old §2 boundary must NOT gate a policy cross — its formula disagrees
+    #   with the policy's lanes near the margin and would abort-loop every
+    #   FLEETING_EDGE/ESCALATED cross (the 93%-churn category, reborn).
+    # * REST/HOLD policy (or a LEGACY proof with no policy field) -> fresh witness
+    #   MAKER: resting is lawful regardless of any fresh EV preference for
+    #   crossing; the escalation lane owns any later cross, never an inline one.
+    #   (A legacy TAKER proof in flight across the deploy aborts MODE_FLIPPED
+    #   once and re-ranks under the policy — fail-closed migration.)
+    _proof_policy = str(actionable_payload.get("rest_then_cross_policy") or "")
+    if _proof_policy.startswith("TAKER_"):
         return "TAKER"
     return "MAKER"
 
@@ -6252,6 +6285,11 @@ def _generate_candidate_proofs(
                     maker_fill_probability=(mode_ev.maker_fill_probability if mode_ev is not None else None),
                     maker_fill_probability_source=(
                         mode_ev.maker_fill_probability_source if mode_ev is not None else None
+                    ),
+                    # K4.0: the policy verdict + escalation deadline travel with the proof.
+                    rest_then_cross_policy=(mode_ev.policy if mode_ev is not None else None),
+                    rest_escalation_deadline_minutes=(
+                        mode_ev.escalation_deadline_minutes if mode_ev is not None else None
                     ),
                 )
             )

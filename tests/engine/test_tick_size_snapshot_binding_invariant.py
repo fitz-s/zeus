@@ -44,10 +44,20 @@ def _era_source() -> str:
 
 def _tick_source_expr() -> str:
     """Extract the exact `tick_size=...` argument expression passed to the cert
-    builder at the build_final_intent_certificate_from_actionable call site."""
+    builder at the build_final_intent_certificate_from_actionable call site.
+
+    SCANNER FIX (2026-06-10): the old lazy DOTALL regex matched the FIRST
+    `tick_size=` anywhere in the file followed eventually by `min_order_size=`;
+    when the venue amount-grid fix added a `tick_size=` kwarg to the upstream
+    quantize call, the capture ballooned across half the submit path (including
+    a historical comment containing the literal `, 0.01)`), failing the test on
+    prose. Anchor the scan INSIDE the cert-builder call region instead — the
+    invariant under test is unchanged."""
     src = _era_source()
-    # Match the keyword argument value up to the trailing comma+newline.
-    m = re.search(r"\n\s*tick_size=(?P<expr>.+?),\n\s*min_order_size=", src, re.DOTALL)
+    call_at = src.find("final_intent = build_final_intent_certificate_from_actionable(")
+    assert call_at != -1, "could not locate the cert-builder call site"
+    region = src[call_at : call_at + 4000]
+    m = re.search(r"\n\s*tick_size=(?P<expr>.+?),\n\s*min_order_size=", region, re.DOTALL)
     assert m is not None, "could not locate tick_size=... kwarg at cert-builder call site"
     return m.group("expr").strip()
 

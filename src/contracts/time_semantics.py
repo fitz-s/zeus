@@ -326,6 +326,22 @@ _GAMMA_FETCH_P95_SECONDS = 2.516
 _GAMMA_TIMEBOX_FLOOR_SECONDS = round(_GAMMA_FETCH_P95_SECONDS * 1.5, 3)  # 3.774s
 
 
+def _maker_rest_escalation_deadline_hours() -> float:
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+    )
+
+    return float(MAKER_REST_ESCALATION_DEADLINE_MINUTES) / 60.0
+
+
+def _taker_immediate_event_end_floor_hours() -> float:
+    from src.strategy.live_inference.mode_consistent_ev import (
+        TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES,
+    )
+
+    return float(TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES) / 60.0
+
+
 REGISTRY: list[Entry] = [
     # --- Cluster 1: Gamma lookup time-box vs measured fetch latency -----------
     Entry(
@@ -841,6 +857,63 @@ REGISTRY: list[Entry] = [
             "alignment with the supervisor's heartbeat-staleness threshold."
         ),
         relations=[],
+    ),
+    # --- Cluster 8 (K4.0, 2026-06-10): REST-THEN-CROSS maker escalation ---------
+    Entry(
+        name="maker_rest_escalation_deadline",
+        unit="hours",
+        kind=Kind.TTL,
+        operation=(
+            "how long a post_only GTC maker entry rests before the escalation job "
+            "cancels it and the next certified decision may cross as taker"
+        ),
+        source=_maker_rest_escalation_deadline_hours,
+        source_ref=(
+            "src/strategy/live_inference/mode_consistent_ev.py:"
+            "MAKER_REST_ESCALATION_DEADLINE_MINUTES (120)"
+        ),
+        basis_kind=BasisKind.MEASURED,
+        basis=(
+            "Kaplan-Meier on 108 right-censored GTC/post_only resting facts "
+            "(docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md): "
+            "cumulative fill 0.188@15min, 0.214@60min, 0.390@120min, 0.530@240min; "
+            "beyond ~240min the at-risk set is too thin to certify. 120min captures "
+            "the steep mid-section of the hazard curve while keeping the cross "
+            "option alive well before event end."
+        ),
+        relations=[],
+    ),
+    Entry(
+        name="taker_immediate_event_end_floor",
+        unit="hours",
+        kind=Kind.TTL,
+        operation=(
+            "minutes-to-event-end below which the rest-then-cross plan cannot "
+            "complete, so entry crosses immediately (policy TAKER_EVENT_END_NEAR)"
+        ),
+        source=_taker_immediate_event_end_floor_hours,
+        source_ref=(
+            "src/strategy/live_inference/mode_consistent_ev.py:"
+            "TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES (180)"
+        ),
+        basis_kind=BasisKind.DERIVED,
+        basis=(
+            "Escalation deadline (2.0h MEASURED) + 1.0h slack for the escalation "
+            "job cadence and the full-pipeline re-certification cycle."
+        ),
+        relations=[
+            Relation(
+                kind=RelationKind.MUST_EXCEED,
+                other="maker_rest_escalation_deadline",
+                margin=0.5,
+                rationale=(
+                    "A rest that cannot reach its escalation deadline (plus job-"
+                    "cadence slack) before the event ends is pointless; the floor "
+                    "must exceed the deadline by at least the slack."
+                ),
+                incident="K4.0 taker-only root cause 2026-06-10",
+            ),
+        ],
     ),
 ]
 

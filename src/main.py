@@ -5995,6 +5995,65 @@ def _edli_bankroll_warm_cycle() -> None:
         )
 
 
+@_scheduler_job("edli_command_recovery")
+def _edli_command_recovery_cycle() -> None:
+    """Unresolved venue-command reconcile sweep for the EDLI lane (#28c).
+
+    INCIDENT (2026-06-10 22:54Z): command 84fb2c4c lost its submit ack and sat
+    SUBMITTING for 8+ minutes while the order had FILLED on-chain at 22:55:13 —
+    invisible exposure. reconcile_unresolved_commands (INV-31) previously ran
+    ONLY inside the legacy cycle_runner loop; the EDLI event-driven lane had NO
+    scheduled owner for unresolved side-effect states. This job gives the sweep
+    a 3-minute cadence independent of which lane is live. The sweep itself is
+    unchanged (venue lookup per in-flight command; REVIEW_REQUIRED handoff for
+    ack-lost rows without an order id).
+    """
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if get_mode() != "live":
+        return
+    from src.execution.command_recovery import reconcile_unresolved_commands
+
+    summary = reconcile_unresolved_commands()
+    if summary.get("scanned"):
+        logger.info("edli_command_recovery: %s", summary)
+
+
+@_scheduler_job("maker_rest_escalation")
+def _maker_rest_escalation_cycle() -> None:
+    """K4.0 REST-THEN-CROSS deadline owner (consolidated overhaul 2026-06-11).
+
+    Cancels post_only GTC ENTRY rests older than the measured escalation
+    deadline (maker_rest_escalation_deadline, 2.0h MEASURED — KM hazard curve
+    on n=108 resting facts). GTC rests have NO other TTL owner. The job is
+    deliberately dumb: cancel only. The next reactor cycle re-certifies the
+    family through the FULL standard pipeline; _family_rest_state then sees the
+    cancelled-unfilled >= deadline rest in venue truth and licenses the
+    policy's TAKER_ESCALATED_AFTER_REST cross. Edge decayed -> no candidate ->
+    the standard regret receipt records the decay (free rest-cost measurement).
+
+    Read-only on the DB; venue cancels only; fail-soft per order.
+    """
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+    if get_mode() != "live":
+        return
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.maker_rest_escalation import run_maker_rest_escalation_cycle
+    from src.state.db import get_trade_connection_read_only
+
+    conn = get_trade_connection_read_only()
+    try:
+        clob = PolymarketClient()
+        stats = run_maker_rest_escalation_cycle(conn, clob)
+        if stats["scanned"]:
+            logger.info("maker_rest_escalation: %s", stats)
+    finally:
+        conn.close()
+
+
 @_scheduler_job("edli_market_substrate_warm")
 def _edli_market_substrate_warm_cycle() -> None:
     """Dedicated EDLI executable-snapshot substrate warmer, DECOUPLED from the reactor.
@@ -8456,6 +8515,31 @@ def main():
             seconds=60,
             id="edli_bankroll_warm",
             next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 30.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # K4.0 REST-THEN-CROSS deadline owner: cancels GTC maker entry rests older
+        # than the measured escalation deadline (2.0h). 5-min cadence is well inside
+        # the deadline's 60-min derivation slack (taker_immediate_event_end_floor
+        # relation in the time-semantics registry). Cancel-only; never submits.
+        scheduler.add_job(
+            _maker_rest_escalation_cycle,
+            "interval",
+            minutes=5,
+            id="maker_rest_escalation",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+            max_instances=1,
+            coalesce=True,
+        )
+        # #28c: unresolved-command reconcile sweep with its own cadence — the
+        # EDLI lane previously had NO owner for stuck SUBMITTING/UNKNOWN rows
+        # (the INV-31 sweep only ran inside the legacy cycle_runner loop).
+        scheduler.add_job(
+            _edli_command_recovery_cycle,
+            "interval",
+            minutes=3,
+            id="edli_command_recovery",
+            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 60.0),
             max_instances=1,
             coalesce=True,
         )

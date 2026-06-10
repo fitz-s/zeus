@@ -42,12 +42,31 @@ settlement rounding declared per-bin AND per-city AND hardcoded at the q integra
     preimage offsets), grep all evaluation sites; any rule with 2+ independent formulas gets
     refactored to ONE shared function consumed everywhere. Deliverable: table of rule →
     sites → shared-function refactor done/why-not.
+    [STATUS 2026-06-10: DONE, commit aca801dc77. Table:
+     - maturity: TWIN→UNIFIED (shared ALT constant+predicate in verifier.py)
+     - relative spread: TWIN→UNIFIED (execution.py dispatches to mode_consistent_ev)
+     - min-order shares: TWIN→UNIFIED (desired_shares_for_reserved_notional, float contract)
+     - mode choice: single authority (proof-side); fresh seam = fail-closed divergence
+       detector, intentionally distinct formula, shared margin pinned (why-not: detector
+       role + abort-not-trade failure cost)
+     - fee shape: licensed float/Decimal twin, golden-equivalence pinned
+     - preimage offsets / direction law / q_mode eligibility / readiness: single source
+     - staleness: per-surface heterogeneous by design; freshness_registry central]
 1.2 CI antibody where mechanically possible: a test that imports both call sites and asserts
     they dispatch to the same function object (or golden-case equivalence tests fed the same
     fixtures through both paths).
+    [STATUS 2026-06-10: DONE, commit aca801dc77 —
+     tests/decision_kernel/test_k1_shared_authority_predicates.py (identity + AST
+     no-local-formula) + tests/contracts/test_k1_twin_formula_equivalence.py (golden
+     matrices: fee float/Decimal, desired-shares, relative-spread both seams).]
 1.3 Known instances to verify already-unified (regression-pin): mode hysteresis both seams
     (a8a1c80536), maturity ALT tuple (verifier L945 + compiler L582 — extract ONE shared
     constant + one shared predicate), settlement preimage (1687be9343 contract).
+    [STATUS 2026-06-10: DONE, commit aca801dc77. Maturity tuple extracted to ONE shared
+     constant+predicate; mode margin AST-pinned (no local literal can fork); preimage
+     single-def grep-pinned. Production proof for tradeable-latest read semantics noted:
+     Karachi fill 2026-06-10T22:19Z skipped newer bounds-less 06Z posterior (id=1404,
+     q_lcb NULL) and served certified 00Z row (id=1456) — canonical golden case.]
 
 # K2 — TYPED CONTRACTS AT EVERY BOUNDARY
 Incidents: ChainState 'external_operator_closed' written by reconcile, unknown to riskguard
@@ -94,9 +113,32 @@ independence and "market truth must survive order-daemon death").
     substrate refresh; plist + deployment_freshness coverage).
 3.4 Phase 3: new_listing_scout joins market-truth daemon.
 3.5 Phase 5 (defer Phase 4 WS channel unless time allows): mainstream warm cache → DB-backed.
-3.6 STATE_TRUTH daemon: harvester + redeem_submitter + redeem_reconciler + wrap cycles +
-    chain_sync → com.zeus.state-truth (wallet keys, no order intent). The $19-class redeem
-    flow must not die with the order daemon.
+3.6 **[RESCOPED by operator directive 2026-06-10 ~22:55Z: "完全抛弃redeem" — Zeus must NEVER
+    submit redeem transactions again. Third-party auto-redeem takes over. Zeus's remaining
+    duties: correct ACCOUNTING + "Confirm pending deposit" handling.]**
+    a) Kill the redeem-submission lanes: ZEUS_AUTONOMOUS_REDEEM_ENABLED set to 0 in
+       com.zeus.live-trading.plist (done 22:55Z, applies at next load; backup
+       /tmp/com.zeus.live-trading.plist.bak_redeem_pivot). Add the code-level antibody:
+       submit_redeem and any redeem-submitting scheduler job hard-refuse (raise) unless an
+       operator-only override env is set — a flag flip alone must not be the only barrier.
+       Tests pin: no codepath reachable from daemon schedulers can broadcast a redeem tx.
+    b) EXTERNAL-REDEMPTION ABSORPTION (extends the operator-activity family — this IS the
+       K6.9 "fourth variant as a table row"): third-party redeem looks like (i) winning
+       position balance → 0 on-chain without a Zeus order/redeem, (ii) USDC inflow to the
+       proxy wallet. Detect both, book as EXTERNAL_REDEMPTION with provenance (tx hash,
+       amount), settle the corresponding settlement_commands rows to a terminal
+       EXTERNALLY_REDEEMED state (new enum member — writer⊆enum⊆consumer test per K2.2),
+       and do NOT raise ghost/drift findings for them.
+    c) CONFIRM-PENDING-DEPOSIT organ (NEW capability; no deposit code exists in src/ today):
+       detect proxy-wallet USDC that needs the Polymarket deposit-confirm/sweep step to
+       become tradeable collateral, perform that step (it is NOT a redeem — it remains in
+       scope), and book the ledger transition. Cadence + staleness bound from the time
+       registry; receipts in collateral_ledger_snapshots.
+    d) Accounting truth for the legacy rows: 19 REDEEM_REVIEW_REQUIRED + 1 REDEEM_TX_HASHED
+       (the $19, tx 0xd4780c8c... broadcast 22:52Z BEFORE the directive) — reconcile each to
+       chain truth (confirmed / externally-redeemed / zero-balance) ONCE, terminally, with
+       no resubmission. The rest of the original 3.6 (state-truth daemon for harvester
+       OBSERVATION + wrap cycles + chain_sync) stands — observation yes, submission never.
 3.7 Single-writer audit per truth surface: status_summary done; repeat for every state/*.json
     + heartbeat files (one writer each, asserted by a registry test).
 3.8 WAL/db-locked chronic noise: the exit-fill projection repair loop (trade_fact_id=28 class)
@@ -107,6 +149,48 @@ independence and "market truth must survive order-daemon death").
 
 # K4 — MEASUREMENT-BASED CONSTANTS (no more guesses)
 Authority: src/contracts/time_semantics.py registry (21 entries, 13 relations, 10 basis=guess).
+4.0 **[OPERATOR-ESCALATED 2026-06-10 ~22:45Z — FRONT-RUN within K4; coordinate restart]**
+    Taker-only execution root cause + REST-THEN-CROSS policy. Evidence + measured KM
+    fill-hazard curve: docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md.
+    All 6 live fills are FOK crosses paying 4.0% of notional to spread (books up to 8¢
+    wide); cause = (a) p_fill_maker=0.10 flat GUESS (measured KM on our own 108 resting
+    facts: 0.188@15min all-band, 0.39@120min, and 9/9 fills in the [0.4,1.0) price band)
+    handicapping maker EV ~10×, and (b) the one-shot maker-XOR-taker decision shape, which
+    cannot represent rest-then-cross at all — that is the design failure, not the constant.
+    Implement the K-decision from the evidence doc: default entry = post_only GTC at
+    min(bid+tick, reservation, mint-boundary cap) with a measured escalation deadline
+    (start 120 min, registry constant basis=MEASURED); at deadline, unfilled + re-certified
+    edge ≥ ts → taker cross; edge gone → cancel + receipt the decay. Taker-immediate only
+    for fleeting-edge / near-event-end / one-sided-book lanes (registry constants).
+    Antibody: no taker cross may exist while an unexpired same-family maker rest exists.
+    Receipts carry mode + deadline so the settlement loop recalibrates the hazard curve and
+    λ (K4.3) from realized maker markout. Subsumes the old "verify N≥30 trigger fires"
+    framing — the trigger's measurement population (25-min deep-longshot rests) was the
+    wrong conditioning; fix the population, not just the constant.
+    [STATUS 2026-06-10: IMPLEMENTED (deploys at next restart window).
+     - Policy: select_rest_then_cross_mode (mode_consistent_ev.py) — REST_DEFAULT
+       post_only GTC; taker-immediate lanes ESCALATED_AFTER_REST / EVENT_END_NEAR /
+       FLEETING_EDGE (0.15, honest GUESS w/ measurement plan) / MAKER_INADMISSIBLE;
+       antibody lane HOLD_REST_IN_PROGRESS (chosen_ev=-inf: NO new order while an
+       unexpired same-family rest exists). p_fill 0.10 GUESS retired -> 0.39
+       MEASURED@120min (provenance only; the policy decides).
+     - Registry: maker_rest_escalation_deadline 2.0h MEASURED +
+       taker_immediate_event_end_floor 3.0h DERIVED w/ MUST_EXCEED relation.
+     - Adapter: proof seam dispatches the policy; family inputs from venue truth
+       (_family_rest_state: open rest blocks family; cancelled-unfilled >= deadline
+       licenses the escalation cross); policy + deadline travel proof -> receipt ->
+       actionable; fresh-mode witness SUBORDINATED to the policy (legacy proofs
+       witness MAKER, fail-closed migration); FRESH_BOOK_EV_FAVORS_CROSS tripwire
+       scoped to legacy proofs.
+     - Escalation job: src/execution/maker_rest_escalation.py + 5-min scheduler job
+       (cancel-only deadline owner; GTC rests had NO other TTL owner). Re-cert is
+       the FULL standard pipeline on the next cycle, never shortcut math.
+     - #28c bundled: edli_command_recovery 3-min job (stuck-SUBMITTING owner for
+       the edli lane; legacy cycle_runner was the only sweep before).
+     - Tests: 19 policy + 15 adapter-seam + 8 escalation-job relationship tests.
+     - Maker fee bonus cited: maker pays zero taker fee -> saves spread (~4.0%
+       notional measured) PLUS fee (1.0-2.5% at our band) per avoided cross.
+     - DEFERRED: hazard-curve/lambda auto-recal from escalation receipts (K4.3).]
 4.1 For each basis=guess entry: build the measurement (from existing telemetry where possible)
     and replace guess→measured with the evidence recorded in the registry. Priority: maker
     p_fill by distance-from-touch (fill_tracker resting facts; auto-recalibration trigger at

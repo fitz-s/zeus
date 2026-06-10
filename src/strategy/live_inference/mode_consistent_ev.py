@@ -93,6 +93,65 @@ TAKER_SPREAD_GUARD_REASON = "TAKER_FORBIDDEN_RELATIVE_SPREAD"
 PLACEMENT_MAKER = "maker_bid_improve"
 PLACEMENT_TAKER = "taker_cross"
 
+# =============================================================================
+# K4.0 REST-THEN-CROSS (consolidated overhaul 2026-06-11, operator escalation
+# 2026-06-10 ~22:45Z; evidence + KM measurement:
+# docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md)
+#
+# THE DESIGN FAILURE: the one-shot maker-XOR-taker EV comparison above cannot
+# represent the true option structure. All 6 live fills were FOK crosses paying
+# 4.0% of notional to spread (books up to 8c wide) because p_fill_maker=0.10
+# (GUESS) handicapped the maker lane ~10x. The fix is NOT a better point prior —
+# it is the POLICY: default entry RESTS post_only GTC at the maker limit with a
+# measured escalation deadline; the cross happens at the deadline (after the
+# edge re-certifies through the FULL standard pipeline) or immediately in the
+# declared exception lanes only.
+#
+# MEASUREMENT (Kaplan-Meier, n=108 right-censored GTC/post_only resting facts):
+# cumulative fill 0.188@15min, 0.214@60min, 0.390@120min, 0.530@240min;
+# 9/9 filled in the [0.40,1.00) price band. The old 0.10 was conditioned on
+# ~25-minute rests of deep-longshot quotes — the wrong population (Fitz #4).
+# =============================================================================
+
+# Escalation deadline for a resting maker entry. basis=MEASURED: the KM curve
+# reaches 0.39 cumulative fill by 120 min and the at-risk set is still thick
+# there (beyond ~240 min it is too thin to certify). Registry-tracked in
+# src/contracts/time_semantics.py as maker_rest_escalation_deadline (2.0 h).
+MAKER_REST_ESCALATION_DEADLINE_MINUTES = 120.0
+
+# Maker fill probability AT the escalation-deadline horizon. basis=MEASURED
+# (KM @120min, all-band). Used for the recorded EV provenance of a REST
+# decision — the EV of the policy's first leg. NOT a one-shot point prior;
+# the policy, not this number, decides the mode.
+MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE = 0.39
+MAKER_FILL_PROBABILITY_DEADLINE_SOURCE = (
+    "km_2026_06_10_resting_facts_n108@120min:basis=MEASURED"
+)
+
+# Taker-immediate exception lane 1: event end too near for the rest-then-cross
+# plan to complete. basis=DERIVED: escalation deadline + 60 min slack for the
+# escalation job cadence + re-certification cycle. Relation pinned in tests:
+# MUST exceed the escalation deadline.
+TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES = 180.0
+
+# Taker-immediate exception lane 2: a fleeting edge — an edge so large the
+# market will likely correct it before the deadline, so resting forfeits it.
+# basis=GUESS (honest): no measurement yet licenses a threshold. MEASUREMENT
+# PLAN: escalation receipts record edge-at-rest vs edge-at-deadline; once the
+# settled cohort is thick enough, replace with the measured edge-decay
+# quantile. Until then 0.15 (~2x the largest fill edge tonight) keeps the lane
+# narrow — resting stays the default for everything we actually traded.
+TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD = 0.15
+
+# Policy verdicts (travel on receipts; the settlement loop groups by these).
+POLICY_REST_DEFAULT = "REST_DEFAULT"
+POLICY_HOLD_REST_IN_PROGRESS = "HOLD_REST_IN_PROGRESS"
+POLICY_TAKER_ESCALATED_AFTER_REST = "TAKER_ESCALATED_AFTER_REST"
+POLICY_TAKER_EVENT_END_NEAR = "TAKER_EVENT_END_NEAR"
+POLICY_TAKER_FLEETING_EDGE = "TAKER_FLEETING_EDGE"
+POLICY_TAKER_MAKER_INADMISSIBLE = "TAKER_MAKER_INADMISSIBLE"
+POLICY_MAKER_TAKER_FORBIDDEN = "MAKER_TAKER_FORBIDDEN"
+
 
 def _finite(value: float | int | None) -> float | None:
     if value is None:
@@ -252,6 +311,9 @@ class ModeConsistentEv:
     maker_fill_probability_source: str
     placement: str  # PLACEMENT_MAKER | PLACEMENT_TAKER
     taker_over_maker_margin: float = TAKER_OVER_MAKER_MARGIN  # hysteresis margin applied
+    # K4.0 REST-THEN-CROSS provenance (None on the legacy one-shot path):
+    policy: str | None = None  # POLICY_* verdict that produced chosen_mode
+    escalation_deadline_minutes: float | None = None  # set on REST_DEFAULT decisions
 
 
 def select_mode_consistent_ev(
@@ -346,3 +408,140 @@ def select_mode_consistent_ev(
         placement=placement,
         taker_over_maker_margin=_margin,
     )
+
+
+def select_rest_then_cross_mode(
+    *,
+    q_lcb: float,
+    taker_all_in_cost: float | None,
+    p_fill_taker: float,
+    best_bid: float | None,
+    best_ask: float | None,
+    tick_size: float,
+    reservation: float,
+    minutes_to_event_end: float | None = None,
+    unexpired_family_rest: bool = False,
+    escalated_after_rest: bool = False,
+    p_fill_maker: float = MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+    p_fill_maker_source: str = MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+    lambda_adverse: float = MAKER_ADVERSE_SELECTION_LAMBDA,
+    max_relative_spread: float = TAKER_MAX_RELATIVE_SPREAD,
+    taker_over_maker_margin: float = TAKER_OVER_MAKER_MARGIN,
+    penalty: float = 0.0,
+    escalation_deadline_minutes: float = MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+    event_end_floor_minutes: float = TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES,
+    fleeting_edge_threshold: float = TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD,
+) -> ModeConsistentEv:
+    """K4.0 REST-THEN-CROSS policy (supersedes the one-shot EV comparison).
+
+    Policy order (each verdict travels on the receipt as ``policy``):
+
+    1. HOLD_REST_IN_PROGRESS — the ANTIBODY lane: an unexpired same-family maker
+       rest exists, so NO new order of either mode may be constructed
+       (chosen_ev=-inf forces the trade-score gate to reject). The operator
+       relationship: "no taker cross may exist while an unexpired same-family
+       maker rest exists" — pinned by
+       tests/strategy/live_inference/test_rest_then_cross_policy.py.
+    2. TAKER_MAKER_INADMISSIBLE — no bid to rest behind (one-sided book): the
+       taker lane stays lawful exactly as before.
+    3. TAKER_ESCALATED_AFTER_REST — the deadline cross: a prior rest for this
+       family was cancelled UNFILLED after >= the escalation deadline, and the
+       edge re-certified through the FULL standard pipeline (this call IS the
+       re-certification — the caller only reaches it with certified q_lcb).
+    4. TAKER_EVENT_END_NEAR — the rest-then-cross plan cannot complete before
+       the event ends; immediate cross while taker is admissible.
+    5. TAKER_FLEETING_EDGE — raw taker edge >= the fleeting threshold; resting
+       would likely forfeit it.
+    6. REST_DEFAULT — everything else rests post_only GTC at the maker limit
+       with the measured escalation deadline. THIS is the default the operator
+       ordered: a fresh-book EV preference for crossing is NOT a license to
+       cross.
+
+    EV provenance: both EVs are still computed (with the MEASURED deadline-
+    horizon fill probability, not the retired 0.10 guess) and travel on the
+    receipt so the settlement loop recalibrates the hazard curve and lambda.
+    The taker spread guard and the hysteresis margin remain lawful and
+    untouched inside the EV kernel.
+    """
+    mode_ev = select_mode_consistent_ev(
+        q_lcb=q_lcb,
+        taker_all_in_cost=taker_all_in_cost,
+        p_fill_taker=p_fill_taker,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        tick_size=tick_size,
+        reservation=reservation,
+        p_fill_maker=p_fill_maker,
+        p_fill_maker_source=p_fill_maker_source,
+        lambda_adverse=lambda_adverse,
+        max_relative_spread=max_relative_spread,
+        taker_over_maker_margin=taker_over_maker_margin,
+        penalty=penalty,
+    )
+    from dataclasses import replace as _replace
+
+    taker_admissible = (
+        mode_ev.ev_taker is not None and mode_ev.taker_forbidden_reason is None
+    )
+    maker_admissible = (
+        mode_ev.ev_maker is not None and mode_ev.maker_limit_price is not None
+    )
+
+    def _as_maker(policy: str, *, chosen_ev: float | None = None, deadline: float | None = None) -> ModeConsistentEv:
+        ev = chosen_ev if chosen_ev is not None else (
+            float(mode_ev.ev_maker) if mode_ev.ev_maker is not None else float("-inf")
+        )
+        return _replace(
+            mode_ev,
+            chosen_mode="MAKER",
+            chosen_ev=ev,
+            placement=PLACEMENT_MAKER,
+            policy=policy,
+            escalation_deadline_minutes=deadline,
+        )
+
+    def _as_taker(policy: str) -> ModeConsistentEv:
+        return _replace(
+            mode_ev,
+            chosen_mode="TAKER",
+            chosen_ev=float(mode_ev.ev_taker),
+            placement=PLACEMENT_TAKER,
+            policy=policy,
+            escalation_deadline_minutes=None,
+        )
+
+    # 1. ANTIBODY: an unexpired same-family rest forbids ANY new order.
+    if unexpired_family_rest:
+        return _as_maker(POLICY_HOLD_REST_IN_PROGRESS, chosen_ev=float("-inf"))
+
+    # 2. One-sided book: maker structurally impossible; taker lane stays lawful.
+    if not maker_admissible:
+        if taker_admissible:
+            return _as_taker(POLICY_TAKER_MAKER_INADMISSIBLE)
+        return _as_maker(POLICY_MAKER_TAKER_FORBIDDEN, chosen_ev=float("-inf"))
+
+    # 3. Deadline escalation: rest expired unfilled + edge re-certified -> cross.
+    if escalated_after_rest and taker_admissible:
+        return _as_taker(POLICY_TAKER_ESCALATED_AFTER_REST)
+
+    # 4. Event end too near for rest-then-cross to complete.
+    if (
+        taker_admissible
+        and minutes_to_event_end is not None
+        and float(minutes_to_event_end) < float(event_end_floor_minutes)
+    ):
+        return _as_taker(POLICY_TAKER_EVENT_END_NEAR)
+
+    # 5. Fleeting edge: resting would likely forfeit it.
+    if taker_admissible and taker_all_in_cost is not None:
+        raw_taker_edge = float(q_lcb) - float(taker_all_in_cost)
+        if raw_taker_edge >= float(fleeting_edge_threshold):
+            return _as_taker(POLICY_TAKER_FLEETING_EDGE)
+
+    # 6. THE DEFAULT: rest post_only GTC with the measured escalation deadline.
+    #    (Also the escalated/taker-forbidden case: the spread guard stays lawful;
+    #    the rest re-posts and the next escalation re-evaluates.)
+    policy = POLICY_MAKER_TAKER_FORBIDDEN if (
+        escalated_after_rest and not taker_admissible
+    ) else POLICY_REST_DEFAULT
+    return _as_maker(policy, deadline=float(escalation_deadline_minutes))
