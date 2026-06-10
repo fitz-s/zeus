@@ -91,6 +91,13 @@ _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 # consecutive cycles cover disjoint families and the whole live set is swept
 # within a bounded number of cycles. See _refresh_pending_family_snapshots.
 _SUBSTRATE_REFRESH_CURSOR = 0
+# New-listing scout (FIX 3c): condition_ids discovered by the 60s scout that have
+# not yet been seen at the head of the substrate-warmer rotation.  The warmer
+# reads + clears this set and prepends matching families so new markets are warmed
+# immediately rather than waiting for normal round-robin rotation.
+_NEW_FAMILY_CONDITION_IDS: set[str] = set()
+# Condition_ids already known at last scout probe — used for diff.
+_SCOUT_KNOWN_CONDITION_IDS: set[str] = set()
 
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
@@ -3357,10 +3364,39 @@ def _refresh_pending_family_snapshots(
     # the freshness-first deterministic order; we only choose a different *start*.
     # No family is dropped — rotation reorders, it does not filter — so a True from
     # the freshness check still captures and no candidate is starved.
-    global _SUBSTRATE_REFRESH_CURSOR
+    # FIX 3c — NEW-FAMILY WARMER PRIORITY (operator 2026-06-09):
+    # Newly-discovered condition_ids (set by _new_listing_scout_cycle) jump to HEAD
+    # of the rotation so they are warmed in the NEXT cycle rather than waiting at
+    # the tail of the round-robin.  Translate condition_ids → (city, date, metric)
+    # tuples via the topology DB, then prepend to families before cursor rotation.
+    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS
+    new_priority_families: list[tuple[str, str, str]] = []
+    if _NEW_FAMILY_CONDITION_IDS:
+        try:
+            new_cids_snapshot = set(_NEW_FAMILY_CONDITION_IDS)
+            _NEW_FAMILY_CONDITION_IDS.clear()
+            for cid in sorted(new_cids_snapshot):
+                try:
+                    row_q = world_conn.execute(
+                        "SELECT city, target_date, temperature_metric FROM market_events WHERE condition_id = ? LIMIT 1",
+                        (cid,),
+                    ).fetchone()
+                    if row_q is not None:
+                        city_v, td_v, metric_v = (
+                            _canonical_refresh_city_name(row_q[0]),
+                            str(row_q[1] or "").strip(),
+                            _canonical_refresh_metric(row_q[2]),
+                        )
+                        fk = _refresh_family_key(city_v, td_v, metric_v)
+                        if fk not in {_refresh_family_key(*f) for f in families}:
+                            new_priority_families.append((city_v, td_v, metric_v))
+                except Exception:
+                    pass
+        except Exception:
+            pass
     n_families = len(families)
     start_offset = _SUBSTRATE_REFRESH_CURSOR % n_families
-    families = families[start_offset:] + families[:start_offset]
+    families = new_priority_families + families[start_offset:] + families[:start_offset]
 
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
     # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
@@ -4000,6 +4036,137 @@ def _market_discovery_cycle() -> None:
     finally:
         _market_substrate_refresh_lock.release()
         _market_discovery_lock.release()
+
+
+@_scheduler_job("new_listing_scout")
+def _new_listing_scout_cycle() -> None:
+    """Lightweight 60s new-listing scout: detect brand-new Polymarket weather markets.
+
+    Upstream real-time discovery gap (dimension a/b/c, operator 2026-06-09):
+    The standard market_discovery runs every 5 minutes.  A brand-new listing
+    (startDate just past) therefore has a ≤5-min discovery lag and then must
+    wait for the next 00Z/12Z opendata wave (hours) before a forecast_posterior
+    exists.  This scout closes two gaps:
+
+    (a) DISCOVERY CADENCE: probes Gamma `order=startDate&ascending=false&limit=10`
+        every 60s — a head-page diff for NEW condition_ids.  Cost: one HTTP GET
+        per cycle (<100ms); no full universe scan.
+
+    (b) POSTERIOR FAST-LANE: enqueues a replacement_forecast shadow materialization
+        request for each new family so the daemon processes it in the next 5-min
+        cycle rather than waiting for the next scheduled 00Z/12Z opendata wave.
+
+    (c) WARMER PRIORITY: inserts new condition_ids into _NEW_FAMILY_CONDITION_IDS so
+        _refresh_pending_family_snapshots prepends them to the warmer rotation head
+        (they are warmed next cycle, not at tail of the round-robin).
+
+    Fail-open: any exception is caught and logged; the live path is never affected.
+    EDLI-gated: only fires when edli_v1.enabled is True.
+    """
+    global _SCOUT_KNOWN_CONDITION_IDS, _NEW_FAMILY_CONDITION_IDS
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+
+    try:
+        import httpx
+        from src.data.market_scanner import GAMMA_BASE, _gamma_get
+        from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+        # (a) Probe head page: most recently started events
+        try:
+            resp = _gamma_get(
+                "/events",
+                params={"order": "startDate", "ascending": "false", "limit": "10"},
+                timeout=10.0,
+                retries=2,
+            )
+            if resp.status_code != 200:
+                logger.debug("new_listing_scout: Gamma probe returned %s", resp.status_code)
+                return
+            raw_events = resp.json() if isinstance(resp.json(), list) else []
+        except Exception as exc:
+            logger.debug("new_listing_scout: Gamma probe failed (non-fatal): %r", exc)
+            return
+
+        # Extract condition_ids from all markets across the head-page events
+        probe_condition_ids: set[str] = set()
+        for ev in raw_events:
+            for market in (ev.get("markets") or []):
+                cid = str(market.get("conditionId") or "").strip()
+                if cid:
+                    probe_condition_ids.add(cid)
+
+        if not probe_condition_ids:
+            return
+
+        # Initialise known set from DB on first run (or when empty)
+        if not _SCOUT_KNOWN_CONDITION_IDS:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(ZEUS_FORECASTS_DB_PATH), timeout=10)
+                try:
+                    rows = conn.execute("SELECT condition_id FROM market_events WHERE condition_id IS NOT NULL").fetchall()
+                    _SCOUT_KNOWN_CONDITION_IDS = {str(r[0]) for r in rows if r[0]}
+                finally:
+                    conn.close()
+            except Exception as exc:
+                logger.debug("new_listing_scout: known-set init failed (non-fatal): %r", exc)
+
+        new_cids = probe_condition_ids - _SCOUT_KNOWN_CONDITION_IDS
+        if not new_cids:
+            # Update known set to include any probe IDs we haven't seen
+            _SCOUT_KNOWN_CONDITION_IDS.update(probe_condition_ids)
+            return
+
+        logger.info(
+            "new_listing_scout: %d new condition_id(s) detected on head-page probe: %s",
+            len(new_cids),
+            sorted(new_cids),
+        )
+
+        # Persist new events to market_events via standard discovery path
+        try:
+            from src.data.market_scanner import find_weather_markets_or_raise, _persist_market_events_to_db
+            new_events = find_weather_markets_or_raise(min_hours_to_resolution=0.0, include_slug_pattern=True)
+            _persist_market_events_to_db(new_events, db_path=ZEUS_FORECASTS_DB_PATH)
+        except Exception as exc:
+            logger.warning("new_listing_scout: persist new events failed (non-fatal): %r", exc)
+
+        # (b) POSTERIOR FAST-LANE: enqueue shadow materialization for each new family
+        try:
+            from src.data.replacement_forecast_production import (
+                _replacement_forecast_shadow_materialization_queue_config,
+            )
+            from src.data.replacement_forecast_shadow_materialization_queue import _write_request
+            from pathlib import Path
+
+            queue_cfg = _replacement_forecast_shadow_materialization_queue_config()
+            request_dir = queue_cfg.get("request_dir")
+            if request_dir is not None:
+                request_dir = Path(str(request_dir))
+                request_dir.mkdir(parents=True, exist_ok=True)
+                for cid in sorted(new_cids):
+                    req_path = request_dir / f"new_listing_scout_{cid}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+                    _write_request(req_path, {
+                        "source": "new_listing_scout",
+                        "condition_id": cid,
+                        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+                        "reason": "NEW_LISTING_FAST_LANE",
+                    })
+                    logger.info("new_listing_scout: enqueued materialization for %s → %s", cid, req_path.name)
+        except Exception as exc:
+            logger.warning("new_listing_scout: materialization enqueue failed (non-fatal): %r", exc)
+
+        # (c) WARMER PRIORITY: mark new condition_ids for head-of-rotation in next warm cycle
+        _NEW_FAMILY_CONDITION_IDS.update(new_cids)
+
+        # Update known set
+        _SCOUT_KNOWN_CONDITION_IDS.update(probe_condition_ids)
+
+    except Exception as exc:
+        logger.warning("new_listing_scout: outer guard (non-fatal): %r", exc)
 
 
 def _capture_boot_state() -> dict:
@@ -6146,10 +6313,45 @@ def _edli_emit_day0_extreme_events(
     received_at: str,
     limit: int,
 ) -> int:
-    """Emit EDLI Day0 extreme events from live observation truth surfaces."""
+    """Emit EDLI Day0 extreme events from live observation truth surfaces.
+
+    Three lanes, freshest first (day0 first-principles review 2026-06-10):
+      1. FAST LANE — free METAR feed (aviationweather.gov, ~3-5 min behind the
+         station) emitting on running-extreme MOVES; carries the WU-vs-METAR
+         oracle-anomaly cross-check (Paris-CDG class, fail-closed pause).
+      2/3. CATCH-UP — the persisted settlement_day_observation_authority and
+         observation_instants scanners (reboot/coverage; hourly-grade
+         staleness, bounded by the stale-obs boundary guard downstream).
+    """
 
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
+
+    fast_emitted = 0
+    try:
+        edli_cfg = settings.get("edli_v1", {}) if hasattr(settings, "get") else settings["edli_v1"]
+        fast_lane_enabled = bool(edli_cfg.get("day0_fast_obs_lane_enabled", True))
+    except Exception:
+        fast_lane_enabled = True
+    if fast_lane_enabled:
+        try:
+            from src.config import runtime_cities
+            from src.data.day0_fast_obs import get_fast_obs_emitter
+            from src.data.day0_oracle_anomaly import wu_metar_anomaly_check
+
+            fast_emitted = get_fast_obs_emitter().emit_events(
+                world_conn=world_conn,
+                cities=runtime_cities(),
+                decision_time=decision_time,
+                received_at=received_at,
+                limit=limit,
+                anomaly_check=wu_metar_anomaly_check,
+            )
+        except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
+            logger.warning(
+                "EDLI day0 fast obs lane failed (non-fatal, catch-up lanes continue): %r",
+                _fast_exc,
+            )
 
     trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
     authority_results = trigger.scan_authority_rows(
@@ -6166,7 +6368,7 @@ def _edli_emit_day0_extreme_events(
         received_at=received_at,
         limit=limit,
     )
-    return len(authority_results) + len(observation_results)
+    return fast_emitted + len(authority_results) + len(observation_results)
 
 
 def _edli_day0_settlement_semantics(observation: dict):
@@ -8001,6 +8203,21 @@ def main():
             max_instances=1,
             coalesce=True,
         )
+        # NEW-LISTING SCOUT (operator 2026-06-09, dimensions a/b/c): lightweight 60s
+        # head-page probe for brand-new Polymarket weather listings.  Detects new
+        # condition_ids, enqueues a shadow-materialization fast-lane request, and marks
+        # families for head-of-rotation in the next substrate warm cycle.
+        # Fail-open: any exception is caught inside the job.  Data-only; no orders.
+        if edli_cfg.get("new_listing_scout_enabled", True):
+            scheduler.add_job(
+                _new_listing_scout_cycle,
+                "interval",
+                seconds=60,
+                id="new_listing_scout",
+                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+                max_instances=1,
+                coalesce=True,
+            )
         # MAINSTREAM WARM (E2 / operator directive 2026-06-04 #2): dedicated off-mutex
         # warmer for the mainstream-forecast point cache (read_mainstream_point_cached),
         # mirroring _edli_market_substrate_warm_cycle. The reactor proof path now ALWAYS

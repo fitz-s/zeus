@@ -1557,6 +1557,33 @@ def build_event_bound_no_submit_receipt(
             event.causal_snapshot_id,
             reason=selected_stale_reason,
         )
+    # Market-age gate for opening_inertia (EDLI path): restore legacy
+    # MODE_PARAMS[OPENING_HUNT]["max_hours_since_open"] = 24 semantics.
+    # Kelly's phase-aware multiplier sizes by opening-tick age; a mislabeled
+    # 30-day-old market receives wrong sizing.  Conservative: missing age →
+    # pass (do NOT reject without evidence).
+    # Placed before the decision engine so it fires even when forecast fields
+    # are absent (the decision engine would return NO_TRADE in those cases, but
+    # the age reason is more informative and fires cheaply first).
+    if event.event_type == "FORECAST_SNAPSHOT_READY" and str(payload.get("direction") or "").strip().lower() == "buy_no":
+        _oi_age_hours = _opening_inertia_market_age_hours(
+            snapshot_row=row,
+            topology_rows=family_topology_rows,
+            family_rows=family_rows,
+            decision_time=decision_time,
+        )
+        if _oi_age_hours is not None and _oi_age_hours >= 24.0:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=f"OPENING_INERTIA_MARKET_TOO_OLD:{_oi_age_hours:.1f}h",
+                city=str(payload.get("city") or ""),
+                target_date=str(payload.get("target_date") or ""),
+                metric=str(payload.get("metric") or payload.get("temperature_metric") or ""),
+                source_status="MATCH",
+                family_complete=True,
+            )
     decision = EventBoundDecisionEngine().evaluate(
         EventBoundDecisionRequest(
             event=event,
@@ -6697,6 +6724,19 @@ def _live_yes_probabilities(
             decision_time=decision_time,
         )
     if event.event_type == "DAY0_EXTREME_UPDATED":
+        # ORACLE ANOMALY PAUSE (day0 review 2026-06-10 item E, Paris-CDG class):
+        # when the WU-vs-METAR divergence detector has flagged this family's
+        # (city, target_date), no day0 q may be built — the running extreme's
+        # truth source is suspect (sensor tampering / feed fault). Raising here
+        # converts to a deterministic no-submit receipt at the
+        # _generate_candidate_proofs ValueError boundary
+        # (LIVE_INFERENCE_INPUTS_MISSING:DAY0_ORACLE_ANOMALY_PAUSED:...).
+        from src.data.day0_oracle_anomaly import is_day0_family_paused
+
+        if is_day0_family_paused(str(family.city), str(family.target_date)):
+            raise ValueError(
+                f"DAY0_ORACLE_ANOMALY_PAUSED:{family.city}:{family.target_date}"
+            )
         generated = _canonical_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -10628,8 +10668,24 @@ def _runtime_bankroll_usd(*, cached_only: bool = False) -> float:
         raise ValueError("bankroll_provider_unavailable")
     if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
         raise ValueError("bankroll_provider_not_canonical")
+    # NEW-ENTRY sizing base (dual-bankroll, 2026-06-09 P1). Preference order:
+    #   1. spendable_cash_usd — free BUY collateral (architect memo §2: live
+    #      entry sizing uses spendable cash so open positions never inflate the
+    #      next order's cap). This is already phantom-free (free cash only).
+    #   2. equity_for_new_entry_sizing_usd — conservative equity that EXCLUDES
+    #      the blip_held phantom. Used only when spendable_cash is unavailable.
+    #   3. value_usd — LAST resort. Under blip_held this HOLDS a phantom position
+    #      value (defends the loss threshold) and MUST NOT seed Kelly; it is the
+    #      final fallback only for legacy/degraded records that carry neither
+    #      conservative field.
     spendable_cash = getattr(bankroll, "spendable_cash_usd", None)
-    bankroll_usd = float(spendable_cash) if spendable_cash is not None else float(bankroll.value_usd)
+    sizing_equity = getattr(bankroll, "equity_for_new_entry_sizing_usd", None)
+    if spendable_cash is not None:
+        bankroll_usd = float(spendable_cash)
+    elif sizing_equity is not None:
+        bankroll_usd = float(sizing_equity)
+    else:
+        bankroll_usd = float(bankroll.value_usd)
     if bankroll_usd <= 0:
         raise ValueError("bankroll_provider_nonpositive")
     return bankroll_usd
@@ -10724,6 +10780,43 @@ def _required_bound_tick_size(snap_for_depth, executable_snapshot_payload) -> st
         )
     # Already a canonical Decimal string from the evidence builder; normalise.
     return str(Decimal(str(payload_tick)))
+
+
+def _opening_inertia_market_age_hours(
+    *,
+    snapshot_row: dict[str, Any],
+    topology_rows: list[dict[str, Any]],
+    family_rows: list[dict[str, Any]],
+    decision_time: datetime,
+) -> float | None:
+    """Return market age in hours, or None if age cannot be determined.
+
+    Priority: snapshot market_start_at → topology created_at (Gamma createdAt) →
+    earliest family captured_at (proxy: first time we saw the market).
+    Returns None (conservative pass) when no usable timestamp found.
+    """
+    # 1) market_start_at from the selected snapshot row
+    raw = snapshot_row.get("market_start_at")
+    market_open = _parse_utc(raw) if isinstance(raw, str) else None
+    # 2) created_at from the first topology row (Gamma createdAt, most authoritative)
+    if market_open is None and topology_rows:
+        for trow in topology_rows:
+            market_open = _parse_utc(trow.get("created_at"))
+            if market_open is not None:
+                break
+    # 3) earliest captured_at across all family rows (proxy lower-bound on open time)
+    if market_open is None and family_rows:
+        earliest = None
+        for frow in family_rows:
+            ts = _parse_utc(frow.get("captured_at"))
+            if ts is not None and (earliest is None or ts < earliest):
+                earliest = ts
+        market_open = earliest
+    if market_open is None:
+        return None  # conservative: cannot determine age → allow through
+    decision_utc = decision_time.astimezone(UTC)
+    delta_seconds = (decision_utc - market_open).total_seconds()
+    return delta_seconds / 3600.0
 
 
 def _optional_bool(value: object) -> bool | None:

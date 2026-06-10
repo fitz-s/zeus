@@ -1171,8 +1171,58 @@ def _reprice_decision_from_executable_snapshot(
                 observation_time=_shadow_observation_time,
                 decision_seq=0,
             )
+            # FIX 2: populate opening_ticks + m0 from snapshot history so
+            # OpeningInertiaRelaxation's λ-estimation branch runs on real data.
+            # Fail-open: any exception leaves opening_ticks/m0 absent → no-λ path.
+            _opening_ticks: list[tuple[float, float]] | None = None
+            _m0: float | None = None
+            try:
+                _snap_cid = str(getattr(snapshot, "condition_id", None) or "")
+                _snap_msa = getattr(snapshot, "market_start_at", None)
+                if _snap_cid and conn is not None:
+                    import sqlite3 as _sqlite3
+                    _hist_cur = conn.execute(
+                        """
+                        SELECT captured_at, orderbook_top_bid, orderbook_top_ask
+                        FROM executable_market_snapshots
+                        WHERE condition_id = ?
+                        ORDER BY captured_at ASC
+                        LIMIT 50
+                        """,
+                        (_snap_cid,),
+                    )
+                    _hist_rows = _hist_cur.fetchall()
+                    if _hist_rows and _snap_msa is not None:
+                        from datetime import timezone as _tz
+                        _msa_dt = _snap_msa if hasattr(_snap_msa, "tzinfo") else None
+                        if _msa_dt is not None:
+                            _ticks: list[tuple[float, float]] = []
+                            for _r_cap, _r_bid, _r_ask in _hist_rows:
+                                try:
+                                    from datetime import datetime as _dt
+                                    _cap_dt = _dt.fromisoformat(str(_r_cap).replace("Z", "+00:00"))
+                                    if _cap_dt.tzinfo is None:
+                                        continue
+                                    _t_sec = (_cap_dt.astimezone(_tz.utc) - _msa_dt.astimezone(_tz.utc)).total_seconds()
+                                    if _t_sec < 0:
+                                        continue
+                                    _bid = float(_r_bid) if _r_bid is not None else None
+                                    _ask = float(_r_ask) if _r_ask is not None else None
+                                    if _bid is not None and _ask is not None:
+                                        _ticks.append((_t_sec, (_bid + _ask) / 2.0))
+                                except Exception:
+                                    continue
+                            if _ticks:
+                                _opening_ticks = _ticks
+                                _m0 = _ticks[0][1]
+            except Exception:
+                pass  # fail-open: no-λ path in OpeningInertiaRelaxation unchanged
             dispatch_shadow_candidates(
-                analysis=_SimpleNamespace(metrics=_vnext_metrics_computed),
+                analysis=_SimpleNamespace(
+                    metrics=_vnext_metrics_computed,
+                    opening_ticks=_opening_ticks,
+                    m0=_m0,
+                ),
                 natural_key=_shadow_nk,
                 observed_at=_shadow_observation_time,
                 # world_conn intentionally omitted: dispatch self-opens a world-DB
