@@ -248,3 +248,114 @@ def test_thin_no_ask_depth_exhausted_falls_to_maker_quote():
     # Quote bounded behind the existing partial ask AND the complementary YES bid.
     assert ep.value <= 0.60 + 1e-9
     assert c95 == pytest.approx(ep.value)
+
+
+# ===========================================================================
+# (e) SIBLING-ROW resolution — live-v12 root cause fix
+# ===========================================================================
+def _no_outcome_row(*, tradeability_status_json=None):
+    """Mimics what the DB returns for the NO-outcome snapshot: single-token CLOB
+    /book response for the NO token.  yes_bids is empty because the YES book was
+    NOT fetched for this row (single-token endpoint returns own side only)."""
+    if tradeability_status_json is None:
+        tradeability_status_json = '{"executable_allowed": false, "reason": "clob_no_ask_illiquid"}'
+    depth = {
+        "NO": {
+            "asks": [],  # empty own ask — that's why tradeability_status=clob_no_ask_illiquid
+            "bids": [{"price": "0.10", "size": "500"}],
+        }
+        # YES key absent: single-token CLOB /book; yes_bids will be ()
+    }
+    return {
+        "snapshot_id": "snap-no-outcome",
+        "condition_id": "condition-wb",
+        "yes_token_id": "yes-wb",
+        "no_token_id": "no-wb",
+        "selected_outcome_token_id": "",
+        "outcome_label": "",
+        "min_tick_size": "0.01",
+        "min_order_size": "5",
+        "fee_details_json": '{"fee_rate_fraction": 0.0}',
+        "neg_risk": 0,
+        "orderbook_depth_json": json.dumps(depth),
+        "tradeability_status_json": tradeability_status_json,
+        "book_hash": "no-outcome-hash",
+    }
+
+
+def test_sibling_row_complement_bid_prices_maker_quote():
+    """Relationship test for the live-v12 None-return bug:
+
+    Root cause: the NO-outcome snapshot row has yes_bids=() (single-token CLOB
+    /book only carries NO side).  _complementary_best_bid_for_direction returned
+    None -> _maker_quote_execution_price_from_snapshot returned None -> fell back
+    to EXECUTABLE_NATIVE_ASK_MISSING.
+
+    Fix: _execution_price_from_snapshot accepts complementary_top_bid (sourced
+    from the sibling YES-outcome row's orderbook_top_bid scalar in
+    _generate_candidate_proofs) and threads it to the maker-quote helper.
+
+    This test exercises the full path: NO-outcome row (yes_bids empty) + sibling
+    YES bid as a scalar -> maker quote is priced correctly.
+    """
+    row = _no_outcome_row()
+    # Sibling YES-outcome row supplies the YES best bid as a scalar (orderbook_top_bid).
+    sibling_yes_bid = 0.85  # Wellington ≤8°C class: extreme favorite, yes_bid ~0.85+
+    ep, p_fill, c95 = era._execution_price_from_snapshot(
+        row,
+        selected_token_id="no-wb",
+        direction="buy_no",
+        complementary_top_bid=sibling_yes_bid,
+    )
+    assert isinstance(ep, ExecutionPrice)
+    # Complementary non-crossing cap: 1 - 0.85 - 0.01 = 0.14
+    assert ep.value <= 0.14 + 1e-9
+    assert ep.value > 0.0
+    assert ep.price_type == "bid"
+    assert c95 == pytest.approx(ep.value)
+
+
+def test_sibling_row_absent_complement_bid_fails_closed():
+    """Without the sibling complement (no yes_bids in row, no complementary_top_bid
+    passed), the maker lane has nothing to quote behind -> fail-closed as before."""
+    row = _no_outcome_row()
+    with pytest.raises(ValueError):
+        era._execution_price_from_snapshot(
+            row,
+            selected_token_id="no-wb",
+            direction="buy_no",
+            # No complementary_top_bid -> comp_best_bid remains None -> None -> raise
+        )
+
+
+# ===========================================================================
+# (f) extreme-favorite complementary book (yes_bid close to 1 - tick)
+# ===========================================================================
+def test_extreme_favorite_yes_bid_0_95_still_prices():
+    """yes_bid=0.95, tick=0.01 -> cap = 1 - 0.95 - 0.01 = 0.04.
+    tick_round_down(0.04, 0.01) = 0.04 > 0.0 -> maker quote priced at 0.04.
+    Sao Paulo ≤15°C (lcb=0.986) class: YES bidders at 0.95, small but positive room."""
+    row = _no_outcome_row()
+    ep, _p, c95 = era._execution_price_from_snapshot(
+        row,
+        selected_token_id="no-wb",
+        direction="buy_no",
+        complementary_top_bid=0.95,
+    )
+    assert isinstance(ep, ExecutionPrice)
+    assert ep.value == pytest.approx(0.04)
+    assert ep.price_type == "bid"
+
+
+def test_extreme_favorite_yes_bid_0_99_fails_closed():
+    """yes_bid=0.99, tick=0.01 -> cap = 1 - 0.99 - 0.01 = 0.00.
+    tick_round_down(0.00, 0.01) = 0 -> fails quote > 0.0 -> None -> raise.
+    No room to quote without crossing YES via mint."""
+    row = _no_outcome_row()
+    with pytest.raises(ValueError):
+        era._execution_price_from_snapshot(
+            row,
+            selected_token_id="no-wb",
+            direction="buy_no",
+            complementary_top_bid=0.99,
+        )

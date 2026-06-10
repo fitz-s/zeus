@@ -6057,11 +6057,29 @@ def _generate_candidate_proofs(
             else:
                 # Price TTL must not shrink the family selector. The selected
                 # executable is re-authorized against a JIT book at submit time.
+                #
+                # SIBLING-ROW COMPLEMENT (2026-06-10 live-v12 fix): for buy_no,
+                # the maker-quote lane needs the YES best bid to compute the
+                # complementary non-crossing cap.  The NO-outcome snapshot row
+                # only carries the NO token's CLOB book (single-token /book
+                # response), so book.yes_bids = () on that row.  The YES best bid
+                # lives in the sibling YES-outcome row's orderbook_top_bid scalar.
+                # We read it here (where both rows are in scope) and pass it down
+                # so the maker-quote function can fall back to it when the book's
+                # yes_bids side is empty.
+                _sibling_complement_bid: float | None = None
+                if direction == "buy_no":
+                    _yes_row = rows_by_direction.get((condition_id, "buy_yes"))
+                    if _yes_row is not None:
+                        _sibling_complement_bid = _optional_float(
+                            _yes_row.get("orderbook_top_bid")
+                        )
                 try:
                     execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
                         row,
                         selected_token_id=token_id,
                         direction=direction,
+                        complementary_top_bid=_sibling_complement_bid,
                     )
                 except ValueError as exc:
                     missing_reason = str(exc)
@@ -11771,6 +11789,7 @@ def _maker_quote_execution_price_from_snapshot(
     *,
     direction: str,
     book,
+    complementary_top_bid: float | None = None,
 ) -> tuple[ExecutionPrice, float, float] | None:
     """MAKER-QUOTE lane: price a buy whose OWN native ask is empty/thin (no taker
     entry exists) by RESTING behind the complementary book.
@@ -11807,6 +11826,14 @@ def _maker_quote_execution_price_from_snapshot(
     if direction != "buy_no":
         return None
     comp_best_bid = _complementary_best_bid_for_direction(book, direction=direction)
+    # SIBLING-ROW FALLBACK (2026-06-10 live-v12 fix): the NO-outcome snapshot row
+    # only carries the NO token's CLOB book (single-token /book response). Its
+    # yes_bids are empty, so _complementary_best_bid_for_direction returns None.
+    # The YES best bid lives in the sibling YES-outcome row as orderbook_top_bid.
+    # The caller (_execution_price_from_snapshot / _generate_candidate_proofs)
+    # passes that scalar here so we can price the complementary cap correctly.
+    if comp_best_bid is None and complementary_top_bid is not None:
+        comp_best_bid = float(complementary_top_bid)
     if comp_best_bid is None:
         return None
     tick = float(book.min_tick_size)
@@ -11839,6 +11866,7 @@ def _execution_price_from_snapshot(
     *,
     selected_token_id: str,
     direction: str,
+    complementary_top_bid: float | None = None,
 ) -> tuple[ExecutionPrice, float, float]:
     # ZEUS-NOBYPASS-1 fail-closed guard (re-added; orig 4f7d963606). Strictly
     # more restrictive: only block when tradeability_status_json.executable_allowed
@@ -11896,7 +11924,9 @@ def _execution_price_from_snapshot(
     # instead of killing the candidate. Fail-closed to the original NATIVE_ASK_
     # MISSING when no complementary liquidity exists.
     if _marked_non_executable and _maker_quotable_marking:
-        maker = _maker_quote_execution_price_from_snapshot(row, direction=direction, book=book)
+        maker = _maker_quote_execution_price_from_snapshot(
+            row, direction=direction, book=book, complementary_top_bid=complementary_top_bid
+        )
         if maker is not None:
             return maker
         raise ValueError(f"EDLI executable snapshot marked non-executable: {_non_executable_reason}")
@@ -11927,7 +11957,9 @@ def _execution_price_from_snapshot(
     except ValueError:
         # No taker entry on the own ask (empty ladder / depth-exhausted / off-grid).
         # The maker QUOTES behind the complementary book instead of dying.
-        maker = _maker_quote_execution_price_from_snapshot(row, direction=direction, book=book)
+        maker = _maker_quote_execution_price_from_snapshot(
+            row, direction=direction, book=book, complementary_top_bid=complementary_top_bid
+        )
         if maker is not None:
             return maker
         raise
