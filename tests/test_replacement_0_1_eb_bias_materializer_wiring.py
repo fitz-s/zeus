@@ -1,6 +1,9 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-06-07
-# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-07
+# Last reused/audited: 2026-06-09
+# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-09
+# 2026-06-09 STALE_LAW re-pin: replacement_0_1_member_vote_smoothing_enabled promoted
+#   to default-ON; _expected_q now mirrors _insert_posterior's smoothing-alpha wiring
+#   (authority: config edli_v1.replacement_0_1_member_vote_smoothing_enabled=true).
 # Purpose: Protect the replacement_forecast_materializer wiring of the per-city EB
 #   bias-correction: flag-OFF materialized posterior byte-identical to today, flag-ON
 #   posterior q matches the direct bias-shifted construction, fail-closed when no shift.
@@ -130,10 +133,17 @@ def _materialized_q(conn, posterior_id: int) -> dict:
 
 
 def _expected_q(*, bias_shift_c: float | None) -> dict:
+    # Mirror _insert_posterior EXACTLY: it passes member_vote_smoothing_alpha from the live
+    # config helper. The smoothing flag (replacement_0_1_member_vote_smoothing_enabled) was
+    # promoted to default-ON 2026-06-09, so the materialized q now carries Laplace smoothing
+    # (every bin strictly positive). Reading the SAME helper keeps the expected construction
+    # in lockstep with the materializer under any flag state (STALE_LAW re-pin: the previous
+    # _expected_q omitted the smoothing alpha and pinned the pre-smoothing shape).
     res = build_openmeteo_ifs9_aifs_soft_anchor_result(
         aifs_extraction=_aifs_extraction(), openmeteo_anchor=_anchor(), metric="high", bins=_bins(),
         config=SoftAnchorConfig(anchor_weight=0.80, anchor_sigma_c=3.0), settlement_step_c=1.0,
         bias_shift_c=bias_shift_c,
+        member_vote_smoothing_alpha=mod._replacement_member_vote_smoothing_alpha(),
     )
     return {k: float(v) for k, v in res.posterior.probabilities.items()}
 
