@@ -758,6 +758,18 @@ def _read_usdce_balance_via_adapter(adapter: Any, safe_address: str) -> int:
     return int(str(raw or "0x0"), 16)
 
 
+# P0-3: same-tick total wall-clock budget. The same-tick path is called INSIDE
+# the redeem submitter/reconciler APScheduler jobs; a long synchronous chain-wait
+# here starves the money-path pollers (RiskGuard, reactor, redeem). So the
+# same-tick path only ENQUEUES + SUBMITS + does ONE short bounded receipt check
+# per tx, then yields. Receipt FINALIZATION belongs to the fast wrap_reconciler.
+_PROCEEDS_TOTAL_BUDGET_S = 12.0
+_PROCEEDS_RECEIPT_CHECK_S = 4.0
+# Bound on how many fresh WRAP rows the re-read loop (P0-1) may enqueue per call
+# so a runaway balance read can't spin forever even within the time budget.
+_PROCEEDS_MAX_ENQUEUE = 4
+
+
 def wrap_proceeds_now(
     conn: sqlite3.Connection,
     adapter: Any,
@@ -765,33 +777,51 @@ def wrap_proceeds_now(
     signer_eoa: str,
     *,
     threshold_micro: int | None = None,
-    mined_timeout_s: float = 120.0,
-    poll_interval_s: float = 3.0,
+    total_budget_s: float = _PROCEEDS_TOTAL_BUDGET_S,
+    receipt_check_s: float = _PROCEEDS_RECEIPT_CHECK_S,
+    poll_interval_s: float = 1.0,
     max_steps: int = 6,
+    # Deprecated (P0-3): kept for backward compat with existing callers/tests.
+    # A 120s synchronous chain-wait inside a scheduler job is no longer allowed;
+    # if passed, it is clamped to receipt_check_s for the per-tx check only.
+    mined_timeout_s: float | None = None,
 ) -> dict[str, Any]:
-    """Proceeds-driven wrap: enqueue AND drive to terminal in the SAME tick.
+    """Proceeds-driven wrap: enqueue + submit + ONE short receipt check per tx.
 
     STRUCTURAL FIX (operator directive 2026-06-09): the periodic wrap state
-    machine advanced one step per 5-minute tick (intent → approve → approve
-    confirm → wrap → wrap confirm), leaving fresh redemption proceeds sitting
-    as unwrapped USDC.e across up to ~25 minutes ("Confirm pending deposit" in
-    the UI). The antibody contract is: after a confirmed-redemption batch, the
-    SAME tick that observed it leaves ZERO USDC.e unwrapped (above threshold).
+    machine advanced one step per 5-minute tick (intent -> approve -> approve
+    confirm -> wrap -> wrap confirm), leaving fresh redemption proceeds sitting
+    as unwrapped USDC.e across up to ~25 minutes ("Confirm pending deposit").
 
-    Behavior (synchronous, bounded):
-      1. Read live USDC.e balance via the adapter RPC seam.
-      2. If above threshold and no pending wrap row exists, insert
-         WRAP_REQUESTED (same idempotency gate as the periodic intent creator).
-      3. Drive ALL pending wrap rows step-by-step to terminal:
-         WRAP_REQUESTED -> APPROVE tx -> wait mined -> WRAP_APPROVED ->
-         WRAP tx -> wait mined -> WRAP_CONFIRMED (+ CLOB balance refresh).
-      4. Fail-soft everywhere: a reverted tx marks WRAP_FAILED; a transient
-         RPC error or mined-wait timeout leaves the row mid-state for the
-         periodic wrap_submitter/wrap_reconciler to resume — no new failure
-         mode, no raise into the calling scheduler tick.
+    THREE P0 invariants encoded here:
 
-    Returns {"enqueued": str|None, "confirmed": [ids], "failed": [ids],
-             "pending": [ids], "balance_micro_before": int}.
+    P0-1 (no naked balance): after driving pending rows, this RE-READS the Safe
+      balance and, while balance > threshold and budget remains, enqueues a NEW
+      WRAP row and submits it. The honest antibody is NOT "balance < threshold
+      after the call" (the wrap may still be mining) — it is "no USDC.e above
+      threshold is UNCOMMITTED (no pending row) after the tick". A row left in
+      a *_TX_HASHED state IS committed (funds are in the pipeline); the fast
+      reconciler confirms it within its cadence.
+
+    P0-2 (atomic state): all transitions go through _transition's compare-and-
+      swap, so a concurrent reconciler/submitter can never revert a row this
+      path advanced (and vice versa). A WrapTransitionRejected here means
+      another worker already advanced the row — caught and treated as success.
+
+    P0-3 (bounded wall time): the WHOLE call is bounded by total_budget_s
+      (default 12s) — it does NOT block a scheduler job for minutes. Each tx
+      gets ONE short receipt check (receipt_check_s, default 4s). If the receipt
+      has not landed, the row is left in its *_TX_HASHED state and the periodic
+      wrap_reconciler (fast cadence while any TX_HASHED row exists) finalizes
+      it. Leaving a row TX_HASHED is SUCCESS, not failure.
+
+    Fail-soft everywhere: a reverted tx marks WRAP_FAILED; a transient RPC error
+    or receipt-check timeout leaves the row mid-state for the periodic poller —
+    no raise into the calling scheduler tick.
+
+    Returns {"enqueued": [ids], "confirmed": [ids], "failed": [ids],
+             "pending": [ids], "balance_micro_before": int,
+             "balance_micro_after": int, "budget_exhausted": bool}.
     """
     import logging
     import time as _time
@@ -803,23 +833,35 @@ def wrap_proceeds_now(
         threshold_micro = int(
             os.environ.get("AUTO_WRAP_THRESHOLD_MICRO", str(_DEFAULT_WRAP_THRESHOLD_MICRO))
         )
+    # P0-3: clamp any legacy mined_timeout_s down to the short per-tx check.
+    if mined_timeout_s is not None:
+        receipt_check_s = min(receipt_check_s, float(mined_timeout_s))
 
+    deadline = _time.monotonic() + float(total_budget_s)
+
+    # NOTE: "enqueued" is a LIST (P0-1 may enqueue multiple rows across the
+    # re-read loop). _wrap_proceeds_same_tick reads it truthily, which still
+    # works for a non-empty list.
     out: dict[str, Any] = {
-        "enqueued": None, "confirmed": [], "failed": [], "pending": [],
-        "balance_micro_before": -1,
+        "enqueued": [], "confirmed": [], "failed": [], "pending": [],
+        "balance_micro_before": -1, "balance_micro_after": -1,
+        "budget_exhausted": False,
     }
 
-    try:
-        balance_micro = _read_usdce_balance_via_adapter(adapter, safe_address)
-    except Exception as exc:  # noqa: BLE001 — fail-soft; periodic poller resumes
-        logger.warning("[WRAP_PROCEEDS_BALANCE_READ_FAILED] %s", exc)
+    def _read_balance() -> Optional[int]:
+        try:
+            return _read_usdce_balance_via_adapter(adapter, safe_address)
+        except Exception as exc:  # noqa: BLE001 — fail-soft; periodic poller resumes
+            logger.warning("[WRAP_PROCEEDS_BALANCE_READ_FAILED] %s", exc)
+            return None
+
+    balance_micro = _read_balance()
+    if balance_micro is None:
         return out
     out["balance_micro_before"] = balance_micro
+    out["balance_micro_after"] = balance_micro
 
-    # Enqueue if needed (same idempotency gate as the periodic intent creator:
-    # any non-terminal WRAP row blocks a new intent).
-    pending = list_pending_wrap_commands(conn)
-    if not pending and balance_micro > threshold_micro:
+    def _enqueue(amount_micro: int) -> str:
         command_id = uuid.uuid4().hex
         requested_at = datetime.now(timezone.utc).isoformat()
         conn.execute(
@@ -829,23 +871,38 @@ def wrap_proceeds_now(
             ) VALUES (?, ?, ?, ?, ?)
             """,
             (command_id, WrapUnwrapState.WRAP_REQUESTED.value, "WRAP",
-             int(balance_micro), requested_at),
+             int(amount_micro), requested_at),
         )
         _append_event(conn, command_id, WrapUnwrapState.WRAP_REQUESTED.value, {
-            "balance_micro": int(balance_micro),
+            "balance_micro": int(amount_micro),
             "threshold_micro": int(threshold_micro),
             "trigger": "proceeds_driven_same_tick",
         })
         conn.commit()
-        out["enqueued"] = command_id
+        out["enqueued"].append(command_id)
         logger.info(
-            "[WRAP_PROCEEDS_ENQUEUED] command_id=%s balance_micro=%d",
-            command_id, balance_micro,
+            "[WRAP_PROCEEDS_ENQUEUED] command_id=%s amount_micro=%d",
+            command_id, amount_micro,
         )
+        return command_id
 
-    def _wait_mined(tx_hash: str) -> Optional[dict[str, Any]]:
+    # Enqueue if needed (same idempotency gate as the periodic intent creator:
+    # any non-terminal WRAP row blocks a new intent).
+    pending = list_pending_wrap_commands(conn)
+    if not pending and balance_micro > threshold_micro:
+        _enqueue(balance_micro)
+
+    def _short_receipt_check(tx_hash: str) -> Optional[dict[str, Any]]:
+        """ONE bounded receipt check (P0-3): a few seconds, not a chain-wait.
+
+        Bounded by both receipt_check_s AND the remaining total budget so the
+        whole call honours total_budget_s.
+        """
         t0 = _time.monotonic()
-        while _time.monotonic() - t0 < mined_timeout_s:
+        while True:
+            now = _time.monotonic()
+            if now - t0 >= receipt_check_s or now >= deadline:
+                return None
             try:
                 rcpt = adapter._rpc_call(
                     adapter.polygon_rpc_url, "eth_getTransactionReceipt", [tx_hash]
@@ -854,22 +911,19 @@ def wrap_proceeds_now(
                 rcpt = None
             if rcpt:
                 return rcpt
-            _time.sleep(poll_interval_s)
-        return None
+            # Don't oversleep past either bound.
+            remaining = min(receipt_check_s - (now - t0), deadline - now)
+            if remaining <= 0:
+                return None
+            _time.sleep(min(poll_interval_s, remaining))
 
-    # Drive every pending row to terminal, bounded by max_steps per call.
-    for _ in range(max_steps):
-        pending = list_pending_wrap_commands(conn)
-        actionable = [
-            r for r in pending
-            if r["state"] in (
-                WrapUnwrapState.WRAP_REQUESTED.value,
-                WrapUnwrapState.WRAP_APPROVED.value,
-            )
-        ]
-        if not actionable:
-            break
-        row = actionable[0]
+    def _advance_one(row: dict[str, Any]) -> str:
+        """Submit the next tx for one pending row and do ONE short receipt check.
+
+        Returns a coarse outcome tag: "confirmed" | "approved" | "hashed"
+        (left TX_HASHED for the reconciler) | "failed" | "stop" (dry-run /
+        submit failure / exception — leave for periodic poller).
+        """
         command_id = row["command_id"]
         tx_kind = (
             "APPROVE"
@@ -888,71 +942,144 @@ def wrap_proceeds_now(
                 "[WRAP_PROCEEDS_STEP_EXCEPTION] command_id=%s tx_kind=%s exc=%s",
                 command_id, tx_kind, exc,
             )
-            break
+            return "stop"
         if result.get("errorCode") == "WRAP_DRY_RUN_LOGGED":
             logger.info(
                 "[WRAP_PROCEEDS_DRY_RUN] command_id=%s tx_kind=%s", command_id, tx_kind,
             )
-            break
+            return "stop"
         if not result.get("success"):
             logger.warning(
                 "[WRAP_PROCEEDS_STEP_FAILED] command_id=%s tx_kind=%s errorCode=%s msg=%s",
                 command_id, tx_kind, result.get("errorCode"), result.get("errorMessage"),
             )
-            break  # leave row mid-state for the periodic poller (fail-soft)
+            return "stop"  # leave row mid-state for the periodic poller (fail-soft)
         tx_hash = str(result["tx_hash"])
-        if tx_kind == "APPROVE":
-            mark_wrap_approve_tx_hashed(command_id, tx_hash, conn=conn)
-        else:
-            mark_wrap_tx_hashed(command_id, tx_hash, conn=conn)
-        conn.commit()
-        rcpt = _wait_mined(tx_hash)
+        try:
+            if tx_kind == "APPROVE":
+                mark_wrap_approve_tx_hashed(command_id, tx_hash, conn=conn)
+            else:
+                mark_wrap_tx_hashed(command_id, tx_hash, conn=conn)
+            conn.commit()
+        except WrapTransitionRejected:
+            # Another worker advanced this row between our read and the CAS.
+            return "stop"
+
+        rcpt = _short_receipt_check(tx_hash)
         if rcpt is None:
-            logger.warning(
-                "[WRAP_PROCEEDS_MINED_TIMEOUT] command_id=%s tx_kind=%s tx=%s "
-                "— periodic wrap_reconciler will resume",
-                command_id, tx_kind, tx_hash,
+            # P0-3: receipt not yet landed within the short budget. The row is
+            # committed (funds in the pipeline); the fast reconciler finalizes.
+            logger.info(
+                "[WRAP_PROCEEDS_HASHED_DEFERRED] command_id=%s tx_kind=%s tx=%s "
+                "— left %s_TX_HASHED for fast wrap_reconciler",
+                command_id, tx_kind, tx_hash, tx_kind,
             )
-            out["pending"].append(command_id)
-            return out
+            return "hashed"
         status = rcpt.get("status")
         if str(status).lower() not in ("0x1", "1"):
-            fail_wrap(
-                command_id,
-                error_payload={"reason": "tx_reverted", "tx_hash": tx_hash, "tx_kind": tx_kind},
-                conn=conn,
-            )
-            conn.commit()
+            try:
+                fail_wrap(
+                    command_id,
+                    error_payload={"reason": "tx_reverted", "tx_hash": tx_hash, "tx_kind": tx_kind},
+                    conn=conn,
+                )
+                conn.commit()
+            except WrapTransitionRejected:
+                return "stop"
             out["failed"].append(command_id)
             logger.warning(
                 "[WRAP_PROCEEDS_TX_REVERTED] command_id=%s tx_kind=%s tx=%s",
                 command_id, tx_kind, tx_hash,
             )
-            continue
+            return "failed"
         if tx_kind == "APPROVE":
-            mark_wrap_approved(command_id, conn=conn)
-            conn.commit()
-        else:
-            block_num = None
             try:
-                _bn = rcpt.get("blockNumber")
-                block_num = int(str(_bn), 16) if isinstance(_bn, str) else int(_bn)
-            except Exception:  # noqa: BLE001
-                block_num = None
+                mark_wrap_approved(command_id, conn=conn)
+                conn.commit()
+            except WrapTransitionRejected:
+                return "stop"
+            return "approved"
+        block_num = None
+        try:
+            _bn = rcpt.get("blockNumber")
+            block_num = int(str(_bn), 16) if isinstance(_bn, str) else int(_bn)
+        except Exception:  # noqa: BLE001
+            block_num = None
+        try:
             confirm_wrap(command_id, confirmation_count=1, block_number=block_num, conn=conn)
             conn.commit()
-            out["confirmed"].append(command_id)
-            logger.info(
-                "[WRAP_PROCEEDS_CONFIRMED] command_id=%s tx=%s block=%s",
-                command_id, tx_hash, block_num,
+        except WrapTransitionRejected:
+            return "stop"
+        out["confirmed"].append(command_id)
+        logger.info(
+            "[WRAP_PROCEEDS_CONFIRMED] command_id=%s tx=%s block=%s",
+            command_id, tx_hash, block_num,
+        )
+        try:
+            _refresh_collateral_after_wrap_confirmation(adapter)
+        except Exception as refresh_exc:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "[WRAP_PROCEEDS_BALANCE_REFRESH_FAILED] command_id=%s exc=%s",
+                command_id, refresh_exc,
             )
-            try:
-                _refresh_collateral_after_wrap_confirmation(adapter)
-            except Exception as refresh_exc:  # noqa: BLE001 — best-effort
-                logger.warning(
-                    "[WRAP_PROCEEDS_BALANCE_REFRESH_FAILED] command_id=%s exc=%s",
-                    command_id, refresh_exc,
-                )
+        return "confirmed"
 
+    # ------------------------------------------------------------------
+    # Drive pending rows, bounded by both max_steps and the wall-clock budget.
+    # ------------------------------------------------------------------
+    enqueue_budget = _PROCEEDS_MAX_ENQUEUE
+    saw_failure = False
+    for _ in range(max_steps):
+        if _time.monotonic() >= deadline:
+            out["budget_exhausted"] = True
+            break
+        pending = list_pending_wrap_commands(conn)
+        actionable = [
+            r for r in pending
+            if r["state"] in (
+                WrapUnwrapState.WRAP_REQUESTED.value,
+                WrapUnwrapState.WRAP_APPROVED.value,
+            )
+        ]
+        if not actionable:
+            # P0-1: no actionable in-flight rows. Re-read the Safe balance — if
+            # fresh proceeds (or a leftover above threshold) remain UNCOMMITTED
+            # (no pending row at all), enqueue and drive a new row so nothing
+            # naked survives the tick. A row already TX_HASHED counts as pending.
+            #
+            # Anti-storm guard: if a tx REVERTED this call, do NOT re-enqueue
+            # against the same residual balance — re-driving a persistently
+            # reverting wrap just burns gas. The failed row is terminal and
+            # needs operator attention; leave the balance for the next tick
+            # (by when the revert cause may have cleared or the operator acted).
+            if pending or enqueue_budget <= 0 or saw_failure:
+                break
+            bal = _read_balance()
+            if bal is not None:
+                out["balance_micro_after"] = bal
+            if bal is None or bal <= threshold_micro:
+                break
+            enqueue_budget -= 1
+            new_id = _enqueue(bal)
+            actionable = [{"command_id": new_id,
+                           "state": WrapUnwrapState.WRAP_REQUESTED.value,
+                           "amount_micro": bal}]
+
+        outcome = _advance_one(actionable[0])
+        if outcome == "failed":
+            saw_failure = True
+            break
+        if outcome in ("stop", "hashed"):
+            # "hashed": tx is in flight; reconciler finalizes — do not spin the
+            #   same row again this tick (avoids a second submit before mining).
+            # "stop":   dry-run / submit failure / exception / CAS race — defer.
+            break
+
+    # Final balance read so the antibody can assert on the committed picture.
+    bal = _read_balance()
+    if bal is not None:
+        out["balance_micro_after"] = bal
     out["pending"] = [r["command_id"] for r in list_pending_wrap_commands(conn)]
+    if _time.monotonic() >= deadline:
+        out["budget_exhausted"] = True
     return out

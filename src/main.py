@@ -8468,8 +8468,14 @@ def main():
         _wrap_submitter_cycle, "interval", minutes=2,
         id="wrap_submitter", max_instances=1, coalesce=True,
     )
+    # P0-3: fast conditional cadence (30s). The reconciler early-exits cheaply
+    # (a single state-count query, BEFORE any credential resolution or adapter
+    # construction) when no *_TX_HASHED row exists — so the expensive RPC path
+    # only fires when there is in-flight wrap work to finalize. The same-tick
+    # path now leaves freshly-submitted txs in a TX_HASHED state for THIS job to
+    # confirm within ~30s, instead of synchronously blocking the redeem ticks.
     scheduler.add_job(
-        _wrap_reconciler_cycle, "interval", minutes=2,
+        _wrap_reconciler_cycle, "interval", seconds=30,
         id="wrap_reconciler", max_instances=1, coalesce=True,
     )
     # PR-S6: deployment freshness gate — runs every 60s, fail-closed at 24h uptime.
