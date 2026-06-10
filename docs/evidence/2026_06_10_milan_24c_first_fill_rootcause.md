@@ -194,6 +194,10 @@ entry candidates pass through):
 
 ### FIX C — mode-consistent EV + spread participation guard + maker placement provenance
 
+(Implemented per the operator's extended directive: mode-consistent evaluation,
+not just the spread guard. The system is structurally a maker; evaluation now
+prices the mode it executes.)
+
 `src/strategy/live_inference/mode_consistent_ev.py` (new, pure) — the two explicit
 EV formulas the operator asked for, in the same per-share probability units as
 `robust_trade_score`:
@@ -220,11 +224,29 @@ EV formulas the operator asked for, in the same per-share probability units as
   shallow-depth/degraded TAKER, and the EV override are ALL subject to it (the lane,
   not the callers). Maker resting remains allowed.
 - Mode selection at evaluation: compute both EVs, choose the max (taker only if the
-  guard passes); the chosen mode's EV is the candidate's `trade_score` (the
-  p_fill × edge − penalty hybrid of taker cost with ≈1.0 fill dies). Receipts carry
+  guard passes); the chosen mode's EV IS the candidate's `trade_score` (the
+  p_fill × edge − penalty hybrid of taker cost with ≈1.0 fill dies). TAKER-chosen
+  scores are byte-identical to the legacy kernel (c_stress == c95 made the legacy
+  min() always the q_lcb leg — relationship test pins it), so the change is
+  surgical: only wide-spread / maker-favored candidates re-price. Receipts carry
   `execution_mode_intent`, `ev_taker`, `ev_maker`, `maker_limit_price`,
-  `spread_relative_at_eval`, `placement` (`maker_bid_improve` / `taker_cross`),
-  `spread_at_entry` — both EVs always recorded for the settlement loop.
+  `relative_spread_at_eval`, `taker_forbidden_reason`, `maker_fill_probability(+source)`;
+  the final intent carries `placement` (`maker_bid_improve`/`taker_cross`),
+  `spread_at_entry`, `relative_spread_at_entry` — both EVs always recorded so the
+  settlement loop can recalibrate p_fill_maker and the haircut from fill facts.
+- Adverse selection: the q_lcb alone does NOT suffice as the fill haircut — it
+  bounds parameter uncertainty of q, while q|fill < q is a conditioning
+  (selection) effect. Implemented as a separate λ × half-spread subtraction, λ=1.0
+  (first-order microstructure estimate) until measured.
+- Submit-seam consistency: the relative-spread guard is enforced INSIDE
+  `_select_edli_order_mode` (step 0) so the canary force-taker, the governor's
+  shallow-depth TAKER (the depth-inversion of §3), and the §2 EV override are ALL
+  subject to it — and on the late maker→taker re-build lane. An unmeasurable
+  two-sided book (missing bid or ask) forbids crossing too. The §2 EV boundary
+  (e(1−P_fill) ≥ s/2(1+P_fill)+f−A) remains the submit-time maker-vs-taker
+  economics within the guard — numbers decide, no dogma.
+- Maker-vs-taker stays a numbers decision on healthy books: a tight-spread
+  favorite where EV_taker > EV_maker still routes taker (antibody test).
 - Venue post_only: the envelope threads `post_only` to the SDK call
   (`polymarket_v2_adapter.submit → create_and_post_order(..., post_only=...)`);
   the in-repo structural guarantee is independent of venue support: executor
@@ -241,8 +263,51 @@ the taker lane (C), and maker EV = 0.10 × (0.0927 − 0.0035 − 0.010) ≈ 0.0
 bid-improving 0.010 post-only rest — no spread cross is constructable. Three
 independent antibodies; each kills the whole category, not the instance.
 
+### Selection hardening (follow-on commit)
+
+`_selection_scoped_proofs` ranked every PRICED proof regardless of
+`missing_reason`: a gate-rejected proof with a corrupt-high q_lcb could win the
+ΔU rank and dead-end at TRADE_SCORE_NON_POSITIVE — never a bad order, but it
+STARVED the legitimate admitted sibling (family false-no-trade). Gate-rejected
+proofs are now unrankable, not merely unsubmittable. End-to-end antibody: the
+verbatim incident family replay yields NO priced selection.
+
+### Residuals (documented, not fixed here)
+
+- The ΔU ranker (`utility_ranker`) still prices candidates at taker cost —
+  conservative (a maker fill never pays more than the taker walk at the same
+  stake); full maker-aware ΔU payoff is follow-up work.
+- QuoteFeasibilityCertificate best_bid/best_ask provenance bug (§3 anomaly,
+  0.32/0.34 recorded for a 0.009/0.016 book) — needs its own audit; the spread
+  guard reads the FRESH pre-submit witness book, not only the quote cert.
+- `p_fill_lcb` (visible-depth taker coverage) still feeds the FDR/no-submit
+  telemetry surfaces unchanged; only the trade_score and submit mode are
+  mode-consistent. The maker fill prior (0.10) recalibrates from fill_tracker
+  facts (e6e02796f0) via the recorded provenance.
+
 ## 6. Verification
 
-See repo commits (this branch): root-cause doc, FIX A, FIX B, FIX C, each with
-antibody tests; s4/s5/s6 + candidate_evaluation + trade_score suites green
-(run log in the commits / final summary).
+Commits on `fix/opportunity-book-selector` (no push, no restart, daemon
+untouched in edli_shadow_no_submit):
+
+- `d3d2dbc5c3` incident: root-cause doc (docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md)
+- `47a173bdc7` fix A: direction law as code (+22 antibody tests, incl. verbatim
+  incident family replay through `_generate_candidate_proofs`)
+- `c7a2252e65` fix B: COVERAGE_UNLICENSED_TAIL (+10 tests, incl. proof-seam
+  wiring on a forecast-adjacent cheap bin where only this guard can decide)
+- `cc15a18d70` selection hardening: gate-rejected proofs unrankable (+2 tests:
+  incident family no-trades end-to-end; no sibling starvation)
+- `5f750abce6` fix C: mode-consistent EV + spread guard + non-crossing maker
+  placement (+21 tests)
+
+Suites: tests/engine + tests/strategy/live_inference + tests/decision_kernel +
+tests/events → **1163 passed**; the 30 failures are byte-identical to the HEAD
+baseline (verified via throwaway worktree diff of FAILED sets — pre-broken,
+owned by the concurrent test-triage/co-tenant work, zero regressions from these
+fixes). s4/s5/s6 + candidate_evaluation + trade_score suites green.
+
+Incident replay under the fixes (all asserted by tests):
+DIRECTION_LAW kills 24°C/23°C YES; COVERAGE_UNLICENSED_TAIL kills any unlicensed
+longshot disagreement that is direction-consistent; the spread guard makes the
+56%-spread FOK cross unconstructable even under canary force; the incident
+family as a whole produces NO priced selection.
