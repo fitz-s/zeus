@@ -3814,9 +3814,14 @@ def _refresh_pending_family_snapshots(
                     # bin identity is harvested instead of thrown away. Bounded so the
                     # CLOB capture reserve is never consumed.
                     if pending_futures:
+                        # 2.0s (was 1.5s): slice 2.0 + grace must clear the measured
+                        # Gamma /events p95 (2.516s) x 1.5 = 3.774s effective recovery
+                        # window; 1.5s left it at 3.5s — 0.27s short, the same miss
+                        # class that pinned families at the FDR gate on 2026-06-10.
+                        # Relation enforced by tests/test_time_semantics_relations.py.
                         grace_s = max(
                             0.0,
-                            float(os.environ.get("ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS", "1.5")),
+                            float(os.environ.get("ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS", "2.0")),
                         )
                         # Cap the grace at the absolute refresh deadline so draining
                         # near-complete fetches never overruns the cycle's total
