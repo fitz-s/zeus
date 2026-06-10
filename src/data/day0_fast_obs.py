@@ -96,6 +96,25 @@ def fast_obs_source_for_city(city: Any) -> Optional[FastObsSource]:
     source_type = str(getattr(city, "settlement_source_type", "") or "")
     station = str(getattr(city, "wu_station", "") or "").strip().upper()
     if source_type == "wu_icao" and station:
+        # SETTLEMENT-FAITHFULNESS GATE (operator correction 2026-06-10,
+        # measured config/wu_metar_divergence.json): a station whose METAR
+        # integer is NOT reliably WU's settlement integer (Seoul/RKSI class:
+        # +-1C on ~4.5% of reports) must not have METAR drive bin-kill
+        # decisions. Excluding the city is the monotone-safe direction —
+        # absence of fast events never kills a bin; the slower WU-derived
+        # lanes still serve it. Lazy import avoids a module cycle.
+        try:
+            from src.data.day0_oracle_anomaly import city_metar_settlement_faithful
+
+            if not city_metar_settlement_faithful(str(getattr(city, "name", "") or "")):
+                logger.warning(
+                    "DAY0_FAST_OBS_CITY_EXCLUDED city=%s station=%s reason=metar_not_settlement_faithful "
+                    "(measured WU-vs-METAR divergence; see config/wu_metar_divergence.json)",
+                    getattr(city, "name", "?"), station,
+                )
+                return None
+        except ImportError:
+            pass  # faithfulness model unavailable -> registry behaves as before
         return FastObsSource(
             source_id=FAST_OBS_SOURCE_ID,
             station_id=station,

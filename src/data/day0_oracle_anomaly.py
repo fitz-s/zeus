@@ -41,11 +41,89 @@ logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
 
-#: Strict divergence thresholds in settlement units.
+#: Conservative DEFAULT divergence thresholds (settlement units) for cities
+#: WITHOUT an empirical measurement. Pre-2026-06-10 these (guessed) values
+#: applied to every city; measured cities now carry per-city empirical
+#: thresholds from config/wu_metar_divergence.json (operator correction
+#: 2026-06-10: 30d x 22 cities, same-station timestamp-matched — 21/22
+#: byte-identical post-rounding -> threshold 1.0 [tight tamper detector];
+#: Seoul RKSI shows REAL +-1C divergence on 4.5% of reports -> threshold 2.0
+#: AND settlement_faithful=false).
 DIVERGENCE_THRESHOLD = {"F": 1.5, "C": 1.0}
 
 #: How long a flagged family stays paused without re-confirmation.
 DEFAULT_PAUSE_TTL_HOURS = 24.0
+
+_DIVERGENCE_MODEL_CACHE: dict[str, dict] = {}
+
+
+def _divergence_model_path() -> "Path":
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[2] / "config" / "wu_metar_divergence.json"
+
+
+def _load_divergence_model(path: "Optional[Path]" = None) -> dict:
+    import json
+    from pathlib import Path  # noqa: F401 — typing only
+
+    path_str = str(path if path is not None else _divergence_model_path())
+    cached = _DIVERGENCE_MODEL_CACHE.get(path_str)
+    if cached is not None:
+        return cached
+    try:
+        with open(path_str, "r", encoding="utf-8") as fh:
+            model = json.load(fh)
+        if not isinstance(model, dict) or not isinstance(model.get("cities"), dict):
+            raise ValueError("wu_metar_divergence.json malformed: missing 'cities'")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "WU_METAR_DIVERGENCE_MODEL_UNAVAILABLE path=%s exc=%s — default thresholds",
+            path_str, exc,
+        )
+        model = {"cities": {}}
+    _DIVERGENCE_MODEL_CACHE[path_str] = model
+    return model
+
+
+def divergence_threshold_for_city(
+    city_name: str, unit: str, *, path: "Optional[Path]" = None
+) -> tuple[float, str]:
+    """(threshold, provenance) for the WU-vs-METAR guard.
+
+    Empirical per-city threshold — max(p99(|rounded delta|) + 1 quantum, 1.0),
+    measured same-station timestamp-matched over 30d — when present with an
+    adequate sample; otherwise the conservative pre-measurement default.
+    Provenance is recorded in the guard verdict ('empirical' | 'default_guess').
+    """
+    entry = _load_divergence_model(path).get("cities", {}).get(str(city_name)) or {}
+    threshold = entry.get("empirical_threshold")
+    provenance = str(entry.get("threshold_provenance") or "")
+    if threshold is not None and provenance == "empirical":
+        try:
+            value = float(threshold)
+            if value > 0.0:
+                return value, "empirical"
+        except (TypeError, ValueError):
+            pass
+    return (
+        DIVERGENCE_THRESHOLD.get(str(unit).upper(), DIVERGENCE_THRESHOLD["F"]),
+        "default_guess",
+    )
+
+
+def city_metar_settlement_faithful(city_name: str, *, path: "Optional[Path]" = None) -> bool:
+    """False when the measurement shows the METAR integer is NOT reliably WU's
+    settlement integer for this station (Seoul/RKSI class: +-1C disagreement
+    on ~4.5% of reports — WU's feed is not the METAR body there). Such a city
+    must NOT have METAR drive day0 bin-kill decisions: the fast lane excludes
+    it entirely (monotone-safe — absence of fast events never kills a bin).
+    Unmeasured cities default to True (the guard threshold still covers them)."""
+    entry = _load_divergence_model(path).get("cities", {}).get(str(city_name)) or {}
+    verdict = entry.get("settlement_faithful")
+    if verdict is None:
+        return True
+    return bool(verdict)
 
 
 @dataclass(frozen=True)
@@ -211,7 +289,7 @@ def check_wu_metar_divergence(
             city=city_name, target_date=str(target_date), unit=unit,
             compared=False, diverged=False, detail="metar_side_no_overlapping_samples",
         )
-    threshold = DIVERGENCE_THRESHOLD.get(unit, DIVERGENCE_THRESHOLD["F"])
+    threshold, threshold_provenance = divergence_threshold_for_city(city_name, unit)
     high_delta = (
         abs(float(wu_high_so_far) - float(truncated.high_so_far))
         if wu_high_so_far is not None and truncated.high_so_far is not None
@@ -224,7 +302,8 @@ def check_wu_metar_divergence(
     )
     diverged = any(delta is not None and delta > threshold for delta in (high_delta, low_delta))
     detail = (
-        f"unit={unit} threshold={threshold} high_delta={high_delta} low_delta={low_delta} "
+        f"unit={unit} threshold={threshold} threshold_provenance={threshold_provenance} "
+        f"high_delta={high_delta} low_delta={low_delta} "
         f"wu_last_obs={wu_last_obs_time.isoformat()} metar_samples={truncated.sample_count}"
     )
     return DivergenceVerdict(
