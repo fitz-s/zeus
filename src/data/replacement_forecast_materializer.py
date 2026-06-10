@@ -5,7 +5,10 @@
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md (the probability chain
 #   §1d-§1e fused-N-direct + settlement sigma floor); FIX 1/FIX 2/FIX 5 (operator-reviewed
 #   2026-06-09): explicit replacement_q_mode authority, settlement-sigma-floor coherence in the
-#   fused-q path, and capture-status provenance.
+#   fused-q path, and capture-status provenance. 2026-06-09 (q_lcb materialization): real per-bin
+#   q_lcb_json/q_ucb_json on the fused path via fused-center parameter-uncertainty bootstrap
+#   (root-cause /tmp/candidate_missing_rootcause.md — NULL bounds force the Wilson-over-AIFS-votes
+#   fallback that under-certifies below ask and discards every candidate).
 """
 
 from __future__ import annotations
@@ -1098,6 +1101,120 @@ def _replacement_bayes_precision_fusion_override(
         return None
 
 
+# ---------------------------------------------------------------------------
+# Q_LCB / Q_UCB MATERIALIZATION (2026-06-09) — fused-center parameter-uncertainty bootstrap.
+#
+# Created: 2026-06-09
+# Authority basis: docs/authority/replacement_final_form_2026_06_09.md §1d-§1e (fused-N-direct q,
+#   σ_pred = sqrt(fused.sd² + σ_resid²)); root-cause /tmp/candidate_missing_rootcause.md (the
+#   live LCB authority falls back to Wilson-over-AIFS-votes when q_lcb_json is NULL → under-certifies
+#   below ask → every proof killed). This builds a REAL per-bin q_lcb/q_ucb consistent with the fused
+#   posterior so the bundle q_lcb takes priority over the Wilson fallback (no downstream change).
+#
+# DESIGN (principled, not a fudge):
+#   The fused posterior gives center μ* with posterior sd = fused.sd (anchor_sigma_c — the CENTER
+#   uncertainty) and predictive spread σ_pred (predictive_sigma_c = sqrt(fused.sd² + σ_resid²)). The
+#   q POINT vector integrates N(μ*, σ_pred). The q_lcb bound is a PARAMETER-uncertainty bootstrap:
+#   draw μ_i ~ N(μ*, fused.sd) — the center uncertainty ONLY (we do NOT re-add σ_resid here; that
+#   would double-count the residual spread already inside σ_pred). For each draw, integrate the SAME
+#   settlement bins via the ONE integrator (bin_probability_settlement, same half_step / Celsius
+#   bounds as the q build). Per-bin 5th percentile across draws = q_lcb, 95th = q_ucb.
+#
+#   CENTER-ONLY justification: σ is a single fused predictive spread with no principled per-cell
+#   spread-uncertainty estimate available at this seam. Jittering σ would require an arbitrary
+#   variance-of-variance; center-only is conservative (it exposes the tail fragility that matters —
+#   a far-tail bin's probability collapses fast as μ wanders) and honest. Basis recorded as
+#   "fused_center_bootstrap_p05".
+#
+#   Percentile vectors do NOT sum to 1 — that is EXPECTED and correct for bounds (the bundle reader
+#   reads them with require_sum=False). Defensive clips: q_lcb ≥ 0 (trivial) and q_lcb ≤ q_point per
+#   bin (a per-bin 5th percentile can never legitimately exceed the point mass; clip if rng noise
+#   nudges it). q_ucb ≥ q_point per bin symmetrically.
+# ---------------------------------------------------------------------------
+
+_QLCB_BOOTSTRAP_DRAWS = 200
+_QLCB_BASIS = "fused_center_bootstrap_p05"
+_QLCB_SEED = 0x5EED_F09  # deterministic per-posterior rng (provenance-stable bounds)
+
+
+def _build_fused_q_bounds(
+    *,
+    mu_star: float,
+    center_sigma_c: float,
+    predictive_sigma_c: float,
+    bins: Sequence["AifsTemperatureBin"],
+    half_step: float,
+    q_point: Mapping[str, float],
+    n_draws: int = _QLCB_BOOTSTRAP_DRAWS,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Vectorized fused-center parameter-uncertainty bootstrap for per-bin q_lcb / q_ucb.
+
+    Draws ``n_draws`` centers μ_i ~ N(μ*, center_sigma_c) and integrates every settlement bin
+    via the ONE integrator's preimage math (bin_probability_settlement, replicated vectorized
+    over the (draws × bins) grid with scipy.special.ndtr). Returns (q_lcb_map, q_ucb_map) where
+    q_lcb[bin] = 5th percentile and q_ucb[bin] = 95th percentile of the per-bin probability across
+    draws, clipped so q_lcb ≤ q_point ≤ q_ucb per bin and q_lcb ≥ 0.
+
+    Raises on any construction failure (caller fail-softs to NULL — Wilson fallback, status quo).
+    """
+    import numpy as np  # noqa: PLC0415
+    from scipy.special import ndtr  # noqa: PLC0415
+
+    if not (math.isfinite(mu_star) and math.isfinite(center_sigma_c) and math.isfinite(predictive_sigma_c)):
+        raise ValueError("non-finite mu*/center_sigma/predictive_sigma for q-bound bootstrap")
+    if predictive_sigma_c <= 0.0:
+        raise ValueError(f"predictive_sigma must be positive, got {predictive_sigma_c}")
+    if center_sigma_c < 0.0:
+        raise ValueError(f"center_sigma must be non-negative, got {center_sigma_c}")
+    if n_draws < 2:
+        raise ValueError(f"n_draws must be >= 2, got {n_draws}")
+
+    bin_ids = [b.bin_id for b in bins]
+    if not bin_ids:
+        raise ValueError("no bins for q-bound bootstrap")
+
+    rng = np.random.default_rng(_QLCB_SEED)
+    # Center draws μ_i ~ N(μ*, center_sigma). center_sigma may be ~0 for a near-certain center;
+    # the draws then collapse to μ* and the bounds equal the point (correct — no center uncertainty).
+    mu_draws = rng.normal(loc=float(mu_star), scale=float(center_sigma_c), size=int(n_draws))  # (N,)
+    sigma = float(predictive_sigma_c)
+
+    # Per-bin integration bounds in absolute Celsius (preimage expansion by ±half_step), matching
+    # bin_probability_settlement exactly. None shoulder -> -inf / +inf via cdf 0.0 / 1.0.
+    lows = np.array(
+        [(-np.inf if b.lower_c is None else float(b.lower_c) - half_step) for b in bins],
+        dtype=float,
+    )  # (M,)
+    highs = np.array(
+        [(np.inf if b.upper_c is None else float(b.upper_c) + half_step) for b in bins],
+        dtype=float,
+    )  # (M,)
+
+    # Standardized z = (bound - mu_i) / sigma over the (N draws × M bins) grid. ndtr is the vectorized
+    # standard-normal CDF; -inf -> 0.0, +inf -> 1.0 are handled by ndtr natively.
+    z_low = (lows[None, :] - mu_draws[:, None]) / sigma  # (N, M)
+    z_high = (highs[None, :] - mu_draws[:, None]) / sigma  # (N, M)
+    probs = np.clip(ndtr(z_high) - ndtr(z_low), 0.0, 1.0)  # (N, M) per-draw per-bin mass
+
+    q_lcb_vec = np.percentile(probs, 5.0, axis=0)  # (M,)
+    q_ucb_vec = np.percentile(probs, 95.0, axis=0)  # (M,)
+
+    q_lcb_map: dict[str, float] = {}
+    q_ucb_map: dict[str, float] = {}
+    for idx, bin_id in enumerate(bin_ids):
+        q_pt = float(q_point.get(bin_id, 0.0))
+        lcb = float(q_lcb_vec[idx])
+        ucb = float(q_ucb_vec[idx])
+        if not (math.isfinite(lcb) and math.isfinite(ucb)):
+            raise ValueError(f"non-finite q-bound for bin {bin_id}: lcb={lcb} ucb={ucb}")
+        # Defensive ordering clips: q_lcb in [0, q_point], q_ucb >= q_point.
+        lcb = min(max(lcb, 0.0), max(q_pt, 0.0))
+        ucb = max(ucb, q_pt)
+        q_lcb_map[bin_id] = lcb
+        q_ucb_map[bin_id] = ucb
+    return q_lcb_map, q_ucb_map
+
+
 def _insert_posterior(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -1161,6 +1278,12 @@ def _insert_posterior(
     settlement_sigma_floor_c: float | None = None
     floor_unavailable_reason: str | None = None
     replacement_sigma_basis: str | None = None
+    # Q_LCB / Q_UCB bootstrap outputs (NULL unless a fused-q is built AND the bound construction
+    # succeeds). FAIL-SOFT: any failure leaves these None -> q_lcb_json/q_ucb_json written as NULL,
+    # which the live side treats exactly as today (Wilson fallback) -> never WORSE than status quo.
+    q_lcb_map: dict[str, float] | None = None
+    q_ucb_map: dict[str, float] | None = None
+    q_lcb_basis: str | None = None
     if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
         replacement_q_mode = REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK
@@ -1213,6 +1336,38 @@ def _insert_posterior(
                 raise ValueError(f"fused-q mass not positive-finite: {_total}")
             q = {key: float(value) / _total for key, value in _fused_q.items()}
             q_shape = "fused_normal_direct"
+            # Q_LCB / Q_UCB (2026-06-09) — fused-center parameter-uncertainty bootstrap. INDEPENDENT
+            # fail-soft: a bound-construction error must NOT roll back the fused q point (that would
+            # regress the q_shape gain). On error: q_lcb/q_ucb stay NULL (Wilson fallback, status quo)
+            # + loud WARNING; replacement_q_mode/q_shape unaffected. The bounds use the SAME _sigma_used
+            # the point q integrates at (settlement-floored if the floor applied) so q_lcb ≤ q_point ≤
+            # q_ucb holds per bin; center uncertainty is fused.sd (anchor_sigma_c), NOT σ_resid (already
+            # inside _sigma_used) — no double-count.
+            try:
+                _lcb_map, _ucb_map = _build_fused_q_bounds(
+                    mu_star=float(bayes_precision_fusion_override.anchor_value_c),
+                    center_sigma_c=float(bayes_precision_fusion_override.anchor_sigma_c),
+                    predictive_sigma_c=_sigma_used,
+                    bins=request.bins,
+                    half_step=_half_step,
+                    q_point=q,
+                )
+                q_lcb_map = _lcb_map
+                q_ucb_map = _ucb_map
+                q_lcb_basis = _QLCB_BASIS
+            except Exception as _qexc:
+                q_lcb_map = None
+                q_ucb_map = None
+                q_lcb_basis = None
+                try:
+                    import logging  # noqa: PLC0415
+                    logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                        "replacement_0_1 q_lcb/q_ucb bootstrap skipped (fail-soft to NULL, "
+                        "Wilson fallback unchanged): %s",
+                        _qexc,
+                    )
+                except Exception:
+                    pass
             # FIX 1 — FULL vs PARTIAL. The fused Normal is the constructed shape either way (so the
             # live gate admits both); PARTIAL records a degraded fusion. PARTIAL when EITHER the K3
             # decorrelated-provider set was INCOMPLETE (reuses the override's verdict, not a parallel
@@ -1323,8 +1478,22 @@ def _insert_posterior(
         "replacement_sigma_basis": replacement_sigma_basis,
         # FIX 5 (2026-06-09): capture-status provenance (recording only).
         "capture_status": capture_status,
-        "q_lcb_json_role": "absent_no_calibrated_lcb_available",
-        "q_ucb_json_role": "absent_no_calibrated_ucb_available",
+        # Q_LCB / Q_UCB provenance (2026-06-09). When the fused-center bootstrap succeeded these
+        # carry the populated-bound role + basis; otherwise the absent-role (Wilson fallback) as
+        # before. The percentile vectors do NOT sum to 1 (expected for bounds; bundle reader uses
+        # require_sum=False).
+        "q_lcb_json_role": (
+            "fused_center_bootstrap_lcb"
+            if q_lcb_map is not None
+            else "absent_no_calibrated_lcb_available"
+        ),
+        "q_ucb_json_role": (
+            "fused_center_bootstrap_ucb"
+            if q_ucb_map is not None
+            else "absent_no_calibrated_ucb_available"
+        ),
+        "q_lcb_basis": q_lcb_basis,
+        "q_lcb_bootstrap_draws": (_QLCB_BOOTSTRAP_DRAWS if q_lcb_map is not None else None),
         "bin_topology": bin_topology_payload,
         "bin_topology_hash": bin_topology_hash,
         "dependency_hash": dependency_hash,
@@ -1374,8 +1543,8 @@ def _insert_posterior(
             "source_available_at": available_at,
             "computed_at": computed_at,
             "q": q,
-            "q_lcb": None,
-            "q_ucb": None,
+            "q_lcb": q_lcb_map,
+            "q_ucb": q_ucb_map,
             "dependency_hash": dependency_hash,
             "bin_topology_hash": bin_topology_hash,
             "posterior_config_hash": posterior_config_hash,
@@ -1408,8 +1577,8 @@ def _insert_posterior(
             available_at,
             computed_at,
             _json(q),
-            None,
-            None,
+            (None if q_lcb_map is None else _json(q_lcb_map)),
+            (None if q_ucb_map is None else _json(q_ucb_map)),
             "openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             request.aifs_source_run_id,
             anchor_id,

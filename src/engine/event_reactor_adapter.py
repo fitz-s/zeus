@@ -192,6 +192,7 @@ from src.strategy.market_phase import (
     market_phase_admits,
 )
 from src.strategy.live_inference.live_admission import (
+    coverage_unlicensed_tail_rejection_reason,
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
 )
@@ -264,6 +265,19 @@ class _CandidateProof:
     # canonical path. Observability only — never gates selection.
     posterior_id: int | None = None
     probability_authority: str | None = None
+    # FIX C (mode-consistent EV; incident 0b5c305e26524042 / operator directive
+    # 2026-06-10): the per-candidate maker/taker mode decision and BOTH EVs travel
+    # on the proof so the receipt/settlement loop can recalibrate p_fill_maker and
+    # the adverse-selection haircut from fill facts. trade_score IS the chosen
+    # mode's EV (the taker-cost x visible-depth-p_fill hybrid is retired).
+    execution_mode_intent: str | None = None
+    ev_taker: float | None = None
+    ev_maker: float | None = None
+    maker_limit_price: float | None = None
+    relative_spread_at_eval: float | None = None
+    taker_forbidden_reason: str | None = None
+    maker_fill_probability: float | None = None
+    maker_fill_probability_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2716,6 +2730,10 @@ def _build_live_execution_command_certificates(
             best_ask=best_ask,
             executable_snapshot=executable_snapshot,
             canary_force_taker=canary_force_taker,
+            # FIX C: the spread participation guard reads the freshest book
+            # (pre-submit authority witness), never only the quote cert's copy.
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
         )
         # WALL #1 (GATE #85 follow-on, 2026-06-01): the passive-maker context is a
         # MAKER-ONLY structural input. ``FinalExecutionIntent`` only requires it when
@@ -2934,9 +2952,23 @@ def _build_live_execution_command_certificates(
             sweep_expected_fill_price=sweep_expected_fill_price,
             executable_market_context=executable_market_context,
         )
+        # FIX C: the late maker->taker EV-override re-build is subject to the SAME
+        # relative-spread participation guard as every other taker route — a wide
+        # spread forbids crossing unconditionally (the lane is guarded, not the
+        # callers).
+        from src.strategy.live_inference.mode_consistent_ev import (
+            taker_spread_guard_reason as _taker_spread_guard_reason,
+        )
+
         if (
             taker_fok_fak_live_enabled
             and final_intent.payload.get("post_only") is True
+            and _taker_spread_guard_reason(
+                fresh_best_bid,
+                fresh_best_ask,
+                max_relative_spread=_taker_max_relative_spread(),
+            )
+            is None
             and _ev_boundary_favors_cross(
                 actionable_payload=actionable.payload,
                 quote_payload=quote_payload,
@@ -3901,6 +3933,8 @@ def _select_edli_order_mode(
     executable_snapshot: DecisionCertificate,
     canary_force_taker: bool = False,
     canary_edge_floor: float | None = None,
+    fresh_best_bid: float | None = None,
+    fresh_best_ask: float | None = None,
 ) -> str:
     """Select MAKER/TAKER for the entry per design §1-§2 (governor + EV override).
 
@@ -3920,6 +3954,25 @@ def _select_edli_order_mode(
     """
     side = "BUY" if str(actionable_payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
     reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+
+    # --- 0. RELATIVE-SPREAD PARTICIPATION GUARD (FIX C; incident
+    # 0b5c305e26524042: 56% relative spread crossed as an instant FOK taker).
+    # When (ask - bid)/mid exceeds the threshold — or the two-sided book is
+    # unmeasurable — taker crossing is FORBIDDEN regardless of edge, canary, or
+    # governor: a wide spread IS the illiquidity signal, and every "edge" that
+    # wants to cross it is measured with the same model q the market is
+    # disputing. Maker resting remains allowed (the conservative default).
+    # Evaluated on the FRESHEST book the caller has (pre-submit authority
+    # witness), falling back to the quote-feasibility book.
+    from src.strategy.live_inference.mode_consistent_ev import taker_spread_guard_reason
+
+    guard_bid = fresh_best_bid if fresh_best_bid is not None else best_bid
+    guard_ask = fresh_best_ask if fresh_best_ask is not None else best_ask
+    spread_guard_reason = taker_spread_guard_reason(
+        guard_bid, guard_ask, max_relative_spread=_taker_max_relative_spread()
+    )
+    if spread_guard_reason is not None:
+        return "MAKER"
 
     # --- 1. Canary force-taker (with 5c post-cross edge floor) ---
     if canary_force_taker:
@@ -5386,6 +5439,15 @@ def _candidate_evaluation_from_proof(
         max_executable_shares=_candidate_max_executable_shares(proof),
         book_hash=_nonnull(row.get("book_hash") or row.get("executable_book_hash") or row.get("snapshot_hash")),
         low_volume_usd=_candidate_low_volume_usd(row),
+        # FIX C: mode-consistent EV provenance (chosen mode + both EVs).
+        execution_mode_intent=proof.execution_mode_intent,
+        ev_taker=proof.ev_taker,
+        ev_maker=proof.ev_maker,
+        maker_limit_price=proof.maker_limit_price,
+        relative_spread_at_eval=proof.relative_spread_at_eval,
+        taker_forbidden_reason=proof.taker_forbidden_reason,
+        maker_fill_probability=proof.maker_fill_probability,
+        maker_fill_probability_source=proof.maker_fill_probability_source,
     )
 
 
@@ -5405,6 +5467,15 @@ def _selection_scoped_proofs(
     locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
+    # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
+    # admission gate REJECTED (missing_reason set: DIRECTION_LAW / COVERAGE_
+    # UNLICENSED_TAIL / capital efficiency / buy_no evidence) must not enter the
+    # ΔU ranking at all. Before this filter a rejected proof with a juicy
+    # (corrupt) q_lcb could win the ΔU rank and then dead-end at the
+    # TRADE_SCORE_NON_POSITIVE submit gate — never a bad order, but it STARVED
+    # the legitimate admitted sibling of its selection. Gate-rejected proofs are
+    # unrankable, not merely unsubmittable.
+    executable = [proof for proof in executable if proof.missing_reason is None]
     tradeable_limit = [
         proof
         for proof in executable
@@ -5563,6 +5634,16 @@ def _generate_candidate_proofs(
     )
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
+    # FIX A (direction law; incident 0b5c305e26524042, 2026-06-10 Milan-24C;
+    # docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md): resolve the
+    # family forecast center ONCE — fusion provenance (anchor_value_c /
+    # bayes_precision_fusion.predictive_sigma_c) when the probability authority carries it,
+    # else the q-distribution mean over the family bins (legacy/canonical rows).
+    direction_law_mu, direction_law_sigma = _direction_law_family_center(
+        family=family,
+        q_by_condition=q_by_condition,
+        probability_evidence=probability_evidence,
+    )
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
@@ -5621,13 +5702,30 @@ def _generate_candidate_proofs(
                     )
                 except ValueError as exc:
                     missing_reason = str(exc)
-            score = _robust_trade_score_from_generated_inputs(
-                q_posterior=q_value,
-                q_lcb_5pct=q_lcb,
+            # FIX C (mode-consistent EV; operator directive 2026-06-10): the
+            # trade_score is the CHOSEN execution mode's EV, never the hybrid
+            # taker-cost x visible-depth-p_fill. TAKER-chosen scores are
+            # byte-identical to the legacy kernel (same q_lcb leg, same penalty);
+            # MAKER-chosen scores price the resting reality: bid-improving limit,
+            # conservative fill prior, adverse-selection half-spread haircut.
+            mode_ev = _mode_consistent_ev_for_proof(
+                row=row,
+                direction=direction,
+                q_lcb=q_lcb,
                 execution_price=execution_price,
                 c_cost_95pct=c_cost_95pct,
                 p_fill_lcb=p_fill_lcb,
             )
+            if mode_ev is not None:
+                score = mode_ev.chosen_ev if math.isfinite(mode_ev.chosen_ev) else 0.0
+            else:
+                score = _robust_trade_score_from_generated_inputs(
+                    q_posterior=q_value,
+                    q_lcb_5pct=q_lcb,
+                    execution_price=execution_price,
+                    c_cost_95pct=c_cost_95pct,
+                    p_fill_lcb=p_fill_lcb,
+                )
             # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13 +
             # operator directive): the scalar market-disagreement buy_no demotion
             # (cheap-NO-overconfidence -> score=0) is GONE. It is SUBSUMED by the
@@ -5669,6 +5767,34 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = buy_no_conservative_evidence_reason
+            # FIX A — DIRECTION LAW (operator doctrine as code): buy_yes only
+            # forecast-adjacent, buy_no only forecast-distant. Deterministic
+            # rejection BEFORE ranking/FDR/sizing; the far-tail YES the incident
+            # bought is unconstructable, not down-weighted.
+            direction_law_reason = _direction_law_reason_for_candidate(
+                candidate=candidate,
+                direction=direction,
+                mu=direction_law_mu,
+                predictive_sigma=direction_law_sigma,
+            )
+            if direction_law_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = direction_law_reason
+            # FIX B — COVERAGE_UNLICENSED_TAIL (fail-closed tail licensing): the
+            # K3 coverage gate leaves INSUFFICIENT_DATA bands UNCHANGED (fail-open),
+            # so an unlicensed (FORECAST_BOOTSTRAP) q_lcb could overrule the market
+            # in a longshot. price < 0.05 with q_lcb > 2x price now requires a
+            # settlement-licensed source (EMOS_ANALYTIC / SETTLEMENT_ISOTONIC).
+            coverage_unlicensed_tail_reason = coverage_unlicensed_tail_rejection_reason(
+                q_lcb=q_lcb,
+                execution_price=execution_price.value if execution_price is not None else None,
+                q_lcb_calibration_source=q_lcb_source,
+            )
+            if coverage_unlicensed_tail_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = coverage_unlicensed_tail_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A structurally non-tradeable candidate must not enter the FDR family
@@ -5679,6 +5805,8 @@ def _generate_candidate_proofs(
             if (
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
+                or direction_law_reason is not None
+                or coverage_unlicensed_tail_reason is not None
             ):
                 passed_prefilter = False
             proofs.append(
@@ -5716,9 +5844,210 @@ def _generate_candidate_proofs(
                     # typed column / FK to forecast_posteriors(posterior_id).
                     posterior_id=_optional_int(probability_evidence.get("posterior_id")),
                     probability_authority=probability_evidence.get("probability_authority"),
+                    # FIX C: the mode decision + BOTH EVs ride the proof to the
+                    # receipt (settlement-loop recalibration provenance).
+                    execution_mode_intent=(mode_ev.chosen_mode if mode_ev is not None else None),
+                    ev_taker=(mode_ev.ev_taker if mode_ev is not None else None),
+                    ev_maker=(mode_ev.ev_maker if mode_ev is not None else None),
+                    maker_limit_price=(mode_ev.maker_limit_price if mode_ev is not None else None),
+                    relative_spread_at_eval=(mode_ev.relative_spread if mode_ev is not None else None),
+                    taker_forbidden_reason=(mode_ev.taker_forbidden_reason if mode_ev is not None else None),
+                    maker_fill_probability=(mode_ev.maker_fill_probability if mode_ev is not None else None),
+                    maker_fill_probability_source=(
+                        mode_ev.maker_fill_probability_source if mode_ev is not None else None
+                    ),
                 )
             )
     return tuple(proofs)
+
+
+def _maker_fill_probability_prior() -> tuple[float, str]:
+    """Operator-tunable resting-fill prior (edli.maker_fill_probability_prior).
+
+    Defaults to the module prior (0.10, fee-study measured 10.8% resting fill
+    rate). Settings override carries its own provenance tag so the receipt
+    records WHERE the prior came from (settlement loop recalibration target).
+    """
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_FILL_PROBABILITY_PRIOR,
+        MAKER_FILL_PROBABILITY_SOURCE,
+    )
+
+    try:
+        raw = settings["edli"].get("maker_fill_probability_prior")
+    except Exception:
+        raw = None
+    if raw is None:
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    if not (0.0 < value <= 1.0):
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    return value, "settings.edli.maker_fill_probability_prior"
+
+
+def _taker_max_relative_spread() -> float:
+    """Operator-tunable crossing guard (edli.taker_max_relative_spread)."""
+    from src.strategy.live_inference.mode_consistent_ev import TAKER_MAX_RELATIVE_SPREAD
+
+    try:
+        value = float(settings["edli"].get("taker_max_relative_spread"))
+    except Exception:
+        return TAKER_MAX_RELATIVE_SPREAD
+    if not (0.0 < value <= 2.0):
+        return TAKER_MAX_RELATIVE_SPREAD
+    return value
+
+
+def _native_side_top_of_book(row: dict[str, Any], *, direction: str) -> tuple[float | None, float | None, float]:
+    """(best_bid, best_ask, tick) for the candidate's OWN native side (S1 row)."""
+    book = _native_quote_book_from_snapshot_row(row)
+    if direction == "buy_yes":
+        asks, bids = book.yes_asks, book.yes_bids
+    else:
+        asks, bids = book.no_asks, book.no_bids
+    best_ask = min((float(level.price) for level in asks), default=None)
+    best_bid = max((float(level.price) for level in bids), default=None)
+    return best_bid, best_ask, float(book.min_tick_size)
+
+
+def _mode_consistent_ev_for_proof(
+    *,
+    row: dict[str, Any] | None,
+    direction: str,
+    q_lcb: float,
+    execution_price: ExecutionPrice | None,
+    c_cost_95pct: float | None,
+    p_fill_lcb: float,
+    penalty: float = 0.01,
+):
+    """FIX C: the per-candidate maker/taker EV decision at the evaluation seam.
+
+    Returns None for an unpriced proof (no mode decision exists; the legacy
+    quote-missing no-trade path owns it). Penalty mirrors the legacy robust
+    kernel's lambda_edge so taker-mode scores stay byte-identical to the
+    pre-fix trade_score (same q_lcb leg: c_stress == c_95 and q_lcb <= q_post
+    made the legacy min() always pick the q_lcb leg).
+    """
+    if execution_price is None or row is None or c_cost_95pct is None:
+        return None
+    from src.strategy.live_inference.mode_consistent_ev import select_mode_consistent_ev
+
+    try:
+        best_bid, best_ask, tick = _native_side_top_of_book(row, direction=direction)
+    except Exception:
+        return None
+    p_fill_maker, p_fill_maker_source = _maker_fill_probability_prior()
+    return select_mode_consistent_ev(
+        q_lcb=q_lcb,
+        taker_all_in_cost=c_cost_95pct,
+        p_fill_taker=p_fill_lcb,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        tick_size=tick,
+        reservation=float(execution_price.value),
+        p_fill_maker=p_fill_maker,
+        p_fill_maker_source=p_fill_maker_source,
+        max_relative_spread=_taker_max_relative_spread(),
+        penalty=penalty,
+    )
+
+
+def _direction_law_family_center(
+    *,
+    family,
+    q_by_condition: Mapping[str, float],
+    probability_evidence: Mapping[str, object],
+) -> tuple[float | None, float | None]:
+    """Resolve (mu, predictive_sigma) in the family's bin unit for the direction law.
+
+    FIX A (2026-06-10 Milan-24C incident). Provenance order (Fitz #4):
+      1. The probability authority's fused posterior center —
+         ``probability_evidence["forecast_mu_c"]`` (anchor_value_c, °C) with
+         ``forecast_predictive_sigma_c`` (bayes_precision_fusion predictive sigma, °C),
+         converted into the bin unit.
+      2. Legacy rows without fusion: the q-distribution mean over the family bins
+         (computed natively in the bin unit; open-ended bins contribute their
+         single bound). Sigma is None — the law then uses the strictly
+         conservative 1-settlement-step threshold.
+
+    Returns (None, None) when no center is resolvable (mixed-unit families, no
+    bins, zero q mass) — the law module fail-closes buy_yes on a missing center.
+    """
+    from src.strategy.live_inference.direction_law import (
+        celsius_delta_to_unit,
+        celsius_to_unit,
+    )
+
+    units = {
+        str(candidate.bin.unit)
+        for candidate in family.candidates
+        if getattr(candidate, "bin", None) is not None
+    }
+    if len(units) != 1:
+        return (None, None)
+    unit = next(iter(units))
+    mu_c = _optional_float(probability_evidence.get("forecast_mu_c"))
+    if mu_c is not None:
+        sigma_c = _optional_float(probability_evidence.get("forecast_predictive_sigma_c"))
+        return (
+            celsius_to_unit(mu_c, unit),
+            None if sigma_c is None else celsius_delta_to_unit(sigma_c, unit),
+        )
+    total = 0.0
+    acc = 0.0
+    for candidate in family.candidates:
+        bin_obj = getattr(candidate, "bin", None)
+        if bin_obj is None:
+            continue
+        q = _optional_float(q_by_condition.get(str(candidate.condition_id or "")))
+        if q is None or q <= 0.0:
+            continue
+        low = bin_obj.low
+        high = bin_obj.high
+        if low is not None and high is not None:
+            center = (float(low) + float(high)) / 2.0
+        elif low is not None:
+            center = float(low)
+        elif high is not None:
+            center = float(high)
+        else:
+            continue
+        total += q
+        acc += q * center
+    if total <= 0.0:
+        return (None, None)
+    return (acc / total, None)
+
+
+def _direction_law_reason_for_candidate(
+    *,
+    candidate,
+    direction: str,
+    mu: float | None,
+    predictive_sigma: float | None,
+) -> str | None:
+    """Per-candidate direction-law verdict (FIX A). None = admissible.
+
+    A candidate with no bin object cannot be measured against the center; it is
+    structurally untradeable on this path anyway (bin-binding gates), so the law
+    abstains rather than inventing a distance.
+    """
+    from src.strategy.live_inference.direction_law import direction_law_rejection_reason
+
+    bin_obj = getattr(candidate, "bin", None)
+    if bin_obj is None:
+        return None
+    return direction_law_rejection_reason(
+        direction=direction,
+        bin_low=bin_obj.low,
+        bin_high=bin_obj.high,
+        bin_unit=str(bin_obj.unit),
+        mu=mu,
+        predictive_sigma=predictive_sigma,
+    )
 
 
 def _per_bin_yes_q_lcb(
@@ -7061,6 +7390,31 @@ def _replacement_anchor_mu_c(replacement_bundle: object) -> float | None:
         return None
 
 
+def _replacement_predictive_sigma_c(replacement_bundle: object) -> float | None:
+    """The fused posterior's predictive sigma (°C) from bayes_precision_fusion provenance.
+
+    FIX A (direction law, 2026-06-10 Milan-24C incident): read from
+    ``provenance_json.bayes_precision_fusion.predictive_sigma_c`` — the T2_BAYES fusion's own
+    predictive sigma, NOT the settlement-floored sigma (the floored ~3.3C value
+    would widen the direction-law band enough to re-admit the incident trade).
+    ``None`` when absent so the law degrades to the 1-settlement-step threshold
+    (strictly conservative).
+    """
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    fusion = provenance.get("bayes_precision_fusion")
+    if not isinstance(fusion, Mapping):
+        return None
+    value = fusion.get("predictive_sigma_c")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _replacement_yes_lcb_for_bin(
     replacement_bundle: object,
     *,
@@ -7327,6 +7681,13 @@ def _replacement_authority_probability_and_fdr_proof(
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",
+        # FIX A (direction law; 2026-06-10 Milan-24C incident): thread the fused
+        # posterior center + predictive sigma (°C) to the proof-construction seam
+        # so candidate admission can enforce buy_yes <=> bin ~= forecast. Read
+        # UNCONDITIONALLY (not gated by the sigma-floor flag): the law needs the
+        # center whenever fusion provenance carries one.
+        "forecast_mu_c": _replacement_anchor_mu_c(replacement_bundle),
+        "forecast_predictive_sigma_c": _replacement_predictive_sigma_c(replacement_bundle),
         "posterior_id": str(replacement_bundle.posterior_id),
         "replacement_product_id": replacement_bundle.product_id,
         "p_cal_vector_hash": _probability_vector_hash(

@@ -105,6 +105,67 @@ def live_capital_efficiency_rejection_reason(
     return None
 
 
+# FIX B (incident 0b5c305e26524042, 2026-06-10 Milan-24C;
+# docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md): the K3 settlement
+# coverage gate fail-OPENS on INSUFFICIENT_DATA, so a tail band with no settled
+# history keeps its raw FORECAST_BOOTSTRAP q_lcb - exactly where the model is least
+# proven. This guard is the fail-CLOSED dual, scoped to the longshot-disagreement
+# case only: a cheap candidate (price < TAIL_PRICE_MAX) whose unlicensed q_lcb
+# claims more than DISAGREEMENT_RATIO x the market price is rejected until its
+# band carries a settlement-licensed calibration source. Near-center trades
+# (price >= TAIL_PRICE_MAX) are untouched by construction. Rejection (not shrink):
+# shrinking q_lcb to the market-implied probability yields conservative EV <= 0,
+# which the capital-efficiency gate rejects anyway - an explicit reason is the
+# same outcome with honest provenance.
+COVERAGE_UNLICENSED_TAIL_PRICE_MAX = 0.05
+COVERAGE_UNLICENSED_TAIL_DISAGREEMENT_RATIO = 2.0
+# Subset of qlcb_provenance.CALIBRATION_SOURCES that is settlement-licensed
+# (mirrors LIVE_BUY_NO_MATERIAL_ALLOWED_LCB_SOURCES; FORECAST_BOOTSTRAP is not).
+COVERAGE_LICENSED_LCB_SOURCES = frozenset({"EMOS_ANALYTIC", "SETTLEMENT_ISOTONIC"})
+
+
+def coverage_unlicensed_tail_rejection_reason(
+    *,
+    q_lcb: float | int | None,
+    execution_price: float | int | None,
+    q_lcb_calibration_source: str | None,
+    tail_price_max: float = COVERAGE_UNLICENSED_TAIL_PRICE_MAX,
+    disagreement_ratio: float = COVERAGE_UNLICENSED_TAIL_DISAGREEMENT_RATIO,
+    licensed_sources: frozenset[str] = COVERAGE_LICENSED_LCB_SOURCES,
+) -> str | None:
+    """Reject an unlicensed longshot disagreement with the market (direction-agnostic).
+
+    Fires iff ALL of: execution_price < tail_price_max (longshot pricing),
+    q_lcb > disagreement_ratio x execution_price (material disagreement), and
+    the q_lcb calibration source is not settlement-licensed. An unpriced
+    candidate (price None) is not this guard's business - the quote-missing
+    no-trade path owns it.
+    """
+    if execution_price is None:
+        return None
+    try:
+        price = float(execution_price)
+        q_value = float(q_lcb)
+        ratio_floor = float(disagreement_ratio)
+        tail_max = float(tail_price_max)
+    except (TypeError, ValueError):
+        return "COVERAGE_UNLICENSED_TAIL:inputs=missing"
+    if not all(math.isfinite(v) for v in (price, q_value, ratio_floor, tail_max)):
+        return "COVERAGE_UNLICENSED_TAIL:inputs=nonfinite"
+    if price <= 0.0 or price >= tail_max:
+        return None
+    if q_value <= ratio_floor * price:
+        return None
+    source = str(q_lcb_calibration_source or "").strip()
+    if source in licensed_sources:
+        return None
+    return (
+        "COVERAGE_UNLICENSED_TAIL:"
+        f"q_lcb={q_value:.6f}:price={price:.6f}:ratio={q_value / price:.2f}:"
+        f"max_ratio={ratio_floor:.2f}:source={source or 'missing'}"
+    )
+
+
 def live_buy_no_conservative_evidence_rejection_reason(
     *,
     direction: str | None,
