@@ -1,10 +1,22 @@
 # Created: (pre-rule legacy)
-# Lifecycle: created=2026-04-23; last_reviewed=2026-04-25; last_reused=2026-04-25
+# Lifecycle: created=2026-04-23; last_reviewed=2026-04-25; last_reused=2026-06-10
 # Purpose: Build canonical diurnal analytics from reader-safe obs_v2 instants.
 # Reuse: Check active packet scope and obs_v2 reader-gate predicates before running; writes state/zeus-world.db.
-# Last reused/audited: 2026-04-25
+# Last reused/audited: 2026-06-10 (STALE_REWRITE of p_high_set semantics —
+#   adversarial review /tmp/day0_adversarial_review.md finding 3: the prior
+#   computation compared the PER-HOUR bucket max against the daily max, i.e.
+#   "P(the peak occurs at hour h)" — a PMF-shaped, non-monotone quantity that
+#   collapsed to ~0 by evening (Chicago Jun h17=0.10, h20=0.00; impossible for
+#   the documented "P(daily high already set by hour h)"). The day0 maturity
+#   gate load-bears on this column; the broken shape sunset-locked US exits and
+#   granted Seoul PRE-peak authority (h13=0.64). Fixed: CUMULATIVE running max
+#   through hour h vs daily max (a survival-shaped, monotone non-decreasing
+#   curve by construction per day) + an isotonic (cumulative-max) pass on the
+#   monthly aggregate so hour-coverage sampling noise can never re-introduce
+#   local decreases. Antibody: tests/test_diurnal_peak_prob_monotone.py.
 # Authority basis: .omc/plans/observation-instants-migration-iter3.md Phase 2 +
-#                  docs/operations/task_2026-04-21_gate_f_data_backfill/step4_phase2_cutover.md
+#                  docs/operations/task_2026-04-21_gate_f_data_backfill/step4_phase2_cutover.md +
+#                  /tmp/day0_adversarial_review.md finding 3 (2026-06-10)
 """ETL: Aggregate DST-safe intraday observations -> diurnal_curves/diurnal_peak_prob.
 
 Source: `observation_instants_current` VIEW (Phase 2 atomic cutover indirection
@@ -101,6 +113,41 @@ def season_from_date(date_str: str, city_name: str = "") -> str:
 
 def _obs_hour(local_timestamp: str) -> int:
     return datetime.fromisoformat(local_timestamp).hour
+
+
+def _isotonic_by_hour(mean_by_hour: dict) -> dict:
+    """ISOTONIC ENFORCEMENT (2026-06-10 finding-3 fix, part 2).
+
+    The per-day high-set indicator is monotone, but hour buckets are averaged
+    over DIFFERENT day subsets (coverage varies by hour), which can
+    re-introduce small local decreases in the aggregate. P(high already set
+    by h) is monotone non-decreasing BY DEFINITION, so enforce the shape with
+    a cumulative-max pass over hours (applies to both the monthly table the
+    day0 maturity gate reads and the seasonal fallback column).
+    """
+    out: dict = {}
+    running = 0.0
+    for hour in sorted(mean_by_hour):
+        running = max(running, float(mean_by_hour[hour]))
+        out[hour] = min(1.0, running)
+    return out
+
+
+def _cumulative_high_set_indicators(samples: list) -> list:
+    """Per-day survival indicators: 1[cum_max(through hour h) == daily_max].
+
+    ``samples``: dicts with 'hour' and 'running_max' (per-hour bucket max).
+    Sorted ascending by hour internally. Returns [(hour, indicator)] —
+    monotone non-decreasing in hour by construction (finding-3 fix, part 1).
+    """
+    ordered = sorted(samples, key=lambda sample: int(sample["hour"]))
+    final_high = max(float(sample["running_max"]) for sample in ordered)
+    cumulative = float("-inf")
+    out: list = []
+    for sample in ordered:
+        cumulative = max(cumulative, float(sample["running_max"]))
+        out.append((int(sample["hour"]), 1.0 if cumulative >= final_high - 1e-9 else 0.0))
+    return out
 
 
 def run_etl() -> dict:
@@ -204,22 +251,44 @@ def run_etl() -> dict:
         )
 
     for (city, target_date), samples in per_day.items():
-        final_high = max(sample["running_max"] for sample in samples)
-        for sample in samples:
-            hour = int(sample["hour"])
-            season = str(sample["season"])
-            month = int(sample["month"])
-            high_set = 1.0 if sample["running_max"] >= final_high - 1e-9 else 0.0
-            seasonal_high_set[(city, season, hour)].append(high_set)
-            monthly_high_set[(city, month, hour)].append(high_set)
+        # p_high_set SEMANTICS FIX (2026-06-10, adversarial review finding 3):
+        # "P(daily high already set by hour h)" requires the CUMULATIVE running
+        # max through hour h, not the hour-h bucket max. The bucket-max version
+        # computed P(peak occurs near hour h) — PMF-shaped, ~0 in the evening —
+        # which inverted the day0 maturity gate's behavior in both directions.
+        # cum_max(h) is monotone non-decreasing, so the per-day indicator
+        # 1[cum_max(h) == daily_max] is a monotone step function (survival
+        # shape), exactly what the gate's post_peak_confidence assumes.
+        #
+        # FULL-DAY COVERAGE GATE: a day whose sampling stops early (e.g. last
+        # bucket 14:00 local) has an UNDERSTATED final_high, which inflates
+        # early-hour p_high_set (the truncated 'daily max' is reached early) —
+        # exactly the pre-peak-authority hazard the gate must not re-acquire.
+        # Only days observed through late evening (>= 21:00 local) and from
+        # early morning (<= 09:00 local) define a trustworthy daily max.
+        hours_present = {int(sample["hour"]) for sample in samples}
+        if max(hours_present) < 21 or min(hours_present) > 9:
+            continue
+        season_by_hour = {int(s["hour"]): str(s["season"]) for s in samples}
+        month_by_hour = {int(s["hour"]): int(s["month"]) for s in samples}
+        for hour, high_set in _cumulative_high_set_indicators(samples):
+            seasonal_high_set[(city, season_by_hour[hour], hour)].append(high_set)
+            monthly_high_set[(city, month_by_hour[hour], hour)].append(high_set)
+
+    seasonal_means = defaultdict(dict)
+    for (city, season, hour), obs in seasonal_high_set.items():
+        if obs:
+            seasonal_means[(city, season)][int(hour)] = float(np.mean(obs))
+    seasonal_iso = {
+        key: _isotonic_by_hour(means) for key, means in seasonal_means.items()
+    }
 
     stored = 0
     for (city, season, hour), temps in sorted(grouped.items()):
         if len(temps) < 5:
             continue
         arr = np.array(temps, dtype=float)
-        high_set_obs = seasonal_high_set.get((city, season, hour), [])
-        p_high_set = float(np.mean(high_set_obs)) if high_set_obs else None
+        p_high_set = seasonal_iso.get((city, season), {}).get(int(hour))
         zeus.execute(
             """
             INSERT OR REPLACE INTO diurnal_curves
@@ -230,19 +299,27 @@ def run_etl() -> dict:
         )
         stored += 1
 
-    monthly_rows = 0
-    for (city, month, hour), obs in sorted(monthly_high_set.items()):
+    monthly_means = defaultdict(dict)
+    monthly_counts = defaultdict(dict)
+    for (city, month, hour), obs in monthly_high_set.items():
         if len(obs) < 5:
             continue
-        zeus.execute(
-            """
-            INSERT OR REPLACE INTO diurnal_peak_prob
-            (city, month, hour, p_high_set, n_obs)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (city, month, hour, float(np.mean(obs)), len(obs)),
-        )
-        monthly_rows += 1
+        monthly_means[(city, month)][int(hour)] = float(np.mean(obs))
+        monthly_counts[(city, month)][int(hour)] = len(obs)
+
+    monthly_rows = 0
+    for (city, month), means in sorted(monthly_means.items()):
+        iso = _isotonic_by_hour(means)
+        for hour in sorted(iso):
+            zeus.execute(
+                """
+                INSERT OR REPLACE INTO diurnal_peak_prob
+                (city, month, hour, p_high_set, n_obs)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (city, month, hour, iso[hour], monthly_counts[(city, month)][hour]),
+            )
+            monthly_rows += 1
 
     zeus.commit()
 
