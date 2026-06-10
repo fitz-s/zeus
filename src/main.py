@@ -117,8 +117,12 @@ REACTOR_MODE_BY_LIVE_STAGE = {
 # OUT — day0 flags crash). `day0_shadow` ADMITS day0 (mask runs, shadow certs
 # produced) but carries NO submit authority of its own — it is orthogonal to the
 # arm axis (real_order_submit_enabled), so day0 candidates fall through the same
-# not-armed block as everything else. Any other value fails closed at boot.
-EDLI_LIVE_SCOPES = frozenset({"forecast_only", "day0_shadow"})
+# not-armed block as everything else. `forecast_plus_day0` ADMITS day0 AND lets
+# day0-lane events PASS the DAY0_SCOPE_SHADOW_ONLY adapter boundary (real submit
+# is then subject to all other proofs/gates/arm) — operator directive 2026-06-09
+# ('全部打开'): shadow-only strategies never self-promote, so the purgatory gate
+# is opened. Any other value fails closed at boot.
+EDLI_LIVE_SCOPES = frozenset({"forecast_only", "day0_shadow", "forecast_plus_day0"})
 EDLI_RUNTIME_FLAGS = (
     "enabled",
     "event_writer_enabled",
@@ -1006,9 +1010,12 @@ def _assert_edli_live_scope(edli_cfg: dict) -> None:
     # edli_live_scope is independent of the arm axis (real_order_submit_enabled),
     # so a day0 candidate routes through the SAME not-armed block as any other
     # event (reactor.py EDLI_REAL_ORDER_SUBMIT_DISABLED / NO_SUBMIT) unless the
-    # operator separately arms. forecast_only stays byte-identical: day0 flags on
-    # under forecast_only still crash with DAY0_OUT_OF_SCOPE_FOR_PR332.
-    if scope == "day0_shadow":
+    # operator separately arms. forecast_plus_day0 ALSO admits day0 (operator
+    # directive 2026-06-09); it additionally lets day0-lane events PASS the
+    # DAY0_SCOPE_SHADOW_ONLY adapter boundary — real submit is then subject to
+    # all other proofs/gates/arm. forecast_only stays byte-identical: day0 flags
+    # on under forecast_only still crash with DAY0_OUT_OF_SCOPE_FOR_PR332.
+    if scope in ("day0_shadow", "forecast_plus_day0"):
         return
     if bool(edli_cfg.get("day0_extreme_trigger_enabled", False)) or bool(
         edli_cfg.get("day0_hard_fact_live_enabled", False)

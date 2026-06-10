@@ -3,9 +3,16 @@
 # Authority basis: FIX-3 (P1) — day0_shadow scope must not permit real submit
 #   for day0-lane events, enforced at the final adapter/submit BOUNDARY.
 #   Relationship tests: scope × event_type × real_order_submit_enabled → outcome.
+#   2026-06-09 extension (operator directive '全部打开'): forecast_plus_day0 scope —
+#   day0-lane events PASS the boundary (NOT blocked by DAY0_SCOPE_SHADOW_ONLY);
+#   day0_shadow regression-pinned.
 """FIX-3 relationship tests: edli_live_scope=day0_shadow + real_order_submit_enabled=true
 + day0 event → DAY0_SCOPE_SHADOW_ONLY rejection (no-submit); forecast-lane event in the same
-config is NOT blocked by DAY0_SCOPE_SHADOW_ONLY (it may fail for other reasons)."""
+config is NOT blocked by DAY0_SCOPE_SHADOW_ONLY (it may fail for other reasons).
+
+forecast_plus_day0 scope: day0-lane events are NOT blocked by the scope gate (they may
+be blocked downstream by other proofs/gates/arm — that is fine); the specific reason
+DAY0_SCOPE_SHADOW_ONLY must not appear."""
 from __future__ import annotations
 
 import sqlite3
@@ -252,3 +259,75 @@ def test_forecast_only_scope_does_not_add_day0_scope_gate(monkeypatch) -> None:
     assert receipt.reason != "DAY0_SCOPE_SHADOW_ONLY", (
         "forecast_only scope must not introduce DAY0_SCOPE_SHADOW_ONLY gate"
     )
+
+
+# ---------------------------------------------------------------------------
+# forecast_plus_day0 (operator directive 2026-06-09 '全部打开'): day0-lane event
+# PASSES the DAY0_SCOPE_SHADOW_ONLY boundary. Real submit is then subject to all
+# OTHER downstream proofs/gates/arm — the receipt may be rejected for some other
+# reason, but NOT for DAY0_SCOPE_SHADOW_ONLY.
+# ---------------------------------------------------------------------------
+
+def test_forecast_plus_day0_scope_does_not_block_day0_event(monkeypatch) -> None:
+    """edli_live_scope='forecast_plus_day0' + DAY0_EXTREME_UPDATED event must NOT
+    be blocked by the scope gate. The event may be rejected by another gate
+    downstream — that is acceptable — but the specific reason
+    DAY0_SCOPE_SHADOW_ONLY must not appear (the shadow-only purgatory gate is
+    opened for day0-lane events under this scope)."""
+    from src.engine import event_reactor_adapter as adapter
+    from src.main import require_operator_arm
+
+    event = _day0_event()
+    monkeypatch.setattr(
+        adapter,
+        "build_event_bound_no_submit_receipt",
+        lambda *_args, **_kwargs: _accepted_no_submit_receipt(event),
+    )
+
+    submit = adapter.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: RiskLevel.GREEN,
+        real_order_submit_enabled=True,
+        live_canary_enabled=True,
+        durable_submit_outbox_enabled=True,
+        executor_submit=lambda *_: None,  # type: ignore[arg-type]
+        operator_arm=require_operator_arm({"edli_live_operator_authorized": True}),
+        edli_live_scope="forecast_plus_day0",
+    )
+
+    receipt = submit(event, _DT)
+
+    # The scope gate must NOT be the blocking reason for a day0 event under
+    # forecast_plus_day0. This is the antibody that the purgatory gate is opened.
+    assert receipt.reason != "DAY0_SCOPE_SHADOW_ONLY", (
+        "forecast_plus_day0 scope must let day0-lane events PASS the "
+        "DAY0_SCOPE_SHADOW_ONLY boundary (got it as the rejection reason)"
+    )
+
+
+def test_forecast_plus_day0_scope_admits_at_boot(monkeypatch) -> None:
+    """forecast_plus_day0 is an admissible edli_live_scope and, like day0_shadow,
+    permits day0 flags to be enabled (no DAY0_OUT_OF_SCOPE_FOR_PR332 crash)."""
+    from src.main import EDLI_LIVE_SCOPES, _assert_edli_live_scope
+
+    assert "forecast_plus_day0" in EDLI_LIVE_SCOPES
+
+    # day0 flags ON under forecast_plus_day0 must NOT crash.
+    _assert_edli_live_scope(
+        {
+            "edli_live_scope": "forecast_plus_day0",
+            "day0_extreme_trigger_enabled": True,
+            "day0_hard_fact_live_enabled": True,
+        }
+    )
+
+    # Regression: day0 flags ON under forecast_only still crash.
+    import pytest
+
+    with pytest.raises(RuntimeError, match="DAY0_OUT_OF_SCOPE_FOR_PR332"):
+        _assert_edli_live_scope(
+            {
+                "edli_live_scope": "forecast_only",
+                "day0_extreme_trigger_enabled": True,
+            }
+        )
