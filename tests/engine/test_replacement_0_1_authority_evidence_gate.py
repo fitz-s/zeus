@@ -1,21 +1,22 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-06-07
-# Authority basis: docs/the_path/REAUDIT_0_1.md §1 (re-pointed FIX-1: the single
-#   shared evidence gate, Insertion Points A+B) + REALIGN_0_1_AUTHORITY.md (live
-#   authority = replacement_0_1) + PR_SPEC.md §2 FIX-1. This is the RELATIONSHIP
-#   test for the cross-module invariant: settlement-validated promotion+capital
-#   evidence must be load-bearing on the path that is ACTUALLY live (the 0.1
-#   probability authority), NOT only on the legacy resolver. One gate, one truth
-#   (iron rule #4): the SAME pure predicate is consulted by the 0.1 path AND by
-#   resolve_replacement_forecast_runtime_policy.
-"""Relationship tests for the single shared replacement_0_1 live-authority evidence gate.
+# Last reused/audited: 2026-06-09
+# Authority basis: docs/the_path/REAUDIT_0_1.md §1 + REALIGN_0_1_AUTHORITY.md +
+#   PR_SPEC.md §2 FIX-1 (ORIGINAL: settlement-evidence gate load-bearing on the live
+#   0.1 path). SUPERSEDED 2026-06-08: operator directive REMOVED the settlement-
+#   evidence promotion gate from BOTH live-authority sites (commits b646f99339 +
+#   54a53334a9); LIVE_AUTHORITY is now FLAG-ONLY. The 3 tests asserting the gate
+#   DENIES the live path were DEAD_TEST-removed (the gating they pinned is deleted;
+#   the removal is owned by test_replacement_live_authority_evidence_gate_wiring_
+#   honesty.py). The 2 surviving tests validate the still-shadow-defined gate as a
+#   pure predicate and the live 0.1 path's positive (flag-on) authority stamp.
+"""Tests for the (now shadow-only) replacement_0_1 live-authority evidence gate.
 
-These verify the CROSS-MODULE invariant, not a single function:
-  flag-true + readiness/bundle/bin-binding all PASS (stubbed) =>
-  the ONLY remaining gate is settlement evidence; absent/failing evidence MUST
-  make the live 0.1 authority path DEGRADE to None (fail-safe -> canonical
-  fallback), and MUST NOT stamp payload['_edli_q_source']='replacement_0_1' (so
-  the legacy evidence-gated backstop is re-enabled).
+CURRENT LAW: the settlement-evidence gate NO LONGER gates the live 0.1 authority
+path (operator-directed flag-only LIVE_AUTHORITY, 2026-06-08). Retained here:
+  - the gate as a PURE PREDICATE contract (it stays defined for shadow); and
+  - the live 0.1 path's POSITIVE authority stamp when the flag/path is armed.
+The deleted "absent/failing evidence -> DEGRADE to None" gating is pinned removed
+by tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py.
 """
 
 from __future__ import annotations
@@ -174,35 +175,14 @@ def test_evidence_gate_pure_predicate_contract() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_replacement_0_1_authority_denied_when_settlement_evidence_absent_or_failing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _arm_flag_and_stub_forecast_path(monkeypatch)
-
-    promo, cap = _real_on_disk_failing_promotion_evidence()
-    assert promo is not None and cap is not None
-    assert promo.promotion_allowed() is False  # the binding real-world failure
-
-    cases = [
-        ("promotion_None", None, _capital_objective_evidence()),
-        ("capital_None", _passing_evidence(), None),
-        ("real_on_disk_failing", promo, cap),
-    ]
-    for label, promotion_evidence, capital_objective_evidence in cases:
-        payload: dict[str, object] = {}
-        result = adapter._replacement_authority_probability_and_fdr_proof(
-            event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
-            payload=payload,
-            family=_family(),
-            conn=object(),
-            native_costs=_native_costs(),
-            decision_time=datetime(2026, 6, 7, tzinfo=timezone.utc),
-            promotion_evidence=promotion_evidence,
-            capital_objective_evidence=capital_objective_evidence,
-        )
-        assert result is None, f"{label}: 0.1 path must DEGRADE to None on bad evidence"
-        # The q_source must NOT be stamped -> legacy evidence-gated backstop re-enabled.
-        assert payload.get("_edli_q_source") != "replacement_0_1", label
+# DEAD_TEST removed 2026-06-09: test_replacement_0_1_authority_denied_when_settlement_
+# evidence_absent_or_failing asserted the evidence gate DEGRADES the LIVE 0.1 authority
+# path to None on absent/failing evidence. That gating was DELETED by operator directive
+# 2026-06-08 (commits b646f99339 "remove promotion/capital-objective evidence gate from
+# BOTH live-authority sites" + 54a53334a9): LIVE_AUTHORITY is now FLAG-ONLY and U0R runs
+# live without the settlement-evidence gate. The removal is pinned by
+# tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py (the superseding
+# owner of this surface). The dead gating invariant has no surviving new form here.
 
 
 def test_replacement_0_1_authority_granted_when_both_evidence_pass(
@@ -231,90 +211,11 @@ def test_replacement_0_1_authority_granted_when_both_evidence_pass(
     assert q_by_condition == {"cond-27": pytest.approx(0.20), "cond-28": pytest.approx(0.80)}
 
 
-# --------------------------------------------------------------------------- #
-# §1.6 test 2 — SINGLE-OWNER: one gate observed by BOTH consumption sites
-# --------------------------------------------------------------------------- #
-
-
-def test_single_owner_gate_observed_by_both_sites(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Monkeypatch the shared gate to a known verdict; assert BOTH the 0.1 path
-    (adapter) AND resolve_replacement_forecast_runtime_policy observe the patched
-    verdict — proving ONE owner, not two divergent predicates."""
-    _arm_flag_and_stub_forecast_path(monkeypatch)
-
-    sentinel_codes = ("PATCHED_GATE_DENY",)
-    calls: list[str] = []
-
-    def _deny_gate(promotion_evidence, capital_objective_evidence):
-        calls.append("called")
-        return (False, sentinel_codes)
-
-    # Patch the single owner in its home module AND the name the adapter resolved.
-    monkeypatch.setattr(runtime_policy, "replacement_live_authority_evidence_gate", _deny_gate)
-    monkeypatch.setattr(adapter, "replacement_live_authority_evidence_gate", _deny_gate)
-
-    # SITE A: the live 0.1 path observes the patched DENY -> None.
-    payload: dict[str, object] = {}
-    result = adapter._replacement_authority_probability_and_fdr_proof(
-        event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
-        payload=payload,
-        family=_family(),
-        conn=object(),
-        native_costs=_native_costs(),
-        decision_time=datetime(2026, 6, 7, tzinfo=timezone.utc),
-        promotion_evidence=_passing_evidence(),
-        capital_objective_evidence=_capital_objective_evidence(),
-    )
-    assert result is None
-    assert payload.get("_edli_q_source") != "replacement_0_1"
-
-    # SITE B: the legacy resolver observes the patched DENY -> not LIVE_AUTHORITY,
-    # carrying the sentinel codes from the SAME gate.
-    flags = {
-        SHADOW_FLAG: True,
-        VETO_FLAG: True,
-        TRADE_AUTHORITY_FLAG: True,
-        KELLY_INCREASE_FLAG: False,
-        DIRECTION_FLIP_FLAG: False,
-    }
-    policy = resolve_replacement_forecast_runtime_policy(
-        flags,
-        promotion_evidence=_passing_evidence(),
-        capital_objective_evidence=_capital_objective_evidence(),
-    )
-    assert policy.status != "LIVE_AUTHORITY"
-    assert "PATCHED_GATE_DENY" in policy.reason_codes
-    assert len(calls) >= 2  # both sites consulted the one owner
-
-
-# --------------------------------------------------------------------------- #
-# §1.6 test 4 — E2E BACKSTOP RE-ENABLE: failing evidence keeps q_source unstamped
-# so _replacement_primary_authority_already_applied stays False (legacy hook runs)
-# --------------------------------------------------------------------------- #
-
-
-def test_failing_evidence_keeps_legacy_backstop_enabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _arm_flag_and_stub_forecast_path(monkeypatch)
-    promo, cap = _real_on_disk_failing_promotion_evidence()
-
-    payload: dict[str, object] = {}
-    result = adapter._replacement_authority_probability_and_fdr_proof(
-        event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
-        payload=payload,
-        family=_family(),
-        conn=object(),
-        native_costs=_native_costs(),
-        decision_time=datetime(2026, 6, 7, tzinfo=timezone.utc),
-        promotion_evidence=promo,
-        capital_objective_evidence=cap,
-    )
-    # (a) 0.1 path returns None
-    assert result is None
-    # (b) q_source NOT stamped replacement_0_1
-    assert payload.get("_edli_q_source") != "replacement_0_1"
-    # (c) a proof carrying that (absent) q_source is NOT treated as primary-applied,
-    #     so the legacy evidence-gated hook IS invoked as the backstop.
-    proof_with_unstamped_source = SimpleNamespace(q_source=payload.get("_edli_q_source"))
-    assert adapter._replacement_primary_authority_already_applied(proof_with_unstamped_source) is False
+# DEAD_TEST removed 2026-06-09: test_single_owner_gate_observed_by_both_sites and
+# test_failing_evidence_keeps_legacy_backstop_enabled both asserted the evidence gate
+# DENIES/degrades the LIVE 0.1 authority path (one monkeypatched a removed adapter
+# symbol `replacement_live_authority_evidence_gate`, now an AttributeError). That live-
+# path gating was deleted by operator directive 2026-06-08 (b646f99339 + 54a53334a9):
+# LIVE_AUTHORITY is FLAG-ONLY; the gate function remains shadow-defined in runtime_policy
+# but is NO LONGER imported into or called by the reactor. The removal is pinned by
+# tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py.
