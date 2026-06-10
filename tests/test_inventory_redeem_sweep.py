@@ -2,11 +2,14 @@
 # Last reused or audited: 2026-06-09
 # Authority basis: operator redeem directive 2026-06-09 (auto-collect: the redeem
 #   trigger is the Safe's actual chain inventory, never the portfolio ledger).
-# Lifecycle: created=2026-06-09; last_reviewed=2026-06-09; last_reused=never
+#   2026-06-09 P1 follow-up: curPrice is a mutable data-api field, NOT a veto on
+#   chain truth — structural prefilter only; CHAIN balance is the sole veto.
+# Lifecycle: created=2026-06-09; last_reviewed=2026-06-09; last_reused=2026-06-09
 # Purpose: Antibody — sweep_chain_inventory_for_redeems enqueues redeem commands
 #   from chain holdings with ZERO ledger involvement (the London-16 case), fails
-#   closed on chain mismatch, and redeemed USDC.e proceeds auto-wrap via
-#   enqueue_wrap_if_balance_above_threshold (no operator hands anywhere).
+#   closed on chain mismatch, NEVER lets a data-api curPrice skip the chain probe
+#   (the $857 stranded-winner category), and redeemed USDC.e proceeds auto-wrap
+#   via enqueue_wrap_if_balance_above_threshold (no operator hands anywhere).
 # Reuse: Run when modifying inventory_redeem_sweep.py, the balance probe, the
 #   _redeem_submitter_cycle sweep wiring, or the wrap intent creator.
 """Antibody tests for the inventory-truth auto-collect sweep.
@@ -23,10 +26,19 @@ Contracts (sed-flip verifiable):
       anywhere still gets a settlement_commands row enqueued.
   S2: live balance 0 (already redeemed / API lag) -> NOT enqueued.
   S3: derived positionId != API asset id -> NOT enqueued (fail-closed).
-  S4: zero-value (curPrice 0) and non-redeemable rows are filtered out.
+  S4: non-redeemable rows are structurally filtered (never probed); but a
+      low/zero curPrice is NOT a structural veto — see C1/C2/C3.
   S5: re-sweep while a command is active returns the SAME command id (no dupes).
   W1 (auto-unwrap): redeemed USDC.e proceeds above threshold enqueue a
       WRAP_REQUESTED row with the full balance (no operator hands).
+
+curPrice-truth antibodies (2026-06-09 P1 — the $857 stranded-winner category):
+  C1 (JACKPOT): redeemable=True, curPrice=0.0, size>0, correct asset, chain
+      balance>0 -> ENQUEUED. A mutable data-api price MUST NOT skip the chain
+      probe. This is the load-bearing antibody.
+  C2 (CHAIN VETO BOTH WAYS): curPrice=0.0 but chain balance 0 -> NOT enqueued.
+  C3 (DATA-API LIES, TELEMETRY): below-threshold curPrice + chain balance>0 ->
+      WARNING logged AND enqueued.
 """
 
 from __future__ import annotations
@@ -41,6 +53,16 @@ from src.state.db import init_schema
 _CID = "0x" + "ee" * 32
 _ASSET = "81633771000021127658752261257414280805140874457786559998422070609600874978435"
 _SAFE = "0x6a096d5042cba434521E2cdb95A1fBa789a09b7f"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rotation():
+    """The per-Safe probe-rotation cursor is module state; isolate each test."""
+    from src.execution.inventory_redeem_sweep import reset_rotation_for_tests
+
+    reset_rotation_for_tests()
+    yield
+    reset_rotation_for_tests()
 
 
 @pytest.fixture()
@@ -167,20 +189,91 @@ def test_s3_position_id_mismatch_fails_closed(trade_conn):
     assert n == 0, "S3 FAIL: mismatched positionId still enqueued."
 
 
-def test_s4_zero_value_and_non_redeemable_filtered(trade_conn):
+def test_s4_non_redeemable_filtered_structurally(trade_conn):
+    """S4: non-redeemable / zero-size / no-identity rows are STRUCTURALLY
+    filtered (never probed). curPrice is NOT a structural veto, so a low/zero
+    curPrice row is NOT filtered here — it flows to the chain probe (see C1).
+
+    Sed-flip: re-add `cur_price > min_cur_price` to the prefilter -> the
+    curPrice=0 row below would be filtered and C1 would RED."""
     from src.execution.inventory_redeem_sweep import sweep_chain_inventory_for_redeems
 
-    adapter = _ProbeAdapter(balance_micro=5_000_000)
+    # Chain says these are all LOSERS (balance 0): the chain veto suppresses
+    # them, NOT a price prefilter. Probe IS called for the structurally-eligible
+    # rows (curPrice 0 and 0.4); only the non-redeemable row is never probed.
+    adapter = _ProbeAdapter(balance_micro=0)
     cmds = sweep_chain_inventory_for_redeems(
         trade_conn, adapter, _SAFE,
         positions=[
-            _position(curPrice=0),            # losing dust
-            _position(redeemable=False),       # not yet resolved
-            _position(curPrice=0.4),           # below winner floor
+            _position(curPrice=0),            # eligible -> probed -> chain veto (bal 0)
+            _position(redeemable=False),       # NOT eligible -> never probed
+            _position(curPrice=0.4),           # eligible -> probed -> chain veto (bal 0)
         ],
     )
     assert cmds == []
-    assert adapter.probe_calls == [], "S4 FAIL: filtered candidates were probed."
+    # The non-redeemable row is structurally filtered (never probed); the two
+    # low/zero-curPrice rows ARE probed — curPrice never short-circuits chain.
+    assert len(adapter.probe_calls) == 2, (
+        "S4 FAIL: a low/zero curPrice must NOT skip the chain probe; only the "
+        f"non-redeemable row should be filtered. probe_calls={adapter.probe_calls!r}"
+    )
+
+
+def test_c1_zero_curprice_winner_is_the_jackpot_and_is_enqueued(trade_conn):
+    """C1 (load-bearing antibody, the $857 category): a redeemable row whose
+    MUTABLE data-api curPrice is 0.0 but whose CHAIN balance is large is the
+    jackpot case — it MUST be probed and enqueued. A data-api price never vetoes
+    chain truth.
+
+    Sed-flip: restore `cur_price > min_cur_price` to the prefilter -> RED."""
+    from src.execution.inventory_redeem_sweep import sweep_chain_inventory_for_redeems
+
+    adapter = _ProbeAdapter(balance_micro=797_976_847)
+    cmds = sweep_chain_inventory_for_redeems(
+        trade_conn, adapter, _SAFE, positions=[_position(curPrice=0.0)],
+    )
+    assert len(cmds) == 1, "C1 FAIL: curPrice=0 chain-winner was stranded (not enqueued)."
+    assert adapter.probe_calls == [(_CID, 2)], "C1 FAIL: chain probe was skipped on curPrice=0."
+    row = trade_conn.execute(
+        "SELECT pusd_amount_micro FROM settlement_commands WHERE command_id = ?",
+        (cmds[0],),
+    ).fetchone()
+    assert row["pusd_amount_micro"] == 797_976_847, "C1 FAIL: amount must come from CHAIN balance."
+
+
+def test_c2_zero_curprice_with_zero_chain_balance_not_enqueued(trade_conn):
+    """C2 (chain veto both ways): curPrice=0 AND chain balance 0 -> the chain
+    veto suppresses it. The row IS probed (no price short-circuit), but chain
+    truth says nothing to claim."""
+    from src.execution.inventory_redeem_sweep import sweep_chain_inventory_for_redeems
+
+    adapter = _ProbeAdapter(balance_micro=0)
+    cmds = sweep_chain_inventory_for_redeems(
+        trade_conn, adapter, _SAFE, positions=[_position(curPrice=0.0)],
+    )
+    assert cmds == []
+    assert adapter.probe_calls == [(_CID, 2)], "C2 FAIL: row must still be probed (chain is the veto)."
+    n = trade_conn.execute("SELECT COUNT(*) FROM settlement_commands").fetchone()[0]
+    assert n == 0
+
+
+def test_c3_below_threshold_curprice_with_chain_balance_warns_and_enqueues(trade_conn, caplog):
+    """C3 (data-api lies, telemetry): a below-threshold curPrice on a
+    chain-CONFIRMED winner means the mutable data-api price is stale/wrong. We
+    WARN (telemetry of the lie) AND enqueue on chain truth."""
+    import logging
+
+    from src.execution.inventory_redeem_sweep import sweep_chain_inventory_for_redeems
+
+    adapter = _ProbeAdapter(balance_micro=120_000_000)
+    with caplog.at_level(logging.WARNING, logger="src.execution.inventory_redeem_sweep"):
+        cmds = sweep_chain_inventory_for_redeems(
+            trade_conn, adapter, _SAFE, positions=[_position(curPrice=0.3)],
+        )
+    assert len(cmds) == 1, "C3 FAIL: below-threshold-but-chain-confirmed winner was not enqueued."
+    assert any(
+        "DATA_API_PRICE_DISAGREES" in r.message for r in caplog.records
+    ), "C3 FAIL: data-api price disagreement was not logged as telemetry."
 
 
 def test_s5_active_command_dedupes(trade_conn):
