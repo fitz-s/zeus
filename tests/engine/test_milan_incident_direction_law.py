@@ -204,3 +204,96 @@ def test_family_center_provenance_order():
     expected = sum(q[c] * centers[c] for c in q) / sum(q.values())
     assert abs(mu_fallback - expected) < 1e-9
     assert sigma_fallback is None
+
+
+# ---------------------------------------------------------------------------
+# Selector hardening: gate-rejected proofs are unrankable, not merely
+# unsubmittable — and the verbatim incident family therefore NO-TRADES.
+# ---------------------------------------------------------------------------
+def test_incident_family_produces_no_selection():
+    """End-to-end through the live selection surface: replaying the incident
+    family yields NO selected proof (family no-trade), because every priced
+    candidate is gate-rejected (direction law / unlicensed tail / capital
+    efficiency)."""
+    from src.engine.event_reactor_adapter import _selected_candidate_proof
+
+    proofs = tuple(_run().values())
+    selected = _selected_candidate_proof({"family_id": "milan-incident"}, proofs)
+    assert selected is None or selected.execution_price is None, (
+        f"incident family must not select a priced trade; got "
+        f"{selected.candidate.condition_id}/{selected.direction} "
+        f"reason={selected.missing_reason}"
+    )
+
+
+def test_rejected_high_delta_u_proof_does_not_starve_admitted_sibling():
+    """A direction-law-rejected proof with a (corrupt) high q_lcb must not win
+    the ΔU rank and starve the admitted forecast-adjacent sibling."""
+    import json as _json
+    import types as _types
+    from datetime import datetime as _dt, timezone as _tz
+    from unittest.mock import patch as _patch
+
+    from src.engine.event_reactor_adapter import (
+        _generate_candidate_proofs as _gen,
+        _selected_candidate_proof as _select,
+    )
+
+    def _mk_row(condition_id, yes_ask):
+        depth = {
+            "YES": {"asks": [{"price": yes_ask, "size": "1000"}],
+                    "bids": [{"price": "0.009", "size": "100"}]},
+            "NO": {"asks": [{"price": "0.99", "size": "1000"}],
+                   "bids": [{"price": "0.95", "size": "100"}]},
+        }
+        return {
+            "snapshot_id": f"snap-{condition_id}", "condition_id": condition_id,
+            "yes_token_id": f"{condition_id}-yes", "no_token_id": f"{condition_id}-no",
+            "selected_outcome_token_id": "", "outcome_label": "",
+            "min_tick_size": "0.001", "min_order_size": "5",
+            "fee_details_json": _json.dumps({"fee_rate_fraction": 0.0}),
+            "neg_risk": 0, "orderbook_depth_json": _json.dumps(depth),
+            "tradeability_status_json": "{}", "book_hash": f"book-{condition_id}",
+        }
+
+    candidates = tuple(
+        MarketTopologyCandidate(
+            city="Milan", target_date="2026-06-11", metric="high",
+            condition_id=cid, yes_token_id=f"{cid}-yes", no_token_id=f"{cid}-no",
+            bin=Bin(low=low, high=low, unit="C", label=f"{int(low)}°C"),
+        )
+        for cid, low in (("cond-24", 24.0), ("cond-26", 26.0))
+    )
+    family = _types.SimpleNamespace(candidates=candidates, city="Milan",
+                                    target_date="2026-06-11", metric="high")
+    lcb = QlcbByDirection()
+    # 24C: corrupt high q_lcb (would dominate ΔU) — but direction-law rejected.
+    lcb[("cond-24", "buy_yes")] = QlcbProvenance(q_lcb=0.30, calibration_source="FORECAST_BOOTSTRAP")
+    lcb[("cond-24", "buy_no")] = QlcbProvenance(q_lcb=0.0, calibration_source="FORECAST_BOOTSTRAP")
+    # 26C: modest LICENSED edge, forecast-adjacent — the legitimate trade.
+    lcb[("cond-26", "buy_yes")] = QlcbProvenance(q_lcb=0.12, calibration_source="SETTLEMENT_ISOTONIC")
+    lcb[("cond-26", "buy_no")] = QlcbProvenance(q_lcb=0.0, calibration_source="SETTLEMENT_ISOTONIC")
+    mock_return = (
+        {"cond-24": 0.30, "cond-26": 0.13}, lcb,
+        {("cond-24", "buy_yes"): 0.0, ("cond-24", "buy_no"): 1.0,
+         ("cond-26", "buy_yes"): 0.0, ("cond-26", "buy_no"): 1.0},
+        {},
+        {"p_cal_vector_hash": "h", "p_live_vector_hash": "h",
+         "forecast_mu_c": INCIDENT_MU_C,
+         "forecast_predictive_sigma_c": INCIDENT_SIGMA_C},
+    )
+    rows = [_mk_row("cond-24", "0.016"), _mk_row("cond-26", "0.03")]
+    sentinel = object()
+    with _patch("src.engine.event_reactor_adapter._live_yes_probabilities",
+                return_value=mock_return):
+        proofs = _gen(
+            event=_types.SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+            payload={}, family=family, snapshot_rows=rows,
+            trade_conn=sentinel, forecast_conn=sentinel, calibration_conn=sentinel,
+            decision_time=_dt(2026, 6, 10, 3, 0, tzinfo=_tz.utc),
+        )
+    selected = _select({"family_id": "milan-starve"}, proofs)
+    assert selected is not None, "admitted 26C sibling must be selectable"
+    assert selected.candidate.condition_id == "cond-26"
+    assert selected.direction == "buy_yes"
+    assert selected.missing_reason is None

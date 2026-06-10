@@ -5406,6 +5406,15 @@ def _selection_scoped_proofs(
     locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
+    # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
+    # admission gate REJECTED (missing_reason set: DIRECTION_LAW / COVERAGE_
+    # UNLICENSED_TAIL / capital efficiency / buy_no evidence) must not enter the
+    # ΔU ranking at all. Before this filter a rejected proof with a juicy
+    # (corrupt) q_lcb could win the ΔU rank and then dead-end at the
+    # TRADE_SCORE_NON_POSITIVE submit gate — never a bad order, but it STARVED
+    # the legitimate admitted sibling of its selection. Gate-rejected proofs are
+    # unrankable, not merely unsubmittable.
+    executable = [proof for proof in executable if proof.missing_reason is None]
     tradeable_limit = [
         proof
         for proof in executable
