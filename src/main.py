@@ -1044,6 +1044,7 @@ def _build_edli_status_pulse(
     rejection_reason_counts: dict,
     submit_disabled_effective_mode: bool,
     live_submit_attempts: int,
+    live_venue_acks: int = 0,
 ) -> dict:
     """Build the EDLI reactor status pulse dict.
 
@@ -1052,6 +1053,9 @@ def _build_edli_status_pulse(
     final intent was built). ``live_submit_attempts`` counts ONLY actual venue
     submit calls made this cycle — 0 in no-submit / degraded cycles. Dashboards
     MUST NOT treat proof_accepted as evidence of a venue interaction.
+
+    ``live_venue_acks`` counts venue responses where ``venue_ack_received`` is
+    True (successful ACK from the exchange).  Always <= live_submit_attempts.
     """
     return {
         "mode": "edli_event_reactor",
@@ -1063,7 +1067,7 @@ def _build_edli_status_pulse(
         "proof_accepted": proof_accepted,
         "final_intents_built": proof_accepted,
         "submit_attempts": live_submit_attempts,
-        "venue_acks": 0,
+        "venue_acks": live_venue_acks,
         "no_trades": rejected + retried + dead_lettered,
         "rejected": rejected,
         "retried": retried,
@@ -5682,13 +5686,16 @@ def _edli_event_reactor_cycle() -> None:
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
         _rejection_counts = dict(Counter(_rr.rejection_reasons))
         _edli_candidates = int(_rr.proof_accepted + _rr.rejected + _rr.retried + _rr.dead_lettered)
-        # FIX-4 (P2): read the per-cycle live-submit call counter from the adapter.
-        # The live adapter exposes _live_submit_count (a mutable 1-element list)
-        # after FIX-4; the no-submit adapter and any legacy adapter do not, so
-        # getattr returns the default [0] → live_submit_attempts=0 (correct for
-        # no-submit cycles).
+        # FIX-4 (P2): read the per-cycle live-submit and venue-ack counters from
+        # the adapter.  The live adapter exposes _live_submit_count and
+        # _live_ack_count (mutable 1-element lists) after FIX-4; the no-submit
+        # adapter and any legacy adapter do not, so getattr returns [0] for both
+        # → live_submit_attempts=0 and live_venue_acks=0 (correct for no-submit
+        # cycles).
         _live_submit_count_ref = getattr(submit_adapter, "_live_submit_count", [0])
         _live_submit_attempts = int(_live_submit_count_ref[0])
+        _live_ack_count_ref = getattr(submit_adapter, "_live_ack_count", [0])
+        _live_venue_acks = int(_live_ack_count_ref[0])
         try:
             from src.observability.status_summary import write_cycle_pulse
 
@@ -5705,6 +5712,7 @@ def _edli_event_reactor_cycle() -> None:
                     rejection_reason_counts=_rejection_counts,
                     submit_disabled_effective_mode=submit_disabled_effective_mode,
                     live_submit_attempts=_live_submit_attempts,
+                    live_venue_acks=_live_venue_acks,
                 )
             )
         except Exception as exc:

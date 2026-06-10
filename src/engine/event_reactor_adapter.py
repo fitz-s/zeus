@@ -1055,6 +1055,11 @@ def event_bound_live_adapter_from_trade_conn(
     # No-submit / degraded cycles always read 0.
     _live_submit_count: list[int] = [0]
 
+    # FIX-4 venue_acks: per-cycle counter of actual venue ACKs (successful
+    # place_limit_order responses).  Incremented when venue_ack_received is
+    # True on the submit result.  Exposed on the adapter callable for main.py.
+    _live_ack_count: list[int] = [0]
+
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
     # rolled back by the reactor before the next sequential event reads it.
@@ -1218,6 +1223,8 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 _live_submit_count[0] += 1  # FIX-4: count actual venue submit calls
                 submit_result = executor_submit(final_intent, command)
+                if submit_result.venue_ack_received:
+                    _live_ack_count[0] += 1  # FIX-4 venue_acks: count actual ACKs
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
                     decision_time=decision_time.astimezone(UTC),
@@ -1380,6 +1387,8 @@ def event_bound_live_adapter_from_trade_conn(
     # FIX-4: expose the live submit call counter so main.py can read it after
     # process_pending to populate live_submit_attempts in the status pulse.
     _submit._live_submit_count = _live_submit_count  # type: ignore[attr-defined]
+    # FIX-4 venue_acks: expose the ACK counter alongside submit counter.
+    _submit._live_ack_count = _live_ack_count  # type: ignore[attr-defined]
     return _submit
 
 
