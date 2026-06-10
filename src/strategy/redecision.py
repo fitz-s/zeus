@@ -1,5 +1,13 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-10
+# Audit note 2026-06-10: GATE 2 PRICE_MOVED is now a TAKER-only protection +
+#   bounded slippage tolerance. A resting MAKER order pays its own admitted limit
+#   and never chases the recaptured ask, so RecaptureInputs.order_rests_at_admitted_price
+#   skips the ceiling for makers; a TAKER ceiling admits up to max_acceptable +
+#   min(max(one_tick, 5%), 1¢). GATE 3 (edge on recaptured cost) is UNCHANGED and
+#   still aborts EDGE_REVERSED on a tolerated/rested move that flips edge negative —
+#   the tolerance never admits a negative-edge submit. Fixes the live sub-3¢
+#   false-abort churn (Lucknow/Seoul/Singapore 2026-06-10).
 # Audit note 2026-06-09: added SUBMIT_ABORTED_BELOW_MIN_ORDER lifecycle state +
 #   MIN_ORDER reversal reason. Antibody for the false-EDGE_REVERSED regression where
 #   a positive-edge candidate whose fractional-Kelly stake fell below the venue min
@@ -225,6 +233,29 @@ class RecaptureInputs:
     recaptured_q_lcb: float
     forecast_still_current: bool
     family_rank_reversed: bool
+    # Maker/taker fill semantics at submit (2026-06-10). The PRICE_MOVED ceiling is
+    # a TAKER protection: a taker order crosses the fresh book and PAYS the recaptured
+    # all-in cost, so a recaptured cost above the admitted ceiling is a real adverse
+    # cost the gate must bound. A MAKER (resting GTC/GTD limit) order pays its OWN
+    # limit (computed downstream as min(held_prob, ask) - offset, i.e. AT the admitted
+    # price) and RESTS when the ask moves away — it never chases, never pays the
+    # recaptured ask. For the maker path the recaptured ask drifting up is therefore
+    # NOT a price move we pay, and aborting PRICE_MOVED contradicts the maker design
+    # (the verifier even requires would_cross_book=false for maker/post-only).
+    #
+    #   * ``order_rests_at_admitted_price=True``  (MAKER): skip the PRICE_MOVED
+    #     ceiling abort entirely — the order rests at the admitted limit. GATE 3
+    #     (edge on the recaptured cost) STILL runs (conservative: the recaptured
+    #     cost is >= what a resting maker pays, so a passing edge here is a fortiori
+    #     positive at the limit we actually pay) and the chosen stake/price the
+    #     intent carries is the admitted boundary, never the chased ask.
+    #   * ``order_rests_at_admitted_price=False`` (TAKER): the order crosses and
+    #     pays the recaptured cost — the BOUNDED slippage tolerance (one tick / 5%
+    #     / 1¢ cap) governs the ceiling so a microscopic tick of drift does not
+    #     false-abort, but an unbounded chase still aborts PRICE_MOVED.
+    # Defaults False (taker-style ceiling) so callers that do not yet supply the
+    # mode keep the strict pre-change behavior — fail-closed on missing provenance.
+    order_rests_at_admitted_price: bool = False
 
 
 @dataclass(frozen=True)
@@ -244,6 +275,17 @@ class SubmitRecaptureDecision:
     recaptured_all_in_cost: Optional[float] = None
     recaptured_edge_lcb: Optional[float] = None
     detail: str = ""
+    # Bounded slippage-tolerance provenance (2026-06-10). When the recaptured
+    # all-in cost is STRICTLY WORSE than the admitted ``max_acceptable_price`` but
+    # within the bounded tolerance (one venue tick / 5% relative / 1¢ absolute cap,
+    # whichever binds), GATE 4 proceeds AT THE RECAPTURED PRICE rather than aborting
+    # PRICE_MOVED. These fields record that a tolerance was consumed so settlement
+    # attribution can measure whether tolerated entries underperform. ``admitted_price``
+    # is the decision-time ceiling; ``price_moved_within_tolerance`` is True only on the
+    # tolerated path (False on a clean no-move recapture and on a beyond-tolerance abort).
+    price_moved_within_tolerance: bool = False
+    admitted_price: Optional[float] = None
+    price_move_tolerance: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -357,16 +399,61 @@ class RedecisionEngine:
         edge_lcb = float(inputs.recaptured_q_lcb) - all_in_cost
 
         # Gate 2: price moved through max acceptable (§7 price row).
-        if Decimal(str(all_in_cost)) > Decimal(inputs.max_acceptable_price):
+        #
+        # The §7 'price row' is a TAKER protection — it bounds what an immediate
+        # crossing fill PAYS. Whether it fires at all depends on the fill semantics
+        # the order will use at submit (``order_rests_at_admitted_price``):
+        #
+        #   MAKER (rests at admitted price): a resting GTC/GTD limit pays its OWN
+        #   limit (downstream ``compute_native_limit_price`` = min(held_prob, ask) -
+        #   offset, i.e. AT the admitted boundary) and RESTS when the ask moves away;
+        #   it never crosses, never chases, never pays the recaptured ask. A
+        #   recaptured ask drifting up is therefore NOT a price we pay. Aborting
+        #   PRICE_MOVED here would contradict the maker design (the verifier requires
+        #   would_cross_book=false for maker/post-only) and produces exactly the
+        #   live false-abort churn observed 2026-06-10 on sub-3¢ books. SKIP the
+        #   ceiling abort. GATE 3 below still runs on the recaptured cost — which is
+        #   >= what the resting maker pays, so a passing edge there is a fortiori
+        #   positive at the admitted limit (the iron-rule economic check is preserved,
+        #   conservatively). The chosen stake/price the intent carries stays the
+        #   admitted boundary (caller leaves execution_price = S1 boundary on the
+        #   tolerated-rest path), never a chased ask.
+        #
+        #   TAKER (crosses to fill): the order pays the recaptured all-in cost, so
+        #   the ceiling must bound it — but with a BOUNDED slippage tolerance, not
+        #   zero tolerance. A zero-tolerance ceiling false-aborts on a single tick of
+        #   drift (the scoring snapshot is up to ~60s stale; the next cycle re-admits
+        #   at the new price anyway → lag+churn, not protection). Admit up to
+        #   ``max_acceptable_price + tolerance``, tolerance = min(max(one_tick,
+        #   0.05*max_acceptable), 0.01) — one venue tick / 5% relative / 1¢ absolute
+        #   chase cap, whichever binds. A move beyond the ceiling is a genuine price
+        #   move -> PRICE_MOVED. The downstream taker touch-vs-reservation check is
+        #   defense-in-depth on the actual crossing price.
+        max_acceptable = Decimal(inputs.max_acceptable_price)
+        recaptured_cost_dec = Decimal(str(all_in_cost))
+        _ABS_CHASE_CAP = Decimal("0.01")
+        one_tick = curve.min_tick if curve.min_tick > Decimal("0") else Decimal("0.001")
+        relative_tol = max_acceptable * Decimal("0.05")
+        tolerance = min(max(one_tick, relative_tol), _ABS_CHASE_CAP)
+        price_ceiling = max_acceptable + tolerance
+        # Provenance: the recapture priced STRICTLY WORSE than admitted, yet the order
+        # proceeds (maker rests at admitted price, or taker within bounded tolerance).
+        price_moved_but_admitted = recaptured_cost_dec > max_acceptable
+
+        if not inputs.order_rests_at_admitted_price and recaptured_cost_dec > price_ceiling:
             return SubmitRecaptureDecision(
                 state=CandidateLifecycleState.SUBMIT_ABORTED_PRICE_MOVED,
                 may_submit=False,
                 reversal_reason=ReversalReason.PRICE,
                 recaptured_all_in_cost=all_in_cost,
                 recaptured_edge_lcb=edge_lcb,
+                admitted_price=float(max_acceptable),
+                price_move_tolerance=float(tolerance),
                 detail=(
                     f"recaptured all-in cost {all_in_cost:.6f} exceeds "
-                    f"max_acceptable_price {inputs.max_acceptable_price}"
+                    f"max_acceptable_price {inputs.max_acceptable_price} + bounded "
+                    f"tolerance {float(tolerance):.6f} (ceiling {float(price_ceiling):.6f}); "
+                    f"taker chase bounded (no rest at admitted price)"
                 ),
             )
 
@@ -374,12 +461,18 @@ class RedecisionEngine:
         # A stale forecast is treated as an edge reversal too: utility computed
         # on a no-longer-current distribution is not trustworthy, fail closed.
         if edge_lcb <= 0.0 or not inputs.forecast_still_current:
+            # CRITICAL INVARIANT: the bounded price tolerance NEVER admits a
+            # negative-edge submit. GATE 3 re-checks the edge on the SAME recaptured
+            # all-in cost the tolerance just admitted — a tolerated price move that
+            # kills the edge still aborts EDGE_REVERSED (not PRICE_MOVED). The
+            # tolerance only governs the PRICE ceiling, never the edge sign.
             return SubmitRecaptureDecision(
                 state=CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED,
                 may_submit=False,
                 reversal_reason=ReversalReason.EDGE,
                 recaptured_all_in_cost=all_in_cost,
                 recaptured_edge_lcb=edge_lcb,
+                admitted_price=float(max_acceptable),
                 detail=(
                     f"recaptured edge_lcb {edge_lcb:.6f} <= 0"
                     if edge_lcb <= 0.0
@@ -403,13 +496,33 @@ class RedecisionEngine:
             )
 
         # All gates passed: the candidate remains primary with positive utility.
+        # Record price-move provenance so settlement attribution can measure whether
+        # entries that proceeded despite an adverse recapture (maker rested at the
+        # admitted price, or taker filled within bounded tolerance) underperform.
+        if price_moved_but_admitted:
+            _rest = inputs.order_rests_at_admitted_price
+            _detail = (
+                "recapture clean: primary holds, positive edge; recaptured cost "
+                f"{all_in_cost:.6f} worse than admitted "
+                f"{float(max_acceptable):.6f} but "
+                + (
+                    "MAKER rests at admitted price (no chase)"
+                    if _rest
+                    else f"within bounded taker tolerance {float(tolerance):.6f}"
+                )
+            )
+        else:
+            _detail = "recapture clean: primary holds, positive edge, price in band"
         return SubmitRecaptureDecision(
             state=CandidateLifecycleState.READY_TO_SUBMIT,
             may_submit=True,
             reversal_reason=None,
             recaptured_all_in_cost=all_in_cost,
             recaptured_edge_lcb=edge_lcb,
-            detail="recapture clean: primary holds, positive edge, price in band",
+            price_moved_within_tolerance=price_moved_but_admitted,
+            admitted_price=float(max_acceptable),
+            price_move_tolerance=float(tolerance),
+            detail=_detail,
         )
 
     # ------------------------------------------------------------------

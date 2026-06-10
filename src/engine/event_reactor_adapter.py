@@ -1,3 +1,12 @@
+# Last reused or audited: 2026-06-10 (S6 PRICE_MOVED maker/taker fix: the submit-
+#   recapture gate now threads order_rests_at_admitted_price into RecaptureInputs.
+#   A resting MAKER (governor GTC/GTD) order pays its admitted limit and never chases
+#   the recaptured ask, so it skips the PRICE_MOVED ceiling; TAKER (FOK/FAK) keeps a
+#   BOUNDED slippage ceiling (one tick / 5% / 1¢ cap). _order_will_rest_at_admitted_price
+#   mirrors _governor_mode_for_snapshot's fail-direction; the taker no-chase bound stays
+#   at intent build (TOUCH_EXCEEDS_RESERVATION). Tolerated/rested moves are recorded on
+#   the receipt (price_moved_within_tolerance + admitted/recaptured/tolerance). Fixes the
+#   live sub-3¢ false-abort churn 2026-06-10.
 # Last reused or audited: 2026-06-08 (S7: deleted the last opportunity-book
 #   selector on/off gate artifacts — the dead `selector_enabled`/`selector_shadow`
 #   cache keys, the `_env_flag_enabled` helper + its `import os`, and every literal
@@ -2139,6 +2148,14 @@ def build_event_bound_no_submit_receipt(
         # records WHY the stake equals the venue floor (the fractional-Kelly risk intent
         # was preserved — min order is << the bankroll cap). Empty on the normal path.
         _stake_floor_provenance: dict[str, object] = {}
+        # Maker/taker fill semantics for the S6 PRICE_MOVED ceiling (2026-06-10).
+        # A resting maker order rests at the admitted limit and never chases the
+        # recaptured ask, so the price-moved ceiling must NOT abort it (it was
+        # producing the live sub-3¢ false-abort churn). A taker order crosses and
+        # pays the recaptured cost, so the bounded tolerance ceiling still governs.
+        # Mirrors the downstream order-mode authority; the taker no-chase bound lives
+        # at intent build (TOUCH_EXCEEDS_RESERVATION), so this never relaxes a real cross.
+        _order_rests_at_admitted_price = _order_will_rest_at_admitted_price(payload)
         _recapture, _robust_stake_usd, _chosen_stake_price = (
             _evaluate_submit_recapture_for_selected(
                 family_key=str(family.family_id or ""),
@@ -2147,6 +2164,7 @@ def build_event_bound_no_submit_receipt(
                 extra_exposure_by_bin_id=_recapture_exposure,
                 bankroll_usd=float(bankroll_usd),
                 kelly_multiplier=_fractional_kelly_mult,
+                order_rests_at_admitted_price=_order_rests_at_admitted_price,
                 # On this synchronous path the forecast snapshot was validated by the
                 # decision engine and (if present) the replacement-forecast hook, both
                 # of which already returned a no-submit receipt on any flip/block
@@ -2349,6 +2367,20 @@ def build_event_bound_no_submit_receipt(
             raw_receipt["stake_floor_delta_u_at_min_order"] = _stake_floor_provenance[
                 "stake_floor_delta_u_at_min_order"
             ]
+    # Price-move tolerance provenance (2026-06-10). When the recapture priced
+    # STRICTLY WORSE than the admitted ceiling yet the entry proceeded — the maker
+    # order rested at the admitted price, or a taker filled within the bounded
+    # tolerance — record admitted vs recaptured so settlement attribution can measure
+    # whether tolerated/rested entries underperform vs assumption (fill-rate, slippage).
+    # Absent on the clean no-move path (receipt stays clean).
+    if _recapture.price_moved_within_tolerance:
+        raw_receipt["price_moved_within_tolerance"] = True
+        raw_receipt["price_move_admitted_price"] = _recapture.admitted_price
+        raw_receipt["price_move_recaptured_cost"] = _recapture.recaptured_all_in_cost
+        raw_receipt["price_move_tolerance"] = _recapture.price_move_tolerance
+        raw_receipt["price_move_order_rests_at_admitted"] = bool(
+            _order_rests_at_admitted_price
+        )
     if opportunity_book is not None:
         raw_receipt["opportunity_book"] = opportunity_book.to_receipt_dict()
     if replacement_forecast_receipt_tag is not None:
@@ -3874,6 +3906,45 @@ def _governor_mode_for_snapshot(executable_snapshot: DecisionCertificate) -> str
     except Exception:
         return "MAKER"
     return "TAKER" if str(order_type).strip().upper() in {"FOK", "FAK"} else "MAKER"
+
+
+def _order_will_rest_at_admitted_price(snapshot_payload: Any) -> bool:
+    """True iff this entry will rest as a MAKER order (GTC/GTD), not cross as a taker.
+
+    Governs whether the S6 submit-recapture gate applies the PRICE_MOVED ceiling
+    (2026-06-10). A resting maker order pays its OWN limit (downstream
+    ``compute_native_limit_price`` = min(held_prob, ask) - offset, at the admitted
+    boundary) and rests when the ask moves away — it never crosses, never chases,
+    never pays the recaptured ask, so the price-moved ceiling must NOT abort it.
+    The PRICE_MOVED ceiling is a TAKER-only protection: it bounds what an immediate
+    crossing fill pays.
+
+    Fail-direction: this MIRRORS the downstream order-mode authority
+    ``_governor_mode_for_snapshot`` (which maps governor unconfigured / NO_TRADE /
+    error -> the conservative resting MAKER default, and only routes TAKER when the
+    governor EXPLICITLY forces FOK/FAK on degraded heartbeat / shallow depth / near
+    close). The live default IS resting GTC (venue_order_facts: order_type GTC), so
+    aligning the gate to "rest unless the governor forces taker" matches both the
+    live maker reality and the maker design — and removes the observed sub-3¢
+    false-abort churn.
+
+    Skipping the S6 ceiling on the maker path NEVER removes the taker chase bound:
+    when the order actually crosses (governor TAKER, or a later ``_select_order_mode``
+    EV-override), the intent build enforces ``TAKER_BUY_TOUCH_EXCEEDS_RESERVATION`` /
+    ``TAKER_SELL_TOUCH_BELOW_RESERVATION`` against the admitted reservation on the
+    fresh crossing price — the authoritative no-chase enforcement for taker fills.
+    """
+    try:
+        from src.risk_allocator import select_global_order_type
+
+        order_type = str(select_global_order_type(snapshot_payload) or "").strip().upper()
+    except Exception:
+        # Governor unconfigured / NO_TRADE -> conservative resting MAKER default,
+        # mirroring _governor_mode_for_snapshot. The live path rests GTC here.
+        return True
+    # Explicit taker (degraded / shallow / near close) keeps the strict bounded
+    # ceiling; any resting / unknown-but-non-taker type rests at admitted price.
+    return order_type not in {"FOK", "FAK"}
 
 
 def _post_cross_edge(
@@ -6144,6 +6215,7 @@ def _evaluate_submit_recapture_for_selected(
     forecast_still_current: bool,
     locked_opportunity_conn: sqlite3.Connection | None = None,
     stake_floor_out: dict[str, object] | None = None,
+    order_rests_at_admitted_price: bool = False,
 ) -> tuple[SubmitRecaptureDecision, float, ExecutionPrice | None]:
     """THE single fail-closed submit-recapture gate (spec §5 / §7 / §14.9 / §14.10).
 
@@ -6330,6 +6402,12 @@ def _evaluate_submit_recapture_for_selected(
             recaptured_q_lcb=float(candidate.q_lcb),
             forecast_still_current=bool(forecast_still_current),
             family_rank_reversed=False,
+            # MAKER (resting GTC/GTD limit at the admitted price) skips the PRICE_MOVED
+            # ceiling: the order rests, never chases the recaptured ask. TAKER (FOK/FAK)
+            # crosses and pays the recaptured cost, so the bounded slippage tolerance
+            # governs the ceiling. Fail-closed False (taker ceiling) when the mode is
+            # not supplied.
+            order_rests_at_admitted_price=bool(order_rests_at_admitted_price),
         ),
     )
     if decision.may_submit:
@@ -6635,6 +6713,7 @@ def _live_yes_probabilities(
             family=family,
             q_by_condition=q_by_condition,
             lcb_by_condition=lcb_by_condition,
+            decision_time=decision_time,
         )
         return masked_q, masked_lcb, p_values, prefilter, {
             **evidence,
@@ -9603,12 +9682,57 @@ def _apply_day0_mask_to_probability_vector(*, payload: dict[str, object], family
     return masked / total
 
 
+def _day0_observation_age_minutes(
+    payload: dict[str, object], decision_time: "datetime | None"
+) -> float | None:
+    """Age of the day0 running extreme at decision time, in minutes.
+
+    Measured from the OBSERVATION VALID TIME (payload.observation_time — the
+    station report timestamp), not from imported_at/observation_available_at:
+    the absorbing boundary's truth-age is how old the station report itself is.
+    Returns None when unparseable (callers must treat None as MAXIMALLY STALE —
+    fail-closed; see day0 first-principles review 2026-06-10, charge #1).
+    """
+    if decision_time is None:
+        return None
+    raw = payload.get("observation_time") or payload.get("observation_available_at")
+    if not raw:
+        return None
+    try:
+        observed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            return None
+        age = (decision_time.astimezone(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds() / 60.0
+    except (TypeError, ValueError, OSError):
+        return None
+    if not (age == age):  # NaN
+        return None
+    return max(0.0, age)
+
+
+def _day0_stale_obs_boundary_guard_enabled() -> bool:
+    """STALE-OBS BOUNDARY GUARD flag (day0 first-principles review 2026-06-10).
+
+    Default TRUE (correctness, not tuning): WU station obs are published on a
+    city-specific cadence (30/60-min METAR grid + publication delay; measured
+    in config/wu_obs_latency.json). A running extreme older than the city's
+    staleness budget is a stale LOWER bound — bins just above it may already
+    be dead. The guard only ZEROES buy_yes q_lcb for boundary-adjacent bins
+    (suppresses submits); it can never enable a trade. Fail-open returns True.
+    """
+    try:
+        return bool(settings["edli_v1"].get("day0_stale_obs_boundary_guard_enabled", True))
+    except Exception:
+        return True
+
+
 def _apply_day0_mask_to_generated_probabilities(
     *,
     payload: dict[str, object],
     family,
     q_by_condition: dict[str, float],
     lcb_by_condition: dict[tuple[str, str], float],
+    decision_time: "datetime | None" = None,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
     rounded = _optional_float(payload.get("rounded_value"))
     if rounded is None:
@@ -9633,6 +9757,58 @@ def _apply_day0_mask_to_generated_probabilities(
                 mask.append(1.0)
         else:
             raise ValueError(f"unsupported Day0 metric: {metric}")
+    # STALE-OBS BOUNDARY GUARD (day0 first-principles review 2026-06-10, charge #1).
+    # The running extreme is a monotone bound: KILLING bins with a stale extreme is
+    # always safe (the true extreme can only be further along). But a bin the stale
+    # extreme says is ALIVE may already be dead — the true extreme may have moved
+    # past its edge during the unobserved window. For bins whose survival edge lies
+    # within (plausible-move-rate x excess staleness) of the stale extreme, the
+    # dead/alive state is UNKNOWN: their buy_yes q_lcb is forced to 0.0 (no live
+    # submit). q itself is NOT changed (the masked posterior remains the honest
+    # point estimate); only the submit-licensing LCB is suppressed. Fail-closed:
+    # unparseable obs time or unknown city => maximum margin / conservative budget.
+    staleness_uncertain: list[bool] = [False] * len(list(family.candidates))
+    if _day0_stale_obs_boundary_guard_enabled():
+        from src.signal.day0_obs_latency import (
+            stale_extreme_uncertainty_margin,
+            staleness_budget_minutes,
+        )
+
+        _bins = [candidate.bin for candidate in family.candidates]
+        _unit = ""
+        for _b in _bins:
+            _unit = str(getattr(_b, "unit", "") or "")
+            if _unit:
+                break
+        if not _unit:
+            _unit = str(payload.get("settlement_unit") or "F")
+        _obs_age_min = _day0_observation_age_minutes(payload, decision_time)
+        _budget_min = staleness_budget_minutes(str(getattr(family, "city", "") or payload.get("city") or ""))
+        _margin = stale_extreme_uncertainty_margin(
+            unit=_unit, obs_age_minutes=_obs_age_min, budget_minutes=_budget_min
+        )
+        if _margin > 0.0:
+            for _index, _bin in enumerate(_bins):
+                if mask[_index] <= 0.0:
+                    continue  # already dead — kill direction is staleness-safe
+                if metric == "high":
+                    # Alive bin whose UPPER edge could already have been crossed by
+                    # the unseen true running max. Open-high shoulder cannot die.
+                    if _bin.high is not None and float(_bin.high) <= rounded + _margin:
+                        staleness_uncertain[_index] = True
+                else:  # metric == "low" (validated above)
+                    if _bin.low is not None and float(_bin.low) >= rounded - _margin:
+                        staleness_uncertain[_index] = True
+            if any(staleness_uncertain):
+                import logging as _logging
+
+                _logging.getLogger("zeus.day0_stale_obs_guard").info(
+                    "DAY0_STALE_OBS_BOUNDARY_GUARD city=%s metric=%s rounded=%s obs_age_min=%s "
+                    "budget_min=%.1f margin=%.2f%s suppressed_bins=%d/%d",
+                    getattr(family, "city", "?"), metric, rounded,
+                    "None" if _obs_age_min is None else f"{_obs_age_min:.1f}",
+                    _budget_min, _margin, _unit, sum(staleness_uncertain), len(_bins),
+                )
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
 
     prior = tuple(max(q_by_condition[str(candidate.condition_id or "")], 1e-9) for candidate in family.candidates)
@@ -9670,7 +9846,9 @@ def _apply_day0_mask_to_generated_probabilities(
         _set_qlcb_provenance(
             masked_lcb_by_direction,
             (condition_id, "buy_yes"),
-            0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value),
+            # STALE-OBS BOUNDARY GUARD: a bin whose dead/alive state is unknowable
+            # under the current obs staleness gets NO buy_yes submit license.
+            0.0 if (mask[index] <= 0.0 or staleness_uncertain[index]) else min(yes_lcb, q_value),
             source="FORECAST_BOOTSTRAP",
         )
         _set_qlcb_provenance(
