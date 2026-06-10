@@ -7446,6 +7446,86 @@ def _make_emos_bootstrap_sampler(mu_native: float, sigma_native: float):
     return _sampler
 
 
+def _make_day0_bootstrap_sampler(
+    *,
+    members_native,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: "datetime | None",
+):
+    """Obs-floor-conditional bootstrap sampler for the DAY0 q_lcb (review item D).
+
+    Per draw: resample member daily extremes (with replacement) + instrument
+    noise widened by obs staleness (margin/2 treated as ~1 extra sigma of
+    unobserved boundary motion), clamp to the absorbing physical law
+    (HIGH: max(draw, running max); LOW: min(draw, running min)), settle-round
+    via the analysis's own convention, bin, apply the absorbing mask,
+    renormalize. Returns None (caller falls back to the legacy static sampler,
+    loudly) when inputs cannot support a bootstrap.
+    """
+    try:
+        members = np.asarray(members_native, dtype=float).ravel()
+        members = members[np.isfinite(members)]
+        if members.size == 0:
+            raise ValueError("no finite members for day0 bootstrap")
+        rounded = _optional_float(payload.get("rounded_value"))
+        metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
+        if metric not in {"high", "low"}:
+            raise ValueError(f"unsupported day0 metric for bootstrap: {metric!r}")
+        mask = _day0_absorbing_mask(payload=payload, family=family)
+        from src.signal.forecast_uncertainty import sigma_instrument
+        from src.signal.day0_obs_latency import (
+            stale_extreme_uncertainty_margin,
+            staleness_budget_minutes,
+        )
+
+        base_sigma = float(sigma_instrument(unit).value)
+        obs_age_min = _day0_observation_age_minutes(payload, decision_time)
+        budget_min = staleness_budget_minutes(str(getattr(family, "city", "") or ""))
+        margin = stale_extreme_uncertainty_margin(
+            unit=unit, obs_age_minutes=obs_age_min, budget_minutes=budget_min
+        )
+        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
+        if not (sigma > 0.0 and np.isfinite(sigma)):
+            raise ValueError(f"day0 bootstrap sigma invalid: {sigma}")
+    except Exception as exc:  # noqa: BLE001 — degrade LOUDLY to the static sampler
+        import logging as _logging
+
+        _logging.getLogger("zeus.day0_bootstrap_lcb").warning(
+            "DAY0_BOOTSTRAP_LCB_UNAVAILABLE city=%s exc=%s: %s — static q_lcb fallback (q_lcb==q)",
+            getattr(family, "city", "?"), type(exc).__name__, exc,
+        )
+        return None
+
+    members_arr = members
+    mask_arr = np.asarray(mask, dtype=float)
+
+    def _sampler(analysis, n_members):
+        n = max(1, int(n_members))
+        idx = analysis._rng.integers(0, members_arr.size, n)
+        draws = members_arr[idx] + analysis._rng.normal(0.0, sigma, n)
+        if rounded is not None:
+            if metric == "high":
+                draws = np.maximum(draws, float(rounded))
+            else:
+                draws = np.minimum(draws, float(rounded))
+        measured = analysis._settle(draws)
+        vec = np.array(
+            [analysis._bin_probability(measured, bb) for bb in analysis.bins], dtype=float
+        )
+        if vec.shape == mask_arr.shape:
+            vec = vec * mask_arr
+        if not np.all(np.isfinite(vec)):
+            return np.asarray(analysis.p_cal, dtype=float)
+        s = float(vec.sum())
+        if s <= 0.0:
+            return np.asarray(analysis.p_cal, dtype=float)
+        return vec / s
+
+    return _sampler
+
+
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
@@ -7674,12 +7754,34 @@ def _market_analysis_from_event_snapshot(
     sampler = _emos_sampler  # one-calibrator (#110): EMOS N(mu,sigma) lcb bootstrap, else None
     is_day0 = family.event_type == "DAY0_EXTREME_UPDATED"
     if is_day0:
-        static_p_cal = np.asarray(p_cal, dtype=float)
+        # DAY0 q_lcb FIX (first-principles review 2026-06-10 item D): the prior
+        # static sampler returned p_cal verbatim every draw, so the bootstrap
+        # percentile collapsed to the point estimate (q_lcb == q — ZERO
+        # uncertainty quantification on the day0 lane). Replace with a real
+        # obs-floor-conditional member bootstrap: each draw resamples the
+        # member extremes, adds instrument noise WIDENED by the measured
+        # per-city obs staleness (config/wu_obs_latency.json), clamps to the
+        # absorbing physical law (final >= running max / final <= running min),
+        # settles, bins, and applies the absorbing mask. q_lcb < q again, and
+        # it widens honestly when the running extreme is stale. Any
+        # construction failure degrades LOUDLY to the legacy static sampler
+        # (no regression vs the pre-fix behavior).
+        _day0_sampler = _make_day0_bootstrap_sampler(
+            members_native=members,
+            payload=payload,
+            family=family,
+            unit=unit,
+            decision_time=decision_time,
+        )
+        if _day0_sampler is not None:
+            sampler = _day0_sampler
+        else:
+            static_p_cal = np.asarray(p_cal, dtype=float)
 
-        def _static_sampler(_analysis, _n_members):
-            return static_p_cal
+            def _static_sampler(_analysis, _n_members):
+                return static_p_cal
 
-        sampler = _static_sampler
+            sampler = _static_sampler
     # K1 — ForecastSharpnessEvidence (Phase-2, REQUIRED ctor param). Day0/imminent
     # paths are exempt (the realized observation replaces the forecast, so forecast
     # sharpness is moot). Otherwise load the settlement MAE for (city, unit, lead)

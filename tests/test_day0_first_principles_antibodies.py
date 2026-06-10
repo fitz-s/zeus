@@ -451,6 +451,138 @@ class TestDay0TransitionMonotonicity:
 
 
 # ===========================================================================
+# R8 — day0 q_lcb is a REAL lower bound (static-sampler fix, review item D)
+# ===========================================================================
+
+class _StubAnalysis:
+    """Minimal stand-in for MarketAnalysis exposing the sampler contract
+    surface (_rng / _settle / _bin_probability / bins / p_cal)."""
+
+    def __init__(self, bins, p_cal, seed=7):
+        import numpy as np
+
+        self._rng = np.random.default_rng(seed)
+        self.bins = bins
+        self.p_cal = p_cal
+
+    def _settle(self, values):
+        import numpy as np
+
+        return np.floor(np.asarray(values, dtype=float) + 0.5)
+
+    def _bin_probability(self, measured, b):
+        import numpy as np
+
+        if getattr(b, "is_open_low", False):
+            return float(np.mean(measured <= b.high))
+        if getattr(b, "is_open_high", False):
+            return float(np.mean(measured >= b.low))
+        return float(np.mean((measured >= b.low) & (measured <= b.high)))
+
+
+def _rich_bin(low, high, unit="C"):
+    return SimpleNamespace(
+        low=low, high=high, unit=unit,
+        is_open_low=low is None, is_open_high=high is None,
+    )
+
+
+class TestDay0BootstrapLcb:
+    def _family(self):
+        bins = [
+            _rich_bin(None, 23.0), _rich_bin(24.0, 24.0), _rich_bin(25.0, 25.0),
+            _rich_bin(26.0, 26.0), _rich_bin(27.0, None),
+        ]
+        candidates = [SimpleNamespace(bin=b, condition_id=f"cond{i}") for i, b in enumerate(bins)]
+        return SimpleNamespace(city="Seoul", metric="high", candidates=candidates), bins
+
+    def _sampler(self, *, obs_age_minutes, members=(24.5, 25.2, 25.8, 26.4, 27.1)):
+        import numpy as np
+        from src.engine.event_reactor_adapter import _make_day0_bootstrap_sampler
+
+        family, bins = self._family()
+        payload = _payload("high", 25.0, obs_age_minutes=obs_age_minutes)
+        sampler = _make_day0_bootstrap_sampler(
+            members_native=np.asarray(members, dtype=float),
+            payload=payload, family=family, unit="C", decision_time=NOW,
+        )
+        return sampler, bins
+
+    def test_sampler_draws_are_valid_masked_distributions(self):
+        import numpy as np
+
+        sampler, bins = self._sampler(obs_age_minutes=10.0)
+        assert sampler is not None
+        analysis = _StubAnalysis(bins, p_cal=np.full(5, 0.2))
+        for _ in range(50):
+            vec = sampler(analysis, 32)
+            assert np.all(np.isfinite(vec))
+            assert abs(float(vec.sum()) - 1.0) < 1e-9
+            # absorbing boundary in EVERY draw: bins below the running max dead
+            assert vec[0] == 0.0 and vec[1] == 0.0
+
+    def test_qlcb_percentile_sits_strictly_below_point_q(self):
+        """The category defect was q_lcb == q (zero-variance static sampler).
+        A real bootstrap must produce strictly positive dispersion across
+        draws for an uncertain bin."""
+        import numpy as np
+
+        sampler, bins = self._sampler(obs_age_minutes=10.0)
+        analysis = _StubAnalysis(bins, p_cal=np.full(5, 0.2))
+        draws = np.array([sampler(analysis, 32) for _ in range(300)])
+        floor_bin = draws[:, 2]  # the bin containing the running max
+        assert float(floor_bin.std()) > 0.0
+        q_point = float(floor_bin.mean())
+        q_lcb_5pct = float(np.percentile(floor_bin, 5))
+        assert q_lcb_5pct < q_point
+
+    def test_stale_obs_widens_the_bootstrap(self):
+        """Staleness (per config/wu_obs_latency.json budgets) must add draw
+        dispersion — the latency artifact is wired into the LCB, not just the
+        boundary guard."""
+        import numpy as np
+
+        fresh_sampler, bins = self._sampler(obs_age_minutes=10.0)
+        stale_sampler, _ = self._sampler(obs_age_minutes=None)  # maximally stale
+        fresh_analysis = _StubAnalysis(bins, np.full(5, 0.2), seed=11)
+        stale_analysis = _StubAnalysis(bins, np.full(5, 0.2), seed=11)
+        fresh = np.array([fresh_sampler(fresh_analysis, 32) for _ in range(200)])
+        stale = np.array([stale_sampler(stale_analysis, 32) for _ in range(200)])
+        # open-high shoulder probability dispersion grows with the staleness sigma
+        assert float(stale[:, 4].std()) > float(fresh[:, 4].std())
+
+    def test_empty_members_degrades_to_none_static_fallback(self):
+        import numpy as np
+        from src.engine.event_reactor_adapter import _make_day0_bootstrap_sampler
+
+        family, _ = self._family()
+        sampler = _make_day0_bootstrap_sampler(
+            members_native=np.array([]), payload=_payload("high", 25.0),
+            family=family, unit="C", decision_time=NOW,
+        )
+        assert sampler is None
+
+    def test_obs_floor_clamp_respects_low_metric_direction(self):
+        import numpy as np
+        from src.engine.event_reactor_adapter import _make_day0_bootstrap_sampler
+
+        bins = [_rich_bin(None, 21.0), _rich_bin(22.0, 22.0), _rich_bin(23.0, 23.0), _rich_bin(24.0, None)]
+        candidates = [SimpleNamespace(bin=b, condition_id=f"cond{i}") for i, b in enumerate(bins)]
+        family = SimpleNamespace(city="Seoul", metric="low", candidates=candidates)
+        payload = _payload("low", 23.0, obs_age_minutes=10.0)
+        sampler = _make_day0_bootstrap_sampler(
+            members_native=np.asarray([21.5, 22.5, 23.5]), payload=payload,
+            family=family, unit="C", decision_time=NOW,
+        )
+        analysis = _StubAnalysis(bins, p_cal=np.full(4, 0.25))
+        for _ in range(30):
+            vec = sampler(analysis, 32)
+            # bins ABOVE the running min are dead for LOW
+            assert vec[3] == 0.0
+            assert abs(float(vec.sum()) - 1.0) < 1e-9
+
+
+# ===========================================================================
 # R4 — pre-maturity authority gate (the estimator-switch root fix)
 # ===========================================================================
 
