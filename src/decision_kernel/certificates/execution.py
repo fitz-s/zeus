@@ -115,6 +115,7 @@ def build_final_intent_certificate_from_actionable(
             Decimal(str(size)),
             final_limit_price=Decimal(str(limit_price)),
             order_type=order_spec.time_in_force,
+            tick_size=tick_size,
         )
         if available_crossable_shares is not None:
             available_depth = Decimal(str(available_crossable_shares))

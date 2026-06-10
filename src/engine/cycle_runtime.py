@@ -527,6 +527,7 @@ def _quantize_submit_shares(
     *,
     final_limit_price: Decimal | None = None,
     order_type: str | None = None,
+    tick_size: Decimal | str | None = None,
 ) -> Decimal:
     if shares <= Decimal("0"):
         raise ValueError("submitted_shares must be positive")
@@ -534,7 +535,11 @@ def _quantize_submit_shares(
         from src.contracts.execution_intent import quantize_submit_shares_for_venue
 
         return quantize_submit_shares_for_venue(
-            direction, shares, final_limit_price=final_limit_price, order_type=order_type
+            direction,
+            shares,
+            final_limit_price=final_limit_price,
+            order_type=order_type,
+            tick_size=tick_size,
         )
     quantum = Decimal("0.01")
     rounding = ROUND_CEILING if direction.startswith("buy_") else ROUND_FLOOR
@@ -642,6 +647,7 @@ def _attach_corrected_pricing_authority(
             raw_submit_shares,
             final_limit_price=candidate_limit,
             order_type=immediate_order_type,
+            tick_size=snapshot.min_tick_size,
         )
         sweep = simulate_clob_sweep(
             snapshot=snapshot,
@@ -1430,6 +1436,7 @@ def _reprice_decision_from_executable_snapshot(
                     max(best_ask_sweep.filled_shares, snapshot.min_order_size),
                     final_limit_price=depth_sweep_limit_decimal,
                     order_type="FOK",
+                    tick_size=snapshot.min_tick_size,
                 )
                 marketable_buy_submitted_notional_usd = (
                     marketable_buy_submitted_shares * depth_sweep_limit_decimal

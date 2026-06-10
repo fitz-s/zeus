@@ -143,11 +143,13 @@ def _venue_submit_amount_precision_rejection_reason(
     from src.contracts.execution_intent import venue_submit_amount_precision_error
 
     direction = getattr(getattr(intent, "direction", ""), "value", getattr(intent, "direction", ""))
+    intent_tick = getattr(intent, "tick_size", None)
     return venue_submit_amount_precision_error(
         direction=str(direction),
         final_limit_price=Decimal(str(intent.limit_price)),
         submitted_shares=Decimal(str(shares)),
         order_type=order_type,
+        tick_size=intent_tick,
     )
 
 

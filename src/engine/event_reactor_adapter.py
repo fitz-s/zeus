@@ -287,6 +287,10 @@ class _CandidateProof:
     taker_forbidden_reason: str | None = None
     maker_fill_probability: float | None = None
     maker_fill_probability_source: str | None = None
+    # K4.0 REST-THEN-CROSS: the policy verdict that produced the mode + the
+    # escalation deadline for REST decisions (None on legacy one-shot proofs).
+    rest_then_cross_policy: str | None = None
+    rest_escalation_deadline_minutes: float | None = None
 
 
 @dataclass(frozen=True)
@@ -3138,6 +3142,7 @@ def _build_live_execution_command_certificates(
                         _raw_capped_shares,
                         final_limit_price=_limit_price_d,
                         order_type="FOK",
+                        tick_size=_tick_size_d,
                     )
                     _venue_quantized_sweep = simulate_clob_sweep(
                         snapshot=_snap_for_depth,
@@ -6007,6 +6012,14 @@ def _generate_candidate_proofs(
         q_by_condition=q_by_condition,
         probability_evidence=probability_evidence,
     )
+    # K4.0 REST-THEN-CROSS family-level inputs, computed ONCE per family:
+    # event-end distance (None -> rest, conservative), and the family rest state
+    # from venue truth (open rest -> HOLD antibody; expired-unfilled rest ->
+    # escalation license for the deadline cross).
+    _rtc_minutes_to_event_end = _minutes_to_family_event_end(family, decision_time)
+    _rtc_unexpired_rest, _rtc_escalated = _family_rest_state(
+        trade_conn, family=family, decision_time=decision_time
+    )
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
@@ -6096,6 +6109,9 @@ def _generate_candidate_proofs(
                 execution_price=execution_price,
                 c_cost_95pct=c_cost_95pct,
                 p_fill_lcb=p_fill_lcb,
+                minutes_to_event_end=_rtc_minutes_to_event_end,
+                unexpired_family_rest=_rtc_unexpired_rest,
+                escalated_after_rest=_rtc_escalated,
             )
             if mode_ev is not None:
                 score = mode_ev.chosen_ev if math.isfinite(mode_ev.chosen_ev) else 0.0
@@ -6242,16 +6258,140 @@ def _generate_candidate_proofs(
     return tuple(proofs)
 
 
+def _minutes_to_family_event_end(family, decision_time: datetime) -> float | None:
+    """K4.0: minutes from decision_time until the family's event end.
+
+    Event end = end of target_date in the city's local timezone (the settlement
+    quantity stops moving at local midnight; the market resolves later, but the
+    edge-realization window is the local day). Returns None when the timezone or
+    target date is unresolvable — the policy then RESTS (conservative default;
+    a None can never open the taker-immediate lane).
+    """
+    try:
+        from zoneinfo import ZoneInfo
+
+        city_config = runtime_cities_by_name().get(str(family.city))
+        tz_name = getattr(city_config, "timezone", None) if city_config is not None else None
+        if not tz_name:
+            return None
+        target = date.fromisoformat(str(family.target_date))
+        local_end = datetime(
+            target.year, target.month, target.day, tzinfo=ZoneInfo(str(tz_name))
+        ) + timedelta(days=1)
+        delta = local_end.astimezone(UTC) - decision_time.astimezone(UTC)
+        return delta.total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+def _family_rest_state(
+    trade_conn: sqlite3.Connection | None,
+    *,
+    family,
+    decision_time: datetime,
+) -> tuple[bool, bool]:
+    """K4.0: (unexpired_family_rest, escalated_after_rest) from venue truth.
+
+    Derived from venue_commands + latest venue_order_facts (no new state table —
+    provenance lives where the orders live):
+
+    - unexpired_family_rest: ANY open ENTRY order on a family token (latest fact
+      LIVE/RESTING/PARTIALLY_MATCHED, or no facts yet with a non-terminal command
+      state). While one exists, NO new order may be constructed for the family
+      (the operator antibody). Age does not matter here: an over-deadline rest
+      still blocks until the escalation job cancels it.
+    - escalated_after_rest: a family ENTRY order was cancelled/expired UNFILLED
+      after resting >= the escalation deadline, within the last 24h. This is the
+      license for the deadline cross (the FULL standard pipeline re-certifies the
+      edge; this flag only switches the policy lane).
+
+    Fail-closed direction: on any query error return (False, False) — the policy
+    then RESTS by default (never crosses on broken provenance).
+    """
+    if trade_conn is None:
+        return (False, False)
+    token_ids = {
+        str(tid)
+        for candidate in getattr(family, "candidates", ())
+        for tid in (getattr(candidate, "yes_token_id", None), getattr(candidate, "no_token_id", None))
+        if tid
+    }
+    if not token_ids:
+        return (False, False)
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+    )
+
+    deadline_seconds = float(MAKER_REST_ESCALATION_DEADLINE_MINUTES) * 60.0
+    now = decision_time.astimezone(UTC)
+    recent_cutoff = (now - timedelta(hours=24)).isoformat()
+    placeholders = ",".join("?" for _ in token_ids)
+    open_fact_states = ("LIVE", "RESTING", "PARTIALLY_MATCHED")
+    terminal_unfilled_states = ("CANCEL_CONFIRMED", "EXPIRED")
+    nonterminal_command_states = ("SUBMITTING", "POSTING", "POST_ACKED", "ACKED", "PARTIAL")
+    try:
+        rows = trade_conn.execute(
+            f"""
+            WITH latest_facts AS (
+                SELECT venue_order_id, state, observed_at, matched_size,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY venue_order_id ORDER BY local_sequence DESC
+                       ) AS rn
+                FROM venue_order_facts
+            )
+            SELECT vc.state AS command_state, vc.created_at,
+                   lf.state AS fact_state, lf.observed_at, lf.matched_size
+            FROM venue_commands vc
+            LEFT JOIN latest_facts lf
+                   ON lf.venue_order_id = vc.venue_order_id AND lf.rn = 1
+            WHERE vc.intent_kind = 'ENTRY'
+              AND vc.token_id IN ({placeholders})
+              AND vc.created_at >= ?
+            """,
+            (*sorted(token_ids), recent_cutoff),
+        ).fetchall()
+    except Exception:
+        return (False, False)
+    unexpired_rest = False
+    escalated = False
+    for row in rows:
+        command_state = str(row["command_state"] if isinstance(row, sqlite3.Row) else row[0] or "")
+        created_at = _parse_utc(row["created_at"] if isinstance(row, sqlite3.Row) else row[1])
+        fact_state = row["fact_state"] if isinstance(row, sqlite3.Row) else row[2]
+        observed_at = _parse_utc(row["observed_at"] if isinstance(row, sqlite3.Row) else row[3])
+        matched = row["matched_size"] if isinstance(row, sqlite3.Row) else row[4]
+        fact_state_s = str(fact_state or "")
+        if fact_state_s in open_fact_states:
+            unexpired_rest = True
+            continue
+        if fact_state is None and command_state in nonterminal_command_states:
+            # Order acknowledged/in flight but no order fact yet: treat as open.
+            unexpired_rest = True
+            continue
+        if (
+            fact_state_s in terminal_unfilled_states
+            and (matched is None or float(matched or 0.0) <= 0.0)
+            and created_at is not None
+            and observed_at is not None
+            and (observed_at - created_at).total_seconds() >= deadline_seconds
+        ):
+            escalated = True
+    return (unexpired_rest, escalated)
+
+
 def _maker_fill_probability_prior() -> tuple[float, str]:
     """Operator-tunable resting-fill prior (edli_v1.maker_fill_probability_prior).
 
-    Defaults to the module prior (0.10, fee-study measured 10.8% resting fill
-    rate). Settings override carries its own provenance tag so the receipt
-    records WHERE the prior came from (settlement loop recalibration target).
+    K4.0 (consolidated overhaul 2026-06-11): the default is the MEASURED
+    deadline-horizon fill probability (KM @120min = 0.39, n=108 right-censored
+    resting facts) — the 0.10 GUESS is retired (its provenance was conditioned
+    on ~25-minute rests of deep-longshot quotes: the wrong population, Fitz #4).
+    Settings override carries its own provenance tag so the receipt records
+    WHERE the prior came from (settlement-loop recalibration target).
     """
     from src.strategy.live_inference.mode_consistent_ev import (
-        MAKER_FILL_PROBABILITY_PRIOR,
-        MAKER_FILL_PROBABILITY_SOURCE,
+        MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+        MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
     )
 
     try:
@@ -6259,13 +6399,22 @@ def _maker_fill_probability_prior() -> tuple[float, str]:
     except Exception:
         raw = None
     if raw is None:
-        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+        return (
+            MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+            MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        )
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+        return (
+            MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+            MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        )
     if not (0.0 < value <= 1.0):
-        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+        return (
+            MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+            MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        )
     return value, "settings.edli_v1.maker_fill_probability_prior"
 
 
@@ -6303,8 +6452,13 @@ def _mode_consistent_ev_for_proof(
     c_cost_95pct: float | None,
     p_fill_lcb: float,
     penalty: float = 0.01,
+    minutes_to_event_end: float | None = None,
+    unexpired_family_rest: bool = False,
+    escalated_after_rest: bool = False,
 ):
-    """FIX C: the per-candidate maker/taker EV decision at the evaluation seam.
+    """FIX C + K4.0: the per-candidate REST-THEN-CROSS mode decision at the
+    evaluation seam (select_rest_then_cross_mode — the one-shot EV comparison
+    is retired as the decider; both EVs still travel as provenance).
 
     Returns None for an unpriced proof (no mode decision exists; the legacy
     quote-missing no-trade path owns it). Penalty mirrors the legacy robust
@@ -6318,7 +6472,7 @@ def _mode_consistent_ev_for_proof(
 
     from src.strategy.live_inference.mode_consistent_ev import (
         TAKER_FORBIDDEN_NO_ASK_EMPTY,
-        select_mode_consistent_ev,
+        select_rest_then_cross_mode,
     )
 
     try:
@@ -6335,7 +6489,7 @@ def _mode_consistent_ev_for_proof(
     _is_maker_quote = str(getattr(execution_price, "price_type", "")) == "bid"
     taker_all_in_cost = None if _is_maker_quote else c_cost_95pct
     p_fill_maker, p_fill_maker_source = _maker_fill_probability_prior()
-    mode_ev = select_mode_consistent_ev(
+    mode_ev = select_rest_then_cross_mode(
         q_lcb=q_lcb,
         taker_all_in_cost=taker_all_in_cost,
         p_fill_taker=p_fill_lcb,
@@ -6343,6 +6497,9 @@ def _mode_consistent_ev_for_proof(
         best_ask=best_ask,
         tick_size=tick,
         reservation=float(execution_price.value),
+        minutes_to_event_end=minutes_to_event_end,
+        unexpired_family_rest=unexpired_family_rest,
+        escalated_after_rest=escalated_after_rest,
         p_fill_maker=p_fill_maker,
         p_fill_maker_source=p_fill_maker_source,
         max_relative_spread=_taker_max_relative_spread(),
