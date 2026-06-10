@@ -6,6 +6,8 @@
 
 **Version 2** (2026-04-13): corrections incorporated per user review of v1 — logit clipping explicit, open-boundary bins allowed, Monte Carlo pseudocode deduplicated across bins, stream-of-consciousness removed, `decision_group` concept added as independent sample unit.
 
+> **Authority notice — strategy of record (2026-06-09).** The live q is built by the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block), summarized in **§0.1** below. The Monte-Carlo P_raw (§4), Extended Platt (§6), and α-weighted market fusion (§7) math in this spec now describes the **LEGACY BASELINE** path — an independent baseline / LCB cap joined to the live q as a floor (`effective_q_lcb = min(replacement, baseline)`), NOT the primary q. Two corrections propagated below: the 10k-MC `p_raw_vector_from_maxes` is **retired** in favor of the closed-form `analytic_p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py`); live market fusion runs `model_only_v1` with **NO market-prior blend** (`src/strategy/market_fusion.py` `compute_posterior`), so the α-weighted `P_posterior` in §7 is spec-only. Cite symbols, not line numbers — lines drift.
+
 ---
 
 ## 0. Scope
@@ -29,6 +31,68 @@ This spec covers every math/stat operation that touches a price, probability, or
 15. Deferred upgrades (future work, not in scope)
 
 Out of scope: execution (order placement), lifecycle (position states), risk manager internals, infrastructure.
+
+---
+
+## 0.1 Replacement-forecast chain math (STRATEGY OF RECORD, 2026-06-09)
+
+Authority `docs/authority/replacement_final_form_2026_06_09.md`. The live q replaces 51-ENS member-counting + Platt with multi-model walk-forward de-bias → Bayesian precision fusion → settlement-preimage bin integration. The integer-settlement preimage rule (§1.2) is unchanged; only the distribution feeding it changed. Constants below are read from `src/forecast/u0r_bayes.py` (cite symbols, not line numbers).
+
+### 0.1a Walk-forward empirical-Bayes de-bias — `u0r_bayes.eb_bias`
+
+Per source `s`, over residuals `r = (x_s − Y)` on train dates strictly before the target (walk-forward, no leakage):
+
+```
+b̂_s = λ·r̄ + (1 − λ)·parent ,   λ = n / (n + κ) ,   κ = 8.0
+```
+
+`κ = 8` ⇒ ~50% trust in the local mean at `n = 8`. Thin source (small `n`) shrinks toward the structural parent (anchor) prior; large `n` trusts the local mean. `parent` is the ECMWF-IFS structural anchor bias.
+
+### 0.1b T2 Bayesian precision fusion — `u0r_bayes.bayes_fuse` / `fuse_u0r_posterior`
+
+Fuse bias-corrected non-anchor instruments `z` (precision `Σ⁻¹`) with the anchor prior `N(μ0, τ0²)`:
+
+```
+V*  = (τ0⁻² + 1ᵀ Σ⁻¹ 1)⁻¹
+μ*  = V* · (τ0⁻² μ0 + 1ᵀ Σ⁻¹ z)
+var = V* + extra_var          (extra_var = σ²_disagree + bias/bridge buffers; widen-only)
+```
+
+- **Σ estimation (covariance-aware only where reliable):** Ledoit-Wolf shrinkage toward the diagonal — `shrink_cov` (n ≥ 3 common dates; optimal intensity `δ* = φ/γ` clamped to [0,1], shrinks toward `diag(S)`); else `diag_cov` (C0 diagonal with low-n inflation ×1.5). PD repair + eigenvalue floor applied. `SIGMA_FLOOR = 0.8°C` on every per-source obs std. NEVER an unregularized `S⁻¹`.
+- **Fail-soft:** no surviving likelihood instruments (`p = 0`) ⇒ posterior IS the anchor prior `N(μ0, τ0² + extra_var)`.
+- **Thin-anchor retention:** `n < 25` keeps the source as an EQUAL_WEIGHT member (not deleted) — `fuse_u0r_posterior` (commit 49492f1528).
+
+### 0.1c Predictive σ floor — `replacement_forecast_materializer._replacement_u0r_fusion_override`
+
+```
+σ_pred = max(1.0°C, √(fused.sd² + σ_resid²))
+```
+
+The 1.0°C floor only WIDENS the predictive distribution (flatter q ⇒ fewer overconfident trades). `σ_resid²` is the grid→station residual variance.
+
+### 0.1d Settlement-preimage bin integration — `emos.bin_probability_settlement`
+
+The **single** live settlement integrator. q over each bin is the N(μ*, σ_pred) mass on the bin's WMO round-half-up settlement preimage (q_shape `fused_normal_direct`), identical preimage logic to §1.2 / `analytic_p_raw_vector_from_maxes`:
+
+```
+interior bin (label X):       [X − 0.5, X + 0.5)
+open-low shoulder (≤ X):      (−∞, X + 0.5)
+open-high shoulder (≥ X):     [X − 0.5, +∞)
+distinct-endpoint [A, B]:     [A − 0.5, B + 0.5)
+```
+
+This fixes the degenerate point-bin problem (interior bins always get non-zero mass). q is persisted by `replacement_forecast_materializer._insert_posterior` (owns q_mode).
+
+### 0.1e q_lcb floor and the baseline junction
+
+```
+q_lcb = Wilson lower bound (z = 1.645)         — event_reactor_adapter._wilson_lower_bound
+        capped per-(city, season, metric) by settlement-residual σ
+                                               — _resolve_replacement_settlement_floor_lcb
+effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)
+```
+
+Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit; a live-authority missing settlement floor BLOCKS. The min-cap is where the §6/§7 baseline q_lcb enters — as a floor, never as the primary q. Edge = q_lcb − cost → BH FDR (§9) → Fractional Kelly (§10), unchanged.
 
 ---
 
@@ -164,7 +228,9 @@ One row per (city, target_date, issue_time, lead_hours):
 
 ---
 
-## 4. Monte Carlo simulation — the P_raw generator
+## 4. Monte Carlo simulation — the P_raw generator (LEGACY BASELINE)
+
+> Baseline path only — the live q is built per §0.1, not by this Monte-Carlo P_raw. The 10k-MC `p_raw_vector_from_maxes` is **retired**; the live baseline P_raw is the closed-form Gaussian-mixture `analytic_p_raw_vector_from_maxes` (`src/signal/ensemble_signal.py`), which integrates the same WMO settlement preimage analytically. The MC derivation below is retained for understanding the noise model the closed form replaces.
 
 ### 4.1 Why Monte Carlo (not member counting)
 
@@ -264,7 +330,9 @@ This guarantees every possible `settlement_value` falls in exactly one bin. Beca
 
 ---
 
-## 6. Extended Platt calibration
+## 6. Extended Platt calibration (LEGACY BASELINE)
+
+> Baseline calibration only. The live q is the fused-normal-direct settlement integration of §0.1d (`emos.bin_probability_settlement`), not Platt. This Platt math feeds the baseline / LCB-cap path (`src/calibration/platt.py` `ExtendedPlattCalibrator.predict`).
 
 ### 6.1 Model (with logit numerical safety)
 
@@ -356,9 +424,11 @@ Note: `C_reg` (regularization strength) is distinct from the Platt intercept `C`
 
 ---
 
-## 7. Market fusion
+## 7. Market fusion (LEGACY BASELINE — α-blend is SPEC-ONLY, not live)
 
-### 7.1 Model
+> **Live market fusion runs `model_only_v1` with NO market-prior blend** (`src/strategy/market_fusion.py` `compute_posterior`; passing a market quote/prior to `model_only_v1` raises). The α-weighted `P_posterior` below is the spec form, NOT the live computation on either chain. Retained to document the parameterization the live `model_only_v1` short-circuits.
+
+### 7.1 Model (spec form — not live)
 
 ```
 P_posterior = α · P_cal + (1 - α) · P_market
