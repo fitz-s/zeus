@@ -125,6 +125,19 @@ class MonitorOneCalibratorQ:
     q_vector: np.ndarray
     q_source: str
     bootstrap_probability_sampler: object | None
+    # PARITY PROVENANCE (P1 review finding 2026-06-09): settlement sigma-floor coherence.
+    # settlement_sigma_floor_applied — True when the empirical settlement σ-floor was
+    #   looked up and found for this (city, season, metric) cell AND actually widened sigma.
+    #   False when floor_enabled=False, or floor cell absent, or not applied (model σ already
+    #   >= floor).
+    # settlement_sigma_floor_required — mirror of the edli_settlement_sigma_floor_required
+    #   config flag at monitor time; recorded for audit.
+    # floor_missing_reason — non-None when floor_enabled=True but the cell lookup failed.
+    #   The caller uses this to detect entry-parity violations (entry had floor, monitor does
+    #   not → mark NOT FRESH; same fail-closed semantics as the day0 panic-sell hold fix).
+    settlement_sigma_floor_applied: bool = False
+    settlement_sigma_floor_required: bool = False
+    floor_missing_reason: str | None = None
 
 
 def _monitor_emos_regime_enabled() -> bool:
@@ -163,6 +176,30 @@ def _monitor_normal_bootstrap_sampler(mu_native: float, sigma_native: float):
     return _sampler
 
 
+def _probe_monitor_settlement_floor(
+    city_name: str,
+    season: str,
+    metric: str,
+) -> tuple[bool, str | None]:
+    """Probe the settlement sigma-floor table for (city, season, metric) without raising.
+
+    Returns (floor_found, floor_missing_reason):
+      floor_found=True  — a positive floor value exists for this cell.
+      floor_found=False — cell absent or table unavailable; floor_missing_reason explains why.
+
+    PARITY RULE (P1 review finding 2026-06-09): called only when apply_settlement_floor=True so
+    callers can determine whether the entry q's floor was obtainable at monitor time.
+    """
+    try:
+        from src.calibration.emos import settlement_sigma_floor  # noqa: PLC0415
+        floor_val = settlement_sigma_floor(city_name, season, str(metric).lower(), required=False)
+        if floor_val is not None and float(floor_val) > 0.0:
+            return True, None
+        return False, f"floor_cell_absent_or_non_positive:{city_name}|{season}|{str(metric).lower()}"
+    except Exception as exc:  # fail-closed: treat as missing, never crash the monitor path
+        return False, f"floor_probe_error:{type(exc).__name__}:{exc}"
+
+
 def _build_monitor_one_calibrator_q(
     *,
     city,
@@ -173,7 +210,15 @@ def _build_monitor_one_calibrator_q(
     semantics: SettlementSemantics,
     all_bins: list,
 ) -> MonitorOneCalibratorQ:
-    """Mirror the live entry EMOS/honest-raw q seam for non-Day0 monitor refresh."""
+    """Mirror the live entry EMOS/honest-raw q seam for non-Day0 monitor refresh.
+
+    PARITY PROVENANCE (P1 review finding 2026-06-09): when the settlement sigma-floor flag is
+    enabled, this function probes the floor table and records floor provenance on the returned
+    MonitorOneCalibratorQ. The caller uses floor_missing_reason to detect parity violations:
+    if the entry q had the floor applied (same flag on, same cell) but the monitor cannot
+    obtain it → the caller marks the monitor probability NOT FRESH so exit decisions do not
+    fire on the degraded (narrower) probability.
+    """
 
     from src.calibration.emos import SettlementSigmaFloorError
     from src.calibration.emos_q_builder import build_emos_q, build_honest_raw_q
@@ -186,6 +231,16 @@ def _build_monitor_one_calibrator_q(
     require_settlement_floor = bool(
         settings["edli_v1"].get("edli_settlement_sigma_floor_required", True)
     )
+
+    # PARITY: probe floor availability when the flag is on. Probed ONCE here (not twice) and
+    # shared to both the emos and honest-raw branches below so the probe cost is minimal.
+    _floor_found: bool = False
+    _floor_missing_reason: str | None = None
+    if apply_settlement_floor:
+        _floor_found, _floor_missing_reason = _probe_monitor_settlement_floor(
+            city.name, season, metric
+        )
+
     q_result = None
     try:
         q_result = build_emos_q(
@@ -221,6 +276,9 @@ def _build_monitor_one_calibrator_q(
                 mu_native,
                 sigma_native,
             ),
+            settlement_sigma_floor_applied=_floor_found,
+            settlement_sigma_floor_required=require_settlement_floor,
+            floor_missing_reason=_floor_missing_reason,
         )
 
     honest_raw = None
@@ -258,6 +316,9 @@ def _build_monitor_one_calibrator_q(
                 mu_native,
                 sigma_native,
             ),
+            settlement_sigma_floor_applied=_floor_found,
+            settlement_sigma_floor_required=require_settlement_floor,
+            floor_missing_reason=_floor_missing_reason,
         )
 
     raw_q = p_raw_vector_from_maxes(
@@ -271,6 +332,9 @@ def _build_monitor_one_calibrator_q(
         q_vector=np.asarray(raw_q, dtype=float),
         q_source="raw_honest",
         bootstrap_probability_sampler=None,
+        settlement_sigma_floor_applied=False,
+        settlement_sigma_floor_required=require_settlement_floor,
+        floor_missing_reason=_floor_missing_reason,
     )
 
 
@@ -867,6 +931,32 @@ def _refresh_ens_member_counting(
                     "period_extrema_members_adapter",
                     f"monitor_emos_sole_calibrator_failed:{type(exc).__name__}",
                 ]
+            # PARITY RULE (P1 review finding 2026-06-09): if the floor was enabled at monitor
+            # time but the cell is absent, the monitor q is narrower than the entry q was
+            # (entry ran with floor applied; monitor silently dropped it). Mark NOT FRESH so
+            # exit decisions do not fire on the degraded posterior — same fail-closed semantics
+            # as the day0 panic-sell hold fix ("Exit authority incomplete").
+            if _monitor_q.floor_missing_reason is not None:
+                logger.warning(
+                    "MONITOR_FLOOR_PARITY_VIOLATION cell=%s|%s|%s "
+                    "floor_applied=%s floor_missing_reason=%s — "
+                    "monitor q narrower than entry q; marking NOT FRESH (no exit trigger)",
+                    city.name,
+                    _monitor_emos_season(target_d),
+                    _position_metric_str,
+                    _monitor_q.settlement_sigma_floor_applied,
+                    _monitor_q.floor_missing_reason,
+                )
+                _set_monitor_probability_fresh(position, False)
+                return position.p_posterior, [
+                    "fresh_ens_fetch",
+                    *forecast_source_validations,
+                    "entry_forecast_reader",
+                    "period_extrema_members_adapter",
+                    "monitor_emos_sole_calibrator",
+                    "monitor_floor_parity_violation",
+                    f"floor_missing_reason:{_monitor_q.floor_missing_reason}",
+                ]
             p_raw_vector = _monitor_q.q_vector
             p_cal_full = np.asarray(_monitor_q.q_vector, dtype=float)
             p_cal_yes = float(p_cal_full[held_idx])
@@ -879,6 +969,7 @@ def _refresh_ens_member_counting(
                 "period_extrema_members_adapter",
                 "monitor_emos_sole_calibrator",
                 f"q_source:{_monitor_q_source}",
+                f"settlement_sigma_floor_applied:{_monitor_q.settlement_sigma_floor_applied}",
             ]
         else:
             # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.
@@ -976,6 +1067,27 @@ def _refresh_ens_member_counting(
                     *forecast_source_validations,
                     f"monitor_emos_sole_calibrator_failed:{type(exc).__name__}",
                 ]
+            # PARITY RULE (P1 review finding 2026-06-09): mirror of the period-extrema branch
+            # above — floor enabled but cell absent → monitor q narrower than entry q → NOT FRESH.
+            if _monitor_q.floor_missing_reason is not None:
+                logger.warning(
+                    "MONITOR_FLOOR_PARITY_VIOLATION cell=%s|%s|%s "
+                    "floor_applied=%s floor_missing_reason=%s — "
+                    "monitor q narrower than entry q; marking NOT FRESH (no exit trigger)",
+                    city.name,
+                    _monitor_emos_season(target_d),
+                    _position_metric_str,
+                    _monitor_q.settlement_sigma_floor_applied,
+                    _monitor_q.floor_missing_reason,
+                )
+                _set_monitor_probability_fresh(position, False)
+                return position.p_posterior, [
+                    "fresh_ens_fetch",
+                    *forecast_source_validations,
+                    "monitor_emos_sole_calibrator",
+                    "monitor_floor_parity_violation",
+                    f"floor_missing_reason:{_monitor_q.floor_missing_reason}",
+                ]
             p_raw_vector = _monitor_q.q_vector
             p_cal_full = np.asarray(_monitor_q.q_vector, dtype=float)
             p_cal_yes = float(p_cal_full[held_idx])
@@ -986,6 +1098,7 @@ def _refresh_ens_member_counting(
                 *forecast_source_validations,
                 "monitor_emos_sole_calibrator",
                 f"q_source:{_monitor_q_source}",
+                f"settlement_sigma_floor_applied:{_monitor_q.settlement_sigma_floor_applied}",
             ]
         else:
             # SEV-1 fix (2026-05-29): pass lead_hours so the correct per-bucket row is served.

@@ -61,6 +61,12 @@ def _replacement_bundle(*, with_anchor: bool = True, with_topology: bool = True)
     provenance: dict = {
         "aifs_member_count": 51,
         "aifs_probabilities": {"bin-28": 41 / 51},
+        # FIX 1 (2026-06-09): the live q-mode gate now runs BEFORE the q_lcb floor logic and
+        # admits only the fused-Normal modes. These fixtures exercise the DOWNSTREAM q_lcb-floor
+        # relationship, so they carry a live-eligible mode to reach it (the gate itself is covered
+        # by tests/test_replacement_q_mode_authority.py).
+        "replacement_q_mode": "FUSED_NORMAL_FULL",
+        "q_shape": "fused_normal_direct",
     }
     if with_anchor:
         provenance["anchor_value_c"] = 28.0

@@ -1,5 +1,7 @@
 # Design vs Live EDLI Probability Chain — Per-Stage Divergence Audit
 
+> **Pre-merge (2026-06-09):** describes the legacy baseline chain only. The strategy of record is now the replacement_forecast chain — authority `docs/authority/replacement_final_form_2026_06_09.md` (`u0r_bayes.fuse_u0r_posterior` → `emos.bin_probability_settlement`).
+
 ```
 # Created: 2026-06-01
 # Last reused or audited: 2026-06-01

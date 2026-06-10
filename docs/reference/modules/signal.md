@@ -4,8 +4,10 @@
 **Current code path:** `src/signal`
 **Authority status:** Dense module reference for predictive signal generation, day0 routing, diurnal logic, and uncertainty features.
 
+> **Strategy of record (2026-06-09):** this module is now the **legacy baseline / LCB-cap** producer. The live forecast authority is the replacement chain in `src/forecast/` + `src/data/replacement_forecast_*` (`u0r_bayes.fuse_u0r_posterior` → `emos.bin_probability_settlement`) — authority `docs/authority/replacement_final_form_2026_06_09.md`. This module's P_raw feeds the LCB cap, not the primary q.
+
 ## 1. Module purpose
-Transform forecast ensembles and observation-derived context into raw predictive distributions and day0 signals that match Zeus's discrete-settlement market objects.
+Transform forecast ensembles and observation-derived context into raw predictive distributions and day0 signals that match Zeus's discrete-settlement market objects. (Baseline path; the live q is built by the replacement chain — see banner.)
 
 ## 2. What this module is not
 - Not settlement law.
@@ -13,7 +15,7 @@ Transform forecast ensembles and observation-derived context into raw predictive
 - Not a place to compress hourly/Day0/settlement tracks into one generic temperature stream.
 
 ## 3. Domain model
-- ECMWF/TIGGE ensemble handling and Monte Carlo raw probability.
+- ECMWF/TIGGE ensemble handling and baseline raw probability (closed-form `analytic_p_raw_vector_from_maxes`; 10k-MC retired).
 - Day0 signal routing and same-day windows.
 - Diurnal/persistence/nowcast features from hourly observation truth.
 - Forecast uncertainty and model agreement helpers.

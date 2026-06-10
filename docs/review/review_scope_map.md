@@ -18,7 +18,7 @@ settlement semantics, persistence corruption, kill-switch integrity.
 ```
 src/execution/**
   executor.py                       — limit-order execution engine (live)
-  exit_triggers.py                  — 8-layer churn defense
+  exit_safety.py                    — 8-layer churn defense
   exit_lifecycle.py                 — exit lifecycle management
   collateral.py                     — fail-closed sell-collateral facade
   settlement_commands.py            — durable settlement/redeem ledger

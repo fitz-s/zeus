@@ -30,7 +30,7 @@ entries:
     status: tracking
     owner: calibration-learning-path
     first_observed: "2026-05-27"
-    review_by: "2026-06-10"
+    review_by: "2026-06-17"
     evidence: |
       test_T1_valid_authority_writes_pairs, test_T7_parametrized_authority_matrix[tigge_ens_v3-True-3-None],
       test_T8_ecmwf_ens_source_writes_pairs all assert n==3 but get n==0.

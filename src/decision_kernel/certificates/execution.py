@@ -1,7 +1,9 @@
 # Created: 2026-05-01
-# Last reused or audited: 2026-06-01
+# Last reused or audited: 2026-06-10
 # Authority basis: GOAL#36 pre-arm parity — Bug A/B fix: tick_size from DB snap (str),
-#   sweep_expected_fill_price as Decimal string (not float).
+#   sweep_expected_fill_price as Decimal string (not float). FIX C 2026-06-10
+#   (incident 0b5c305e26524042): maker limit additionally capped one tick inside
+#   the opposite touch (structurally non-crossing) + placement/spread provenance.
 """Execution certificate builders and verifier entrypoints."""
 
 from __future__ import annotations
@@ -195,6 +197,15 @@ def build_final_intent_certificate_from_actionable(
         "submitted": False,
         "venue_order_id": None,
         "taker_fok_fak_live_enabled": bool(taker_fok_fak_live_enabled),
+        # FIX C provenance (2026-06-10): which placement lane this intent is and
+        # the book spread it was priced against, so settlement can attribute
+        # fills to maker_bid_improve vs taker_cross and recalibrate p_fill/
+        # adverse selection from facts. Additive observability — gates nothing.
+        "placement": "taker_cross" if order_spec.mode == "TAKER" else "maker_bid_improve",
+        "spread_at_entry": _spread_at_entry(best_bid, best_ask, passive_maker_context),
+        "relative_spread_at_entry": _relative_spread_at_entry(
+            best_bid, best_ask, passive_maker_context
+        ),
     }
     return _build_cert(
         claims.FINAL_INTENT,
@@ -595,12 +606,41 @@ def _branch_limit_price(
                 f"reservation={reservation:.6g}"
             )
         return marketable
-    # maker: improve the touch by one tick, capped by reservation
+    # maker: improve the touch by one tick, capped by reservation. FIX C
+    # (2026-06-10 Milan-24C incident): ALSO capped one tick inside the opposite
+    # touch, so a crossing maker limit is UNCONSTRUCTABLE at the price level even
+    # where the venue ignores post_only — at a one-tick spread the order joins
+    # the touch instead of crossing it. (The executor's passive no-cross sweep
+    # check at executor.py:1806 remains the snapshot-level backstop.)
     if side == "BUY":
         improved = (bid + tick_size) if bid is not None else reservation
+        if ask is not None:
+            improved = min(improved, ask - tick_size)
         return _tick_round_down(min(improved, reservation), tick_size)
     improved = (ask - tick_size) if ask is not None else reservation
+    if bid is not None:
+        improved = max(improved, bid + tick_size)
     return _tick_round_up(max(improved, reservation), tick_size)
+
+
+def _spread_at_entry(best_bid, best_ask, passive_maker_context) -> float | None:
+    """(ask - bid) at intent build, from the same sources _branch_limit_price uses."""
+    bid = _coerce_price(best_bid, passive_maker_context, "best_bid")
+    ask = _coerce_price(best_ask, passive_maker_context, "best_ask")
+    if bid is None or ask is None or ask < bid:
+        return None
+    return ask - bid
+
+
+def _relative_spread_at_entry(best_bid, best_ask, passive_maker_context) -> float | None:
+    bid = _coerce_price(best_bid, passive_maker_context, "best_bid")
+    ask = _coerce_price(best_ask, passive_maker_context, "best_ask")
+    if bid is None or ask is None or bid <= 0.0 or ask <= 0.0 or ask < bid:
+        return None
+    mid = (ask + bid) / 2.0
+    if mid <= 0.0:
+        return None
+    return (ask - bid) / mid
 
 
 def _coerce_price(value, passive_maker_context, key: str) -> float | None:

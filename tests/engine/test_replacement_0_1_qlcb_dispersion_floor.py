@@ -144,6 +144,10 @@ def _replacement_bundle() -> SimpleNamespace:
         q={"bin-27": 0.20, "bin-28": 0.80},
         q_lcb=None,
         provenance_json={
+            # FIX 1 (2026-06-09): live-eligible q-mode so this fixture reaches the q_lcb-floor
+            # dispersion relationship it tests (the gate itself is covered separately).
+            "replacement_q_mode": "FUSED_NORMAL_FULL",
+            "q_shape": "fused_normal_direct",
             "anchor_value_c": 28.0,
             "aifs_member_count": 51,
             "aifs_probabilities": {"bin-27": 10 / 51, "bin-28": 41 / 51},

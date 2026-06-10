@@ -671,6 +671,8 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "scripts/replay_downloaded_replacement_economic.py",  # read_only_ro_uri: replacement forecast economic replay opens forecasts+trade DBs with mode=ro/query_only; writes reports only
         # --- calibration bake-off + settlement backfill (2026-06-02, operator-invoked offline) ---
         "scripts/fit_settlement_sigma_floor.py",  # read_only_ro_uri: opens forecasts DB via file:...?mode=ro uri; SELECT-only over settlement_outcomes(VERIFIED); writes settlement_sigma_floor.json only; EMPIRICAL σ-floor offline fit (q1000 2026-06-05)
+        "scripts/measure_wu_obs_latency.py",  # read_only_ro_uri: opens world+trades DBs via file:...?mode=ro uri; SELECT-only over observation_instants + settlement_day_observation_authority; writes config/wu_obs_latency.json + evidence md only (day0 first-principles 2026-06-10)
+        "scripts/measure_wu_metar_divergence.py",  # read_only_ro_uri: opens world DB via file:...?mode=ro uri; SELECT-only over observation_instants; writes config/wu_metar_divergence.json + evidence md only (anomaly-threshold calibration 2026-06-10)
         "scripts/calibration_bakeoff.py",   # read_only: scores calibrators vs settlements VERIFIED; writes JSON/txt only
         "scripts/calibration_bakeoff_v2.py",  # read_only: corrected bake-off (RAW on live-served vector, OOS-gated); writes JSON/txt only
         "scripts/backfill_settlement_outcomes_canonical_2026_06_02.py",  # RO dry-run default; RW settlement_outcomes only with --execute, atomic SAVEPOINT (zeus-forecasts.db)

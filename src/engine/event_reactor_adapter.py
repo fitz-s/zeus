@@ -1,3 +1,12 @@
+# Last reused or audited: 2026-06-10 (S6 PRICE_MOVED maker/taker fix: the submit-
+#   recapture gate now threads order_rests_at_admitted_price into RecaptureInputs.
+#   A resting MAKER (governor GTC/GTD) order pays its admitted limit and never chases
+#   the recaptured ask, so it skips the PRICE_MOVED ceiling; TAKER (FOK/FAK) keeps a
+#   BOUNDED slippage ceiling (one tick / 5% / 1¢ cap). _order_will_rest_at_admitted_price
+#   mirrors _governor_mode_for_snapshot's fail-direction; the taker no-chase bound stays
+#   at intent build (TOUCH_EXCEEDS_RESERVATION). Tolerated/rested moves are recorded on
+#   the receipt (price_moved_within_tolerance + admitted/recaptured/tolerance). Fixes the
+#   live sub-3¢ false-abort churn 2026-06-10.
 # Last reused or audited: 2026-06-08 (S7: deleted the last opportunity-book
 #   selector on/off gate artifacts — the dead `selector_enabled`/`selector_shadow`
 #   cache keys, the `_env_flag_enabled` helper + its `import os`, and every literal
@@ -183,6 +192,7 @@ from src.strategy.market_phase import (
     market_phase_admits,
 )
 from src.strategy.live_inference.live_admission import (
+    coverage_unlicensed_tail_rejection_reason,
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
 )
@@ -255,6 +265,19 @@ class _CandidateProof:
     # canonical path. Observability only — never gates selection.
     posterior_id: int | None = None
     probability_authority: str | None = None
+    # FIX C (mode-consistent EV; incident 0b5c305e26524042 / operator directive
+    # 2026-06-10): the per-candidate maker/taker mode decision and BOTH EVs travel
+    # on the proof so the receipt/settlement loop can recalibrate p_fill_maker and
+    # the adverse-selection haircut from fill facts. trade_score IS the chosen
+    # mode's EV (the taker-cost x visible-depth-p_fill hybrid is retired).
+    execution_mode_intent: str | None = None
+    ev_taker: float | None = None
+    ev_maker: float | None = None
+    maker_limit_price: float | None = None
+    relative_spread_at_eval: float | None = None
+    taker_forbidden_reason: str | None = None
+    maker_fill_probability: float | None = None
+    maker_fill_probability_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1010,6 +1033,7 @@ def event_bound_live_adapter_from_trade_conn(
     canary_force_taker_provider: Callable[[], bool] | None = None,
     taker_fok_fak_live_enabled: bool = False,
     operator_arm: "OperatorArm | None" = None,
+    edli_live_scope: str = "forecast_only",
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -1023,6 +1047,32 @@ def event_bound_live_adapter_from_trade_conn(
     reservation accumulator is CLOSURE-held (test-isolation safe), fresh per
     adapter instance (== per reactor cycle).
     """
+
+    # FIX-3 (P1): day0_shadow scope → structural no-submit at the FINAL ADAPTER
+    # BOUNDARY for day0-lane events. edli_live_scope="day0_shadow" ADMITS day0
+    # events (the mask and shadow certs run) but the word "shadow" must not lie:
+    # no real submit can ever reach the venue for a day0 event under this scope.
+    # The guard lives here (not at admission) so future admission changes cannot
+    # bypass it. Fail-closed: unknown event_type is treated as day0 (rejected).
+    #
+    # forecast_plus_day0 (operator directive 2026-06-09 '全部打开'): day0-lane
+    # events PASS this boundary (real submit allowed, subject to all OTHER
+    # proofs/gates/arm downstream). The unknown-event-type fail-closed posture is
+    # preserved under both shadow-style scopes — an event type that is neither
+    # the known forecast lane nor the known day0 lane is rejected.
+    _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+
+    # FIX-4 (P2): per-cycle live submit call counter. Incremented ONLY when
+    # executor_submit() is actually called (i.e., real_order_submit_enabled and
+    # all gates pass). Exposed on the adapter callable so main.py can read it
+    # after process_pending and populate live_submit_attempts accurately.
+    # No-submit / degraded cycles always read 0.
+    _live_submit_count: list[int] = [0]
+
+    # FIX-4 venue_acks: per-cycle counter of actual venue ACKs (successful
+    # place_limit_order responses).  Incremented when venue_ack_received is
+    # True on the submit result.  Exposed on the adapter callable for main.py.
+    _live_ack_count: list[int] = [0]
 
     # INV-K7 reservation ledger: closure-held, fresh per reactor cycle. FIX B
     # (2026-06-05): rollback-aware so a candidate rejected downstream of Kelly is
@@ -1048,6 +1098,68 @@ def event_bound_live_adapter_from_trade_conn(
     )
 
     def _submit_inner(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
+        # FINAL ADAPTER BOUNDARY SCOPE GATE (PR#404 MAJOR 5 + FIX-3 P1).
+        #
+        # Every scope — including the DEFAULT "forecast_only" — explicitly rejects
+        # event types that are out-of-scope.  No scope relies on the caller passing
+        # only the right event types; the boundary is deterministic and fail-closed.
+        #
+        # Reason taxonomy (separately named by scope, never aliased):
+        #   forecast_only  → DAY0_OUT_OF_SCOPE_AT_BOUNDARY  (day0 or unknown)
+        #   day0_shadow    → DAY0_SCOPE_SHADOW_ONLY          (day0 or unknown)
+        #   forecast_plus_day0 → DAY0_SCOPE_SHADOW_ONLY      (unknown only)
+        #
+        # FIX-3 (P1): day0_shadow / forecast_plus_day0 path (unchanged semantics).
+        # MAJOR 5: forecast_only path — explicit day0 + unknown rejection added here
+        #           so that no downstream probe or adapter change can accidentally
+        #           admit a day0-lane event on the forecast-only scope.
+        import logging as _logging
+
+        event_type = getattr(event, "event_type", None)
+        _FORECAST_LANE_EVENT_TYPES: frozenset[str] = frozenset({"FORECAST_SNAPSHOT_READY"})
+        is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
+        is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
+
+        if edli_live_scope == "forecast_only":
+            # MAJOR 5: forecast_only is blind to observation by design
+            # (src/strategy/market_phase.py authority). Any day0-lane or unknown
+            # event type is rejected deterministically here.
+            if not is_forecast_lane:
+                if not is_day0_lane:
+                    _logging.getLogger(__name__).error(
+                        "DAY0_OUT_OF_SCOPE_AT_BOUNDARY: unknown event_type=%r "
+                        "rejected at forecast_only boundary (fail-closed)",
+                        event_type,
+                    )
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="DAY0_OUT_OF_SCOPE_AT_BOUNDARY",
+                    proof_accepted=False,
+                )
+        elif edli_live_scope in ("day0_shadow", "forecast_plus_day0"):
+            # forecast_plus_day0 admits day0-lane events through this boundary;
+            # day0_shadow rejects them. In BOTH scopes, an event type that is
+            # neither known lane is fail-closed (treated as day0, rejected).
+            day0_lane_blocked_here = edli_live_scope == "day0_shadow"
+            if not is_forecast_lane and not is_day0_lane:
+                _logging.getLogger(__name__).error(
+                    "DAY0_SCOPE_SHADOW_ONLY: unknown event_type=%r treated as day0 (fail-closed) "
+                    "while edli_live_scope=%r",
+                    event_type,
+                    edli_live_scope,
+                )
+            reject_day0_lane = is_day0_lane and day0_lane_blocked_here
+            reject_unknown = not is_forecast_lane and not is_day0_lane
+            if reject_day0_lane or reject_unknown:
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="DAY0_SCOPE_SHADOW_ONLY",
+                    proof_accepted=False,
+                )
         no_submit_receipt = build_event_bound_no_submit_receipt(
             event,
             trade_conn=trade_conn,
@@ -1151,7 +1263,10 @@ def event_bound_live_adapter_from_trade_conn(
                     command,
                     decision_time=decision_time.astimezone(UTC),
                 )
+                _live_submit_count[0] += 1  # FIX-4: count actual venue submit calls
                 submit_result = executor_submit(final_intent, command)
+                if submit_result.venue_ack_received:
+                    _live_ack_count[0] += 1  # FIX-4 venue_acks: count actual ACKs
                 receipt_cert = build_execution_receipt_certificate(
                     execution_command_cert=command,
                     decision_time=decision_time.astimezone(UTC),
@@ -1311,6 +1426,11 @@ def event_bound_live_adapter_from_trade_conn(
     # FIX B: expose the per-cycle ledger so the reactor commits/rolls back
     # provisional reservations in its post-submit phase.
     _submit.reservation_ledger = portfolio_reservation  # type: ignore[attr-defined]
+    # FIX-4: expose the live submit call counter so main.py can read it after
+    # process_pending to populate live_submit_attempts in the status pulse.
+    _submit._live_submit_count = _live_submit_count  # type: ignore[attr-defined]
+    # FIX-4 venue_acks: expose the ACK counter alongside submit counter.
+    _submit._live_ack_count = _live_ack_count  # type: ignore[attr-defined]
     return _submit
 
 
@@ -1488,6 +1608,33 @@ def build_event_bound_no_submit_receipt(
             event.causal_snapshot_id,
             reason=selected_stale_reason,
         )
+    # Market-age gate for opening_inertia (EDLI path): restore legacy
+    # MODE_PARAMS[OPENING_HUNT]["max_hours_since_open"] = 24 semantics.
+    # Kelly's phase-aware multiplier sizes by opening-tick age; a mislabeled
+    # 30-day-old market receives wrong sizing.  Conservative: missing age →
+    # pass (do NOT reject without evidence).
+    # Placed before the decision engine so it fires even when forecast fields
+    # are absent (the decision engine would return NO_TRADE in those cases, but
+    # the age reason is more informative and fires cheaply first).
+    if event.event_type == "FORECAST_SNAPSHOT_READY" and str(payload.get("direction") or "").strip().lower() == "buy_no":
+        _oi_age_hours = _opening_inertia_market_age_hours(
+            snapshot_row=row,
+            topology_rows=family_topology_rows,
+            family_rows=family_rows,
+            decision_time=decision_time,
+        )
+        if _oi_age_hours is not None and _oi_age_hours >= 24.0:
+            return EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                reason=f"OPENING_INERTIA_MARKET_TOO_OLD:{_oi_age_hours:.1f}h",
+                city=str(payload.get("city") or ""),
+                target_date=str(payload.get("target_date") or ""),
+                metric=str(payload.get("metric") or payload.get("temperature_metric") or ""),
+                source_status="MATCH",
+                family_complete=True,
+            )
     decision = EventBoundDecisionEngine().evaluate(
         EventBoundDecisionRequest(
             event=event,
@@ -2073,6 +2220,45 @@ def build_event_bound_no_submit_receipt(
             portfolio_reservation=portfolio_reservation,
             family=family,
         )
+        # Stake-floor provenance collector (2026-06-09 min-order fix). The recapture
+        # kernel writes stake_floor="VENUE_MIN_ORDER" here when it bumps a positive-edge
+        # candidate's haircut stake up to the venue min order, so the submit receipt
+        # records WHY the stake equals the venue floor (the fractional-Kelly risk intent
+        # was preserved — min order is << the bankroll cap). Empty on the normal path.
+        _stake_floor_provenance: dict[str, object] = {}
+        # DAY0 EXPOSURE CAP (PR#404 operator review P0-1: the cap is part of the
+        # SIZING KERNEL'S feasible region, never a post-hoc clamp). The family
+        # headroom — cap minus existing family exposure — is computed HERE
+        # (where the exposure map lives) and threaded INTO the recapture/sizing
+        # kernel as an upper bound on the optimizer's max_stake. The kernel
+        # therefore: re-optimizes within [min_order, min(headroom, fractional
+        # cap, concentration ceiling)], reprices the CHOSEN stake on the same
+        # curve (price/cost-basis consistent by construction), and aborts
+        # first-class when headroom is exhausted or below the SELECTED curve's
+        # REAL venue min order (DAY0_EXPOSURE_CAP_EXHAUSTED /
+        # DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER — the old post-clamp's 'headroom <
+        # $1' constant was a wrong risk boundary: real min orders range $0.15
+        # to $30+). Invariant (asserted in the kernel): final stake +
+        # existing_family_notional <= cap + epsilon.
+        _day0_headroom_usd: float | None = None
+        if event.event_type == "DAY0_EXTREME_UPDATED":
+            _day0_cap = _day0_family_notional_cap_usd()
+            if _day0_cap is not None:
+                _existing_family_usd = float(
+                    sum(float(v) for v in (_recapture_exposure or {}).values())
+                )
+                _day0_headroom_usd = float(_day0_cap) - max(0.0, _existing_family_usd)
+        # Maker/taker fill semantics for the S6 PRICE_MOVED ceiling (2026-06-10).
+        # A resting maker order rests at the admitted limit and never chases the
+        # recaptured ask, so the price-moved ceiling must NOT abort it (it was
+        # producing the live sub-3¢ false-abort churn). A taker order crosses and
+        # pays the recaptured cost, so the bounded tolerance ceiling still governs.
+        # P0-B (2026-06-10): use the PROOF's execution_mode_intent (the same single
+        # authority as the final-command builder), NOT the governor's event-payload
+        # inference.  Conservative fail direction: unknown mode → TAKER semantics
+        # (full fee + ceiling).  _order_will_rest_at_admitted_price is kept for
+        # backward-compat but is no longer called on the money path.
+        _order_rests_at_admitted_price = _proof_order_rests_at_admitted_price(proof)
         _recapture, _robust_stake_usd, _chosen_stake_price = (
             _evaluate_submit_recapture_for_selected(
                 family_key=str(family.family_id or ""),
@@ -2081,6 +2267,7 @@ def build_event_bound_no_submit_receipt(
                 extra_exposure_by_bin_id=_recapture_exposure,
                 bankroll_usd=float(bankroll_usd),
                 kelly_multiplier=_fractional_kelly_mult,
+                order_rests_at_admitted_price=_order_rests_at_admitted_price,
                 # On this synchronous path the forecast snapshot was validated by the
                 # decision engine and (if present) the replacement-forecast hook, both
                 # of which already returned a no-submit receipt on any flip/block
@@ -2091,6 +2278,8 @@ def build_event_bound_no_submit_receipt(
                 # called with this same conn at selection) — else a locked / below-min-tick
                 # leg scoped OUT of selection falsely reverses the chosen leg.
                 locked_opportunity_conn=locked_opportunity_conn,
+                stake_floor_out=_stake_floor_provenance,
+                day0_headroom_usd=_day0_headroom_usd,
             )
         )
         kelly = dataclass_replace(
@@ -2268,6 +2457,34 @@ def build_event_bound_no_submit_receipt(
             "family_complete": True,
         }
     )
+    # Stake-floor provenance (2026-06-09 min-order fix): record when the chosen stake
+    # was bumped up to the venue min order because the fractional-Kelly haircut shrank
+    # it below the floor while the robust edge at min order was strictly positive. Absent
+    # on the normal (un-bumped) path. Keeps the receipt honest about why size==min order.
+    if _stake_floor_provenance.get("stake_floor"):
+        raw_receipt["stake_floor"] = _stake_floor_provenance["stake_floor"]
+        if "stake_floor_min_order_usd" in _stake_floor_provenance:
+            raw_receipt["stake_floor_min_order_usd"] = _stake_floor_provenance[
+                "stake_floor_min_order_usd"
+            ]
+        if "stake_floor_delta_u_at_min_order" in _stake_floor_provenance:
+            raw_receipt["stake_floor_delta_u_at_min_order"] = _stake_floor_provenance[
+                "stake_floor_delta_u_at_min_order"
+            ]
+    # Price-move tolerance provenance (2026-06-10). When the recapture priced
+    # STRICTLY WORSE than the admitted ceiling yet the entry proceeded — the maker
+    # order rested at the admitted price, or a taker filled within the bounded
+    # tolerance — record admitted vs recaptured so settlement attribution can measure
+    # whether tolerated/rested entries underperform vs assumption (fill-rate, slippage).
+    # Absent on the clean no-move path (receipt stays clean).
+    if _recapture.price_moved_within_tolerance:
+        raw_receipt["price_moved_within_tolerance"] = True
+        raw_receipt["price_move_admitted_price"] = _recapture.admitted_price
+        raw_receipt["price_move_recaptured_cost"] = _recapture.recaptured_all_in_cost
+        raw_receipt["price_move_tolerance"] = _recapture.price_move_tolerance
+        raw_receipt["price_move_order_rests_at_admitted"] = bool(
+            _order_rests_at_admitted_price
+        )
     if opportunity_book is not None:
         raw_receipt["opportunity_book"] = opportunity_book.to_receipt_dict()
     if replacement_forecast_receipt_tag is not None:
@@ -2546,7 +2763,32 @@ def _build_live_execution_command_certificates(
             best_ask=best_ask,
             executable_snapshot=executable_snapshot,
             canary_force_taker=canary_force_taker,
+            # FIX C: the spread participation guard reads the freshest book
+            # (pre-submit authority witness), never only the quote cert's copy.
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
         )
+        # P0-A (2026-06-10): mode-flip guard. The proof's execution_mode_intent was
+        # computed at candidate-generation on the snapshot book; the fresh book at
+        # submit time may have changed enough to flip MAKER↔TAKER.  A flip means the
+        # economics the ΔU ranker chose (EV_maker vs EV_taker, maker_limit_price,
+        # spread guard result) are stale — the current cycle must re-evaluate from
+        # scratch rather than submit under the wrong mode.  Outcome: no-submit this
+        # cycle; the event re-queues and re-evaluates on the next pulse.
+        #
+        # When the proof has no mode (legacy path / priced-but-no-mode_ev): skip the
+        # check — we have no baseline to compare against (no-op for backward compat).
+        # When proof mode == fresh mode: consistent, proceed as before.
+        # When proof mode != fresh mode: abort deterministically (not a ValueError
+        # that looks like an infra error — a typed raise that the caller maps to a
+        # no-submit receipt with SUBMIT_ABORTED_MODE_FLIPPED).
+        _proof_mode = str(actionable.payload.get("proof_execution_mode_intent") or "").strip().upper() or None
+        if _proof_mode is not None and _proof_mode != str(order_mode).strip().upper():
+            raise ValueError(
+                f"SUBMIT_ABORTED_MODE_FLIPPED:"
+                f"proof_mode={_proof_mode}:fresh_mode={order_mode}:"
+                f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
+            )
         # WALL #1 (GATE #85 follow-on, 2026-06-01): the passive-maker context is a
         # MAKER-ONLY structural input. ``FinalExecutionIntent`` only requires it when
         # ``order_policy == "post_only_passive_limit"`` (execution_intent.py:1735); a
@@ -2764,9 +3006,23 @@ def _build_live_execution_command_certificates(
             sweep_expected_fill_price=sweep_expected_fill_price,
             executable_market_context=executable_market_context,
         )
+        # FIX C: the late maker->taker EV-override re-build is subject to the SAME
+        # relative-spread participation guard as every other taker route — a wide
+        # spread forbids crossing unconditionally (the lane is guarded, not the
+        # callers).
+        from src.strategy.live_inference.mode_consistent_ev import (
+            taker_spread_guard_reason as _taker_spread_guard_reason,
+        )
+
         if (
             taker_fok_fak_live_enabled
             and final_intent.payload.get("post_only") is True
+            and _taker_spread_guard_reason(
+                fresh_best_bid,
+                fresh_best_ask,
+                max_relative_spread=_taker_max_relative_spread(),
+            )
+            is None
             and _ev_boundary_favors_cross(
                 actionable_payload=actionable.payload,
                 quote_payload=quote_payload,
@@ -2935,6 +3191,49 @@ def _build_live_execution_command_certificates(
     return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
 
 
+def _selected_candidate_mode_fields_from_receipt(
+    receipt: EventSubmissionReceipt,
+) -> dict[str, object]:
+    """Extract the proof-time mode-consistent EV fields for the selected candidate.
+
+    P0-A (2026-06-10): execution_mode_intent and its siblings are computed at
+    candidate-generation time (_generate_candidate_proofs) and stored in the
+    CandidateEvaluation → opportunity_book["candidates"][N]. Thread them into
+    the actionable payload so _build_live_execution_command_certificates can
+    compare the proof's mode against the fresh-snapshot mode and abort on flip.
+
+    Returns an empty dict when the receipt carries no opportunity book or the
+    selected candidate cannot be located (legacy receipts — no-op for callers).
+    """
+    book = receipt.opportunity_book
+    if not isinstance(book, dict):
+        return {}
+    candidate_id = receipt.candidate_id or book.get("selected_candidate_id")
+    if not candidate_id:
+        return {}
+    candidates = book.get("candidates")
+    if not isinstance(candidates, list):
+        return {}
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("candidate_id") or "") == str(candidate_id):
+            result: dict[str, object] = {}
+            for key in (
+                "execution_mode_intent",
+                "ev_taker",
+                "ev_maker",
+                "maker_limit_price",
+                "taker_forbidden_reason",
+                "relative_spread_at_eval",
+            ):
+                val = cand.get(key)
+                if val is not None:
+                    result[f"proof_{key}"] = val
+            return result
+    return {}
+
+
 def _actionable_payload_from_receipt(
     receipt: EventSubmissionReceipt,
     live_cap_cert: DecisionCertificate,
@@ -2945,6 +3244,10 @@ def _actionable_payload_from_receipt(
     city = receipt.city or _event_identity_value(event, "city")
     target_date = receipt.target_date or _event_identity_value(event, "target_date")
     metric = receipt.metric or _event_identity_value(event, "metric") or _event_identity_value(event, "temperature_metric")
+    # P0-A (2026-06-10): thread the proof-time mode fields into the actionable
+    # payload so the final-command builder can compare proof mode vs fresh mode
+    # and emit SUBMIT_ABORTED_MODE_FLIPPED on disagreement.
+    proof_mode_fields = _selected_candidate_mode_fields_from_receipt(receipt)
     return {
         "event_id": receipt.event_id,
         "event_type": event.event_type if event is not None else None,
@@ -2983,6 +3286,7 @@ def _actionable_payload_from_receipt(
         "outcome_label": receipt.outcome_label,
         "unit": receipt.unit,
         "submitted": False,
+        **proof_mode_fields,
     }
 
 
@@ -3731,6 +4035,8 @@ def _select_edli_order_mode(
     executable_snapshot: DecisionCertificate,
     canary_force_taker: bool = False,
     canary_edge_floor: float | None = None,
+    fresh_best_bid: float | None = None,
+    fresh_best_ask: float | None = None,
 ) -> str:
     """Select MAKER/TAKER for the entry per design §1-§2 (governor + EV override).
 
@@ -3750,6 +4056,25 @@ def _select_edli_order_mode(
     """
     side = "BUY" if str(actionable_payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
     reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+
+    # --- 0. RELATIVE-SPREAD PARTICIPATION GUARD (FIX C; incident
+    # 0b5c305e26524042: 56% relative spread crossed as an instant FOK taker).
+    # When (ask - bid)/mid exceeds the threshold — or the two-sided book is
+    # unmeasurable — taker crossing is FORBIDDEN regardless of edge, canary, or
+    # governor: a wide spread IS the illiquidity signal, and every "edge" that
+    # wants to cross it is measured with the same model q the market is
+    # disputing. Maker resting remains allowed (the conservative default).
+    # Evaluated on the FRESHEST book the caller has (pre-submit authority
+    # witness), falling back to the quote-feasibility book.
+    from src.strategy.live_inference.mode_consistent_ev import taker_spread_guard_reason
+
+    guard_bid = fresh_best_bid if fresh_best_bid is not None else best_bid
+    guard_ask = fresh_best_ask if fresh_best_ask is not None else best_ask
+    spread_guard_reason = taker_spread_guard_reason(
+        guard_bid, guard_ask, max_relative_spread=_taker_max_relative_spread()
+    )
+    if spread_guard_reason is not None:
+        return "MAKER"
 
     # --- 1. Canary force-taker (with 5c post-cross edge floor) ---
     if canary_force_taker:
@@ -3793,6 +4118,69 @@ def _governor_mode_for_snapshot(executable_snapshot: DecisionCertificate) -> str
     except Exception:
         return "MAKER"
     return "TAKER" if str(order_type).strip().upper() in {"FOK", "FAK"} else "MAKER"
+
+
+def _order_will_rest_at_admitted_price(snapshot_payload: Any) -> bool:
+    """True iff this entry will rest as a MAKER order (GTC/GTD), not cross as a taker.
+
+    Governs whether the S6 submit-recapture gate applies the PRICE_MOVED ceiling
+    (2026-06-10). A resting maker order pays its OWN limit (downstream
+    ``compute_native_limit_price`` = min(held_prob, ask) - offset, at the admitted
+    boundary) and rests when the ask moves away — it never crosses, never chases,
+    never pays the recaptured ask, so the price-moved ceiling must NOT abort it.
+    The PRICE_MOVED ceiling is a TAKER-only protection: it bounds what an immediate
+    crossing fill pays.
+
+    Fail-direction: this MIRRORS the downstream order-mode authority
+    ``_governor_mode_for_snapshot`` (which maps governor unconfigured / NO_TRADE /
+    error -> the conservative resting MAKER default, and only routes TAKER when the
+    governor EXPLICITLY forces FOK/FAK on degraded heartbeat / shallow depth / near
+    close). The live default IS resting GTC (venue_order_facts: order_type GTC), so
+    aligning the gate to "rest unless the governor forces taker" matches both the
+    live maker reality and the maker design — and removes the observed sub-3¢
+    false-abort churn.
+
+    Skipping the S6 ceiling on the maker path NEVER removes the taker chase bound:
+    when the order actually crosses (governor TAKER, or a later ``_select_order_mode``
+    EV-override), the intent build enforces ``TAKER_BUY_TOUCH_EXCEEDS_RESERVATION`` /
+    ``TAKER_SELL_TOUCH_BELOW_RESERVATION`` against the admitted reservation on the
+    fresh crossing price — the authoritative no-chase enforcement for taker fills.
+    """
+    try:
+        from src.risk_allocator import select_global_order_type
+
+        order_type = str(select_global_order_type(snapshot_payload) or "").strip().upper()
+    except Exception:
+        # Governor unconfigured / NO_TRADE -> conservative resting MAKER default,
+        # mirroring _governor_mode_for_snapshot. The live path rests GTC here.
+        return True
+    # Explicit taker (degraded / shallow / near close) keeps the strict bounded
+    # ceiling; any resting / unknown-but-non-taker type rests at admitted price.
+    return order_type not in {"FOK", "FAK"}
+
+
+def _proof_order_rests_at_admitted_price(proof: "_CandidateProof") -> bool:
+    """True iff the selected proof's mode-consistent EV chose MAKER.
+
+    P0-B (2026-06-10): the S6 submit-recapture gate must apply TAKER or MAKER
+    semantics based on the SAME mode authority used by the rest of the money
+    path — the proof's execution_mode_intent — not an inference from the event
+    payload via the governor.
+
+    The old _order_will_rest_at_admitted_price read select_global_order_type on
+    the event payload and defaulted to MAKER on error/exception.  That mismatch
+    let recapture use zero-taker-fee cost and skip the PRICE_MOVED ceiling while
+    the final intent could go TAKER: a candidate that never cleared TAKER
+    recapture (full fee + ceiling) could be submitted as a taker order.
+
+    Conservative fail-direction: unknown mode (None / legacy proof without
+    execution_mode_intent) → TAKER semantics (full fee + ceiling).  This is the
+    safe conservative side: over-applying the ceiling aborts some valid maker
+    orders (they re-queue and re-try), while under-applying it can admit a
+    non-viable taker cross.
+    """
+    mode = str(proof.execution_mode_intent or "").strip().upper()
+    return mode == "MAKER"
 
 
 def _post_cross_edge(
@@ -5177,6 +5565,15 @@ def _candidate_evaluation_from_proof(
         max_executable_shares=_candidate_max_executable_shares(proof),
         book_hash=_nonnull(row.get("book_hash") or row.get("executable_book_hash") or row.get("snapshot_hash")),
         low_volume_usd=_candidate_low_volume_usd(row),
+        # FIX C: mode-consistent EV provenance (chosen mode + both EVs).
+        execution_mode_intent=proof.execution_mode_intent,
+        ev_taker=proof.ev_taker,
+        ev_maker=proof.ev_maker,
+        maker_limit_price=proof.maker_limit_price,
+        relative_spread_at_eval=proof.relative_spread_at_eval,
+        taker_forbidden_reason=proof.taker_forbidden_reason,
+        maker_fill_probability=proof.maker_fill_probability,
+        maker_fill_probability_source=proof.maker_fill_probability_source,
     )
 
 
@@ -5196,6 +5593,15 @@ def _selection_scoped_proofs(
     locked_opportunity_conn: sqlite3.Connection | None = None,
 ) -> tuple[_CandidateProof, ...]:
     executable = [proof for proof in proofs if proof.execution_price is not None]
+    # FIX A/B hardening (2026-06-10 Milan-24C incident): a priced proof that an
+    # admission gate REJECTED (missing_reason set: DIRECTION_LAW / COVERAGE_
+    # UNLICENSED_TAIL / capital efficiency / buy_no evidence) must not enter the
+    # ΔU ranking at all. Before this filter a rejected proof with a juicy
+    # (corrupt) q_lcb could win the ΔU rank and then dead-end at the
+    # TRADE_SCORE_NON_POSITIVE submit gate — never a bad order, but it STARVED
+    # the legitimate admitted sibling of its selection. Gate-rejected proofs are
+    # unrankable, not merely unsubmittable.
+    executable = [proof for proof in executable if proof.missing_reason is None]
     tradeable_limit = [
         proof
         for proof in executable
@@ -5354,6 +5760,16 @@ def _generate_candidate_proofs(
     )
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
+    # FIX A (direction law; incident 0b5c305e26524042, 2026-06-10 Milan-24C;
+    # docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md): resolve the
+    # family forecast center ONCE — fusion provenance (anchor_value_c /
+    # u0r_fusion.predictive_sigma_c) when the probability authority carries it,
+    # else the q-distribution mean over the family bins (legacy/canonical rows).
+    direction_law_mu, direction_law_sigma = _direction_law_family_center(
+        family=family,
+        q_by_condition=q_by_condition,
+        probability_evidence=probability_evidence,
+    )
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
@@ -5412,13 +5828,30 @@ def _generate_candidate_proofs(
                     )
                 except ValueError as exc:
                     missing_reason = str(exc)
-            score = _robust_trade_score_from_generated_inputs(
-                q_posterior=q_value,
-                q_lcb_5pct=q_lcb,
+            # FIX C (mode-consistent EV; operator directive 2026-06-10): the
+            # trade_score is the CHOSEN execution mode's EV, never the hybrid
+            # taker-cost x visible-depth-p_fill. TAKER-chosen scores are
+            # byte-identical to the legacy kernel (same q_lcb leg, same penalty);
+            # MAKER-chosen scores price the resting reality: bid-improving limit,
+            # conservative fill prior, adverse-selection half-spread haircut.
+            mode_ev = _mode_consistent_ev_for_proof(
+                row=row,
+                direction=direction,
+                q_lcb=q_lcb,
                 execution_price=execution_price,
                 c_cost_95pct=c_cost_95pct,
                 p_fill_lcb=p_fill_lcb,
             )
+            if mode_ev is not None:
+                score = mode_ev.chosen_ev if math.isfinite(mode_ev.chosen_ev) else 0.0
+            else:
+                score = _robust_trade_score_from_generated_inputs(
+                    q_posterior=q_value,
+                    q_lcb_5pct=q_lcb,
+                    execution_price=execution_price,
+                    c_cost_95pct=c_cost_95pct,
+                    p_fill_lcb=p_fill_lcb,
+                )
             # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13 +
             # operator directive): the scalar market-disagreement buy_no demotion
             # (cheap-NO-overconfidence -> score=0) is GONE. It is SUBSUMED by the
@@ -5460,6 +5893,34 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = buy_no_conservative_evidence_reason
+            # FIX A — DIRECTION LAW (operator doctrine as code): buy_yes only
+            # forecast-adjacent, buy_no only forecast-distant. Deterministic
+            # rejection BEFORE ranking/FDR/sizing; the far-tail YES the incident
+            # bought is unconstructable, not down-weighted.
+            direction_law_reason = _direction_law_reason_for_candidate(
+                candidate=candidate,
+                direction=direction,
+                mu=direction_law_mu,
+                predictive_sigma=direction_law_sigma,
+            )
+            if direction_law_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = direction_law_reason
+            # FIX B — COVERAGE_UNLICENSED_TAIL (fail-closed tail licensing): the
+            # K3 coverage gate leaves INSUFFICIENT_DATA bands UNCHANGED (fail-open),
+            # so an unlicensed (FORECAST_BOOTSTRAP) q_lcb could overrule the market
+            # in a longshot. price < 0.05 with q_lcb > 2x price now requires a
+            # settlement-licensed source (EMOS_ANALYTIC / SETTLEMENT_ISOTONIC).
+            coverage_unlicensed_tail_reason = coverage_unlicensed_tail_rejection_reason(
+                q_lcb=q_lcb,
+                execution_price=execution_price.value if execution_price is not None else None,
+                q_lcb_calibration_source=q_lcb_source,
+            )
+            if coverage_unlicensed_tail_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = coverage_unlicensed_tail_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A structurally non-tradeable candidate must not enter the FDR family
@@ -5470,6 +5931,8 @@ def _generate_candidate_proofs(
             if (
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
+                or direction_law_reason is not None
+                or coverage_unlicensed_tail_reason is not None
             ):
                 passed_prefilter = False
             proofs.append(
@@ -5507,9 +5970,210 @@ def _generate_candidate_proofs(
                     # typed column / FK to forecast_posteriors(posterior_id).
                     posterior_id=_optional_int(probability_evidence.get("posterior_id")),
                     probability_authority=probability_evidence.get("probability_authority"),
+                    # FIX C: the mode decision + BOTH EVs ride the proof to the
+                    # receipt (settlement-loop recalibration provenance).
+                    execution_mode_intent=(mode_ev.chosen_mode if mode_ev is not None else None),
+                    ev_taker=(mode_ev.ev_taker if mode_ev is not None else None),
+                    ev_maker=(mode_ev.ev_maker if mode_ev is not None else None),
+                    maker_limit_price=(mode_ev.maker_limit_price if mode_ev is not None else None),
+                    relative_spread_at_eval=(mode_ev.relative_spread if mode_ev is not None else None),
+                    taker_forbidden_reason=(mode_ev.taker_forbidden_reason if mode_ev is not None else None),
+                    maker_fill_probability=(mode_ev.maker_fill_probability if mode_ev is not None else None),
+                    maker_fill_probability_source=(
+                        mode_ev.maker_fill_probability_source if mode_ev is not None else None
+                    ),
                 )
             )
     return tuple(proofs)
+
+
+def _maker_fill_probability_prior() -> tuple[float, str]:
+    """Operator-tunable resting-fill prior (edli_v1.maker_fill_probability_prior).
+
+    Defaults to the module prior (0.10, fee-study measured 10.8% resting fill
+    rate). Settings override carries its own provenance tag so the receipt
+    records WHERE the prior came from (settlement loop recalibration target).
+    """
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_FILL_PROBABILITY_PRIOR,
+        MAKER_FILL_PROBABILITY_SOURCE,
+    )
+
+    try:
+        raw = settings["edli_v1"].get("maker_fill_probability_prior")
+    except Exception:
+        raw = None
+    if raw is None:
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    if not (0.0 < value <= 1.0):
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    return value, "settings.edli_v1.maker_fill_probability_prior"
+
+
+def _taker_max_relative_spread() -> float:
+    """Operator-tunable crossing guard (edli_v1.taker_max_relative_spread)."""
+    from src.strategy.live_inference.mode_consistent_ev import TAKER_MAX_RELATIVE_SPREAD
+
+    try:
+        value = float(settings["edli_v1"].get("taker_max_relative_spread"))
+    except Exception:
+        return TAKER_MAX_RELATIVE_SPREAD
+    if not (0.0 < value <= 2.0):
+        return TAKER_MAX_RELATIVE_SPREAD
+    return value
+
+
+def _native_side_top_of_book(row: dict[str, Any], *, direction: str) -> tuple[float | None, float | None, float]:
+    """(best_bid, best_ask, tick) for the candidate's OWN native side (S1 row)."""
+    book = _native_quote_book_from_snapshot_row(row)
+    if direction == "buy_yes":
+        asks, bids = book.yes_asks, book.yes_bids
+    else:
+        asks, bids = book.no_asks, book.no_bids
+    best_ask = min((float(level.price) for level in asks), default=None)
+    best_bid = max((float(level.price) for level in bids), default=None)
+    return best_bid, best_ask, float(book.min_tick_size)
+
+
+def _mode_consistent_ev_for_proof(
+    *,
+    row: dict[str, Any] | None,
+    direction: str,
+    q_lcb: float,
+    execution_price: ExecutionPrice | None,
+    c_cost_95pct: float | None,
+    p_fill_lcb: float,
+    penalty: float = 0.01,
+):
+    """FIX C: the per-candidate maker/taker EV decision at the evaluation seam.
+
+    Returns None for an unpriced proof (no mode decision exists; the legacy
+    quote-missing no-trade path owns it). Penalty mirrors the legacy robust
+    kernel's lambda_edge so taker-mode scores stay byte-identical to the
+    pre-fix trade_score (same q_lcb leg: c_stress == c_95 and q_lcb <= q_post
+    made the legacy min() always pick the q_lcb leg).
+    """
+    if execution_price is None or row is None or c_cost_95pct is None:
+        return None
+    from src.strategy.live_inference.mode_consistent_ev import select_mode_consistent_ev
+
+    try:
+        best_bid, best_ask, tick = _native_side_top_of_book(row, direction=direction)
+    except Exception:
+        return None
+    p_fill_maker, p_fill_maker_source = _maker_fill_probability_prior()
+    return select_mode_consistent_ev(
+        q_lcb=q_lcb,
+        taker_all_in_cost=c_cost_95pct,
+        p_fill_taker=p_fill_lcb,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        tick_size=tick,
+        reservation=float(execution_price.value),
+        p_fill_maker=p_fill_maker,
+        p_fill_maker_source=p_fill_maker_source,
+        max_relative_spread=_taker_max_relative_spread(),
+        penalty=penalty,
+    )
+
+
+def _direction_law_family_center(
+    *,
+    family,
+    q_by_condition: Mapping[str, float],
+    probability_evidence: Mapping[str, object],
+) -> tuple[float | None, float | None]:
+    """Resolve (mu, predictive_sigma) in the family's bin unit for the direction law.
+
+    FIX A (2026-06-10 Milan-24C incident). Provenance order (Fitz #4):
+      1. The probability authority's fused posterior center —
+         ``probability_evidence["forecast_mu_c"]`` (anchor_value_c, °C) with
+         ``forecast_predictive_sigma_c`` (u0r_fusion predictive sigma, °C),
+         converted into the bin unit.
+      2. Legacy rows without fusion: the q-distribution mean over the family bins
+         (computed natively in the bin unit; open-ended bins contribute their
+         single bound). Sigma is None — the law then uses the strictly
+         conservative 1-settlement-step threshold.
+
+    Returns (None, None) when no center is resolvable (mixed-unit families, no
+    bins, zero q mass) — the law module fail-closes buy_yes on a missing center.
+    """
+    from src.strategy.live_inference.direction_law import (
+        celsius_delta_to_unit,
+        celsius_to_unit,
+    )
+
+    units = {
+        str(candidate.bin.unit)
+        for candidate in family.candidates
+        if getattr(candidate, "bin", None) is not None
+    }
+    if len(units) != 1:
+        return (None, None)
+    unit = next(iter(units))
+    mu_c = _optional_float(probability_evidence.get("forecast_mu_c"))
+    if mu_c is not None:
+        sigma_c = _optional_float(probability_evidence.get("forecast_predictive_sigma_c"))
+        return (
+            celsius_to_unit(mu_c, unit),
+            None if sigma_c is None else celsius_delta_to_unit(sigma_c, unit),
+        )
+    total = 0.0
+    acc = 0.0
+    for candidate in family.candidates:
+        bin_obj = getattr(candidate, "bin", None)
+        if bin_obj is None:
+            continue
+        q = _optional_float(q_by_condition.get(str(candidate.condition_id or "")))
+        if q is None or q <= 0.0:
+            continue
+        low = bin_obj.low
+        high = bin_obj.high
+        if low is not None and high is not None:
+            center = (float(low) + float(high)) / 2.0
+        elif low is not None:
+            center = float(low)
+        elif high is not None:
+            center = float(high)
+        else:
+            continue
+        total += q
+        acc += q * center
+    if total <= 0.0:
+        return (None, None)
+    return (acc / total, None)
+
+
+def _direction_law_reason_for_candidate(
+    *,
+    candidate,
+    direction: str,
+    mu: float | None,
+    predictive_sigma: float | None,
+) -> str | None:
+    """Per-candidate direction-law verdict (FIX A). None = admissible.
+
+    A candidate with no bin object cannot be measured against the center; it is
+    structurally untradeable on this path anyway (bin-binding gates), so the law
+    abstains rather than inventing a distance.
+    """
+    from src.strategy.live_inference.direction_law import direction_law_rejection_reason
+
+    bin_obj = getattr(candidate, "bin", None)
+    if bin_obj is None:
+        return None
+    return direction_law_rejection_reason(
+        direction=direction,
+        bin_low=bin_obj.low,
+        bin_high=bin_obj.high,
+        bin_unit=str(bin_obj.unit),
+        mu=mu,
+        predictive_sigma=predictive_sigma,
+    )
 
 
 def _per_bin_yes_q_lcb(
@@ -5749,6 +6413,50 @@ def _chosen_stake_execution_price(
     return price
 
 
+class _StakeBelowMinOrder(RuntimeError):
+    """The fractional-Kelly chosen stake fell below the venue min order and could NOT
+    be bumped to min order within the bankroll cap.
+
+    This is a SIZING/venue-floor abort, NOT an edge reversal. Raised by the sizing
+    kernel (:func:`_robust_marginal_utility_stake_and_price`) and caught in the submit
+    decision body, where it becomes a distinct ``SUBMIT_ABORTED_BELOW_MIN_ORDER``
+    decision. Never conflated with the zero-stake EDGE_REVERSED gate (antibody for the
+    2026-06-09 false-EDGE_REVERSED regression: a positive-edge candidate whose
+    post-haircut stake was below min order was being mislabeled "no edge").
+    """
+
+
+class _Day0CapExhausted(RuntimeError):
+    """DAY0 family notional headroom is exhausted (PR#404 P0-1).
+
+    Raised by the sizing kernel when ``day0_headroom_usd <= 0`` — the family
+    already carries the configured day0 notional cap. First-class abort
+    (``SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED`` -> receipt reason
+    ``DAY0_EXPOSURE_CAP_EXHAUSTED``), never an edge verdict.
+    """
+
+
+class _Day0CapBelowMinOrder(RuntimeError):
+    """DAY0 family headroom is positive but below the SELECTED curve's REAL
+    venue min-order notional (PR#404 P0-1 — the boundary the old post-hoc
+    clamp got wrong with its 'headroom < $1' constant; real min orders range
+    ~$0.15 to $30+ depending on min_order_size x all-in price). First-class
+    abort (``SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER`` -> receipt reason
+    ``DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER``); the kernel must never emit a
+    stake below the venue floor.
+    """
+
+
+# Operator guard on the auto-bump-to-min-order action (2026-06-09 fix). When the
+# fractional-Kelly haircut shrinks the chosen stake below the venue min order but the
+# ROBUST (q_lcb-based) ΔU at the min-order notional is strictly positive, the sizing
+# path bumps the stake UP to min order — the fractional-Kelly risk intent is preserved
+# because a $0.05–$0.80 min order on a ~$900 wallet is well under this ceiling. The bump
+# is ALLOWED only when min_order_usd <= this fraction of the SIZING bankroll; above it,
+# the candidate aborts as SUBMIT_ABORTED_BELOW_MIN_ORDER rather than over-committing.
+_MIN_ORDER_BUMP_MAX_BANKROLL_PCT = 0.02
+
+
 def _robust_marginal_utility_stake_and_price(
     *,
     family_key: str,
@@ -5757,6 +6465,8 @@ def _robust_marginal_utility_stake_and_price(
     extra_exposure_by_bin_id: Mapping[str, float] | None,
     bankroll_usd: float,
     kelly_multiplier: float,
+    stake_floor_out: dict[str, object] | None = None,
+    day0_headroom_usd: float | None = None,
 ) -> tuple[float, ExecutionPrice | None]:
     """Chosen FRACTIONAL-Kelly stake AND its typed chosen-stake price (spec §5.3 / §14.10).
 
@@ -5786,6 +6496,21 @@ def _robust_marginal_utility_stake_and_price(
     positive-ΔU stake clears min order / depth (a no-trade) or the boundary cannot
     be priced. The selected proof is scored within the WHOLE family so the π /
     exposure / OUTSIDE geometry matches the ranking decision exactly.
+
+    MIN-ORDER FLOOR (2026-06-09 false-EDGE_REVERSED fix). When the fractional-Kelly
+    haircut shrinks the chosen stake below the venue min-order notional but the ROBUST
+    ΔU at min order is strictly positive AND min order is within the bankroll-cap guard
+    (``_MIN_ORDER_BUMP_MAX_BANKROLL_PCT``), the stake is BUMPED to min order and the
+    floor is recorded in ``stake_floor_out`` (if provided) as
+    ``stake_floor="VENUE_MIN_ORDER"``. When the bump is not admissible (bankroll cap
+    fails) it raises :class:`_StakeBelowMinOrder` — a DISTINCT sizing abort the decision
+    body maps to ``SUBMIT_ABORTED_BELOW_MIN_ORDER``, never EDGE_REVERSED. A genuinely
+    reversed candidate (no positive-ΔU stake at ANY admissible size incl. min order)
+    still returns ``(0.0, None)`` -> EDGE_REVERSED.
+
+    ``stake_floor_out`` (optional): a caller-owned dict the kernel writes the stake-floor
+    provenance into on a bump. Left unset by callers that don't need provenance (the
+    behavior is otherwise identical), so existing 2-tuple call sites are unaffected.
     """
     if bankroll_usd <= 0.0 or selected_proof.execution_price is None:
         return 0.0, None
@@ -5838,6 +6563,19 @@ def _robust_marginal_utility_stake_and_price(
         max_stake = min(_fractional_cap, _concentration_ceiling)
     else:
         max_stake = _fractional_cap
+    # DAY0 EXPOSURE CAP as a KERNEL bound (PR#404 P0-1): the family headroom is
+    # one more upper bound in the same feasible region as the fractional-Kelly
+    # budget and the concentration ceiling — the chosen stake (and therefore
+    # the chosen-stake execution price below) is optimized WITHIN it, never
+    # post-clamped. Exhausted headroom is a first-class abort here.
+    if day0_headroom_usd is not None:
+        _day0_headroom = Decimal(str(day0_headroom_usd))
+        if _day0_headroom <= Decimal("0"):
+            raise _Day0CapExhausted(
+                f"day0 family notional headroom exhausted: headroom="
+                f"{float(_day0_headroom):.6f} USD (cap minus existing family exposure)"
+            )
+        max_stake = min(max_stake, _day0_headroom)
     scored, proof_by_hypothesis = _score_family_candidates_by_robust_marginal_utility(
         executable=list(all_proofs),
         family_key=family_key,
@@ -5861,6 +6599,66 @@ def _robust_marginal_utility_stake_and_price(
         chosen = Decimal(str(min(Decimal(str(fractional)), max_stake)))
         if chosen <= Decimal("0"):
             return 0.0, None
+
+        # MIN-ORDER-AWARE STAKE FLOOR (2026-06-09 false-EDGE_REVERSED fix). The ΔU
+        # optimizer sizes ``optimal_stake_usd`` on the full bankroll; the fractional-
+        # Kelly haircut (×mult, e.g. 0.125) then shrinks the chosen stake. For cheap
+        # low-probability bins the haircut stake can fall BELOW the venue min-order
+        # notional even though the ROBUST (q_lcb-based) edge at min order is strictly
+        # positive. Previously ``_chosen_stake_execution_price`` raised "below min
+        # order" and the generic except mapped it to (0.0, None) -> a FALSE
+        # EDGE_REVERSED. Now: if the haircut stake is below min order BUT ΔU at the
+        # min-order notional is strictly positive AND min order is within the operator
+        # bankroll-cap guard, BUMP the stake up to min order (the fractional-Kelly risk
+        # intent is preserved — a sub-$1 min order on a ~$900 wallet is << the cap) and
+        # record the floor in provenance. Otherwise raise ``_StakeBelowMinOrder`` so the
+        # decision body emits a DISTINCT SUBMIT_ABORTED_BELOW_MIN_ORDER (never
+        # EDGE_REVERSED). ΔU(min_order) is the SAME robust q_lcb-based π/exposure the
+        # ranker used (utility_ranker records it on the score), so the min-order edge is
+        # robust-consistent, never a looser point estimate.
+        min_order_usd = Decimal(str(score.min_order_notional_usd))
+        # DAY0 cap vs REAL venue floor (PR#404 P0-1): when the day0 headroom
+        # cannot even cover the SELECTED curve's min-order notional, no
+        # admissible stake exists — first-class DAY0_CAP_BELOW_MIN_ORDER abort
+        # (the min-order bump below must never bump THROUGH the cap).
+        if (
+            day0_headroom_usd is not None
+            and min_order_usd > Decimal("0")
+            and Decimal(str(day0_headroom_usd)) < min_order_usd
+        ):
+            raise _Day0CapBelowMinOrder(
+                f"day0 family headroom {float(day0_headroom_usd):.6f} USD below the "
+                f"selected market's venue min-order notional "
+                f"{float(min_order_usd):.6f} USD — no admissible stake within the cap"
+            )
+        if min_order_usd > Decimal("0") and chosen < min_order_usd:
+            delta_u_at_min = float(score.delta_u_at_min_order)
+            bankroll_cap = Decimal(str(_MIN_ORDER_BUMP_MAX_BANKROLL_PCT)) * Decimal(
+                str(bankroll_usd)
+            )
+            if delta_u_at_min > 0.0 and min_order_usd <= bankroll_cap:
+                # Edge is genuinely positive at min order and the floor is within the
+                # bankroll cap -> trade at the venue minimum.
+                chosen = min_order_usd
+                if stake_floor_out is not None:
+                    stake_floor_out["stake_floor"] = "VENUE_MIN_ORDER"
+                    stake_floor_out["stake_floor_min_order_usd"] = float(min_order_usd)
+                    stake_floor_out["stake_floor_delta_u_at_min_order"] = delta_u_at_min
+            else:
+                # Either ΔU(min_order) <= 0 (no admissible positive-edge stake — but the
+                # ranker already excluded that via is_no_trade above, so this arm is the
+                # bankroll-cap guard) or min order exceeds the bankroll cap. Distinct
+                # BELOW_MIN_ORDER abort — NOT an edge reversal.
+                raise _StakeBelowMinOrder(
+                    f"chosen stake {float(chosen):.6f} USD below venue min order "
+                    f"{float(min_order_usd):.6f} USD; "
+                    f"delta_u_at_min_order={delta_u_at_min:.6g}, "
+                    f"min_order_usd/bankroll_cap={float(min_order_usd):.6f}/"
+                    f"{float(bankroll_cap):.6f} "
+                    f"(positive edge at min order but stake floor not admissible; "
+                    f"NOT an edge reversal)"
+                )
+
         # S5 boundary: reprice the SELECTED leg at the CHOSEN stake on its OWN curve
         # (the depth-walked avg cost — Hidden #6), as the typed Kelly cost-of-entry.
         curve = score.candidate.executable_cost_curve
@@ -5868,10 +6666,31 @@ def _robust_marginal_utility_stake_and_price(
             return float(chosen), None
         try:
             price = _chosen_stake_execution_price(curve, chosen)
-        except (ValueError, ArithmeticError, ExecutionPriceContractError):
-            # Chosen stake not fillable at this curve (depth/min-order/off-grid) or
-            # the boundary is Kelly-unsafe -> no priced stake (fail closed, §13).
+        except ValueError as exc:
+            # NARROWED except (2026-06-09): a "below min order" ValueError must NOT be
+            # conflated with arithmetic/contract faults. After the bump above the chosen
+            # stake is >= min order on the live path, so a below-min ValueError here is a
+            # genuine venue-floor block -> route to the distinct BELOW_MIN_ORDER abort.
+            # Any OTHER ValueError (depth exhaustion / off-grid) keeps the original
+            # fail-closed behavior (0.0 -> EDGE_REVERSED), unchanged.
+            if "min_order_size" in str(exc) or "below" in str(exc):
+                raise _StakeBelowMinOrder(
+                    f"chosen-stake pricing rejected below min order: {exc}"
+                ) from exc
             return 0.0, None
+        except (ArithmeticError, ExecutionPriceContractError):
+            # Arithmetic/contract fault on the boundary -> no priced stake (fail closed,
+            # §13). Genuinely unexpected; keep the conservative no-trade behavior.
+            return 0.0, None
+        # DAY0 cap INVARIANT (PR#404 P0-1): final stake + existing family
+        # notional <= cap + epsilon, by construction (chosen <= max_stake <=
+        # headroom). Asserted so any future re-ordering of the bounds above
+        # fails loudly instead of leaking notional past the cap.
+        if day0_headroom_usd is not None:
+            assert float(chosen) <= float(day0_headroom_usd) + 1e-6, (
+                f"DAY0 exposure-cap invariant violated: chosen stake {float(chosen):.6f} "
+                f"USD exceeds family headroom {float(day0_headroom_usd):.6f} USD"
+            )
         return float(chosen), price
     return 0.0, None
 
@@ -5894,6 +6713,10 @@ _SUBMIT_ABORT_RECEIPT_REASON: dict[CandidateLifecycleState, str] = {
     CandidateLifecycleState.SUBMIT_ABORTED_PRICE_MOVED: "SUBMIT_ABORTED_PRICE_MOVED",
     CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED: "SUBMIT_ABORTED_EDGE_REVERSED",
     CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED: "SUBMIT_ABORTED_FAMILY_REVERSED",
+    CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER: "SUBMIT_ABORTED_BELOW_MIN_ORDER",
+    # PR#404 P0-1 — first-class day0 exposure-cap aborts (operator-named reasons).
+    CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED: "DAY0_EXPOSURE_CAP_EXHAUSTED",
+    CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER: "DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER",
 }
 
 
@@ -5964,6 +6787,9 @@ def _evaluate_submit_recapture_for_selected(
     kelly_multiplier: float,
     forecast_still_current: bool,
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    stake_floor_out: dict[str, object] | None = None,
+    order_rests_at_admitted_price: bool = False,
+    day0_headroom_usd: float | None = None,
 ) -> tuple[SubmitRecaptureDecision, float, ExecutionPrice | None]:
     """THE single fail-closed submit-recapture gate (spec §5 / §7 / §14.9 / §14.10).
 
@@ -5993,8 +6819,13 @@ def _evaluate_submit_recapture_for_selected(
       2. family rank reversed (selected leg no longer the ΔU primary on fresh curves)
          -> FAMILY_REVERSED (abort + defer to full re-rank; a non-primary leg never
          price/edge-checks — Hidden #7 / §5 AbortOrSwitchOnlyAfterFullRerank);
-      3. stake <= 0 (no positive-utility stake on the fresh curve) -> EDGE_REVERSED
-         (utility nonpositive, §5 ``if utility <= 0: Abort``);
+      3. stake <= 0 (no positive-utility stake at ANY admissible size INCLUDING min
+         order on the fresh curve) -> EDGE_REVERSED (utility nonpositive, §5 ``if
+         utility <= 0: Abort``);
+      3b. positive edge at min order but the fractional-Kelly haircut stake is below
+         the venue min order and cannot be bumped within the bankroll cap ->
+         BELOW_MIN_ORDER (a DISTINCT sizing abort, NOT an edge reversal — 2026-06-09
+         antibody; the regret ledger records the true cause);
       4. recaptured all-in cost > ``max_acceptable_price`` -> PRICE_MOVED;
       5. ``edge_lcb = q_lcb - all_in_cost <= 0`` or forecast not current -> EDGE_REVERSED.
 
@@ -6067,21 +6898,78 @@ def _evaluate_submit_recapture_for_selected(
         )
 
     # Recompute the chosen fractional-Kelly stake + chosen-stake price on the FRESH
-    # curve (the S5 kernel — same scored candidate, same curve, no drift).
-    chosen_stake_usd, chosen_price = _robust_marginal_utility_stake_and_price(
-        family_key=family_key,
-        selected_proof=selected_proof,
-        all_proofs=all_proofs,
-        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
-        bankroll_usd=bankroll_usd,
-        kelly_multiplier=kelly_multiplier,
-    )
+    # curve (the S5 kernel — same scored candidate, same curve, no drift). The kernel
+    # raises _StakeBelowMinOrder (a DISTINCT sizing abort) when the haircut stake is
+    # below the venue min order AND cannot be bumped within the bankroll cap — that is
+    # NOT an edge reversal and must NOT be folded into the zero-stake EDGE gate below.
+    try:
+        chosen_stake_usd, chosen_price = _robust_marginal_utility_stake_and_price(
+            family_key=family_key,
+            selected_proof=selected_proof,
+            all_proofs=all_proofs,
+            extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+            bankroll_usd=bankroll_usd,
+            kelly_multiplier=kelly_multiplier,
+            stake_floor_out=stake_floor_out,
+            day0_headroom_usd=day0_headroom_usd,
+        )
+    except _Day0CapExhausted as exc:
+        # DAY0 cap GATE (PR#404 P0-1): family notional headroom exhausted —
+        # first-class abort, never an edge verdict, never a post-hoc clamp.
+        return (
+            SubmitRecaptureDecision(
+                state=CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED,
+                may_submit=False,
+                reversal_reason=ReversalReason.DAY0_CAP,
+                detail=str(exc),
+            ),
+            0.0,
+            None,
+        )
+    except _Day0CapBelowMinOrder as exc:
+        # DAY0 cap vs REAL venue floor (PR#404 P0-1): positive headroom that
+        # cannot cover the selected market's min-order notional — no admissible
+        # stake exists within the cap. Distinct from BELOW_MIN_ORDER (which is
+        # the bankroll-cap guard) so the regret ledger separates "cap full" from
+        # "venue floor above sizing intent".
+        return (
+            SubmitRecaptureDecision(
+                state=CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER,
+                may_submit=False,
+                reversal_reason=ReversalReason.DAY0_CAP,
+                detail=str(exc),
+            ),
+            0.0,
+            None,
+        )
+    except _StakeBelowMinOrder as exc:
+        # GATE 3b (BELOW_MIN_ORDER, 2026-06-09 antibody). Edge is positive at min order
+        # but the sized stake could not clear the venue floor within the bankroll cap.
+        # A DISTINCT first-class abort so the regret ledger records the true cause —
+        # EDGE_REVERSED keeps meaning "no edge at ANY admissible stake".
+        return (
+            SubmitRecaptureDecision(
+                state=CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER,
+                may_submit=False,
+                reversal_reason=ReversalReason.MIN_ORDER,
+                detail=(
+                    f"recaptured edge positive at min order but fractional-Kelly stake "
+                    f"below venue min order and not bump-admissible within the bankroll "
+                    f"cap: {exc}"
+                ),
+            ),
+            0.0,
+            None,
+        )
 
     # GATE 3 (edge reversed, §5 'utility <= 0: Abort' / §7 edge row). A zero chosen
     # stake on a PRESENT fresh curve is an edge reversal: the recompute found no
-    # positive-utility stake (q_lcb fell, cost rose, or exposure concavity killed it).
-    # Surface it as EDGE_REVERSED directly — feeding stake_usd=0 to the engine would
-    # make avg_cost(0) raise (below min order) and mis-map to PRICE_MOVED.
+    # positive-utility stake at ANY admissible size including min order (q_lcb fell,
+    # cost rose, or exposure concavity killed it). NOTE: a below-min-order-but-positive
+    # edge case is handled by GATE 3b above (distinct BELOW_MIN_ORDER), so reaching here
+    # with stake 0 genuinely means no positive-ΔU stake exists. Surface as EDGE_REVERSED
+    # directly — feeding stake_usd=0 to the engine would make avg_cost(0) raise (below
+    # min order) and mis-map to PRICE_MOVED.
     if chosen_stake_usd <= 0.0:
         return (
             SubmitRecaptureDecision(
@@ -6118,6 +7006,12 @@ def _evaluate_submit_recapture_for_selected(
             recaptured_q_lcb=float(candidate.q_lcb),
             forecast_still_current=bool(forecast_still_current),
             family_rank_reversed=False,
+            # MAKER (resting GTC/GTD limit at the admitted price) skips the PRICE_MOVED
+            # ceiling: the order rests, never chases the recaptured ask. TAKER (FOK/FAK)
+            # crosses and pays the recaptured cost, so the bounded slippage tolerance
+            # governs the ceiling. Fail-closed False (taker ceiling) when the mode is
+            # not supplied.
+            order_rests_at_admitted_price=bool(order_rests_at_admitted_price),
         ),
     )
     if decision.may_submit:
@@ -6407,6 +7301,19 @@ def _live_yes_probabilities(
             decision_time=decision_time,
         )
     if event.event_type == "DAY0_EXTREME_UPDATED":
+        # ORACLE ANOMALY PAUSE (day0 review 2026-06-10 item E, Paris-CDG class):
+        # when the WU-vs-METAR divergence detector has flagged this family's
+        # (city, target_date), no day0 q may be built — the running extreme's
+        # truth source is suspect (sensor tampering / feed fault). Raising here
+        # converts to a deterministic no-submit receipt at the
+        # _generate_candidate_proofs ValueError boundary
+        # (LIVE_INFERENCE_INPUTS_MISSING:DAY0_ORACLE_ANOMALY_PAUSED:...).
+        from src.data.day0_oracle_anomaly import is_day0_family_paused
+
+        if is_day0_family_paused(str(family.city), str(family.target_date)):
+            raise ValueError(
+                f"DAY0_ORACLE_ANOMALY_PAUSED:{family.city}:{family.target_date}"
+            )
         generated = _canonical_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -6423,6 +7330,21 @@ def _live_yes_probabilities(
             family=family,
             q_by_condition=q_by_condition,
             lcb_by_condition=lcb_by_condition,
+            decision_time=decision_time,
+        )
+        # LCB AUDIT IDENTITY (PR#404 P1): the staleness guard can revoke submit
+        # licenses (q_lcb -> 0) WITHOUT moving q, so p_live_vector_hash alone
+        # cannot distinguish two receipts with different eligibility. Hash the
+        # buy_yes LCB vector AND the full day0 lcb transform (per-direction
+        # lcbs, mask, suppressed bins, obs age/budget/margin) so receipts can
+        # explain 'q unchanged but submit license revoked'.
+        import hashlib
+
+        from src.calibration.qlcb_provenance import _qlcb_float as _lcbf
+
+        _lcb_transform = payload.get("_edli_day0_lcb_transform") or {}
+        _transform_canonical = json.dumps(
+            _lcb_transform, sort_keys=True, separators=(",", ":"), default=str
         )
         return masked_q, masked_lcb, p_values, prefilter, {
             **evidence,
@@ -6430,8 +7352,58 @@ def _live_yes_probabilities(
                 masked_q[str(candidate.condition_id or "")]
                 for candidate in family.candidates
             ),
+            "q_lcb_vector_hash": _probability_vector_hash(
+                _lcbf(masked_lcb.get((str(candidate.condition_id or ""), "buy_yes"), 0.0))
+                for candidate in family.candidates
+            ),
+            "day0_lcb_transform_hash": "sha256:"
+            + hashlib.sha256(_transform_canonical.encode("utf-8")).hexdigest(),
+            "day0_lcb_staleness_suppressed_bins": len(
+                _lcb_transform.get("staleness_suppressed_conditions") or ()
+            ),
+            "day0_lcb_obs_age_minutes": _lcb_transform.get("obs_age_minutes"),
+            "day0_lcb_staleness_budget_minutes": _lcb_transform.get("staleness_budget_minutes"),
+            "day0_lcb_staleness_margin": _lcb_transform.get("staleness_margin"),
         }
     raise ValueError(f"unsupported EDLI event type for inference: {event.event_type}")
+
+
+# FIX 1 (2026-06-09) — replacement q-mode live eligibility gate. The materializer derives an
+# explicit `replacement_q_mode` into provenance_json (FUSED_NORMAL_FULL/PARTIAL,
+# SOFT_ANCHOR_FALLBACK, U0R_CAPTURE_MISSING, FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY
+# for the two fused-Normal modes (the constructed Normal shape the release evidence assumes).
+# This kills the silent-degradation category: a row that fell back to the legacy member-vote
+# soft-anchor q (or had no fusion at all) must NOT size live Kelly under the wrong probability
+# regime just because all flags were on.
+_REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
+_REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
+_REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
+    {_REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL, _REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL}
+)
+
+
+def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bool, str]:
+    """Return (live_eligible, mode) for a replacement posterior bundle. Fail-closed.
+
+    Reads provenance_json.replacement_q_mode. Eligible ONLY for the two fused-Normal modes.
+
+    GRANDFATHERING: pre-change live rows (the 67 already in the DB) have NO replacement_q_mode key
+    but were built with q_shape=="fused_normal_direct" (the constructed fused-Normal shape) — those
+    are treated as a fused-Normal mode so this change does not brick them; the next materialization
+    adds the explicit key. A row with NO mode key AND q_shape != "fused_normal_direct" is the legacy
+    member-vote soft-anchor shape and is NOT live-eligible (fail-closed).
+    """
+    provenance = getattr(replacement_bundle, "provenance_json", None)
+    if not isinstance(provenance, Mapping):
+        provenance = {}
+    mode = provenance.get("replacement_q_mode")
+    if isinstance(mode, str) and mode:
+        return (mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE, mode)
+    # No explicit mode key: grandfather only the constructed fused-Normal shape.
+    q_shape = str(provenance.get("q_shape") or "")
+    if q_shape == "fused_normal_direct":
+        return (True, "FUSED_NORMAL_GRANDFATHERED")
+    return (False, "NO_Q_MODE_KEY")
 
 
 def _replacement_authority_enabled() -> bool:
@@ -6662,6 +7634,31 @@ def _replacement_anchor_mu_c(replacement_bundle: object) -> float | None:
         return None
 
 
+def _replacement_predictive_sigma_c(replacement_bundle: object) -> float | None:
+    """The fused posterior's predictive sigma (°C) from u0r_fusion provenance.
+
+    FIX A (direction law, 2026-06-10 Milan-24C incident): read from
+    ``provenance_json.u0r_fusion.predictive_sigma_c`` — the T2_BAYES fusion's own
+    predictive sigma, NOT the settlement-floored sigma (the floored ~3.3C value
+    would widen the direction-law band enough to re-admit the incident trade).
+    ``None`` when absent so the law degrades to the 1-settlement-step threshold
+    (strictly conservative).
+    """
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    fusion = provenance.get("u0r_fusion")
+    if not isinstance(fusion, Mapping):
+        return None
+    value = fusion.get("predictive_sigma_c")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _replacement_yes_lcb_for_bin(
     replacement_bundle: object,
     *,
@@ -6787,6 +7784,60 @@ def _replacement_authority_probability_and_fdr_proof(
     if not bundle_result.ok or bundle_result.bundle is None:
         raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED:{bundle_result.reason_code}")
     replacement_bundle = bundle_result.bundle
+    # FIX 1 (2026-06-09) — q-mode live eligibility gate. Real submit is allowed ONLY when the
+    # replacement posterior's q was built as a fused-Normal (FUSED_NORMAL_FULL/PARTIAL, or a
+    # grandfathered q_shape=="fused_normal_direct" row). Every other mode (soft-anchor fallback,
+    # capture missing, fused-q build failed, or a legacy non-fused row without the key) is a
+    # deterministic no-submit: the row sizes Kelly under a DIFFERENT probability regime than the
+    # release evidence assumes. Raising here becomes a LIVE_INFERENCE_INPUTS_MISSING no-submit
+    # receipt at the caller (data-class check; fail-closed).
+    _q_mode_eligible, _q_mode = _replacement_q_mode_live_eligibility(replacement_bundle)
+    if not _q_mode_eligible:
+        raise ValueError(f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#{_q_mode}")
+    # PR#403 FIX (2026-06-09) — belt-and-braces bounds presence check. The materializer now
+    # degrades FULL/PARTIAL to FUSED_NORMAL_BOUNDS_MISSING when bounds fail, so the q_mode gate
+    # above already catches new materializations. This second check catches rows materialized
+    # BEFORE the fix (which have FULL/PARTIAL mode but NULL q_lcb_json / q_ucb_json) and any
+    # future code path that might set a live-eligible mode without writing bounds.
+    #
+    # Requirement: when q_shape=="fused_normal_direct" (or grandfathered as such), the bundle
+    # MUST carry BOTH q_lcb and q_ucb as non-empty mappings AND q_lcb_basis must equal the
+    # fused-center bootstrap marker. Absent/mismatched => reject with FUSED_NORMAL_BOUNDS_MISSING.
+    #
+    # GRANDFATHERED rows (pre-bounds, q_mode="FUSED_NORMAL_GRANDFATHERED") are the hardest case:
+    # they predate bounds materialization entirely and therefore have NO q_lcb/q_ucb. They are
+    # NOT live-eligible now. That is the correct hard line: a row that sizes Kelly under fused-Normal
+    # q but uses the Wilson LCB authority of the REPLACED chain is a regime mismatch regardless of
+    # how it got there. The next materialization will write proper bounds and be admitted.
+    _prov_bounds_check = getattr(replacement_bundle, "provenance_json", None) or {}
+    _q_shape_for_bounds = str(
+        _prov_bounds_check.get("q_shape") if isinstance(_prov_bounds_check, Mapping) else ""
+    )
+    _needs_bounds = (
+        _q_shape_for_bounds == "fused_normal_direct"
+        or _q_mode == "FUSED_NORMAL_GRANDFATHERED"
+    )
+    if _needs_bounds:
+        _bundle_q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
+        _bundle_q_ucb = getattr(replacement_bundle, "q_ucb", None) or {}
+        _lcb_basis = (
+            _prov_bounds_check.get("q_lcb_basis")
+            if isinstance(_prov_bounds_check, Mapping)
+            else None
+        )
+        _bounds_ok = (
+            isinstance(_bundle_q_lcb, Mapping)
+            and bool(_bundle_q_lcb)
+            and isinstance(_bundle_q_ucb, Mapping)
+            and bool(_bundle_q_ucb)
+            and _lcb_basis == "fused_center_bootstrap_p05"
+        )
+        if not _bounds_ok:
+            raise ValueError(
+                f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#FUSED_NORMAL_BOUNDS_MISSING"
+                f":q_shape={_q_shape_for_bounds}:q_mode={_q_mode}"
+                f":lcb_basis={_lcb_basis}"
+            )
     q_by_condition: dict[str, float] = {}
     lcb_by_direction: QlcbByDirection = QlcbByDirection()
     p_values: dict[tuple[str, str], float] = {}
@@ -6918,6 +7969,13 @@ def _replacement_authority_probability_and_fdr_proof(
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",
+        # FIX A (direction law; 2026-06-10 Milan-24C incident): thread the fused
+        # posterior center + predictive sigma (°C) to the proof-construction seam
+        # so candidate admission can enforce buy_yes <=> bin ~= forecast. Read
+        # UNCONDITIONALLY (not gated by the sigma-floor flag): the law needs the
+        # center whenever fusion provenance carries one.
+        "forecast_mu_c": _replacement_anchor_mu_c(replacement_bundle),
+        "forecast_predictive_sigma_c": _replacement_predictive_sigma_c(replacement_bundle),
         "posterior_id": str(replacement_bundle.posterior_id),
         "replacement_product_id": replacement_bundle.product_id,
         "p_cal_vector_hash": _probability_vector_hash(
@@ -7446,6 +8504,86 @@ def _make_emos_bootstrap_sampler(mu_native: float, sigma_native: float):
     return _sampler
 
 
+def _make_day0_bootstrap_sampler(
+    *,
+    members_native,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: "datetime | None",
+):
+    """Obs-floor-conditional bootstrap sampler for the DAY0 q_lcb (review item D).
+
+    Per draw: resample member daily extremes (with replacement) + instrument
+    noise widened by obs staleness (margin/2 treated as ~1 extra sigma of
+    unobserved boundary motion), clamp to the absorbing physical law
+    (HIGH: max(draw, running max); LOW: min(draw, running min)), settle-round
+    via the analysis's own convention, bin, apply the absorbing mask,
+    renormalize. Returns None (caller falls back to the legacy static sampler,
+    loudly) when inputs cannot support a bootstrap.
+    """
+    try:
+        members = np.asarray(members_native, dtype=float).ravel()
+        members = members[np.isfinite(members)]
+        if members.size == 0:
+            raise ValueError("no finite members for day0 bootstrap")
+        rounded = _optional_float(payload.get("rounded_value"))
+        metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
+        if metric not in {"high", "low"}:
+            raise ValueError(f"unsupported day0 metric for bootstrap: {metric!r}")
+        mask = _day0_absorbing_mask(payload=payload, family=family)
+        from src.signal.forecast_uncertainty import sigma_instrument
+        from src.signal.day0_obs_latency import (
+            stale_extreme_uncertainty_margin,
+            staleness_budget_minutes,
+        )
+
+        base_sigma = float(sigma_instrument(unit).value)
+        obs_age_min = _day0_observation_age_minutes(payload, decision_time)
+        budget_min = staleness_budget_minutes(str(getattr(family, "city", "") or ""))
+        margin = stale_extreme_uncertainty_margin(
+            unit=unit, obs_age_minutes=obs_age_min, budget_minutes=budget_min
+        )
+        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
+        if not (sigma > 0.0 and np.isfinite(sigma)):
+            raise ValueError(f"day0 bootstrap sigma invalid: {sigma}")
+    except Exception as exc:  # noqa: BLE001 — degrade LOUDLY to the static sampler
+        import logging as _logging
+
+        _logging.getLogger("zeus.day0_bootstrap_lcb").warning(
+            "DAY0_BOOTSTRAP_LCB_UNAVAILABLE city=%s exc=%s: %s — static q_lcb fallback (q_lcb==q)",
+            getattr(family, "city", "?"), type(exc).__name__, exc,
+        )
+        return None
+
+    members_arr = members
+    mask_arr = np.asarray(mask, dtype=float)
+
+    def _sampler(analysis, n_members):
+        n = max(1, int(n_members))
+        idx = analysis._rng.integers(0, members_arr.size, n)
+        draws = members_arr[idx] + analysis._rng.normal(0.0, sigma, n)
+        if rounded is not None:
+            if metric == "high":
+                draws = np.maximum(draws, float(rounded))
+            else:
+                draws = np.minimum(draws, float(rounded))
+        measured = analysis._settle(draws)
+        vec = np.array(
+            [analysis._bin_probability(measured, bb) for bb in analysis.bins], dtype=float
+        )
+        if vec.shape == mask_arr.shape:
+            vec = vec * mask_arr
+        if not np.all(np.isfinite(vec)):
+            return np.asarray(analysis.p_cal, dtype=float)
+        s = float(vec.sum())
+        if s <= 0.0:
+            return np.asarray(analysis.p_cal, dtype=float)
+        return vec / s
+
+    return _sampler
+
+
 def _market_analysis_from_event_snapshot(
     *,
     calibration_conn: sqlite3.Connection,
@@ -7607,14 +8745,37 @@ def _market_analysis_from_event_snapshot(
             )
             p_cal = np.asarray(p_raw, dtype=float)
     else:
-        members, _bias_corrected = _maybe_apply_edli_bias_correction(
-            raw_members, snapshot=snapshot, family=family, city=city, payload=payload
-        )
+        # === DAY0 REMAINING-DAY MODE (review 2026-06-10 item B, flag-gated OFF) ===
+        # When ON and fresh high-res hourly vectors are persisted for this family
+        # (day0_hourly_vectors lane), the member array becomes the pooled per-model
+        # REMAINING-day extremes (hours >= now, city-local), clamped to the absorbing
+        # physical law (HIGH: max(model_remaining, running max)). This prices
+        # P(remaining excursion | now) instead of the full-day distribution —
+        # below-floor remaining members land IN the floor bin (the post-peak
+        # repricing) rather than being renormalized away. Platt is SKIPPED in this
+        # mode (identity p_cal): the fitted Platt's domain is full-day member
+        # distributions, not remaining-day pools. The absorbing mask below still
+        # applies, and the day0 bootstrap sampler draws from the SAME members.
+        _day0_rd_members = None
+        if family.event_type == "DAY0_EXTREME_UPDATED" and _day0_remaining_day_q_enabled():
+            _day0_rd_members = _day0_remaining_day_members(
+                payload=payload, family=family, unit=unit, decision_time=decision_time
+            )
+        if _day0_rd_members is not None:
+            members = _day0_rd_members
+            _bias_corrected = False
+            payload["_edli_q_source"] = "day0_remaining_day"
+            payload["_edli_day0_q_mode"] = "remaining_day"
+        else:
+            members, _bias_corrected = _maybe_apply_edli_bias_correction(
+                raw_members, snapshot=snapshot, family=family, city=city, payload=payload
+            )
         if _bias_corrected:
             payload["_edli_bias_corrected"] = True
         # #120: maze-fallback calibrator provenance (EMOS did not serve this cell).
         # "bias_platt" = bias-corrected members fed to Platt; "platt" = plain.
-        payload["_edli_q_source"] = "bias_platt" if _bias_corrected else "platt"
+        if _day0_rd_members is None:
+            payload["_edli_q_source"] = "bias_platt" if _bias_corrected else "platt"
         # Grid→point representativeness correction (lead-invariant, OOS-validated).
         # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
         # Applied on the (potentially bias-corrected) member array so both corrections compose.
@@ -7645,15 +8806,19 @@ def _market_analysis_from_event_snapshot(
             snapshot, family=family, bins=bins, members=members, payload=payload,
             members_already_corrected=True,
         )
-        p_cal = _snapshot_p_cal(
-            calibration_conn,
-            snapshot=snapshot,
-            family=family,
-            bins=bins,
-            p_raw=p_raw,
-            payload=payload,
-            decision_time=decision_time,
-        )
+        if _day0_rd_members is not None:
+            # remaining-day mode: identity calibration (see block comment above)
+            p_cal = np.asarray(p_raw, dtype=float)
+        else:
+            p_cal = _snapshot_p_cal(
+                calibration_conn,
+                snapshot=snapshot,
+                family=family,
+                bins=bins,
+                p_raw=p_raw,
+                payload=payload,
+                decision_time=decision_time,
+            )
         if family.event_type == "DAY0_EXTREME_UPDATED":
             p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
             p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
@@ -7674,12 +8839,34 @@ def _market_analysis_from_event_snapshot(
     sampler = _emos_sampler  # one-calibrator (#110): EMOS N(mu,sigma) lcb bootstrap, else None
     is_day0 = family.event_type == "DAY0_EXTREME_UPDATED"
     if is_day0:
-        static_p_cal = np.asarray(p_cal, dtype=float)
+        # DAY0 q_lcb FIX (first-principles review 2026-06-10 item D): the prior
+        # static sampler returned p_cal verbatim every draw, so the bootstrap
+        # percentile collapsed to the point estimate (q_lcb == q — ZERO
+        # uncertainty quantification on the day0 lane). Replace with a real
+        # obs-floor-conditional member bootstrap: each draw resamples the
+        # member extremes, adds instrument noise WIDENED by the measured
+        # per-city obs staleness (config/wu_obs_latency.json), clamps to the
+        # absorbing physical law (final >= running max / final <= running min),
+        # settles, bins, and applies the absorbing mask. q_lcb < q again, and
+        # it widens honestly when the running extreme is stale. Any
+        # construction failure degrades LOUDLY to the legacy static sampler
+        # (no regression vs the pre-fix behavior).
+        _day0_sampler = _make_day0_bootstrap_sampler(
+            members_native=members,
+            payload=payload,
+            family=family,
+            unit=unit,
+            decision_time=decision_time,
+        )
+        if _day0_sampler is not None:
+            sampler = _day0_sampler
+        else:
+            static_p_cal = np.asarray(p_cal, dtype=float)
 
-        def _static_sampler(_analysis, _n_members):
-            return static_p_cal
+            def _static_sampler(_analysis, _n_members):
+                return static_p_cal
 
-        sampler = _static_sampler
+            sampler = _static_sampler
     # K1 — ForecastSharpnessEvidence (Phase-2, REQUIRED ctor param). Day0/imminent
     # paths are exempt (the realized observation replaces the forecast, so forecast
     # sharpness is moot). Otherwise load the settlement MAE for (city, unit, lead)
@@ -9343,12 +10530,162 @@ def _apply_day0_mask_to_probability_vector(*, payload: dict[str, object], family
     return masked / total
 
 
+def _day0_observation_age_minutes(
+    payload: dict[str, object], decision_time: "datetime | None"
+) -> float | None:
+    """Age of the day0 running extreme at decision time, in minutes.
+
+    Measured from the OBSERVATION VALID TIME (payload.observation_time — the
+    station report timestamp), not from imported_at/observation_available_at:
+    the absorbing boundary's truth-age is how old the station report itself is.
+    Returns None when unparseable (callers must treat None as MAXIMALLY STALE —
+    fail-closed; see day0 first-principles review 2026-06-10, charge #1).
+    """
+    if decision_time is None:
+        return None
+    raw = payload.get("observation_time") or payload.get("observation_available_at")
+    if not raw:
+        return None
+    try:
+        observed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            return None
+        age = (decision_time.astimezone(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds() / 60.0
+    except (TypeError, ValueError, OSError):
+        return None
+    if not (age == age):  # NaN
+        return None
+    return max(0.0, age)
+
+
+def _day0_stale_obs_boundary_guard_enabled() -> bool:
+    """STALE-OBS BOUNDARY GUARD flag (day0 first-principles review 2026-06-10).
+
+    Default TRUE (correctness, not tuning): WU station obs are published on a
+    city-specific cadence (30/60-min METAR grid + publication delay; measured
+    in config/wu_obs_latency.json). A running extreme older than the city's
+    staleness budget is a stale LOWER bound — bins just above it may already
+    be dead. The guard only ZEROES buy_yes q_lcb for boundary-adjacent bins
+    (suppresses submits); it can never enable a trade. Fail-open returns True.
+    """
+    try:
+        return bool(settings["edli_v1"].get("day0_stale_obs_boundary_guard_enabled", True))
+    except Exception:
+        return True
+
+
+#: DAY0 per-family notional cap default (USD) — adversarial review fix 5.
+#: Interim risk bound while the day0 flip/exit machinery is young; modest by
+#: design, operator-overridable via edli_v1.day0_family_notional_cap_usd
+#: (set <= 0 to disable once forward evidence exists).
+_DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD = 25.0
+
+
+def _day0_family_notional_cap_usd() -> float | None:
+    """Per-family day0 notional cap in USD, or None when disabled (<= 0)."""
+    try:
+        raw = settings["edli_v1"].get(
+            "day0_family_notional_cap_usd", _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
+        )
+        value = float(raw)
+    except Exception:
+        return _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
+    if not (value > 0.0):
+        return None
+    return value
+
+
+# _apply_day0_exposure_cap REMOVED (PR#404 P0-1): the post-hoc clamp bypassed
+# the min-order-aware sizing kernel's semantics ('headroom < $1' was a wrong
+# risk boundary — real venue min orders range ~$0.15 to $30+) and could emit a
+# stake below the selected market's real venue floor that downstream receipts /
+# cost basis / live-cap reservations would treat as sizing-proven. The cap now
+# lives INSIDE _robust_marginal_utility_stake_and_price as a feasible-region
+# bound (day0_headroom_usd), with first-class aborts
+# SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED / SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER.
+
+
+def _day0_remaining_day_q_enabled() -> bool:
+    """REMAINING-DAY q mode flag (review 2026-06-10 item B). Default FALSE.
+
+    Unlike the conservative-only guards (boundary suppression, anomaly pause,
+    bootstrap LCB), this CHANGES the day0 point q in both directions (it can
+    RAISE q for the bin containing the running extreme post-peak). It must be
+    operator-flipped only after shadow receipts comparing
+    _edli_day0_q_mode=remaining_day vs the legacy full-day-masked q look sane.
+    """
+    try:
+        return bool(settings["edli_v1"].get("day0_remaining_day_q_enabled", False))
+    except Exception:
+        return False
+
+
+def _day0_remaining_day_members(
+    *,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: "datetime | None",
+) -> "np.ndarray | None":
+    """Pooled per-model remaining-day extremes in the NATIVE unit, clamped to
+    the absorbing physical law. None (-> legacy full-day path) when no fresh
+    persisted high-res vectors exist for this family.
+
+    Source: day0_hourly_vectors lane (degC storage; converted here at the
+    consumption seam). Clamp: HIGH max(value, running max); LOW min(value,
+    running min) — below-floor remaining mass lands IN the floor bin.
+    """
+    if decision_time is None:
+        return None
+    try:
+        from src.data.day0_hourly_vectors import (
+            read_freshest_day0_hourly_vectors,
+            remaining_day_extremes_c,
+        )
+
+        metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
+        if metric not in {"high", "low"}:
+            return None
+        vectors = read_freshest_day0_hourly_vectors(
+            city=str(family.city), target_date=str(family.target_date), now=decision_time
+        )
+        if not vectors:
+            return None
+        extremes_c = remaining_day_extremes_c(
+            vectors, target_date=str(family.target_date), now=decision_time, metric=metric
+        )
+        if not extremes_c:
+            return None
+        values = np.asarray(extremes_c, dtype=float)
+        if str(unit).upper() == "F":
+            values = values * 9.0 / 5.0 + 32.0
+        rounded = _optional_float(payload.get("rounded_value"))
+        if rounded is not None:
+            values = (
+                np.maximum(values, float(rounded))
+                if metric == "high"
+                else np.minimum(values, float(rounded))
+            )
+        payload["_edli_day0_remaining_models"] = int(values.size)
+        return values
+    except Exception as exc:  # noqa: BLE001 — degrade LOUDLY to the full-day path
+        import logging as _logging
+
+        _logging.getLogger("zeus.day0_remaining_day").warning(
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=%s date=%s exc=%s: %s — full-day fallback",
+            getattr(family, "city", "?"), getattr(family, "target_date", "?"),
+            type(exc).__name__, exc,
+        )
+        return None
+
+
 def _apply_day0_mask_to_generated_probabilities(
     *,
     payload: dict[str, object],
     family,
     q_by_condition: dict[str, float],
     lcb_by_condition: dict[tuple[str, str], float],
+    decision_time: "datetime | None" = None,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
     rounded = _optional_float(payload.get("rounded_value"))
     if rounded is None:
@@ -9373,6 +10710,59 @@ def _apply_day0_mask_to_generated_probabilities(
                 mask.append(1.0)
         else:
             raise ValueError(f"unsupported Day0 metric: {metric}")
+    # STALE-OBS BOUNDARY GUARD (day0 first-principles review 2026-06-10, charge #1).
+    # The running extreme is a monotone bound: KILLING bins with a stale extreme is
+    # always safe (the true extreme can only be further along). But a bin the stale
+    # extreme says is ALIVE may already be dead — the true extreme may have moved
+    # past its edge during the unobserved window. For bins whose survival edge lies
+    # within (plausible-move-rate x excess staleness) of the stale extreme, the
+    # dead/alive state is UNKNOWN: their buy_yes q_lcb is forced to 0.0 (no live
+    # submit). q itself is NOT changed (the masked posterior remains the honest
+    # point estimate); only the submit-licensing LCB is suppressed. Fail-closed:
+    # unparseable obs time or unknown city => maximum margin / conservative budget.
+    staleness_uncertain: list[bool] = [False] * len(list(family.candidates))
+    _obs_age_min = _budget_min = _margin = None  # audit fields (PR#404 P1 lcb-transform)
+    if _day0_stale_obs_boundary_guard_enabled():
+        from src.signal.day0_obs_latency import (
+            stale_extreme_uncertainty_margin,
+            staleness_budget_minutes,
+        )
+
+        _bins = [candidate.bin for candidate in family.candidates]
+        _unit = ""
+        for _b in _bins:
+            _unit = str(getattr(_b, "unit", "") or "")
+            if _unit:
+                break
+        if not _unit:
+            _unit = str(payload.get("settlement_unit") or "F")
+        _obs_age_min = _day0_observation_age_minutes(payload, decision_time)
+        _budget_min = staleness_budget_minutes(str(getattr(family, "city", "") or payload.get("city") or ""))
+        _margin = stale_extreme_uncertainty_margin(
+            unit=_unit, obs_age_minutes=_obs_age_min, budget_minutes=_budget_min
+        )
+        if _margin > 0.0:
+            for _index, _bin in enumerate(_bins):
+                if mask[_index] <= 0.0:
+                    continue  # already dead — kill direction is staleness-safe
+                if metric == "high":
+                    # Alive bin whose UPPER edge could already have been crossed by
+                    # the unseen true running max. Open-high shoulder cannot die.
+                    if _bin.high is not None and float(_bin.high) <= rounded + _margin:
+                        staleness_uncertain[_index] = True
+                else:  # metric == "low" (validated above)
+                    if _bin.low is not None and float(_bin.low) >= rounded - _margin:
+                        staleness_uncertain[_index] = True
+            if any(staleness_uncertain):
+                import logging as _logging
+
+                _logging.getLogger("zeus.day0_stale_obs_guard").info(
+                    "DAY0_STALE_OBS_BOUNDARY_GUARD city=%s metric=%s rounded=%s obs_age_min=%s "
+                    "budget_min=%.1f margin=%.2f%s suppressed_bins=%d/%d",
+                    getattr(family, "city", "?"), metric, rounded,
+                    "None" if _obs_age_min is None else f"{_obs_age_min:.1f}",
+                    _budget_min, _margin, _unit, sum(staleness_uncertain), len(_bins),
+                )
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
 
     prior = tuple(max(q_by_condition[str(candidate.condition_id or "")], 1e-9) for candidate in family.candidates)
@@ -9410,7 +10800,9 @@ def _apply_day0_mask_to_generated_probabilities(
         _set_qlcb_provenance(
             masked_lcb_by_direction,
             (condition_id, "buy_yes"),
-            0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value),
+            # STALE-OBS BOUNDARY GUARD: a bin whose dead/alive state is unknowable
+            # under the current obs staleness gets NO buy_yes submit license.
+            0.0 if (mask[index] <= 0.0 or staleness_uncertain[index]) else min(yes_lcb, q_value),
             source="FORECAST_BOOTSTRAP",
         )
         _set_qlcb_provenance(
@@ -9419,6 +10811,34 @@ def _apply_day0_mask_to_generated_probabilities(
             0.0,
             source="FORECAST_BOOTSTRAP",
         )
+    # LCB-TRANSFORM AUDIT IDENTITY (PR#404 P1): the staleness guard changes
+    # SUBMIT ELIGIBILITY (q_lcb) without changing q — two receipts with equal
+    # p_live_vector_hash can differ in license. Stash the full transform
+    # (per-condition/direction lcb, mask, suppressed bins, obs age, budget,
+    # margin) on the payload so the caller can hash it into belief evidence
+    # and a no-submit receipt can explain 'q unchanged but license revoked'.
+    payload["_edli_day0_lcb_transform"] = {
+        "yes_lcb_by_condition": {
+            str(candidate.condition_id or ""): _qlcb_float(
+                masked_lcb_by_direction.get((str(candidate.condition_id or ""), "buy_yes"), 0.0)
+            )
+            for candidate in family.candidates
+        },
+        "no_lcb_by_condition": {
+            str(candidate.condition_id or ""): 0.0 for candidate in family.candidates
+        },
+        "mask": [float(value) for value in mask],
+        "staleness_suppressed_conditions": [
+            str(candidate.condition_id or "")
+            for index, candidate in enumerate(family.candidates)
+            if staleness_uncertain[index]
+        ],
+        "obs_age_minutes": _obs_age_min,
+        "staleness_budget_minutes": _budget_min,
+        "staleness_margin": _margin,
+        "rounded_extreme": float(rounded),
+        "metric": str(metric),
+    }
     return masked_q_by_condition, masked_lcb_by_direction
 
 
@@ -9938,6 +11358,24 @@ def _depth_for_token_or_label(depth: object, *, token_id: str, label: str) -> di
         value = depth.get(key)
         if isinstance(value, dict):
             return value
+    # SINGLE-TOKEN CLOB FORMAT (2026-06-09 depth-JSON fix). The materializer stores a
+    # SINGLE token's raw CLOB /book response directly as orderbook_depth_json:
+    # ``{"asks": [...], "asset_id": "<token>", "bids": [...], ...}`` — the asks/bids are
+    # at the TOP LEVEL (not nested under tokens/outcomes/books, and the token is the
+    # ``asset_id`` field, not a dict key). Pre-fix this format matched NOTHING, so the
+    # curve degraded to the 1-level _explicit_depth_for_selected_token fallback (top_ask
+    # + depth_at_best_ask only) instead of the 30–80 level book actually present. Now we
+    # recognize it and return the full book — CANONICALLY SORTED (asks ascending /
+    # cheapest first, bids descending / highest first) so the depth-walk consumes the
+    # BEST level first. We sort by price rather than trusting array position because the
+    # codebase's own CLOB consumers (_top_book_level_decimal) take min/max over all rows
+    # rather than rely on order — CLOB-native arrays are best-price-LAST, so a raw pass
+    # would walk the WORST level first and corrupt the cost curve. Sorting makes the
+    # ordering-bug category impossible regardless of source order.
+    if str(depth.get("asset_id") or depth.get("token_id") or "") == token_id and (
+        isinstance(depth.get("asks"), list) or isinstance(depth.get("bids"), list)
+    ):
+        return _canonicalize_single_token_book(depth)
     for key in ("tokens", "outcomes", "books"):
         value = depth.get(key)
         if isinstance(value, dict):
@@ -9953,6 +11391,44 @@ def _depth_for_token_or_label(depth: object, *, token_id: str, label: str) -> di
                 if str(item.get("outcome") or item.get("outcome_label") or "").upper() == label:
                     return item
     return None
+
+
+def _canonicalize_single_token_book(book: dict) -> dict[str, object]:
+    """Normalize a raw single-token CLOB book to best-price-FIRST asks/bids.
+
+    The depth-walk (_book_walk_average / ExecutableCostCurve) consumes levels in order
+    and assumes ``levels[0]`` is the best (cheapest ask / highest bid). Raw CLOB arrays
+    are best-price-LAST, so we sort: asks ASCENDING (cheapest first), bids DESCENDING
+    (highest first) — identical to the projector's normalization (project_rest_snapshot).
+    Rows that cannot be parsed to a numeric price are dropped (fail-safe). Returns the
+    ``{"asks": [...], "bids": [...]}`` shape the NativeQuoteBook builder expects.
+    """
+    def _price(row: object) -> Decimal | None:
+        if isinstance(row, dict):
+            raw = row.get("price")
+        else:
+            try:
+                raw, _ = row  # type: ignore[misc]
+            except (TypeError, ValueError):
+                return None
+        if raw in (None, ""):
+            return None
+        try:
+            return Decimal(str(raw))
+        except (ArithmeticError, ValueError, TypeError):
+            return None
+
+    def _sorted(side: object, *, ascending: bool) -> list[object]:
+        if not isinstance(side, list):
+            return []
+        keyed = [(p, row) for row in side if (p := _price(row)) is not None]
+        keyed.sort(key=lambda pr: pr[0], reverse=not ascending)
+        return [row for _, row in keyed]
+
+    return {
+        "asks": _sorted(book.get("asks"), ascending=True),
+        "bids": _sorted(book.get("bids"), ascending=False),
+    }
 
 
 def _explicit_depth_for_selected_token(
@@ -10134,8 +11610,24 @@ def _runtime_bankroll_usd(*, cached_only: bool = False) -> float:
         raise ValueError("bankroll_provider_unavailable")
     if bankroll.authority != "canonical" or bankroll.source != "polymarket_wallet":
         raise ValueError("bankroll_provider_not_canonical")
+    # NEW-ENTRY sizing base (dual-bankroll, 2026-06-09 P1). Preference order:
+    #   1. spendable_cash_usd — free BUY collateral (architect memo §2: live
+    #      entry sizing uses spendable cash so open positions never inflate the
+    #      next order's cap). This is already phantom-free (free cash only).
+    #   2. equity_for_new_entry_sizing_usd — conservative equity that EXCLUDES
+    #      the blip_held phantom. Used only when spendable_cash is unavailable.
+    #   3. value_usd — LAST resort. Under blip_held this HOLDS a phantom position
+    #      value (defends the loss threshold) and MUST NOT seed Kelly; it is the
+    #      final fallback only for legacy/degraded records that carry neither
+    #      conservative field.
     spendable_cash = getattr(bankroll, "spendable_cash_usd", None)
-    bankroll_usd = float(spendable_cash) if spendable_cash is not None else float(bankroll.value_usd)
+    sizing_equity = getattr(bankroll, "equity_for_new_entry_sizing_usd", None)
+    if spendable_cash is not None:
+        bankroll_usd = float(spendable_cash)
+    elif sizing_equity is not None:
+        bankroll_usd = float(sizing_equity)
+    else:
+        bankroll_usd = float(bankroll.value_usd)
     if bankroll_usd <= 0:
         raise ValueError("bankroll_provider_nonpositive")
     return bankroll_usd
@@ -10230,6 +11722,43 @@ def _required_bound_tick_size(snap_for_depth, executable_snapshot_payload) -> st
         )
     # Already a canonical Decimal string from the evidence builder; normalise.
     return str(Decimal(str(payload_tick)))
+
+
+def _opening_inertia_market_age_hours(
+    *,
+    snapshot_row: dict[str, Any],
+    topology_rows: list[dict[str, Any]],
+    family_rows: list[dict[str, Any]],
+    decision_time: datetime,
+) -> float | None:
+    """Return market age in hours, or None if age cannot be determined.
+
+    Priority: snapshot market_start_at → topology created_at (Gamma createdAt) →
+    earliest family captured_at (proxy: first time we saw the market).
+    Returns None (conservative pass) when no usable timestamp found.
+    """
+    # 1) market_start_at from the selected snapshot row
+    raw = snapshot_row.get("market_start_at")
+    market_open = _parse_utc(raw) if isinstance(raw, str) else None
+    # 2) created_at from the first topology row (Gamma createdAt, most authoritative)
+    if market_open is None and topology_rows:
+        for trow in topology_rows:
+            market_open = _parse_utc(trow.get("created_at"))
+            if market_open is not None:
+                break
+    # 3) earliest captured_at across all family rows (proxy lower-bound on open time)
+    if market_open is None and family_rows:
+        earliest = None
+        for frow in family_rows:
+            ts = _parse_utc(frow.get("captured_at"))
+            if ts is not None and (earliest is None or ts < earliest):
+                earliest = ts
+        market_open = earliest
+    if market_open is None:
+        return None  # conservative: cannot determine age → allow through
+    decision_utc = decision_time.astimezone(UTC)
+    delta_seconds = (decision_utc - market_open).total_seconds()
+    return delta_seconds / 3600.0
 
 
 def _optional_bool(value: object) -> bool | None:

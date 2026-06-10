@@ -14,10 +14,26 @@ Zeus is a **live weather settlement-contract trading runtime** for Polymarket.
 **The Money Path:**
 `contract semantics -> source truth -> forecast signal -> calibration -> edge -> execution -> monitoring -> settlement -> learning`
 
-**The Probability Chain:**
-`51 ENS members -> ENS bias correction (empirical-Bayes, pre-MC; flag-gated, default off) -> per-member daily max -> Monte Carlo (sensor noise + ASOS rounding) -> P_raw -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> α-weighted Market Fusion -> P_posterior -> Edge & Double-Bootstrap CI -> Fractional Kelly (× DDD oracle-coverage discount) -> Position Size`
+### Strategy of Record (2026-06-09)
 
-ENS bias correction is empirical-Bayes shrinkage of the TIGGE structural prior toward live OpenData residuals, SNR-gated and applied to member extrema before Monte Carlo (`src/calibration/ens_bias_model.py`, `src/calibration/ens_error_model.py`; PRs #334/#336). This step is flag-gated (`settings.bias_correction_enabled`, default `false`) and not yet active in production — activation pending. The final Kelly size is scaled by the Data Density Discount (DDD) when observation coverage is thin (see Subsystem Map).
+The live forecast→edge→size path is the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block). Cite symbols, not line numbers — lines drift.
+
+```
+per-model walk-forward EB de-bias (u0r_bayes.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
+fusion, Ledoit-Wolf Σ (u0r_bayes.fuse_u0r_posterior; bayes_fuse + shrink_cov) →
+σ_pred = max(1.0°C, √(fused.sd²+σ_resid²)) → settlement-preimage bin q
+(emos.bin_probability_settlement, q_shape fused_normal_direct) → q_lcb floor →
+Edge → BH FDR → Fractional Kelly → Position Size
+```
+
+- Live-authority entry: `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof` (gated by `_replacement_authority_enabled`); q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL, else deterministic no-submit.
+- q is built and persisted in `src/data/replacement_forecast_materializer.py` `_insert_posterior` (owns q_mode); σ_pred floor in `_replacement_u0r_fusion_override`.
+- The single live settlement integrator is `src/calibration/emos.py` `bin_probability_settlement` (WMO round-half preimage of N(μ*, σ)).
+
+**The Probability Chain (LEGACY BASELINE — independent LCB cap only, NOT the live q):**
+`51 ENS members -> analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture; 10k-MC p_raw_vector_from_maxes retired) -> Extended Platt (A·logit + B·lead_days + C) -> P_cal -> market_fusion.compute_posterior (model_only_v1 — NO market-prior blend live) -> bootstrap q_lcb`
+
+This baseline is joined to the live q as a floor in `src/engine/event_reactor_adapter.py`: `effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)`. The legacy `α-weighted Market Fusion → P_posterior` blend is spec-only (`src/strategy/market_fusion.py` `compute_posterior` runs `model_only_v1`); the 10k Monte-Carlo P_raw is retired in favor of the closed-form `src/signal/ensemble_signal.py` `analytic_p_raw_vector_from_maxes`. ENS bias correction (`src/calibration/ens_bias_model.py`; flag `settings.bias_correction_enabled`, default `false`) and the Data Density Discount (DDD) Kelly scaling remain baseline-path features.
 
 ### Platform Configuration & Change Control
 
@@ -40,7 +56,7 @@ Primary code path:
 - `src/engine/cycle_runner.py` owns the shared cycle across discovery modes.
 - `src/engine/evaluator.py` converts market candidates into trade/no-trade decisions.
 - `src/execution/executor.py` places live limit orders.
-- `src/engine/monitor_refresh.py` and `src/execution/exit_triggers.py` refresh
+- `src/engine/monitor_refresh.py` and `src/execution/exit_safety.py` refresh
   monitored positions and emit exit intent.
 - `src/execution/harvester.py` handles settlement and learning follow-through.
 

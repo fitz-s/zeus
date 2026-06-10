@@ -1171,8 +1171,58 @@ def _reprice_decision_from_executable_snapshot(
                 observation_time=_shadow_observation_time,
                 decision_seq=0,
             )
+            # FIX 2: populate opening_ticks + m0 from snapshot history so
+            # OpeningInertiaRelaxation's λ-estimation branch runs on real data.
+            # Fail-open: any exception leaves opening_ticks/m0 absent → no-λ path.
+            _opening_ticks: list[tuple[float, float]] | None = None
+            _m0: float | None = None
+            try:
+                _snap_cid = str(getattr(snapshot, "condition_id", None) or "")
+                _snap_msa = getattr(snapshot, "market_start_at", None)
+                if _snap_cid and conn is not None:
+                    import sqlite3 as _sqlite3
+                    _hist_cur = conn.execute(
+                        """
+                        SELECT captured_at, orderbook_top_bid, orderbook_top_ask
+                        FROM executable_market_snapshots
+                        WHERE condition_id = ?
+                        ORDER BY captured_at ASC
+                        LIMIT 50
+                        """,
+                        (_snap_cid,),
+                    )
+                    _hist_rows = _hist_cur.fetchall()
+                    if _hist_rows and _snap_msa is not None:
+                        from datetime import timezone as _tz
+                        _msa_dt = _snap_msa if hasattr(_snap_msa, "tzinfo") else None
+                        if _msa_dt is not None:
+                            _ticks: list[tuple[float, float]] = []
+                            for _r_cap, _r_bid, _r_ask in _hist_rows:
+                                try:
+                                    from datetime import datetime as _dt
+                                    _cap_dt = _dt.fromisoformat(str(_r_cap).replace("Z", "+00:00"))
+                                    if _cap_dt.tzinfo is None:
+                                        continue
+                                    _t_sec = (_cap_dt.astimezone(_tz.utc) - _msa_dt.astimezone(_tz.utc)).total_seconds()
+                                    if _t_sec < 0:
+                                        continue
+                                    _bid = float(_r_bid) if _r_bid is not None else None
+                                    _ask = float(_r_ask) if _r_ask is not None else None
+                                    if _bid is not None and _ask is not None:
+                                        _ticks.append((_t_sec, (_bid + _ask) / 2.0))
+                                except Exception:
+                                    continue
+                            if _ticks:
+                                _opening_ticks = _ticks
+                                _m0 = _ticks[0][1]
+            except Exception:
+                pass  # fail-open: no-λ path in OpeningInertiaRelaxation unchanged
             dispatch_shadow_candidates(
-                analysis=_SimpleNamespace(metrics=_vnext_metrics_computed),
+                analysis=_SimpleNamespace(
+                    metrics=_vnext_metrics_computed,
+                    opening_ticks=_opening_ticks,
+                    m0=_m0,
+                ),
                 natural_key=_shadow_nk,
                 observed_at=_shadow_observation_time,
                 # world_conn intentionally omitted: dispatch self-opens a world-DB
@@ -3460,29 +3510,57 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 continue
 
             edge_ctx = refresh_position(conn, clob, pos)
+            # === DAY0 HARD-FACT verdict — computed BEFORE the canonical-write
+            # failure branch (PR#404 operator review P0-4): the hard-fact exit
+            # is settlement-authority evidence and must NOT depend on monitor
+            # telemetry/canonical-event writes succeeding. A deterministic dead
+            # bin exits even when the canonical MONITOR_REFRESHED write fails.
+            _hard_fact = None
+            if _position_state_value(pos) == "day0_window" and city is not None:
+                try:
+                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+                    _hard_fact = evaluate_hard_fact_exit(position=pos, city=city, now=deps._utcnow())
+                except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
+                    deps.logger.warning(
+                        "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
+                    )
             monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
                 conn,
                 pos,
                 deps=deps,
             )
             if not monitor_canonical_written:
-                monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
-                artifact.add_monitor_result(
-                    deps.MonitorResult(
-                        position_id=pos.trade_id,
-                        fresh_prob=monitor_fresh_prob,
-                        fresh_edge=monitor_fresh_edge,
-                        should_exit=False,
-                        exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
-                        neg_edge_count=pos.neg_edge_count,
-                    )
-                )
-                monitor_result_written = True
                 summary["monitor_canonical_write_failed"] = (
                     summary.get("monitor_canonical_write_failed", 0) + 1
                 )
-                summary["monitors"] += 1
-                continue
+                if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                    # P0-4: telemetry failure must not hold a structurally dead
+                    # leg — fall through to the hard-fact exit below. The later
+                    # add_monitor_result records the exit decision.
+                    summary["day0_hard_fact_exit_despite_canonical_write_failure"] = (
+                        summary.get("day0_hard_fact_exit_despite_canonical_write_failure", 0) + 1
+                    )
+                    deps.logger.error(
+                        "MONITOR_CANONICAL_WRITE_FAILED for %s but day0 hard-fact bin death "
+                        "present — proceeding to exit (telemetry failure does not gate "
+                        "settlement-authority exits)",
+                        pos.trade_id,
+                    )
+                else:
+                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
+                    artifact.add_monitor_result(
+                        deps.MonitorResult(
+                            position_id=pos.trade_id,
+                            fresh_prob=monitor_fresh_prob,
+                            fresh_edge=monitor_fresh_edge,
+                            should_exit=False,
+                            exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
+                            neg_edge_count=pos.neg_edge_count,
+                        )
+                    )
+                    monitor_result_written = True
+                    summary["monitors"] += 1
+                    continue
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,
@@ -3503,8 +3581,64 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
-            exit_decision = pos.evaluate_exit(exit_context)
-            if _summary_risk_level(summary) == "ORANGE":
+            # === DAY0 HARD-FACT EXIT LANE (adversarial review 2026-06-10 fix 1) ===
+            # SEPARATE from the estimator-evidence lane below: a position whose bin
+            # is absorbing-boundary DEAD by a settlement-grade hard fact (WU + the
+            # METAR fast lane, margin per config/wu_metar_divergence.json) exits NOW
+            # — no maturity gate, no CI separation, no fresh_prob dependency (this
+            # is what gives buy_no its day0 exit authority for the hard-fact class).
+            # Estimator flips keep the full panic-sell hardening unchanged. The lane
+            # is fail-soft: any data gap / oracle-anomaly pause -> None -> the normal
+            # evaluate_exit path runs.
+            # (_hard_fact was computed ABOVE, before the canonical-write failure
+            # branch — PR#404 P0-4.)
+            if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                from src.state.portfolio import ExitDecision as _ExitDecision
+
+                pos.applied_validations = list(
+                    dict.fromkeys([*(pos.applied_validations or []), "day0_hard_fact_exit_lane"])
+                )
+                exit_decision = _ExitDecision(
+                    True,
+                    f"DAY0_HARD_FACT_BIN_DEAD ({_hard_fact.reason}; source={_hard_fact.source})",
+                    urgency="immediate",
+                    trigger="DAY0_HARD_FACT_BIN_DEAD",
+                    selected_method=pos.selected_method or pos.entry_method,
+                    applied_validations=list(pos.applied_validations),
+                )
+                summary["day0_hard_fact_exits"] = summary.get("day0_hard_fact_exits", 0) + 1
+            elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+                # TERMINAL HOLD (PR#404 BLOCKER 2): a structural-win hard fact
+                # (buy_no on a DEAD bin, buy_yes on the entered shoulder) is an
+                # absorbing settlement-authority verdict — do NOT run the normal
+                # estimator-evidence path and do NOT let the ORANGE favorable-exit
+                # layer sell out of a structurally won position.  The hold is
+                # explicit and separately named: only a kill-switch / manual
+                # reduce-only override (which produces an EXIT_DEAD_BIN verdict)
+                # can override it.
+                from src.state.portfolio import ExitDecision as _ExitDecision
+
+                pos.applied_validations = list(
+                    dict.fromkeys([*(pos.applied_validations or []), "day0_hard_fact_structural_win_hold"])
+                )
+                exit_decision = _ExitDecision(
+                    False,
+                    f"DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD ({_hard_fact.reason}; source={_hard_fact.source})",
+                    urgency="normal",
+                    trigger="DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD",
+                    selected_method=pos.selected_method or pos.entry_method,
+                    applied_validations=list(pos.applied_validations),
+                )
+                summary["day0_hard_fact_structural_win_holds"] = (
+                    summary.get("day0_hard_fact_structural_win_holds", 0) + 1
+                )
+                # ORANGE gate intentionally skipped: a favorable exit on a
+                # structurally-won position would defeat the purpose of holding.
+            else:
+                exit_decision = pos.evaluate_exit(exit_context)
+            if _summary_risk_level(summary) == "ORANGE" and not (
+                _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+            ):
                 orange_decision = _orange_favorable_exit_decision(
                     pos,
                     exit_context,

@@ -1,7 +1,10 @@
-# Last reused or audited: 2026-06-04
+# Last reused or audited: 2026-06-09
 # Authority basis: coverage SLUG-discovery fix / wiring verdict 2026-06-03;
 #   2026-06-04 EXECUTABLE_SNAPSHOT_BLOCKED root-cause fix — substrate refresh admits
 #   non-tradeable family-identity bins to capture + max_outcomes=0 UNLIMITED sentinel
+# Audit note 2026-06-09: executable-snapshot fee capture now prefers the Gamma
+#   feeSchedule (V2 rate) over the stale /fee-rate base_fee=1000 (2x overestimate),
+#   fail-closed to /fee-rate when the feeSchedule is absent/unparseable.
 """Gamma API market scanner: discover active weather markets.
 
 Queries Polymarket's Gamma API for temperature events.
@@ -36,6 +39,7 @@ from src.contracts.executable_market_snapshot import (
     MarketSnapshotMismatchError,
     canonicalize_legacy_fee_rate_value,
     canonicalize_fee_details,
+    fee_details_from_gamma_fee_schedule,
 )
 from src.state.book_hash_transitions import write_transition as _write_book_hash_transition
 from src.state.snapshot_repo import insert_snapshot
@@ -2908,7 +2912,9 @@ def capture_executable_market_snapshot(
         if tolerate_missing_book:
             fee_details = _default_substrate_fee_details(selected_token)
         else:
-            fee_details = _fetch_fee_details(clob, selected_token)
+            fee_details = _fee_details_gamma_first(
+                clob, selected_token, gamma_market_raw, outcome, raw_clob_market
+            )
 
     # Validate the caller's boundary timestamp, but do not use it as the
     # executable snapshot's authority time.  The fresh orderbook authority is
@@ -4308,6 +4314,67 @@ def _fetch_fee_details(clob: Any, token_id: str) -> dict[str, Any]:
         raise ExecutableSnapshotCaptureError("CLOB fee-rate response is not numeric") from exc
     except Exception as exc:
         raise ExecutableSnapshotCaptureError(f"CLOB fee-rate fetch failed: {exc}") from exc
+
+
+def _gamma_fee_schedule_raw(*payloads: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Return the first ``feeSchedule`` mapping + ``feeType`` from Gamma payloads.
+
+    Fee Structure V2 serves ``feeSchedule`` on the Gamma market object. Casing
+    varies across Gamma response shapes (camelCase ``feeSchedule`` vs snake
+    ``fee_schedule``); accept both.
+    """
+
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for key in ("feeSchedule", "fee_schedule"):
+            schedule = payload.get(key)
+            if isinstance(schedule, dict) and schedule:
+                fee_type = payload.get("feeType") or payload.get("fee_type")
+                return schedule, (str(fee_type) if fee_type else None)
+    return None, None
+
+
+def _fee_details_gamma_first(
+    clob: Any,
+    token_id: str,
+    *gamma_payloads: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve fee_details preferring the Gamma feeSchedule (V2) over /fee-rate.
+
+    Authority order (P10 changelog 2026-03-31): the Gamma market ``feeSchedule``
+    carries the correct V2 ``rate`` (0.05 weather); the standalone CLOB
+    ``/fee-rate`` endpoint still returns a stale ``base_fee`` (1000 bps = 0.10),
+    a 2x overestimate. Prefer the Gamma feeSchedule.
+
+    The Gamma feeSchedule is AUTHORITATIVE when present and parseable: it is the
+    V2 source and supersedes the standalone /fee-rate endpoint (whose stale
+    base_fee=1000 = 0.10 is a 2x overestimate). When the Gamma rate is the LOWER
+    one, that lower rate is the truth — it must NOT be inflated back to the stale
+    /fee-rate value.
+
+    FAIL-CLOSED applies ONLY when the Gamma feeSchedule is ABSENT or UNPARSEABLE:
+    fall back to the /fee-rate value (overestimating fees is the safe error).
+    """
+
+    schedule, fee_type = _gamma_fee_schedule_raw(*gamma_payloads)
+    if schedule is not None:
+        try:
+            return fee_details_from_gamma_fee_schedule(
+                schedule,
+                source="gamma_fee_schedule",
+                token_id=token_id,
+                fee_type=fee_type,
+            )
+        except MarketSnapshotMismatchError as exc:
+            logger.warning(
+                "Gamma feeSchedule unparseable for %s (%s); failing closed to /fee-rate",
+                token_id,
+                exc,
+            )
+
+    # Gamma feeSchedule absent/unparseable: fail closed to the /fee-rate value.
+    return _fetch_fee_details(clob, token_id)
 
 
 def _default_substrate_fee_details(token_id: str) -> dict[str, Any]:

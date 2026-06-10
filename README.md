@@ -8,24 +8,38 @@ Zeus converts atmospheric ensemble forecasts into calibrated probabilities, iden
 
 ## How it works
 
-Zeus trades **discrete settlement contracts** on daily high/low temperatures. The core pipeline:
+Zeus trades **discrete settlement contracts** on daily high/low temperatures.
+
+### Strategy of record (2026-06-09)
+
+The live forecast→edge→size path is the **replacement_forecast** chain (authority `docs/authority/replacement_final_form_2026_06_09.md`):
 
 ```text
 contract semantics
   → source truth (settlement provider, station, observation field)
-  → ensemble forecast signal (51 ENS members)
-  → ENS bias correction (empirical-Bayes, pre-Monte-Carlo; flag-gated, default off / activation pending)
-  → Monte Carlo sensor-noise + rounding simulation → P_raw
-  → Extended Platt calibration (temporal-decay aware) → P_cal
-  → α-weighted model-market fusion → P_posterior
-  → double-bootstrap confidence intervals → edge + p-value
-  → BH FDR filtering (per tested-family)
+  → per-model walk-forward empirical-Bayes de-bias (u0r_bayes.eb_bias, λ=n/(n+8))
+  → T2 Bayesian precision fusion, Ledoit-Wolf Σ (u0r_bayes.fuse_u0r_posterior)
+  → σ_pred = max(1.0°C, √(fused.sd²+σ_resid²))
+  → settlement-preimage bin q (emos.bin_probability_settlement, q_shape fused_normal_direct)
+  → q_lcb floor (Wilson z=1.645) → edge → BH FDR (per tested-family)
   → fractional Kelly sizing (dynamic cascade multiplier × DDD coverage discount)
-  → execution via Polymarket CLOB
-  → monitoring / exit
-  → settlement reconciliation
+  → execution via Polymarket CLOB → monitoring / exit → settlement reconciliation
   → learning (without hindsight leakage)
 ```
+
+Live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`; q built and persisted by `src/data/replacement_forecast_materializer.py` `_insert_posterior`; the single settlement integrator is `src/calibration/emos.py` `bin_probability_settlement`.
+
+### Baseline & Caps (legacy chain)
+
+The legacy 51-ENS chain still runs as an **independent baseline / LCB cap only**, joined to the live q as a floor (`effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)` in `src/engine/event_reactor_adapter.py`) — it is NOT the live q:
+
+```text
+51 ENS members → analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture;
+  10k-MC p_raw_vector_from_maxes retired) → Extended Platt → P_cal →
+  market_fusion.compute_posterior (model_only_v1 — NO market-prior blend live) → bootstrap q_lcb
+```
+
+ENS bias correction (`src/calibration/ens_bias_model.py`; flag `settings.bias_correction_enabled`, default `false`) and the Data Density Discount remain baseline-path features. The α-weighted `P_posterior = α·P_cal + (1−α)·P_market` is **spec-only**; the live `model_only_v1` posterior takes no market input.
 
 Everything starts with the **venue contract** — city, local date, temperature metric, unit, bin topology, settlement source, and provider-specific settlement transform. Forecast probability is economically meaningful only after these semantic obligations are pinned.
 
@@ -41,9 +55,9 @@ Three bin types exist:
 | `finite_range` | 50-51°F | Resolves on {50, 51} |
 | `open_shoulder` | 75°F+ | Unbounded — not a symmetric range |
 
-### Calibration
+### Calibration (baseline path)
 
-Raw ensemble probabilities are biased — overconfident at long lead times, underconfident near settlement. Zeus uses Extended Platt scaling with lead-time as an input feature:
+Extended Platt below is the **legacy baseline / LCB-cap** calibration; the live q is built by `emos.bin_probability_settlement` (see Strategy of record above). Raw ensemble probabilities are biased — overconfident at long lead times, underconfident near settlement. Zeus uses Extended Platt scaling with lead-time as an input feature:
 
 ```text
 P_cal = sigmoid(A·logit(P_raw) + B·lead_days + C)
@@ -55,7 +69,7 @@ Before calibration, raw ensemble member extrema are bias-corrected: an **empiric
 
 ### Edge detection and sizing
 
-- **Model-market fusion**: `P_posterior = α × P_cal + (1 - α) × P_market`, where α is dynamically computed from calibration maturity, ensemble spread, and lead time (clamped to [0.20, 0.85])
+- **Model-market fusion** (baseline path; spec-only — live runs `model_only_v1` with NO market blend, `src/strategy/market_fusion.py` `compute_posterior`): `P_posterior = α × P_cal + (1 - α) × P_market`, where α is dynamically computed from calibration maturity, ensemble spread, and lead time (clamped to [0.20, 0.85])
 - **Uncertainty**: double-bootstrap propagates ensemble sampling noise, instrument noise (σ ≈ 0.2–0.5°F), and calibration parameter uncertainty
 - **Selection**: Benjamini-Hochberg FDR controls false discovery within each tested family
 - **Sizing**: fractional Kelly reduced multiplicatively through CI width, lead time, win rate, portfolio heat, and drawdown cascades (fail-closed on NaN)
@@ -142,7 +156,7 @@ High and low temperature markets share city/date geometry but are **separate sem
 | `src/engine/evaluator.py` | Candidate → decision pipeline |
 | `src/execution/executor.py` | Live order placement |
 | `src/engine/monitor_refresh.py` | Position monitoring |
-| `src/execution/exit_triggers.py` | Exit logic |
+| `src/execution/exit_safety.py` | Exit logic |
 | `src/execution/harvester.py` | Settlement and learning |
 
 ### Integrity checks

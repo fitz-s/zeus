@@ -1,10 +1,18 @@
 # Created: 2026-05 (R3 M5)
-# Last reused or audited: 2026-06-04
+# Last reused or audited: 2026-06-09
 # Authority basis: R3 M5 reconcile + 2026-06-04 M5 mutex-IO antibody. The adapter-
 #   touching entrypoints (fresh_reconcile_snapshot, run_reconcile_sweep) assert
 #   the world write mutex is NOT held before any venue read, so a future caller
 #   that holds the lock across the reconcile sweep fails loud (WorldMutexIOViolation)
 #   at the reconcile boundary instead of wedging the daemon (STEP-7 / #95 disease).
+#   2026-06-09 foreign-wallet classification: the wallet is NOT exclusively Zeus's —
+#   the operator places manual orders on the same proxy wallet (observed: 6 LIVE GTC
+#   orders on AI-themed markets tripping reconcile_finding_threshold and freezing all
+#   Zeus entries). A resting, zero-fill venue order on a market entirely outside
+#   Zeus's domain (never in executable_market_snapshots NOR venue_commands) cannot be
+#   a lost Zeus side effect; it is recorded for audit and immediately resolved instead
+#   of arming the kill switch. Any matched size or any Zeus-domain market keeps the
+#   strict fail-closed ghost path (credential-compromise tripwire intact).
 """R3 M5 exchange reconciliation sweep.
 
 This module reconciles read-only exchange observations against Zeus's durable
@@ -329,10 +337,18 @@ def refresh_unresolved_reconcile_findings(
     _validate_context(context)
     init_exchange_reconcile_schema(conn)
     observed = _coerce_dt(observed_at)
+    # Foreign-wallet ghost findings are resolvable from local evidence alone (no venue
+    # read): run the migration pass here too so the kill switch clears on the next
+    # 1-minute refresh instead of waiting for the next full ws-gap sweep.
+    foreign_resolved = _resolve_foreign_wallet_ghost_findings(conn, observed_at=observed)
     token_ids = _unresolved_position_drift_tokens(conn)
     trade_ids = _unresolved_unrecorded_trade_ids(conn)
     if not token_ids and not trade_ids:
-        return {"status": "not_required", "resolved": 0, "remaining": 0}
+        return {
+            "status": "not_required",
+            "resolved": foreign_resolved,
+            "remaining": len(list_unresolved_findings(conn)),
+        }
 
     order_ids = _local_order_ids_for_tokens(conn, token_ids) | _order_ids_for_unrecorded_trade_findings(conn)
     snapshot = fresh_reconcile_snapshot(
@@ -489,6 +505,16 @@ def run_reconcile_sweep(
         if not order_id:
             continue
         if order_id not in local_by_order:
+            raw = _raw(order)
+            if _is_foreign_wallet_resting_order(conn, raw):
+                _record_foreign_wallet_ghost(
+                    conn,
+                    order_id=order_id,
+                    raw=raw,
+                    context=context,
+                    observed_at=observed,
+                )
+                continue
             findings.append(
                 record_finding(
                     conn,
@@ -496,7 +522,7 @@ def run_reconcile_sweep(
                     subject_id=order_id,
                     context=context,
                     evidence={
-                        "exchange_order": _raw(order),
+                        "exchange_order": raw,
                         "reason": "exchange_open_order_absent_from_venue_commands",
                     },
                     recorded_at=observed,
@@ -633,11 +659,168 @@ def run_reconcile_sweep(
                 observed_at=observed,
             )
         )
+    _resolve_foreign_wallet_ghost_findings(conn, observed_at=observed)
     _resolve_disappeared_ghost_order_findings(
         adapter, conn, open_order_ids, trades=trades if trades_available else None, observed_at=observed
     )
     reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
     return findings
+
+
+_FOREIGN_WALLET_GHOST_RESOLUTION = "foreign_wallet_order_market_outside_zeus_domain"
+
+
+def _order_matched_size(raw: Mapping[str, Any]) -> Decimal:
+    try:
+        return Decimal(str(raw.get("size_matched") or "0"))
+    except (InvalidOperation, ValueError):
+        # Unparseable matched size cannot prove "no fill" — stay strict.
+        return Decimal("1")
+
+
+def _is_market_in_zeus_domain(conn: sqlite3.Connection, market_id: str) -> bool:
+    """Whether Zeus has ever discovered or commanded this market.
+
+    Fail-closed: if the snapshot surface is missing/empty (so domain membership
+    cannot be proven either way), every market is treated as in-domain and the
+    strict ghost path applies.
+    """
+
+    if not market_id:
+        return True
+    try:
+        snapshot_total = conn.execute(
+            "SELECT COUNT(*) FROM executable_market_snapshots"
+        ).fetchone()
+        if snapshot_total is None or int(snapshot_total[0]) == 0:
+            return True
+        in_snapshots = conn.execute(
+            "SELECT 1 FROM executable_market_snapshots WHERE condition_id = ? LIMIT 1",
+            (market_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return True
+    if in_snapshots is not None:
+        return True
+    in_commands = conn.execute(
+        "SELECT 1 FROM venue_commands WHERE market_id = ? LIMIT 1",
+        (market_id,),
+    ).fetchone()
+    return in_commands is not None
+
+
+def _is_foreign_wallet_resting_order(conn: sqlite3.Connection, raw: Mapping[str, Any]) -> bool:
+    """A zero-fill open order on a market entirely outside Zeus's domain.
+
+    The wallet is shared with the operator's manual trading (2026-06-09: manual
+    GTC orders on AI-themed markets armed the kill switch and froze all Zeus
+    entries). Such an order cannot be a lost Zeus side effect. Any matched size
+    or any Zeus-domain market keeps the strict fail-closed ghost path.
+    """
+
+    market_id = str(raw.get("market") or "")
+    if not market_id:
+        return False
+    if _order_matched_size(raw) != 0:
+        return False
+    return not _is_market_in_zeus_domain(conn, market_id)
+
+
+def _record_foreign_wallet_ghost(
+    conn: sqlite3.Connection,
+    *,
+    order_id: str,
+    raw: Mapping[str, Any],
+    context: ReconcileContext,
+    observed_at: datetime,
+) -> None:
+    """Audit-record a foreign wallet order without arming the kill switch."""
+
+    existing = conn.execute(
+        """
+        SELECT 1 FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND subject_id = ?
+           AND resolution = ?
+         LIMIT 1
+        """,
+        (order_id, _FOREIGN_WALLET_GHOST_RESOLUTION),
+    ).fetchone()
+    if existing is not None:
+        return
+    logger.warning(
+        "foreign_wallet_order: venue order %s on market %s is outside Zeus's "
+        "domain (operator manual activity on the shared wallet); recorded for "
+        "audit, excluded from the reconcile kill switch",
+        order_id,
+        raw.get("market"),
+    )
+    finding = record_finding(
+        conn,
+        kind="exchange_ghost_order",
+        subject_id=order_id,
+        context=context,
+        evidence={
+            "exchange_order": dict(raw),
+            "reason": "exchange_open_order_absent_from_venue_commands",
+            "classification": "foreign_wallet_order",
+        },
+        recorded_at=observed_at,
+    )
+    resolve_finding(
+        conn,
+        finding.finding_id,
+        resolution=_FOREIGN_WALLET_GHOST_RESOLUTION,
+        resolved_by="src.execution.exchange_reconcile",
+        resolved_at=observed_at,
+    )
+
+
+def _resolve_foreign_wallet_ghost_findings(
+    conn: sqlite3.Connection,
+    *,
+    observed_at: datetime,
+) -> int:
+    """Resolve pre-existing unresolved ghost findings that are foreign wallet orders.
+
+    Migration pass for findings recorded before the foreign-wallet
+    classification existed (the 2026-06-09 kill-switch incident rows).
+    """
+
+    rows = conn.execute(
+        """
+        SELECT finding_id, evidence_json
+          FROM exchange_reconcile_findings
+         WHERE kind = 'exchange_ghost_order'
+           AND resolved_at IS NULL
+        """
+    ).fetchall()
+    resolved = 0
+    for row in rows:
+        try:
+            evidence = json.loads(row["evidence_json"])
+        except (TypeError, ValueError):
+            continue
+        raw = evidence.get("exchange_order") or {}
+        if not isinstance(raw, Mapping):
+            continue
+        if not _is_foreign_wallet_resting_order(conn, raw):
+            continue
+        logger.warning(
+            "foreign_wallet_order: resolving pre-classification ghost finding %s "
+            "(market %s outside Zeus's domain, zero matched size)",
+            row["finding_id"],
+            raw.get("market"),
+        )
+        resolve_finding(
+            conn,
+            str(row["finding_id"]),
+            resolution=_FOREIGN_WALLET_GHOST_RESOLUTION,
+            resolved_by="src.execution.exchange_reconcile",
+            resolved_at=observed_at,
+        )
+        resolved += 1
+    return resolved
 
 
 def reconcile_recorded_maker_fill_economics(

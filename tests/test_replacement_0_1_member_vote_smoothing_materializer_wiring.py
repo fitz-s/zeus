@@ -1,6 +1,10 @@
 # Created: 2026-06-07
-# Last reused/audited: 2026-06-07
-# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-07
+# Last reused/audited: 2026-06-09
+# Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-09
+# 2026-06-09 STALE_LAW re-pin: smoothing flag promoted default-OFF -> default-ON
+#   (config edli_v1.replacement_0_1_member_vote_smoothing_enabled=true). The shipped-
+#   config resolver test now asserts the default alpha; OFF inertness stays covered by
+#   the monkeypatch tests.
 # Purpose: Protect the replacement_forecast_materializer wiring of the flag-gated AIFS
 #   member-vote (Laplace/Dirichlet) smoothing: flag-OFF materialized posterior byte-identical
 #   to today, flag-ON written q matches the direct alpha-smoothed construction, and the shipped
@@ -167,9 +171,15 @@ def test_flag_on_materialized_posterior_matches_smoothed_construction(monkeypatc
     assert got["cool"] > off_cool * 1e6
 
 
-def test_resolver_default_config_flag_is_off_returns_none() -> None:
-    # The shipped default-OFF flag means the real resolver returns None -> live path inert.
-    assert mod._replacement_member_vote_smoothing_alpha() is None
+def test_resolver_shipped_config_flag_is_on_returns_default_alpha() -> None:
+    # STALE_LAW re-pin 2026-06-09: replacement_0_1_member_vote_smoothing_enabled was
+    # promoted from default-OFF to default-ON (authority: config edli_v1.
+    # replacement_0_1_member_vote_smoothing_enabled=true; the alpha key is absent so the
+    # resolver falls back to MEMBER_VOTE_SMOOTHING_ALPHA=0.05). The live path now applies
+    # Laplace smoothing. (Flag-OFF inertness is still covered by the monkeypatch tests.)
+    assert mod._replacement_member_vote_smoothing_alpha() == pytest.approx(
+        MEMBER_VOTE_SMOOTHING_ALPHA
+    )
 
 
 def test_resolver_returns_alpha_when_flag_enabled(monkeypatch) -> None:

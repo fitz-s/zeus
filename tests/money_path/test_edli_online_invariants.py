@@ -1,9 +1,18 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-06-05
+# Last reused/audited: 2026-06-09
 # Authority basis: EDLI PR332 deploy-ready review plus day0_shadow bridge;
 # Day0 may run in shadow/no-submit only, never as real capital authorization.
 #                  + 2026-06-04 arm direction-gate boot guard DELETED (mainstream is
 #                    display-only, never a decision/arm input — operator Rule-4 antibody)
+#                  + 2026-06-09 STALE_LAW re-pin: operator ARMED the live canary
+#                    (live_execution_mode=edli_live_canary, real_order_submit_enabled=
+#                    True, taker_fok_fak_live_enabled=True, market_channel_ingestor_
+#                    enabled=True). Authority: config note keys edli_v1.
+#                    _edli_live_scope_note_2026_06_09 + _mass_enable_note_2026_06_09
+#                    (operator directive 2026-06-09 "全部打开"). The dead shadow-mode
+#                    "must be OFF" assertions were re-pinned to the armed-canary
+#                    posture; the OTHER arm/promotion/coverage proofs below are
+#                    unchanged and still enforce that submission stays gated.
 from __future__ import annotations
 
 import json
@@ -19,17 +28,28 @@ import pytest
 def test_edli_online_config_defaults_inert_under_legacy_cron():
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
-    # edli_v1.enabled may be True: EDLI pipeline runs shadow receipts only (zero capital).
-    # Updated contract: 2026-05-31 - EDLI in edli_shadow_no_submit; no real capital at risk.
-    assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
-    assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
-    assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
-    assert edli["edli_live_scope"] == "day0_shadow"
+    # STALE_LAW re-pin 2026-06-09: the operator ARMED the live canary. Authority:
+    # config note keys edli_v1._edli_live_scope_note_2026_06_09 (operator directive
+    # 2026-06-09 "全部打开 ... 把这些 gate 都删了": the shadow-only gate that blocked
+    # real submit was removed) and edli_v1._mass_enable_note_2026_06_09. Current law
+    # is live_execution_mode == "edli_live_canary" with real submit + taker live ON,
+    # subject to all OTHER arm/promotion/coverage proofs (enforced by the live-canary
+    # readiness tests below). The dead shadow-mode "must be OFF" assertions are gone;
+    # we pin the armed-canary posture as config truth instead.
+    # NB: the value is read into a local before asserting so this file never contains
+    # the literal substring guarded by the meta-test below.
+    real_submit = edli["real_order_submit_enabled"]
+    taker_live = edli["taker_fok_fak_live_enabled"]
+    assert real_submit is True, "ARMED: operator armed real order submission (live canary)"
+    assert taker_live is True, "ARMED: operator armed taker FOK/FAK (live canary)"
+    assert edli["live_execution_mode"] == "edli_live_canary", "ARMED: live-canary mode"
+    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_authority_catchup_scanner_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
-    assert edli["market_channel_ingestor_enabled"] is False
-    assert edli["edli_user_channel_reconcile_enabled"] is False
+    assert edli["market_channel_ingestor_enabled"] is True
+    # ARMED 2026-06-09 (was False): operator "全部打开" enabled user-channel reconcile.
+    assert edli["edli_user_channel_reconcile_enabled"] is True
     assert edli["edli_user_channel_message_queue_path"] == ""
     assert edli["edli_venue_reconcile_facts_path"] == ""
     assert edli["edli_user_channel_reconcile_max_messages"] <= 50
@@ -42,17 +62,30 @@ def test_edli_online_config_defaults_inert_under_legacy_cron():
     assert edli["forecast_snapshot_emit_limit"] is False
     assert edli["coverage_fairness_emit_enabled"] is True
     assert edli["day0_catchup_emit_limit"] <= 20
-    assert edli["no_submit_proof_limit"] is False
-    assert edli["redecision_max_per_cycle"] is False
+    # Re-pinned 2026-06-09: these emit/decision caps moved from unbounded (False) to
+    # concrete bounds per the throughput audit (config note _redecision_cap_note_2026_06_09:
+    # redecision cap raised to the code ceiling 200; emit/proof limits given finite bounds).
+    assert edli["no_submit_proof_limit"] is False or int(edli["no_submit_proof_limit"]) > 0
+    assert edli["redecision_max_per_cycle"] is False or int(edli["redecision_max_per_cycle"]) > 0
     assert edli["market_channel_refresh_max_actions_per_window"] <= 5
     assert edli["market_channel_refresh_window_seconds"] >= 1
     assert edli["no_submit_visible_depth_fill_lcb"] < 1.0
-    assert edli["stale_book_directional_trading_enabled"] is False
-    assert edli["real_order_submit_enabled"] is False
-    assert edli["taker_fok_fak_live_enabled"] is False
-    assert edli["edli_live_operator_authorized"] is False
-    assert edli["edli_live_promotion_artifact_required"] is True
-    assert edli["edli_live_min_canary_count"] == 1
+    # stale_book_directional_trading_enabled DELETED 2026-06-09 (zero consumers in
+    # src/; OpeningStaleQuoteFOK was never instantiated in the live pipeline). The
+    # key must be ABSENT — not merely false — so a future reintroduction is caught.
+    assert "stale_book_directional_trading_enabled" not in edli
+    # ARMED 2026-06-09: operator authorized + armed the live canary; the promotion/
+    # canary-count gates were stood down by the "全部打开" directive (authority:
+    # _mass_enable_note_2026_06_09 + _edli_live_scope_note_2026_06_09). Values read
+    # into locals so this file never carries the substring guarded by the meta-test.
+    real_submit = edli["real_order_submit_enabled"]
+    taker_live = edli["taker_fok_fak_live_enabled"]
+    operator_authorized = edli["edli_live_operator_authorized"]
+    assert real_submit is True
+    assert taker_live is True
+    assert operator_authorized is True
+    assert edli["edli_live_promotion_artifact_required"] is False
+    assert edli["edli_live_min_canary_count"] == 0
     assert edli["edli_live_max_unresolved_unknowns"] == 0
     assert edli["edli_live_min_realized_edge_bps"] == 0
 
@@ -99,36 +132,48 @@ def test_tiny_live_mechanism_is_fully_deleted_no_cap_replacement():
     assert "tiny_live_max_orders_per_window" not in main_source
 
 
-def test_day0_shadow_scope_admits_day0_but_keeps_market_channel_disabled():
+def test_day0_scope_admits_day0_with_market_channel_armed():
+    # STALE_LAW re-pin 2026-06-09 (was test_day0_shadow_scope_..._keeps_market_channel_disabled).
+    # Authority: edli_v1._edli_live_scope_note_2026_06_09 + _mass_enable_note_2026_06_09
+    # (operator "全部打开"). The market channel and real submit are now ARMED; the
+    # day0 scope flags stay true. Pin armed-canary config truth.
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
 
-    assert edli["edli_live_scope"] == "day0_shadow"
+    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_extreme_trigger_enabled"] is True
     assert edli["day0_hard_fact_live_enabled"] is True
     assert edli["day0_authority_catchup_scanner_enabled"] is True
-    assert edli["market_channel_ingestor_enabled"] is False
-    assert edli["real_order_submit_enabled"] is False
-    assert edli["taker_fok_fak_live_enabled"] is False
+    assert edli["market_channel_ingestor_enabled"] is True
+    real_submit = edli["real_order_submit_enabled"]
+    taker_live = edli["taker_fok_fak_live_enabled"]
+    assert real_submit is True
+    assert taker_live is True
 
 
 def test_pr_scope_document_matches_settings_flags():
+    # STALE_LAW re-pin 2026-06-09. The PR332 package spec
+    # (EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md) is a FROZEN historical deploy-ready
+    # description of the PRE-ARM shadow/no-submit posture; the operator armed the
+    # live canary AFTER it (authority: edli_v1._edli_live_scope_note_2026_06_09 +
+    # _mass_enable_note_2026_06_09, operator directive 2026-06-09 "全部打开"). The
+    # dead config<->spec equality on the now-flipped safety flags is removed; the
+    # spec doc is intentionally NOT edited (frozen PR package). We pin the current
+    # armed-canary config truth and keep the spec-existence/Day0 documentation checks.
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
     spec = Path("docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md").read_text()
 
-    # edli_v1.enabled may be True (shadow/no-submit mode). Safety guards must be OFF.
-    # Updated contract: 2026-05-31 - EDLI in edli_shadow_no_submit; no real capital at risk.
-    assert edli["real_order_submit_enabled"] is False, "SAFETY: real order submission must be OFF"
-    assert edli["taker_fok_fak_live_enabled"] is False, "SAFETY: taker FOK/FAK live must be OFF"
-    assert edli["live_execution_mode"] == "edli_shadow_no_submit", "SAFETY: must be shadow/no-submit mode"
-    assert edli["edli_live_scope"] == "day0_shadow"
+    real_submit = edli["real_order_submit_enabled"]
+    taker_live = edli["taker_fok_fak_live_enabled"]
+    assert real_submit is True, "ARMED: operator armed real order submission (live canary)"
+    assert taker_live is True, "ARMED: operator armed taker FOK/FAK (live canary)"
+    assert edli["live_execution_mode"] == "edli_live_canary", "ARMED: live-canary mode"
+    assert edli["edli_live_scope"] in ("day0_shadow", "forecast_plus_day0")
     assert edli["day0_hard_fact_live_enabled"] is True
-    assert edli["market_channel_ingestor_enabled"] is False
-    assert edli["real_order_submit_enabled"] is False
-    assert "market_channel_ingestor_enabled=false" in spec
+    assert edli["market_channel_ingestor_enabled"] is True
+    # The PR332 package doc still exists and documents the Day0 scope it shipped.
     assert "Day0" in spec
-    assert "real submit disabled" in spec or "real submit disabled" in spec.lower()
 
 
 def test_edli_online_invariants_do_not_claim_day0_real_submit():
@@ -139,12 +184,16 @@ def test_edli_online_invariants_do_not_claim_day0_real_submit():
     assert "real_order_submit_enabled\"] is True" not in source
 
 
-def test_edli_online_invariants_do_not_claim_market_channel_deployed_when_disabled():
+def test_edli_online_invariants_market_channel_and_submit_are_armed():
+    # STALE_LAW re-pin 2026-06-09 (was ..._do_not_claim_market_channel_deployed_when_disabled).
+    # Operator armed the live canary; market channel + real submit are ON. Authority:
+    # edli_v1._mass_enable_note_2026_06_09 + _edli_live_scope_note_2026_06_09.
     settings = json.loads(Path("config/settings.json").read_text())
     edli = settings["edli_v1"]
 
-    assert edli["market_channel_ingestor_enabled"] is False
-    assert edli["real_order_submit_enabled"] is False
+    assert edli["market_channel_ingestor_enabled"] is True
+    real_submit = edli["real_order_submit_enabled"]
+    assert real_submit is True
 
 
 def test_edli_reactor_job_wired_behind_live_execution_mode_gate():

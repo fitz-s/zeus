@@ -304,20 +304,36 @@ a small temperature shift would significantly change which bin wins.
 
 ## 5. Probability Chain
 
-### 5.1 End-to-end flow
+### Strategy of record (2026-06-09)
+
+The live chain is the **replacement_forecast** path (authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block; cite symbols, not line numbers):
+
+```
+per-model walk-forward EB de-bias (u0r_bayes.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
+fusion, Ledoit-Wolf Σ (u0r_bayes.fuse_u0r_posterior) → σ_pred = max(1.0°C, …) →
+settlement-preimage bin q (emos.bin_probability_settlement, q_shape fused_normal_direct) →
+q_lcb floor (Wilson z=1.645) → Edge → BH FDR → Fractional Kelly
+```
+
+Live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`; q-mode gate `_replacement_q_mode_live_eligibility` admits only FUSED_NORMAL_FULL/PARTIAL; q persisted in `src/data/replacement_forecast_materializer.py` `_insert_posterior`. The **single** live settlement integrator is `src/calibration/emos.py` `bin_probability_settlement` (WMO round-half preimage of N(μ*, σ)) — the integer-settlement preimage logic in this doc still holds, but the live q is built by `emos.py`, not by the Platt/MC path below.
+
+Sections 5.1–5.5 below describe the **LEGACY BASELINE** chain. It now runs only as an independent baseline / LCB cap, joined to the live q as a floor: `effective_q_lcb = min(proof.q_lcb_5pct, replacement_hook_result.effective_q_lcb)`.
+
+### 5.1 End-to-end flow (legacy baseline)
 
 ```
 51 ENS members
   → daily max/min per member (local timezone day slice)
   → + ECMWF bias correction (if enabled)
-  → Monte Carlo (N=10,000): member + N(0, σ²) sensor noise → settlement rounding
+  → analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture; 10k-MC
+      p_raw_vector_from_maxes retired)
   → P_raw vector (per bin)
   → Extended Platt: P_cal = sigmoid(A·logit(P_raw) + B·lead_days + C)
   → calibrate_and_normalize() → P_cal vector sums to 1.0
-  → α-weighted fusion: P_posterior = α·P_cal + (1-α)·P_market
-  → edge = P_posterior - P_market
-  → double-bootstrap CI (3σ layers: ensemble, instrument, Platt params)
-  → Kelly sizing (if CI_lower > 0)
+  → market_fusion.compute_posterior (model_only_v1 — NO market-prior blend live;
+      the α-weighted P_posterior = α·P_cal + (1-α)·P_market form is spec-only)
+  → bootstrap q_lcb (double-bootstrap CI: ensemble, instrument, Platt params)
+  → min-capped against the live q at effective_q_lcb
 ```
 
 ### 5.2 Extended Platt calibration

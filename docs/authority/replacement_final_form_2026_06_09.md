@@ -118,7 +118,7 @@ q_shape provenance = "fused_normal_direct"
 24/54 cities have regional expert coverage:
 - icon_eu: 7 EU-edge cities (Madrid, Moscow, Istanbul, Ankara, Helsinki, Tel Aviv, Warsaw) + 5 Central-EU shared with icon_d2
 - icon_d2: 5 Central-EU cities (Munich, Milan, Paris, Amsterdam, London partial)
-- arome: 6 France/Po-valley cities
+- arome: 2 cities (Milan, Paris — polygon lat_max=51.10 covers only these two; London/Amsterdam/Madrid/Munich are outside)
 - ukmo_uk_2km: London
 - nbm_conus: 12 CONUS + Toronto
 

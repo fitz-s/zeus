@@ -300,6 +300,10 @@ def _candidate_strategy_key_for_reason(reason: Optional["NoTradeReason"]) -> str
         # shoulder_impossible_tail_capture data-gate and theorem failure
         NoTradeReason.PHYSICAL_ENVELOPE_UNWIRED: "shoulder_impossible_tail_capture",
         NoTradeReason.SHOULDER_PHYSICAL_BOUND_NOT_EXCLUDES_TAIL: "shoulder_impossible_tail_capture",
+        # C2 OpeningStaleQuoteFOK (§14) — wired into the live candidate pipeline
+        # 2026-06-09; preserve its no_trade provenance instead of "unknown_candidate".
+        NoTradeReason.OPENING_STALE_FOK_UNWIRED: "c2_opening_stale_fok",
+        NoTradeReason.OPENING_STALE_FOK_NO_EDGE: "c2_opening_stale_fok",
     }
     return strategy_by_reason.get(reason, "unknown_candidate")
 
@@ -464,6 +468,7 @@ from .shoulder_impossible_tail_capture import ShoulderImpossibleTailCapture
 from .settlement_capture_shadow import PhysicalIntervalBound, SettlementCaptureShadow
 from .center_buy_calibrated_shadow import CenterBuyCalibratedShadow
 from .opening_inertia_relaxation import OpeningInertiaRelaxation, estimate_lambda
+from .c2_opening_stale_fok import OpeningStaleQuoteFOK
 from .imminent_open_capture_posterior_collapse import ImminentOpenCapturePosteriorCollapse
 from .shoulder_buy_evt import ShoulderBuyEVT
 
@@ -486,6 +491,7 @@ __all__ = [
     "LiquidityProvisionWithHeartbeat",
     "NegRiskBasket",
     "OpeningInertiaRelaxation",
+    "OpeningStaleQuoteFOK",
     "PhysicalIntervalBound",
     "PriceLevel",
     "ResolutionWindowMaker",

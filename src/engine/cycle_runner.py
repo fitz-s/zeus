@@ -573,7 +573,6 @@ def _execute_discovery_phase(
         entry_bankroll,
         decision_time,
         env=env,
-        edli_event_context=edli_event_context,
         deps=sys.modules[__name__],
     )
 

@@ -35,6 +35,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 # Live-hang diagnostics (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
@@ -90,6 +91,13 @@ _EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS = 20.0
 # consecutive cycles cover disjoint families and the whole live set is swept
 # within a bounded number of cycles. See _refresh_pending_family_snapshots.
 _SUBSTRATE_REFRESH_CURSOR = 0
+# New-listing scout (FIX 3c): condition_ids discovered by the 60s scout that have
+# not yet been seen at the head of the substrate-warmer rotation.  The warmer
+# reads + clears this set and prepends matching families so new markets are warmed
+# immediately rather than waiting for normal round-robin rotation.
+_NEW_FAMILY_CONDITION_IDS: set[str] = set()
+# Condition_ids already known at last scout probe — used for diff.
+_SCOUT_KNOWN_CONDITION_IDS: set[str] = set()
 
 LIVE_EXECUTION_MODES = {
     "legacy_cron",
@@ -117,8 +125,12 @@ REACTOR_MODE_BY_LIVE_STAGE = {
 # OUT — day0 flags crash). `day0_shadow` ADMITS day0 (mask runs, shadow certs
 # produced) but carries NO submit authority of its own — it is orthogonal to the
 # arm axis (real_order_submit_enabled), so day0 candidates fall through the same
-# not-armed block as everything else. Any other value fails closed at boot.
-EDLI_LIVE_SCOPES = frozenset({"forecast_only", "day0_shadow"})
+# not-armed block as everything else. `forecast_plus_day0` ADMITS day0 AND lets
+# day0-lane events PASS the DAY0_SCOPE_SHADOW_ONLY adapter boundary (real submit
+# is then subject to all other proofs/gates/arm) — operator directive 2026-06-09
+# ('全部打开'): shadow-only strategies never self-promote, so the purgatory gate
+# is opened. Any other value fails closed at boot.
+EDLI_LIVE_SCOPES = frozenset({"forecast_only", "day0_shadow", "forecast_plus_day0"})
 EDLI_RUNTIME_FLAGS = (
     "enabled",
     "event_writer_enabled",
@@ -1006,14 +1018,68 @@ def _assert_edli_live_scope(edli_cfg: dict) -> None:
     # edli_live_scope is independent of the arm axis (real_order_submit_enabled),
     # so a day0 candidate routes through the SAME not-armed block as any other
     # event (reactor.py EDLI_REAL_ORDER_SUBMIT_DISABLED / NO_SUBMIT) unless the
-    # operator separately arms. forecast_only stays byte-identical: day0 flags on
-    # under forecast_only still crash with DAY0_OUT_OF_SCOPE_FOR_PR332.
-    if scope == "day0_shadow":
+    # operator separately arms. forecast_plus_day0 ALSO admits day0 (operator
+    # directive 2026-06-09); it additionally lets day0-lane events PASS the
+    # DAY0_SCOPE_SHADOW_ONLY adapter boundary — real submit is then subject to
+    # all other proofs/gates/arm. forecast_only stays byte-identical: day0 flags
+    # on under forecast_only still crash with DAY0_OUT_OF_SCOPE_FOR_PR332.
+    if scope in ("day0_shadow", "forecast_plus_day0"):
         return
     if bool(edli_cfg.get("day0_extreme_trigger_enabled", False)) or bool(
         edli_cfg.get("day0_hard_fact_live_enabled", False)
     ):
         raise RuntimeError("DAY0_OUT_OF_SCOPE_FOR_PR332")
+
+
+def _build_edli_status_pulse(
+    *,
+    started_at: str,
+    completed_at: str,
+    candidates: int,
+    processed: int,
+    proof_accepted: int,
+    rejected: int,
+    retried: int,
+    dead_lettered: int,
+    rejection_reason_counts: dict,
+    submit_disabled_effective_mode: bool,
+    live_submit_attempts: int,
+    live_venue_acks: int = 0,
+) -> dict:
+    """Build the EDLI reactor status pulse dict.
+
+    FIX-4 (P2, 2026-06-09): separates proof_accepted from live_submit_attempts.
+    ``proof_accepted`` counts events whose money-path proof was accepted (i.e.,
+    final intent was built). ``live_submit_attempts`` counts ONLY actual venue
+    submit calls made this cycle — 0 in no-submit / degraded cycles. Dashboards
+    MUST NOT treat proof_accepted as evidence of a venue interaction.
+
+    ``live_venue_acks`` counts venue responses where ``venue_ack_received`` is
+    True (successful ACK from the exchange).  Always <= live_submit_attempts.
+    """
+    return {
+        "mode": "edli_event_reactor",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "candidates": candidates,
+        "candidates_evaluated": candidates,
+        "processed": processed,
+        "proof_accepted": proof_accepted,
+        "final_intents_built": proof_accepted,
+        "submit_attempts": live_submit_attempts,
+        "venue_acks": live_venue_acks,
+        "no_trades": rejected + retried + dead_lettered,
+        "rejected": rejected,
+        "retried": retried,
+        "dead_lettered": dead_lettered,
+        "rejection_reason_counts": rejection_reason_counts,
+        "top_no_trade_reasons": rejection_reason_counts,
+        "deterministic_rejections": (
+            {"real_order_submit_disabled": proof_accepted}
+            if submit_disabled_effective_mode and proof_accepted > 0
+            else {}
+        ),
+    }
 
 
 def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
@@ -1356,6 +1422,52 @@ def _wu_daily_dispatch() -> None:
     run_wu_daily_dispatch()
 
 
+@_scheduler_job("settlement_guard_report")
+def _settlement_guard_report_tick() -> None:
+    """Daily 守護 settlement-guard scorecard (operator-approved Phase-2 organ).
+
+    Read-only: grades every executed fill against the spine-graded VERIFIED
+    settlement truth (via grade_receipt — the ONE Direction-Law truth function),
+    computes the after-cost win-rate vs the 51% GOAL bar with a binomial CI,
+    flags SUSPEND_CANDIDATE cities (report-only), and writes:
+      - state/settlement_guard_report.json (machine)
+      - docs/evidence/settlement_guard/<date>_settlement_guard.md (human)
+    plus a one-line INFO summary the operator sees in this daemon's log daily.
+
+    Idempotent + cheap (one read-only pass over graded tables); n=0 produces an
+    honest report, never a crash. Import is local to keep src.main import-light.
+    """
+    from src.analysis.settlement_guard_report import run_settlement_guard_report
+
+    run_settlement_guard_report()
+
+
+@_scheduler_job("shadow_comparator")
+def _shadow_comparator_tick() -> None:
+    """Daily standing shadow-vs-live comparator (operator-approved, K<<N organ).
+
+    The ONE comparator every promotion uses instead of a bespoke harness. For
+    each registered shadow candidate (immediate customer: day0_remaining_day_q),
+    it READS the persisted shadow + live q for each settled cohort cell, grades
+    both against the VERIFIED settlement via grade_receipt (the ONE Direction-Law
+    truth function — never recomputes domain logic), and emits a running
+    scoreboard with a PROMOTE_SUPPORTED | LIVE_BETTER | INSUFFICIENT_N verdict:
+      - state/shadow_comparator.json (machine)
+      - docs/evidence/shadow_comparisons/<date>_shadow_comparison.md (human)
+    plus a one-line INFO verdict per candidate in this daemon's log.
+
+    Co-located with the settlement-guard tick (same WORLD+forecasts read shape,
+    same daily cadence). Read-only; honest absence (INSUFFICIENT_N) when a
+    candidate's shadow lane is not yet persisting a comparable q — never a
+    fabricated cohort. Import is local to keep src.main import-light.
+    """
+    from src.analysis.shadow_comparator import run_shadow_comparator_job
+
+    report = run_shadow_comparator_job()
+    for cand in report.get("candidates", []):
+        logger.info("shadow_comparator[%s]: %s", cand["name"], cand["verdict_line"])
+
+
 # ---------------------------------------------------------------------------
 # F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
 # ---------------------------------------------------------------------------
@@ -1379,6 +1491,59 @@ def _wu_daily_dispatch() -> None:
 # _wrap_reconciler_cycle: polls chain for tx receipts; advances
 #   WRAP_APPROVE_TX_HASHED → WRAP_APPROVED and WRAP_TX_HASHED → WRAP_CONFIRMED;
 #   on WRAP_CONFIRMED calls adapter.update_balance_allowance() to refresh CLOB ledger.
+
+def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
+    """Proceeds-driven wrap: leave ZERO unwrapped USDC.e after this tick.
+
+    STRUCTURAL FIX (operator directive 2026-06-09): redemption proceeds land as
+    USDC.e at the Safe, but the periodic wrap state machine (intent creator /
+    submitter / reconciler, 5-min ticks) advanced one step per tick — fresh
+    proceeds sat unwrapped for up to ~25 minutes ("Confirm pending deposit").
+    This helper is called from the SAME redeem ticks that broadcast/confirm
+    redemptions and synchronously drives the full APPROVE→WRAP chain via
+    wrap_proceeds_now. Fail-soft: any failure logs and defers to the periodic
+    wrap jobs (which remain as the resume/backstop path).
+
+    P0-2 (d) shared logical lock: takes the single `wrap_state_machine` lock
+    shared by _wrap_intent_creator_cycle / _wrap_submitter_cycle /
+    _wrap_reconciler_cycle / this same-tick path. With ONE lock, no two of them
+    ever submit a Safe tx or transition a wrap row concurrently — so a stale
+    snapshot can never drive a duplicate on-chain tx (burned gas) against a row
+    another worker is advancing. The CAS in _transition is the structural
+    anti-reversion guard; this lock is the duplicate-submission guard.
+    """
+    from src.data.dual_run_lock import acquire_lock
+    from src.execution.wrap_unwrap_commands import wrap_proceeds_now
+    from src.state.db import get_world_connection
+
+    try:
+        from eth_account import Account as _Account
+        signer_eoa = _Account.from_key(creds["private_key"]).address
+    except Exception as exc:  # noqa: BLE001 — fail-soft
+        logger.warning("wrap_proceeds_same_tick: signer derivation failed: %s", exc)
+        return
+    with acquire_lock("wrap_state_machine") as acquired:
+        if not acquired:
+            logger.info("wrap_proceeds_same_tick skipped_lock_held")
+            return
+        wconn = get_world_connection()
+        try:
+            summary = wrap_proceeds_now(
+                wconn, adapter, creds["funder_address"], signer_eoa,
+            )
+            if summary.get("enqueued") or summary.get("confirmed") or summary.get("failed"):
+                logger.info(
+                    "wrap_proceeds_same_tick: balance_before=%s enqueued=%s "
+                    "confirmed=%s failed=%s pending=%s",
+                    summary.get("balance_micro_before"), summary.get("enqueued"),
+                    summary.get("confirmed"), summary.get("failed"),
+                    summary.get("pending"),
+                )
+        except Exception as exc:  # noqa: BLE001 — fail-soft, periodic jobs resume
+            logger.warning("wrap_proceeds_same_tick failed (fail-soft): %s", exc)
+        finally:
+            wconn.close()
+
 
 @_scheduler_job("redeem_submitter")
 def _redeem_submitter_cycle() -> None:
@@ -1509,6 +1674,11 @@ def _redeem_submitter_cycle() -> None:
                             "redeem_submitter: inventory sweep enqueued/active %d command(s)",
                             len(swept),
                         )
+                    # Proceeds-driven wrap (same tick): any USDC.e already
+                    # sitting at the Safe from earlier confirmed redemptions is
+                    # wrapped to pUSD NOW, not left for the slow periodic
+                    # balance poll. Fail-soft inside.
+                    _wrap_proceeds_same_tick(creds, adapter)
             # Poll ALL submittable states (INTENT_CREATED + RETRYING).
             placeholders = ",".join("?" * len(_SUBMITTABLE_STATES))
             state_values = tuple(s.value for s in _SUBMITTABLE_STATES)
@@ -1623,6 +1793,39 @@ def _redeem_reconciler_cycle() -> None:
                     "redeem_reconciler: reconciled=%d states=%s",
                     len(results), [r.state.value for r in results],
                 )
+                # Proceeds-driven wrap (same tick): a REDEEM_CONFIRMED batch
+                # means USDC.e proceeds just became chain-final at the Safe.
+                # Wrap them NOW in this tick instead of waiting for the
+                # periodic balance poll. Fail-soft: credential/adapter issues
+                # log and defer to the periodic wrap jobs.
+                if any(
+                    r.state == SettlementState.REDEEM_CONFIRMED for r in results
+                ):
+                    try:
+                        from src.data.polymarket_client import (
+                            resolve_polymarket_credentials as _resolve_creds,
+                            _resolve_clob_v2_signature_type as _sig_type,
+                        )
+                        from src.venue.polymarket_v2_adapter import (
+                            DEFAULT_V2_HOST as _V2_HOST,
+                            PolymarketV2Adapter as _V2Adapter,
+                        )
+                        _creds = _resolve_creds()
+                        _adapter = _V2Adapter(
+                            host=os.environ.get("POLYMARKET_CLOB_V2_HOST", _V2_HOST),
+                            funder_address=_creds["funder_address"],
+                            signer_key=_creds["private_key"],
+                            chain_id=int(os.environ.get("POLYMARKET_CHAIN_ID", "137")),
+                            signature_type=_sig_type(),
+                            polygon_rpc_url=polygon_rpc_url,
+                            api_creds=_creds.get("api_creds"),
+                        )
+                        _wrap_proceeds_same_tick(_creds, _adapter)
+                    except Exception as _wrap_exc:  # noqa: BLE001 — fail-soft
+                        logger.warning(
+                            "redeem_reconciler: same-tick wrap skipped: %s",
+                            _wrap_exc,
+                        )
             except Exception as exc:
                 try:
                     conn.rollback()
@@ -1651,7 +1854,8 @@ def _wrap_intent_creator_cycle() -> None:
         logger.info("wrap_intent_creator skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_intent_creator") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_intent_creator").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_intent_creator skipped_lock_held")
             return
@@ -1720,7 +1924,8 @@ def _wrap_submitter_cycle() -> None:
         logger.info("wrap_submitter skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_submitter") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_submitter").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_submitter skipped_lock_held")
             return
@@ -1857,7 +2062,8 @@ def _wrap_reconciler_cycle() -> None:
         logger.info("wrap_reconciler skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_reconciler") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_reconciler").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_reconciler skipped_lock_held")
             return
@@ -3216,10 +3422,39 @@ def _refresh_pending_family_snapshots(
     # the freshness-first deterministic order; we only choose a different *start*.
     # No family is dropped — rotation reorders, it does not filter — so a True from
     # the freshness check still captures and no candidate is starved.
-    global _SUBSTRATE_REFRESH_CURSOR
+    # FIX 3c — NEW-FAMILY WARMER PRIORITY (operator 2026-06-09):
+    # Newly-discovered condition_ids (set by _new_listing_scout_cycle) jump to HEAD
+    # of the rotation so they are warmed in the NEXT cycle rather than waiting at
+    # the tail of the round-robin.  Translate condition_ids → (city, date, metric)
+    # tuples via the topology DB, then prepend to families before cursor rotation.
+    global _SUBSTRATE_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS
+    new_priority_families: list[tuple[str, str, str]] = []
+    if _NEW_FAMILY_CONDITION_IDS:
+        try:
+            new_cids_snapshot = set(_NEW_FAMILY_CONDITION_IDS)
+            _NEW_FAMILY_CONDITION_IDS.clear()
+            for cid in sorted(new_cids_snapshot):
+                try:
+                    row_q = world_conn.execute(
+                        "SELECT city, target_date, temperature_metric FROM market_events WHERE condition_id = ? LIMIT 1",
+                        (cid,),
+                    ).fetchone()
+                    if row_q is not None:
+                        city_v, td_v, metric_v = (
+                            _canonical_refresh_city_name(row_q[0]),
+                            str(row_q[1] or "").strip(),
+                            _canonical_refresh_metric(row_q[2]),
+                        )
+                        fk = _refresh_family_key(city_v, td_v, metric_v)
+                        if fk not in {_refresh_family_key(*f) for f in families}:
+                            new_priority_families.append((city_v, td_v, metric_v))
+                except Exception:
+                    pass
+        except Exception:
+            pass
     n_families = len(families)
     start_offset = _SUBSTRATE_REFRESH_CURSOR % n_families
-    families = families[start_offset:] + families[:start_offset]
+    families = new_priority_families + families[start_offset:] + families[:start_offset]
 
     # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
     # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
@@ -3859,6 +4094,137 @@ def _market_discovery_cycle() -> None:
     finally:
         _market_substrate_refresh_lock.release()
         _market_discovery_lock.release()
+
+
+@_scheduler_job("new_listing_scout")
+def _new_listing_scout_cycle() -> None:
+    """Lightweight 60s new-listing scout: detect brand-new Polymarket weather markets.
+
+    Upstream real-time discovery gap (dimension a/b/c, operator 2026-06-09):
+    The standard market_discovery runs every 5 minutes.  A brand-new listing
+    (startDate just past) therefore has a ≤5-min discovery lag and then must
+    wait for the next 00Z/12Z opendata wave (hours) before a forecast_posterior
+    exists.  This scout closes two gaps:
+
+    (a) DISCOVERY CADENCE: probes Gamma `order=startDate&ascending=false&limit=10`
+        every 60s — a head-page diff for NEW condition_ids.  Cost: one HTTP GET
+        per cycle (<100ms); no full universe scan.
+
+    (b) POSTERIOR FAST-LANE: enqueues a replacement_forecast shadow materialization
+        request for each new family so the daemon processes it in the next 5-min
+        cycle rather than waiting for the next scheduled 00Z/12Z opendata wave.
+
+    (c) WARMER PRIORITY: inserts new condition_ids into _NEW_FAMILY_CONDITION_IDS so
+        _refresh_pending_family_snapshots prepends them to the warmer rotation head
+        (they are warmed next cycle, not at tail of the round-robin).
+
+    Fail-open: any exception is caught and logged; the live path is never affected.
+    EDLI-gated: only fires when edli_v1.enabled is True.
+    """
+    global _SCOUT_KNOWN_CONDITION_IDS, _NEW_FAMILY_CONDITION_IDS
+
+    edli_cfg = _settings_section("edli_v1", {})
+    if not edli_cfg.get("enabled"):
+        return
+
+    try:
+        import httpx
+        from src.data.market_scanner import GAMMA_BASE, _gamma_get
+        from src.state.db import ZEUS_FORECASTS_DB_PATH
+
+        # (a) Probe head page: most recently started events
+        try:
+            resp = _gamma_get(
+                "/events",
+                params={"order": "startDate", "ascending": "false", "limit": "10"},
+                timeout=10.0,
+                retries=2,
+            )
+            if resp.status_code != 200:
+                logger.debug("new_listing_scout: Gamma probe returned %s", resp.status_code)
+                return
+            raw_events = resp.json() if isinstance(resp.json(), list) else []
+        except Exception as exc:
+            logger.debug("new_listing_scout: Gamma probe failed (non-fatal): %r", exc)
+            return
+
+        # Extract condition_ids from all markets across the head-page events
+        probe_condition_ids: set[str] = set()
+        for ev in raw_events:
+            for market in (ev.get("markets") or []):
+                cid = str(market.get("conditionId") or "").strip()
+                if cid:
+                    probe_condition_ids.add(cid)
+
+        if not probe_condition_ids:
+            return
+
+        # Initialise known set from DB on first run (or when empty)
+        if not _SCOUT_KNOWN_CONDITION_IDS:
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(ZEUS_FORECASTS_DB_PATH), timeout=10)
+                try:
+                    rows = conn.execute("SELECT condition_id FROM market_events WHERE condition_id IS NOT NULL").fetchall()
+                    _SCOUT_KNOWN_CONDITION_IDS = {str(r[0]) for r in rows if r[0]}
+                finally:
+                    conn.close()
+            except Exception as exc:
+                logger.debug("new_listing_scout: known-set init failed (non-fatal): %r", exc)
+
+        new_cids = probe_condition_ids - _SCOUT_KNOWN_CONDITION_IDS
+        if not new_cids:
+            # Update known set to include any probe IDs we haven't seen
+            _SCOUT_KNOWN_CONDITION_IDS.update(probe_condition_ids)
+            return
+
+        logger.info(
+            "new_listing_scout: %d new condition_id(s) detected on head-page probe: %s",
+            len(new_cids),
+            sorted(new_cids),
+        )
+
+        # Persist new events to market_events via standard discovery path
+        try:
+            from src.data.market_scanner import find_weather_markets_or_raise, _persist_market_events_to_db
+            new_events = find_weather_markets_or_raise(min_hours_to_resolution=0.0, include_slug_pattern=True)
+            _persist_market_events_to_db(new_events, db_path=ZEUS_FORECASTS_DB_PATH)
+        except Exception as exc:
+            logger.warning("new_listing_scout: persist new events failed (non-fatal): %r", exc)
+
+        # (b) POSTERIOR FAST-LANE: enqueue shadow materialization for each new family
+        try:
+            from src.data.replacement_forecast_production import (
+                _replacement_forecast_shadow_materialization_queue_config,
+            )
+            from src.data.replacement_forecast_shadow_materialization_queue import _write_request
+            from pathlib import Path
+
+            queue_cfg = _replacement_forecast_shadow_materialization_queue_config()
+            request_dir = queue_cfg.get("request_dir")
+            if request_dir is not None:
+                request_dir = Path(str(request_dir))
+                request_dir.mkdir(parents=True, exist_ok=True)
+                for cid in sorted(new_cids):
+                    req_path = request_dir / f"new_listing_scout_{cid}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+                    _write_request(req_path, {
+                        "source": "new_listing_scout",
+                        "condition_id": cid,
+                        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+                        "reason": "NEW_LISTING_FAST_LANE",
+                    })
+                    logger.info("new_listing_scout: enqueued materialization for %s → %s", cid, req_path.name)
+        except Exception as exc:
+            logger.warning("new_listing_scout: materialization enqueue failed (non-fatal): %r", exc)
+
+        # (c) WARMER PRIORITY: mark new condition_ids for head-of-rotation in next warm cycle
+        _NEW_FAMILY_CONDITION_IDS.update(new_cids)
+
+        # Update known set
+        _SCOUT_KNOWN_CONDITION_IDS.update(probe_condition_ids)
+
+    except Exception as exc:
+        logger.warning("new_listing_scout: outer guard (non-fatal): %r", exc)
 
 
 def _capture_boot_state() -> dict:
@@ -5082,6 +5448,21 @@ def _edli_event_reactor_cycle() -> None:
             edli_cfg, "no_submit_proof_limit", default=10, maximum=400
         )
         store = EventStore(conn)
+        #
+        # PR#404 P0-2 (operator merge blocker): the day0 fast lane's network IO
+        # (aviationweather METAR fetch, WU anomaly cross-check, open-meteo
+        # hourly-vector refresh) MUST happen BEFORE the mutex is acquired —
+        # the world-write mutex exists for WAL writer exclusion and must never
+        # span an external HTTP call (a slow venue/API response would serialize
+        # every world writer: ingestor, collateral heartbeat, reactor drain).
+        # The prefetch returns a pure in-memory snapshot; only EventWriter
+        # writes happen inside the mutex.
+        _day0_fast_prefetch = None
+        if (
+            edli_cfg.get("day0_extreme_trigger_enabled")
+            and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+        ):
+            _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
         # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
@@ -5180,6 +5561,10 @@ def _edli_event_reactor_cycle() -> None:
                         decision_time=now,
                         received_at=received_at,
                         limit=day0_emit_limit,
+                        # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
+                        # (_day0_fast_prefetch above, before acquire); this call
+                        # is the pure write phase.
+                        fast_prefetch=_day0_fast_prefetch,
                     )
                 finally:
                     _day0_trade_conn.close()
@@ -5207,6 +5592,7 @@ def _edli_event_reactor_cycle() -> None:
 
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
+        edli_live_scope = str(edli_cfg.get("edli_live_scope") or "forecast_only")
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
         submit_disabled_effective_mode = reactor_mode == "live_no_submit"
         live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
@@ -5325,6 +5711,9 @@ def _edli_event_reactor_cycle() -> None:
                     decision_time=process_pending_decision_time,
                 ),
                 operator_arm=operator_arm,
+                # FIX-3 (P1): pass scope so the adapter can enforce
+                # DAY0_SCOPE_SHADOW_ONLY at the final submit boundary.
+                edli_live_scope=edli_live_scope,
             )
             if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(
@@ -5370,33 +5759,41 @@ def _edli_event_reactor_cycle() -> None:
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
         _rejection_counts = dict(Counter(_rr.rejection_reasons))
         _edli_candidates = int(_rr.proof_accepted + _rr.rejected + _rr.retried + _rr.dead_lettered)
+        # FIX-4 (P2): read the per-cycle live-submit and venue-ack counters from
+        # the adapter.  The live adapter exposes _live_submit_count and
+        # _live_ack_count (mutable 1-element lists) after FIX-4; the no-submit
+        # adapter and any legacy adapter do not, so getattr returns [0] for both
+        # → live_submit_attempts=0 and live_venue_acks=0 (correct for no-submit
+        # cycles).
+        # FAIL-SOFT counter read (Copilot PR#404): honor the FIX-4 closure
+        # counter when it has the expected 1-element-list shape; any other
+        # shape (legacy adapter, int, empty list, None) reads as 0 instead of
+        # crashing the status-pulse write.
+        _live_submit_count_ref = getattr(submit_adapter, "_live_submit_count", [0])
+        try:
+            _live_submit_attempts = int(_live_submit_count_ref[0])
+        except (TypeError, IndexError, KeyError, ValueError):
+            _live_submit_attempts = 0
+        _live_ack_count_ref = getattr(submit_adapter, "_live_ack_count", [0])
+        _live_venue_acks = int(_live_ack_count_ref[0])
         try:
             from src.observability.status_summary import write_cycle_pulse
 
             write_cycle_pulse(
-                {
-                    "mode": "edli_event_reactor",
-                    "started_at": process_pending_decision_time.isoformat(),
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                    "candidates": _edli_candidates,
-                    "candidates_evaluated": _edli_candidates,
-                    "processed": int(_rr.processed),
-                    "proof_accepted": int(_rr.proof_accepted),
-                    "final_intents_built": int(_rr.proof_accepted),
-                    "submit_attempts": int(_rr.proof_accepted),
-                    "venue_acks": 0,
-                    "no_trades": int(_rr.rejected + _rr.retried + _rr.dead_lettered),
-                    "rejected": int(_rr.rejected),
-                    "retried": int(_rr.retried),
-                    "dead_lettered": int(_rr.dead_lettered),
-                    "rejection_reason_counts": _rejection_counts,
-                    "top_no_trade_reasons": _rejection_counts,
-                    "deterministic_rejections": (
-                        {"real_order_submit_disabled": int(_rr.proof_accepted)}
-                        if submit_disabled_effective_mode and _rr.proof_accepted > 0
-                        else {}
-                    ),
-                }
+                _build_edli_status_pulse(
+                    started_at=process_pending_decision_time.isoformat(),
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                    candidates=_edli_candidates,
+                    processed=int(_rr.processed),
+                    proof_accepted=int(_rr.proof_accepted),
+                    rejected=int(_rr.rejected),
+                    retried=int(_rr.retried),
+                    dead_lettered=int(_rr.dead_lettered),
+                    rejection_reason_counts=_rejection_counts,
+                    submit_disabled_effective_mode=submit_disabled_effective_mode,
+                    live_submit_attempts=_live_submit_attempts,
+                    live_venue_acks=_live_venue_acks,
+                )
             )
         except Exception as exc:
             logger.error(
@@ -5996,6 +6393,55 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
 
+def _edli_day0_fast_lane_enabled() -> bool:
+    try:
+        edli_cfg = settings.get("edli_v1", {}) if hasattr(settings, "get") else settings["edli_v1"]
+        return bool(edli_cfg.get("day0_fast_obs_lane_enabled", True))
+    except Exception:
+        return True
+
+
+def _edli_prefetch_day0_fast_obs(*, decision_time: datetime):
+    """HTTP PHASE of the day0 fast lane (PR#404 operator review P0-2).
+
+    Runs OUTSIDE the world-write mutex: METAR batch fetch, WU anomaly
+    cross-check, and the open-meteo hourly-vector refresh (which writes the
+    FORECASTS db under its own writer lock — never the world WAL). Returns a
+    pure in-memory FastObsPrefetch (or None) for the mutex-held write phase.
+    decision_time is captured HERE so event identity uses the prefetch clock,
+    not a lock-held clock. Fail-soft: any error returns None.
+    """
+    if not _edli_day0_fast_lane_enabled():
+        return None
+    prefetch = None
+    try:
+        from src.config import runtime_cities
+        from src.data.day0_fast_obs import get_fast_obs_emitter
+        from src.data.day0_oracle_anomaly import wu_metar_anomaly_check
+
+        prefetch = get_fast_obs_emitter().prefetch(
+            cities=runtime_cities(),
+            decision_time=decision_time,
+            anomaly_check=wu_metar_anomaly_check,
+        )
+    except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive
+        logger.warning(
+            "EDLI day0 fast obs prefetch failed (non-fatal, catch-up lanes continue): %r",
+            _fast_exc,
+        )
+    try:
+        # High-res hourly vector refresh (30-min throttle per city inside the
+        # module; ~17 in-domain cities). open-meteo HTTP + forecasts-DB write —
+        # both forbidden under the world-write mutex, so it lives here.
+        from src.config import runtime_cities as _rc
+        from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+
+        maybe_refresh_day0_hourly_vectors(_rc(), decision_time=decision_time)
+    except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
+        logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)
+    return prefetch
+
+
 def _edli_emit_day0_extreme_events(
     world_conn,
     trade_conn,
@@ -6003,11 +6449,38 @@ def _edli_emit_day0_extreme_events(
     decision_time: datetime,
     received_at: str,
     limit: int,
+    fast_prefetch=None,
 ) -> int:
-    """Emit EDLI Day0 extreme events from live observation truth surfaces."""
+    """Emit EDLI Day0 extreme events from live observation truth surfaces.
+
+    WRITE PHASE ONLY (PR#404 P0-2): performs NO network IO — safe to call
+    while holding the world-write mutex. The fast lane's HTTP results arrive
+    via ``fast_prefetch`` (built by _edli_prefetch_day0_fast_obs OUTSIDE the
+    mutex); the catch-up scanners below are DB-only by construction.
+
+    Returns the TOTAL emitted across all three lanes (PR#404 P2: the fast-lane
+    count was previously dropped from the return value).
+    """
 
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
+
+    fast_emitted = 0
+    if fast_prefetch is not None:
+        try:
+            from src.data.day0_fast_obs import get_fast_obs_emitter
+
+            fast_emitted = get_fast_obs_emitter().emit_prefetched(
+                world_conn=world_conn,
+                prefetch=fast_prefetch,
+                received_at=received_at,
+                limit=limit,
+            )
+        except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
+            logger.warning(
+                "EDLI day0 fast obs emit failed (non-fatal, catch-up lanes continue): %r",
+                _fast_exc,
+            )
 
     trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
     authority_results = trigger.scan_authority_rows(
@@ -6024,7 +6497,13 @@ def _edli_emit_day0_extreme_events(
         received_at=received_at,
         limit=limit,
     )
-    return len(authority_results) + len(observation_results)
+    # Structured per-lane counters (PR#404 P2 observability fix).
+    logger.info(
+        "EDLI day0 emit: day0_fast_emitted=%d day0_authority_emitted=%d "
+        "day0_observation_instants_emitted=%d",
+        fast_emitted, len(authority_results), len(observation_results),
+    )
+    return fast_emitted + len(authority_results) + len(observation_results)
 
 
 def _edli_day0_settlement_semantics(observation: dict):
@@ -7424,6 +7903,35 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                 )
                 summary["monitoring_error"] = str(exc)
 
+            # Phase 2b: DAY0 resting-order cancel sweep (adversarial review
+            # 2026-06-10 fix 2 — finding 4 "standing free option"). Cancels OUR
+            # open resting ENTRY orders whose day0 bin is hard-fact dead for the
+            # order's side, or whose family is oracle-anomaly paused. Cancels
+            # only REDUCE standing risk; gated to live-submit mode because in
+            # shadow no real resting orders of ours exist (and the venue cancel
+            # is a real API call). Fail-soft.
+            if real_order_submit_enabled and bool(
+                edli_cfg.get("day0_dead_bin_order_cancel_enabled", True)
+            ):
+                try:
+                    from src.config import runtime_cities_by_name
+                    from src.execution.day0_hard_fact_exit import (
+                        cancel_day0_dead_bin_resting_entries,
+                    )
+
+                    cancelled = cancel_day0_dead_bin_resting_entries(
+                        clob=clob,
+                        conn=conn,
+                        cities_by_name=runtime_cities_by_name(),
+                    )
+                    if cancelled:
+                        summary["day0_dead_bin_orders_cancelled"] = cancelled
+                except Exception as exc:  # noqa: BLE001 — sweep is additive
+                    logger.warning(
+                        "chain_sync_and_exit_monitor: day0 dead-bin cancel sweep failed (non-fatal): %s",
+                        exc,
+                    )
+
         # INV-17 / DT#1: commit the DB transaction (monitoring state transitions) FIRST,
         # then export the derived portfolio/tracker JSON with the committed artifact id —
         # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can
@@ -7859,6 +8367,21 @@ def main():
             max_instances=1,
             coalesce=True,
         )
+        # NEW-LISTING SCOUT (operator 2026-06-09, dimensions a/b/c): lightweight 60s
+        # head-page probe for brand-new Polymarket weather listings.  Detects new
+        # condition_ids, enqueues a shadow-materialization fast-lane request, and marks
+        # families for head-of-rotation in the next substrate warm cycle.
+        # Fail-open: any exception is caught inside the job.  Data-only; no orders.
+        if edli_cfg.get("new_listing_scout_enabled", True):
+            scheduler.add_job(
+                _new_listing_scout_cycle,
+                "interval",
+                seconds=60,
+                id="new_listing_scout",
+                next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 45.0),
+                max_instances=1,
+                coalesce=True,
+            )
         # MAINSTREAM WARM (E2 / operator directive 2026-06-04 #2): dedicated off-mutex
         # warmer for the mainstream-forecast point cache (read_mainstream_point_cached),
         # mirroring _edli_market_substrate_warm_cycle. The reactor proof path now ALWAYS
@@ -8033,8 +8556,14 @@ def main():
         _wrap_submitter_cycle, "interval", minutes=2,
         id="wrap_submitter", max_instances=1, coalesce=True,
     )
+    # P0-3: fast conditional cadence (30s). The reconciler early-exits cheaply
+    # (a single state-count query, BEFORE any credential resolution or adapter
+    # construction) when no *_TX_HASHED row exists — so the expensive RPC path
+    # only fires when there is in-flight wrap work to finalize. The same-tick
+    # path now leaves freshly-submitted txs in a TX_HASHED state for THIS job to
+    # confirm within ~30s, instead of synchronously blocking the redeem ticks.
     scheduler.add_job(
-        _wrap_reconciler_cycle, "interval", minutes=2,
+        _wrap_reconciler_cycle, "interval", seconds=30,
         id="wrap_reconciler", max_instances=1, coalesce=True,
     )
     # PR-S6: deployment freshness gate — runs every 60s, fail-closed at 24h uptime.
@@ -8047,6 +8576,24 @@ def main():
     scheduler.add_job(
         _wu_daily_dispatch, "interval", hours=1, id="wu_daily",
         max_instances=1, coalesce=True,
+    )
+    # Daily 守護 settlement-guard scorecard — runs at 09:15 UTC, after the
+    # 07:30 forecasts tick and the hourly settlement-truth writes have landed.
+    # Read-only over graded tables; writes state/settlement_guard_report.json +
+    # docs/evidence/settlement_guard/<date>.md + a one-line INFO summary.
+    scheduler.add_job(
+        _settlement_guard_report_tick, "cron", hour=9, minute=15,
+        id="settlement_guard_report", max_instances=1, coalesce=True,
+    )
+    # Standing shadow-vs-live comparator — 09:20 UTC, just after the settlement-
+    # guard tick (same WORLD+forecasts read shape, settlement truth already
+    # landed). Read-only; writes state/shadow_comparator.json +
+    # docs/evidence/shadow_comparisons/<date>.md + a one-line verdict per
+    # candidate. INSUFFICIENT_N (honest absence) until a shadow lane persists a
+    # comparable q.
+    scheduler.add_job(
+        _shadow_comparator_tick, "cron", hour=9, minute=20,
+        id="shadow_comparator", max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER

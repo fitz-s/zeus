@@ -37,7 +37,21 @@ from src.state.portfolio import (
 from src.config import state_path
 from src.contracts.edge_context import EdgeContext
 from src.contracts.semantic_types import EntryMethod
-from src.execution.exit_triggers import evaluate_exit_triggers
+
+# NOTE (2026-06-09): src.execution.exit_triggers was deleted by commit 608ef638bd
+# ("one exit path + one sizing rule — delete orphan twins"). The V2-replay
+# simulation in run_profit_validation_replay() depended on the deleted
+# evaluate_exit_triggers(); that diagnostic path is therefore tombstoned. The
+# still-live cohort-gating contract (require_single_exit_economics_cohort /
+# require_legacy_exit_trigger_replay_cohort) is independent of it and remains
+# importable + testable. We tombstone at call-site rather than import-time so
+# importing this module never re-introduces the dead dependency.
+_LEGACY_EXIT_TRIGGER_REPLAY_REMOVED = (
+    "evaluate_exit_triggers was removed when the dual exit paths were "
+    "consolidated to a single exit path (commit 608ef638bd). The V2 exit-trigger "
+    "replay simulation is tombstoned; this diagnostic can no longer reconstruct "
+    "the deleted trigger semantics."
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -302,11 +316,7 @@ def run_profit_validation_replay():
             target_dt = datetime.fromisoformat(target_date + "T23:59:59+00:00")
             hours_to_settle = max(0.0, (target_dt - tick_dt).total_seconds() / 3600.0)
             
-            signal = evaluate_exit_triggers(
-                position=sim_position,
-                current_edge_context=edge_ctx,
-                hours_to_settlement=hours_to_settle,
-            )
+            raise RuntimeError(_LEGACY_EXIT_TRIGGER_REPLAY_REMOVED)
             
             if signal:
                 v2_exit_time = tick["timestamp"]

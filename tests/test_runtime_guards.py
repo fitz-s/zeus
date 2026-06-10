@@ -26,6 +26,12 @@ import src.data.ensemble_client as ensemble_client
 import src.engine.cycle_runner as cycle_runner
 import src.engine.cycle_runtime as cycle_runtime
 import src.engine.evaluator as evaluator_module
+# STALE_LAW re-pin 2026-06-09: the NATIVE_MULTIBIN_BUY_NO_* flag-key constants moved from
+# src.engine.evaluator to src.strategy.family_exclusive_dedup (22dba73349 + slim bce3091a0d).
+from src.strategy.family_exclusive_dedup import (
+    NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG,
+    NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG,
+)
 import src.execution.exit_lifecycle as exit_lifecycle_module
 from src.backtest.economics import check_economics_readiness
 from src.data.observation_client import Day0ObservationContext
@@ -138,8 +144,8 @@ def _allow_entry_gates_for_runtime_test(monkeypatch) -> None:
 
 def _set_native_multibin_buy_no_flags(monkeypatch, *, shadow: bool, live: bool = False) -> None:
     flags = dict(settings["feature_flags"])
-    flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = shadow
-    flags[evaluator_module.NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = live
+    flags[NATIVE_MULTIBIN_BUY_NO_SHADOW_FLAG] = shadow
+    flags[NATIVE_MULTIBIN_BUY_NO_LIVE_FLAG] = live
     monkeypatch.setitem(settings._data, "feature_flags", flags)
 
 
@@ -987,7 +993,7 @@ def test_entry_evaluator_uses_ask_only_buy_quote_when_yes_bid_is_absent(monkeypa
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
     monkeypatch.setattr(evaluator_module, "model_agreement", lambda *args, **kwargs: "AGREE")
 
     decisions = evaluator_module.evaluate_candidate(
@@ -7728,7 +7734,7 @@ def test_evaluator_uses_configured_primary_and_crosscheck_models(monkeypatch):
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
     monkeypatch.setattr(
         evaluator_module,
         "analyze_model_agreement",
@@ -7937,7 +7943,7 @@ def test_forecast_provider_identity_uses_source_id_not_model_family(monkeypatch)
     monkeypatch.setattr(evaluator_module, "get_calibrator", _get_calibrator)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", CapturingAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
 
     decisions = evaluator_module.evaluate_candidate(
         candidate,
@@ -8043,7 +8049,7 @@ def test_evaluator_buffers_microstructure_without_opening_quote_loop_transaction
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", EmptyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
     clob = BoundaryClob()
     microstructure_rows: list[dict] = []
 
@@ -8178,7 +8184,7 @@ def test_evaluator_live_path_ignores_shadow_calibration_authority_result(monkeyp
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
     monkeypatch.setattr(evaluator_module, "get_calibration_authority_result", _forbidden_authority_result, raising=False)
     import src.calibration.manager as manager_module
     monkeypatch.setattr(manager_module, "get_calibration_authority_result", _forbidden_authority_result)
@@ -11229,7 +11235,7 @@ def test_evaluator_projects_exposure_across_multiple_edges(monkeypatch, tmp_path
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "phase_aware_kelly_multiplier", lambda **kwargs: 1.0)
     monkeypatch.setattr(evaluator_module, "kelly_size", _kelly_size)
@@ -11369,7 +11375,7 @@ def test_update_reaction_degenerate_ci_fails_closed_before_sizing(monkeypatch):
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("degenerate CI must not reach sizing")))
 
     decisions = evaluator_module.evaluate_candidate(
@@ -11677,7 +11683,7 @@ def test_day0_observation_path_reaches_day0_signal(monkeypatch):
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges)
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: edges, raising=False)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
     monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, "OK"))
@@ -11980,7 +11986,7 @@ def test_gfs_crosscheck_uses_local_target_day_hours_instead_of_first_24h(monkeyp
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
 
     decisions = evaluator_module.evaluate_candidate(
         candidate,
@@ -12090,7 +12096,7 @@ def test_gfs_crosscheck_forecast_days_cover_fractional_local_target_lead(monkeyp
     _patch_mature_calibration(monkeypatch)
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
 
     decisions = evaluator_module.evaluate_candidate(
         candidate,

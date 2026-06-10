@@ -1,5 +1,7 @@
 # Zeus Doc Gap Inventory — 2026-05-24
 
+> **Pre-merge (2026-06-09):** superseded by the replacement_forecast merge. The gap findings predate the replacement chain becoming strategy of record — authority `docs/authority/replacement_final_form_2026_06_09.md`.
+
 Created: 2026-05-24
 Authority basis: read-only codebase + target-doc audit
 

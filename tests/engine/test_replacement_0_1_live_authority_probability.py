@@ -49,6 +49,11 @@ def _replacement_bundle() -> SimpleNamespace:
         },
         q_lcb=None,
         provenance_json={
+            # FIX 1 (2026-06-09): the live q-mode gate runs before this proof's logic and admits
+            # only the fused-Normal modes. This fixture exercises the downstream YES-posterior /
+            # native-NO direction relationship, so it carries a live-eligible mode to reach it.
+            "replacement_q_mode": "FUSED_NORMAL_FULL",
+            "q_shape": "fused_normal_direct",
             "aifs_member_count": 51,
             "aifs_probabilities": {
                 "bin-27": 10 / 51,

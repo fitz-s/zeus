@@ -632,6 +632,19 @@ class PolymarketUserChannelIngestor:
         arrive, and there is no missed-order risk when the local side-effect
         surface is empty.  Genuine mid-run gaps still require explicit M5
         reconcile evidence.
+
+        2026-06-09 deadlock fix: when the side-effect surface is NOT empty (e.g.
+        a resting PARTIAL GTC order spans a daemon restart), the pong still
+        transitions ``not_configured`` -> AUTHED — transport+auth liveness is
+        the pong's proof — but the M5 latch stays armed and ONLY the full M5
+        sweep (run_ws_gap_reconcile_and_clear: fresh venue enumeration, zero
+        findings) clears submit authority.  Before this, three requirements
+        formed a cycle that latched submits forever after every restart with
+        any open order: the pong transition demanded an empty surface, the M5
+        clear pass deferred on ``DISCONNECTED:not_configured``, and
+        ``clear_after_m5_reconcile`` demanded a healthy (pong-fed) subscription.
+        Two proofs, two owners: pong proves the channel, the sweep proves the
+        surface.
         """
 
         current = ws_gap_guard.status()
@@ -645,26 +658,45 @@ class PolymarketUserChannelIngestor:
         clean_boot_age_seconds = (now - clean_boot_reference.astimezone(timezone.utc)).total_seconds()
         if (
             current.subscription_state == "DISCONNECTED"
-            and current.gap_reason == "not_configured"
             and current.m5_reconcile_required
             and clean_boot_age_seconds >= 0
-            and self._clean_boot_side_effect_surface_empty()
         ):
+            # Transport+auth proof applies to ANY disconnected latched state the
+            # pong can reach (clean boot OR post-reconnect after a real gap).
+            # AUTH_FAILED / MARKET_MISMATCH are not DISCONNECTED and stay latched.
+            was_clean_boot = current.gap_reason == "not_configured"
             ws_gap_guard.record_message(
                 observed_at=now,
                 subscription_state="AUTHED",
                 stale_after_seconds=self.stale_after_seconds,
             )
-            return ws_gap_guard.clear_after_no_local_side_effects(
-                observed_at=now,
-                stale_after_seconds=self.stale_after_seconds,
+            if was_clean_boot and self._clean_boot_side_effect_surface_empty():
+                # Only the clean boot may fast-clear: the daemon never had a
+                # connection to lose messages from. A REAL mid-run gap could
+                # hide fills regardless of the local surface — it always waits
+                # for the full M5 sweep (run_ws_gap_reconcile_and_clear).
+                return ws_gap_guard.clear_after_no_local_side_effects(
+                    observed_at=now,
+                    stale_after_seconds=self.stale_after_seconds,
+                )
+            logger.info(
+                "M3 user-channel transport healthy (pong, %s); M5 latch stays "
+                "armed pending the full ws-gap reconcile sweep",
+                "clean boot, non-empty surface" if was_clean_boot else
+                f"post-gap reconnect ({current.gap_reason})",
             )
+            return ws_gap_guard.status()
         if (
             current.subscription_state not in {"AUTHED", "SUBSCRIBED"}
-            or current.m5_reconcile_required
             or current.is_stale(now=observed_at)
         ):
             return current
+        # NOTE: an armed M5 latch must NOT stop liveness refresh.  record_message
+        # never clears the latch outside the explicit SUBSCRIBED+not_configured
+        # clean-boot rule; refusing to refresh here let the guard go stale 30s
+        # after the AUTHED transition, so clear_after_m5_reconcile could never
+        # observe a healthy subscription ("cannot clear ws gap without healthy
+        # subscription" forever — the 2026-06-09 12:26Z failed-closed loop).
         return ws_gap_guard.record_message(
             observed_at=observed_at,
             subscription_state=current.subscription_state,

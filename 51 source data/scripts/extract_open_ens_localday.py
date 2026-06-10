@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-29
+# Last reused/audited: 2026-06-09
 # Authority basis (2026-05-29 D1-LOW patch — PROPOSED COPY, not yet live):
 #   The aggregation window was a TIGGE-era scalar STEP_HOURS=6 imported from
 #   tigge_local_calendar_day_common.py and applied to the 3h Open Data product
@@ -566,9 +566,14 @@ def extract_open_ens_localday(
                     boundary = members_boundary.get(m, [])
                     inner_min = min(inner) if inner else None
                     boundary_min = min(boundary) if boundary else None
+                    # Fix 2026-06-09 (parity with extract_tigge_mn2t6_localday_min.py
+                    # Addendum 2 §2 Bug B): use strict < instead of <=.
+                    # Ties (boundary_min == inner_min) are NOT ambiguous — the boundary
+                    # bucket cannot be strictly colder than the inner, so it adds no
+                    # look-ahead leakage. Non-strict <= was quarantining good snapshots.
                     boundary_ambiguous = (
                         boundary_min is not None
-                        and (inner_min is None or boundary_min <= inner_min)
+                        and (inner_min is None or boundary_min < inner_min)
                     )
                     if boundary_ambiguous:
                         boundary_ambiguous_members.append(m)
@@ -582,7 +587,15 @@ def extract_open_ens_localday(
                         "boundary_min_native_unit": boundary_min,
                         "boundary_ambiguous": boundary_ambiguous,
                     })
-                training_allowed = len(missing_members) == 0 and len(boundary_ambiguous_members) == 0
+                # Fix 2026-06-09 (parity with extract_tigge_mn2t6_localday_min.py
+                # Addendum 2 §2 Bug A): use majority threshold instead of any().
+                # Old rule: any single ambiguous member quarantined the whole snapshot.
+                # New rule: majority (≥26/51) required before snapshot-level quarantine.
+                # Empirical basis: ambiguous_member_count is continuously distributed
+                # 0-51; 26 (51% of 51) is the same default used in the TIGGE extractor.
+                _majority_threshold = max(1, len(members_out) // 2 + 1)  # 26/51
+                any_boundary_ambiguous = len(boundary_ambiguous_members) >= _majority_threshold
+                training_allowed = len(missing_members) == 0 and not any_boundary_ambiguous
                 payload = {
                     "generated_at": now_utc_iso(),
                     "data_version": track.data_version,
@@ -614,10 +627,10 @@ def extract_open_ens_localday(
                     "step_horizon_hours": float(max_step),
                     "step_horizon_deficit_hours": 0.0,
                     "causality": {"status": "OK"},
-                    "boundary_ambiguous": len(boundary_ambiguous_members) > 0,
+                    "boundary_ambiguous": any_boundary_ambiguous,
                     "boundary_policy": {
                         "training_rule": "drop_ambiguous_members",
-                        "boundary_ambiguous": len(boundary_ambiguous_members) > 0,
+                        "boundary_ambiguous": any_boundary_ambiguous,
                         "ambiguous_member_count": len(boundary_ambiguous_members),
                     },
                     "nearest_grid_lat": grid_provenance["nearest_grid_lat"],
