@@ -10,10 +10,10 @@ in config/settings.json (edli_v1 for capture/fusion/arm/caps/qlcb;
 feature_flags for soft_anchor flags) — NOT from the top-level cfg dict.
 
 Assertion spec (operator-named):
-  edli_v1.replacement_0_1_u0r_multimodel_capture_enabled=true
-  + edli_v1.replacement_0_1_u0r_fusion_enabled=false
+  edli_v1.replacement_0_1_bayes_precision_fusion_capture_enabled=true
+  + edli_v1.replacement_0_1_bayes_precision_fusion_enabled=false
   -> stage == ACCRUING (not SHADOW)
-  -> next flip == replacement_0_1_u0r_fusion_enabled
+  -> next flip == replacement_0_1_bayes_precision_fusion_enabled
 """
 from __future__ import annotations
 
@@ -106,8 +106,8 @@ def _settings(*, capture: bool, fusion: bool,
                auth: bool = False, kelly: bool = False, flip: bool = False) -> dict:
     return {
         "edli_v1": {
-            "replacement_0_1_u0r_multimodel_capture_enabled": capture,
-            "replacement_0_1_u0r_fusion_enabled": fusion,
+            "replacement_0_1_bayes_precision_fusion_capture_enabled": capture,
+            "replacement_0_1_bayes_precision_fusion_enabled": fusion,
             "replacement_qlcb_settlement_sigma_floor_enabled": qlcb,
             "edli_live_operator_authorized": arm,
         },
@@ -140,10 +140,10 @@ def test_capture_on_fusion_off_reads_edli_v1_stage_is_accruing():
 def test_capture_on_fusion_off_next_flip_is_fusion_flag():
     """
     With capture=true + fusion=false in edli_v1, next flip must name
-    replacement_0_1_u0r_fusion_enabled.
+    replacement_0_1_bayes_precision_fusion_enabled.
     """
     result = _run_preflight(_settings(capture=True, fusion=False))
-    assert "replacement_0_1_u0r_fusion_enabled" in result["next_flip"], (
+    assert "replacement_0_1_bayes_precision_fusion_enabled" in result["next_flip"], (
         f"Expected fusion flag in NEXT FLIP but got: {result['next_flip']!r}\n"
         f"Full output:\n{result['stdout']}"
     )
@@ -162,7 +162,7 @@ def test_capture_off_fusion_off_stage_is_shadow():
 
 def test_capture_off_stage_next_flip_is_capture_flag():
     result = _run_preflight(_settings(capture=False, fusion=False))
-    assert "replacement_0_1_u0r_multimodel_capture_enabled" in result["next_flip"], (
+    assert "replacement_0_1_bayes_precision_fusion_capture_enabled" in result["next_flip"], (
         f"Expected capture flag in NEXT FLIP but got: {result['next_flip']!r}"
     )
 

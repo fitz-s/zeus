@@ -1,13 +1,13 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 (causality: previous-runs fixed-lead train ONLY;
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causality: previous-runs fixed-lead train ONLY;
 #   run_time != source_available_at), §5 (walk-forward, no same-day leak), §7 antibodies
 #   ("top-K-uses-target-truth (walk-forward only)", "previous-runs-for-live-decision",
 #   "C/F unit mix (settlement-unit residual)"); CONTINUITY_AND_WIRING.md §4 step 4 + IRON
 #   RULE #3 (provenance/no-leak). RELATIONSHIP TEST (Fitz: test the cross-module boundary,
 #   not the function): the invariant that holds across the raw_model_forecasts ->
 #   settlement_outcomes JOIN is what is asserted here, written BEFORE the provider impl.
-"""Relationship test for the U0R walk-forward history provider (no-leak JOIN).
+"""Relationship test for the BAYES_PRECISION_FUSION walk-forward history provider (no-leak JOIN).
 
 The cross-module invariant under test (raw_model_forecasts -> settlement_outcomes):
   (1) NO LEAK: only rows with target_date STRICTLY < decision_date enter the history.
@@ -28,7 +28,7 @@ from datetime import date
 
 import pytest
 
-from src.forecast.u0r_bayes import MIN_TRAIN
+from src.forecast.bayes_precision_fusion import MIN_TRAIN
 from src.state.schema.v2_schema import (
     apply_canonical_schema,
     ensure_replacement_forecast_shadow_schema,
@@ -101,7 +101,7 @@ def _dates(n: int, *, start: date = date(2026, 4, 1)) -> list[str]:
 # (1) NO LEAK — target_date strictly before the decision date only
 # =====================================================================================
 def test_history_excludes_target_on_or_after_decision_date() -> None:
-    from src.data.u0r_history_provider import U0RHistoryProvider
+    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
 
     conn = _conn()
     # Three settled days BEFORE decision, plus one ON and one AFTER the decision date.
@@ -113,7 +113,7 @@ def test_history_excludes_target_on_or_after_decision_date() -> None:
         _insert_raw(conn, model="gfs_global", city="Paris", target_date=d, metric="high", forecast_value_c=20.0)
         _insert_settlement(conn, city="Paris", target_date=d, metric="high", settlement_value=19.0)
 
-    provider = U0RHistoryProvider(conn)
+    provider = BayesPrecisionFusionHistoryProvider(conn)
     hist = provider(
         city="Paris", metric="high", lead_days=1,
         target_date=date(2026, 4, 4), models=["gfs_global"],
@@ -128,7 +128,7 @@ def test_history_excludes_target_on_or_after_decision_date() -> None:
 # (2) PROVENANCE GATE — authority must be VERIFIED
 # =====================================================================================
 def test_history_excludes_non_verified_settlement() -> None:
-    from src.data.u0r_history_provider import U0RHistoryProvider
+    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
 
     conn = _conn()
     _insert_raw(conn, model="gfs_global", city="Paris", target_date="2026-04-01", metric="high", forecast_value_c=20.0)
@@ -138,7 +138,7 @@ def test_history_excludes_non_verified_settlement() -> None:
     _insert_raw(conn, model="gfs_global", city="Paris", target_date="2026-04-03", metric="high", forecast_value_c=20.0)
     _insert_settlement(conn, city="Paris", target_date="2026-04-03", metric="high", settlement_value=19.0, authority="QUARANTINED")
 
-    provider = U0RHistoryProvider(conn)
+    provider = BayesPrecisionFusionHistoryProvider(conn)
     hist = provider(city="Paris", metric="high", lead_days=1, target_date=date(2026, 5, 1), models=["gfs_global"])
     assert hist["gfs_global"].n_train == 1, "only authority=VERIFIED settlement rows may contribute"
 
@@ -147,7 +147,7 @@ def test_history_excludes_non_verified_settlement() -> None:
 # (3) ENDPOINT GATE — single_runs (live capture) must NOT train
 # =====================================================================================
 def test_history_excludes_single_runs_endpoint() -> None:
-    from src.data.u0r_history_provider import U0RHistoryProvider
+    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
 
     conn = _conn()
     # previous_runs: trains.  single_runs: must be excluded (run_time != source_available_at).
@@ -156,7 +156,7 @@ def test_history_excludes_single_runs_endpoint() -> None:
     _insert_raw(conn, model="gfs_global", city="Paris", target_date="2026-04-02", metric="high", forecast_value_c=20.0, endpoint="single_runs")
     _insert_settlement(conn, city="Paris", target_date="2026-04-02", metric="high", settlement_value=19.0)
 
-    provider = U0RHistoryProvider(conn)
+    provider = BayesPrecisionFusionHistoryProvider(conn)
     hist = provider(city="Paris", metric="high", lead_days=1, target_date=date(2026, 5, 1), models=["gfs_global"])
     assert hist["gfs_global"].n_train == 1, "single_runs rows must never enter the fixed-lead train window"
 
@@ -165,7 +165,7 @@ def test_history_excludes_single_runs_endpoint() -> None:
 # (4) UNIT COHERENCE — F-settlement converted to degC before the residual
 # =====================================================================================
 def test_history_converts_fahrenheit_settlement_to_celsius() -> None:
-    from src.data.u0r_history_provider import U0RHistoryProvider
+    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
 
     conn = _conn()
     # forecast_value_c is degC by construction. Settlement stored in degF must be converted.
@@ -173,7 +173,7 @@ def test_history_converts_fahrenheit_settlement_to_celsius() -> None:
     _insert_raw(conn, model="gfs_global", city="NewYork", target_date="2026-04-01", metric="high", forecast_value_c=21.0)
     _insert_settlement(conn, city="NewYork", target_date="2026-04-01", metric="high", settlement_value=68.0, settlement_unit="F")
 
-    provider = U0RHistoryProvider(conn)
+    provider = BayesPrecisionFusionHistoryProvider(conn)
     hist = provider(city="NewYork", metric="high", lead_days=1, target_date=date(2026, 5, 1), models=["gfs_global"])
     gfs = hist["gfs_global"]
     assert gfs.n_train == 1
@@ -184,11 +184,11 @@ def test_history_converts_fahrenheit_settlement_to_celsius() -> None:
 # (5) FAIL-SOFT — provider never raises
 # =====================================================================================
 def test_provider_never_raises_on_bad_input() -> None:
-    from src.data.u0r_history_provider import U0RHistoryProvider
+    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
 
     conn = _conn()
     conn.close()  # a closed connection forces a query error -> must be swallowed to {}
-    provider = U0RHistoryProvider(conn)
+    provider = BayesPrecisionFusionHistoryProvider(conn)
     out = provider(city="Paris", metric="high", lead_days=1, target_date=date(2026, 5, 1), models=["gfs_global"])
     assert out == {}, "provider MUST be fail-soft: any error -> empty mapping (anchor fallback)"
 
@@ -197,7 +197,7 @@ def test_provider_never_raises_on_bad_input() -> None:
 # (6) CROSSING MIN_TRAIN — >=25 verified previous-runs rows -> trustable history
 # =====================================================================================
 def test_history_crosses_min_train_with_25_verified_rows() -> None:
-    from src.data.u0r_history_provider import U0RHistoryProvider
+    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
 
     conn = _conn()
     days = _dates(MIN_TRAIN, start=date(2026, 4, 1))  # 25 days, all strictly < decision
@@ -206,7 +206,7 @@ def test_history_crosses_min_train_with_25_verified_rows() -> None:
             _insert_raw(conn, model=m, city="Paris", target_date=d, metric="high", forecast_value_c=20.0 + 0.1 * i)
         _insert_settlement(conn, city="Paris", target_date=d, metric="high", settlement_value=19.5 + 0.1 * i)
 
-    provider = U0RHistoryProvider(conn)
+    provider = BayesPrecisionFusionHistoryProvider(conn)
     hist = provider(
         city="Paris", metric="high", lead_days=1,
         target_date=date(2026, 6, 1), models=["ecmwf_ifs", "gfs_global", "icon_global"],
@@ -214,5 +214,5 @@ def test_history_crosses_min_train_with_25_verified_rows() -> None:
     for m in ("ecmwf_ifs", "gfs_global", "icon_global"):
         assert hist[m].n_train >= MIN_TRAIN, f"{m} should accrue >= MIN_TRAIN={MIN_TRAIN} verified rows"
     # The anchor's n_train >= MIN_TRAIN is the switch that lets capture set anchor_z/anchor_tau0
-    # (u0r_multimodel_capture.py:312) so fuse_u0r_posterior reaches T2_BAYES (not EQUAL_WEIGHT).
+    # (bayes_precision_fusion_capture.py:312) so fuse_bayes_precision_posterior reaches T2_BAYES (not EQUAL_WEIGHT).
     assert hist["ecmwf_ifs"].n_train >= MIN_TRAIN

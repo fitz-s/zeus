@@ -21,7 +21,7 @@ from datetime import date
 import pytest
 
 import src.data.replacement_forecast_materializer as mod
-from tests.test_u0r_history_provider_materializer_wiring import (
+from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (
     _conn,
     _disable_other_layers,
     _enable_fusion,
@@ -30,7 +30,7 @@ from tests.test_u0r_history_provider_materializer_wiring import (
     _row,
     _seed_history,
 )
-from tests.test_u0r_materializer_uses_persisted_current_rows_not_network import (
+from tests.test_bayes_precision_fusion_materializer_uses_persisted_current_rows_not_network import (
     CURRENT_MODELS,
     _seed_current_single_runs,
 )
@@ -45,7 +45,7 @@ def test_posterior_records_raw_model_forecast_ids(monkeypatch) -> None:
 
     # No network fetch wired -> the persisted-row reader is the only source.
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
+    prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
 
     ids = prov.get("raw_model_forecast_ids")
     assert ids, "the posterior must record the raw_model_forecast_ids it fused from"

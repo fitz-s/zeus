@@ -1,32 +1,32 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: Relationship regression test for U0R extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli_v1 flag.
-# Reuse: Run with pytest; update if the U0R extra-capture wiring or flag gate in src/main.py changes.
+# Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli_v1 flag.
+# Reuse: Run with pytest; update if the BAYES_PRECISION_FUSION extra-capture wiring or flag gate in src/main.py changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: PR#400 review (src/main.py:4909 bare `date` NameError swallowed by
-#   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + U0R_BAYES_SPEC.md §6 F1 (U0R multi-model
-#   SHADOW capture gated by edli_v1.replacement_0_1_u0r_multimodel_capture_enabled).
-"""Relationship regression test for the U0R extra-model capture wiring in src.main.
+#   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + BAYES_PRECISION_FUSION_SPEC.md §6 F1 (BAYES_PRECISION_FUSION multi-model
+#   SHADOW capture gated by edli_v1.replacement_0_1_bayes_precision_fusion_capture_enabled).
+"""Relationship regression test for the BAYES_PRECISION_FUSION extra-model capture wiring in src.main.
 
-Relationship under test (plan-row -> U0R download-target boundary, src/main.py
-`_download_u0r_extra_raw_inputs_if_needed`):
+Relationship under test (plan-row -> BAYES_PRECISION_FUSION download-target boundary, src/main.py
+`_download_bayes_precision_fusion_extra_raw_inputs_if_needed`):
 
   The plan builder emits ReplacementForecastCurrentTargetPlanRow objects whose
   ``target_date`` is an ISO string. main.py converts that string with
   ``date.fromisoformat(row.target_date) - cycle.date()`` to derive ``lead_days``
-  before handing the target to ``download_u0r_extra_raw_inputs``. ``date`` is NOT a
+  before handing the target to ``download_bayes_precision_fusion_extra_raw_inputs``. ``date`` is NOT a
   module-level name in main.py (module import is only ``datetime, timedelta,
   timezone``), and the function's local import block historically imported only
   ``datetime``/``timezone`` -- so the first uncovered target row raised
   ``NameError: name 'date' is not defined``. That NameError was swallowed by the
   function's broad fail-soft ``except Exception`` (status
-  ``U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED``), so the whole U0R capture silently never
+  ``BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED``), so the whole BAYES_PRECISION_FUSION capture silently never
   ran even with the flag ON.
 
 Properties asserted:
   (1) With the capture flag ON and a normal uncovered target row, the function does
       NOT raise NameError and does NOT fall into the fail-soft skip path.
-  (2) The capture is actually ATTEMPTED: ``download_u0r_extra_raw_inputs`` is invoked
+  (2) The capture is actually ATTEMPTED: ``download_bayes_precision_fusion_extra_raw_inputs`` is invoked
       with exactly one target carrying the row's city/metric/target_date and a
       correctly-derived non-negative ``lead_days`` (the value computed across the
       ``date.fromisoformat`` boundary).
@@ -42,7 +42,7 @@ import pytest
 
 import src.config as cfg
 import src.data.replacement_forecast_current_target_plan as plan_mod
-import src.data.u0r_multimodel_download as dl_mod
+import src.data.bayes_precision_fusion_download as dl_mod
 import src.main as main_mod
 from src.data.replacement_forecast_current_target_plan import (
     ReplacementForecastCurrentTargetPlan,
@@ -83,9 +83,9 @@ def _plan(rows: list[ReplacementForecastCurrentTargetPlanRow]) -> ReplacementFor
 
 def _wire(monkeypatch, *, rows, forecast_db="zeus-forecasts.db"):
     """Enable the capture flag and inject the plan builder + downloader. Returns the
-    list that records each ``download_u0r_extra_raw_inputs`` call's kwargs."""
+    list that records each ``download_bayes_precision_fusion_extra_raw_inputs`` call's kwargs."""
     monkeypatch.setitem(
-        cfg.settings["edli_v1"], "replacement_0_1_u0r_multimodel_capture_enabled", True
+        cfg.settings["edli_v1"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True
     )
 
     monkeypatch.setattr(
@@ -103,9 +103,9 @@ def _wire(monkeypatch, *, rows, forecast_db="zeus-forecasts.db"):
             "targets": targets,
             "release_lag_hours": release_lag_hours,
         })
-        return {"status": "U0R_EXTRA_RAW_INPUTS_DOWNLOADED", "written_row_count": len(targets)}
+        return {"status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED", "written_row_count": len(targets)}
 
-    monkeypatch.setattr(dl_mod, "download_u0r_extra_raw_inputs", _fake_download)
+    monkeypatch.setattr(dl_mod, "download_bayes_precision_fusion_extra_raw_inputs", _fake_download)
 
     cfg_dict = {"forecast_db": forecast_db, "download_release_lag_hours": 14.0}
     return cfg_dict, calls
@@ -122,14 +122,14 @@ def test_does_not_raise_nameerror_and_attempts_capture(monkeypatch) -> None:
     rows = [_row(city="Amsterdam", target_date=target_date, covered=False)]
     cfg_dict, calls = _wire(monkeypatch, rows=rows)
 
-    report = main_mod._download_u0r_extra_raw_inputs_if_needed(cfg_dict)
+    report = main_mod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg_dict)
 
     # Property (1): NOT the fail-soft skip path. A NameError would have produced
-    # status U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED with the NameError text.
+    # status BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED with the NameError text.
     assert report is not None
-    assert report.get("status") != "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", report
+    assert report.get("status") != "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", report
     assert "name 'date' is not defined" not in str(report.get("error", ""))
-    assert report.get("status") == "U0R_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert report.get("status") == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
 
     # Property (2): capture actually attempted with the row's identity + derived lead.
     assert len(calls) == 1
@@ -165,9 +165,9 @@ def test_covered_rows_excluded_from_targets(monkeypatch) -> None:
     ]
     cfg_dict, calls = _wire(monkeypatch, rows=rows)
 
-    report = main_mod._download_u0r_extra_raw_inputs_if_needed(cfg_dict)
+    report = main_mod._download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg_dict)
 
-    assert report.get("status") != "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", report
+    assert report.get("status") != "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", report
     assert len(calls) == 1
     cities = sorted(t.city for t in calls[0]["targets"])
     assert cities == ["Ankara"]

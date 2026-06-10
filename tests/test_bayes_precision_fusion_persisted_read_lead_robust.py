@@ -3,14 +3,14 @@ from __future__ import annotations
 # Created: 2026-06-09
 # Last reused or audited: 2026-06-09
 # Authority basis: live-wiring root-cause 2026-06-09 (iron rule 1 + Fitz #2 boundary bug).
-#   The multi-model U0R Bayesian fusion fired on 0/598 live posteriors -> the live forecast was
+#   The multi-model BAYES_PRECISION_FUSION Bayesian fusion fired on 0/598 live posteriors -> the live forecast was
 #   the cold AIFS-soft-anchor, NOT the physically-superior de-biased multi-model fusion. Root
 #   cause: `_read_persisted_current_capture` filtered raw_model_forecasts on `lead_days`, but the
 #   DOWNLOAD persists lead on the cycle/UTC calendar (target - source_cycle) while the
 #   MATERIALIZER re-derived lead from `computed_at` on the CITY-LOCAL calendar (BLOCKER 6) — a
 #   different reference time AND calendar. The two leads disagreed (e.g. Wuhan: download lead=2
 #   from cycle 06-08, reader lead=1 from computed_at 06-09 local), so the read returned EMPTY,
-#   `capture.has_extras` was False, and `_replacement_u0r_fusion_override` silently returned None
+#   `capture.has_extras` was False, and `_replacement_bayes_precision_fusion_override` silently returned None
 #   (no warning) -> soft-anchor fallback.
 #
 # RELATIONSHIP ANTIBODY (make the error CATEGORY unconstructable): the persisted-current read

@@ -4,7 +4,7 @@
 #   idempotent under the new UNIQUE(model,product_id,request_url_hash,city,target_date,metric,
 #   source_cycle_time,endpoint). The pre-fix script wrote NULL product_id/request_url_hash, and
 #   because SQLite treats NULL!=NULL the row was NOT idempotent: a 2nd run DUPLICATED every seed
-#   row, doubling n_train and corrupting EB-lambda / covariance / tau0. U0R_BAYES_SPEC §6 F1.
+#   row, doubling n_train and corrupting EB-lambda / covariance / tau0. BAYES_PRECISION_FUSION_SPEC §6 F1.
 """Relationship test (backfill -> UNIQUE-key idempotency boundary).
 
 Running the seed twice on a FRESH PR400-schema DB must add ZERO rows the second time.
@@ -58,17 +58,17 @@ def _count(db: Path) -> int:
 
 
 def test_backfill_run_twice_adds_zero_rows_second_time(tmp_path) -> None:
-    from scripts.backfill_u0r_history_from_b0 import backfill_u0r_history
+    from scripts.backfill_bayes_precision_fusion_history_from_b0 import backfill_bayes_precision_fusion_history
 
     db = _db(tmp_path)
     b0 = _b0()
 
-    r1 = backfill_u0r_history(b0=b0, db=db, dry_run=False)
+    r1 = backfill_bayes_precision_fusion_history(b0=b0, db=db, dry_run=False)
     n1 = _count(db)
     assert n1 > 0, "first run must seed rows"
     assert r1["written_row_count"] == n1
 
-    r2 = backfill_u0r_history(b0=b0, db=db, dry_run=False)
+    r2 = backfill_bayes_precision_fusion_history(b0=b0, db=db, dry_run=False)
     n2 = _count(db)
     assert n2 == n1, (
         f"second run must add ZERO rows under the new UNIQUE (got {n1} -> {n2}); "

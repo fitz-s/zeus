@@ -1,6 +1,6 @@
 # Zeus Strategy Mathematics & Execution Authority Specification
 
-> **Superseded for probability law (2026-06-09):** the live q chain is `docs/authority/replacement_final_form_2026_06_09.md` (`u0r_bayes.fuse_u0r_posterior` → `emos.bin_probability_settlement`). This spec describes the **legacy baseline**; its proof-form taxonomy still governs, but treat its probability/calibration math as baseline / LCB-cap, not the strategy of record.
+> **Superseded for probability law (2026-06-09):** the live q chain is `docs/authority/replacement_final_form_2026_06_09.md` (`bayes_precision_fusion.fuse_bayes_precision_posterior` → `emos.bin_probability_settlement`). This spec describes the **legacy baseline**; its proof-form taxonomy still governs, but treat its probability/calibration math as baseline / LCB-cap, not the strategy of record.
 
 **Created:** 2026-05-22  
 **Suggested repo destination:** `docs/reference/zeus_strategy_authority_spec.md`  

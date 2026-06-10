@@ -17,12 +17,12 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-from src.data.u0r_multimodel_download import (
-    U0R_CANDIDATE_ACCRUAL_MODELS,
-    U0R_EXTRA_MODELS,
-    U0RDownloadTarget,
+from src.data.bayes_precision_fusion_download import (
+    BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS,
+    BAYES_PRECISION_FUSION_EXTRA_MODELS,
+    BayesPrecisionFusionDownloadTarget,
     _model_in_domain,
-    download_u0r_extra_raw_inputs,
+    download_bayes_precision_fusion_extra_raw_inputs,
 )
 from src.forecast.model_selection import (
     NBM_MODEL,
@@ -45,10 +45,10 @@ PRESENT_ALL = {
 
 def test_promoted_models_ride_the_extra_download_set() -> None:
     # Promotion moved them from the candidate lane into the selection sets -> they ride
-    # U0R_EXTRA_MODELS; the candidate lane MUST be empty (no double-fetch).
+    # BAYES_PRECISION_FUSION_EXTRA_MODELS; the candidate lane MUST be empty (no double-fetch).
     for m in (NBM_MODEL, UKMO_GLOBAL_MODEL, UKMO_UK_MODEL):
-        assert m in U0R_EXTRA_MODELS
-        assert m not in U0R_CANDIDATE_ACCRUAL_MODELS
+        assert m in BAYES_PRECISION_FUSION_EXTRA_MODELS
+        assert m not in BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS
 
 
 def test_conus_nbm_is_the_ncep_rep_and_gfs_is_suppressed() -> None:
@@ -126,11 +126,11 @@ def test_download_fetches_promoted_models_domain_gated(tmp_path) -> None:
         prev_calls.append(model)
         return 19.5
 
-    target = U0RDownloadTarget(
+    target = BayesPrecisionFusionDownloadTarget(
         city="Atlanta", latitude=ATLANTA[0], longitude=ATLANTA[1],
         timezone_name="America/New_York", target_date="2026-06-10", lead_days=1, metric="high",
     )
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC), targets=[target],
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )
@@ -172,11 +172,11 @@ def test_download_row_level_skip_only_missing_fetches(tmp_path) -> None:
         single_calls.append(model)
         return 20.0
 
-    target = U0RDownloadTarget(
+    target = BayesPrecisionFusionDownloadTarget(
         city="Atlanta", latitude=ATLANTA[0], longitude=ATLANTA[1],
         timezone_name="America/New_York", target_date="2026-06-10", lead_days=1, metric="high",
     )
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC), targets=[target],
         single_runs_fetch=_single, previous_runs_fetch=lambda **k: 19.5,
     )

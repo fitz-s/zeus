@@ -3,7 +3,7 @@
 # Reuse: Run with pytest; update if lead_days computation or timezone handling in the materializer override changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 (lead is fixed-lead in the CITY-LOCAL calendar; the
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (lead is fixed-lead in the CITY-LOCAL calendar; the
 #   lead bucket / regional eligibility / sigma all key off the city-local decision date).
 #   Fitz Constraint #4 (data provenance / DST-aware local time): computed_at is UTC; the
 #   lead must be computed against the city-local date, never the UTC date — cross-timezone
@@ -25,7 +25,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from src.data.replacement_forecast_materializer import _u0r_city_local_lead_days
+from src.data.replacement_forecast_materializer import _bayes_precision_fusion_city_local_lead_days
 
 UTC = timezone.utc
 
@@ -48,7 +48,7 @@ UTC = timezone.utc
 )
 def test_lead_days_uses_city_local_date(tz_name, computed_at, target_local_date, expected_lead) -> None:
     assert (
-        _u0r_city_local_lead_days(
+        _bayes_precision_fusion_city_local_lead_days(
             computed_at=computed_at, target_local_date=target_local_date, tz_name=tz_name
         )
         == expected_lead
@@ -58,7 +58,7 @@ def test_lead_days_uses_city_local_date(tz_name, computed_at, target_local_date,
 def test_lead_days_never_negative() -> None:
     """A target_local_date BEFORE the city-local computed date floors at 0 (max(0, ...))."""
     assert (
-        _u0r_city_local_lead_days(
+        _bayes_precision_fusion_city_local_lead_days(
             computed_at=datetime(2026, 6, 4, 2, 0, tzinfo=UTC),
             target_local_date=date(2026, 6, 1),
             tz_name="Asia/Tokyo",

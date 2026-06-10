@@ -1,16 +1,16 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Reuse: Run with pytest; update if u0r_bayes fusion, materializer wiring, or flag-gate semantics change.
+# Reuse: Run with pytest; update if bayes_precision_fusion fusion, materializer wiring, or flag-gate semantics change.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Purpose: Protect the replacement_forecast_materializer wiring of the flag-gated U0R-Bayes
+# Purpose: Protect the replacement_forecast_materializer wiring of the flag-gated BAYES_PRECISION_FUSION-Bayes
 #   multi-model fusion. (a) flag-OFF materialized posterior BYTE-IDENTICAL to today (hash
 #   unchanged); (b) flag-ON: the fused mu*/sigma REPLACE the single-anchor center/spread and the
 #   written q changes + the fused product gets its OWN EMOS cell identity (F6); (c) FAIL-SOFT: a
 #   dropped global -> fusion uses remaining; all extras absent -> anchor fallback (byte-identical),
 #   no crash; (d) regional gate: icon_d2 in-polygon enters, Moscow out-of-polygon ABSENT, dedup
 #   drops icon_seamless. The capture's live fetch + walk-forward history are injected (no network).
-# Authority basis: U0R_BAYES_SPEC.md §6 integration; U0R_PROOF_RESULT.md; src/forecast/u0r_bayes.py.
-"""Replacement_0_1 U0R-Bayes fusion materializer-wiring tests."""
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 integration; BAYES_PRECISION_FUSION_PROOF_RESULT.md; src/forecast/bayes_precision_fusion.py.
+"""Replacement_0_1 BAYES_PRECISION_FUSION-Bayes fusion materializer-wiring tests."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 import src.data.replacement_forecast_materializer as mod
-import src.data.u0r_multimodel_capture as capture_mod
+import src.data.bayes_precision_fusion_capture as capture_mod
 from src.data.ecmwf_aifs_sampled_2t_localday import AifsMemberLocalDayExtrema, AifsSampledLocalDayExtraction
 from src.data.openmeteo_ecmwf_ifs9_anchor import OpenMeteoIfs9LocalDayAnchor
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
@@ -29,7 +29,7 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
 from src.data.replacement_forecast_materializer import ReplacementForecastMaterializeRequest
-from src.data.u0r_multimodel_capture import ModelHistory
+from src.data.bayes_precision_fusion_capture import ModelHistory
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
 
@@ -150,13 +150,13 @@ def _make_history(models: list[str], n: int = 30):
 
 
 def _install_seams(monkeypatch, *, live_values: dict[str, float], history_models: list[str]):
-    monkeypatch.setattr(mod._replacement_u0r_fusion_override, "_live_fetch", _make_live_fetch(live_values), raising=False)
+    monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_live_fetch", _make_live_fetch(live_values), raising=False)
     hist = _make_history(history_models)
 
     def _provider(*, city, metric, lead_days, target_date, models):
         return {m: hist[m] for m in models if m in hist}
 
-    monkeypatch.setattr(mod._replacement_u0r_fusion_override, "_history_provider", _provider, raising=False)
+    monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_history_provider", _provider, raising=False)
 
 
 def _seed_current_single_runs(conn, *, live_values: dict[str, float], request=None,
@@ -169,7 +169,7 @@ def _seed_current_single_runs(conn, *, live_values: dict[str, float], request=No
     target_date = mod._date_text(req.target_date)
     cyc = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat()
     tz = req.city_timezone
-    lead = mod._u0r_city_local_lead_days(
+    lead = mod._bayes_precision_fusion_city_local_lead_days(
         computed_at=mod._to_utc(req.computed_at, field_name="computed_at"),
         target_local_date=_date.fromisoformat(target_date), tz_name=tz,
     )
@@ -187,7 +187,7 @@ def _seed_current_single_runs(conn, *, live_values: dict[str, float], request=No
 
 def _enable_flag(monkeypatch):
     import src.config as cfg
-    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_u0r_fusion_enabled", True)
+    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_bayes_precision_fusion_enabled", True)
 
 
 def _disable_other_layers(monkeypatch):
@@ -216,8 +216,8 @@ def test_flag_off_materialized_posterior_byte_identical(monkeypatch) -> None:
     assert row_a["q_json"] == row_b["q_json"]
     assert row_a["posterior_identity_hash"] == row_b["posterior_identity_hash"]
     assert row_a["posterior_config_hash"] == row_b["posterior_config_hash"]
-    # No U0R provenance written when OFF.
-    assert "u0r_fusion" not in json.loads(row_b["provenance_json"])
+    # No BAYES_PRECISION_FUSION provenance written when OFF.
+    assert "bayes_precision_fusion" not in json.loads(row_b["provenance_json"])
 
 
 # =====================================================================================
@@ -245,7 +245,7 @@ def test_flag_on_fusion_changes_posterior_and_writes_emos_identity(monkeypatch) 
 
     assert q_on != q_off, "fused posterior must differ from the single-anchor posterior"
     assert row_on["posterior_config_hash"] != cfg_off, "fused product needs its own EMOS cell"
-    fusion = prov["u0r_fusion"]
+    fusion = prov["bayes_precision_fusion"]
     assert fusion["method"] == "T2_BAYES"
     assert fusion["used_models"][0] == "ecmwf_ifs"
     # BLOCKER 9 / spec §4(2): one representative per provider family. Paris is in the Central-EU
@@ -280,7 +280,7 @@ def test_flag_on_dropped_global_fuses_with_remaining(monkeypatch) -> None:
     _seed_current_single_runs(conn, live_values={"gfs_global": 23.0,
                                                  "gem_global": 22.5, "jma_seamless": 24.0, "icon_eu": 23.2})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
+    prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert "icon_global" in prov["dropped_models"]
     assert "icon_global" not in prov["used_models"]
     assert prov["method"] == "T2_BAYES"
@@ -301,7 +301,7 @@ def test_flag_on_all_extras_absent_falls_back_byte_identical(monkeypatch) -> Non
     pid_on = mod._insert_posterior(conn_on, _request(), metric="high", anchor_id=1)
     row_on = _row(conn_on, pid_on)
     assert row_on["q_json"] == q_off, "all-extras-absent must fall back to the byte-identical anchor posterior"
-    assert "u0r_fusion" not in json.loads(row_on["provenance_json"])
+    assert "bayes_precision_fusion" not in json.loads(row_on["provenance_json"])
 
 
 def test_flag_on_capture_exception_is_failsoft(monkeypatch) -> None:
@@ -316,8 +316,8 @@ def test_flag_on_capture_exception_is_failsoft(monkeypatch) -> None:
     def _boom(**kwargs):
         raise RuntimeError("simulated network blowup")
 
-    monkeypatch.setattr(mod._replacement_u0r_fusion_override, "_live_fetch", _boom, raising=False)
-    monkeypatch.setattr(mod._replacement_u0r_fusion_override, "_history_provider", None, raising=False)
+    monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_live_fetch", _boom, raising=False)
+    monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_history_provider", None, raising=False)
     conn_on = _conn()
     pid_on = mod._insert_posterior(conn_on, _request(), metric="high", anchor_id=1)
     assert _row(conn_on, pid_on)["q_json"] == q_off
@@ -336,7 +336,7 @@ def test_flag_on_icon_d2_enters_in_paris_polygon(monkeypatch) -> None:
     _seed_current_single_runs(conn, live_values={"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
                                                  "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
+    prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert "icon_d2" in prov["used_models"]
     assert "icon_d2" not in prov["excluded_regionals"]
 
@@ -361,7 +361,7 @@ def test_flag_on_icon_d2_absent_in_moscow_zero_leak(monkeypatch) -> None:
                               live_values={"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
                                            "jma_seamless": 24.0, "icon_eu": 23.2, "icon_d2": 23.1})
     pid = mod._insert_posterior(conn, moscow_req, metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
+    prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert "icon_d2" not in prov["used_models"], "Moscow out-of-polygon: icon_d2 must be ABSENT (zero-leak)"
     assert "icon_d2" in prov["excluded_regionals"]
 
@@ -370,7 +370,7 @@ def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
     _disable_other_layers(monkeypatch)
     _enable_flag(monkeypatch)
     # icon_seamless fetched, but bit-identical history to icon_d2 -> deduped.
-    monkeypatch.setattr(mod._replacement_u0r_fusion_override, "_live_fetch",
+    monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_live_fetch",
                         _make_live_fetch({"gfs_global": 23.0, "icon_eu": 23.2,
                                           "icon_d2": 23.1, "icon_seamless": 23.1}), raising=False)
     hist = _make_history(["ecmwf_ifs", "gfs_global", "icon_eu"])
@@ -385,12 +385,12 @@ def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
     def _provider(*, city, metric, lead_days, target_date, models):
         return {m: hist[m] for m in models if m in hist}
 
-    monkeypatch.setattr(mod._replacement_u0r_fusion_override, "_history_provider", _provider, raising=False)
+    monkeypatch.setattr(mod._replacement_bayes_precision_fusion_override, "_history_provider", _provider, raising=False)
     conn = _conn()
     _seed_current_single_runs(conn, live_values={"gfs_global": 23.0, "icon_eu": 23.2,
                                                  "icon_d2": 23.1, "icon_seamless": 23.1})
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
+    prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert "icon_seamless" in prov["dropped_aliases"]
     assert "icon_seamless" not in prov["used_models"]
     assert "icon_d2" in prov["used_models"]
@@ -398,4 +398,4 @@ def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
 
 # ---- resolver flag discipline ----
 def test_resolver_default_flag_off_returns_none() -> None:
-    assert mod._replacement_u0r_fusion_override(_request(), metric="high", anchor_value_corrected_c=27.0) is None
+    assert mod._replacement_bayes_precision_fusion_override(_request(), metric="high", anchor_value_corrected_c=27.0) is None

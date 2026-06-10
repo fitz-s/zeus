@@ -26,7 +26,7 @@ import pytest
 
 import src.data.replacement_forecast_materializer as mod
 from src.engine.event_reactor_adapter import _replacement_q_mode_live_eligibility
-from tests.test_u0r_history_provider_materializer_wiring import (  # reuse the proven harness
+from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (  # reuse the proven harness
     _conn,
     _disable_other_layers,
     _enable_fusion,
@@ -75,26 +75,26 @@ def _materialize_provenance(conn) -> dict:
 # =====================================================================================
 def test_fusion_override_raises_shadow_accrues_capture_missing_gate_rejects(monkeypatch) -> None:
     """Fusion override raises -> the posterior STILL materializes (shadow accrual preserved),
-    replacement_q_mode == U0R_CAPTURE_MISSING, and the live gate rejects it."""
+    replacement_q_mode == BAYES_PRECISION_FUSION_CAPTURE_MISSING, and the live gate rejects it."""
     _disable_other_layers(monkeypatch)
     _enable_fusion(monkeypatch)
     _enable_fused_shape(monkeypatch)
     # Force the override layer to fail-soft to None (its documented contract on any error).
     monkeypatch.setattr(
-        mod, "_replacement_u0r_fusion_override", lambda *a, **k: None
+        mod, "_replacement_bayes_precision_fusion_override", lambda *a, **k: None
     )
     conn = _conn()
     _seed_history(conn, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn, values=_full_live_values())
 
     prov = _materialize_provenance(conn)  # MUST NOT raise — shadow row accrues
-    assert prov["replacement_q_mode"] == "U0R_CAPTURE_MISSING"
+    assert prov["replacement_q_mode"] == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
     assert prov["q_shape"] == "aifs_member_votes_soft_anchor"
     assert prov["capture_status"] == "STALE_HISTORY_ONLY"
 
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
     assert eligible is False
-    assert mode == "U0R_CAPTURE_MISSING"
+    assert mode == "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 
 
 def test_fused_q_build_raises_mode_build_failed_gate_rejects(monkeypatch) -> None:
@@ -137,8 +137,8 @@ def test_happy_path_full_mode_gate_admits(monkeypatch) -> None:
     assert prov["replacement_q_mode"] == "FUSED_NORMAL_FULL"
     assert prov["q_shape"] == "fused_normal_direct"
     assert prov["capture_status"] == "FULL_CURRENT"
-    assert prov["u0r_fusion"]["decorrelated_providers_served"] == 5
-    assert prov["u0r_fusion"]["decorrelated_providers_complete"] is True
+    assert prov["bayes_precision_fusion"]["decorrelated_providers_served"] == 5
+    assert prov["bayes_precision_fusion"]["decorrelated_providers_complete"] is True
 
     eligible, mode = _replacement_q_mode_live_eligibility(_BundleStub(prov))
     assert eligible is True
@@ -216,7 +216,7 @@ def test_floor_present_widens_sigma_q_flatter(monkeypatch) -> None:
     assert prov_on["replacement_sigma_basis"] == "fused_center_residual_std"
     assert prov_on["settlement_sigma_floor_unavailable_reason"] is None
     # the recorded floor must exceed the raw predictive sigma (else max() is a no-op)
-    assert prov_on["settlement_sigma_floor_c"] > prov_on["u0r_fusion"]["predictive_sigma_c"]
+    assert prov_on["settlement_sigma_floor_c"] > prov_on["bayes_precision_fusion"]["predictive_sigma_c"]
 
     # Floor OFF for the identical cell.
     monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", False)

@@ -3,13 +3,13 @@
 # Reuse: Run with pytest; update if the UNIQUE constraint or rejection semantics in raw_model_forecasts writer change.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R PR#400 BLOCKER 4 (operator-sharpened) + Fitz Constraint #4 (data
+# Authority basis: BAYES_PRECISION_FUSION PR#400 BLOCKER 4 (operator-sharpened) + Fitz Constraint #4 (data
 #   provenance) + Fitz Methodology #4 (make the category impossible). The pre-fix UNIQUE was
 #   UNIQUE(model, city, target_date, metric, source_cycle_time, endpoint) with INSERT OR IGNORE:
 #   a Run-2 with the SAME logical key but a DIFFERENT physical request (changed timezone /
 #   cell_selection / elevation / product_id / request_url_hash) was SILENTLY discarded, leaving
 #   a stale forecast_value_c to contaminate bias/MAE/sigma/covariance/q in the walk-forward
-#   history JOIN (src/data/u0r_history_provider.py keys on model/city/metric/lead/endpoint/
+#   history JOIN (src/data/bayes_precision_fusion_history_provider.py keys on model/city/metric/lead/endpoint/
 #   target_date -- NOT on the request hash, so a stale row poisons the residual series).
 """BLOCKER 4 -- a same-logical-key row with a DIFFERENT request hash is REJECTED, not ignored.
 
@@ -31,7 +31,7 @@ import sqlite3
 
 import pytest
 
-from src.data.u0r_multimodel_download import (
+from src.data.bayes_precision_fusion_download import (
     RawModelForecastRequestConflict,
     _persist_rows,
 )

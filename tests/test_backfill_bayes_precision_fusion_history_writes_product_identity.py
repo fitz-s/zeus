@@ -2,8 +2,8 @@
 # Last reused or audited: 2026-06-08
 # Authority basis: operator BLOCKER (the_path PR review 2026-06-08) — the B0->raw_model_forecasts
 #   backfill must construct DETERMINISTIC product identity per row using the SAME identity
-#   construction the live download writer uses (src/data/u0r_multimodel_download._u0r_product_identity),
-#   so seeded rows are byte-for-byte identity-compatible with live-fetched rows. U0R_BAYES_SPEC §6 F1.
+#   construction the live download writer uses (src/data/bayes_precision_fusion_download._bayes_precision_fusion_product_identity),
+#   so seeded rows are byte-for-byte identity-compatible with live-fetched rows. BAYES_PRECISION_FUSION_SPEC §6 F1.
 """Relationship test (B0 seed row -> raw_model_forecasts product identity boundary).
 
 The pre-fix backfill inserted ONLY the narrow 12-column tuple, leaving product_id /
@@ -52,14 +52,14 @@ def _b0_one_city() -> dict:
 
 
 def test_backfill_writes_full_product_identity_matching_live_writer(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import (
-        U0RDownloadTarget,
-        _u0r_product_identity,
+    from src.data.bayes_precision_fusion_download import (
+        BayesPrecisionFusionDownloadTarget,
+        _bayes_precision_fusion_product_identity,
     )
-    from scripts.backfill_u0r_history_from_b0 import backfill_u0r_history
+    from scripts.backfill_bayes_precision_fusion_history_from_b0 import backfill_bayes_precision_fusion_history
 
     db = _db(tmp_path)
-    report = backfill_u0r_history(b0=_b0_one_city(), db=db, dry_run=False)
+    report = backfill_bayes_precision_fusion_history(b0=_b0_one_city(), db=db, dry_run=False)
     assert report["written_row_count"] > 0
 
     conn = sqlite3.connect(str(db))
@@ -89,11 +89,11 @@ def test_backfill_writes_full_product_identity_matching_live_writer(tmp_path) ->
     by_model = {r["model"]: r for r in rows}
     for model in ("ecmwf_ifs", "gfs_global"):
         r = by_model[model]
-        t = U0RDownloadTarget(
+        t = BayesPrecisionFusionDownloadTarget(
             city="Paris", metric=r["metric"], target_date="2026-06-01",
             lead_days=1, latitude=48.967, longitude=2.428, timezone_name="Europe/Paris",
         )
-        ident = _u0r_product_identity(model, "previous_runs", t)
+        ident = _bayes_precision_fusion_product_identity(model, "previous_runs", t)
         assert r["product_id"] == ident["product_id"]
         assert r["request_url_hash"] == ident["request_url_hash"]
         assert r["model_name"] == ident["model_name"]

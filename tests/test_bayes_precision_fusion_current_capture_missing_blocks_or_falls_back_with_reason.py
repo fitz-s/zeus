@@ -1,6 +1,6 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: BLOCKER 5 — a missing persisted current capture must produce a logged reason and single-anchor path, never a silent network fetch inside the q path.
-# Reuse: Run with pytest; update if the missing-capture handling or logging contract in the U0R fusion override changes.
+# Reuse: Run with pytest; update if the missing-capture handling or logging contract in the BAYES_PRECISION_FUSION fusion override changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: BLOCKER 5 — if the persisted CURRENT capture is missing, the q path must NOT
@@ -23,7 +23,7 @@ from datetime import date
 import pytest
 
 import src.data.replacement_forecast_materializer as mod
-from tests.test_u0r_history_provider_materializer_wiring import (
+from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (
     _conn,
     _disable_other_layers,
     _enable_fusion,
@@ -32,7 +32,7 @@ from tests.test_u0r_history_provider_materializer_wiring import (
     _row,
     _seed_history,
 )
-from tests.test_u0r_materializer_uses_persisted_current_rows_not_network import CURRENT_MODELS
+from tests.test_bayes_precision_fusion_materializer_uses_persisted_current_rows_not_network import CURRENT_MODELS
 
 
 def test_missing_current_capture_falls_back_to_single_anchor_with_reason(monkeypatch, caplog) -> None:
@@ -48,14 +48,14 @@ def test_missing_current_capture_falls_back_to_single_anchor_with_reason(monkeyp
     def _exploding_fetch(*a, **k):
         raise AssertionError("missing current capture must NOT trigger a network fetch")
 
-    mod._replacement_u0r_fusion_override._live_fetch = _exploding_fetch
+    mod._replacement_bayes_precision_fusion_override._live_fetch = _exploding_fetch
 
-    with caplog.at_level(logging.WARNING, logger="zeus.replacement_u0r_fusion"):
+    with caplog.at_level(logging.WARNING, logger="zeus.replacement_bayes_precision_fusion"):
         pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
 
-    # Single-anchor path: no u0r_fusion block in provenance (byte-identical to flag-off).
+    # Single-anchor path: no bayes_precision_fusion block in provenance (byte-identical to flag-off).
     prov = json.loads(_row(conn, pid)["provenance_json"])
-    assert "u0r_fusion" not in prov, "missing current capture must fall back to single-anchor"
+    assert "bayes_precision_fusion" not in prov, "missing current capture must fall back to single-anchor"
 
     # The reason is logged (observable, not silent).
     msgs = " ".join(rec.getMessage().lower() for rec in caplog.records)

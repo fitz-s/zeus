@@ -3,8 +3,8 @@
 # Reuse: Run with pytest; update if domain polygons, alias map, or regional eligibility logic in model_selection change.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 (DEDUP icon_seamless==icon_d2), §4 selection,
-#   §7 antibodies (regional-outside-domain polygon; alias dedup). U0R_PROOF_RESULT.md:
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (DEDUP icon_seamless==icon_d2), §4 selection,
+#   §7 antibodies (regional-outside-domain polygon; alias dedup). BAYES_PRECISION_FUSION_PROOF_RESULT.md:
 #   "icon_d2 used ONLY at in-box cities; Moscow 0/0; icon_seamless in 0/27684 used_models".
 # Purpose: REGIONAL GATE proof. icon_d2 in-polygon ENTERS; Moscow out-of-polygon ABSENT
 #   (zero-leak); arome only inside France; dedup drops icon_seamless; lead>1 excludes regional.
@@ -19,7 +19,7 @@ from src.forecast.model_selection import (
     select_models,
 )
 
-# Proof city settlement coordinates (lat, lon) from u0r_fixed_lead_dataset.json.
+# Proof city settlement coordinates (lat, lon) from bayes_precision_fusion_fixed_lead_dataset.json.
 PARIS = (48.967, 2.428)
 LONDON = (51.505, 0.055)
 MUNICH = (48.348, 11.813)

@@ -1,13 +1,13 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 (anchor prior = the LIVE 9km/0.1 ecmwf_ifs product);
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (anchor prior = the LIVE 9km/0.1 ecmwf_ifs product);
 #   Fitz Constraint #4 (data provenance: the anchor history product must match the live anchor
 #   OR be reconciled through an explicit declared bridge). BLOCKER 3 (PR#400 review): the
 #   chosen honest option for what Open-Meteo actually serves.
 """BLOCKER 3 — the explicit ifs025 -> ifs9 anchor bridge.
 
-THE PROVENANCE PROBLEM. u0r_bayes.ANCHOR_MODEL = 'ecmwf_ifs' is the LIVE anchor: the
-Open-Meteo ECMWF IFS 9km / 0.1-degree deterministic product (the prior mean of the U0R fusion).
+THE PROVENANCE PROBLEM. bayes_precision_fusion.ANCHOR_MODEL = 'ecmwf_ifs' is the LIVE anchor: the
+Open-Meteo ECMWF IFS 9km / 0.1-degree deterministic product (the prior mean of the BAYES_PRECISION_FUSION fusion).
 But the anchor's WALK-FORWARD history can only come from Open-Meteo's previous-runs API, and
 that API serves the ECMWF deterministic feed ONLY as 'ecmwf_ifs025' — the 0.25-degree product
 (see src/data/forecast_source_registry.py: ecmwf_previous_runs -> model_name='ecmwf_ifs025';

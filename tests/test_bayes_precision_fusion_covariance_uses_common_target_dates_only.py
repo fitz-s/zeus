@@ -1,17 +1,17 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: BLOCKER 2 — covariance rows must be aligned by target_date (not positional index); fuse_u0r_posterior must use the date-aligned common window, not equal-length same-index assumption.
-# Reuse: Run with pytest; update if residual matrix date-alignment logic in fuse_u0r_posterior changes.
+# Purpose: BLOCKER 2 — covariance rows must be aligned by target_date (not positional index); fuse_bayes_precision_posterior must use the date-aligned common window, not equal-length same-index assumption.
+# Reuse: Run with pytest; update if residual matrix date-alignment logic in fuse_bayes_precision_posterior changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §2 T2 fusion (covariance estimated over the COMMON
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §2 T2 fusion (covariance estimated over the COMMON
 #   estimation window), §4 algorithm (residual matrix over dates where ALL selected models
-#   are present). Fitz Constraint: relationship test — when Module A (U0RHistoryProvider /
+#   are present). Fitz Constraint: relationship test — when Module A (BayesPrecisionFusionHistoryProvider /
 #   capture) emits per-model residual vectors of EQUAL LENGTH but DIFFERENT target_dates,
-#   Module B (fuse_u0r_posterior) must NOT place them in the same covariance row. The cross-
+#   Module B (fuse_bayes_precision_posterior) must NOT place them in the same covariance row. The cross-
 #   module invariant: covariance rows are aligned by target_date, NEVER by positional index.
 """BLOCKER 2 (the critical stat bug) — covariance must use the date-aligned COMMON window.
 
-Before the fix, fuse_u0r_posterior built the covariance matrix M from per-instrument residual
+Before the fix, fuse_bayes_precision_posterior built the covariance matrix M from per-instrument residual
 vectors whose ONLY check was equal len(train_residuals). Residuals from DIFFERENT target_dates
 got stacked into the same covariance row -> a FAKE covariance -> Sigma^-1 fusion weights wrong.
 
@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.forecast.u0r_bayes import (
+from src.forecast.bayes_precision_fusion import (
     ModelInstrument,
-    fuse_u0r_posterior,
+    fuse_bayes_precision_posterior,
     shrink_cov,
 )
 
@@ -61,7 +61,7 @@ def test_covariance_built_over_target_date_intersection_only() -> None:
     ins_a = _inst("gfs_global", z=0.1, residuals_by_date=a_dates)
     ins_b = _inst("icon_global", z=-0.1, residuals_by_date=b_dates)
 
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=0.0, anchor_tau0=1.0, likelihood=[ins_a, ins_b], use_covariance=True
     )
     assert fused.method == "T2_BAYES"
@@ -75,7 +75,7 @@ def test_covariance_built_over_target_date_intersection_only() -> None:
 
     # The fused posterior must be reproducible from the date-aligned Sigma (NOT the positional
     # stack that would include the 5.0/-5.0 outliers and blow the off-diagonal up).
-    from src.forecast.u0r_bayes import bayes_fuse
+    from src.forecast.bayes_precision_fusion import bayes_fuse
 
     mu_exp, sd_exp = bayes_fuse(
         np.array([ins_a.z, ins_b.z]), Sigma_expected, 0.0, 1.0, 0.0
@@ -110,7 +110,7 @@ def test_positional_stack_of_misaligned_dates_would_differ() -> None:
     ins_a = _inst("gfs_global", z=0.1, residuals_by_date=a_dates)
     ins_b = _inst("icon_global", z=-0.1, residuals_by_date=b_dates)
 
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=0.0, anchor_tau0=1.0, likelihood=[ins_a, ins_b], use_covariance=True
     )
 
@@ -119,7 +119,7 @@ def test_positional_stack_of_misaligned_dates_would_differ() -> None:
         [list(a_dates.values()), list(b_dates.values())]
     ).T
     Sigma_positional = shrink_cov(M_positional)
-    from src.forecast.u0r_bayes import bayes_fuse
+    from src.forecast.bayes_precision_fusion import bayes_fuse
 
     mu_pos, _ = bayes_fuse(np.array([ins_a.z, ins_b.z]), Sigma_positional, 0.0, 1.0, 0.0)
 

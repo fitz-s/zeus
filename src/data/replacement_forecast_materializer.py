@@ -68,7 +68,7 @@ UTC = timezone.utc
 REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
 REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
 REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK = "SOFT_ANCHOR_FALLBACK"
-REPLACEMENT_Q_MODE_U0R_CAPTURE_MISSING = "U0R_CAPTURE_MISSING"
+REPLACEMENT_Q_MODE_BAYES_PRECISION_FUSION_CAPTURE_MISSING = "BAYES_PRECISION_FUSION_CAPTURE_MISSING"
 REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
 
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
@@ -550,7 +550,7 @@ def _replacement_eb_bias_shift_c(
 def _replacement_fused_q_shape_enabled() -> bool:
     """Flag gate for the FUSED-Q SHAPE replacement (2026-06-09 AIFS-replacement experiment).
 
-    When ``replacement_0_1_fused_q_shape_enabled`` is true AND the U0R fusion produced an
+    When ``replacement_0_1_fused_q_shape_enabled`` is true AND the BAYES_PRECISION_FUSION fusion produced an
     override with a predictive sigma, the posterior q is built DIRECTLY from
     N(mu*, sigma_pred) via the ONE settlement bin integrator (bin_probability_settlement) —
     fully replacing the AIFS member-vote shape. Experiment verdict (n=39 settled cells,
@@ -675,8 +675,8 @@ def _replacement_member_vote_smoothing_alpha() -> float | None:
 
 
 @dataclass(frozen=True)
-class _U0RFusionOverride:
-    """The U0R fused center/spread that replace the single-anchor in the soft-anchor build,
+class _BayesPrecisionFusionFusionOverride:
+    """The BAYES_PRECISION_FUSION fused center/spread that replace the single-anchor in the soft-anchor build,
     plus the F6 EMOS identity components (model_set_hash, resolution_mix_hash, lead_bucket)
     and provenance for the fused product."""
 
@@ -800,7 +800,7 @@ def _read_persisted_current_capture(
     return out
 
 
-def _u0r_city_local_lead_days(
+def _bayes_precision_fusion_city_local_lead_days(
     *, computed_at: datetime, target_local_date: date, tz_name: str
 ) -> int:
     """BLOCKER 6 — lead in the CITY-LOCAL calendar, never the UTC calendar.
@@ -820,7 +820,7 @@ def _u0r_city_local_lead_days(
     return max(0, (target_local_date - computed_local_date).days)
 
 
-def _u0r_lead_bucket(lead_days: int) -> str:
+def _bayes_precision_fusion_lead_bucket(lead_days: int) -> str:
     """F6 lead_bucket for the fused EMOS cell. Regional expert is lead<=1; group leads."""
     if lead_days <= 1:
         return "L1"
@@ -829,23 +829,23 @@ def _u0r_lead_bucket(lead_days: int) -> str:
     return "L4P"
 
 
-def _replacement_u0r_fusion_override(
+def _replacement_bayes_precision_fusion_override(
     request: "ReplacementForecastMaterializeRequest",
     *,
     metric: str,
     anchor_value_corrected_c: float,
     conn: "sqlite3.Connection | None" = None,
-) -> _U0RFusionOverride | None:
-    """Flag-gated U0R-Bayes multi-model fusion override (the_path replacement_0_1_u0r_fusion).
+) -> _BayesPrecisionFusionFusionOverride | None:
+    """Flag-gated BAYES_PRECISION_FUSION-Bayes multi-model fusion override (the_path replacement_0_1_bayes_precision_fusion).
 
     Returns the fused (anchor_value_c, anchor_sigma_c) that REPLACE the single OM9 9km anchor
-    center/spread in the soft-anchor construction, ONLY when ``replacement_0_1_u0r_fusion_enabled``
+    center/spread in the soft-anchor construction, ONLY when ``replacement_0_1_bayes_precision_fusion_enabled``
     is true AND at least one decorrelated extra survives the fail-soft capture. Returns None when
     the flag is OFF (default) OR all extras are absent -> the existing single-anchor path runs
     BYTE-IDENTICALLY. This is the ONE place the flag is read; the fusion itself is the ported
-    proof C1 (src/forecast/u0r_bayes.py — no parallel fusion).
+    proof C1 (src/forecast/bayes_precision_fusion.py — no parallel fusion).
 
-    LAYERING (U0R_BAYES_SPEC.md §6 integration): the override is computed from the ALREADY
+    LAYERING (BAYES_PRECISION_FUSION_SPEC.md §6 integration): the override is computed from the ALREADY
     EB-bias-corrected anchor center (so it composes AFTER the EB bias layer); it replaces only
     the anchor center/spread; the AIFS member-vote prior + member-vote smoothing + the downstream
     q_lcb settlement floor + EMOS + bin integration are all UNCHANGED. FAIL-SOFT / FAIL-CLOSED:
@@ -855,7 +855,7 @@ def _replacement_u0r_fusion_override(
         from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
 
         edli_cfg = settings["edli_v1"]
-        if not bool(edli_cfg.get("replacement_0_1_u0r_fusion_enabled", False)):
+        if not bool(edli_cfg.get("replacement_0_1_bayes_precision_fusion_enabled", False)):
             return None
 
         city_obj = runtime_cities_by_name().get(request.city)
@@ -870,12 +870,12 @@ def _replacement_u0r_fusion_override(
         computed_at = _to_utc(request.computed_at, field_name="computed_at")
         # BLOCKER 6: lead in the CITY-LOCAL date (tz_name), NOT the UTC date. Cross-timezone the
         # UTC date is off-by-one -> wrong lead bucket / regional eligibility / sigma.
-        lead_days = _u0r_city_local_lead_days(
+        lead_days = _bayes_precision_fusion_city_local_lead_days(
             computed_at=computed_at, target_local_date=target_local_date, tz_name=tz_name
         )
 
-        from src.data.u0r_multimodel_capture import capture_u0r_instruments  # noqa: PLC0415
-        from src.forecast.u0r_bayes import fuse_u0r_posterior  # noqa: PLC0415
+        from src.data.bayes_precision_fusion_capture import capture_bayes_precision_instruments  # noqa: PLC0415
+        from src.forecast.bayes_precision_fusion import fuse_bayes_precision_posterior  # noqa: PLC0415
 
         # Optional injected seams (live wiring / tests). An explicitly-assigned
         # _history_provider attribute wins (tests inject a fixture). When none is assigned AND
@@ -883,13 +883,13 @@ def _replacement_u0r_fusion_override(
         # history provider reading the PERSISTED previous-runs raw_model_forecasts JOINed to
         # VERIFIED settlement on the SAME zeus-forecasts.db connection (intra-DB, INV-37; no-leak
         # target_date<decision, IRON RULE #3). This assignment is THE switch that lets
-        # fuse_u0r_posterior reach T2_BAYES once n_train>=MIN_TRAIN (else EQUAL_WEIGHT). Fail-soft:
+        # fuse_bayes_precision_posterior reach T2_BAYES once n_train>=MIN_TRAIN (else EQUAL_WEIGHT). Fail-soft:
         # the provider NEVER raises (returns {} on any error) -> anchor fallback / equal-weight.
-        history_provider = getattr(_replacement_u0r_fusion_override, "_history_provider", None)
+        history_provider = getattr(_replacement_bayes_precision_fusion_override, "_history_provider", None)
         if history_provider is None and conn is not None:
-            from src.data.u0r_history_provider import U0RHistoryProvider  # noqa: PLC0415
+            from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider  # noqa: PLC0415
 
-            history_provider = U0RHistoryProvider(conn)
+            history_provider = BayesPrecisionFusionHistoryProvider(conn)
 
         # BLOCKER 5: the CURRENT values feeding the traded q come from the PERSISTED single_runs
         # rows the download job wrote — NEVER a network fetch inside the q path. Read them by
@@ -912,14 +912,14 @@ def _replacement_u0r_fusion_override(
         # when the persisted row exists. It does NOT defeat the missing-capture gate: when the
         # persisted capture is entirely absent the q path falls back to single-anchor regardless,
         # because B5 forbids building the traded q from any non-persisted current value.
-        injected_live_fetch = getattr(_replacement_u0r_fusion_override, "_live_fetch", None)
+        injected_live_fetch = getattr(_replacement_bayes_precision_fusion_override, "_live_fetch", None)
 
         if conn is not None and not persisted_current:
             # Missing current capture on the live path -> single-anchor fallback + logged reason.
             # NEVER a network fetch in the q path (the persisted download is the sole q source).
             import logging  # noqa: PLC0415
-            logging.getLogger("zeus.replacement_u0r_fusion").warning(
-                "replacement_0_1 U0R fusion: persisted current single_runs capture MISSING for "
+            logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                "replacement_0_1 BAYES_PRECISION_FUSION fusion: persisted current single_runs capture MISSING for "
                 "%s %s %s lead=%s cycle=%s -> single-anchor fallback (no network fetch in q path)",
                 request.city, metric, target_date, lead_days, source_cycle_iso,
             )
@@ -940,7 +940,7 @@ def _replacement_u0r_fusion_override(
                 return injected_live_fetch(model=model, **_kwargs)
             return None
 
-        capture = capture_u0r_instruments(
+        capture = capture_bayes_precision_instruments(
             city=request.city, metric=metric, latitude=lat, longitude=lon,
             timezone_name=tz_name,
             run=_to_utc(request.source_cycle_time, field_name="source_cycle_time"),
@@ -950,14 +950,14 @@ def _replacement_u0r_fusion_override(
         )
         if not capture.has_extras:
             # K3 ANTIBODY (2026-06-09): all multi-model extras absent. We only reach here when
-            # replacement_0_1_u0r_fusion_enabled is True, so ZERO extras is a WIRING failure (e.g.
+            # replacement_0_1_bayes_precision_fusion_enabled is True, so ZERO extras is a WIRING failure (e.g.
             # the lead-calendar mismatch that silently reverted ALL fusion to cold soft-anchor for
             # ~30h) — NOT a benign inert path. Make it LOUD so a repeat can never hide as a
             # transient drop. (Behaviour unchanged: still single-anchor fallback.)
             try:
                 import logging  # noqa: PLC0415
-                logging.getLogger("zeus.replacement_u0r_fusion").warning(
-                    "replacement_0_1 U0R fusion fired with ZERO multi-model extras (flag ON) -> "
+                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                    "replacement_0_1 BAYES_PRECISION_FUSION fusion fired with ZERO multi-model extras (flag ON) -> "
                     "single-anchor fallback for %s %s %s cycle=%s. Check the single_runs capture "
                     "+ natural-key match.", request.city, metric, target_date,
                     _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat(),
@@ -966,7 +966,7 @@ def _replacement_u0r_fusion_override(
                 pass
             return None
 
-        fused = fuse_u0r_posterior(
+        fused = fuse_bayes_precision_posterior(
             anchor_z=capture.anchor_z, anchor_tau0=capture.anchor_tau0,
             likelihood=capture.likelihood, disagree_var=capture.disagree_var,
             use_covariance=True,
@@ -1006,8 +1006,8 @@ def _replacement_u0r_fusion_override(
         if _missing_providers:
             try:
                 import logging  # noqa: PLC0415
-                logging.getLogger("zeus.replacement_u0r_fusion").warning(
-                    "replacement_0_1 U0R fusion decorrelated-provider INCOMPLETE for %s %s: served "
+                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                    "replacement_0_1 BAYES_PRECISION_FUSION fusion decorrelated-provider INCOMPLETE for %s %s: served "
                     "%d/5, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
                     "cadence single_runs) must be resolved explicitly, not silently dropped.",
                     request.city, metric, _decorrelated_served, _missing_providers,
@@ -1035,10 +1035,10 @@ def _replacement_u0r_fusion_override(
 
         # BLOCKER 3: declare the ifs025->ifs9 anchor bridge provenance (applied when the anchor
         # history product is the 0.25 feed, which is the only ECMWF previous-runs OM serves).
-        from src.data.u0r_multimodel_capture import (  # noqa: PLC0415
+        from src.data.bayes_precision_fusion_capture import (  # noqa: PLC0415
             OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
         )
-        from src.forecast.u0r_anchor_bridge import bridge_metadata  # noqa: PLC0415
+        from src.forecast.bayes_precision_fusion_anchor_bridge import bridge_metadata  # noqa: PLC0415
         anchor_bridge = bridge_metadata(
             stored_model_name=OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME
         )
@@ -1069,14 +1069,14 @@ def _replacement_u0r_fusion_override(
                     _sigma_resid = 1.5
         predictive_sigma_c = max(1.0, (float(fused.sd) ** 2 + _sigma_resid ** 2) ** 0.5)
 
-        return _U0RFusionOverride(
+        return _BayesPrecisionFusionFusionOverride(
             anchor_value_c=float(fused.mu),
             anchor_sigma_c=float(fused.sd),
             method=fused.method,
             used_models=used_models,
             model_set_hash=model_set_hash,
             resolution_mix_hash=resolution_mix_hash,
-            lead_bucket=_u0r_lead_bucket(lead_days),
+            lead_bucket=_bayes_precision_fusion_lead_bucket(lead_days),
             dropped_models=capture.dropped_models,
             excluded_regionals=capture.selection.excluded_regionals,
             dropped_aliases=capture.selection.dropped_aliases,
@@ -1090,8 +1090,8 @@ def _replacement_u0r_fusion_override(
     except Exception as exc:  # fail-soft: never break shadow materialization
         try:
             import logging  # noqa: PLC0415
-            logging.getLogger("zeus.replacement_u0r_fusion").warning(
-                "replacement_0_1 U0R fusion wiring skipped (fail-soft): %s", exc
+            logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
+                "replacement_0_1 BAYES_PRECISION_FUSION fusion wiring skipped (fail-soft): %s", exc
             )
         except Exception:
             pass
@@ -1113,13 +1113,13 @@ def _insert_posterior(
     # member prior is strictly positive on every bin and the soft_anchor.py:197-198 zero-prior
     # -inf veto can never make a bin un-hittable. None when flag OFF -> byte-identical to today.
     member_vote_smoothing_alpha = _replacement_member_vote_smoothing_alpha()
-    # U0R-Bayes fusion (flag-gated, default-OFF): replace the single OM9 9km anchor center/spread
+    # BAYES_PRECISION_FUSION-Bayes fusion (flag-gated, default-OFF): replace the single OM9 9km anchor center/spread
     # with the multi-model Bayesian posterior. Computed from the EB-corrected anchor center so it
     # composes AFTER the EB bias layer; member-vote smoothing stays applied to the AIFS prior; the
     # downstream q_lcb floor + EMOS + bin integration are unchanged. None -> byte-identical path.
     raw_anchor_value_c = request.openmeteo_anchor.high_c if metric == "high" else request.openmeteo_anchor.low_c
     anchor_value_corrected_c = float(raw_anchor_value_c) - (0.0 if bias_shift_c is None else float(bias_shift_c))
-    u0r_override = _replacement_u0r_fusion_override(
+    bayes_precision_fusion_override = _replacement_bayes_precision_fusion_override(
         request, metric=metric, anchor_value_corrected_c=anchor_value_corrected_c, conn=conn
     )
     result = build_openmeteo_ifs9_aifs_soft_anchor_result(
@@ -1131,8 +1131,8 @@ def _insert_posterior(
         settlement_step_c=float(request.settlement_step_c),
         bias_shift_c=bias_shift_c,
         member_vote_smoothing_alpha=member_vote_smoothing_alpha,
-        anchor_value_override_c=(u0r_override.anchor_value_c if u0r_override is not None else None),
-        anchor_sigma_override_c=(u0r_override.anchor_sigma_c if u0r_override is not None else None),
+        anchor_value_override_c=(bayes_precision_fusion_override.anchor_value_c if bayes_precision_fusion_override is not None else None),
+        anchor_sigma_override_c=(bayes_precision_fusion_override.anchor_sigma_c if bayes_precision_fusion_override is not None else None),
     )
     target_date = _date_text(request.target_date)
     source_cycle_time = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
@@ -1156,17 +1156,17 @@ def _insert_posterior(
     # FIX 1/FIX 2 (2026-06-09): derive the EXPLICIT q-mode + record the settlement sigma-floor
     # coherence in provenance. These are derived from the SAME determinations the fused-q path
     # already makes (no parallel re-derivation). Defaults cover the no-override branches.
-    replacement_q_mode = REPLACEMENT_Q_MODE_U0R_CAPTURE_MISSING
+    replacement_q_mode = REPLACEMENT_Q_MODE_BAYES_PRECISION_FUSION_CAPTURE_MISSING
     settlement_sigma_floor_applied = False
     settlement_sigma_floor_c: float | None = None
     floor_unavailable_reason: str | None = None
     replacement_sigma_basis: str | None = None
-    if u0r_override is not None:
+    if bayes_precision_fusion_override is not None:
         # An override exists. Default mode while we attempt the fused-q build below.
         replacement_q_mode = REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK
     if (
-        u0r_override is not None
-        and u0r_override.predictive_sigma_c is not None
+        bayes_precision_fusion_override is not None
+        and bayes_precision_fusion_override.predictive_sigma_c is not None
         and _replacement_fused_q_shape_enabled()
     ):
         try:
@@ -1179,7 +1179,7 @@ def _insert_posterior(
             # protect the strategy of record. Look up the SAME floor (city|season|metric) and widen:
             # sigma_used = max(sigma_pred, floor). max() only WIDENS -> flatter q -> fewer overconfident
             # bets (it can never tighten). Missing/malformed floor -> recorded, NEVER blocks shadow.
-            _sigma_pred = float(u0r_override.predictive_sigma_c)
+            _sigma_pred = float(bayes_precision_fusion_override.predictive_sigma_c)
             _sigma_used = _sigma_pred
             replacement_sigma_basis = "fused_center_residual_std"
             if _edli_settlement_sigma_floor_enabled():
@@ -1195,7 +1195,7 @@ def _insert_posterior(
                     floor_unavailable_reason = _floor_reason
             _fused_q = {
                 b.bin_id: bin_probability_settlement(
-                    mu=float(u0r_override.anchor_value_c),
+                    mu=float(bayes_precision_fusion_override.anchor_value_c),
                     sigma=_sigma_used,
                     bin_low=(None if b.lower_c is None else float(b.lower_c)),
                     bin_high=(None if b.upper_c is None else float(b.upper_c)),
@@ -1222,7 +1222,7 @@ def _insert_posterior(
             _floor_required_but_missing = (
                 _edli_settlement_sigma_floor_required() and not settlement_sigma_floor_applied
             )
-            if u0r_override.decorrelated_providers_complete and not _floor_required_but_missing:
+            if bayes_precision_fusion_override.decorrelated_providers_complete and not _floor_required_but_missing:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL
             else:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL
@@ -1237,7 +1237,7 @@ def _insert_posterior(
             replacement_sigma_basis = None
             try:
                 import logging  # noqa: PLC0415
-                logging.getLogger("zeus.replacement_u0r_fusion").warning(
+                logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
                     "replacement_0_1 fused-q shape skipped (fail-closed to soft-anchor q): %s",
                     _exc,
                 )
@@ -1257,27 +1257,27 @@ def _insert_posterior(
         "anchor_sigma_c": float(request.anchor_sigma_c),
         "settlement_step_c": float(request.settlement_step_c),
     }
-    if u0r_override is not None:
+    if bayes_precision_fusion_override is not None:
         # F6: the FUSED product gets its OWN EMOS cell identity (product + resolution_mix_hash +
         # model_set_hash + lead_bucket) so it never reuses the single-anchor EMOS cell. The fused
         # center/spread REPLACE the OM9 anchor, so posterior_config_hash diverges from the
         # single-anchor cell by construction.
         posterior_config.update(
             {
-                "posterior_method": "the_path_u0r_fusion",
-                "u0r_fusion_method": u0r_override.method,
-                "u0r_product_id": "the_path_u0r_fusion_v1",
-                "u0r_model_set_hash": u0r_override.model_set_hash,
-                "u0r_resolution_mix_hash": u0r_override.resolution_mix_hash,
-                "u0r_lead_bucket": u0r_override.lead_bucket,
-                "u0r_anchor_value_c": float(u0r_override.anchor_value_c),
-                "u0r_anchor_sigma_c": float(u0r_override.anchor_sigma_c),
+                "posterior_method": "the_path_bayes_precision_fusion",
+                "bayes_precision_fusion_method": bayes_precision_fusion_override.method,
+                "bayes_precision_fusion_product_id": "the_path_bayes_precision_fusion_v1",
+                "bayes_precision_fusion_model_set_hash": bayes_precision_fusion_override.model_set_hash,
+                "bayes_precision_fusion_resolution_mix_hash": bayes_precision_fusion_override.resolution_mix_hash,
+                "bayes_precision_fusion_lead_bucket": bayes_precision_fusion_override.lead_bucket,
+                "bayes_precision_fusion_anchor_value_c": float(bayes_precision_fusion_override.anchor_value_c),
+                "bayes_precision_fusion_anchor_sigma_c": float(bayes_precision_fusion_override.anchor_sigma_c),
             }
         )
     posterior_config_hash = _json_hash(posterior_config)
     family_id = f"{request.city}:{target_date}:{metric}:{bin_topology_hash}"
     # FIX 5 (2026-06-09) — capture-status provenance (recording only; the FIX-1 live gate is the
-    # enforcement point, and U0R_CAPTURE_MISSING already covers the dangerous no-override case).
+    # enforcement point, and BAYES_PRECISION_FUSION_CAPTURE_MISSING already covers the dangerous no-override case).
     # Derived from the SAME K3 completeness verdict the fusion computed (no parallel re-derivation):
     #   FULL_CURRENT     — override present AND all 5 decorrelated providers' current values served.
     #   PARTIAL_CURRENT  — override present but the decorrelated set was INCOMPLETE (count present).
@@ -1285,10 +1285,10 @@ def _insert_posterior(
     #                        missing -> the legacy single-anchor q; no current multi-model capture).
     # DB_READ_ERROR is reserved for an explicit DB read failure surfaced by the capture reader; the
     # override layer is fail-soft (returns None) so at this seam an absent override reads as
-    # STALE_HISTORY_ONLY (the live gate rejects it via U0R_CAPTURE_MISSING regardless).
-    if u0r_override is None:
+    # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
+    if bayes_precision_fusion_override is None:
         capture_status = REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY
-    elif u0r_override.decorrelated_providers_complete:
+    elif bayes_precision_fusion_override.decorrelated_providers_complete:
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
     else:
         capture_status = REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT
@@ -1335,31 +1335,31 @@ def _insert_posterior(
         "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
-    if u0r_override is not None:
-        provenance_payload["u0r_fusion"] = {
-            "method": u0r_override.method,
-            "used_models": list(u0r_override.used_models),
-            "model_set_hash": u0r_override.model_set_hash,
-            "resolution_mix_hash": u0r_override.resolution_mix_hash,
-            "lead_bucket": u0r_override.lead_bucket,
-            "anchor_value_c": float(u0r_override.anchor_value_c),
-            "anchor_sigma_c": float(u0r_override.anchor_sigma_c),
+    if bayes_precision_fusion_override is not None:
+        provenance_payload["bayes_precision_fusion"] = {
+            "method": bayes_precision_fusion_override.method,
+            "used_models": list(bayes_precision_fusion_override.used_models),
+            "model_set_hash": bayes_precision_fusion_override.model_set_hash,
+            "resolution_mix_hash": bayes_precision_fusion_override.resolution_mix_hash,
+            "lead_bucket": bayes_precision_fusion_override.lead_bucket,
+            "anchor_value_c": float(bayes_precision_fusion_override.anchor_value_c),
+            "anchor_sigma_c": float(bayes_precision_fusion_override.anchor_sigma_c),
             "predictive_sigma_c": (
-                None if u0r_override.predictive_sigma_c is None
-                else float(u0r_override.predictive_sigma_c)
+                None if bayes_precision_fusion_override.predictive_sigma_c is None
+                else float(bayes_precision_fusion_override.predictive_sigma_c)
             ),
-            "dropped_models": list(u0r_override.dropped_models),
-            "excluded_regionals": list(u0r_override.excluded_regionals),
-            "dropped_aliases": list(u0r_override.dropped_aliases),
+            "dropped_models": list(bayes_precision_fusion_override.dropped_models),
+            "excluded_regionals": list(bayes_precision_fusion_override.excluded_regionals),
+            "dropped_aliases": list(bayes_precision_fusion_override.dropped_aliases),
             # BLOCKER 5: the persisted current rows this traded q was fused from (reconstructable).
-            "raw_model_forecast_ids": list(u0r_override.raw_model_forecast_ids),
+            "raw_model_forecast_ids": list(bayes_precision_fusion_override.raw_model_forecast_ids),
             # BLOCKER 3: the ifs025->ifs9 anchor bridge provenance applied to the anchor prior.
-            "anchor_bridge": dict(u0r_override.anchor_bridge) if u0r_override.anchor_bridge else None,
+            "anchor_bridge": dict(bayes_precision_fusion_override.anchor_bridge) if bayes_precision_fusion_override.anchor_bridge else None,
             # FIX 1/FIX 5 (2026-06-09): the K3 decorrelated-provider completeness verdict (the SAME
             # determination that drives replacement_q_mode FULL vs PARTIAL + capture_status).
-            "decorrelated_providers_complete": bool(u0r_override.decorrelated_providers_complete),
-            "decorrelated_providers_served": int(u0r_override.decorrelated_providers_served),
-            "decorrelated_providers_expected": int(u0r_override.decorrelated_providers_expected),
+            "decorrelated_providers_complete": bool(bayes_precision_fusion_override.decorrelated_providers_complete),
+            "decorrelated_providers_served": int(bayes_precision_fusion_override.decorrelated_providers_served),
+            "decorrelated_providers_expected": int(bayes_precision_fusion_override.decorrelated_providers_expected),
             "fusion_authority": "SHADOW_ONLY",
         }
     posterior_identity_hash = _json_hash(

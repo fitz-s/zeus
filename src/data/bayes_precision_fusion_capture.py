@@ -1,15 +1,15 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-09
-# Authority basis: U0R_BAYES_SPEC.md §6 F1 (fail-soft multi-model live capture), §4 algorithm
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (fail-soft multi-model live capture), §4 algorithm
 #   step (1) eligible / (4) EB bias-correct; §7 antibodies (source-disagreement, lowN). The
 #   capture reuses the existing Open-Meteo single-runs fetch pattern
 #   (openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload) per model.
-"""F1 — fail-soft multi-model live capture for the U0R-Bayes fusion.
+"""F1 — fail-soft multi-model live capture for the BAYES_PRECISION_FUSION-Bayes fusion.
 
 Fetches the decorrelated globals (gfs_global, icon_global, gem_global, jma_seamless, icon_eu)
 and the in-EU-polygon icon_d2 / France arome ALONGSIDE the existing AIFS+0.1 anchor, via the
 existing Open-Meteo single-runs fetch pattern. EB-bias-corrects each model from a walk-forward
-settlement-joined history, and emits the u0r_bayes.ModelInstrument inputs for the fusion.
+settlement-joined history, and emits the bayes_precision_fusion.ModelInstrument inputs for the fusion.
 
 FAIL-SOFT IS THE STRUCTURAL GUARANTEE (Fitz #1 + spec §6): a per-model fetch failure DROPS that
 model and the cycle proceeds with the survivors — the Bayesian fusion handles missing sources by
@@ -39,14 +39,14 @@ from src.forecast.model_selection import (
     SelectedModelSet,
     select_models,
 )
-from src.forecast.u0r_bayes import (
+from src.forecast.bayes_precision_fusion import (
     DISAGREE_W,
     MIN_TRAIN,
     ModelInstrument,
     eb_bias,
 )
 
-_LOG = logging.getLogger("zeus.u0r_multimodel_capture")
+_LOG = logging.getLogger("zeus.bayes_precision_fusion_capture")
 
 # Open-Meteo model ids for the single-runs forecast endpoint. icon_eu is OM's `icon_eu`;
 # jma_seamless / gem_global / gfs_global / icon_global / icon_d2 are OM model ids; the France
@@ -89,7 +89,7 @@ class ModelHistory:
     the SAME order as the value tuples. ``residual_by_target_date`` maps each date to its
     residual. The fusion's covariance is built ONLY over the INTERSECTION of these dates across
     the selected models, so residuals from different target_dates can never share a covariance
-    row (equal length is NOT equal meaning — U0R_BAYES_SPEC §2/§4). ``target_dates`` defaults
+    row (equal length is NOT equal meaning — BAYES_PRECISION_FUSION_SPEC §2/§4). ``target_dates`` defaults
     to empty for legacy callers that supply only the value tuples (date-less -> the covariance
     aligner falls back to the proven positional stack for that caller only).
     """
@@ -119,7 +119,7 @@ class ModelHistory:
         return len(self.forecast_values)
 
 
-class U0RHistoryProvider(Protocol):
+class BayesPrecisionFusionHistoryProvider(Protocol):
     """Supplies walk-forward residual history per model. The live materializer wires a forecast/
     settlement-store query; tests inject a fixture. Implementations MUST be walk-forward (only
     target_date strictly before ``target_date``) and MUST NOT raise (return {} on any failure)."""
@@ -188,7 +188,7 @@ def _default_live_fetch(
         payload = fetch(
             SINGLE_RUNS_FORECAST_URL,
             params,
-            endpoint_label=f"u0r_{model}_single_runs",
+            endpoint_label=f"bayes_precision_fusion_{model}_single_runs",
         )
         anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(
             payload,
@@ -197,13 +197,13 @@ def _default_live_fetch(
         )
         return float(anchor.high_c if metric == "high" else anchor.low_c)
     except Exception as exc:  # FAIL-SOFT: drop this model, never block the cycle.
-        _LOG.warning("U0R live fetch dropped model %s (fail-soft): %s", model, exc)
+        _LOG.warning("BAYES_PRECISION_FUSION live fetch dropped model %s (fail-soft): %s", model, exc)
         return None
 
 
 @dataclass(frozen=True)
-class U0RCaptureResult:
-    """The fail-soft capture output, ready for u0r_bayes.fuse_u0r_posterior.
+class BayesPrecisionFusionCaptureResult:
+    """The fail-soft capture output, ready for bayes_precision_fusion.fuse_bayes_precision_posterior.
 
     ``anchor_z`` is the EB-corrected anchor center — ALWAYS set (the anchor product feeds every
     cell on this path). ``anchor_tau0`` is the anchor's walk-forward residual std (the TRUSTED
@@ -236,7 +236,7 @@ def _eb_corrected(model: str, raw_value: float, history: ModelHistory | None, pa
     return raw_value - b_hat, (history.n_train if history else 0)
 
 
-def capture_u0r_instruments(
+def capture_bayes_precision_instruments(
     *,
     city: str,
     metric: str,
@@ -248,9 +248,9 @@ def capture_u0r_instruments(
     lead_days: int,
     forecast_hours: int = 120,
     anchor_z_corrected: float,
-    history_provider: U0RHistoryProvider | None = None,
+    history_provider: BayesPrecisionFusionHistoryProvider | None = None,
     live_fetch: LiveFetchFn | None = None,
-) -> U0RCaptureResult:
+) -> BayesPrecisionFusionCaptureResult:
     """F1 — fetch the extras fail-soft, EB-correct, gate, dedup, and build fusion inputs.
 
     ``anchor_z_corrected`` is the already-EB-corrected 0.1 anchor center the materializer already
@@ -283,7 +283,7 @@ def capture_u0r_instruments(
                 forecast_hours=forecast_hours,
             )
         except Exception as exc:  # belt-and-braces: a buggy provider must not crash the cycle
-            _LOG.warning("U0R capture dropped %s (provider raised, fail-soft): %s", model, exc)
+            _LOG.warning("BAYES_PRECISION_FUSION capture dropped %s (provider raised, fail-soft): %s", model, exc)
             value = None
         if value is None:
             dropped.append(model)
@@ -304,7 +304,7 @@ def capture_u0r_instruments(
             )
         )
     except Exception as exc:
-        _LOG.warning("U0R history provider failed (fail-soft, no history): %s", exc)
+        _LOG.warning("BAYES_PRECISION_FUSION history provider failed (fail-soft, no history): %s", exc)
         histories = {}
 
     # parent bias = pooled mean residual across anchor + globals (structural prior, spec EB).
@@ -356,7 +356,7 @@ def capture_u0r_instruments(
     # ifs025->ifs9 bridge BEFORE it becomes the anchor prior tau0 (the bridge widens, never
     # narrows). Without this the anchor sigma + q_lcb would silently inherit a 0.25 product's
     # uncertainty as if it were the 9km anchor's.
-    from src.forecast.u0r_anchor_bridge import (  # noqa: PLC0415
+    from src.forecast.bayes_precision_fusion_anchor_bridge import (  # noqa: PLC0415
         anchor_history_requires_bridge,
         bridge_anchor_tau0,
     )
@@ -384,7 +384,7 @@ def capture_u0r_instruments(
         # materializer's own EB-corrected anchor product and is ALWAYS available — it must
         # always reach the fusion, exactly like a zero-history global participates
         # LOWN-inflated in equal-weight. anchor_tau0=None is the explicit "no TRUSTED prior"
-        # signal: fuse_u0r_posterior then stays EQUAL_WEIGHT and blends the center as ONE
+        # signal: fuse_bayes_precision_posterior then stays EQUAL_WEIGHT and blends the center as ONE
         # equal member at the conservative thin variance (TAU0_FLOOR * LOWN_INFLATE)^2.
         # (The old `if anchor_hist else None` deleted the strongest model for zero-history
         # cells, and the old comment claimed "the fusion floors tau0" — it never did: the
@@ -403,7 +403,7 @@ def capture_u0r_instruments(
     else:
         disagree_var = 0.0
 
-    return U0RCaptureResult(
+    return BayesPrecisionFusionCaptureResult(
         anchor_z=anchor_z,
         anchor_tau0=anchor_tau0,
         likelihood=tuple(instruments),

@@ -189,14 +189,14 @@ tables:
     created_by: ensure_replacement_forecast_shadow_schema
     pk_col: raw_model_forecast_id
     notes: >
-      U0R-Bayes F1 multi-model walk-forward capture (2026-06-08, U0R_BAYES_SPEC.md
+      BAYES_PRECISION_FUSION-Bayes F1 multi-model walk-forward capture (2026-06-08, BAYES_PRECISION_FUSION_SPEC.md
       §6 F1). SHADOW_ONLY, training_allowed=0 (CHECK-pinned). One row per
       (model, city, target_date, metric, source_cycle_time, endpoint): the
       decorrelated globals (gfs_global/icon_global/gem_global/jma_seamless/icon_eu)
       and in-domain regionals (icon_d2/arome) captured alongside the ECMWF anchor.
       forecast_value_c is ALWAYS degC (no C/F mix). endpoint distinguishes
       single_runs (live capture) from previous_runs (fixed-lead walk-forward train).
-      PRODUCT-IDENTITY columns (2026-06-08, U0R PR#400 BLOCKER 4, Fitz Constraint #4
+      PRODUCT-IDENTITY columns (2026-06-08, BAYES_PRECISION_FUSION PR#400 BLOCKER 4, Fitz Constraint #4
       data provenance): source_id, source_family, product_id, provider, model_name,
       request_params_json, request_url_hash, raw_sha256 (nullable), latitude_requested,
       longitude_requested, timezone_requested, cell_selection, elevation_param,
@@ -207,7 +207,7 @@ tables:
       live-money posterior never trains on a value whose product cannot be proven.
       The anchor (model='ecmwf_ifs', the fusion identity) is stored with
       model_name='ecmwf_ifs025' because OM's previous-runs API serves only the 0.25
-      ECMWF product (BLOCKER 3 ifs025->ifs9 bridge in src/forecast/u0r_anchor_bridge.py).
+      ECMWF product (BLOCKER 3 ifs025->ifs9 bridge in src/forecast/bayes_precision_fusion_anchor_bridge.py).
       Added via an idempotent forward-only ALTER guard in
       _create_replacement_forecast_shadow_tables (column-existence checked before ADD;
       no DROP). Created via _create_replacement_forecast_shadow_tables (the shadow-schema
@@ -215,9 +215,9 @@ tables:
       apply_canonical_schema forecast_tables=True). Lives ONLY on
       zeus-forecasts.db (INV-37 single-DB); the history JOIN to settlement_outcomes
       (same DB) is intra-DB on one connection. Gated by
-      replacement_0_1_u0r_multimodel_capture_enabled; not a settlement, calibration,
+      replacement_0_1_bayes_precision_fusion_capture_enabled; not a settlement, calibration,
       or order truth table.
-      UNIQUENESS (2026-06-08, U0R PR#400 BLOCKER 4 operator-sharpened): the row key
+      UNIQUENESS (2026-06-08, BAYES_PRECISION_FUSION PR#400 BLOCKER 4 operator-sharpened): the row key
       is UNIQUE(model, product_id, request_url_hash, city, target_date, metric,
       source_cycle_time, endpoint) — WIDENED from the original logical-only
       UNIQUE(model,city,target_date,metric,source_cycle_time,endpoint). The old key
@@ -225,7 +225,7 @@ tables:
       but a DIFFERENT physical request (changed timezone/cell_selection/elevation/
       product_id), leaving a stale forecast_value_c to contaminate bias/MAE/sigma/
       covariance/q. The widened key makes a changed request a NEW row; the persist
-      layer (src/data/u0r_multimodel_download.py::_persist_rows /
+      layer (src/data/bayes_precision_fusion_download.py::_persist_rows /
       _scan_and_audit_request_conflicts) additionally REJECTS a same-logical-key/
       different-request insert (RawModelForecastRequestConflict + audit row in
       raw_model_forecast_request_conflicts) so the contamination category is
@@ -241,7 +241,7 @@ tables:
     created_by: ensure_replacement_forecast_shadow_schema
     pk_col: conflict_id
     notes: >
-      BLOCKER 4 (2026-06-08, U0R PR#400 operator-sharpened) conflict audit ledger for
+      BLOCKER 4 (2026-06-08, BAYES_PRECISION_FUSION PR#400 operator-sharpened) conflict audit ledger for
       raw_model_forecasts. When a capture row arrives with the SAME logical key
       (model,city,target_date,metric,source_cycle_time,endpoint) as a stored row but a
       DIFFERENT physical request identity (product_id / request_url_hash changed — a

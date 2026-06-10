@@ -1,9 +1,9 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: BLOCKER 2 — when the date-intersection window is too short, fuse_u0r_posterior must collapse to diagonal C0 rather than attempt Ledoit-Wolf on an unreliable short window.
-# Reuse: Run with pytest; update if the covariance-reliability threshold or diagonal-collapse logic in fuse_u0r_posterior changes.
+# Purpose: BLOCKER 2 — when the date-intersection window is too short, fuse_bayes_precision_posterior must collapse to diagonal C0 rather than attempt Ledoit-Wolf on an unreliable short window.
+# Reuse: Run with pytest; update if the covariance-reliability threshold or diagonal-collapse logic in fuse_bayes_precision_posterior changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §2/§4 PARSIMONY rule (covariance-aware ONLY where Sigma
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §2/§4 PARSIMONY rule (covariance-aware ONLY where Sigma
 #   is reliably estimable; collapse to diagonal C0 when the common window is too short). The
 #   threshold mirrors the proof's "M.shape[0] >= 5 -> shrink_cov else diag_cov".
 """BLOCKER 2 — when the date-intersection is too short, fall back to a diagonal Sigma.
@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.forecast.u0r_bayes import (
+from src.forecast.bayes_precision_fusion import (
     ModelInstrument,
     diag_cov,
-    fuse_u0r_posterior,
+    fuse_bayes_precision_posterior,
     shrink_cov,
 )
 
@@ -54,7 +54,7 @@ def test_low_common_date_count_uses_diag_cov_not_shrink_cov() -> None:
     ins_a = _inst("gfs_global", z=0.1, residuals_by_date=a)
     ins_b = _inst("icon_global", z=-0.1, residuals_by_date=b)
 
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=0.0, anchor_tau0=1.0, likelihood=[ins_a, ins_b], use_covariance=True
     )
     assert fused.method == "T2_BAYES"
@@ -66,7 +66,7 @@ def test_low_common_date_count_uses_diag_cov_not_shrink_cov() -> None:
     Sigma_diag = diag_cov(M, lown)
     Sigma_shrink = shrink_cov(M)
 
-    from src.forecast.u0r_bayes import bayes_fuse
+    from src.forecast.bayes_precision_fusion import bayes_fuse
 
     mu_diag, sd_diag = bayes_fuse(np.array([ins_a.z, ins_b.z]), Sigma_diag, 0.0, 1.0, 0.0)
     mu_shrink, _ = bayes_fuse(np.array([ins_a.z, ins_b.z]), Sigma_shrink, 0.0, 1.0, 0.0)
@@ -82,7 +82,7 @@ def test_empty_common_window_falls_back_to_diagonal() -> None:
     The fused posterior must still be finite (fail-soft) and method T2_BAYES (anchor + extras)."""
     ins_a = _inst("gfs_global", z=0.1, residuals_by_date={"2026-04-01": 0.5, "2026-04-02": -0.5})
     ins_b = _inst("icon_global", z=-0.1, residuals_by_date={"2026-05-01": 0.4, "2026-05-02": -0.4})
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=0.0, anchor_tau0=1.0, likelihood=[ins_a, ins_b], use_covariance=True
     )
     assert fused.method == "T2_BAYES"

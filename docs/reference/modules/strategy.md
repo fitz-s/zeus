@@ -4,7 +4,7 @@
 **Current code path:** `src/strategy`
 **Authority status:** Dense module reference for edge selection, fusion, FDR, correlation control, and sizing support.
 
-> **Strategy of record (2026-06-09):** the live q this module consumes is built by the **replacement chain**, not by `market_fusion.py`. Per-model walk-forward EB de-bias (`src/forecast/u0r_bayes.py` `eb_bias`, λ=n/(n+8)) → T2 Bayesian precision fusion (`fuse_u0r_posterior`) → settlement-preimage bin q (`src/calibration/emos.py` `bin_probability_settlement`, q_shape `fused_normal_direct`); live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`. Authority `docs/authority/replacement_final_form_2026_06_09.md`; canonical chain in root `AGENTS.md`. This module's `market_fusion.py` (`compute_posterior` runs `model_only_v1` — NO market-prior blend live) is **baseline / LCB-cap** edge-shaping, joined as a floor via `effective_q_lcb = min(...)`; FDR/correlation/Kelly here still gate the live edge.
+> **Strategy of record (2026-06-09):** the live q this module consumes is built by the **replacement chain**, not by `market_fusion.py`. Per-model walk-forward EB de-bias (`src/forecast/bayes_precision_fusion.py` `eb_bias`, λ=n/(n+8)) → T2 Bayesian precision fusion (`fuse_bayes_precision_posterior`) → settlement-preimage bin q (`src/calibration/emos.py` `bin_probability_settlement`, q_shape `fused_normal_direct`); live entry `src/engine/event_reactor_adapter.py` `_replacement_authority_probability_and_fdr_proof`. Authority `docs/authority/replacement_final_form_2026_06_09.md`; canonical chain in root `AGENTS.md`. This module's `market_fusion.py` (`compute_posterior` runs `model_only_v1` — NO market-prior blend live) is **baseline / LCB-cap** edge-shaping, joined as a floor via `effective_q_lcb = min(...)`; FDR/correlation/Kelly here still gate the live edge.
 
 ## 1. Module purpose
 Convert calibrated predictive information and market context into a portfolio of tradable opportunities that respect multiple-testing, correlation, and capital-allocation constraints.
@@ -33,7 +33,7 @@ Derived but economically central. Strategy code must stay downstream of contract
 ### Canonical truth surfaces
 - `docs/authority/replacement_final_form_2026_06_09.md` — strategy of record (probability law); root `AGENTS.md` probability-chain block
 - `docs/reference/zeus_domain_model.md` and `zeus_math_spec.md` for legacy-baseline posterior/edge/FDR/Kelly logic (Platt/MC path = baseline; live q via `emos.bin_probability_settlement` — see banner)
-- live q source: `src/forecast/u0r_bayes.py` (`fuse_u0r_posterior`), `src/data/replacement_forecast_materializer.py` (`_insert_posterior`), `src/calibration/emos.py` (`bin_probability_settlement`)
+- live q source: `src/forecast/bayes_precision_fusion.py` (`fuse_bayes_precision_posterior`), `src/data/replacement_forecast_materializer.py` (`_insert_posterior`), `src/calibration/emos.py` (`bin_probability_settlement`)
 - `src/strategy/market_analysis.py`, `market_fusion.py` (baseline `compute_posterior`, `model_only_v1`), `fdr_filter.py`, `kelly.py`, `correlation.py`, `risk_limits.py`, `selection_family.py`
 - `docs/authority/zeus_current_architecture.md` money path
 

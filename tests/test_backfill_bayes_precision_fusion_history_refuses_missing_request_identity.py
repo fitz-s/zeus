@@ -3,7 +3,7 @@
 # Authority basis: operator BLOCKER (the_path PR review 2026-06-08) requirement #2 — if the
 #   required product/request identity CANNOT be constructed for a row, the script REFUSES to
 #   seed (hard error) rather than writing identity-less rows. A NULL-identity row reintroduces
-#   the NULL!=NULL non-idempotency hole and is unreconstructable to its OM product. U0R_BAYES_SPEC §6 F1.
+#   the NULL!=NULL non-idempotency hole and is unreconstructable to its OM product. BAYES_PRECISION_FUSION_SPEC §6 F1.
 """Relationship test (backfill -> identity-construction failure boundary).
 
 When a B0 city cannot be resolved to its requested coordinates/timezone (so the live
@@ -37,9 +37,9 @@ def _count(db: Path) -> int:
 
 
 def test_backfill_refuses_when_city_identity_unresolvable(tmp_path) -> None:
-    from scripts.backfill_u0r_history_from_b0 import (
+    from scripts.backfill_bayes_precision_fusion_history_from_b0 import (
         BackfillIdentityError,
-        backfill_u0r_history,
+        backfill_bayes_precision_fusion_history,
     )
 
     db = _db(tmp_path)
@@ -51,7 +51,7 @@ def test_backfill_refuses_when_city_identity_unresolvable(tmp_path) -> None:
         }
     }
     with pytest.raises(BackfillIdentityError):
-        backfill_u0r_history(b0=b0, db=db, dry_run=False)
+        backfill_bayes_precision_fusion_history(b0=b0, db=db, dry_run=False)
 
     # And it wrote NOTHING (refuses cleanly, never partial identity-less rows).
     assert _count(db) == 0, "a refusal must not leave identity-less rows behind"

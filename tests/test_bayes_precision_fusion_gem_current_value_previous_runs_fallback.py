@@ -104,9 +104,9 @@ def test_gem_fallback_respects_natural_key_cycle() -> None:
 def test_download_skips_gem_single_runs_leg_but_keeps_previous_runs_leg(tmp_path) -> None:
     from datetime import UTC, datetime
 
-    from src.data.u0r_multimodel_download import (
-        U0RDownloadTarget,
-        download_u0r_extra_raw_inputs,
+    from src.data.bayes_precision_fusion_download import (
+        BayesPrecisionFusionDownloadTarget,
+        download_bayes_precision_fusion_extra_raw_inputs,
     )
     from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
 
@@ -126,11 +126,11 @@ def test_download_skips_gem_single_runs_leg_but_keeps_previous_runs_leg(tmp_path
         prev_calls.append(model)
         return 19.5
 
-    target = U0RDownloadTarget(
+    target = BayesPrecisionFusionDownloadTarget(
         city="Amsterdam", latitude=52.3, longitude=4.77, timezone_name="Europe/Amsterdam",
         target_date="2026-06-10", lead_days=1, metric="high",
     )
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC), targets=[target],
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )

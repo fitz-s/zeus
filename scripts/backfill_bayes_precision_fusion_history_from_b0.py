@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: Seed raw_model_forecasts (endpoint=previous_runs, SHADOW_ONLY) from the proven B0 fixed-lead multi-model dataset so U0RHistoryProvider has walk-forward history immediately.
+# Purpose: Seed raw_model_forecasts (endpoint=previous_runs, SHADOW_ONLY) from the proven B0 fixed-lead multi-model dataset so BayesPrecisionFusionHistoryProvider has walk-forward history immediately.
 # Reuse: --b0 and --db are both REQUIRED; --b0 must point at B0_multilead_dataset.json; --db must point at target zeus-forecasts.db. Use --dry-run first. Never run against live DB without operator intent.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: docs/the_path/BACKFILL_NOW.md + U0R_BAYES_SPEC.md §3/§5/§6 F1 + BLOCKER 4
+# Authority basis: docs/the_path/BACKFILL_NOW.md + BAYES_PRECISION_FUSION_SPEC.md §3/§5/§6 F1 + BLOCKER 4
 #   (product-identity provenance, Fitz Constraint #4). Operator BLOCKER (the_path PR review
 #   2026-06-08): the seed MUST construct DETERMINISTIC product identity per row using the SAME
 #   identity construction the live download writer uses, persist via the SAME conflict-guarded
 #   idempotent path, and REFUSE (hard error) rather than write identity-less rows.
 """Seed raw_model_forecasts (endpoint='previous_runs') from the proven fixed-lead
-multi-model dataset B0_multilead_dataset.json so the live U0RHistoryProvider has
+multi-model dataset B0_multilead_dataset.json so the live BayesPrecisionFusionHistoryProvider has
 its walk-forward training history IMMEDIATELY (no 25-day forward wait). Fusion then
 reaches T2_BAYES instead of EQUAL_WEIGHT on the very next materialize cycle.
 
@@ -18,10 +18,10 @@ PROVENANCE / SAFETY:
   * Writes ONLY the SHADOW-ONLY research-accrual table raw_model_forecasts
     (trade_authority_status='SHADOW_ONLY', training_allowed=0) — NOT a money-path
     or order/training-truth table. It changes NO posterior until
-    replacement_0_1_u0r_fusion_enabled is flipped AND the U0RHistoryProvider reads it.
+    replacement_0_1_bayes_precision_fusion_enabled is flipped AND the BayesPrecisionFusionHistoryProvider reads it.
   * --db is REQUIRED and never defaults to the live path: the operator points it at
     the target zeus-forecasts.db explicitly. NEVER run against a DB you must not write.
-  * No-leak is enforced at SERVE time by U0RHistoryProvider (target_date < decision_date);
+  * No-leak is enforced at SERVE time by BayesPrecisionFusionHistoryProvider (target_date < decision_date);
     this seed is genuine historical fixed-lead previous-runs data, correctly tagged.
 
 PRODUCT IDENTITY (operator BLOCKER, the_path PR review 2026-06-08):
@@ -29,7 +29,7 @@ PRODUCT IDENTITY (operator BLOCKER, the_path PR review 2026-06-08):
   request_url_hash, source_id, source_family, provider, model_name, request_params_json,
   lat/lon/timezone requested, cell_selection, elevation_param, downscaling_policy,
   endpoint_mode='previous_runs', model_domain_hash, coverage_status) constructed by the
-  SAME _u0r_product_identity the LIVE download writer uses (src/data/u0r_multimodel_download).
+  SAME _bayes_precision_fusion_product_identity the LIVE download writer uses (src/data/bayes_precision_fusion_download).
   So a seed row is byte-for-byte identity-compatible with a live-fetched row on the new
   UNIQUE(model,product_id,request_url_hash,city,target_date,metric,source_cycle_time,endpoint).
 
@@ -54,10 +54,10 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.data.u0r_multimodel_download import (
-    U0RDownloadTarget,
+from src.data.bayes_precision_fusion_download import (
+    BayesPrecisionFusionDownloadTarget,
     _persist_rows,
-    _u0r_product_identity,
+    _bayes_precision_fusion_product_identity,
 )
 
 # captured_at fixed to the seed date (deterministic, audit-stable); recorded_at is DB default.
@@ -80,10 +80,10 @@ def _iso_cycle(target_date: str, lead_days: int) -> str:
 
 def _resolve_city_target(
     *, city: str, metric: str, target_date: str, lead_days: int,
-) -> U0RDownloadTarget:
+) -> BayesPrecisionFusionDownloadTarget:
     """Resolve a B0 city key to the requested-coordinate target the live writer stamps identity
     from. Reuses cities_by_name (name + aliases + slug_names) — the SAME coordinate/timezone source
-    src/main.py uses to build live U0RDownloadTargets. Raises BackfillIdentityError if unresolved."""
+    src/main.py uses to build live BayesPrecisionFusionDownloadTargets. Raises BackfillIdentityError if unresolved."""
     from src.config import cities  # noqa: PLC0415
 
     if not hasattr(_resolve_city_target, "_lookup"):
@@ -102,7 +102,7 @@ def _resolve_city_target(
             f"cannot construct product identity for B0 city {city!r}: it does not resolve to a "
             "configured city (no requested lat/lon/timezone). REFUSING to seed identity-less rows."
         )
-    return U0RDownloadTarget(
+    return BayesPrecisionFusionDownloadTarget(
         city=city_cfg.name,  # canonicalize to the settlement_outcomes city identifier
         metric=metric,
         target_date=target_date,
@@ -139,7 +139,7 @@ def iter_identity_rows(b0: dict):
                         target = _resolve_city_target(
                             city=city, metric=metric, target_date=td, lead_days=lead,
                         )
-                        identity = _u0r_product_identity(model, _PREVIOUS_RUNS_ENDPOINT, target)
+                        identity = _bayes_precision_fusion_product_identity(model, _PREVIOUS_RUNS_ENDPOINT, target)
                         yield {
                             "model": model,
                             "city": target.city,
@@ -155,7 +155,7 @@ def iter_identity_rows(b0: dict):
                         }
 
 
-def backfill_u0r_history(*, b0: dict, db: Path, dry_run: bool = False) -> dict[str, object]:
+def backfill_bayes_precision_fusion_history(*, b0: dict, db: Path, dry_run: bool = False) -> dict[str, object]:
     """Seed raw_model_forecasts (previous_runs) from the B0 dict with FULL product identity.
 
     Constructs all rows FIRST (so a single unresolvable city REFUSES the whole seed before any
@@ -170,7 +170,7 @@ def backfill_u0r_history(*, b0: dict, db: Path, dry_run: bool = False) -> dict[s
     n_models = len({r["model"] for r in rows})
 
     report: dict[str, object] = {
-        "status": "U0R_BACKFILL_DRY_RUN" if dry_run else "U0R_BACKFILL_SEEDED",
+        "status": "BAYES_PRECISION_FUSION_BACKFILL_DRY_RUN" if dry_run else "BAYES_PRECISION_FUSION_BACKFILL_SEEDED",
         "candidate_row_count": len(rows),
         "city_count": n_cities,
         "model_count": n_models,
@@ -205,7 +205,7 @@ def _print_history_join_self_check(db: Path) -> None:
     matching VERIFIED settlement in the SAME db. The metric predicate
     (s.temperature_metric = r.metric) is MANDATORY: each (city, target_date) has BOTH a high AND a
     low settlement row, so omitting it joins every forecast row to 2 settlement rows -> a 2x
-    over-count that would NOT match the provider-grade JOIN (u0r_history_provider.py)."""
+    over-count that would NOT match the provider-grade JOIN (bayes_precision_fusion_history_provider.py)."""
     conn = sqlite3.connect(str(db))
     try:
         joined = conn.execute(
@@ -250,7 +250,7 @@ def main() -> int:
     with open(args.b0) as f:
         b0 = json.load(f)
 
-    report = backfill_u0r_history(b0=b0, db=Path(args.db), dry_run=args.dry_run)
+    report = backfill_bayes_precision_fusion_history(b0=b0, db=Path(args.db), dry_run=args.dry_run)
     print(
         f"B0 -> {report['candidate_row_count']:,} raw_model_forecasts rows "
         f"({report['city_count']} cities, {report['model_count']} models, "

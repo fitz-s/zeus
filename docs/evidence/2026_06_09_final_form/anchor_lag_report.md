@@ -66,7 +66,7 @@ Current daemon (started 08:51 local / 13:51 UTC):
 - Line 416601: **the 00Z cron fired**:
   `2026-06-09 09:16:52,237 [apscheduler.executors.replacement_download] INFO: Running job "_replacement_forecast_download_job (trigger: cron[hour='14,2', minute='10'], next run at: 2026-06-10 02:10:00 UTC)" (scheduled at 2026-06-09 14:10:00+00:00)`
   `_parse_cycle(14:10 UTC − 14h = 00:10)` → **cycle = 2026-06-09T00** (arithmetic verified with the venv interpreter).
-- Immediately after, the U0R multi-model leg in the SAME job correctly fetched the new cycle:
+- Immediately after, the BAYES_PRECISION_FUSION multi-model leg in the SAME job correctly fetched the new cycle:
   `2026-06-09 09:16:53,401 [httpx] INFO: HTTP Request: GET https://single-runs-api.open-meteo.com/v1/forecast?latitude=36.362&longitude=120.087&hourly=temperature_2m&models=ecmwf_ifs&run=2026-06-09T00%3A00&forecast_hours=120... "HTTP/1.1 200 OK"`
   → proves Open-Meteo HAS the 06-09T00 run and the API is healthy.
 - Line 418742: `2026-06-09 09:45:53,608 ... Job "_replacement_forecast_download_job (trigger: cron...)" executed successfully`
@@ -82,7 +82,7 @@ Current daemon (started 08:51 local / 13:51 UTC):
 - `deterministic_forecast_anchors`: `('2026-06-08T18:00:00+00:00', 96)` is MAX.
 - `forecast_posteriors`: `('2026-06-08T18:00:00+00:00', 321)` rows covering 96 distinct
   city/target/metric combos.
-- `raw_model_forecasts` (U0R capture, separate path): all models AT cycle `2026-06-09T00:00:00+00:00`
+- `raw_model_forecasts` (BAYES_PRECISION_FUSION capture, separate path): all models AT cycle `2026-06-09T00:00:00+00:00`
   — confirming the same cron successfully ingested 00Z data on the non-anchor leg.
 
 ---
@@ -132,7 +132,7 @@ the cron can never advance the anchor again.
 
 **Eliminated alternatives:**
 - (a) not scheduled / flag-disabled — cron registered and fired (line 416601); both flags true.
-- (b) upstream unavailable — Open-Meteo served `run=2026-06-09T00:00` with 200 OK to the U0R leg
+- (b) upstream unavailable — Open-Meteo served `run=2026-06-09T00:00` with 200 OK to the BAYES_PRECISION_FUSION leg
   inside the same job run.
 - (c) crash — job logged "executed successfully"; no traceback in `zeus-forecast-live.err`.
 - (e) intentional cadence wait — the 14:10 UTC cron exists precisely to fetch the 00Z release,

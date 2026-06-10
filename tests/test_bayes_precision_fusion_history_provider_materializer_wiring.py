@@ -1,15 +1,15 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: End-to-end wiring — real U0RHistoryProvider assigned at the materializer seam; persisted previous_runs + VERIFIED settlement yields T2_BAYES on the real forecasts DB connection.
-# Reuse: Run with pytest; update if U0RHistoryProvider, materializer seam, or T2_BAYES promotion logic changes.
+# Purpose: End-to-end wiring — real BayesPrecisionFusionHistoryProvider assigned at the materializer seam; persisted previous_runs + VERIFIED settlement yields T2_BAYES on the real forecasts DB connection.
+# Reuse: Run with pytest; update if BayesPrecisionFusionHistoryProvider, materializer seam, or T2_BAYES promotion logic changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §6 F1 integration + §4 (T2 fusion reached once n_train>=
-#   MIN_TRAIN); CONTINUITY_AND_WIRING.md §4 steps 4-5 (real U0RHistoryProvider ASSIGNED at the
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 integration + §4 (T2 fusion reached once n_train>=
+#   MIN_TRAIN); CONTINUITY_AND_WIRING.md §4 steps 4-5 (real BayesPrecisionFusionHistoryProvider ASSIGNED at the
 #   materializer seam -> EQUAL_WEIGHT crosses to T2_BAYES). IRON RULE #3 (no-leak), #4 (one
 #   builder), INV-37 (single forecasts DB). Tests the CROSS-MODULE boundary: persisted
 #   raw_model_forecasts (previous_runs) + VERIFIED settlement -> the materializer's fused
 #   posterior reaches T2_BAYES via the REAL provider on the SAME connection.
-"""End-to-end: the real U0RHistoryProvider wired through _insert_posterior reaches T2_BAYES.
+"""End-to-end: the real BayesPrecisionFusionHistoryProvider wired through _insert_posterior reaches T2_BAYES.
 
 This is the relationship test the brief requires (step (d)): on a constructed >=25-row VERIFIED
 previous_runs fixture persisted to the materialization connection, with fusion ON, the override
@@ -38,7 +38,7 @@ from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
 )
 from src.data.replacement_forecast_materializer import ReplacementForecastMaterializeRequest
-from src.forecast.u0r_bayes import MIN_TRAIN
+from src.forecast.bayes_precision_fusion import MIN_TRAIN
 from src.state.db import _create_readiness_state
 from src.state.schema.v2_schema import apply_canonical_schema
 
@@ -59,8 +59,8 @@ def _reset_override_seams():
     lifecycle — no competing undo stack."""
     def _clear():
         for attr in ("_history_provider", "_live_fetch"):
-            if hasattr(mod._replacement_u0r_fusion_override, attr):
-                delattr(mod._replacement_u0r_fusion_override, attr)
+            if hasattr(mod._replacement_bayes_precision_fusion_override, attr):
+                delattr(mod._replacement_bayes_precision_fusion_override, attr)
     _clear()
     yield
     _clear()
@@ -185,11 +185,11 @@ def _seed_history(conn, *, decision: date, models, n: int = MIN_TRAIN + 5, leak:
 
 
 def _enable_fusion(monkeypatch):
-    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_u0r_fusion_enabled", True)
+    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_bayes_precision_fusion_enabled", True)
 
 
 def _enable_capture(monkeypatch):
-    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_u0r_multimodel_capture_enabled", True)
+    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True)
 
 
 def _disable_other_layers(monkeypatch):
@@ -207,7 +207,7 @@ def _install_live_fetch(monkeypatch, values):
     # of this PROCESS-GLOBAL attribute, so there is no competing monkeypatch undo stack.
     def _fetch(*, model, latitude, longitude, timezone_name, run, target_local_date, metric, forecast_hours):
         return values.get(model)
-    mod._replacement_u0r_fusion_override._live_fetch = _fetch
+    mod._replacement_bayes_precision_fusion_override._live_fetch = _fetch
 
 
 def _seed_current_single_runs(conn, *, values, request=None, anchor_value=27.0):
@@ -218,7 +218,7 @@ def _seed_current_single_runs(conn, *, values, request=None, anchor_value=27.0):
     req = request if request is not None else _request()
     target_date = mod._date_text(req.target_date)
     cyc = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat()
-    lead = mod._u0r_city_local_lead_days(
+    lead = mod._bayes_precision_fusion_city_local_lead_days(
         computed_at=mod._to_utc(req.computed_at, field_name="computed_at"),
         target_local_date=date.fromisoformat(target_date), tz_name="Europe/Paris",
     )
@@ -248,7 +248,7 @@ def test_real_provider_reaches_t2_bayes(monkeypatch) -> None:
     _seed_current_single_runs(conn, values=_live_values())
 
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
+    prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert prov["method"] == "T2_BAYES", (
         f"with >=MIN_TRAIN VERIFIED previous_runs history the real provider must reach T2_BAYES, "
         f"got {prov['method']}"
@@ -267,7 +267,7 @@ def test_real_provider_equal_weight_below_min_train(monkeypatch) -> None:
     _seed_current_single_runs(conn, values=_live_values())
 
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
+    prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     assert prov["method"] == "EQUAL_WEIGHT", (
         f"below MIN_TRAIN={MIN_TRAIN} the fusion must stay EQUAL_WEIGHT, got {prov['method']}"
     )
@@ -283,7 +283,7 @@ def test_real_provider_no_leak_future_rows_ignored(monkeypatch) -> None:
     _seed_history(conn, decision=date(2026, 6, 7), models=models, leak=True)
     _seed_current_single_runs(conn, values=_live_values())
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"])["u0r_fusion"]
+    prov = json.loads(_row(conn, pid)["provenance_json"])["bayes_precision_fusion"]
     # If the 99.0 leak rows had contributed, the EB bias would be ~-77 and the center would blow
     # far above the bins. T2_BAYES with a sane center is the proof the leak rows were excluded.
     assert prov["method"] == "T2_BAYES"
@@ -309,7 +309,7 @@ def test_both_flags_off_byte_identical(monkeypatch) -> None:
     assert row_a["q_json"] == row_b["q_json"]
     assert row_a["posterior_identity_hash"] == row_b["posterior_identity_hash"]
     assert row_a["posterior_config_hash"] == row_b["posterior_config_hash"]
-    assert "u0r_fusion" not in json.loads(row_b["provenance_json"])
+    assert "bayes_precision_fusion" not in json.loads(row_b["provenance_json"])
 
 
 def test_capture_on_fusion_off_money_path_byte_identical(monkeypatch) -> None:
@@ -333,7 +333,7 @@ def test_capture_on_fusion_off_money_path_byte_identical(monkeypatch) -> None:
     assert cap["q_json"] == base["q_json"], "capture flag must not change the posterior (money path)"
     assert cap["posterior_identity_hash"] == base["posterior_identity_hash"]
     assert cap["posterior_config_hash"] == base["posterior_config_hash"]
-    assert "u0r_fusion" not in json.loads(cap["provenance_json"])
+    assert "bayes_precision_fusion" not in json.loads(cap["provenance_json"])
 
 
 def test_provider_self_supplies_row_factory_tuple_conn_identical_history() -> None:
@@ -342,19 +342,19 @@ def test_provider_self_supplies_row_factory_tuple_conn_identical_history() -> No
     -> the per-row fail-soft silently skipped EVERY row -> n_train=0 with no error (silent
     de-bias-off). The provider now sets a per-CURSOR Row factory, so a tuple-factory caller
     conn yields IDENTICAL history to a Row-factory conn — the category is unconstructable."""
-    from src.data.u0r_history_provider import U0RHistoryProvider
+    from src.data.bayes_precision_fusion_history_provider import BayesPrecisionFusionHistoryProvider
 
     conn = _conn()
     models = ["ecmwf_ifs", "gfs_global", "icon_global"]
     _seed_history(conn, decision=date(2026, 6, 7), models=models)
 
-    row_hist = U0RHistoryProvider(conn)(
+    row_hist = BayesPrecisionFusionHistoryProvider(conn)(
         city="Paris", metric="high", lead_days=1, target_date=date(2026, 6, 7), models=models
     )
     assert row_hist and all(h.n_train > 0 for h in row_hist.values())  # precondition
 
     conn.row_factory = None  # tuple-factory caller (the live conn config is OUT of our control)
-    tuple_hist = U0RHistoryProvider(conn)(
+    tuple_hist = BayesPrecisionFusionHistoryProvider(conn)(
         city="Paris", metric="high", lead_days=1, target_date=date(2026, 6, 7), models=models
     )
     assert set(tuple_hist) == set(row_hist), (

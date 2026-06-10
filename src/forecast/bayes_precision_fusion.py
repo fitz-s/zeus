@@ -1,18 +1,18 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-09
-# Authority basis: U0R_BAYES_SPEC.md §1 observation model, §2 T2 fusion, §4 algorithm,
-#   §6 F5 (u0r_bayes). PORTED VERBATIM from the proven proof engine
-#   /Users/leofitz/zeus/.omc/research/polyweather_eval/scripts/run_u0r_bayes_fusion.py
-#   (commit 658275e33b "U0R-Bayes forecast core: spec + settlement proof"). Verdict:
-#   U0R_PROOF_RESULT.md (core PROMOTE ~15% Brier; regional shadow-grade lead-1-only).
-"""U0R-Bayes settlement fusion — the production port of the proven C1 posterior.
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §1 observation model, §2 T2 fusion, §4 algorithm,
+#   §6 F5 (bayes_precision_fusion). PORTED VERBATIM from the proven proof engine
+#   /Users/leofitz/zeus/.omc/research/polyweather_eval/scripts/run_bayes_precision_fusion.py
+#   (commit 658275e33b "BAYES_PRECISION_FUSION-Bayes forecast core: spec + settlement proof"). Verdict:
+#   BAYES_PRECISION_FUSION_PROOF_RESULT.md (core PROMOTE ~15% Brier; regional shadow-grade lead-1-only).
+"""BAYES_PRECISION_FUSION-Bayes settlement fusion — the production port of the proven C1 posterior.
 
-THE ONE FUSION. This module is the single production home of the U0R-Bayes math.
+THE ONE FUSION. This module is the single production home of the BAYES_PRECISION_FUSION-Bayes math.
 It is a faithful port of the offline proof engine's per-cell fusion internals: the
 SAME EB bias rule, the SAME Ledoit-Wolf shrink-to-diagonal covariance, and the SAME
 T2 Bayesian posterior. It does NOT invent a second fusion. The hyperparameters are
 copied byte-for-byte from the proof script so a known cell reproduces the proven
-mu*/V*/q to 4 decimals (see tests/test_u0r_bayes_port_fidelity.py — Paris/high/L1
+mu*/V*/q to 4 decimals (see tests/test_bayes_precision_fusion_port_fidelity.py — Paris/high/L1
 2025-12-26 -> mu*=4.3137, sd=0.7259).
 
 WHAT THIS MODULE OWNS (per spec §4):
@@ -28,7 +28,7 @@ WHAT THIS MODULE OWNS (per spec §4):
                            Sigma is not reliably estimated.
 
 PRODUCTION CONTRACT (the live caller in replacement_forecast_materializer):
-  - fuse_u0r_posterior(...) takes ALREADY-bias-corrected instrument values (z), the
+  - fuse_bayes_precision_posterior(...) takes ALREADY-bias-corrected instrument values (z), the
     anchor prior (mu0, tau0), and the residual matrix used to estimate Sigma. It
     returns FusedPosterior(mu, sd, ...). The materializer feeds mu -> anchor_value_c
     and sd -> anchor_sigma_c into the EXISTING soft-anchor construction; the downstream
@@ -47,7 +47,7 @@ import numpy as np
 
 
 # ---- EB / shrink hyperparameters (PORTED VERBATIM; fixed a-priori, NOT tuned) -------
-# These MUST match run_u0r_bayes_fusion.py exactly or the port-fidelity test fails.
+# These MUST match run_bayes_precision_fusion.py exactly or the port-fidelity test fails.
 KAPPA = 8.0          # EB shrink: lam = n/(n+kappa). kappa=8 -> ~50% trust at n=8.
 MIN_TRAIN = 25       # need >=25 walk-forward rows before a model is trusted.
 SIGMA_FLOOR = 0.8    # degC floor on per-source obs std (OM grid->station residual).
@@ -187,7 +187,7 @@ def equal_weight(
 # ---- production-facing fused posterior ----------------------------------------------
 @dataclass(frozen=True)
 class FusedPosterior:
-    """The U0R fused center + spread that REPLACE the single-anchor anchor_value_c /
+    """The BAYES_PRECISION_FUSION fused center + spread that REPLACE the single-anchor anchor_value_c /
     anchor_sigma_c in the existing soft-anchor construction (flag-ON only).
 
     ``mu`` -> soft-anchor anchor_value_c ; ``sd`` -> soft-anchor anchor_sigma_c. The
@@ -227,7 +227,7 @@ class ModelInstrument:
     THIS is what the covariance estimator aligns on: the cross-model covariance matrix M is built
     ONLY over the INTERSECTION of target_dates across the selected instruments, so residuals from
     different target_dates can NEVER land in the same covariance row (equal length is NOT equal
-    meaning — see U0R_BAYES_SPEC §2/§4). ``is_regional``: True for in-domain regional experts
+    meaning — see BAYES_PRECISION_FUSION_SPEC §2/§4). ``is_regional``: True for in-domain regional experts
     (icon_d2/arome) — provenance only; eligibility is gated in model_selection.py. ``n_train``:
     count of walk-forward residuals (drives low-n inflation).
     """
@@ -274,7 +274,7 @@ def _common_window_residual_matrix(
     return None
 
 
-def fuse_u0r_posterior(
+def fuse_bayes_precision_posterior(
     *,
     anchor_z: float | None,
     anchor_tau0: float | None,
@@ -284,7 +284,7 @@ def fuse_u0r_posterior(
 ) -> FusedPosterior:
     """Run the proven C1 fusion and return the center+spread for the soft-anchor.
 
-    THE ONE FUSION. Mirrors run_u0r_bayes_fusion.run_city_metric_lead's C1/D1 branch:
+    THE ONE FUSION. Mirrors run_bayes_precision_fusion.run_city_metric_lead's C1/D1 branch:
 
       1. anchor (ecmwf_ifs 0.1) is the prior N(anchor_z, anchor_tau0^2). It is ALREADY
          bias-corrected by the caller (z_today[ANCHOR]); anchor_tau0 is the walk-forward
@@ -317,7 +317,7 @@ def fuse_u0r_posterior(
     have_anchor = anchor_center is not None and anchor_tau0 is not None
 
     if anchor_center is None and not instruments:
-        raise ValueError("U0R fusion requires at least an anchor prior or one instrument")
+        raise ValueError("BAYES_PRECISION_FUSION fusion requires at least an anchor prior or one instrument")
 
     # ---- no TRUSTED prior: equal-weight; thin anchor center joins as one equal member ----
     if not have_anchor:

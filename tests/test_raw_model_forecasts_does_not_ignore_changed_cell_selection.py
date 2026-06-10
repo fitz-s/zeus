@@ -3,7 +3,7 @@
 # Reuse: Run with pytest; update if raw_model_forecasts UNIQUE constraint or INSERT OR IGNORE semantics change.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R PR#400 BLOCKER 4 (operator-sharpened) + Fitz Constraint #4 (data
+# Authority basis: BAYES_PRECISION_FUSION PR#400 BLOCKER 4 (operator-sharpened) + Fitz Constraint #4 (data
 #   provenance) + the cell_selection-is-product-identity antibody
 #   (tests/test_openmeteo_cell_selection_and_elevation_are_product_identity.py). Open-Meteo's
 #   cell_selection (nearest vs land vs sea) materially changes the returned 2m temperature: the
@@ -25,10 +25,10 @@ import sqlite3
 
 import pytest
 
-from src.data.u0r_multimodel_download import (
+from src.data.bayes_precision_fusion_download import (
     RawModelForecastRequestConflict,
     _persist_rows,
-    _u0r_product_identity,
+    _bayes_precision_fusion_product_identity,
 )
 from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
 
@@ -40,8 +40,8 @@ def _conn() -> sqlite3.Connection:
 
 
 def _target():
-    from src.data.u0r_multimodel_download import U0RDownloadTarget
-    return U0RDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
+    from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
+    return BayesPrecisionFusionDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
                              lead_days=1, latitude=48.967, longitude=2.428,
                              timezone_name="Europe/Paris")
 
@@ -60,15 +60,15 @@ def test_changed_cell_selection_changes_request_identity() -> None:
     """Sanity on the upstream relationship: cell_selection participates in request_url_hash and
     product/domain identity, so two cell_selections are NOT identity-equal. (If this ever broke,
     the conflict below could never fire -- the bug would be silent again.)"""
-    import src.data.u0r_multimodel_download as dl
+    import src.data.bayes_precision_fusion_download as dl
 
-    id_nearest = _u0r_product_identity("gfs_global", "previous_runs", _target())
-    orig = dl.U0R_CELL_SELECTION
+    id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
+    orig = dl.BAYES_PRECISION_FUSION_CELL_SELECTION
     try:
-        dl.U0R_CELL_SELECTION = "land"
-        id_land = _u0r_product_identity("gfs_global", "previous_runs", _target())
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "land"
+        id_land = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
     finally:
-        dl.U0R_CELL_SELECTION = orig
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = orig
     assert id_nearest["cell_selection"] == "nearest"
     assert id_land["cell_selection"] == "land"
     assert id_nearest["request_url_hash"] != id_land["request_url_hash"], \
@@ -80,18 +80,18 @@ def test_changed_cell_selection_changes_request_identity() -> None:
 def test_changed_cell_selection_same_logical_key_is_not_ignored() -> None:
     """The core operator assertion: a corrected cell_selection under the SAME logical key must
     NOT be silently dropped. It raises (loud) instead of leaving the stale 'nearest' value."""
-    import src.data.u0r_multimodel_download as dl
+    import src.data.bayes_precision_fusion_download as dl
 
     conn = _conn()
-    id_nearest = _u0r_product_identity("gfs_global", "previous_runs", _target())
+    id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
     _persist_rows(conn, [_row_with_identity(id_nearest, value=19.5)])
 
-    orig = dl.U0R_CELL_SELECTION
+    orig = dl.BAYES_PRECISION_FUSION_CELL_SELECTION
     try:
-        dl.U0R_CELL_SELECTION = "land"
-        id_land = _u0r_product_identity("gfs_global", "previous_runs", _target())
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "land"
+        id_land = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
     finally:
-        dl.U0R_CELL_SELECTION = orig
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = orig
 
     with pytest.raises(RawModelForecastRequestConflict):
         _persist_rows(conn, [_row_with_identity(id_land, value=22.0)])
@@ -107,18 +107,18 @@ def test_changed_cell_selection_same_logical_key_is_not_ignored() -> None:
 def test_changed_cell_selection_audit_row_records_both_requests() -> None:
     """The conflict audit row records the existing and incoming request hashes so the changed
     cell_selection is forensically attributable, not a silent no-op."""
-    import src.data.u0r_multimodel_download as dl
+    import src.data.bayes_precision_fusion_download as dl
 
     conn = _conn()
-    id_nearest = _u0r_product_identity("gfs_global", "previous_runs", _target())
+    id_nearest = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
     _persist_rows(conn, [_row_with_identity(id_nearest, value=19.5)])
 
-    orig = dl.U0R_CELL_SELECTION
+    orig = dl.BAYES_PRECISION_FUSION_CELL_SELECTION
     try:
-        dl.U0R_CELL_SELECTION = "land"
-        id_land = _u0r_product_identity("gfs_global", "previous_runs", _target())
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = "land"
+        id_land = _bayes_precision_fusion_product_identity("gfs_global", "previous_runs", _target())
     finally:
-        dl.U0R_CELL_SELECTION = orig
+        dl.BAYES_PRECISION_FUSION_CELL_SELECTION = orig
 
     with pytest.raises(RawModelForecastRequestConflict):
         _persist_rows(conn, [_row_with_identity(id_land, value=22.0)])

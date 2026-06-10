@@ -1,9 +1,9 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
 # Purpose: BLOCKER 2 — equal-length but fully date-misaligned histories must NOT produce a learned off-diagonal covariance; the covariance must be rejected, not estimated.
-# Reuse: Run with pytest; update if date-alignment or covariance rejection logic in fuse_u0r_posterior changes.
+# Reuse: Run with pytest; update if date-alignment or covariance rejection logic in fuse_bayes_precision_posterior changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §2/§4 (covariance over the COMMON estimation window).
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §2/§4 (covariance over the COMMON estimation window).
 #   Fitz Constraint #2 relationship test: equal LENGTH is not equal MEANING. Two residual
 #   vectors of identical length but ZERO shared target_dates carry NO joint information; the
 #   off-diagonal covariance between them is undefined, so the fusion must NOT estimate one.
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.forecast.u0r_bayes import ModelInstrument, fuse_u0r_posterior
+from src.forecast.bayes_precision_fusion import ModelInstrument, fuse_bayes_precision_posterior
 
 
 def _inst(model: str, z: float, residuals_by_date: dict[str, float]) -> ModelInstrument:
@@ -47,14 +47,14 @@ def test_disjoint_dates_equal_length_yields_diagonal_not_learned_covariance() ->
     ins_a = _inst("gfs_global", z=0.2, residuals_by_date=a_dates)
     ins_b = _inst("icon_global", z=-0.2, residuals_by_date=b_dates)
 
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=0.0, anchor_tau0=1.0, likelihood=[ins_a, ins_b], use_covariance=True
     )
 
     # The positional stack would manufacture a strong NEGATIVE correlation. The date-aligned
     # path sees an EMPTY common window and must NOT. We prove this by checking the fused result
     # equals the DIAGONAL-Sigma fusion, not the off-diagonal one.
-    from src.forecast.u0r_bayes import bayes_fuse, SIGMA_FLOOR, LOWN_INFLATE
+    from src.forecast.bayes_precision_fusion import bayes_fuse, SIGMA_FLOOR, LOWN_INFLATE
 
     # With empty common window and these thin per-model histories, the fusion uses a diagonal
     # Sigma. The exact diagonal value is implementation-defined, but it MUST be diagonal: the

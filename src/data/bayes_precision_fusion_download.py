@@ -1,20 +1,20 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-09
-# Authority basis: U0R_BAYES_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
 #   raw_model_forecasts), §3 (causality: previous-runs fixed-lead; single-runs live capture;
 #   run_time != source_available_at), §5 (~6mo retention); §7 antibodies (C/F unit mix ->
 #   force celsius; fail-soft drop). CONTINUITY_AND_WIRING.md §4 steps 2-3, 9 (forward+history
 #   daily download/persist + 180d prune). IRON RULE #4 (ONE-BUILDER: REUSE the existing OM
 #   fetchers + OPENMETEO_MODEL_IDS; no parallel fetcher). INV-37: a SINGLE zeus-forecasts.db
 #   connection, single BEGIN/commit; no cross-DB write.
-"""F1 step-2/3/9 — the FORWARD + walk-forward U0R multi-model download/persist job.
+"""F1 step-2/3/9 — the FORWARD + walk-forward BAYES_PRECISION_FUSION multi-model download/persist job.
 
 For each current-target (city, metric, target_date, lead) x the 8 extra Open-Meteo models
 (decorrelated globals gfs_global/icon_global/gem_global/jma_seamless + icon_eu + in-domain
 regionals icon_d2/arome + icon_seamless for alias-dedup), this job:
 
   (1) FORWARD single_runs fetch  — today's current-target value at the fixed cycle (live capture
-      for replay; SPEC §3 single-runs identity). REUSES u0r_multimodel_capture._default_live_fetch.
+      for replay; SPEC §3 single-runs identity). REUSES bayes_precision_fusion_capture._default_live_fetch.
   (2) fixed-lead previous_runs fetch — the no-leak walk-forward train value via the OM
       previous-runs API temperature_2m_previous_dayN hourly var (SPEC §3 fixed-lead). Forces
       temperature_unit=celsius (forecast_value_c is ALWAYS degC -> SPEC §7 C/F unit-mix antibody).
@@ -38,7 +38,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
-from src.data.u0r_multimodel_capture import (
+from src.data.bayes_precision_fusion_capture import (
     OPENMETEO_MODEL_IDS,
     OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
     _default_live_fetch,
@@ -51,7 +51,7 @@ from src.forecast.model_selection import (
     regional_eligible,
 )
 
-_LOG = logging.getLogger("zeus.u0r_multimodel_download")
+_LOG = logging.getLogger("zeus.bayes_precision_fusion_download")
 
 # SPEC §5: ~6 months retention on the shadow capture table.
 RETENTION_DAYS = 180
@@ -64,7 +64,7 @@ class RawModelForecastRequestConflict(RuntimeError):
 
     The pre-fix UNIQUE(model,city,target_date,metric,source_cycle_time,endpoint) + INSERT OR
     IGNORE SILENTLY discarded such a Run-2, leaving a STALE forecast_value_c to contaminate
-    bias/MAE/sigma/covariance/q in the walk-forward history JOIN (u0r_history_provider keys on
+    bias/MAE/sigma/covariance/q in the walk-forward history JOIN (bayes_precision_fusion_history_provider keys on
     model/city/metric/lead/endpoint/target_date — NOT on the request hash, so a stale row poisons
     the residual series). This exception replaces the silent drop with a LOUD, attributable fault:
     the persist writes an audit row to raw_model_forecast_request_conflicts and raises, so an
@@ -81,14 +81,14 @@ _RMF_LOGICAL_KEY_COLUMNS = (
 # BLOCKER 4 (product identity): the provider + per-endpoint physical-product constants that the
 # download stamps onto every raw_model_forecasts row so a stored forecast_value_c is
 # reconstructable to its exact Open-Meteo product. cell_selection / elevation / downscaling are
-# the OM grid choices the U0R fetchers use (the single-runs anchor pattern: nearest gridpoint,
+# the OM grid choices the BAYES_PRECISION_FUSION fetchers use (the single-runs anchor pattern: nearest gridpoint,
 # requested elevation, no extra downscaling). endpoint_mode is the physical endpoint family.
 OPENMETEO_PROVIDER = "open-meteo"
 SINGLE_RUNS_SOURCE_FAMILY = "openmeteo_single_runs"
 PREVIOUS_RUNS_SOURCE_FAMILY = "openmeteo_previous_runs"
-U0R_CELL_SELECTION = "nearest"          # OM default cell pick (nearest gridpoint to requested).
-U0R_ELEVATION_PARAM = "requested"       # OM elevation = requested point (no override).
-U0R_DOWNSCALING_POLICY = "none"         # no statistical downscaling applied to the raw value.
+BAYES_PRECISION_FUSION_CELL_SELECTION = "nearest"          # OM default cell pick (nearest gridpoint to requested).
+BAYES_PRECISION_FUSION_ELEVATION_PARAM = "requested"       # OM elevation = requested point (no override).
+BAYES_PRECISION_FUSION_DOWNSCALING_POLICY = "none"         # no statistical downscaling applied to the raw value.
 
 # Per-model OM previous-runs source_id (the WHICH-feed identity). Keyed by STORED model identity.
 # The anchor is stored model='ecmwf_ifs' but its OM previous-runs source is ecmwf_previous_runs
@@ -137,7 +137,7 @@ def _model_domain_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget") -> dict:
+def _bayes_precision_fusion_product_identity(model: str, endpoint: str, target: "BayesPrecisionFusionDownloadTarget") -> dict:
     """BLOCKER 4 — the full product-identity payload for one (model, endpoint, target) capture.
 
     Resolves the OM model id actually addressed (model_name), the source_id/source_family/
@@ -166,7 +166,7 @@ def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget"
             "models": model_name,
             "temperature_unit": "celsius",
             "timezone": target.timezone_name,
-            "cell_selection": U0R_CELL_SELECTION,
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
     else:  # single_runs
         from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
@@ -184,7 +184,7 @@ def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget"
             "models": model_name,
             "temperature_unit": "celsius",
             "timezone": target.timezone_name,
-            "cell_selection": U0R_CELL_SELECTION,
+            "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
         }
     request_params_json = json.dumps(request_params, sort_keys=True, separators=(",", ":"))
     request_url_hash = hashlib.sha256(
@@ -194,9 +194,9 @@ def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget"
     model_domain_hash = _model_domain_hash(
         provider=OPENMETEO_PROVIDER,
         model_name=model_name,
-        cell_selection=U0R_CELL_SELECTION,
-        elevation_param=U0R_ELEVATION_PARAM,
-        downscaling_policy=U0R_DOWNSCALING_POLICY,
+        cell_selection=BAYES_PRECISION_FUSION_CELL_SELECTION,
+        elevation_param=BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+        downscaling_policy=BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
         endpoint_mode=endpoint,
     )
     return {
@@ -210,9 +210,9 @@ def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget"
         "latitude_requested": float(target.latitude),
         "longitude_requested": float(target.longitude),
         "timezone_requested": target.timezone_name,
-        "cell_selection": U0R_CELL_SELECTION,
-        "elevation_param": U0R_ELEVATION_PARAM,
-        "downscaling_policy": U0R_DOWNSCALING_POLICY,
+        "cell_selection": BAYES_PRECISION_FUSION_CELL_SELECTION,
+        "elevation_param": BAYES_PRECISION_FUSION_ELEVATION_PARAM,
+        "downscaling_policy": BAYES_PRECISION_FUSION_DOWNSCALING_POLICY,
         "endpoint_mode": endpoint,
         "model_domain_hash": model_domain_hash,
         "coverage_status": "COVERED",
@@ -220,7 +220,7 @@ def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget"
 
 # FIX 1 (live-money correctness): the ANCHOR (ecmwf_ifs) MUST be captured alongside the
 # likelihood instruments. Without it, raw_model_forecasts NEVER accrues anchor previous_runs
-# rows -> U0RHistoryProvider returns no anchor history -> the fusion's have_anchor is False ->
+# rows -> BayesPrecisionFusionHistoryProvider returns no anchor history -> the fusion's have_anchor is False ->
 # the posterior is stuck at EQUAL_WEIGHT forever (the prior is never formed). The anchor is the
 # FIRST element so its row provenance is unambiguous in the candidate ordering.
 #
@@ -228,7 +228,7 @@ def _u0r_product_identity(model: str, endpoint: str, target: "U0RDownloadTarget"
 # + the alias-dedup probe (icon_seamless). icon_seamless is captured only so the fusion's
 # alias-dedup test has both series; it is dropped from the fused Sigma downstream (never
 # double-counts icon_d2).
-U0R_EXTRA_MODELS: tuple[str, ...] = (
+BAYES_PRECISION_FUSION_EXTRA_MODELS: tuple[str, ...] = (
     (ANCHOR_MODEL,)
     + tuple(GLOBAL_LIKELIHOOD_MODELS)
     + tuple(REGIONAL_MODELS)
@@ -238,7 +238,7 @@ U0R_EXTRA_MODELS: tuple[str, ...] = (
 # CANDIDATE-ACCRUAL LANE (2026-06-09 regional survey /tmp/uncovered_cities_regional_report.md,
 # settlement-graded). These models accrue raw data (forward single_runs + fixed-lead
 # previous_runs, both curl-verified available 2026-06-09) so a future promotion has walk-forward
-# history — they are NOT in U0R_EXTRA_MODELS' selection inputs and select_models NEVER admits
+# history — they are NOT in BAYES_PRECISION_FUSION_EXTRA_MODELS' selection inputs and select_models NEVER admits
 # them into a fusion (REGIONAL_MODELS / GLOBAL_LIKELIHOOD_MODELS unchanged).
 #   ncep_nbm_conus               — CONUS, pooled MAE 1.193 vs ecmwf_ifs 1.395 (-14.4%, n=1029).
 #                                  Role candidate: CONUS ANCHOR replacement. NBM blends NCEP
@@ -255,10 +255,10 @@ U0R_EXTRA_MODELS: tuple[str, ...] = (
 # 2026-06-09 SAME-DAY PROMOTION (operator-directed): all three candidates were promoted into
 # the selection sets (model_selection.py — ukmo_global into DECORR_GLOBALS, ncep_nbm into
 # GLOBAL_LIKELIHOOD_MODELS via the NCEP family contest, ukmo_uk into REGIONAL_MODELS), so they
-# now ride U0R_EXTRA_MODELS automatically. The lane stays for FUTURE candidates; keep it empty
+# now ride BAYES_PRECISION_FUSION_EXTRA_MODELS automatically. The lane stays for FUTURE candidates; keep it empty
 # rather than deleting the mechanism (any model listed here must NOT also be in the selection
 # sets, or the download loop would fetch it twice).
-U0R_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = ()
+BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS: tuple[str, ...] = ()
 
 # K2 (2026-06-09, curl-verified): models the open-meteo single-runs API STRUCTURALLY cannot
 # serve. cmc_gem_gdps_15km returns modelRunUnavailable even for cadence-valid 00z/12z runs —
@@ -273,14 +273,14 @@ SINGLE_RUNS_UNSERVABLE_MODELS: tuple[str, ...] = ("gem_global",)
 
 # Open-Meteo PREVIOUS-RUNS model ids keyed by the STORED model identity. The previous-runs API
 # model id can differ from both the stored identity AND the single-runs id: the anchor is stored
-# under its fusion identity ANCHOR_MODEL ("ecmwf_ifs", the U0RHistoryProvider join key) but the
+# under its fusion identity ANCHOR_MODEL ("ecmwf_ifs", the BayesPrecisionFusionHistoryProvider join key) but the
 # OM previous-runs API addresses the ECMWF deterministic feed as "ecmwf_ifs025" (the proven id
 # in forecast_source_registry.OPENMETEO_PREVIOUS_RUNS_MODEL_SOURCE_MAP / forecasts_append). The
 # fetch translates store-id -> OM-previous-runs-id here; the stored `model` column is ALWAYS the
 # fusion identity. Non-anchor models fall back to OPENMETEO_MODEL_IDS (their OM id == store id).
 OPENMETEO_PREVIOUS_RUNS_MODEL_IDS: dict[str, str] = {
     # OM previous-runs ECMWF id; stored model col stays "ecmwf_ifs" (the fusion identity). The
-    # value is the SINGLE source of truth in u0r_multimodel_capture (BLOCKER 3 bridge gate reads
+    # value is the SINGLE source of truth in bayes_precision_fusion_capture (BLOCKER 3 bridge gate reads
     # the same constant) so the download and the bridge can never drift on which product served
     # the anchor history.
     ANCHOR_MODEL: OPENMETEO_PREVIOUS_RUNS_ANCHOR_MODEL_NAME,
@@ -335,7 +335,7 @@ PreviousRunsFetchFn = Callable[..., float | None]
 
 
 @dataclass(frozen=True)
-class U0RDownloadTarget:
+class BayesPrecisionFusionDownloadTarget:
     """One current-target the extra models are captured for."""
 
     city: str
@@ -388,11 +388,11 @@ def _default_previous_runs_fetch(
         payload = fetch(
             PREVIOUS_RUNS_URL,
             params,
-            endpoint_label=f"u0r_{model}_previous_runs",
+            endpoint_label=f"bayes_precision_fusion_{model}_previous_runs",
         )
         return _extract_localday_extremum_c(payload, hourly_var, metric)
     except Exception as exc:  # FAIL-SOFT: drop this model, never block the cycle.
-        _LOG.warning("U0R previous-runs fetch dropped model %s (fail-soft): %s", model, exc)
+        _LOG.warning("BAYES_PRECISION_FUSION previous-runs fetch dropped model %s (fail-soft): %s", model, exc)
         return None
 
 
@@ -508,7 +508,7 @@ def _scan_and_audit_request_conflicts(conn, rows: Sequence[dict]) -> None:
     """BLOCKER 4 production pre-scan — detect same-logical-key/different-request conflicts and
     DURABLY write their audit rows on autocommit BEFORE the caller opens its insert transaction.
 
-    download_u0r_extra_raw_inputs wraps the insert in a BEGIN it ROLLS BACK on any error. If the
+    download_bayes_precision_fusion_extra_raw_inputs wraps the insert in a BEGIN it ROLLS BACK on any error. If the
     conflict audit were written inside that BEGIN it would be rolled back along with everything
     else — the operator would lose the forensic trail of the silent-drop-that-wasn't. So the
     production path calls THIS first, with NO open transaction. If ANY conflict is found the audit
@@ -554,7 +554,7 @@ def _persist_rows(
 
     AUDIT DURABILITY CONTRACT: this function writes the audit row and raises, but does NOT itself
     guarantee the audit survives a caller's surrounding ROLLBACK. Callers that wrap this in a
-    transaction they roll back on error (e.g. download_u0r_extra_raw_inputs) MUST pre-scan with
+    transaction they roll back on error (e.g. download_bayes_precision_fusion_extra_raw_inputs) MUST pre-scan with
     _scan_and_audit_request_conflicts on autocommit BEFORE opening that transaction, so the audit
     is already durable. When called directly on an autocommit connection (the operator-named test
     API), each statement self-commits and the audit is durable on its own.
@@ -586,11 +586,11 @@ def _prune_old(conn, *, cutoff_iso: str) -> int:
     return int(cur.rowcount or 0)
 
 
-def download_u0r_extra_raw_inputs(
+def download_bayes_precision_fusion_extra_raw_inputs(
     *,
     forecast_db: Path,
     cycle: datetime,
-    targets: Iterable[U0RDownloadTarget],
+    targets: Iterable[BayesPrecisionFusionDownloadTarget],
     single_runs_fetch: SingleRunsFetchFn | None = None,
     previous_runs_fetch: PreviousRunsFetchFn | None = None,
     release_lag_hours: float = 14.0,
@@ -645,7 +645,7 @@ def download_u0r_extra_raw_inputs(
 
     for t in target_list:
         target_local_date = date.fromisoformat(t.target_date)
-        for model in U0R_EXTRA_MODELS + U0R_CANDIDATE_ACCRUAL_MODELS:
+        for model in BAYES_PRECISION_FUSION_EXTRA_MODELS + BAYES_PRECISION_FUSION_CANDIDATE_ACCRUAL_MODELS:
             # Domain gate: skip domain-limited models for out-of-domain cities. The API
             # returns HTTP 400 "No data is available for this location" for these, which
             # would be retried (wasting time) and then fail-soft dropped (silent absence).
@@ -654,7 +654,7 @@ def download_u0r_extra_raw_inputs(
                 key = f"{model}:{t.city}"
                 domain_excluded.append(key)
                 _LOG.info(
-                    "U0R download domain-excluded %s for %s (%.3fN, %.3fE) — "
+                    "BAYES_PRECISION_FUSION download domain-excluded %s for %s (%.3fN, %.3fE) — "
                     "out-of-domain, no request sent",
                     model, t.city, t.latitude, t.longitude,
                 )
@@ -681,7 +681,7 @@ def download_u0r_extra_raw_inputs(
                         forecast_hours=forecast_hours,
                     )
                 except Exception as exc:
-                    _LOG.warning("U0R single_runs dropped %s (fail-soft): %s", model, exc)
+                    _LOG.warning("BAYES_PRECISION_FUSION single_runs dropped %s (fail-soft): %s", model, exc)
                     sv = None
                 if sv is None:
                     dropped.append(f"{model}:single_runs")
@@ -692,7 +692,7 @@ def download_u0r_extra_raw_inputs(
                     "source_available_at": source_available_iso, "captured_at": captured_iso,
                     "lead_days": int(t.lead_days), "forecast_value_c": float(sv),
                     "endpoint": "single_runs",
-                    **_u0r_product_identity(model, "single_runs", t),
+                    **_bayes_precision_fusion_product_identity(model, "single_runs", t),
                 })
 
             # (2) fixed-lead previous_runs (walk-forward train).
@@ -706,7 +706,7 @@ def download_u0r_extra_raw_inputs(
                         lead_days=int(t.lead_days), metric=t.metric,
                     )
                 except Exception as exc:
-                    _LOG.warning("U0R previous_runs dropped %s (fail-soft): %s", model, exc)
+                    _LOG.warning("BAYES_PRECISION_FUSION previous_runs dropped %s (fail-soft): %s", model, exc)
                     pv = None
                 if pv is None:
                     dropped.append(f"{model}:previous_runs")
@@ -717,7 +717,7 @@ def download_u0r_extra_raw_inputs(
                     "source_available_at": source_available_iso, "captured_at": captured_iso,
                     "lead_days": int(t.lead_days), "forecast_value_c": float(pv),
                     "endpoint": "previous_runs",
-                    **_u0r_product_identity(model, "previous_runs", t),
+                    **_bayes_precision_fusion_product_identity(model, "previous_runs", t),
                 })
 
     # ---- single-connection / single-DB persist + prune (INV-37) ----
@@ -752,7 +752,7 @@ def download_u0r_extra_raw_inputs(
 
     if domain_excluded:
         _LOG.info(
-            "U0R download domain-excluded %d model×city combos (expected — regional models "
+            "BAYES_PRECISION_FUSION download domain-excluded %d model×city combos (expected — regional models "
             "not requested for out-of-domain cities): %s",
             len(domain_excluded),
             ", ".join(sorted(set(domain_excluded))[:20]),
@@ -762,7 +762,7 @@ def download_u0r_extra_raw_inputs(
     # are the signal of a real upstream problem. Distinguish them from domain-excluded
     # (expected absence) so the operator can tell "complete global ensemble" from "degraded".
     global_models_expected = frozenset(
-        m for m in U0R_EXTRA_MODELS
+        m for m in BAYES_PRECISION_FUSION_EXTRA_MODELS
         if m not in frozenset(REGIONAL_MODELS) | frozenset({ICON_EU_MODEL})
     )
     global_single_dropped = {
@@ -770,13 +770,13 @@ def download_u0r_extra_raw_inputs(
     } & global_models_expected
     if global_single_dropped:
         _LOG.warning(
-            "U0R download: GLOBAL model(s) single_runs UNAVAILABLE (not domain-excluded — "
+            "BAYES_PRECISION_FUSION download: GLOBAL model(s) single_runs UNAVAILABLE (not domain-excluded — "
             "real upstream failure): %s",
             sorted(global_single_dropped),
         )
 
     return {
-        "status": "U0R_EXTRA_RAW_INPUTS_DOWNLOADED",
+        "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
         "cycle": cycle_iso,
         "forecast_db": str(forecast_db),
         "target_count": len(target_list),

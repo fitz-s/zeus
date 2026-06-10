@@ -26,7 +26,7 @@ def _completed(stderr: str = "", stdout: str = "", rc: int = 0):
 
 def test_subprocess_warning_lines_are_relogged(caplog) -> None:
     k3_line = (
-        "2026-06-09 12:56:13,000 [zeus.replacement_u0r_fusion] WARNING: replacement_0_1 U0R "
+        "2026-06-09 12:56:13,000 [zeus.replacement_bayes_precision_fusion] WARNING: replacement_0_1 BAYES_PRECISION_FUSION "
         "fusion decorrelated-provider INCOMPLETE for Wuhan high: served 3/4, missing "
         "['CMC/gem_global']"
     )

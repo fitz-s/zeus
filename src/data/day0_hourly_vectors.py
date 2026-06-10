@@ -28,7 +28,7 @@ Bounded by design
 Provenance: every row carries source identity (provider/model/endpoint/
 request hash), capture clock, and the model run identity open-meteo exposes.
 Temperatures are ALWAYS degC in storage (the C/F unit-mix antibody from the
-u0r lane: convert at the consumption seam, never store mixed units).
+bayes_precision_fusion lane: convert at the consumption seam, never store mixed units).
 """
 from __future__ import annotations
 

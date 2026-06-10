@@ -1,14 +1,14 @@
 # Created: 2026-06-09
 # Last reused or audited: 2026-06-09
-# Authority basis: U0R_BAYES_SPEC.md §4 (T3 equal-weight fallback) + u0r_bayes.equal_weight
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §4 (T3 equal-weight fallback) + bayes_precision_fusion.equal_weight
 #   docstring ("If a prior is supplied, blend it as one more equal member"). Fix of the
 #   2026-06-09 wiring-audit MED defect: capture passed anchor_z with anchor_tau0=None for a
 #   thin (<MIN_TRAIN) anchor history and its comment claimed "the fusion floors tau0", but
-#   fuse_u0r_posterior required BOTH non-None -> the ECMWF 0.1 anchor CENTER (the strongest
+#   fuse_bayes_precision_posterior required BOTH non-None -> the ECMWF 0.1 anchor CENTER (the strongest
 #   single model, Exp O) was silently DROPPED from every EQUAL_WEIGHT cell.
 """RELATIONSHIP tests: capture -> fusion thin-anchor retention.
 
-Cross-module invariant (capture_u0r_instruments -> fuse_u0r_posterior boundary):
+Cross-module invariant (capture_bayes_precision_instruments -> fuse_bayes_precision_posterior boundary):
   ANY cell whose capture carries a finite anchor center MUST produce a fused posterior whose
   used_models includes the anchor — the anchor value participates regardless of history depth.
   Thin history (< MIN_TRAIN) demotes the anchor from T2 prior to ONE equal member with
@@ -25,18 +25,18 @@ from datetime import date, datetime, timezone
 import numpy as np
 import pytest
 
-from src.data.u0r_multimodel_capture import (
+from src.data.bayes_precision_fusion_capture import (
     ModelHistory,
-    capture_u0r_instruments,
+    capture_bayes_precision_instruments,
 )
-from src.forecast.u0r_bayes import (
+from src.forecast.bayes_precision_fusion import (
     ANCHOR_MODEL,
     LOWN_INFLATE,
     MIN_TRAIN,
     SIGMA_FLOOR,
     TAU0_FLOOR,
     ModelInstrument,
-    fuse_u0r_posterior,
+    fuse_bayes_precision_posterior,
 )
 
 # Tokyo: outside every regional polygon -> likelihood = the 4 decorrelated globals with
@@ -66,7 +66,7 @@ def _live_fetch_all_globals(*, model: str, **_kw) -> float | None:
 
 def _capture(history_models: list[str], n: int):
     provider = lambda **_kw: {m: _zero_residual_history(m, n) for m in history_models}  # noqa: E731
-    return capture_u0r_instruments(
+    return capture_bayes_precision_instruments(
         city="Tokyo", metric="high", latitude=TOKYO[0], longitude=TOKYO[1],
         timezone_name="Asia/Tokyo", run=RUN, target_local_date=TARGET, lead_days=1,
         anchor_z_corrected=ANCHOR_CENTER_C,
@@ -83,7 +83,7 @@ def test_thin_anchor_history_center_retained_through_capture_to_fusion() -> None
     assert cap.anchor_tau0 is None
     assert cap.has_extras
 
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=cap.anchor_z, anchor_tau0=cap.anchor_tau0,
         likelihood=cap.likelihood, disagree_var=cap.disagree_var,
     )
@@ -108,7 +108,7 @@ def test_zero_anchor_history_center_still_retained() -> None:
     assert cap.anchor_z == pytest.approx(ANCHOR_CENTER_C)
     assert cap.anchor_tau0 is None
 
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=cap.anchor_z, anchor_tau0=cap.anchor_tau0,
         likelihood=cap.likelihood, disagree_var=cap.disagree_var,
     )
@@ -124,7 +124,7 @@ def test_trusted_anchor_history_still_reaches_t2_bayes() -> None:
     models = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless"]
     cap = _capture(models, n=MIN_TRAIN + 5)
     assert cap.anchor_z is not None and cap.anchor_tau0 is not None
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=cap.anchor_z, anchor_tau0=cap.anchor_tau0,
         likelihood=cap.likelihood, disagree_var=cap.disagree_var,
     )
@@ -142,7 +142,7 @@ def _thin_global(model: str, z: float) -> ModelInstrument:
 
 def test_fuse_thin_anchor_is_one_equal_member_with_conservative_variance() -> None:
     instruments = [_thin_global(m, GLOBAL_VALUE_C) for m in ("gfs_global", "icon_global", "jma_seamless")]
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=ANCHOR_CENTER_C, anchor_tau0=None, likelihood=instruments, disagree_var=0.0,
     )
     assert fused.method == "EQUAL_WEIGHT"
@@ -157,7 +157,7 @@ def test_fuse_thin_anchor_is_one_equal_member_with_conservative_variance() -> No
 
 def test_fuse_anchor_none_unchanged_plain_mean() -> None:
     instruments = [_thin_global(m, GLOBAL_VALUE_C) for m in ("gfs_global", "icon_global", "jma_seamless")]
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=None, anchor_tau0=None, likelihood=instruments, disagree_var=0.0,
     )
     assert fused.method == "EQUAL_WEIGHT"
@@ -168,7 +168,7 @@ def test_fuse_anchor_none_unchanged_plain_mean() -> None:
 
 def test_fuse_nonfinite_anchor_treated_as_absent() -> None:
     instruments = [_thin_global(m, GLOBAL_VALUE_C) for m in ("gfs_global", "icon_global", "jma_seamless")]
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=float("nan"), anchor_tau0=None, likelihood=instruments, disagree_var=0.0,
     )
     assert fused.method == "EQUAL_WEIGHT"
@@ -180,7 +180,7 @@ def test_fuse_nonfinite_anchor_treated_as_absent() -> None:
 def test_fuse_thin_anchor_alone_no_instruments_returns_single_member() -> None:
     # Previously raised ValueError (have_anchor required tau0). A finite thin-anchor center
     # with zero surviving instruments is a valid degenerate equal-weight of ONE member.
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=ANCHOR_CENTER_C, anchor_tau0=None, likelihood=[], disagree_var=0.0,
     )
     assert fused.method == "EQUAL_WEIGHT"

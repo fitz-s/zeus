@@ -1,11 +1,11 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: operator LANDMINE #1 (the_path PR review 2026-06-08) — in
-#   src/data/u0r_multimodel_download._detect_request_conflict, a STORED row whose
+#   src/data/bayes_precision_fusion_download._detect_request_conflict, a STORED row whose
 #   request_url_hash IS NULL (a pre-identity / legacy-backfill row) must be treated as
 #   ENRICHABLE (update-in-place / not a conflict), NOT raised as a same-key-different-request
 #   conflict; otherwise the live download after ANY legacy backfill falsely conflicts. The genuine
-#   populated-vs-DIFFERENT-populated conflict must STILL be detected. U0R_BAYES_SPEC §6 F1, BLOCKER 4.
+#   populated-vs-DIFFERENT-populated conflict must STILL be detected. BAYES_PRECISION_FUSION_SPEC §6 F1, BLOCKER 4.
 """Relationship test (legacy NULL-identity stored row -> live download conflict boundary).
 
 Two cases across the boundary:
@@ -19,7 +19,7 @@ from __future__ import annotations
 import sqlite3
 
 from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema
-from src.data.u0r_multimodel_download import _detect_request_conflict
+from src.data.bayes_precision_fusion_download import _detect_request_conflict
 
 
 def _conn():

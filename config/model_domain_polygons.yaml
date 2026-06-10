@@ -1,8 +1,8 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 source identities ("ICON-D2 2km EU Central-Europe
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 source identities ("ICON-D2 2km EU Central-Europe
 #   polygon <=48h; AROME France polygon"), §7 antibody "regional-outside-domain (polygon)";
-#   U0R_PROOF_RESULT.md open question #3 ("in_icon_d2_box polygon is LOOSE ... tighten to the
+#   BAYES_PRECISION_FUSION_PROOF_RESULT.md open question #3 ("in_icon_d2_box polygon is LOOSE ... tighten to the
 #   true Central-Europe polygon so the domain gate and the data-presence gate AGREE before any
 #   wiring"). The proof's loose bounding box [37..71N, -17..37E] flagged Madrid/Warsaw/Helsinki/
 #   Istanbul in_box with no ICON-D2 data; this file uses the TIGHTENED physical model domains.
@@ -13,8 +13,8 @@
 # Polygon membership is point-in-polygon over (lat, lon) of the city's settlement coordinate.
 #
 # IMPORTANT: presence here is domain plumbing only. It does NOT enable any source, fetch, or
-# trade authority. ICON-D2/AROME stay shadow-only / deferred per U0R_PROOF_RESULT.md until an
-# ingest+calibration path exists. The U0R fusion flag (replacement_0_1_u0r_fusion_enabled) is
+# trade authority. ICON-D2/AROME stay shadow-only / deferred per BAYES_PRECISION_FUSION_PROOF_RESULT.md until an
+# ingest+calibration path exists. The BAYES_PRECISION_FUSION fusion flag (replacement_0_1_bayes_precision_fusion_enabled) is
 # default-OFF; with it OFF this file is inert.
 
 schema: model_domain_polygons_v1

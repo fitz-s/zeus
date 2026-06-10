@@ -16,7 +16,7 @@ writer). Rows already present for a (model, city, metric, lead, target) are skip
 accrual rows are never duplicated into the covariance window.
 
 Usage:
-  PYTHONSAFEPATH=1 PYTHONPATH=. .venv/bin/python scripts/backfill_u0r_promoted_model_history.py
+  PYTHONSAFEPATH=1 PYTHONPATH=. .venv/bin/python scripts/backfill_bayes_precision_fusion_promoted_model_history.py
 """
 from __future__ import annotations
 
@@ -31,12 +31,12 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.data.u0r_multimodel_download import (  # noqa: E402
-    U0RDownloadTarget,
+from src.data.bayes_precision_fusion_download import (  # noqa: E402
+    BayesPrecisionFusionDownloadTarget,
     _model_in_domain,
     _persist_rows,
     _scan_and_audit_request_conflicts,
-    _u0r_product_identity,
+    _bayes_precision_fusion_product_identity,
 )
 from src.state.db import _connect  # noqa: E402
 from src.state.schema.v2_schema import ensure_replacement_forecast_shadow_schema  # noqa: E402
@@ -120,7 +120,7 @@ def main() -> int:
                     for metric, value in (("high", hi), ("low", lo)):
                         if (model, city["name"], metric, lead, target_date) in existing:
                             continue
-                        target = U0RDownloadTarget(
+                        target = BayesPrecisionFusionDownloadTarget(
                             city=city["name"], metric=metric, target_date=target_date,
                             lead_days=lead, latitude=float(city["lat"]),
                             longitude=float(city["lon"]), timezone_name=str(city["timezone"]),
@@ -131,7 +131,7 @@ def main() -> int:
                             "source_available_at": available_iso, "captured_at": captured_iso,
                             "lead_days": lead, "forecast_value_c": float(value),
                             "endpoint": "previous_runs",
-                            **_u0r_product_identity(model, "previous_runs", target),
+                            **_bayes_precision_fusion_product_identity(model, "previous_runs", target),
                         })
             if not rows:
                 print(f"  {model}/{city['name']}: nothing new", flush=True)

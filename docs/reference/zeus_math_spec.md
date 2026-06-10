@@ -36,9 +36,9 @@ Out of scope: execution (order placement), lifecycle (position states), risk man
 
 ## 0.1 Replacement-forecast chain math (STRATEGY OF RECORD, 2026-06-09)
 
-Authority `docs/authority/replacement_final_form_2026_06_09.md`. The live q replaces 51-ENS member-counting + Platt with multi-model walk-forward de-bias → Bayesian precision fusion → settlement-preimage bin integration. The integer-settlement preimage rule (§1.2) is unchanged; only the distribution feeding it changed. Constants below are read from `src/forecast/u0r_bayes.py` (cite symbols, not line numbers).
+Authority `docs/authority/replacement_final_form_2026_06_09.md`. The live q replaces 51-ENS member-counting + Platt with multi-model walk-forward de-bias → Bayesian precision fusion → settlement-preimage bin integration. The integer-settlement preimage rule (§1.2) is unchanged; only the distribution feeding it changed. Constants below are read from `src/forecast/bayes_precision_fusion.py` (cite symbols, not line numbers).
 
-### 0.1a Walk-forward empirical-Bayes de-bias — `u0r_bayes.eb_bias`
+### 0.1a Walk-forward empirical-Bayes de-bias — `bayes_precision_fusion.eb_bias`
 
 Per source `s`, over residuals `r = (x_s − Y)` on train dates strictly before the target (walk-forward, no leakage):
 
@@ -48,7 +48,7 @@ b̂_s = λ·r̄ + (1 − λ)·parent ,   λ = n / (n + κ) ,   κ = 8.0
 
 `κ = 8` ⇒ ~50% trust in the local mean at `n = 8`. Thin source (small `n`) shrinks toward the structural parent (anchor) prior; large `n` trusts the local mean. `parent` is the ECMWF-IFS structural anchor bias.
 
-### 0.1b T2 Bayesian precision fusion — `u0r_bayes.bayes_fuse` / `fuse_u0r_posterior`
+### 0.1b T2 Bayesian precision fusion — `bayes_precision_fusion.bayes_fuse` / `fuse_bayes_precision_posterior`
 
 Fuse bias-corrected non-anchor instruments `z` (precision `Σ⁻¹`) with the anchor prior `N(μ0, τ0²)`:
 
@@ -60,9 +60,9 @@ var = V* + extra_var          (extra_var = σ²_disagree + bias/bridge buffers; 
 
 - **Σ estimation (covariance-aware only where reliable):** Ledoit-Wolf shrinkage toward the diagonal — `shrink_cov` (n ≥ 3 common dates; optimal intensity `δ* = φ/γ` clamped to [0,1], shrinks toward `diag(S)`); else `diag_cov` (C0 diagonal with low-n inflation ×1.5). PD repair + eigenvalue floor applied. `SIGMA_FLOOR = 0.8°C` on every per-source obs std. NEVER an unregularized `S⁻¹`.
 - **Fail-soft:** no surviving likelihood instruments (`p = 0`) ⇒ posterior IS the anchor prior `N(μ0, τ0² + extra_var)`.
-- **Thin-anchor retention:** `n < 25` keeps the source as an EQUAL_WEIGHT member (not deleted) — `fuse_u0r_posterior` (commit 49492f1528).
+- **Thin-anchor retention:** `n < 25` keeps the source as an EQUAL_WEIGHT member (not deleted) — `fuse_bayes_precision_posterior` (commit 49492f1528).
 
-### 0.1c Predictive σ floor — `replacement_forecast_materializer._replacement_u0r_fusion_override`
+### 0.1c Predictive σ floor — `replacement_forecast_materializer._replacement_bayes_precision_fusion_override`
 
 ```
 σ_pred = max(1.0°C, √(fused.sd² + σ_resid²))

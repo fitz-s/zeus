@@ -5178,7 +5178,7 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
         }
 
 
-# WIRING FIX (operator Point-1 directive 2026-06-08): the U0R/replacement forecast
+# WIRING FIX (operator Point-1 directive 2026-06-08): the BAYES_PRECISION_FUSION/replacement forecast
 # PRODUCTION functions (raw-input download + light shadow materialization) were moved
 # VERBATIM to src/data/replacement_forecast_production.py and are now SCHEDULED on the
 # forecast-live (data) daemon, NOT here. The ~365MB AIFS ensemble fetch must never run
@@ -5188,7 +5188,7 @@ def _edli_refresh_global_allocator_for_live_bridge(conn) -> dict:
 # live-trading scheduler no longer registers the download/materialize jobs.
 from src.data.replacement_forecast_production import (  # noqa: E402
     _download_replacement_forecast_current_targets_if_needed,
-    _download_u0r_extra_raw_inputs_if_needed,
+    _download_bayes_precision_fusion_extra_raw_inputs_if_needed,
     _replacement_forecast_download_cycle,
     _replacement_forecast_runtime_flags_from_settings,
     _replacement_forecast_shadow_materialization_queue_config,

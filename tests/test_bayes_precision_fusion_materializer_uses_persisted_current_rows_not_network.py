@@ -1,15 +1,15 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: BLOCKER 5 — the U0R fusion override must read persisted current single_runs rows from the DB, never network-fetch inside the q path.
-# Reuse: Run with pytest; update if the current-rows consumption path or network-fetch prohibition in the U0R override changes.
+# Purpose: BLOCKER 5 — the BAYES_PRECISION_FUSION fusion override must read persisted current single_runs rows from the DB, never network-fetch inside the q path.
+# Reuse: Run with pytest; update if the current-rows consumption path or network-fetch prohibition in the BAYES_PRECISION_FUSION override changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §6 F1 (the download job persists raw_model_forecasts;
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (the download job persists raw_model_forecasts;
 #   the q path CONSUMES persisted rows) + Fitz Constraint #4 (a traded q must be reconstructable
 #   to the exact persisted inputs: which models, URL, params, payload, source_available_at).
 #   BLOCKER 5 (PR#400 review): the materializer must NOT network-fetch inside the q path.
-"""BLOCKER 5 — the U0R fusion override reads PERSISTED current single_runs rows, not network.
+"""BLOCKER 5 — the BAYES_PRECISION_FUSION fusion override reads PERSISTED current single_runs rows, not network.
 
-Before the fix, _replacement_u0r_fusion_override called capture_u0r_instruments which
+Before the fix, _replacement_bayes_precision_fusion_override called capture_bayes_precision_instruments which
 network-fetched the current (single_runs) values in-memory (no DB write) and fused them into the
 traded posterior — so the q was built from un-persisted network values (not reconstructable).
 
@@ -28,7 +28,7 @@ import pytest
 
 import src.config as cfg
 import src.data.replacement_forecast_materializer as mod
-from tests.test_u0r_history_provider_materializer_wiring import (  # reuse fixtures
+from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (  # reuse fixtures
     _anchor,
     _aifs_extraction,
     _bins,
@@ -41,7 +41,7 @@ from tests.test_u0r_history_provider_materializer_wiring import (  # reuse fixtu
     _row,
     _seed_history,
 )
-from src.forecast.u0r_bayes import MIN_TRAIN
+from src.forecast.bayes_precision_fusion import MIN_TRAIN
 
 UTC = timezone.utc
 
@@ -51,11 +51,11 @@ CURRENT_MODELS = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_s
 def _seed_current_single_runs(conn, *, request) -> None:
     """Persist the CURRENT single_runs rows the download job would have written for THIS cycle
     (city, metric, target_date, lead, source_cycle_time). These are what the q path must read."""
-    from src.data.replacement_forecast_materializer import _date_text, _to_utc, _u0r_city_local_lead_days
+    from src.data.replacement_forecast_materializer import _date_text, _to_utc, _bayes_precision_fusion_city_local_lead_days
 
     target_date = _date_text(request.target_date)
     cyc = _to_utc(request.source_cycle_time, field_name="source_cycle_time").isoformat()
-    lead = _u0r_city_local_lead_days(
+    lead = _bayes_precision_fusion_city_local_lead_days(
         computed_at=_to_utc(request.computed_at, field_name="computed_at"),
         target_local_date=date.fromisoformat(target_date),
         tz_name="Europe/Paris",
@@ -83,10 +83,10 @@ def test_q_path_uses_persisted_current_rows_and_never_calls_network(monkeypatch)
     def _exploding_fetch(*a, **k):
         raise AssertionError("the q path must NOT network-fetch; it must read persisted rows")
 
-    mod._replacement_u0r_fusion_override._live_fetch = _exploding_fetch
+    mod._replacement_bayes_precision_fusion_override._live_fetch = _exploding_fetch
 
     pid = mod._insert_posterior(conn, _request(), metric="high", anchor_id=1)
-    prov = json.loads(_row(conn, pid)["provenance_json"]).get("u0r_fusion")
+    prov = json.loads(_row(conn, pid)["provenance_json"]).get("bayes_precision_fusion")
     assert prov is not None, "fusion must have run from the persisted current rows"
     assert prov["method"] in {"T2_BAYES", "EQUAL_WEIGHT", "ANCHOR_FALLBACK"}
     # The fused center must be sane (built from the persisted ~23 current values vs 27 anchor).

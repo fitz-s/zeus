@@ -728,30 +728,30 @@ test_trust_policy:
     tests/test_replacement_shadow_qlcb_missing_floor_logs_raw_fallback.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 7 RT: SHADOW half of the mode split — missing floor input logs raw-fallback + returns None (keep raw); live_authority=True on same input raises"}
     # PR #400 compliance additions — operator-directed TDD tests (2026-06-08)
     tests/test_preflight_restart_check_reads_edli_v1_flags.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 1 RT: preflight_restart_check.py reads flags from correct scope (edli_v1/feature_flags), not top-level cfg dict"}
-    tests/test_u0r_covariance_uses_common_target_dates_only.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: covariance rows aligned by target_date not positional index — the critical date-alignment stat bug"}
-    tests/test_u0r_covariance_rejects_equal_length_misaligned_histories.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: equal-length but fully date-misaligned histories must not yield a learned off-diagonal covariance"}
-    tests/test_u0r_covariance_falls_back_to_diag_when_common_dates_low.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: date-intersection too short -> collapse to diagonal C0 (PARSIMONY rule)"}
+    tests/test_bayes_precision_fusion_covariance_uses_common_target_dates_only.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: covariance rows aligned by target_date not positional index — the critical date-alignment stat bug"}
+    tests/test_bayes_precision_fusion_covariance_rejects_equal_length_misaligned_histories.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: equal-length but fully date-misaligned histories must not yield a learned off-diagonal covariance"}
+    tests/test_bayes_precision_fusion_covariance_falls_back_to_diag_when_common_dates_low.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 2 RT: date-intersection too short -> collapse to diagonal C0 (PARSIMONY rule)"}
     tests/test_anchor_history_product_matches_live_anchor_or_bridge_required.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 3 RT: anchor prior must match live 9km product or go through explicit ifs025->ifs9 bridge"}
     tests/test_ecmwf_ifs025_previous_runs_cannot_label_as_ecmwf_ifs9_without_bridge.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 3 RT: 025 previous-runs history must be bridged before becoming 9km anchor prior"}
     tests/test_openmeteo_cell_selection_and_elevation_are_product_identity.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 RT: cell_selection + elevation/downscaling are first-class product identity and must be persisted"}
-    tests/test_openmeteo_request_params_persisted.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 RT: U0R download writer must persist Open-Meteo request params so every stored forecast is reconstructable"}
+    tests/test_openmeteo_request_params_persisted.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 RT: BAYES_PRECISION_FUSION download writer must persist Open-Meteo request params so every stored forecast is reconstructable"}
     tests/test_raw_model_forecasts_requires_product_identity.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 RT: raw_model_forecasts must carry product-identity columns; no provenance -> must not train live-money posterior"}
     tests/test_raw_model_forecasts_rejects_same_key_different_request_hash.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (operator-sharpened) RT: same logical key + DIFFERENT request_url_hash/product_id is REJECTED (RawModelForecastRequestConflict + audit row), never silently INSERT-OR-IGNORE dropped; stale value never silently survives a corrected request"}
     tests/test_raw_model_forecasts_does_not_ignore_changed_cell_selection.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (operator-sharpened) RT: a changed cell_selection (-> changed request_url_hash/product_id) under the same logical key is surfaced (conflict + audit), not silently ignored; cross-module download->persist relationship test"}
-    tests/test_u0r_materializer_uses_persisted_current_rows_not_network.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: U0R fusion override reads persisted current single_runs rows, never network-fetches inside q path"}
-    tests/test_u0r_current_capture_missing_blocks_or_falls_back_with_reason.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: missing persisted current capture -> logged reason + single-anchor path, never silent network fetch"}
-    tests/test_u0r_posterior_records_raw_model_forecast_dependency_ids.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: fused posterior records raw_model_forecast_ids for full q reconstructability"}
-    tests/test_u0r_lead_days_uses_city_local_date_not_utc.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 RT: lead_days computed against city-local date, not UTC (off-by-one in cross-timezone cases)"}
-    tests/test_u0r_history_provider_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 end-to-end RT: real U0RHistoryProvider at materializer seam; persisted previous_runs + VERIFIED settlement yields T2_BAYES"}
-    tests/test_replacement_0_1_u0r_fusion_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 RT: flag-OFF byte-identical; flag-ON fused mu*/sigma replaces anchor center/spread + own EMOS cell identity (F6)"}
-    tests/test_u0r_model_selection_gate.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 F4 RT: regional polygon gate + alias dedup; icon_d2 in-polygon enters; out-of-polygon absent; icon_seamless deduped"}
+    tests/test_bayes_precision_fusion_materializer_uses_persisted_current_rows_not_network.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: BAYES_PRECISION_FUSION fusion override reads persisted current single_runs rows, never network-fetches inside q path"}
+    tests/test_bayes_precision_fusion_current_capture_missing_blocks_or_falls_back_with_reason.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: missing persisted current capture -> logged reason + single-anchor path, never silent network fetch"}
+    tests/test_bayes_precision_fusion_posterior_records_raw_model_forecast_dependency_ids.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 5 RT: fused posterior records raw_model_forecast_ids for full q reconstructability"}
+    tests/test_bayes_precision_fusion_lead_days_uses_city_local_date_not_utc.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 RT: lead_days computed against city-local date, not UTC (off-by-one in cross-timezone cases)"}
+    tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 end-to-end RT: real BayesPrecisionFusionHistoryProvider at materializer seam; persisted previous_runs + VERIFIED settlement yields T2_BAYES"}
+    tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 RT: flag-OFF byte-identical; flag-ON fused mu*/sigma replaces anchor center/spread + own EMOS cell identity (F6)"}
+    tests/test_bayes_precision_fusion_model_selection_gate.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 F4 RT: regional polygon gate + alias dedup; icon_d2 in-polygon enters; out-of-polygon absent; icon_seamless deduped"}
     tests/test_switch_decision_live_policy_requires_capital_evidence_object.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 8 RT: evaluate_replacement_forecast_switch_decision must not trust upstream LIVE_AUTHORITY without capital evidence object"}
     tests/test_replacement_forecast_topology_settlement_identity.py: {created: "2026-06-07", last_used: "2026-06-07", note: "H4 antibody RT: settlement_unit/rounding_rule in topology-core equivalence; mismatched settlement semantics never share a market"}
     tests/money_path/test_operator_arm_gates_edli_submit.py: {created: "2026-06-07", last_used: "2026-06-07", note: "FIX-2b RT: OperatorArm modes x operator_authorized matrix for EDLI live-submit boundary; mainline executor unaffected"}
     tests/test_no_computed_at_date_utc_lead_ast_guard.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 AST guard: no computed_at.date() (UTC) in lead_days computation — enforces city-local ZoneInfo date at the AST level"}
     tests/test_raw_model_forecasts_does_not_ignore_changed_cell_selection.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (sharpened) RT: changed cell_selection on same logical key must not be silently discarded by INSERT OR IGNORE"}
     tests/test_raw_model_forecasts_rejects_same_key_different_request_hash.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (sharpened) RT: same logical key with different request_url_hash must be REJECTED, not silently discarded"}
-    tests/test_u0r_extra_capture_if_needed_date_in_scope.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 9 RT: U0R extra-model capture wiring guards bare date NameError in src/main.py; capture gated by edli_v1 flag"}
+    tests/test_bayes_precision_fusion_extra_capture_if_needed_date_in_scope.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 9 RT: BAYES_PRECISION_FUSION extra-model capture wiring guards bare date NameError in src/main.py; capture gated by edli_v1 flag"}
 
 categories:
   core_law_antibody:
@@ -3508,25 +3508,25 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_covariance_uses_common_target_dates_only.py:
+  tests/test_bayes_precision_fusion_covariance_uses_common_target_dates_only.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 2 (the critical stat bug) RT: covariance rows must be aligned by
-      target_date, never by positional index. When U0RHistoryProvider emits per-model
-      residual vectors of equal length but different target_dates, fuse_u0r_posterior
+      target_date, never by positional index. When BayesPrecisionFusionHistoryProvider emits per-model
+      residual vectors of equal length but different target_dates, fuse_bayes_precision_posterior
       must not place them in the same covariance row. Cross-module invariant: residual
       matrix over dates where ALL selected models are present.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_covariance_rejects_equal_length_misaligned_histories.py:
+  tests/test_bayes_precision_fusion_covariance_rejects_equal_length_misaligned_histories.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 2 RT: equal-length but fully date-misaligned histories (zero common
       target_dates) must NOT produce a learned off-diagonal covariance. The old code's
@@ -3534,14 +3534,14 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_covariance_falls_back_to_diag_when_common_dates_low.py:
+  tests/test_bayes_precision_fusion_covariance_falls_back_to_diag_when_common_dates_low.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 2 RT: PARSIMONY rule — when the common date-intersection window is below
-      the covariance-reliability threshold, fuse_u0r_posterior must collapse to diagonal
+      the covariance-reliability threshold, fuse_bayes_precision_posterior must collapse to diagonal
       C0 rather than attempt Ledoit-Wolf shrinkage on an unreliable short window.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
@@ -3550,7 +3550,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 3 RT: the anchor prior must come from the same physical product as the
       live anchor (ecmwf_ifs 9km), or be reconciled through an explicit declared bridge
@@ -3562,7 +3562,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 3 RT: 025 previous-runs history must be bridged (ifs025->ifs9 tau0
       widening) before it becomes the 9km anchor prior. Raw 025 tau0 must not be
@@ -3574,7 +3574,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 4 RT: cell_selection (nearest/land/sea) and elevation/downscaling
       materially change the returned 2m temperature and are first-class product
@@ -3586,9 +3586,9 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
-      BLOCKER 4 RT: the U0R download writer must persist Open-Meteo request params
+      BLOCKER 4 RT: the BAYES_PRECISION_FUSION download writer must persist Open-Meteo request params
       (lat/lon, timezone, model, endpoint, request_params_json, url_hash) so every
       stored forecast is reconstructable to the exact fetch. Fitz Constraint #4.
     created: 2026-06-08
@@ -3598,7 +3598,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 4 RT: raw_model_forecasts must carry product-identity columns. A
       forecast value that cannot prove its physical product must not silently train
@@ -3610,7 +3610,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 4 (operator-sharpened) RT: the logical key
       (model,city,target_date,metric,source_cycle_time,endpoint) binds EXACTLY ONE
@@ -3628,7 +3628,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 4 (operator-sharpened) RT, cross-module download->persist relationship:
       cell_selection flows into request_params_json -> request_url_hash and into
@@ -3639,23 +3639,23 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_materializer_uses_persisted_current_rows_not_network.py:
+  tests/test_bayes_precision_fusion_materializer_uses_persisted_current_rows_not_network.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
-      BLOCKER 5 RT: the U0R fusion override must read persisted current single_runs
+      BLOCKER 5 RT: the BAYES_PRECISION_FUSION fusion override must read persisted current single_runs
       rows from raw_model_forecasts, never network-fetch inside the q path.
       Reconstructability invariant: traded q must map to exact persisted inputs.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_current_capture_missing_blocks_or_falls_back_with_reason.py:
+  tests/test_bayes_precision_fusion_current_capture_missing_blocks_or_falls_back_with_reason.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 5 RT: a missing persisted current capture must produce a logged reason
       and route to the single-anchor path (byte-identical to pre-fusion), never a
@@ -3663,11 +3663,11 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_posterior_records_raw_model_forecast_dependency_ids.py:
+  tests/test_bayes_precision_fusion_posterior_records_raw_model_forecast_dependency_ids.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 5 RT: the fused posterior must record the raw_model_forecast_ids it
       consumed so the q is reconstructable to exact persisted inputs (models, URL,
@@ -3675,11 +3675,11 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_lead_days_uses_city_local_date_not_utc.py:
+  tests/test_bayes_precision_fusion_lead_days_uses_city_local_date_not_utc.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 6 RT: lead_days must be computed against the city-local date, not the
       UTC date. UTC date is off-by-one in cross-timezone cases (Tokyo example). The
@@ -3688,23 +3688,23 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_history_provider_materializer_wiring.py:
+  tests/test_bayes_precision_fusion_history_provider_materializer_wiring.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
-      End-to-end RT: real U0RHistoryProvider wired at the materializer seam reaches
+      End-to-end RT: real BayesPrecisionFusionHistoryProvider wired at the materializer seam reaches
       T2_BAYES via _insert_posterior when persisted previous_runs rows + VERIFIED
       settlement are present on the same connection. INV-37 (single forecasts DB).
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_replacement_0_1_u0r_fusion_materializer_wiring.py:
+  tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       RT: (a) flag-OFF materialized posterior byte-identical to today; (b) flag-ON
       fused mu*/sigma replace single-anchor center/spread and get own EMOS cell
@@ -3714,15 +3714,15 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_model_selection_gate.py:
+  tests/test_bayes_precision_fusion_model_selection_gate.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       F4 regional polygon gate + alias dedup RT: icon_d2 in-polygon (Paris/London/
       Munich) ENTERS; Moscow out-of-polygon ABSENT (zero-leak); arome France-only;
-      dedup drops icon_seamless; lead>1 excludes regional. U0R_PROOF_RESULT.md proof.
+      dedup drops icon_seamless; lead>1 excludes regional. BAYES_PRECISION_FUSION_PROOF_RESULT.md proof.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
@@ -3769,7 +3769,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 6 AST guard RT: no computed_at.date() (UTC) call site in lead_days
       computation in src/main.py. Enforces city-local ZoneInfo date at the AST
@@ -3781,7 +3781,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 4 (sharpened) RT: a changed cell_selection on the same logical key
       must NOT be silently discarded by INSERT OR IGNORE. Prevents stale
@@ -3793,7 +3793,7 @@ test_metadata:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
     notes: >
       BLOCKER 4 (sharpened) RT: same logical key with a different request_url_hash
       must raise a ConflictError, not silently disappear. Makes stale-contamination
@@ -3801,16 +3801,16 @@ test_metadata:
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
 
-  tests/test_u0r_extra_capture_if_needed_date_in_scope.py:
+  tests/test_bayes_precision_fusion_extra_capture_if_needed_date_in_scope.py:
     cohort: law_antibody
     trust: trusted
     authority_docs:
-      - docs/the_path/U0R_BAYES_SPEC.md
+      - docs/the_path/BAYES_PRECISION_FUSION_SPEC.md
       - docs/the_path/CONTINUITY_AND_WIRING.md
     notes: >
-      BLOCKER 9 RT: relationship regression test for U0R extra-model capture
+      BLOCKER 9 RT: relationship regression test for BAYES_PRECISION_FUSION extra-model capture
       wiring in src/main.py. Guards against bare date NameError swallowed at
-      line 4909. Capture gated by edli_v1.replacement_0_1_u0r_multimodel_
+      line 4909. Capture gated by edli_v1.replacement_0_1_bayes_precision_fusion_
       capture_enabled and fires only for in-scope target dates.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08

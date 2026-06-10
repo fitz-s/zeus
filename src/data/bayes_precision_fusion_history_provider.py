@@ -1,15 +1,15 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §3 (causality: previous-runs fixed-lead train ONLY;
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §3 (causality: previous-runs fixed-lead train ONLY;
 #   run_time != source_available_at), §1 observation model (residual z_s - Y), §5 walk-forward
 #   (no same-day leak); §7 antibodies ("top-K-uses-target-truth (walk-forward only)",
 #   "previous-runs-for-live-decision", "C/F unit mix (settlement-unit residual)").
-#   CONTINUITY_AND_WIRING.md §4 step 4 (the real U0RHistoryProvider). IRON RULE #3
+#   CONTINUITY_AND_WIRING.md §4 step 4 (the real BayesPrecisionFusionHistoryProvider). IRON RULE #3
 #   (provenance/no-leak): walk-forward history uses ONLY target_date < decision_date with
 #   VERIFIED settlement. INV-37: intra-DB JOIN on ONE zeus-forecasts.db connection.
-"""F1/step-4 — the real walk-forward history provider for the U0R-Bayes fusion.
+"""F1/step-4 — the real walk-forward history provider for the BAYES_PRECISION_FUSION-Bayes fusion.
 
-Implements the ``U0RHistoryProvider`` Protocol (src/data/u0r_multimodel_capture.py:89-103):
+Implements the ``BayesPrecisionFusionHistoryProvider`` Protocol (src/data/bayes_precision_fusion_capture.py:89-103):
 reads the PERSISTED previous-runs forecasts from raw_model_forecasts JOINed to VERIFIED
 settlement_outcomes, strictly target_date < decision_date, on the SINGLE zeus-forecasts.db
 connection (both tables are FORECAST_CLASS on the same DB -> intra-DB JOIN, INV-37 safe).
@@ -34,9 +34,9 @@ import sqlite3
 from datetime import date
 from typing import Mapping, Sequence
 
-from src.data.u0r_multimodel_capture import ModelHistory
+from src.data.bayes_precision_fusion_capture import ModelHistory
 
-_LOG = logging.getLogger("zeus.u0r_history_provider")
+_LOG = logging.getLogger("zeus.bayes_precision_fusion_history_provider")
 
 
 def _settlement_to_celsius(value: float, unit: str | None) -> float:
@@ -48,10 +48,10 @@ def _settlement_to_celsius(value: float, unit: str | None) -> float:
     return float(value)
 
 
-class U0RHistoryProvider:
+class BayesPrecisionFusionHistoryProvider:
     """Walk-forward residual history reader. Constructed with an OPEN zeus-forecasts.db
     connection (the live materializer wires the forecast-store connection; tests inject an
-    in-memory conn). Callable per the ``U0RHistoryProvider`` Protocol.
+    in-memory conn). Callable per the ``BayesPrecisionFusionHistoryProvider`` Protocol.
 
     The provider is process-stateless beyond its connection; it does NOT cache, so a wired
     instance always reflects the latest accrued raw_model_forecasts rows.
@@ -116,7 +116,7 @@ class U0RHistoryProvider:
             rows = cursor.execute(sql, params).fetchall()
         except Exception as exc:  # FAIL-SOFT: any DB error -> no history (Protocol contract).
             _LOG.warning(
-                "U0R history provider query failed (fail-soft, no history): %s", exc
+                "BAYES_PRECISION_FUSION history provider query failed (fail-soft, no history): %s", exc
             )
             return {}
 

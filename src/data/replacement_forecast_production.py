@@ -1,6 +1,6 @@
 # Created: 2026-06-08
 # Last reused/audited: 2026-06-08
-# Authority basis: operator Point-1 directive 2026-06-08 — move U0R/replacement_0_1
+# Authority basis: operator Point-1 directive 2026-06-08 — move BAYES_PRECISION_FUSION/replacement_0_1
 #   forecast PRODUCTION (raw-input download + light shadow materialization) OFF the
 #   live-trading daemon (src/main.py) INTO the forecast-live (data) daemon. The
 #   ~365MB AIFS ensemble download (~11.5 min) monopolized disk I/O on the trading
@@ -174,7 +174,7 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     # NEVER implies currency ("the currently-available IFS cycle's raw inputs exist"). The old
     # gates short-circuited on plan.ready alone, so once ANY cycle fully materialized the cron
     # could never advance the anchor again — deterministic_forecast_anchors froze at 06-08T18
-    # for ~24h while Open-Meteo was serving 06-09T00 (it answered 200 OK to the U0R leg of the
+    # for ~24h while Open-Meteo was serving 06-09T00 (it answered 200 OK to the BAYES_PRECISION_FUSION leg of the
     # SAME job run). Both early returns now additionally require the downloaded high-water mark
     # to have reached the currently-available cycle.
     release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
@@ -223,18 +223,18 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     )
 
 
-def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
-    """THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (CONTINUITY_AND_WIRING.md §4 step 2,
-    U0R_BAYES_SPEC.md §6 F1). Gated by the NEW capture flag
-    ``settings['edli_v1']['replacement_0_1_u0r_multimodel_capture_enabled']`` (default FALSE),
-    SEPARATE from replacement_0_1_u0r_fusion_enabled: when ON it downloads + persists the 8 extra
+def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+    """THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model SHADOW capture/accrual (CONTINUITY_AND_WIRING.md §4 step 2,
+    BAYES_PRECISION_FUSION_SPEC.md §6 F1). Gated by the NEW capture flag
+    ``settings['edli_v1']['replacement_0_1_bayes_precision_fusion_capture_enabled']`` (default FALSE),
+    SEPARATE from replacement_0_1_bayes_precision_fusion_enabled: when ON it downloads + persists the 8 extra
     OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
     zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
     center/spread/order -> the money path is byte-identical whether or not this runs. Forward,
     daily, fail-soft (it NEVER raises into the shadow cycle). Returns None when the flag is OFF or
     there is no forecast_db / no targets."""
     try:
-        if not bool(settings["edli_v1"].get("replacement_0_1_u0r_multimodel_capture_enabled", False)):
+        if not bool(settings["edli_v1"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
             return None
     except Exception:
         return None
@@ -249,9 +249,9 @@ def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             build_replacement_forecast_current_target_plan,
         )
-        from src.data.u0r_multimodel_download import (  # noqa: PLC0415
-            U0RDownloadTarget,
-            download_u0r_extra_raw_inputs,
+        from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+            BayesPrecisionFusionDownloadTarget,
+            download_bayes_precision_fusion_extra_raw_inputs,
         )
 
         release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
@@ -267,7 +267,7 @@ def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str
         # cycle, endpoint) combos that are already persisted, so the steady-state cost is
         # only-missing fetches (self-healing per cycle, no covered/freshness conflation).
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-        targets: list[U0RDownloadTarget] = []
+        targets: list[BayesPrecisionFusionDownloadTarget] = []
         for row in plan.rows:
             city_cfg = cities_by_name.get(row.city)
             if city_cfg is None:
@@ -276,27 +276,27 @@ def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str
                 lead_days = max(0, (date.fromisoformat(row.target_date) - cycle.date()).days)
             except Exception:
                 lead_days = 0
-            targets.append(U0RDownloadTarget(
+            targets.append(BayesPrecisionFusionDownloadTarget(
                 city=row.city, metric=row.temperature_metric, target_date=row.target_date,
                 lead_days=lead_days, latitude=float(city_cfg.lat), longitude=float(city_cfg.lon),
                 timezone_name=str(city_cfg.timezone),
             ))
         if not targets:
-            return {"status": "U0R_EXTRA_NO_TARGETS"}
-        return download_u0r_extra_raw_inputs(
+            return {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
+        return download_bayes_precision_fusion_extra_raw_inputs(
             forecast_db=Path(str(forecast_db)),
             cycle=cycle,
             targets=targets,
             release_lag_hours=release_lag_hours,
         )
     except Exception as exc:  # noqa: BLE001 - fail-soft: shadow accrual never breaks the cycle
-        logger.warning("U0R extra-model shadow capture skipped (fail-soft): %s", exc)
-        return {"status": "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
+        logger.warning("BAYES_PRECISION_FUSION extra-model shadow capture skipped (fail-soft): %s", exc)
+        return {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
 @_scheduler_job("replacement_forecast_shadow_materialize")
 def _replacement_forecast_download_cycle() -> None:
-    """Proactive raw-input PRE-FETCH for the U0R/replacement soft-anchor forecast.
+    """Proactive raw-input PRE-FETCH for the BAYES_PRECISION_FUSION/replacement soft-anchor forecast.
 
     Operator directive 2026-06-08 (WIRING FIX): the 150-300MB AIFS-ensemble +
     OpenMeteo raw-input downloads MUST NOT run inside the 5-min seed->materialize
@@ -335,31 +335,31 @@ def _replacement_forecast_download_cycle() -> None:
             logger.info(
                 "replacement forecast current-target download report: %s", download_report
             )
-    # THE_PATH U0R-Bayes multi-model SHADOW capture/accrual (forward + fixed-lead), gated by the
-    # SEPARATE replacement_0_1_u0r_multimodel_capture_enabled flag. Pure side-effect on
+    # THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model SHADOW capture/accrual (forward + fixed-lead), gated by the
+    # SEPARATE replacement_0_1_bayes_precision_fusion_capture_enabled flag. Pure side-effect on
     # raw_model_forecasts (zeus-forecasts.db); NO posterior/q/order effect. Fail-soft.
-    u0r_capture_report = _download_u0r_extra_raw_inputs_if_needed(cfg)
-    if u0r_capture_report is not None and u0r_capture_report.get("status") not in {
-        "U0R_EXTRA_NO_TARGETS",
+    bayes_precision_fusion_capture_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
+    if bayes_precision_fusion_capture_report is not None and bayes_precision_fusion_capture_report.get("status") not in {
+        "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS",
     }:
-        logger.info("U0R extra-model shadow capture report: %s", u0r_capture_report)
+        logger.info("BAYES_PRECISION_FUSION extra-model shadow capture report: %s", bayes_precision_fusion_capture_report)
     # SILENT-DEATH SURFACING (2026-06-09): if the extras sub-step fails or is
     # fail-soft skipped, the parent download job still shows OK in scheduler
     # health (only AIFS/IFS9 success is tracked by the @_scheduler_job wrapper).
     # Write a distinct component entry so logs/scheduler_jobs_health.json shows
     # the degradation and an operator/alert can detect multi-day extras outages.
-    if u0r_capture_report is not None:
-        _u0r_status = u0r_capture_report.get("status", "")
-        _u0r_failed = _u0r_status == "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
-        if _u0r_failed or u0r_capture_report.get("global_models_unavailable"):
+    if bayes_precision_fusion_capture_report is not None:
+        _bayes_precision_fusion_status = bayes_precision_fusion_capture_report.get("status", "")
+        _bayes_precision_fusion_failed = _bayes_precision_fusion_status == "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"
+        if _bayes_precision_fusion_failed or bayes_precision_fusion_capture_report.get("global_models_unavailable"):
             from src.observability.scheduler_health import _write_scheduler_health as _wsh  # noqa: PLC0415
-            _failure_reason = u0r_capture_report.get("error") or str(
-                u0r_capture_report.get("global_models_unavailable", "")
+            _failure_reason = bayes_precision_fusion_capture_report.get("error") or str(
+                bayes_precision_fusion_capture_report.get("global_models_unavailable", "")
             )
-            _wsh("u0r_multimodel_capture", failed=True, reason=_failure_reason)
-        elif _u0r_status not in {"U0R_EXTRA_NO_TARGETS", ""}:
+            _wsh("bayes_precision_fusion_capture", failed=True, reason=_failure_reason)
+        elif _bayes_precision_fusion_status not in {"BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS", ""}:
             from src.observability.scheduler_health import _write_scheduler_health as _wsh  # noqa: PLC0415, F811
-            _wsh("u0r_multimodel_capture", failed=False)
+            _wsh("bayes_precision_fusion_capture", failed=False)
 
 
 def _replacement_forecast_shadow_materialize_cycle() -> None:

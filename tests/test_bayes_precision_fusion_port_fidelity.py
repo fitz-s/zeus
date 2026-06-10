@@ -1,29 +1,29 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §2 T2, §4 algorithm; U0R_PROOF_RESULT.md skeptic re-probe
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §2 T2, §4 algorithm; BAYES_PRECISION_FUSION_PROOF_RESULT.md skeptic re-probe
 #   ("3-cell recompute mu*, sigma, Brier match stored predictions to 5 decimal places").
-# Purpose: PORT-FIDELITY. The production src/forecast/u0r_bayes.py reproduces the PROVEN C1
+# Purpose: PORT-FIDELITY. The production src/forecast/bayes_precision_fusion.py reproduces the PROVEN C1
 #   posterior on a known settlement cell (Paris/high/lead-1/2025-12-26) to 4 decimals.
-#   Golden inputs are the captured walk-forward internals of run_u0r_bayes_fusion.py at that
+#   Golden inputs are the captured walk-forward internals of run_bayes_precision_fusion.py at that
 #   cell (z_lik, the 25x5 common-window residual matrix, mu0, tau0, disagree). Self-contained:
 #   no dependency on the offline proof JSONL / dataset / LIVE repo.
-"""Port-fidelity: src U0R fusion == proven proof C1 (mu*=4.3137, sd=0.7259)."""
+"""Port-fidelity: src BAYES_PRECISION_FUSION fusion == proven proof C1 (mu*=4.3137, sd=0.7259)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from src.forecast.u0r_bayes import (
+from src.forecast.bayes_precision_fusion import (
     ModelInstrument,
     bayes_fuse,
     diag_cov,
-    fuse_u0r_posterior,
+    fuse_bayes_precision_posterior,
     shrink_cov,
 )
 
 # ---- GOLDEN FIXTURE: Paris / high / lead 1 / target_date 2025-12-26 (first walk-forward cell) ----
-# Captured from run_u0r_bayes_fusion.py internals; proof stored mu=4.3137 sd=0.7259 (C1 variant).
+# Captured from run_bayes_precision_fusion.py internals; proof stored mu=4.3137 sd=0.7259 (C1 variant).
 LIK_MODELS = ["gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
 Z_LIK = [5.14193939, 3.7449697, 5.05709091, 3.83587879, 4.11163636]
 N_TRAIN = [25, 25, 25, 25, 25]
@@ -56,7 +56,7 @@ def test_bayes_fuse_reproduces_proof_c1_with_captured_sigma() -> None:
     assert round(sd, 4) == EXPECT_SD
 
 
-def test_fuse_u0r_posterior_end_to_end_reproduces_proof_c1() -> None:
+def test_fuse_bayes_precision_posterior_end_to_end_reproduces_proof_c1() -> None:
     """The production API: anchor prior + 5 bias-corrected globals -> proven C1 posterior."""
     instruments = [
         ModelInstrument(
@@ -68,7 +68,7 @@ def test_fuse_u0r_posterior_end_to_end_reproduces_proof_c1() -> None:
         )
         for i, m in enumerate(LIK_MODELS)
     ]
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=MU0, anchor_tau0=TAU0, likelihood=instruments,
         disagree_var=DISAGREE, use_covariance=True,
     )
@@ -90,7 +90,7 @@ def test_c0_diagonal_branch_matches_proof_c0_construction() -> None:
                         n_train=N_TRAIN[i])
         for i, m in enumerate(LIK_MODELS)
     ]
-    fused = fuse_u0r_posterior(
+    fused = fuse_bayes_precision_posterior(
         anchor_z=MU0, anchor_tau0=TAU0, likelihood=instruments,
         disagree_var=DISAGREE, use_covariance=False,
     )
@@ -105,11 +105,11 @@ def test_port_matches_live_proof_engine_if_present() -> None:
     from pathlib import Path
 
     proof = Path(
-        "/Users/leofitz/zeus/.omc/research/polyweather_eval/scripts/run_u0r_bayes_fusion.py"
+        "/Users/leofitz/zeus/.omc/research/polyweather_eval/scripts/run_bayes_precision_fusion.py"
     )
     if not proof.exists():
         pytest.skip("offline proof engine not present in this checkout")
-    spec = importlib.util.spec_from_file_location("u0rproof_ref", proof)
+    spec = importlib.util.spec_from_file_location("bayes_precision_fusionproof_ref", proof)
     ref = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ref)
 
@@ -128,7 +128,7 @@ def test_port_matches_live_proof_engine_if_present() -> None:
 
 def test_anchor_fallback_when_all_extras_absent() -> None:
     """FAIL-SOFT: no likelihood instruments -> posterior IS the anchor prior."""
-    fused = fuse_u0r_posterior(anchor_z=MU0, anchor_tau0=TAU0, likelihood=[], disagree_var=0.0)
+    fused = fuse_bayes_precision_posterior(anchor_z=MU0, anchor_tau0=TAU0, likelihood=[], disagree_var=0.0)
     assert fused.method == "ANCHOR_FALLBACK"
     assert fused.mu == pytest.approx(MU0)
     assert fused.sd == pytest.approx(TAU0)
@@ -143,7 +143,7 @@ def test_dropped_global_fuses_with_remaining() -> None:
                         n_train=N_TRAIN[i])
         for i, m in enumerate(survivors)
     ]
-    fused = fuse_u0r_posterior(anchor_z=MU0, anchor_tau0=TAU0, likelihood=instruments,
+    fused = fuse_bayes_precision_posterior(anchor_z=MU0, anchor_tau0=TAU0, likelihood=instruments,
                                disagree_var=DISAGREE)
     assert fused.method == "T2_BAYES"
     assert fused.used_models == ("ecmwf_ifs",) + tuple(survivors)
@@ -157,7 +157,7 @@ def test_equal_weight_when_no_reliable_anchor_prior() -> None:
                         n_train=N_TRAIN[i])
         for i, m in enumerate(LIK_MODELS)
     ]
-    fused = fuse_u0r_posterior(anchor_z=None, anchor_tau0=None, likelihood=instruments,
+    fused = fuse_bayes_precision_posterior(anchor_z=None, anchor_tau0=None, likelihood=instruments,
                                disagree_var=DISAGREE)
     assert fused.method == "EQUAL_WEIGHT"
     assert fused.anchor_model is None

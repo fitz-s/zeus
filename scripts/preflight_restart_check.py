@@ -90,8 +90,8 @@ def main() -> int:
     def f_ff(name, default=False):
         return bool(feature_flags.get(name, default))
 
-    capture = f_edli("replacement_0_1_u0r_multimodel_capture_enabled")
-    fusion = f_edli("replacement_0_1_u0r_fusion_enabled")
+    capture = f_edli("replacement_0_1_bayes_precision_fusion_capture_enabled")
+    fusion = f_edli("replacement_0_1_bayes_precision_fusion_enabled")
     eb = f_edli("replacement_0_1_eb_bias_correction_enabled")
     smooth = f_edli("replacement_0_1_member_vote_smoothing_enabled")
     qlcb = f_edli("replacement_qlcb_settlement_sigma_floor_enabled")
@@ -109,7 +109,7 @@ def main() -> int:
 
     # ---- posture ----
     if not capture and not fusion:
-        stage = "0  SHADOW (single-anchor only; U0R not active)"
+        stage = "0  SHADOW (single-anchor only; BAYES_PRECISION_FUSION not active)"
     elif capture and not fusion:
         stage = "1  ACCRUING (multi-model data persisting; posterior unchanged)"
     elif fusion and not auth:
@@ -127,7 +127,7 @@ def main() -> int:
     issues = []
     if fusion and not capture:
         issues.append(("WARN", "fusion ON but capture OFF — forward history will go stale; "
-                               "ensure raw_model_forecasts was seeded (scripts/backfill_u0r_history_from_b0.py)"))
+                               "ensure raw_model_forecasts was seeded (scripts/backfill_bayes_precision_fusion_history_from_b0.py)"))
     if (auth or kelly or flip) and not ev_ok:
         issues.append(("CRITICAL", "soft_anchor trade_authority/kelly/flip ON while evidence gate FAILS — "
                                    "resolver footgun. Set these FALSE until the gate passes (Fault C)."))
@@ -136,7 +136,7 @@ def main() -> int:
                                    "real money path open without promotion evidence. CLOSE the arm."))
     if (auth or arm) and not fusion:
         issues.append(("WARN", "authority/arm ON but fusion OFF — you would trade the single-anchor path, "
-                               "not the proven U0R fusion."))
+                               "not the proven BAYES_PRECISION_FUSION fusion."))
 
     print("-" * 72)
     if issues:
@@ -149,13 +149,13 @@ def main() -> int:
     # ---- the single next action ----
     print("-" * 72)
     if not capture:
-        nxt = ("replacement_0_1_u0r_multimodel_capture_enabled = TRUE",
+        nxt = ("replacement_0_1_bayes_precision_fusion_capture_enabled = TRUE",
                "start multi-model accrual (shadow, zero trading effect). "
-               "Pair with: run scripts/backfill_u0r_history_from_b0.py --db <forecasts.db> to seed history NOW.")
+               "Pair with: run scripts/backfill_bayes_precision_fusion_history_from_b0.py --db <forecasts.db> to seed history NOW.")
     elif not fusion:
-        nxt = ("replacement_0_1_u0r_fusion_enabled = TRUE (+ eb_bias + member_vote_smoothing)",
+        nxt = ("replacement_0_1_bayes_precision_fusion_enabled = TRUE (+ eb_bias + member_vote_smoothing)",
                "history is seeded/accruing -> fusion reaches T2_BAYES. Shadow first; verify "
-               "posterior_method shows the_path_u0r_fusion before granting authority.")
+               "posterior_method shows the_path_bayes_precision_fusion before granting authority.")
     elif not qlcb:
         nxt = ("replacement_qlcb_settlement_sigma_floor_enabled = TRUE",
                "license after >=30 settled per-band coverage passes (only-lowers, conservative).")

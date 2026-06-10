@@ -1,7 +1,7 @@
 # Replacement Forecast Final Form (2026-06-09, operator-ratified)
 
 **Status:** LIVE_AUTHORITY (flag-only, operator directive 2026-06-08).  
-**Supersedes:** `U0R_BAYES_SPEC.md` (deleted).  
+**Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
 **Last audited:** 2026-06-09  
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 + four experiments `docs/evidence/2026_06_09_final_form/aifs_replacement_experiment.md`, `docs/evidence/2026_06_09_final_form/inverted_blend_experiment.md`, `docs/evidence/2026_06_09_final_form/uncovered_cities_regional_report.md`, `docs/evidence/2026_06_09_final_form/universality_sweep.md`.
@@ -17,27 +17,27 @@ For each instrument `s` at `(city, metric, target_date)`:
 ```
 residuals_s  = {x_s(d) − Y(d) | d in previous_runs, d < target_date, lead-bucket preferred=1}
 r̄_s          = mean(residuals_s),   n_s = len(residuals_s)
-λ_s          = n_s / (n_s + κ),     κ = KAPPA = 8.0          # src/forecast/u0r_bayes.py:51
+λ_s          = n_s / (n_s + κ),     κ = KAPPA = 8.0          # src/forecast/bayes_precision_fusion.py:51
 b̂_s          = λ_s · r̄_s + (1−λ_s) · parent                # parent prior = 0.0
 z_s          = x_s − b̂_s                                    # de-biased instrument value
 ```
 
 `n_s < MIN_TRAIN=25` → LOWN_INFLATE=1.5 applied to σ_s (thin instrument).  
-Walk-forward is strictly `target_date < decision_date`; settlement residuals only (`endpoint='previous_runs'`). `src/forecast/u0r_bayes.py:67–78`.
+Walk-forward is strictly `target_date < decision_date`; settlement residuals only (`endpoint='previous_runs'`). `src/forecast/bayes_precision_fusion.py:67–78`.
 
 ### 1b. T2 Bayesian fusion
 
 Anchor: `ecmwf_ifs` as prior N(μ₀, τ₀²), τ₀ = max(anchor_walk_forward_std, TAU0_FLOOR=0.8).  
 Likelihood instruments: K de-biased values z = [z₁ … z_K] (globals + in-domain regionals).
 
-Covariance Σ: Ledoit-Wolf shrinkage of the sample covariance toward its diagonal, computed on the **common-target-date residual matrix** (rows = dates present for ALL instruments simultaneously). Requires ≥ COMMON_DATES_MIN=5 common dates; else diagonal C0 = diag(σ²_s). `src/forecast/u0r_bayes.py:82–114`.
+Covariance Σ: Ledoit-Wolf shrinkage of the sample covariance toward its diagonal, computed on the **common-target-date residual matrix** (rows = dates present for ALL instruments simultaneously). Requires ≥ COMMON_DATES_MIN=5 common dates; else diagonal C0 = diag(σ²_s). `src/forecast/bayes_precision_fusion.py:82–114`.
 
 ```
 V* = ( τ₀⁻² + 1ᵀ Σ⁻¹ 1 )⁻¹
 μ* = V* · ( τ₀⁻² μ₀  +  1ᵀ Σ⁻¹ z )
 ```
 
-Hyperparameters fixed a-priori (`src/forecast/u0r_bayes.py:51–57`):
+Hyperparameters fixed a-priori (`src/forecast/bayes_precision_fusion.py:51–57`):
 
 | Param | Value | Meaning |
 |---|---|---|
@@ -54,7 +54,7 @@ Under diagonal Σ the "prior" label is algebraically irrelevant: μ* is the prec
 
 ### 1c. Thin-anchor retention (commit 49492f1528)
 
-When anchor history `n < MIN_TRAIN`, the anchor has no trusted τ₀. Prior to this fix the anchor center was silently dropped. **Fix (both sides of the boundary):** a finite `anchor_z` without trusted τ₀ joins the fusion as ONE equal-weight member at variance `(TAU0_FLOOR · LOWN_INFLATE)² = (0.8·1.5)² = 1.44 °C²` — demoted from T2 prior, never deleted. Zero-history anchor is the only valid reason for a null anchor center. `src/forecast/u0r_bayes.py` + `src/data/u0r_multimodel_capture.py`.
+When anchor history `n < MIN_TRAIN`, the anchor has no trusted τ₀. Prior to this fix the anchor center was silently dropped. **Fix (both sides of the boundary):** a finite `anchor_z` without trusted τ₀ joins the fusion as ONE equal-weight member at variance `(TAU0_FLOOR · LOWN_INFLATE)² = (0.8·1.5)² = 1.44 °C²` — demoted from T2 prior, never deleted. Zero-history anchor is the only valid reason for a null anchor center. `src/forecast/bayes_precision_fusion.py` + `src/data/bayes_precision_fusion_capture.py`.
 
 ### 1d. Predictive spread
 
@@ -136,7 +136,7 @@ These make error categories **unconstructable**, not merely less likely.
 1. `replacement_forecast_current_target_plan.py:36` — download gate (94b584cc3f): requires downloaded HWM ≥ available cycle
 2. `download_replacement_forecast_current_targets.py:177` — `include_covered=True` when cycle stale (9c594c9fc3)
 3. `replacement_forecast_shadow_materialization_queue.py:345` — seed checks posterior AND `expires_at > now` (pre-existing, confirmed clean)
-4. `_download_u0r_extra_raw_inputs_if_needed` — coverage filter removed; replaced by row-level per-(model, city, target, metric, cycle, endpoint) skip (df8199ef8e)
+4. `_download_bayes_precision_fusion_extra_raw_inputs_if_needed` — coverage filter removed; replaced by row-level per-(model, city, target, metric, cycle, endpoint) skip (df8199ef8e)
 5. Download gate for replacement anchor — same root (9c594c9fc3, instance 3 in commit)
 
 **L2 — Row-level only-missing fetches.** Extras download preloads logical keys already persisted for the cycle and skips per-row. Steady-state cost = only-missing; self-healing on re-run regardless of coverage state. Commit df8199ef8e.
@@ -145,9 +145,9 @@ These make error categories **unconstructable**, not merely less likely.
 
 **L4 — Domain gate == data presence == settlement skill.** Milan/arome: data present and settlement-graded before polygon boundary overrides inclusion. The polygon is the OUTER bound; data-presence-with-skill is the inner bound. Source-identity law: a model's live-inference product must match the product its de-bias history was fit on. Violated cases: EB-bias wrong-set (ENS bias over-corrects 9km IFS anchor → disabled, ff7f33dd5b), gem_seamless rejection (serves HRDPS/RDPS for NA cities, wrong physical product).
 
-**L5 — No in-fusion provider double-count.** PROVIDER_FAMILIES covers all active same-provider pairs: ICON family (d2↔eu↔global), NCEP family (nbm↔gfs), UKMO family (uk2km↔global). ECMWF (ifs + AIFS) is not a U0R concern — AIFS never enters U0R Bayes. Universality sweep P6: CLEAN (8f20d39863).
+**L5 — No in-fusion provider double-count.** PROVIDER_FAMILIES covers all active same-provider pairs: ICON family (d2↔eu↔global), NCEP family (nbm↔gfs), UKMO family (uk2km↔global). ECMWF (ifs + AIFS) is not a BAYES_PRECISION_FUSION concern — AIFS never enters BAYES_PRECISION_FUSION Bayes. Universality sweep P6: CLEAN (8f20d39863).
 
-**L6 — Explicit model-id registration.** Promoted models (`ncep_nbm_conus`, `ukmo_global_deterministic_10km`, `ukmo_uk_deterministic_2km`) have explicit entries in `OPENMETEO_MODEL_IDS` (`src/data/u0r_multimodel_capture.py`) — no identity-fallback implicit mapping. Commit 8f20d39863.
+**L6 — Explicit model-id registration.** Promoted models (`ncep_nbm_conus`, `ukmo_global_deterministic_10km`, `ukmo_uk_deterministic_2km`) have explicit entries in `OPENMETEO_MODEL_IDS` (`src/data/bayes_precision_fusion_capture.py`) — no identity-fallback implicit mapping. Commit 8f20d39863.
 
 ---
 
@@ -172,9 +172,9 @@ These make error categories **unconstructable**, not merely less likely.
 
 | Test file | Category killed |
 |---|---|
-| `tests/test_u0r_fusion_persisted_read_lead_robust.py` | Lead-calendar mismatch makes fusion fire on 0 cells (140d75ff6d) |
-| `tests/test_u0r_fusion_thin_anchor_retained.py` | Anchor center dropped from EQUAL_WEIGHT cells (49492f1528) |
-| `tests/test_u0r_gem_current_value_previous_runs_fallback.py` | gem single_runs dead leg silently shrinks ensemble 4→3 (edc598b440) |
+| `tests/test_bayes_precision_fusion_persisted_read_lead_robust.py` | Lead-calendar mismatch makes fusion fire on 0 cells (140d75ff6d) |
+| `tests/test_bayes_precision_fusion_thin_anchor_retained.py` | Anchor center dropped from EQUAL_WEIGHT cells (49492f1528) |
+| `tests/test_bayes_precision_fusion_gem_current_value_previous_runs_fallback.py` | gem single_runs dead leg silently shrinks ensemble 4→3 (edc598b440) |
 | `tests/test_replacement_download_cycle_currency_gate.py` | Coverage-vs-currency conflation freezes anchor indefinitely (94b584cc3f) |
 | `tests/test_stale_cycle_download_includes_covered_targets.py` | Covered-target filter starves new-cycle raw inputs (9c594c9fc3) |
 | `tests/test_download_row_level_skip_only_missing_fetches.py` | Coverage filter on extras download; instance 5 coverage!=currency (df8199ef8e) |
@@ -184,7 +184,7 @@ These make error categories **unconstructable**, not merely less likely.
 | `tests/test_replacement_0_1_anchor_eb_bias_source_match.py` | ENS bias applied to IFS anchor (wrong-set over-correction) (ff7f33dd5b) |
 | `tests/test_forecast_live_opendata_producer_required_for_fsr.py` | FSR starvation when opendata baseline producer disabled (8c6e028066) |
 | `tests/test_replacement_live_authority_evidence_gate_wiring_honesty.py` | Dead-but-advertised evidence gate misleads operator (54a53334a9) |
-| `tests/test_u0r_candidate_accrual_models.py` | Family coexistence impossibilities; lead fallback; single-fetch-per-target (a70436d478) |
-| `tests/test_u0r_bayes_port_fidelity.py` | T2 math port reproduces proof engine (Paris/high/L1 2025-12-26 → μ*=4.3137, sd=0.7259) |
+| `tests/test_bayes_precision_fusion_candidate_accrual_models.py` | Family coexistence impossibilities; lead fallback; single-fetch-per-target (a70436d478) |
+| `tests/test_bayes_precision_fusion_port_fidelity.py` | T2 math port reproduces proof engine (Paris/high/L1 2025-12-26 → μ*=4.3137, sd=0.7259) |
 
 27/27 materializer+fusion+wiring green at ship. 61/61 green post-promotion (a70436d478).

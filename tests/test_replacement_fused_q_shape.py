@@ -21,7 +21,7 @@ from datetime import date
 import pytest
 
 import src.data.replacement_forecast_materializer as mod
-from tests.test_u0r_history_provider_materializer_wiring import (  # reuse the proven harness
+from tests.test_bayes_precision_fusion_history_provider_materializer_wiring import (  # reuse the proven harness
     _conn,
     _disable_other_layers,
     _enable_fusion,
@@ -61,8 +61,8 @@ def test_fused_shape_q_has_full_support_no_zero_bins(monkeypatch) -> None:
     row = _row(conn, pid)
     prov = json.loads(row["provenance_json"])
     assert prov["q_shape"] == "fused_normal_direct"
-    assert prov["u0r_fusion"]["predictive_sigma_c"] is not None
-    assert prov["u0r_fusion"]["predictive_sigma_c"] >= 1.0  # conservative floor
+    assert prov["bayes_precision_fusion"]["predictive_sigma_c"] is not None
+    assert prov["bayes_precision_fusion"]["predictive_sigma_c"] >= 1.0  # conservative floor
     q = json.loads(row["q_json"])
     assert q, "q must be non-empty"
     for bin_id, p in q.items():
@@ -87,7 +87,7 @@ def test_flag_off_q_byte_identical_to_soft_anchor(monkeypatch) -> None:
     assert prov["q_shape"] == "aifs_member_votes_soft_anchor"
     # the fused center still overrides the soft-anchor inputs (existing behavior), but the
     # SHAPE remains the member-vote construction — predictive sigma recorded for shadow audit.
-    assert prov["u0r_fusion"]["method"] in {"T2_BAYES", "EQUAL_WEIGHT"}
+    assert prov["bayes_precision_fusion"]["method"] in {"T2_BAYES", "EQUAL_WEIGHT"}
 
 
 def test_fused_shape_fails_closed_on_construction_error(monkeypatch) -> None:

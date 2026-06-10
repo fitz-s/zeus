@@ -430,7 +430,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     """)
 
     # ------------------------------------------------------------------------
-    # raw_model_forecasts  (U0R_BAYES_SPEC.md §6 F1 raw capture)
+    # raw_model_forecasts  (BAYES_PRECISION_FUSION_SPEC.md §6 F1 raw capture)
     # ------------------------------------------------------------------------
     # The spec-named SHADOW-ONLY multi-model walk-forward capture table. One row per
     # (model, city, target_date, metric, source_cycle_time, endpoint): the decorrelated
@@ -442,7 +442,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     # causality run_time != source_available_at). SHADOW_ONLY + training_allowed=0 are
     # CHECK-pinned exactly like raw_forecast_artifacts: this is a research-accrual surface,
     # NEVER an order/training truth table. Lives ONLY on zeus-forecasts.db (FORECAST_CLASS,
-    # INV-37 single-DB). The walk-forward history JOIN (src/data/u0r_history_provider.py)
+    # INV-37 single-DB). The walk-forward history JOIN (src/data/bayes_precision_fusion_history_provider.py)
     # reads endpoint='previous_runs' rows JOINed to settlement_outcomes (same DB) with
     # target_date < decision_date and authority='VERIFIED' (no-leak, IRON RULE #3).
     # BLOCKER 4 (live-money data provenance, Fitz Constraint #4): the original capture columns
@@ -509,7 +509,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             -- insert (RawModelForecastRequestConflict + an audit row) so a corrected request is a
             -- LOUD, attributable event rather than two silently-coexisting rows the history JOIN
             -- (which keys on model/city/metric/lead/endpoint/target_date, NOT on the hash) would
-            -- conflate. See src/data/u0r_multimodel_download.py::_persist_rows.
+            -- conflate. See src/data/bayes_precision_fusion_download.py::_persist_rows.
             UNIQUE(model, product_id, request_url_hash, city, target_date, metric,
                    source_cycle_time, endpoint)
         )
@@ -561,7 +561,7 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
     # (logical key + product_id + request_url_hash) forward-only, no DROP/rebuild. On a fresh DB
     # this is redundant with the table-level UNIQUE above (both pin the identical column set); on
     # a legacy DB it is the only way the widened key reaches the physical table. The persist layer
-    # (src/data/u0r_multimodel_download.py::_persist_rows) is the PRIMARY antibody — it REJECTS a
+    # (src/data/bayes_precision_fusion_download.py::_persist_rows) is the PRIMARY antibody — it REJECTS a
     # same-logical-key/different-request-hash insert before it is attempted — and this index is
     # defense-in-depth for any write path that bypasses _persist_rows.
     conn.execute("""

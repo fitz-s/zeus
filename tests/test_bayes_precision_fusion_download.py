@@ -1,10 +1,10 @@
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
-# Authority basis: U0R_BAYES_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
+# Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
 #   raw_model_forecasts), §5 (~6mo retention); CONTINUITY_AND_WIRING.md §4 steps 2-3 + 9
 #   (forward+history daily download/persist + 180d prune). IRON RULE #4 (one-builder: reuse
 #   the OM fetchers, single persist conn), INV-37 (single zeus-forecasts.db connection).
-"""TDD for the U0R multi-model forward+history download/persist job.
+"""TDD for the BAYES_PRECISION_FUSION multi-model forward+history download/persist job.
 
 Relationship under test (download job -> raw_model_forecasts persistence boundary):
   (a) when capture-flag ON it WRITES raw_model_forecasts rows (single_runs FORWARD +
@@ -36,9 +36,9 @@ def _forecast_db(tmp_path: Path) -> Path:
 
 def _targets():
     # (city, metric, target_date, lead_days, lat, lon, timezone)
-    from src.data.u0r_multimodel_download import U0RDownloadTarget
+    from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
     return [
-        U0RDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
+        BayesPrecisionFusionDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
                           lead_days=1, latitude=48.967, longitude=2.428, timezone_name="Europe/Paris"),
     ]
 
@@ -56,7 +56,7 @@ def _count(db: Path, **where) -> int:
 # (a) capture-flag ON: writes single_runs (forward) + previous_runs (fixed-lead) rows
 # =====================================================================================
 def test_download_writes_single_and_previous_runs(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
     cycle = datetime(2026, 6, 8, 0, 0, tzinfo=UTC)
@@ -69,11 +69,11 @@ def test_download_writes_single_and_previous_runs(tmp_path) -> None:
     def _previous(*, model, latitude, longitude, timezone_name, target_date, lead_days, metric):
         return 19.5 + len(model) * 0.01
 
-    report = download_u0r_extra_raw_inputs(
+    report = download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=cycle, targets=_targets(),
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )
-    assert report["status"] == "U0R_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     # At least the 8 extra models x {single_runs, previous_runs} for the one target.
     n_single = _count(db, endpoint="single_runs")
     n_prev = _count(db, endpoint="previous_runs")
@@ -92,10 +92,10 @@ def test_download_writes_single_and_previous_runs(tmp_path) -> None:
 # (b) no targets -> no writes
 # =====================================================================================
 def test_download_no_targets_writes_nothing(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
-    report = download_u0r_extra_raw_inputs(
+    report = download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 8, 0, tzinfo=UTC), targets=[],
         single_runs_fetch=lambda **k: 20.0, previous_runs_fetch=lambda **k: 20.0,
     )
@@ -107,7 +107,7 @@ def test_download_no_targets_writes_nothing(tmp_path) -> None:
 # (c) FAIL-SOFT per model: a raising fetch drops only that model
 # =====================================================================================
 def test_download_failsoft_per_model(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
 
@@ -116,11 +116,11 @@ def test_download_failsoft_per_model(tmp_path) -> None:
             raise RuntimeError("simulated network blowup for gfs_global")
         return 20.0
 
-    report = download_u0r_extra_raw_inputs(
+    report = download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 8, 0, tzinfo=UTC), targets=_targets(),
         single_runs_fetch=_single, previous_runs_fetch=lambda **k: 19.0,
     )
-    assert report["status"] == "U0R_EXTRA_RAW_INPUTS_DOWNLOADED"
+    assert report["status"] == "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     # gfs_global single_runs dropped; others present.
     assert _count(db, endpoint="single_runs", model="gfs_global") == 0
     assert _count(db, endpoint="single_runs", model="icon_global") == 1
@@ -130,14 +130,14 @@ def test_download_failsoft_per_model(tmp_path) -> None:
 # (d) None fetch -> model simply absent (fail-soft drop, no crash)
 # =====================================================================================
 def test_download_none_fetch_drops_model(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
 
     def _single(*, model, **k):
         return None if model == "jma_seamless" else 20.0
 
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 8, 0, tzinfo=UTC), targets=_targets(),
         single_runs_fetch=_single, previous_runs_fetch=lambda **k: None,
     )
@@ -149,7 +149,7 @@ def test_download_none_fetch_drops_model(tmp_path) -> None:
 # (e) retention prune: rows older than the cutoff are deleted
 # =====================================================================================
 def test_download_prunes_old_rows(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs, RETENTION_DAYS
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs, RETENTION_DAYS
 
     db = _forecast_db(tmp_path)
     # Seed one ancient row (captured ~200d ago) and one recent row.
@@ -166,7 +166,7 @@ def test_download_prunes_old_rows(tmp_path) -> None:
     conn.commit(); conn.close()
     assert _count(db) == 1
 
-    report = download_u0r_extra_raw_inputs(
+    report = download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 8, 0, tzinfo=UTC), targets=[],
         single_runs_fetch=lambda **k: 20.0, previous_runs_fetch=lambda **k: 20.0,
     )
@@ -178,15 +178,15 @@ def test_download_prunes_old_rows(tmp_path) -> None:
 # (f) idempotent re-run: UNIQUE(model,city,target_date,metric,source_cycle_time,endpoint)
 # =====================================================================================
 def test_download_is_idempotent(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
     cycle = datetime(2026, 6, 8, 0, tzinfo=UTC)
     kwargs = dict(forecast_db=db, cycle=cycle, targets=_targets(),
                   single_runs_fetch=lambda **k: 20.0, previous_runs_fetch=lambda **k: 19.0)
-    download_u0r_extra_raw_inputs(**kwargs)
+    download_bayes_precision_fusion_extra_raw_inputs(**kwargs)
     n1 = _count(db)
-    download_u0r_extra_raw_inputs(**kwargs)  # same cycle -> no duplicate rows
+    download_bayes_precision_fusion_extra_raw_inputs(**kwargs)  # same cycle -> no duplicate rows
     n2 = _count(db)
     assert n1 == n2, "re-running the same cycle must not duplicate rows (UNIQUE upsert)"
 
@@ -195,21 +195,21 @@ def test_download_is_idempotent(tmp_path) -> None:
 # (g) FIX 1 — the ANCHOR (ecmwf_ifs) MUST be captured, else its walk-forward history is
 #     forever empty (have_anchor=False -> fusion stuck EQUAL_WEIGHT). The download set
 #     MUST include ANCHOR_MODEL, and the PERSISTED `model` column MUST be the anchor
-#     identity "ecmwf_ifs" (the key U0RHistoryProvider / capture join on), NOT the
+#     identity "ecmwf_ifs" (the key BayesPrecisionFusionHistoryProvider / capture join on), NOT the
 #     Open-Meteo model id. The OM previous-runs fetch uses the OM ECMWF id (ecmwf_ifs025),
 #     but the STORED model col = "ecmwf_ifs".
 # =====================================================================================
 def test_download_includes_anchor_and_stores_ecmwf_ifs_identity(tmp_path) -> None:
-    from src.data.u0r_multimodel_download import (
-        U0R_EXTRA_MODELS,
-        download_u0r_extra_raw_inputs,
+    from src.data.bayes_precision_fusion_download import (
+        BAYES_PRECISION_FUSION_EXTRA_MODELS,
+        download_bayes_precision_fusion_extra_raw_inputs,
     )
     from src.forecast.model_selection import ANCHOR_MODEL
 
     # The download set MUST include the anchor (ecmwf_ifs); otherwise no anchor history
     # ever accrues and the fusion can never leave EQUAL_WEIGHT.
-    assert ANCHOR_MODEL in U0R_EXTRA_MODELS, (
-        "the anchor (ecmwf_ifs) must be in the U0R capture set so its previous_runs "
+    assert ANCHOR_MODEL in BAYES_PRECISION_FUSION_EXTRA_MODELS, (
+        "the anchor (ecmwf_ifs) must be in the BAYES_PRECISION_FUSION capture set so its previous_runs "
         "history accrues -> have_anchor=True -> T2_BAYES"
     )
 
@@ -225,7 +225,7 @@ def test_download_includes_anchor_and_stores_ecmwf_ifs_identity(tmp_path) -> Non
         seen_prev_models.append(model)
         return 19.0
 
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=cycle, targets=_targets(),
         single_runs_fetch=_single, previous_runs_fetch=_previous,
     )
@@ -257,9 +257,9 @@ def test_download_includes_anchor_and_stores_ecmwf_ifs_identity(tmp_path) -> Non
 
 def _tokyo_target():
     """A city outside icon_eu/icon_d2/arome domains (Tokyo)."""
-    from src.data.u0r_multimodel_download import U0RDownloadTarget
+    from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
     return [
-        U0RDownloadTarget(city="Tokyo", metric="high", target_date="2026-06-09",
+        BayesPrecisionFusionDownloadTarget(city="Tokyo", metric="high", target_date="2026-06-09",
                           lead_days=1, latitude=35.553, longitude=139.781,
                           timezone_name="Asia/Tokyo"),
     ]
@@ -267,9 +267,9 @@ def _tokyo_target():
 
 def _paris_target():
     """A city inside all EU domains (Paris)."""
-    from src.data.u0r_multimodel_download import U0RDownloadTarget
+    from src.data.bayes_precision_fusion_download import BayesPrecisionFusionDownloadTarget
     return [
-        U0RDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
+        BayesPrecisionFusionDownloadTarget(city="Paris", metric="high", target_date="2026-06-09",
                           lead_days=1, latitude=48.967, longitude=2.428,
                           timezone_name="Europe/Paris"),
     ]
@@ -282,7 +282,7 @@ def test_domain_gate_no_request_for_regional_at_out_of_domain_city(tmp_path) -> 
     this gate prevents those requests from ever being built, making the 400 category
     structurally impossible.
     """
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
     fetched_models: list[str] = []
@@ -295,7 +295,7 @@ def test_domain_gate_no_request_for_regional_at_out_of_domain_city(tmp_path) -> 
         fetched_models.append(model)
         return 19.0
 
-    report = download_u0r_extra_raw_inputs(
+    report = download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC),
         targets=_tokyo_target(),
         single_runs_fetch=_single, previous_runs_fetch=_previous,
@@ -338,7 +338,7 @@ def test_domain_gate_all_models_fetched_for_in_domain_city(tmp_path) -> None:
 
     The gate must not over-exclude: in-domain cities should request every model.
     """
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
 
     db = _forecast_db(tmp_path)
     fetched_models: list[str] = []
@@ -350,7 +350,7 @@ def test_domain_gate_all_models_fetched_for_in_domain_city(tmp_path) -> None:
     def _previous(*, model, **k):
         return 19.0
 
-    download_u0r_extra_raw_inputs(
+    download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC),
         targets=_paris_target(),
         single_runs_fetch=_single, previous_runs_fetch=_previous,
@@ -369,7 +369,7 @@ def test_domain_gate_unavailable_global_is_loud_not_silent(tmp_path) -> None:
     This guards STEP 4: real upstream failures on global models are distinguishable
     from expected domain-exclusion absences.
     """
-    from src.data.u0r_multimodel_download import download_u0r_extra_raw_inputs
+    from src.data.bayes_precision_fusion_download import download_bayes_precision_fusion_extra_raw_inputs
     from src.forecast.model_selection import ANCHOR_MODEL
 
     db = _forecast_db(tmp_path)
@@ -379,7 +379,7 @@ def test_domain_gate_unavailable_global_is_loud_not_silent(tmp_path) -> None:
             return None  # simulate upstream unavailability
         return 20.0
 
-    report = download_u0r_extra_raw_inputs(
+    report = download_bayes_precision_fusion_extra_raw_inputs(
         forecast_db=db, cycle=datetime(2026, 6, 9, 0, tzinfo=UTC),
         targets=_paris_target(),
         single_runs_fetch=_single, previous_runs_fetch=lambda **k: 19.0,
@@ -408,7 +408,7 @@ def test_default_previous_runs_fetch_uses_om_ecmwf_id_for_anchor(monkeypatch) ->
     the anchor history fail-soft.
     """
     import src.data.openmeteo_client as om
-    from src.data.u0r_multimodel_download import _default_previous_runs_fetch
+    from src.data.bayes_precision_fusion_download import _default_previous_runs_fetch
     from src.forecast.model_selection import ANCHOR_MODEL
 
     captured: dict[str, object] = {}

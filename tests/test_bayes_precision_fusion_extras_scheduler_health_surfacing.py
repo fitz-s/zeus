@@ -1,18 +1,18 @@
 # Created: 2026-06-09
 # Last reused or audited: 2026-06-09
 # Authority basis: continuity audit 2026-06-09 — silent-death lane fix;
-#   defect: U0R extras sub-task failure was invisible at scheduler_jobs_health.json
+#   defect: BAYES_PRECISION_FUSION extras sub-task failure was invisible at scheduler_jobs_health.json
 #   (parent job showed OK while model degradation silently accumulated).
-"""Antibody: U0R extras failure surfaces to scheduler_jobs_health.json.
+"""Antibody: BAYES_PRECISION_FUSION extras failure surfaces to scheduler_jobs_health.json.
 
-Before this fix, _download_u0r_extra_raw_inputs_if_needed() returning
-{"status": "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED"} was logged at WARNING level
+Before this fix, _download_bayes_precision_fusion_extra_raw_inputs_if_needed() returning
+{"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED"} was logged at WARNING level
 only — the parent replacement_forecast_download job continued showing status=OK
 in scheduler_jobs_health.json.  An operator would not detect sustained OpenMeteo
 outages until fusion degraded visibly in production.
 
 Fix: _replacement_forecast_download_cycle() now calls _write_scheduler_health(
-"u0r_multimodel_capture", failed=True) when the extras report is FAILSOFT_SKIPPED
+"bayes_precision_fusion_capture", failed=True) when the extras report is FAILSOFT_SKIPPED
 or reports global_models_unavailable — and failed=False on a clean run.
 """
 from __future__ import annotations
@@ -60,7 +60,7 @@ def _patch_env(extras_report: dict | None, download_report=None):
         _replacement_forecast_runtime_flags_from_settings=MagicMock(return_value=_BASE_FLAGS),
         _replacement_forecast_shadow_materialization_queue_config=MagicMock(return_value=_BASE_CFG),
         _download_replacement_forecast_current_targets_if_needed=MagicMock(return_value=download_report),
-        _download_u0r_extra_raw_inputs_if_needed=MagicMock(return_value=extras_report),
+        _download_bayes_precision_fusion_extra_raw_inputs_if_needed=MagicMock(return_value=extras_report),
     )
 
 
@@ -70,8 +70,8 @@ def _patch_env(extras_report: dict | None, download_report=None):
 
 
 def test_extras_failsoft_skipped_writes_health_failed():
-    """U0R extras FAILSOFT_SKIPPED → _write_scheduler_health("u0r_multimodel_capture", failed=True)."""
-    failsoft_report = {"status": "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": "connection timeout"}
+    """BAYES_PRECISION_FUSION extras FAILSOFT_SKIPPED → _write_scheduler_health("bayes_precision_fusion_capture", failed=True)."""
+    failsoft_report = {"status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": "connection timeout"}
 
     health_calls = []
 
@@ -86,13 +86,13 @@ def test_extras_failsoft_skipped_writes_health_failed():
             fn = _get_download_cycle_fn()
             fn()
 
-    u0r_calls = [c for c in health_calls if c["job_name"] == "u0r_multimodel_capture"]
-    assert u0r_calls, "Expected _write_scheduler_health('u0r_multimodel_capture', ...) to be called"
-    assert u0r_calls[-1]["failed"] is True, (
-        f"Expected failed=True for FAILSOFT_SKIPPED; got {u0r_calls[-1]}"
+    bayes_precision_fusion_calls = [c for c in health_calls if c["job_name"] == "bayes_precision_fusion_capture"]
+    assert bayes_precision_fusion_calls, "Expected _write_scheduler_health('bayes_precision_fusion_capture', ...) to be called"
+    assert bayes_precision_fusion_calls[-1]["failed"] is True, (
+        f"Expected failed=True for FAILSOFT_SKIPPED; got {bayes_precision_fusion_calls[-1]}"
     )
-    assert "timeout" in (u0r_calls[-1]["reason"] or ""), (
-        f"Expected reason to include original error; got {u0r_calls[-1]['reason']!r}"
+    assert "timeout" in (bayes_precision_fusion_calls[-1]["reason"] or ""), (
+        f"Expected reason to include original error; got {bayes_precision_fusion_calls[-1]['reason']!r}"
     )
 
 
@@ -102,7 +102,7 @@ def test_extras_failsoft_skipped_writes_health_failed():
 
 
 def test_extras_global_models_unavailable_writes_health_failed():
-    """U0R extras global_models_unavailable → health failed=True."""
+    """BAYES_PRECISION_FUSION extras global_models_unavailable → health failed=True."""
     unavailable_report = {
         "status": "OK",
         "global_models_unavailable": ["gfs_global", "icon_global"],
@@ -121,9 +121,9 @@ def test_extras_global_models_unavailable_writes_health_failed():
             fn = _get_download_cycle_fn()
             fn()
 
-    u0r_calls = [c for c in health_calls if c["job_name"] == "u0r_multimodel_capture"]
-    assert u0r_calls, "Expected u0r_multimodel_capture health entry"
-    assert u0r_calls[-1]["failed"] is True
+    bayes_precision_fusion_calls = [c for c in health_calls if c["job_name"] == "bayes_precision_fusion_capture"]
+    assert bayes_precision_fusion_calls, "Expected bayes_precision_fusion_capture health entry"
+    assert bayes_precision_fusion_calls[-1]["failed"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -132,9 +132,9 @@ def test_extras_global_models_unavailable_writes_health_failed():
 
 
 def test_extras_clean_success_writes_health_ok():
-    """U0R extras clean success → health failed=False for u0r_multimodel_capture."""
+    """BAYES_PRECISION_FUSION extras clean success → health failed=False for bayes_precision_fusion_capture."""
     success_report = {
-        "status": "U0R_EXTRA_CAPTURED",
+        "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURED",
         "captured_count": 40,
         "global_models_unavailable": [],
     }
@@ -152,9 +152,9 @@ def test_extras_clean_success_writes_health_ok():
             fn = _get_download_cycle_fn()
             fn()
 
-    u0r_calls = [c for c in health_calls if c["job_name"] == "u0r_multimodel_capture"]
-    assert u0r_calls, "Expected u0r_multimodel_capture health entry on success"
-    assert u0r_calls[-1]["failed"] is False
+    bayes_precision_fusion_calls = [c for c in health_calls if c["job_name"] == "bayes_precision_fusion_capture"]
+    assert bayes_precision_fusion_calls, "Expected bayes_precision_fusion_capture health entry on success"
+    assert bayes_precision_fusion_calls[-1]["failed"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +163,8 @@ def test_extras_clean_success_writes_health_ok():
 
 
 def test_extras_no_targets_does_not_write_health():
-    """U0R extras U0R_EXTRA_NO_TARGETS → no health entry written (not a failure)."""
-    no_targets_report = {"status": "U0R_EXTRA_NO_TARGETS"}
+    """BAYES_PRECISION_FUSION extras BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS → no health entry written (not a failure)."""
+    no_targets_report = {"status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"}
 
     health_calls = []
 
@@ -179,9 +179,9 @@ def test_extras_no_targets_does_not_write_health():
             fn = _get_download_cycle_fn()
             fn()
 
-    u0r_calls = [c for c in health_calls if c["job_name"] == "u0r_multimodel_capture"]
-    assert not u0r_calls, (
-        "U0R_EXTRA_NO_TARGETS must NOT write a health entry (normal no-op when plan is empty)"
+    bayes_precision_fusion_calls = [c for c in health_calls if c["job_name"] == "bayes_precision_fusion_capture"]
+    assert not bayes_precision_fusion_calls, (
+        "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS must NOT write a health entry (normal no-op when plan is empty)"
     )
 
 
@@ -191,7 +191,7 @@ def test_extras_no_targets_does_not_write_health():
 
 
 def test_extras_flag_off_no_health_entry():
-    """Flag off (extras returns None) → no u0r_multimodel_capture health entry."""
+    """Flag off (extras returns None) → no bayes_precision_fusion_capture health entry."""
     health_calls = []
 
     def _fake_write_health(job_name, *, failed, reason=None, **_kw):
@@ -205,5 +205,5 @@ def test_extras_flag_off_no_health_entry():
             fn = _get_download_cycle_fn()
             fn()
 
-    u0r_calls = [c for c in health_calls if c["job_name"] == "u0r_multimodel_capture"]
-    assert not u0r_calls, "Flag-off (None return) must NOT write u0r_multimodel_capture health entry"
+    bayes_precision_fusion_calls = [c for c in health_calls if c["job_name"] == "bayes_precision_fusion_capture"]
+    assert not bayes_precision_fusion_calls, "Flag-off (None return) must NOT write bayes_precision_fusion_capture health entry"

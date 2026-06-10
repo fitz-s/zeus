@@ -6797,7 +6797,7 @@ def _live_yes_probabilities(
 
 # FIX 1 (2026-06-09) — replacement q-mode live eligibility gate. The materializer derives an
 # explicit `replacement_q_mode` into provenance_json (FUSED_NORMAL_FULL/PARTIAL,
-# SOFT_ANCHOR_FALLBACK, U0R_CAPTURE_MISSING, FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY
+# SOFT_ANCHOR_FALLBACK, BAYES_PRECISION_FUSION_CAPTURE_MISSING, FUSED_Q_BUILD_FAILED). Real submit is allowed ONLY
 # for the two fused-Normal modes (the constructed Normal shape the release evidence assumes).
 # This kills the silent-degradation category: a row that fell back to the legacy member-vote
 # soft-anchor q (or had no fusion at all) must NOT size live Kelly under the wrong probability
@@ -7151,13 +7151,13 @@ def _replacement_authority_probability_and_fdr_proof(
     # second copy of the circular "prove after-cost before trading" bureaucracy and was
     # the actual binding blocker on the live FORECAST_SNAPSHOT_READY path: with the live
     # evidence file it returned permitted=False (INSUFFICIENT_OFFICIAL_DAYS/ROWS,
-    # Q_LCB_COVERAGE_TOO_LOW, NESTED_WALK_FORWARD_NOT_PASSED) → return None → U0R silently
+    # Q_LCB_COVERAGE_TOO_LOW, NESTED_WALK_FORWARD_NOT_PASSED) → return None → BAYES_PRECISION_FUSION silently
     # degraded to the legacy canonical kernel and never traded live. Live authority is
     # now granted by the trade_authority flag (_replacement_authority_enabled, above).
     # The REAL forward risk controls remain enforced BELOW and are untouched: readiness
     # freshness (READINESS_MISSING raise), the bundle gate (BUNDLE_BLOCKED), the q_lcb
     # settlement-sigma floor (QLCB_FLOOR_MISSING — blocks, never degrades to raw Wilson),
-    # the direction law (re-derived from argmax(U0R.q) per bin), fractional Kelly, the
+    # the direction law (re-derived from argmax(BAYES_PRECISION_FUSION.q) per bin), fractional Kelly, the
     # after-cost cost floor, and RiskGuard. Overconfidence is bounded FORWARD by q_lcb +
     # fractional Kelly and judged by settlement, not by a pre-trade evidence checklist.
     import logging as _logging
