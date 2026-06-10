@@ -313,6 +313,57 @@ def _write_request(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
 
 
+# POISON-PILL IMMUNITY (2026-06-10): the materializer subprocess accesses these keys
+# unconditionally and immediately (scripts/materialize_replacement_forecast_shadow.py:163-165,
+# then 173/178/197 for the aifs input). A request file missing any of them — e.g. a
+# new_listing_scout intent stub {condition_id, enqueued_at, reason, source} — crashes the
+# subprocess with KeyError on every cycle and, because it is never removed from requests/,
+# permanently consumes a queue slot. 772 such stubs starved ALL legitimate posterior
+# production on 2026-06-10. The category antibody: validate the request schema BEFORE
+# spawning, and route an invalid file to failed/ so each bad file consumes queue budget AT
+# MOST ONCE. A malformed producer must never be able to starve the queue.
+# Authority basis: materializer queue starvation incident 2026-06-10, /tmp/materializer_collapse_report.md
+_REQUEST_REQUIRED_KEYS: tuple[str, ...] = (
+    "temperature_metric",
+    "target_date",
+    "source_cycle_time",
+)
+
+
+def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
+    """Return (ok, reason_code, detail) for a queued request file WITHOUT spawning a subprocess.
+
+    A valid materialization request always carries the minimal keys the materializer accesses
+    before any work (temperature_metric, target_date, source_cycle_time) plus one AIFS input
+    selector (aifs_samples_json or aifs_grib_path). Anything else (a scout intent stub,
+    unparseable JSON, a non-object) is poison: fail it fast so it leaves the queue at most once.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return False, "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_UNREADABLE", repr(exc)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return False, "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MALFORMED_JSON", str(exc)
+    if not isinstance(payload, dict):
+        return False, "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_NOT_OBJECT", f"top-level {type(payload).__name__}"
+    missing = [key for key in _REQUEST_REQUIRED_KEYS if not str(payload.get(key) or "").strip()]
+    if missing:
+        return (
+            False,
+            "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_REQUIRED_KEYS",
+            "missing_required_keys=" + ",".join(missing),
+        )
+    if not ("aifs_samples_json" in payload or "aifs_grib_path" in payload):
+        return (
+            False,
+            "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_AIFS_INPUT",
+            "requires aifs_samples_json or aifs_grib_path",
+        )
+    return True, "", ""
+
+
 def _prepare_seed_requests(
     *,
     seed_dir: Path | str | None,
@@ -533,6 +584,32 @@ def _process_replacement_forecast_shadow_materialization_queue_locked(
     processed: list[str] = []
     failed: list[str] = []
     for input_json in requests[:limit]:
+        # POISON-PILL GATE: validate the request schema before spawning the materializer
+        # subprocess. An invalid file (scout stub, malformed JSON, missing required keys)
+        # is moved to failed/ here, so it consumes this queue slot AT MOST ONCE and can
+        # never crash-and-stay to starve legitimate seeds. See _validate_request_payload.
+        valid, reason_code, detail = _validate_request_payload(input_json)
+        if not valid:
+            _LOG.warning(
+                "materialize[%s] rejected pre-spawn: %s (%s)",
+                input_json.name,
+                reason_code,
+                detail,
+            )
+            moved = _move_request(input_json, failed_path)
+            _write_sidecar(
+                moved,
+                {
+                    "status": "ERROR",
+                    "returncode": None,
+                    "reason_codes": [reason_code],
+                    "error": detail,
+                    "request_validated": False,
+                    "subprocess_spawned": False,
+                },
+            )
+            failed.append(str(moved))
+            continue
         command = (
             sys.executable,
             str(PROJECT_ROOT / "scripts" / "materialize_replacement_forecast_shadow.py"),

@@ -4192,7 +4192,24 @@ def _new_listing_scout_cycle() -> None:
         except Exception as exc:
             logger.warning("new_listing_scout: persist new events failed (non-fatal): %r", exc)
 
-        # (b) POSTERIOR FAST-LANE: enqueue shadow materialization for each new family
+        # (b) POSTERIOR FAST-LANE: stage a scout INTENT for each new family.
+        #
+        # CONTRACT FIX (2026-06-10): scout intents are condition_id-only stubs
+        # {source, condition_id, enqueued_at, reason}. They are NOT fully-resolved
+        # materialization request payloads (which require city, temperature_metric,
+        # target_date, source_cycle_time, aifs input, ...). Writing stubs directly into
+        # the materializer requests/ dir crashed the subprocess (KeyError) on every cycle
+        # and starved ALL legitimate posterior production (772 stubs / 4 posteriors/h on
+        # 2026-06-10 — see /tmp/materializer_collapse_report.md). Stage intents in the
+        # non-queue scout_intents/ directory instead.
+        #
+        # CONSUMED-BY TODO: the seed→request builder pipeline
+        # (src.data.replacement_forecast_seed_discovery.discover_replacement_forecast_materialization_seeds
+        # / build_replacement_forecast_current_target_plan) does NOT yet read scout_intents/.
+        # Until that consumption side is wired (resolve condition_id → city+metric+target_date
+        # via executable_market_snapshots/topology, include as a scope hint in the next seed
+        # build, then delete the consumed intent), this directory is WRITE-ONLY staging and
+        # the fast-lane latency benefit degrades gracefully to the normal 00Z/12Z wave cadence.
         try:
             from src.data.replacement_forecast_production import (
                 _replacement_forecast_shadow_materialization_queue_config,
@@ -4203,19 +4220,20 @@ def _new_listing_scout_cycle() -> None:
             queue_cfg = _replacement_forecast_shadow_materialization_queue_config()
             request_dir = queue_cfg.get("request_dir")
             if request_dir is not None:
-                request_dir = Path(str(request_dir))
-                request_dir.mkdir(parents=True, exist_ok=True)
+                # scout_intents/ is a sibling staging dir of requests/ — never the queue's input.
+                intents_dir = Path(str(request_dir)).parent / "scout_intents"
+                intents_dir.mkdir(parents=True, exist_ok=True)
                 for cid in sorted(new_cids):
-                    req_path = request_dir / f"new_listing_scout_{cid}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-                    _write_request(req_path, {
+                    intent_path = intents_dir / f"new_listing_scout_{cid}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+                    _write_request(intent_path, {
                         "source": "new_listing_scout",
                         "condition_id": cid,
                         "enqueued_at": datetime.now(timezone.utc).isoformat(),
                         "reason": "NEW_LISTING_FAST_LANE",
                     })
-                    logger.info("new_listing_scout: enqueued materialization for %s → %s", cid, req_path.name)
+                    logger.info("new_listing_scout: staged intent for %s → scout_intents/%s", cid, intent_path.name)
         except Exception as exc:
-            logger.warning("new_listing_scout: materialization enqueue failed (non-fatal): %r", exc)
+            logger.warning("new_listing_scout: intent staging failed (non-fatal): %r", exc)
 
         # (c) WARMER PRIORITY: mark new condition_ids for head-of-rotation in next warm cycle
         _NEW_FAMILY_CONDITION_IDS.update(new_cids)
