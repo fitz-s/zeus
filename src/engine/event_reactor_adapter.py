@@ -7550,6 +7550,50 @@ def _replacement_authority_probability_and_fdr_proof(
     _q_mode_eligible, _q_mode = _replacement_q_mode_live_eligibility(replacement_bundle)
     if not _q_mode_eligible:
         raise ValueError(f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#{_q_mode}")
+    # PR#403 FIX (2026-06-09) — belt-and-braces bounds presence check. The materializer now
+    # degrades FULL/PARTIAL to FUSED_NORMAL_BOUNDS_MISSING when bounds fail, so the q_mode gate
+    # above already catches new materializations. This second check catches rows materialized
+    # BEFORE the fix (which have FULL/PARTIAL mode but NULL q_lcb_json / q_ucb_json) and any
+    # future code path that might set a live-eligible mode without writing bounds.
+    #
+    # Requirement: when q_shape=="fused_normal_direct" (or grandfathered as such), the bundle
+    # MUST carry BOTH q_lcb and q_ucb as non-empty mappings AND q_lcb_basis must equal the
+    # fused-center bootstrap marker. Absent/mismatched => reject with FUSED_NORMAL_BOUNDS_MISSING.
+    #
+    # GRANDFATHERED rows (pre-bounds, q_mode="FUSED_NORMAL_GRANDFATHERED") are the hardest case:
+    # they predate bounds materialization entirely and therefore have NO q_lcb/q_ucb. They are
+    # NOT live-eligible now. That is the correct hard line: a row that sizes Kelly under fused-Normal
+    # q but uses the Wilson LCB authority of the REPLACED chain is a regime mismatch regardless of
+    # how it got there. The next materialization will write proper bounds and be admitted.
+    _prov_bounds_check = getattr(replacement_bundle, "provenance_json", None) or {}
+    _q_shape_for_bounds = str(
+        _prov_bounds_check.get("q_shape") if isinstance(_prov_bounds_check, Mapping) else ""
+    )
+    _needs_bounds = (
+        _q_shape_for_bounds == "fused_normal_direct"
+        or _q_mode == "FUSED_NORMAL_GRANDFATHERED"
+    )
+    if _needs_bounds:
+        _bundle_q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
+        _bundle_q_ucb = getattr(replacement_bundle, "q_ucb", None) or {}
+        _lcb_basis = (
+            _prov_bounds_check.get("q_lcb_basis")
+            if isinstance(_prov_bounds_check, Mapping)
+            else None
+        )
+        _bounds_ok = (
+            isinstance(_bundle_q_lcb, Mapping)
+            and bool(_bundle_q_lcb)
+            and isinstance(_bundle_q_ucb, Mapping)
+            and bool(_bundle_q_ucb)
+            and _lcb_basis == "fused_center_bootstrap_p05"
+        )
+        if not _bounds_ok:
+            raise ValueError(
+                f"REPLACEMENT_Q_MODE_NOT_LIVE_ELIGIBLE#FUSED_NORMAL_BOUNDS_MISSING"
+                f":q_shape={_q_shape_for_bounds}:q_mode={_q_mode}"
+                f":lcb_basis={_lcb_basis}"
+            )
     q_by_condition: dict[str, float] = {}
     lcb_by_direction: QlcbByDirection = QlcbByDirection()
     p_values: dict[tuple[str, str], float] = {}

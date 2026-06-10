@@ -73,6 +73,13 @@ REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
 REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK = "SOFT_ANCHOR_FALLBACK"
 REPLACEMENT_Q_MODE_U0R_CAPTURE_MISSING = "U0R_CAPTURE_MISSING"
 REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
+# PR#403 FIX (2026-06-09) — fused-q succeeded but the bounds failed. DISTINCT from
+# FUSED_Q_BUILD_FAILED (the point q is fine; only the bounds are absent). The fused-Normal
+# q point is STILL written to the DB (shadow materialization completes for accrual), but
+# live eligibility is killed. Without this a FULL/PARTIAL row with NULL q_lcb_json would be
+# live-eligible, letting buy_yes fall back to Wilson-over-AIFS-votes — exactly the two-measures
+# disease (fused-Normal q point + legacy LCB authority) that the Milan incident root-caused.
+REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING = "FUSED_NORMAL_BOUNDS_MISSING"
 
 # FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
 REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
@@ -1377,7 +1384,14 @@ def _insert_posterior(
             _floor_required_but_missing = (
                 _edli_settlement_sigma_floor_required() and not settlement_sigma_floor_applied
             )
-            if u0r_override.decorrelated_providers_complete and not _floor_required_but_missing:
+            # PR#403 FIX (2026-06-09): bounds required for live eligibility. FUSED_NORMAL_FULL/PARTIAL
+            # now REQUIRES both q_lcb_map and q_ucb_map successfully built. Bounds failure degrades
+            # to FUSED_NORMAL_BOUNDS_MISSING — the point q is fine (shadow accrual continues) but the
+            # live gate will reject this mode. This kills the two-measures disease: fused-Normal q
+            # point + Wilson LCB authority = two incompatible regimes, exactly the Milan root cause.
+            if q_lcb_map is None or q_ucb_map is None:
+                replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_BOUNDS_MISSING
+            elif u0r_override.decorrelated_providers_complete and not _floor_required_but_missing:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL
             else:
                 replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL
