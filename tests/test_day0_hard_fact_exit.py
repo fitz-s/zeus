@@ -469,3 +469,116 @@ class TestDay0ExposureCap:
         assert 0.0 < _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD <= 100.0
         cap = _day0_family_notional_cap_usd()
         assert cap is None or cap > 0.0
+
+
+# ===========================================================================
+# R20 — hard-fact exit survives monitor canonical-write failure (PR#404 P0-4)
+# ===========================================================================
+
+class TestHardFactExitDespiteCanonicalWriteFailure:
+    """Operator merge blocker 4: the hard-fact lane is settlement-authority
+    evidence — a monitor telemetry/canonical-event write failure must not
+    `continue` past it and hold a structurally dead leg another cycle."""
+
+    def _run_phase(self, monkeypatch, *, hard_fact_verdict):
+        import logging as _logging
+
+        import numpy as np
+
+        from src.contracts import EdgeContext, EntryMethod
+        from src.engine import cycle_runtime
+        from src.state.portfolio import Position, PortfolioState
+
+        monkeypatch.setenv("ZEUS_MARKET_PHASE_DISPATCH", "0")
+        pos = Position(
+            trade_id="hf_p04_001", market_id="mkt_hf", city="Tokyo",
+            cluster="East Asia", target_date="2026-06-10",
+            bin_label="25°C on June 10?", direction="buy_yes",
+            size_usd=10.0, entry_price=0.40, p_posterior=0.55, edge=0.15,
+            shares=25.0, cost_basis_usd=10.0, state="day0_window",
+            token_id="tok_yes_hf", no_token_id="tok_no_hf", unit="C", env="live",
+        )
+        portfolio = PortfolioState(positions=[pos])
+
+        class LiveClob:
+            def get_best_bid_ask(self, token_id):
+                return 0.10, 0.12, 100.0, 100.0
+
+        class Tracker:
+            def record_exit(self, position):
+                pass
+
+        def mock_refresh(conn, clob, position):
+            return EdgeContext(
+                p_raw=np.array([]), p_cal=np.array([]),
+                p_market=np.array([position.entry_price]),
+                p_posterior=position.p_posterior,
+                forward_edge=0.0, alpha=0.0,
+                confidence_band_upper=0.0, confidence_band_lower=0.0,
+                entry_provenance=EntryMethod.ENS_MEMBER_COUNTING,
+                decision_snapshot_id="snap1", n_edges_found=1, n_edges_after_fdr=1,
+                market_velocity_1h=0.0, divergence_score=0.0,
+            )
+
+        monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", mock_refresh)
+        # THE P0-4 condition: the canonical MONITOR_REFRESHED write FAILS
+        monkeypatch.setattr(
+            cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
+            lambda conn, pos, *, deps: False,
+        )
+        monkeypatch.setattr(
+            "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+            lambda *, position, city, now=None: hard_fact_verdict,
+        )
+
+        results = []
+
+        class Artifact:
+            def add_monitor_result(self, result):
+                results.append(result)
+
+        deps = type(
+            "Deps", (),
+            {
+                "MonitorResult": type(
+                    "MonitorResult", (),
+                    {"__init__": lambda self, **kw: self.__dict__.update(kw)},
+                ),
+                "logger": _logging.getLogger("test_hf_p04"),
+                "cities_by_name": {
+                    "Tokyo": type("City", (), {"timezone": "Asia/Tokyo"})()
+                },
+                "_utcnow": staticmethod(
+                    lambda: datetime(2026, 6, 10, 6, 0, tzinfo=UTC)
+                ),
+            },
+        )
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None, LiveClob(), portfolio, Artifact(), Tracker(), summary,
+            deps=deps, exit_order_submit_enabled=False,
+        )
+        return results, summary
+
+    def test_dead_bin_exits_even_when_canonical_write_fails(self, monkeypatch):
+        verdict = HardFactVerdict(
+            action="EXIT_DEAD_BIN",
+            reason="running high extreme 26.0 beyond bin [25.0,25.0] — YES structurally dead",
+            metric="high", rounded_extreme=26.0, source="metar_fast_lane",
+        )
+        results, summary = self._run_phase(monkeypatch, hard_fact_verdict=verdict)
+        assert summary.get("day0_hard_fact_exits") == 1
+        assert summary.get("day0_hard_fact_exit_despite_canonical_write_failure") == 1
+        assert summary.get("monitor_canonical_write_failed") == 1
+        exits = [r for r in results if getattr(r, "should_exit", False)]
+        assert exits, "the dead-bin exit decision must be recorded despite the write failure"
+        assert any("DAY0_HARD_FACT_BIN_DEAD" in str(getattr(r, "exit_reason", "")) for r in exits)
+        assert summary.get("exits_suppressed_no_submit", 0) >= 1  # shadow mode: decision made, no real order
+
+    def test_no_hard_fact_keeps_the_existing_failure_continue(self, monkeypatch):
+        results, summary = self._run_phase(monkeypatch, hard_fact_verdict=None)
+        assert summary.get("monitor_canonical_write_failed") == 1
+        assert summary.get("day0_hard_fact_exits") is None
+        reasons = [str(getattr(r, "exit_reason", "")) for r in results]
+        assert any("MONITOR_CANONICAL_WRITE_FAILED" in reason for reason in reasons)
+        assert not any(getattr(r, "should_exit", False) for r in results)
