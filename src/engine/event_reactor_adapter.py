@@ -5563,6 +5563,16 @@ def _generate_candidate_proofs(
     )
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
+    # FIX A (direction law; incident 0b5c305e26524042, 2026-06-10 Milan-24C;
+    # docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md): resolve the
+    # family forecast center ONCE — fusion provenance (anchor_value_c /
+    # u0r_fusion.predictive_sigma_c) when the probability authority carries it,
+    # else the q-distribution mean over the family bins (legacy/canonical rows).
+    direction_law_mu, direction_law_sigma = _direction_law_family_center(
+        family=family,
+        q_by_condition=q_by_condition,
+        probability_evidence=probability_evidence,
+    )
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
@@ -5669,6 +5679,20 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = buy_no_conservative_evidence_reason
+            # FIX A — DIRECTION LAW (operator doctrine as code): buy_yes only
+            # forecast-adjacent, buy_no only forecast-distant. Deterministic
+            # rejection BEFORE ranking/FDR/sizing; the far-tail YES the incident
+            # bought is unconstructable, not down-weighted.
+            direction_law_reason = _direction_law_reason_for_candidate(
+                candidate=candidate,
+                direction=direction,
+                mu=direction_law_mu,
+                predictive_sigma=direction_law_sigma,
+            )
+            if direction_law_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = direction_law_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A structurally non-tradeable candidate must not enter the FDR family
@@ -5679,6 +5703,7 @@ def _generate_candidate_proofs(
             if (
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
+                or direction_law_reason is not None
             ):
                 passed_prefilter = False
             proofs.append(
@@ -5719,6 +5744,101 @@ def _generate_candidate_proofs(
                 )
             )
     return tuple(proofs)
+
+
+def _direction_law_family_center(
+    *,
+    family,
+    q_by_condition: Mapping[str, float],
+    probability_evidence: Mapping[str, object],
+) -> tuple[float | None, float | None]:
+    """Resolve (mu, predictive_sigma) in the family's bin unit for the direction law.
+
+    FIX A (2026-06-10 Milan-24C incident). Provenance order (Fitz #4):
+      1. The probability authority's fused posterior center —
+         ``probability_evidence["forecast_mu_c"]`` (anchor_value_c, °C) with
+         ``forecast_predictive_sigma_c`` (u0r_fusion predictive sigma, °C),
+         converted into the bin unit.
+      2. Legacy rows without fusion: the q-distribution mean over the family bins
+         (computed natively in the bin unit; open-ended bins contribute their
+         single bound). Sigma is None — the law then uses the strictly
+         conservative 1-settlement-step threshold.
+
+    Returns (None, None) when no center is resolvable (mixed-unit families, no
+    bins, zero q mass) — the law module fail-closes buy_yes on a missing center.
+    """
+    from src.strategy.live_inference.direction_law import (
+        celsius_delta_to_unit,
+        celsius_to_unit,
+    )
+
+    units = {
+        str(candidate.bin.unit)
+        for candidate in family.candidates
+        if getattr(candidate, "bin", None) is not None
+    }
+    if len(units) != 1:
+        return (None, None)
+    unit = next(iter(units))
+    mu_c = _optional_float(probability_evidence.get("forecast_mu_c"))
+    if mu_c is not None:
+        sigma_c = _optional_float(probability_evidence.get("forecast_predictive_sigma_c"))
+        return (
+            celsius_to_unit(mu_c, unit),
+            None if sigma_c is None else celsius_delta_to_unit(sigma_c, unit),
+        )
+    total = 0.0
+    acc = 0.0
+    for candidate in family.candidates:
+        bin_obj = getattr(candidate, "bin", None)
+        if bin_obj is None:
+            continue
+        q = _optional_float(q_by_condition.get(str(candidate.condition_id or "")))
+        if q is None or q <= 0.0:
+            continue
+        low = bin_obj.low
+        high = bin_obj.high
+        if low is not None and high is not None:
+            center = (float(low) + float(high)) / 2.0
+        elif low is not None:
+            center = float(low)
+        elif high is not None:
+            center = float(high)
+        else:
+            continue
+        total += q
+        acc += q * center
+    if total <= 0.0:
+        return (None, None)
+    return (acc / total, None)
+
+
+def _direction_law_reason_for_candidate(
+    *,
+    candidate,
+    direction: str,
+    mu: float | None,
+    predictive_sigma: float | None,
+) -> str | None:
+    """Per-candidate direction-law verdict (FIX A). None = admissible.
+
+    A candidate with no bin object cannot be measured against the center; it is
+    structurally untradeable on this path anyway (bin-binding gates), so the law
+    abstains rather than inventing a distance.
+    """
+    from src.strategy.live_inference.direction_law import direction_law_rejection_reason
+
+    bin_obj = getattr(candidate, "bin", None)
+    if bin_obj is None:
+        return None
+    return direction_law_rejection_reason(
+        direction=direction,
+        bin_low=bin_obj.low,
+        bin_high=bin_obj.high,
+        bin_unit=str(bin_obj.unit),
+        mu=mu,
+        predictive_sigma=predictive_sigma,
+    )
 
 
 def _per_bin_yes_q_lcb(
@@ -7061,6 +7181,31 @@ def _replacement_anchor_mu_c(replacement_bundle: object) -> float | None:
         return None
 
 
+def _replacement_predictive_sigma_c(replacement_bundle: object) -> float | None:
+    """The fused posterior's predictive sigma (°C) from u0r_fusion provenance.
+
+    FIX A (direction law, 2026-06-10 Milan-24C incident): read from
+    ``provenance_json.u0r_fusion.predictive_sigma_c`` — the T2_BAYES fusion's own
+    predictive sigma, NOT the settlement-floored sigma (the floored ~3.3C value
+    would widen the direction-law band enough to re-admit the incident trade).
+    ``None`` when absent so the law degrades to the 1-settlement-step threshold
+    (strictly conservative).
+    """
+    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
+    if not isinstance(provenance, Mapping):
+        return None
+    fusion = provenance.get("u0r_fusion")
+    if not isinstance(fusion, Mapping):
+        return None
+    value = fusion.get("predictive_sigma_c")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _replacement_yes_lcb_for_bin(
     replacement_bundle: object,
     *,
@@ -7327,6 +7472,13 @@ def _replacement_authority_probability_and_fdr_proof(
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",
+        # FIX A (direction law; 2026-06-10 Milan-24C incident): thread the fused
+        # posterior center + predictive sigma (°C) to the proof-construction seam
+        # so candidate admission can enforce buy_yes <=> bin ~= forecast. Read
+        # UNCONDITIONALLY (not gated by the sigma-floor flag): the law needs the
+        # center whenever fusion provenance carries one.
+        "forecast_mu_c": _replacement_anchor_mu_c(replacement_bundle),
+        "forecast_predictive_sigma_c": _replacement_predictive_sigma_c(replacement_bundle),
         "posterior_id": str(replacement_bundle.posterior_id),
         "replacement_product_id": replacement_bundle.product_id,
         "p_cal_vector_hash": _probability_vector_hash(
