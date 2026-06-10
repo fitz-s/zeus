@@ -42,6 +42,18 @@ class CandidateEvaluation:
     low_volume_usd: float | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
+    # FIX C (mode-consistent EV, 2026-06-10): the per-candidate maker/taker mode
+    # decision and BOTH EVs (trade_score == the chosen mode's EV). Receipt-level
+    # provenance for the settlement loop to recalibrate p_fill_maker / the
+    # adverse-selection haircut from fill facts. None on legacy/unpriced proofs.
+    execution_mode_intent: str | None = None
+    ev_taker: float | None = None
+    ev_maker: float | None = None
+    maker_limit_price: float | None = None
+    relative_spread_at_eval: float | None = None
+    taker_forbidden_reason: str | None = None
+    maker_fill_probability: float | None = None
+    maker_fill_probability_source: str | None = None
 
     @property
     def robust_ev_per_dollar(self) -> float:
@@ -192,6 +204,14 @@ class CandidateEvaluation:
             "live_capital_efficiency_reason": self.live_capital_efficiency_reason,
             "live_buy_no_conservative_evidence_admissible": self.live_buy_no_conservative_evidence_admissible,
             "live_buy_no_conservative_evidence_reason": self.live_buy_no_conservative_evidence_reason,
+            "execution_mode_intent": self.execution_mode_intent,
+            "ev_taker": self.ev_taker,
+            "ev_maker": self.ev_maker,
+            "maker_limit_price": self.maker_limit_price,
+            "relative_spread_at_eval": self.relative_spread_at_eval,
+            "taker_forbidden_reason": self.taker_forbidden_reason,
+            "maker_fill_probability": self.maker_fill_probability,
+            "maker_fill_probability_source": self.maker_fill_probability_source,
             "robust_ev_per_dollar": self.robust_ev_per_dollar,
             "robust_kelly_fraction_lcb": self.robust_kelly_fraction_lcb,
             "robust_kelly_growth_score": self.robust_kelly_growth_score,

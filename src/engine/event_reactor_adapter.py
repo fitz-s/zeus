@@ -265,6 +265,19 @@ class _CandidateProof:
     # canonical path. Observability only — never gates selection.
     posterior_id: int | None = None
     probability_authority: str | None = None
+    # FIX C (mode-consistent EV; incident 0b5c305e26524042 / operator directive
+    # 2026-06-10): the per-candidate maker/taker mode decision and BOTH EVs travel
+    # on the proof so the receipt/settlement loop can recalibrate p_fill_maker and
+    # the adverse-selection haircut from fill facts. trade_score IS the chosen
+    # mode's EV (the taker-cost x visible-depth-p_fill hybrid is retired).
+    execution_mode_intent: str | None = None
+    ev_taker: float | None = None
+    ev_maker: float | None = None
+    maker_limit_price: float | None = None
+    relative_spread_at_eval: float | None = None
+    taker_forbidden_reason: str | None = None
+    maker_fill_probability: float | None = None
+    maker_fill_probability_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2717,6 +2730,10 @@ def _build_live_execution_command_certificates(
             best_ask=best_ask,
             executable_snapshot=executable_snapshot,
             canary_force_taker=canary_force_taker,
+            # FIX C: the spread participation guard reads the freshest book
+            # (pre-submit authority witness), never only the quote cert's copy.
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
         )
         # WALL #1 (GATE #85 follow-on, 2026-06-01): the passive-maker context is a
         # MAKER-ONLY structural input. ``FinalExecutionIntent`` only requires it when
@@ -2935,9 +2952,23 @@ def _build_live_execution_command_certificates(
             sweep_expected_fill_price=sweep_expected_fill_price,
             executable_market_context=executable_market_context,
         )
+        # FIX C: the late maker->taker EV-override re-build is subject to the SAME
+        # relative-spread participation guard as every other taker route — a wide
+        # spread forbids crossing unconditionally (the lane is guarded, not the
+        # callers).
+        from src.strategy.live_inference.mode_consistent_ev import (
+            taker_spread_guard_reason as _taker_spread_guard_reason,
+        )
+
         if (
             taker_fok_fak_live_enabled
             and final_intent.payload.get("post_only") is True
+            and _taker_spread_guard_reason(
+                fresh_best_bid,
+                fresh_best_ask,
+                max_relative_spread=_taker_max_relative_spread(),
+            )
+            is None
             and _ev_boundary_favors_cross(
                 actionable_payload=actionable.payload,
                 quote_payload=quote_payload,
@@ -3902,6 +3933,8 @@ def _select_edli_order_mode(
     executable_snapshot: DecisionCertificate,
     canary_force_taker: bool = False,
     canary_edge_floor: float | None = None,
+    fresh_best_bid: float | None = None,
+    fresh_best_ask: float | None = None,
 ) -> str:
     """Select MAKER/TAKER for the entry per design §1-§2 (governor + EV override).
 
@@ -3921,6 +3954,25 @@ def _select_edli_order_mode(
     """
     side = "BUY" if str(actionable_payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
     reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+
+    # --- 0. RELATIVE-SPREAD PARTICIPATION GUARD (FIX C; incident
+    # 0b5c305e26524042: 56% relative spread crossed as an instant FOK taker).
+    # When (ask - bid)/mid exceeds the threshold — or the two-sided book is
+    # unmeasurable — taker crossing is FORBIDDEN regardless of edge, canary, or
+    # governor: a wide spread IS the illiquidity signal, and every "edge" that
+    # wants to cross it is measured with the same model q the market is
+    # disputing. Maker resting remains allowed (the conservative default).
+    # Evaluated on the FRESHEST book the caller has (pre-submit authority
+    # witness), falling back to the quote-feasibility book.
+    from src.strategy.live_inference.mode_consistent_ev import taker_spread_guard_reason
+
+    guard_bid = fresh_best_bid if fresh_best_bid is not None else best_bid
+    guard_ask = fresh_best_ask if fresh_best_ask is not None else best_ask
+    spread_guard_reason = taker_spread_guard_reason(
+        guard_bid, guard_ask, max_relative_spread=_taker_max_relative_spread()
+    )
+    if spread_guard_reason is not None:
+        return "MAKER"
 
     # --- 1. Canary force-taker (with 5c post-cross edge floor) ---
     if canary_force_taker:
@@ -5387,6 +5439,15 @@ def _candidate_evaluation_from_proof(
         max_executable_shares=_candidate_max_executable_shares(proof),
         book_hash=_nonnull(row.get("book_hash") or row.get("executable_book_hash") or row.get("snapshot_hash")),
         low_volume_usd=_candidate_low_volume_usd(row),
+        # FIX C: mode-consistent EV provenance (chosen mode + both EVs).
+        execution_mode_intent=proof.execution_mode_intent,
+        ev_taker=proof.ev_taker,
+        ev_maker=proof.ev_maker,
+        maker_limit_price=proof.maker_limit_price,
+        relative_spread_at_eval=proof.relative_spread_at_eval,
+        taker_forbidden_reason=proof.taker_forbidden_reason,
+        maker_fill_probability=proof.maker_fill_probability,
+        maker_fill_probability_source=proof.maker_fill_probability_source,
     )
 
 
@@ -5641,13 +5702,30 @@ def _generate_candidate_proofs(
                     )
                 except ValueError as exc:
                     missing_reason = str(exc)
-            score = _robust_trade_score_from_generated_inputs(
-                q_posterior=q_value,
-                q_lcb_5pct=q_lcb,
+            # FIX C (mode-consistent EV; operator directive 2026-06-10): the
+            # trade_score is the CHOSEN execution mode's EV, never the hybrid
+            # taker-cost x visible-depth-p_fill. TAKER-chosen scores are
+            # byte-identical to the legacy kernel (same q_lcb leg, same penalty);
+            # MAKER-chosen scores price the resting reality: bid-improving limit,
+            # conservative fill prior, adverse-selection half-spread haircut.
+            mode_ev = _mode_consistent_ev_for_proof(
+                row=row,
+                direction=direction,
+                q_lcb=q_lcb,
                 execution_price=execution_price,
                 c_cost_95pct=c_cost_95pct,
                 p_fill_lcb=p_fill_lcb,
             )
+            if mode_ev is not None:
+                score = mode_ev.chosen_ev if math.isfinite(mode_ev.chosen_ev) else 0.0
+            else:
+                score = _robust_trade_score_from_generated_inputs(
+                    q_posterior=q_value,
+                    q_lcb_5pct=q_lcb,
+                    execution_price=execution_price,
+                    c_cost_95pct=c_cost_95pct,
+                    p_fill_lcb=p_fill_lcb,
+                )
             # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13 +
             # operator directive): the scalar market-disagreement buy_no demotion
             # (cheap-NO-overconfidence -> score=0) is GONE. It is SUBSUMED by the
@@ -5766,9 +5844,115 @@ def _generate_candidate_proofs(
                     # typed column / FK to forecast_posteriors(posterior_id).
                     posterior_id=_optional_int(probability_evidence.get("posterior_id")),
                     probability_authority=probability_evidence.get("probability_authority"),
+                    # FIX C: the mode decision + BOTH EVs ride the proof to the
+                    # receipt (settlement-loop recalibration provenance).
+                    execution_mode_intent=(mode_ev.chosen_mode if mode_ev is not None else None),
+                    ev_taker=(mode_ev.ev_taker if mode_ev is not None else None),
+                    ev_maker=(mode_ev.ev_maker if mode_ev is not None else None),
+                    maker_limit_price=(mode_ev.maker_limit_price if mode_ev is not None else None),
+                    relative_spread_at_eval=(mode_ev.relative_spread if mode_ev is not None else None),
+                    taker_forbidden_reason=(mode_ev.taker_forbidden_reason if mode_ev is not None else None),
+                    maker_fill_probability=(mode_ev.maker_fill_probability if mode_ev is not None else None),
+                    maker_fill_probability_source=(
+                        mode_ev.maker_fill_probability_source if mode_ev is not None else None
+                    ),
                 )
             )
     return tuple(proofs)
+
+
+def _maker_fill_probability_prior() -> tuple[float, str]:
+    """Operator-tunable resting-fill prior (edli_v1.maker_fill_probability_prior).
+
+    Defaults to the module prior (0.10, fee-study measured 10.8% resting fill
+    rate). Settings override carries its own provenance tag so the receipt
+    records WHERE the prior came from (settlement loop recalibration target).
+    """
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_FILL_PROBABILITY_PRIOR,
+        MAKER_FILL_PROBABILITY_SOURCE,
+    )
+
+    try:
+        raw = settings["edli_v1"].get("maker_fill_probability_prior")
+    except Exception:
+        raw = None
+    if raw is None:
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    if not (0.0 < value <= 1.0):
+        return MAKER_FILL_PROBABILITY_PRIOR, MAKER_FILL_PROBABILITY_SOURCE
+    return value, "settings.edli_v1.maker_fill_probability_prior"
+
+
+def _taker_max_relative_spread() -> float:
+    """Operator-tunable crossing guard (edli_v1.taker_max_relative_spread)."""
+    from src.strategy.live_inference.mode_consistent_ev import TAKER_MAX_RELATIVE_SPREAD
+
+    try:
+        value = float(settings["edli_v1"].get("taker_max_relative_spread"))
+    except Exception:
+        return TAKER_MAX_RELATIVE_SPREAD
+    if not (0.0 < value <= 2.0):
+        return TAKER_MAX_RELATIVE_SPREAD
+    return value
+
+
+def _native_side_top_of_book(row: dict[str, Any], *, direction: str) -> tuple[float | None, float | None, float]:
+    """(best_bid, best_ask, tick) for the candidate's OWN native side (S1 row)."""
+    book = _native_quote_book_from_snapshot_row(row)
+    if direction == "buy_yes":
+        asks, bids = book.yes_asks, book.yes_bids
+    else:
+        asks, bids = book.no_asks, book.no_bids
+    best_ask = min((float(level.price) for level in asks), default=None)
+    best_bid = max((float(level.price) for level in bids), default=None)
+    return best_bid, best_ask, float(book.min_tick_size)
+
+
+def _mode_consistent_ev_for_proof(
+    *,
+    row: dict[str, Any] | None,
+    direction: str,
+    q_lcb: float,
+    execution_price: ExecutionPrice | None,
+    c_cost_95pct: float | None,
+    p_fill_lcb: float,
+    penalty: float = 0.01,
+):
+    """FIX C: the per-candidate maker/taker EV decision at the evaluation seam.
+
+    Returns None for an unpriced proof (no mode decision exists; the legacy
+    quote-missing no-trade path owns it). Penalty mirrors the legacy robust
+    kernel's lambda_edge so taker-mode scores stay byte-identical to the
+    pre-fix trade_score (same q_lcb leg: c_stress == c_95 and q_lcb <= q_post
+    made the legacy min() always pick the q_lcb leg).
+    """
+    if execution_price is None or row is None or c_cost_95pct is None:
+        return None
+    from src.strategy.live_inference.mode_consistent_ev import select_mode_consistent_ev
+
+    try:
+        best_bid, best_ask, tick = _native_side_top_of_book(row, direction=direction)
+    except Exception:
+        return None
+    p_fill_maker, p_fill_maker_source = _maker_fill_probability_prior()
+    return select_mode_consistent_ev(
+        q_lcb=q_lcb,
+        taker_all_in_cost=c_cost_95pct,
+        p_fill_taker=p_fill_lcb,
+        best_bid=best_bid,
+        best_ask=best_ask,
+        tick_size=tick,
+        reservation=float(execution_price.value),
+        p_fill_maker=p_fill_maker,
+        p_fill_maker_source=p_fill_maker_source,
+        max_relative_spread=_taker_max_relative_spread(),
+        penalty=penalty,
+    )
 
 
 def _direction_law_family_center(
