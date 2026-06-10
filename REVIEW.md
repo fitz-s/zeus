@@ -129,7 +129,7 @@ look productive.
 Detailed path table at `docs/review/review_scope_map.md`. Compressed map:
 
 **Tier 0 — Live money / runtime safety / kill switch**
-- `src/execution/**` — executor, exit_triggers, exit_lifecycle, collateral,
+- `src/execution/**` — executor, exit_safety, exit_lifecycle, collateral,
   settlement_commands, wrap_unwrap_commands, fill_tracker, harvester
 - `src/venue/**` — Polymarket V2 adapter, CLOB submission, on-chain calls
 - `src/contracts/{settlement_semantics,execution_price,venue_submission_envelope,fx_classification}.py`
@@ -142,8 +142,10 @@ Detailed path table at `docs/review/review_scope_map.md`. Compressed map:
 - `bindings/zeus/safety_overrides.yaml` — loaded by `maintenance_worker/core/validator.py`; defines the forbidden-rule set at runtime
 
 **Tier 1 — Data / probability / persistence correctness**
-- `src/calibration/**` — Platt fitting, manager, replay
-- `src/signal/**` — P_raw, ensemble, MC noise, ASOS rounding
+- `src/forecast/**` — **live forecast authority (strategy of record)**: `u0r_bayes` T2 Bayesian fusion (`fuse_u0r_posterior`, `eb_bias`), walk-forward de-bias
+- `src/data/replacement_forecast_*` — replacement materializer/bundle (`_insert_posterior` owns q_mode); `src/calibration/emos.py` is the live settlement q integrator (`bin_probability_settlement`)
+- `src/calibration/**` — Extended Platt (`platt.py`) is now LEGACY BASELINE / LCB-cap calibration; manager, replay
+- `src/signal/**` — baseline P_raw (closed-form `analytic_p_raw_vector_from_maxes`), ensemble, ASOS rounding — feeds the LCB cap, not the live q
 - `src/strategy/**` — strategy_key grammar, market_phase, oracle interaction
 - `src/data/**`, `src/ingest/**` — forecast ingest, dual-track integrity
 - `src/contracts/{calibration_bins,edge_context,epistemic_context,vig_treatment,reality_contract,reality_contracts_loader,reality_verifier,provenance_registry}.py`
