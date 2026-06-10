@@ -1422,6 +1422,26 @@ def _wu_daily_dispatch() -> None:
     run_wu_daily_dispatch()
 
 
+@_scheduler_job("settlement_guard_report")
+def _settlement_guard_report_tick() -> None:
+    """Daily 守護 settlement-guard scorecard (operator-approved Phase-2 organ).
+
+    Read-only: grades every executed fill against the spine-graded VERIFIED
+    settlement truth (via grade_receipt — the ONE Direction-Law truth function),
+    computes the after-cost win-rate vs the 51% GOAL bar with a binomial CI,
+    flags SUSPEND_CANDIDATE cities (report-only), and writes:
+      - state/settlement_guard_report.json (machine)
+      - docs/evidence/settlement_guard/<date>_settlement_guard.md (human)
+    plus a one-line INFO summary the operator sees in this daemon's log daily.
+
+    Idempotent + cheap (one read-only pass over graded tables); n=0 produces an
+    honest report, never a crash. Import is local to keep src.main import-light.
+    """
+    from src.analysis.settlement_guard_report import run_settlement_guard_report
+
+    run_settlement_guard_report()
+
+
 # ---------------------------------------------------------------------------
 # F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
 # ---------------------------------------------------------------------------
@@ -8425,6 +8445,14 @@ def main():
     scheduler.add_job(
         _wu_daily_dispatch, "interval", hours=1, id="wu_daily",
         max_instances=1, coalesce=True,
+    )
+    # Daily 守護 settlement-guard scorecard — runs at 09:15 UTC, after the
+    # 07:30 forecasts tick and the hourly settlement-truth writes have landed.
+    # Read-only over graded tables; writes state/settlement_guard_report.json +
+    # docs/evidence/settlement_guard/<date>.md + a one-line INFO summary.
+    scheduler.add_job(
+        _settlement_guard_report_tick, "cron", hour=9, minute=15,
+        id="settlement_guard_report", max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER

@@ -57,6 +57,13 @@ NON_STATE_MACHINE_JOB_IDS = frozenset({
     # state-machine table and owns no cascade-liveness obligation — classed with
     # world_wal_checkpoint / heartbeat / deployment_freshness.
     "arm_gate_emit",
+    # settlement_guard_report is the daily 守護 settlement scorecard (2026-06-09):
+    # a read-only reporting pass that grades executed fills against VERIFIED
+    # settlement truth and writes state/settlement_guard_report.json + a dated
+    # markdown. It polls NO state-machine table (no *_INTENT_CREATED /
+    # *_REQUESTED rows) and owns no cascade-liveness obligation — classed with
+    # wu_daily / arm_gate_emit / world_wal_checkpoint.
+    "settlement_guard_report",
 })
 
 
