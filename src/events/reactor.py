@@ -220,6 +220,10 @@ class ReactorConfig:
 # cycle (after capture) rather than being consumed. After this many attempts without a snapshot
 # the event is dead-lettered as genuinely uncapturable.
 _EXECUTABLE_SNAPSHOT_RETRY = "RETRY_EXECUTABLE_SNAPSHOT_PENDING"
+
+# K2.1: once-per-process-per-base warning dedup for unregistered rejection-reason
+# bases (see _write_regret). Module-level so every reactor instance shares it.
+_UNREGISTERED_REJECTION_BASES_WARNED: set[str] = set()
 MAX_EXECUTABLE_SNAPSHOT_RETRIES = 8
 # Sentinel returned by _process_one when a FORECAST_SNAPSHOT_READY event has been dead-lettered
 # due to non-live-eligible window authority. The dead-letter + reject writes are done inside
@@ -896,6 +900,31 @@ class OpportunityEventReactor:
         if self._regret_ledger is None:
             return
         from src.strategy.live_inference.no_trade_regret import NoTradeRegretEvent
+
+        # K2.1 runtime sensor (consolidated overhaul 2026-06-11): every rejection
+        # reason BASE must be a declared member of the typed registry. The AST CI
+        # antibody covers literal emit sites; THIS warning covers dynamic paths —
+        # above all the dead-letter lane where str(exc) becomes the reason (raw
+        # exception text in rejection_reason is the disease the registry kills).
+        # Warn once per base per process; never block the write (truth preserved).
+        from src.contracts.rejection_reasons import (
+            base_reason,
+            is_registered_rejection_reason,
+        )
+
+        _base = base_reason(reason)
+        if not is_registered_rejection_reason(_base) and _base not in _UNREGISTERED_REJECTION_BASES_WARNED:
+            _UNREGISTERED_REJECTION_BASES_WARNED.add(_base)
+            import logging as _logging
+
+            _logging.getLogger("zeus.events.reactor").warning(
+                "UNREGISTERED_REJECTION_REASON base=%r (full=%r stage=%r): not in "
+                "src/contracts/rejection_reasons.py — register it with a category "
+                "or fix the emit site (raw exception text is never a valid reason)",
+                _base,
+                str(reason)[:200],
+                stage,
+            )
 
         payload = _payload_dict(event)
         self._regret_ledger.insert_idempotent(
