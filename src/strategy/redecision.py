@@ -1,5 +1,10 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-09
+# Audit note 2026-06-09: added SUBMIT_ABORTED_BELOW_MIN_ORDER lifecycle state +
+#   MIN_ORDER reversal reason. Antibody for the false-EDGE_REVERSED regression where
+#   a positive-edge candidate whose fractional-Kelly stake fell below the venue min
+#   order was mislabeled "edge reversed". EDGE_REVERSED now means exactly: ΔU ≤ 0 at
+#   EVERY admissible stake including min order.
 # Authority basis: "bin selection.md" §7 (state machine + reversal table +
 #   hysteresis) + §3 (reversal-type table) + §5 submit-recapture pseudocode +
 #   §6 (fallback queue rule) + §9 Hidden #7 (fallback is WATCH-only) +
@@ -94,6 +99,15 @@ class CandidateLifecycleState(StrEnum):
     SUBMIT_ABORTED_PRICE_MOVED = auto()
     SUBMIT_ABORTED_EDGE_REVERSED = auto()
     SUBMIT_ABORTED_FAMILY_REVERSED = auto()
+    # Edge is GENUINELY POSITIVE at the venue min order, but the fractional-Kelly
+    # haircut shrank the chosen stake below that min order AND it could not be bumped
+    # to min order (ΔU(min_order) ≤ 0 — impossible by definition here, so this state is
+    # only reached via the bankroll-cap guard: min_order_usd would exceed the operator
+    # single-order bankroll cap). DISTINCT from EDGE_REVERSED: this is a sizing/venue
+    # floor abort, NOT a "no edge" verdict. Keeps the regret ledger honest — a candidate
+    # with real edge that we declined for sizing reasons must never be recorded as
+    # "edge reversed". Antibody for the 2026-06-09 false-EDGE_REVERSED regression.
+    SUBMIT_ABORTED_BELOW_MIN_ORDER = auto()
 
     SUBMITTED = auto()
     ACKED = auto()
@@ -117,6 +131,7 @@ SUBMIT_ABORT_STATES: frozenset[CandidateLifecycleState] = frozenset(
         CandidateLifecycleState.SUBMIT_ABORTED_PRICE_MOVED,
         CandidateLifecycleState.SUBMIT_ABORTED_EDGE_REVERSED,
         CandidateLifecycleState.SUBMIT_ABORTED_FAMILY_REVERSED,
+        CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER,
     }
 )
 
@@ -136,6 +151,9 @@ class ReversalReason(StrEnum):
         FAMILY_RANK  — primary / fallback ordering changed (with hysteresis).
         SUBMIT       — decision candidate failed submit recapture (fail-closed).
         PORTFOLIO    — existing / pending exposure changed marginal utility.
+        MIN_ORDER    — edge positive at min order but the sized stake could not clear
+                       the venue floor within the bankroll cap (sizing abort, NOT an
+                       edge reversal). Keeps EDGE distinct from venue-floor declines.
     """
 
     FORECAST = auto()
@@ -146,6 +164,7 @@ class ReversalReason(StrEnum):
     FAMILY_RANK = auto()
     SUBMIT = auto()
     PORTFOLIO = auto()
+    MIN_ORDER = auto()
 
 
 # ---------------------------------------------------------------------------

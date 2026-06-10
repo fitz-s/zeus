@@ -1,5 +1,10 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-06-09
+# Audit note 2026-06-09: RobustCandidateScore now records ΔU at the min-order
+#   notional (delta_u_at_min_order / min_order_notional_usd) so the fractional-Kelly
+#   sizing path can distinguish a true edge reversal (ΔU ≤ 0 at every admissible
+#   stake incl. min order) from a post-haircut stake that merely fell below the
+#   venue floor. No change to the ranking objective or no-trade gate.
 # Authority basis: "bin selection.md" §3 (ΔU marginal-log-utility objective) +
 #   §5.3 (cost-curve ELG optimizer, s* = argmax_s Σ_y π_y log(A_y + R_y(s))) +
 #   §6 (best-candidate selection; why utility beats q / q-c / ROI) +
@@ -496,6 +501,15 @@ class RobustCandidateScore:
     # Non-key provenance: the ΔU evaluated at a couple of probe stakes, for
     # debugging the optimizer. Excluded from eq/hash.
     n_evals: int = field(default=0, compare=False)
+    # ΔU evaluated at the MIN-ORDER notional (the feasible lower bound ``lo``), and
+    # that notional in USD. These let the sizing path distinguish "edge reversed at
+    # EVERY admissible stake including min order" (true EDGE_REVERSED) from "edge is
+    # positive at min order but the fractional-Kelly haircut shrank the stake below
+    # the venue floor" (a BELOW_MIN_ORDER case, NOT an edge reversal). Excluded from
+    # eq/hash (pure provenance). ``delta_u_at_min_order`` is ``-inf`` when no feasible
+    # interval exists / the candidate is untradeable; ``min_order_notional_usd`` is 0.
+    delta_u_at_min_order: float = field(default=float("-inf"), compare=False)
+    min_order_notional_usd: Decimal = field(default=Decimal("0"), compare=False)
 
     @property
     def is_no_trade(self) -> bool:
@@ -593,6 +607,15 @@ def score_candidate(
     # so it is computed a single time here and reused for every probe stake.
     eff_pi = effective_outcome_pi(candidate, matrix, pi)
 
+    # ROBUST edge at the venue MIN-ORDER notional (the feasible lower bound ``lo``).
+    # Recorded so the fractional-Kelly sizing path can tell a genuine edge reversal
+    # (ΔU ≤ 0 at EVERY admissible stake INCLUDING min order) apart from "ΔU > 0 at
+    # min order but the post-optimizer haircut shrank the chosen stake below the
+    # venue floor". This is the SAME q_lcb-based π / exposure / matrix the optimizer
+    # uses (one extra avg_cost walk), so the min-order edge is robust-consistent with
+    # the optimal-stake edge — never a looser point estimate.
+    delta_u_at_min_order = _delta_u_at_stake(candidate, matrix, eff_pi, exposure, lo)
+
     best_u = float("-inf")
     best_s = Decimal("0")
     n_evals = 0
@@ -629,6 +652,8 @@ def score_candidate(
             optimal_stake_usd=Decimal("0"),
             no_trade_reason="robust marginal expected log utility <= 0 (§13)",
             n_evals=n_evals,
+            delta_u_at_min_order=delta_u_at_min_order,
+            min_order_notional_usd=lo,
         )
 
     return RobustCandidateScore(
@@ -637,6 +662,8 @@ def score_candidate(
         optimal_stake_usd=best_s,
         no_trade_reason="",
         n_evals=n_evals,
+        delta_u_at_min_order=delta_u_at_min_order,
+        min_order_notional_usd=lo,
     )
 
 
