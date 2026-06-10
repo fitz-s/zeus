@@ -192,9 +192,35 @@ def active_day0_anomalies() -> dict[tuple[str, str], str]:
         return {key: record.detail for key, record in _REGISTRY.items()}
 
 
+#: Quarantined-print observability (adversarial review fix 4): counts per
+#: (city, target_date). Quarantine is NOT a pause — it excludes single prints
+#: pending corroboration; the counter gives the anomaly surface visibility.
+_QUARANTINE_COUNTS: dict[tuple[str, str], int] = {}
+_QUARANTINE_LOCK = threading.Lock()
+
+
+def note_metar_quarantine(city: str, target_date: str, *, detail: str) -> None:
+    """Record (and loudly log) a quarantined METAR print for observability."""
+    key = (str(city), str(target_date))
+    with _QUARANTINE_LOCK:
+        _QUARANTINE_COUNTS[key] = _QUARANTINE_COUNTS.get(key, 0) + 1
+        count = _QUARANTINE_COUNTS[key]
+    logger.warning(
+        "DAY0_METAR_QUARANTINE city=%s target_date=%s count=%d detail=%s",
+        city, target_date, count, detail,
+    )
+
+
+def metar_quarantine_counts() -> dict[tuple[str, str], int]:
+    with _QUARANTINE_LOCK:
+        return dict(_QUARANTINE_COUNTS)
+
+
 def _reset_registry_for_tests() -> None:
     with _REGISTRY_LOCK:
         _REGISTRY.clear()
+    with _QUARANTINE_LOCK:
+        _QUARANTINE_COUNTS.clear()
 
 
 #: WU live-API anomaly checks are throttled per city (the comparison only

@@ -240,6 +240,104 @@ class FastObsExtremes:
     last_receipt_time: Optional[datetime]
     sample_count: int
     skipped_unit_law: int
+    quarantined_implausible: int = 0
+
+
+# --- METAR PLAUSIBILITY BOUND (adversarial review 2026-06-10 fix 4) ----------
+# One corrupt/spoofed METAR value must not permanently ratchet the monotone
+# running extreme (emission is irreversible by design). Two checks, applied
+# BEFORE extremes are computed:
+#   1. ABSOLUTE BAND: value outside the city's monthly climatology band
+#      (config/city_monthly_bounds.json p01/p99, degC) +- a record-headroom
+#      allowance -> quarantined outright.
+#   2. SPIKE RULE: a value whose step from the previous accepted report exceeds
+#      the physical rate bound is accepted ONLY when the NEXT report
+#      corroborates it (stays within the bound of the suspect value). The
+#      LATEST report (no next yet) with an implausible step is quarantined
+#      PENDING corroboration — the next fetch cycle re-evaluates it with its
+#      successor present. Genuine frontal jumps corroborate within one report
+#      interval (~30-60 min) — bounded delay, never a permanent loss.
+# Quarantined prints are excluded from extremes (no bin-kill), counted on the
+# extremes object, WARN-logged, and reported to the oracle-anomaly module.
+_MAX_PLAUSIBLE_STEP_PER_HOUR = {"C": 10.0, "F": 18.0}
+_MIN_STEP_ALLOWANCE = {"C": 3.0, "F": 5.4}
+_CLIMATOLOGY_HEADROOM_C = 8.0
+_MIN_STEP_DT_HOURS = 1.0 / 12.0  # treat sub-5-min gaps as 5 min for the bound
+
+
+def _monthly_band_unit(city_name: str, month: int, unit: str) -> Optional[tuple[float, float]]:
+    """(lower, upper) plausibility band in the settlement unit, or None.
+
+    PROVENANCE NOTE (caught by tests; Fitz constraint #4): each
+    city_monthly_bounds.json entry carries its OWN ``unit`` field — NYC bounds
+    are already degF (p01 56.6, p99 94.0), Tokyo degC. The band must be read
+    in the ENTRY's unit and converted to the settlement unit, never assumed C.
+    """
+    try:
+        import json as _json
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[2] / "config" / "city_monthly_bounds.json"
+        model = _json.loads(path.read_text(encoding="utf-8"))
+        entry = (model.get("cities") or {}).get(str(city_name), {}).get(str(int(month)))
+        if not entry:
+            return None
+        entry_unit = str(entry.get("unit") or "C").upper()
+        headroom = _CLIMATOLOGY_HEADROOM_C if entry_unit == "C" else _CLIMATOLOGY_HEADROOM_C * 1.8
+        lo = float(entry["p01"]) - headroom
+        hi = float(entry["p99"]) + headroom
+        target = str(unit).upper()
+        if entry_unit == target:
+            return (lo, hi)
+        if entry_unit == "C" and target == "F":
+            return (lo * 9.0 / 5.0 + 32.0, hi * 9.0 / 5.0 + 32.0)
+        if entry_unit == "F" and target == "C":
+            return ((lo - 32.0) * 5.0 / 9.0, (hi - 32.0) * 5.0 / 9.0)
+        return None
+    except Exception:  # noqa: BLE001 — band unavailable -> spike rule still applies
+        return None
+
+
+def _step_exceeds(prev: tuple[datetime, float], cur: tuple[datetime, float], unit: str) -> bool:
+    dt_hours = max(_MIN_STEP_DT_HOURS, abs((cur[0] - prev[0]).total_seconds()) / 3600.0)
+    allowed = _MIN_STEP_ALLOWANCE.get(unit, 5.4) + _MAX_PLAUSIBLE_STEP_PER_HOUR.get(unit, 18.0) * dt_hours
+    return abs(cur[1] - prev[1]) > allowed
+
+
+def filter_plausible_values(
+    values: list[tuple[datetime, float, Optional[datetime]]],
+    *,
+    unit: str,
+    city_name: str,
+    month: int,
+) -> tuple[list[tuple[datetime, float, Optional[datetime]]], int]:
+    """(accepted, quarantined_count). ``values`` must be time-sorted."""
+    band = _monthly_band_unit(city_name, month, unit)
+    accepted: list[tuple[datetime, float, Optional[datetime]]] = []
+    quarantined = 0
+    for index, item in enumerate(values):
+        ts, value, receipt = item
+        if band is not None and not (band[0] <= value <= band[1]):
+            quarantined += 1
+            logger.warning(
+                "METAR_PRINT_QUARANTINED city=%s reason=climatology_band value=%.1f%s band=[%.1f,%.1f] ts=%s",
+                city_name, value, unit, band[0], band[1], ts.isoformat(),
+            )
+            continue
+        if accepted and _step_exceeds((accepted[-1][0], accepted[-1][1]), (ts, value), unit):
+            nxt = values[index + 1] if index + 1 < len(values) else None
+            corroborated = nxt is not None and not _step_exceeds((ts, value), (nxt[0], nxt[1]), unit)
+            if not corroborated:
+                quarantined += 1
+                logger.warning(
+                    "METAR_PRINT_QUARANTINED city=%s reason=%s value=%.1f%s prev=%.1f%s ts=%s",
+                    city_name,
+                    "implausible_step_pending_corroboration" if nxt is None else "isolated_spike",
+                    value, unit, accepted[-1][1], unit, ts.isoformat(),
+                )
+                continue
+        accepted.append(item)
+    return accepted, quarantined
 
 
 def running_extremes_for_local_day(
@@ -254,7 +352,8 @@ def running_extremes_for_local_day(
     Local-day membership via ZoneInfo on the report obs time (DST-correct).
     ``as_of`` truncates samples at/before that UTC instant — used by the
     oracle-anomaly detector to compare against a slower WU snapshot over the
-    SAME observation window.
+    SAME observation window. Implausible prints are quarantined (fix 4) before
+    extremes are computed — for emission AND for the anomaly comparison.
     """
     tz = ZoneInfo(str(getattr(city, "timezone")))
     unit = str(getattr(city, "settlement_unit", "F") or "F").upper()
@@ -278,23 +377,39 @@ def running_extremes_for_local_day(
         values.append((report.obs_time, value, report.receipt_time))
 
     values.sort(key=lambda item: item[0])
+    city_name = str(getattr(city, "name", ""))
+    values, quarantined = filter_plausible_values(
+        values, unit=unit, city_name=city_name, month=target.month
+    )
+    if quarantined:
+        try:
+            from src.data.day0_oracle_anomaly import note_metar_quarantine
+
+            note_metar_quarantine(
+                city_name, target.isoformat(),
+                detail=f"{quarantined} implausible METAR print(s) quarantined (station {station})",
+            )
+        except Exception:  # noqa: BLE001 — notification is best-effort
+            pass
     if not values:
         return FastObsExtremes(
-            city=str(getattr(city, "name", "")), station_id=station,
+            city=city_name, station_id=station,
             target_date=target.isoformat(), unit=unit,
             high_so_far=None, low_so_far=None, current_temp=None,
             first_obs_time=None, last_obs_time=None, last_receipt_time=None,
             sample_count=0, skipped_unit_law=skipped,
+            quarantined_implausible=quarantined,
         )
     temps = [v for _, v, _ in values]
     receipts = [r for _, _, r in values if r is not None]
     return FastObsExtremes(
-        city=str(getattr(city, "name", "")), station_id=station,
+        city=city_name, station_id=station,
         target_date=target.isoformat(), unit=unit,
         high_so_far=max(temps), low_so_far=min(temps), current_temp=temps[-1],
         first_obs_time=values[0][0], last_obs_time=values[-1][0],
         last_receipt_time=max(receipts) if receipts else None,
         sample_count=len(values), skipped_unit_law=skipped,
+        quarantined_implausible=quarantined,
     )
 
 
@@ -417,6 +532,21 @@ class Day0FastObsEmitter:
                 self._cached_reports = list(reports)
                 self._last_fetch_monotonic = now
             return list(self._cached_reports)
+
+    def latest_rounded_extreme(
+        self, city_name: str, target_date: str, metric: str
+    ) -> Optional[int]:
+        """Latest EMITTED settlement-rounded extreme for (city, date, metric).
+
+        Values here passed the full LIVE_AUTHORITY hard-fact statuses at
+        emission (settlement-faithful city, station match, local-date match,
+        unit law). Consumed by the day0 hard-fact exit lane
+        (src/execution/day0_hard_fact_exit.py) so held positions ride the same
+        ~3-9 min METAR freshness as entries. None when nothing emitted in this
+        process for the key (restart, lane disabled, city excluded).
+        """
+        with self._lock:
+            return self._last_emitted_rounded.get((str(city_name), str(target_date), str(metric)))
 
     def emit_events(
         self,

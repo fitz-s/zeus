@@ -7807,6 +7807,35 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
                 )
                 summary["monitoring_error"] = str(exc)
 
+            # Phase 2b: DAY0 resting-order cancel sweep (adversarial review
+            # 2026-06-10 fix 2 — finding 4 "standing free option"). Cancels OUR
+            # open resting ENTRY orders whose day0 bin is hard-fact dead for the
+            # order's side, or whose family is oracle-anomaly paused. Cancels
+            # only REDUCE standing risk; gated to live-submit mode because in
+            # shadow no real resting orders of ours exist (and the venue cancel
+            # is a real API call). Fail-soft.
+            if real_order_submit_enabled and bool(
+                edli_cfg.get("day0_dead_bin_order_cancel_enabled", True)
+            ):
+                try:
+                    from src.config import runtime_cities_by_name
+                    from src.execution.day0_hard_fact_exit import (
+                        cancel_day0_dead_bin_resting_entries,
+                    )
+
+                    cancelled = cancel_day0_dead_bin_resting_entries(
+                        clob=clob,
+                        conn=conn,
+                        cities_by_name=runtime_cities_by_name(),
+                    )
+                    if cancelled:
+                        summary["day0_dead_bin_orders_cancelled"] = cancelled
+                except Exception as exc:  # noqa: BLE001 — sweep is additive
+                    logger.warning(
+                        "chain_sync_and_exit_monitor: day0 dead-bin cancel sweep failed (non-fatal): %s",
+                        exc,
+                    )
+
         # INV-17 / DT#1: commit the DB transaction (monitoring state transitions) FIRST,
         # then export the derived portfolio/tracker JSON with the committed artifact id —
         # so canonical_write.detect_stale_portfolio's marker stays valid and JSON can
