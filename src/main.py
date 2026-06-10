@@ -3639,8 +3639,19 @@ def _refresh_pending_family_snapshots(
             gamma_slug_failed = 0
             gamma_slug_invalid = 0
             gamma_slug_timebox_unattempted = 0
-            gamma_attempted_family_keys: set[tuple[str, str, str]] = set()
             gamma_empty_family_keys: set[tuple[str, str, str]] = set()
+            # FDR-GATE PARSE INCIDENT FIX (2026-06-10): track HARVESTED (result
+            # actually read), not merely SUBMITTED. A future cancelled / not drained
+            # at the gamma time-box — whose HTTP often lands ~140ms LATER, since
+            # `future.cancel()` cannot stop an already-running thread — was previously
+            # counted as "attempted" yet never harvested. The match loop then reported
+            # that transient timing miss as a permanent "did not parse — bin identity
+            # unknown" verdict, pinning real families at the FDR gate forever. The
+            # terminal verdict is now restricted to keys in this set; everything else
+            # (submitted-but-un-harvested) is reported RETRYABLE so the next cycle
+            # re-fetches it. Fail-closed is preserved: a harvested-but-unmatched family
+            # still stays terminal.
+            gamma_harvested_family_keys: set[tuple[str, str, str]] = set()
 
             gamma_jobs: list[dict] = []
             for fam_city, fam_date, fam_metric in gamma_refresh_families:
@@ -3711,8 +3722,35 @@ def _refresh_pending_family_snapshots(
                     job = gamma_jobs[next_job_index]
                     next_job_index += 1
                     gamma_slug_attempted += 1
-                    gamma_attempted_family_keys.add(job["family_key"])
                     pending_futures[executor.submit(_fetch_gamma_slug, job)] = job
+
+            def _harvest_gamma_result(result: dict) -> None:
+                """Record a Gamma future's RESULT (not its mere submission).
+
+                Marking the family_key harvested here is what lets the downstream
+                match loop distinguish "we read a response and it did not match this
+                pending family" (terminal: stay at FDR gate, fail-closed) from "we
+                never got to read a response" (retryable). Without this the two were
+                conflated and every time-boxed family was reported as a hard parse
+                failure.
+                """
+                nonlocal gamma_slug_http_non_200, gamma_slug_empty
+                gamma_harvested_family_keys.add(result["family_key"])
+                if result["status"] == "http_non_200":
+                    gamma_slug_http_non_200 += 1
+                    logger.debug(
+                        "refresh_pending_family_snapshots: Gamma %s -> HTTP %s",
+                        result["slug"], result.get("status_code"),
+                    )
+                elif result["status"] == "empty":
+                    gamma_slug_empty += 1
+                    gamma_empty_family_keys.add(result["family_key"])
+                else:
+                    for event in result["events"]:
+                        event_id = event.get("id") or event.get("slug")
+                        if event_id and event_id not in raw_events_seen:
+                            raw_events_seen.add(event_id)
+                            raw_events_collected.append(event)
 
             if gamma_jobs:
                 with ThreadPoolExecutor(
@@ -3724,18 +3762,23 @@ def _refresh_pending_family_snapshots(
                         remaining = gamma_deadline - time.monotonic()
                         if remaining <= 0.0:
                             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
-                            for future in pending_futures:
-                                future.cancel()
                             logger.info(
                                 "refresh_pending_family_snapshots: Gamma time-box %.0fs hit after %d/%d "
-                                "submitted families; reserving %.1fs for CLOB capture",
+                                "submitted families; draining %d in-flight, reserving %.1fs for CLOB capture",
                                 max(0.1, gamma_deadline - (refresh_deadline - refresh_budget_s)),
                                 gamma_slug_attempted,
                                 len(gamma_jobs),
+                                len(pending_futures),
                                 snapshot_reserve_s,
                             )
                             next_job_index = len(gamma_jobs)
-                            pending_futures.clear()
+                            # FDR-GATE PARSE INCIDENT FIX (2026-06-10): break WITHOUT
+                            # cancel/clear here. The post-loop drain below harvests any
+                            # futures whose HTTP lands within the bounded grace window
+                            # (live: ~140ms after the time-box) so their bin identity is
+                            # NOT discarded and mislabeled "did not parse". Whatever is
+                            # still pending after the grace is then cancelled and left
+                            # retryable (never harvested -> never terminal).
                             break
                         try:
                             future = next(
@@ -3757,22 +3800,66 @@ def _refresh_pending_family_snapshots(
                             )
                             _submit_gamma_jobs(executor)
                             continue
-                        if result["status"] == "http_non_200":
-                            gamma_slug_http_non_200 += 1
-                            logger.debug(
-                                "refresh_pending_family_snapshots: Gamma %s -> HTTP %s",
-                                result["slug"], result.get("status_code"),
-                            )
-                        elif result["status"] == "empty":
-                            gamma_slug_empty += 1
-                            gamma_empty_family_keys.add(result["family_key"])
-                        else:
-                            for event in result["events"]:
-                                event_id = event.get("id") or event.get("slug")
-                                if event_id and event_id not in raw_events_seen:
-                                    raw_events_seen.add(event_id)
-                                    raw_events_collected.append(event)
+                        _harvest_gamma_result(result)
                         _submit_gamma_jobs(executor)
+
+                    # FDR-GATE PARSE INCIDENT FIX (2026-06-10): drain futures that are
+                    # ALREADY done but were left in pending_futures when the loop exited
+                    # via the time-box. `future.cancel()` returns False for a running
+                    # future — its worker thread keeps going and the HTTP completes a
+                    # short moment after the time-box. The prior code cleared
+                    # pending_futures without reading those landed results, discarding
+                    # perfectly parseable responses and reporting them as parse failures.
+                    # A small bounded grace lets the near-complete fetches land so their
+                    # bin identity is harvested instead of thrown away. Bounded so the
+                    # CLOB capture reserve is never consumed.
+                    if pending_futures:
+                        grace_s = max(
+                            0.0,
+                            float(os.environ.get("ZEUS_REACTOR_GAMMA_DRAIN_GRACE_SECONDS", "1.5")),
+                        )
+                        # Cap the grace at the absolute refresh deadline so draining
+                        # near-complete fetches never overruns the cycle's total
+                        # wall-clock budget; this only borrows otherwise-idle wait time.
+                        grace_deadline = min(
+                            time.monotonic() + grace_s,
+                            refresh_deadline,
+                        )
+                        # Harvest in COMPLETION order so the futures whose HTTP lands
+                        # first (live: ~140ms after the time-box) are recovered before
+                        # the grace runs out, regardless of dict iteration order.
+                        while pending_futures:
+                            remaining_grace = grace_deadline - time.monotonic()
+                            if remaining_grace <= 0.0:
+                                break
+                            try:
+                                future = next(
+                                    as_completed(
+                                        tuple(pending_futures),
+                                        timeout=remaining_grace,
+                                    )
+                                )
+                            except FuturesTimeoutError:
+                                break
+                            job = pending_futures.pop(future)
+                            try:
+                                result = future.result()
+                            except Exception as _exc:
+                                # Future raised (e.g. network error). Not harvested, so
+                                # it stays retryable next cycle.
+                                gamma_slug_failed += 1
+                                logger.debug(
+                                    "refresh_pending_family_snapshots: Gamma drain fetch failed for %s: %s",
+                                    job["slug"], _exc,
+                                )
+                                continue
+                            _harvest_gamma_result(result)
+                        # Anything still unharvested after the grace is genuinely
+                        # unresolved this cycle; cancel and leave it RETRYABLE (its
+                        # key was never added to gamma_harvested_family_keys).
+                        for future in pending_futures:
+                            future.cancel()
+                        pending_futures.clear()
 
             gamma_slug_timebox_unattempted += len(gamma_jobs) - next_job_index
 
@@ -3823,7 +3910,14 @@ def _refresh_pending_family_snapshots(
             key = _refresh_family_key(city, target_date, metric)
             ev = gamma_by_family.get(key)
             if ev is None:
-                if key in gamma_attempted_family_keys:
+                # FDR-GATE PARSE INCIDENT FIX (2026-06-10): gate the TERMINAL "did not
+                # parse — stay at FDR gate" verdict on whether the family's Gamma
+                # future was actually HARVESTED (its result read), not merely
+                # submitted. A family whose future was cancelled / not drained at the
+                # time-box was "attempted" but never harvested; reporting it as a hard
+                # parse failure pinned real families at the gate forever. Such families
+                # are now reported RETRYABLE so the next cycle re-fetches them.
+                if key in gamma_harvested_family_keys:
                     skipped_not_found += 1
                     if key in gamma_empty_family_keys:
                         logger.warning(
@@ -3839,7 +3933,7 @@ def _refresh_pending_family_snapshots(
                         )
                 else:
                     logger.info(
-                        "refresh_pending_family_snapshots: Gamma not attempted before time-box for "
+                        "refresh_pending_family_snapshots: Gamma fetch not harvested before time-box for "
                         "%s/%s/%s — family remains retryable",
                         city, target_date, metric,
                     )
@@ -4215,6 +4309,7 @@ def _new_listing_scout_cycle() -> None:
                 _replacement_forecast_shadow_materialization_queue_config,
             )
             from src.data.replacement_forecast_shadow_materialization_queue import _write_request
+            from src.contracts.replacement_pipeline_files import validate_scout_intent
             from pathlib import Path
 
             queue_cfg = _replacement_forecast_shadow_materialization_queue_config()
@@ -4225,12 +4320,19 @@ def _new_listing_scout_cycle() -> None:
                 intents_dir.mkdir(parents=True, exist_ok=True)
                 for cid in sorted(new_cids):
                     intent_path = intents_dir / f"new_listing_scout_{cid}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-                    _write_request(intent_path, {
+                    # BOUNDARY CONTRACT (2026-06-10): validate the intent stub against the
+                    # SCOUT_INTENT schema before writing. This is the producer half of the
+                    # contract that prevents the 2026-06-10 starvation category: the scout
+                    # can only emit a well-formed intent, and the intent shape is explicitly
+                    # distinct from a materialization REQUEST (the REQUEST validator rejects
+                    # exactly this shape). Authority basis: pipeline-contract project.
+                    intent = validate_scout_intent({
                         "source": "new_listing_scout",
                         "condition_id": cid,
                         "enqueued_at": datetime.now(timezone.utc).isoformat(),
                         "reason": "NEW_LISTING_FAST_LANE",
                     })
+                    _write_request(intent_path, intent.to_dict())
                     logger.info("new_listing_scout: staged intent for %s → scout_intents/%s", cid, intent_path.name)
         except Exception as exc:
             logger.warning("new_listing_scout: intent staging failed (non-fatal): %r", exc)

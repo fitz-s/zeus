@@ -633,9 +633,20 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
             )
             return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
         if name == "request_status":
-            from src.observability.status_summary import write_status
-            write_status()
-            return True, ""
+            # Single-writer principle: status_summary.json is written ONLY by the
+            # live-trading daemon (write_status / write_cycle_pulse in src/main.py).
+            # The control-plane process lacks heartbeat_supervisor + collateral_ledger
+            # config, so calling write_status() here produced a stale, misleading
+            # snapshot (heartbeat_lost / global_allow_submit=False) that oscillated
+            # with the daemon's correct writes.
+            #
+            # The daemon's write_cycle_pulse cadence keeps status_summary.json well
+            # within live_health.py's STATUS_FRESH_BUDGET_SECONDS (300 s), so this
+            # branch does not need to write anything.  Return success so callers that
+            # issue request_status get an ACK without error.
+            #
+            # Authority: status dual-writer oscillation fix 2026-06-10.
+            return True, "status_summary_written_by_daemon"
         if name == "set_strategy_gate":
             strategy = str(cmd.get("strategy") or "")
             enabled = cmd.get("enabled")
