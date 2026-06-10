@@ -6640,6 +6640,18 @@ def _live_yes_probabilities(
             decision_time=decision_time,
         )
     if event.event_type == "DAY0_EXTREME_UPDATED":
+        # Oracle anomaly guard: when the WU-vs-METAR divergence detector has flagged
+        # this family's (city, target_date), no day0 q may be built — the running
+        # extreme's truth source is suspect (sensor tampering / feed fault). Raising
+        # here converts to a deterministic no-submit receipt at the
+        # _generate_candidate_proofs ValueError boundary
+        # (LIVE_INFERENCE_INPUTS_MISSING:DAY0_ORACLE_ANOMALY_PAUSED:...).
+        from src.data.day0_oracle_anomaly import is_day0_family_paused
+
+        if is_day0_family_paused(str(family.city), str(family.target_date)):
+            raise ValueError(
+                f"DAY0_ORACLE_ANOMALY_PAUSED:{family.city}:{family.target_date}"
+            )
         generated = _canonical_probability_and_fdr_proof(
             event=event,
             payload=payload,
@@ -6656,6 +6668,7 @@ def _live_yes_probabilities(
             family=family,
             q_by_condition=q_by_condition,
             lcb_by_condition=lcb_by_condition,
+            decision_time=decision_time,
         )
         return masked_q, masked_lcb, p_values, prefilter, {
             **evidence,
@@ -9932,6 +9945,7 @@ def _apply_day0_mask_to_generated_probabilities(
     family,
     q_by_condition: dict[str, float],
     lcb_by_condition: dict[tuple[str, str], float],
+    decision_time: "datetime | None" = None,
 ) -> tuple[dict[str, float], dict[tuple[str, str], float]]:
     rounded = _optional_float(payload.get("rounded_value"))
     if rounded is None:
@@ -9956,6 +9970,58 @@ def _apply_day0_mask_to_generated_probabilities(
                 mask.append(1.0)
         else:
             raise ValueError(f"unsupported Day0 metric: {metric}")
+    # STALE-OBS BOUNDARY GUARD (day0 first-principles review 2026-06-10, charge #1).
+    # The running extreme is a monotone bound: KILLING bins with a stale extreme is
+    # always safe (the true extreme can only be further along). But a bin the stale
+    # extreme says is ALIVE may already be dead — the true extreme may have moved
+    # past its edge during the unobserved window. For bins whose survival edge lies
+    # within (plausible-move-rate x excess staleness) of the stale extreme, the
+    # dead/alive state is UNKNOWN: their buy_yes q_lcb is forced to 0.0 (no live
+    # submit). q itself is NOT changed (the masked posterior remains the honest
+    # point estimate); only the submit-licensing LCB is suppressed. Fail-closed:
+    # unparseable obs time or unknown city => maximum margin / conservative budget.
+    staleness_uncertain: list[bool] = [False] * len(list(family.candidates))
+    if _day0_stale_obs_boundary_guard_enabled():
+        from src.signal.day0_obs_latency import (
+            stale_extreme_uncertainty_margin,
+            staleness_budget_minutes,
+        )
+
+        _bins = [candidate.bin for candidate in family.candidates]
+        _unit = ""
+        for _b in _bins:
+            _unit = str(getattr(_b, "unit", "") or "")
+            if _unit:
+                break
+        if not _unit:
+            _unit = str(payload.get("settlement_unit") or "F")
+        _obs_age_min = _day0_observation_age_minutes(payload, decision_time)
+        _budget_min = staleness_budget_minutes(str(getattr(family, "city", "") or payload.get("city") or ""))
+        _margin = stale_extreme_uncertainty_margin(
+            unit=_unit, obs_age_minutes=_obs_age_min, budget_minutes=_budget_min
+        )
+        if _margin > 0.0:
+            for _index, _bin in enumerate(_bins):
+                if mask[_index] <= 0.0:
+                    continue  # already dead — kill direction is staleness-safe
+                if metric == "high":
+                    # Alive bin whose UPPER edge could already have been crossed by
+                    # the unseen true running max. Open-high shoulder cannot die.
+                    if _bin.high is not None and float(_bin.high) <= rounded + _margin:
+                        staleness_uncertain[_index] = True
+                else:  # metric == "low" (validated above)
+                    if _bin.low is not None and float(_bin.low) >= rounded - _margin:
+                        staleness_uncertain[_index] = True
+            if any(staleness_uncertain):
+                import logging as _logging
+
+                _logging.getLogger("zeus.day0_stale_obs_guard").info(
+                    "DAY0_STALE_OBS_BOUNDARY_GUARD city=%s metric=%s rounded=%s obs_age_min=%s "
+                    "budget_min=%.1f margin=%.2f%s suppressed_bins=%d/%d",
+                    getattr(family, "city", "?"), metric, rounded,
+                    "None" if _obs_age_min is None else f"{_obs_age_min:.1f}",
+                    _budget_min, _margin, _unit, sum(staleness_uncertain), len(_bins),
+                )
     from src.strategy.live_inference.inference_engine import InferenceInputs, evaluate_live_bins
 
     prior = tuple(max(q_by_condition[str(candidate.condition_id or "")], 1e-9) for candidate in family.candidates)
@@ -9993,7 +10059,9 @@ def _apply_day0_mask_to_generated_probabilities(
         _set_qlcb_provenance(
             masked_lcb_by_direction,
             (condition_id, "buy_yes"),
-            0.0 if mask[index] <= 0.0 else min(yes_lcb, q_value),
+            # STALE-OBS BOUNDARY GUARD: a bin whose dead/alive state is unknowable
+            # under the current obs staleness gets NO buy_yes submit license.
+            0.0 if (mask[index] <= 0.0 or staleness_uncertain[index]) else min(yes_lcb, q_value),
             source="FORECAST_BOOTSTRAP",
         )
         _set_qlcb_provenance(
