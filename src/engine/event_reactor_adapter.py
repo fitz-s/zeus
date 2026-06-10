@@ -1,3 +1,12 @@
+# Last reused or audited: 2026-06-10 (P0 mode-authority, operator review 2026-06-10):
+#   the FINAL command builder no longer re-selects maker/taker mode. The selected proof's
+#   PROVEN execution_mode_intent + maker_limit_price are first-class receipt fields that
+#   flow receipt -> actionable payload -> final intent certificate. _select_edli_order_mode
+#   is demoted to a VALIDATOR input (_validate_final_order_mode_or_abort): any final-stage
+#   mode change in EITHER direction (incl. the removed late EV-override TAKER re-build, and
+#   a missing/unknown mode fail-closed) aborts the typed _SubmitAbortedModeFlipped, mapped
+#   to the first-class SUBMIT_ABORTED_MODE_FLIPPED lifecycle state for a full re-rank.
+#   Authority basis: operator review 2026-06-10 P0 mode-authority.
 # Last reused or audited: 2026-06-10 (S6 PRICE_MOVED maker/taker fix: the submit-
 #   recapture gate now threads order_rests_at_admitted_price into RecaptureInputs.
 #   A resting MAKER (governor GTC/GTD) order pays its admitted limit and never chases
@@ -1120,6 +1129,18 @@ def event_bound_live_adapter_from_trade_conn(
         is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
         is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
 
+        # day0-shadow-receipt-enrichment (operator directive 2026-06-10): in
+        # day0_shadow scope a day0-lane event must NEVER submit, but the shadow
+        # receipt must still carry the FULL candidate decision content (bin_label,
+        # direction, q_live, q_lcb_5pct, trade_score, execution_mode_intent,
+        # maker_limit_price) so the comparator can analyze what day0 WOULD have done.
+        # Instead of an early bare-receipt return, we run the full decision pipeline
+        # and then FORCE a no-submit receipt that dominates ALL submit branches. The
+        # fail-closed contract of the FIX-3 scope gate is FULLY PRESERVED: this flag
+        # forces the no-submit return BEFORE any submit-eligibility branch below.
+        # Unknown event types remain a bare fail-closed rejection (NEVER run the
+        # pipeline for unknown types).
+        force_shadow = False
         if edli_live_scope == "forecast_only":
             # MAJOR 5: forecast_only is blind to observation by design
             # (src/strategy/market_phase.py authority). Any day0-lane or unknown
@@ -1152,7 +1173,9 @@ def event_bound_live_adapter_from_trade_conn(
                 )
             reject_day0_lane = is_day0_lane and day0_lane_blocked_here
             reject_unknown = not is_forecast_lane and not is_day0_lane
-            if reject_day0_lane or reject_unknown:
+            if reject_unknown:
+                # Fail-closed: an unknown event type NEVER runs the decision
+                # pipeline. Bare rejection (unchanged) under both shadow-style scopes.
                 return EventSubmissionReceipt(
                     False,
                     event.event_id,
@@ -1160,6 +1183,11 @@ def event_bound_live_adapter_from_trade_conn(
                     reason="DAY0_SCOPE_SHADOW_ONLY",
                     proof_accepted=False,
                 )
+            if reject_day0_lane:
+                # day0_shadow + day0-lane: run the full pipeline below to build the
+                # candidate proof, then force the enriched DAY0_SCOPE_SHADOW_ONLY
+                # no-submit receipt. This NEVER reaches any submit/order-build path.
+                force_shadow = True
         no_submit_receipt = build_event_bound_no_submit_receipt(
             event,
             trade_conn=trade_conn,
@@ -1176,6 +1204,37 @@ def event_bound_live_adapter_from_trade_conn(
             replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
             replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
         )
+        if force_shadow:
+            # day0-shadow-receipt-enrichment (operator directive 2026-06-10).
+            # HARD GUARANTEE 1: this return dominates ALL submit-eligibility
+            # branches below — even with real_order_submit_enabled=true and the
+            # live canary on, a day0_shadow day0-lane event can NEVER reach a
+            # submit/order-build path. The forced no-submit receipt carries the
+            # FULL candidate proof content (bin_label/direction/q_live/q_lcb_5pct/
+            # trade_score + execution_mode_intent/maker_limit_price) so the shadow
+            # comparator can analyze what day0 WOULD have done. trade_score_positive
+            # is forced False so the reactor routes this through the rejection /
+            # regret-write path (no_trade_regret_events) — the comparator's source
+            # of truth — NOT the accepted/submit path.
+            #
+            # HARD GUARANTEE 2: build_event_bound_no_submit_receipt PROVISIONALLY
+            # reserved this event's stake (portfolio_reservation.reserve) the moment
+            # the candidate passed Kelly+RiskGuard. A shadow-forced receipt must NOT
+            # consume any durable sizing state or per-cycle headroom, so we roll back
+            # that provisional reservation here. (The durable live_cap is untouched —
+            # the no-submit build never transitions live_cap; that only happens on the
+            # real submit/SUBMIT_DISABLED build paths below, which force_shadow skips.)
+            _rollback = getattr(portfolio_reservation, "rollback", None)
+            if callable(_rollback):
+                _rollback(event.event_id)
+            return dataclass_replace(
+                no_submit_receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason="DAY0_SCOPE_SHADOW_ONLY",
+                proof_accepted=False,
+                trade_score_positive=False,
+            )
         if no_submit_receipt.proof_accepted is not True or no_submit_receipt.decision_proof_bundle is None:
             return no_submit_receipt
         if real_order_submit_enabled and not live_canary_enabled:
@@ -1326,6 +1385,24 @@ def event_bound_live_adapter_from_trade_conn(
                 reason=str(exc),
                 proof_accepted=True,
             )
+        except _SubmitAbortedModeFlipped as exc:
+            # P0 mode-authority (operator review 2026-06-10): the proven proof mode is no
+            # longer executable on the fresh book (or is missing — fail-closed). This is a
+            # FIRST-CLASS deferral, not a build failure: the proof WAS valid (proof_accepted
+            # stays True), we abort this submit and let the next cycle do a full re-rank. The
+            # reason string is DERIVED from the lifecycle state machine's terminal state
+            # (single source of truth), exactly as the recapture FAMILY_REVERSED / day0-cap
+            # aborts derive theirs — so the receipt reason and the lifecycle state can never
+            # disagree. NEVER a default taker submit.
+            return dataclass_replace(
+                no_submit_receipt,
+                side_effect_status="NO_SUBMIT",
+                reason=(
+                    f"{_SUBMIT_ABORT_RECEIPT_REASON[CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED]}"
+                    f":{exc}"
+                ),
+                proof_accepted=True,
+            )
         except Exception as exc:
             return EventSubmissionReceipt(
                 False,
@@ -1388,6 +1465,10 @@ def event_bound_live_adapter_from_trade_conn(
             opportunity_book=no_submit_receipt.opportunity_book,
             replacement_forecast=no_submit_receipt.replacement_forecast,
             unit=no_submit_receipt.unit,
+            # P0 mode-authority: carry the proven proof mode + maker limit forward onto
+            # the submit-outcome receipt for settlement attribution (operator 2026-06-10).
+            execution_mode_intent=no_submit_receipt.execution_mode_intent,
+            maker_limit_price=no_submit_receipt.maker_limit_price,
         )
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
@@ -2455,6 +2536,19 @@ def build_event_bound_no_submit_receipt(
             "native_quote_available": True,
             "source_status": FORECAST_LIVE_ELIGIBLE_STATUS,
             "family_complete": True,
+            # P0 mode-authority (operator review 2026-06-10): the SELECTED proof's
+            # maker/taker mode and its maker limit price are first-class receipt fields.
+            # The recapture above PROVED these under that mode's economics
+            # (_proof_order_rests_at_admitted_price(proof)); the final command builder
+            # consumes them as the SOLE mode authority and must not re-decide. None on a
+            # proof that carries no mode_ev (legacy/priced-without-mode) — the final
+            # builder fails closed on a missing mode at the final stage.
+            "execution_mode_intent": (
+                str(proof.execution_mode_intent).strip().upper()
+                if proof.execution_mode_intent is not None
+                else None
+            ),
+            "maker_limit_price": proof.maker_limit_price,
         }
     )
     # Stake-floor provenance (2026-06-09 min-order fix): record when the chosen stake
@@ -2629,6 +2723,11 @@ def _event_submission_receipt_from_typed_receipt_payload(
         opportunity_book=raw_receipt.get("opportunity_book"),
         replacement_forecast=raw_receipt.get("replacement_forecast"),
         unit=raw_receipt.get("unit"),
+        # P0 mode-authority (operator review 2026-06-10): the proven proof mode + maker
+        # limit price travel as first-class receipt fields end-to-end so the final
+        # command builder validates (never re-decides) against the proven mode.
+        execution_mode_intent=raw_receipt.get("execution_mode_intent"),
+        maker_limit_price=_optional_float(raw_receipt.get("maker_limit_price")),
     )
 
 
@@ -2667,6 +2766,71 @@ def _build_submit_disabled_live_certificates(
         decision_time=decision_time,
     )
     return command_certificates + (receipt_cert, transition_cert)
+
+
+# Sentinel prefix the caller (process_pending submit body) recognizes to map a
+# final-stage mode-flip to the first-class SUBMIT_ABORTED_MODE_FLIPPED lifecycle
+# state instead of the generic EDLI_LIVE_CERTIFICATE_BUILD_FAILED. The single
+# source of truth for the reason string is _SUBMIT_ABORT_RECEIPT_REASON keyed on
+# CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED.
+_MODE_FLIPPED_ABORT_PREFIX = "SUBMIT_ABORTED_MODE_FLIPPED"
+
+
+class _SubmitAbortedModeFlipped(ValueError):
+    """Typed final-stage abort: the proven proof mode is no longer executable.
+
+    P0 mode-authority (operator review 2026-06-10). The selected proof's maker/taker
+    ``execution_mode_intent`` was PROVEN through submit recapture under that mode's
+    economics (a MAKER rests at the admitted limit with zero taker fee and skips the
+    PRICE_MOVED ceiling; a TAKER pays full fee under the bounded ceiling). The final
+    command builder may NOT re-decide the mode. If the FRESH book / governor / canary /
+    EV boundary would change it — in EITHER direction (MAKER->TAKER or TAKER->MAKER) —
+    the proven economics are stale: raise so the submit aborts and the next cycle does a
+    FULL re-rank rather than submitting under an unproven mode.
+
+    Subclasses ValueError so it propagates through the existing ``except Exception``
+    submit boundary; the caller maps it to the first-class SUBMIT_ABORTED_MODE_FLIPPED
+    receipt by matching :data:`_MODE_FLIPPED_ABORT_PREFIX`.
+    """
+
+
+def _validate_final_order_mode_or_abort(
+    *,
+    proof_mode: str | None,
+    fresh_mode: str,
+    fresh_best_bid: float | None,
+    fresh_best_ask: float | None,
+) -> str:
+    """VALIDATOR (not a re-selector): confirm the proven proof mode still holds.
+
+    P0 mode-authority (operator review 2026-06-10, fix requirement #2). The fresh-book
+    ``fresh_mode`` (from :func:`_select_edli_order_mode`) is used ONLY to validate that the
+    proven ``proof_mode`` is still executable — never to silently flip the order. Behavior:
+
+    * proof_mode present and EQUAL to fresh_mode  -> return proof_mode (proceed, no flip).
+    * proof_mode present and DIFFERENT             -> raise _SubmitAbortedModeFlipped (both
+      directions: MAKER->TAKER and TAKER->MAKER abort; NO inline flip in either direction).
+    * proof_mode MISSING / unknown at this stage   -> FAIL CLOSED: raise (treat as unproven;
+      never default to a taker submit).
+
+    Returns the validated proof mode (normalized upper-case) on success so the caller uses
+    the PROVEN mode for the final intent, not the re-decided fresh mode.
+    """
+    _proof = str(proof_mode or "").strip().upper() or None
+    _fresh = str(fresh_mode or "").strip().upper() or None
+    if _proof not in {"MAKER", "TAKER"}:
+        # Fail-closed: a missing/unknown proven mode at the final stage is unproven.
+        raise _SubmitAbortedModeFlipped(
+            f"{_MODE_FLIPPED_ABORT_PREFIX}:proof_mode={_proof}:fresh_mode={_fresh}:"
+            f"reason=MISSING_OR_UNKNOWN_PROOF_MODE:"
+            f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
+        )
+    if _proof != _fresh:
+        raise _SubmitAbortedModeFlipped(
+            f"{_MODE_FLIPPED_ABORT_PREFIX}:proof_mode={_proof}:fresh_mode={_fresh}:"
+            f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
+        )
+    return _proof
 
 
 def _build_live_execution_command_certificates(
@@ -2756,7 +2920,24 @@ def _build_live_execution_command_certificates(
         fresh_best_ask = float(authority_witness.current_best_ask)
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
-        order_mode = _select_edli_order_mode(
+        # P0 mode-authority (operator review 2026-06-10, fix requirement #1+#2): the
+        # final command builder must NOT re-SELECT the mode. _select_edli_order_mode is
+        # demoted to a VALIDATOR input: it re-derives the fresh-book mode ONLY so
+        # _validate_final_order_mode_or_abort can confirm the PROVEN proof mode is still
+        # executable. The PROVEN mode (receipt.execution_mode_intent → actionable payload)
+        # is the SOLE authority that drives the final intent build below.
+        #
+        # The proof's execution_mode_intent was computed at candidate-generation on the
+        # snapshot book AND proven through submit recapture under that mode's economics
+        # (zero taker fee + skipped PRICE_MOVED ceiling for MAKER; full fee + ceiling for
+        # TAKER). If the fresh book / governor / canary / EV boundary would change the
+        # mode — in EITHER direction (MAKER->TAKER and TAKER->MAKER) — those proven
+        # economics are stale: abort SUBMIT_ABORTED_MODE_FLIPPED so the next cycle does a
+        # FULL re-rank rather than submitting under an unproven mode. NO inline flip.
+        #
+        # Fail-closed: a missing/unknown proven mode at the final stage is treated as
+        # unproven and ALSO aborts here (never a default taker submit).
+        _fresh_mode = _select_edli_order_mode(
             actionable_payload=actionable.payload,
             quote_payload=quote_payload,
             best_bid=best_bid,
@@ -2768,27 +2949,12 @@ def _build_live_execution_command_certificates(
             fresh_best_bid=fresh_best_bid,
             fresh_best_ask=fresh_best_ask,
         )
-        # P0-A (2026-06-10): mode-flip guard. The proof's execution_mode_intent was
-        # computed at candidate-generation on the snapshot book; the fresh book at
-        # submit time may have changed enough to flip MAKER↔TAKER.  A flip means the
-        # economics the ΔU ranker chose (EV_maker vs EV_taker, maker_limit_price,
-        # spread guard result) are stale — the current cycle must re-evaluate from
-        # scratch rather than submit under the wrong mode.  Outcome: no-submit this
-        # cycle; the event re-queues and re-evaluates on the next pulse.
-        #
-        # When the proof has no mode (legacy path / priced-but-no-mode_ev): skip the
-        # check — we have no baseline to compare against (no-op for backward compat).
-        # When proof mode == fresh mode: consistent, proceed as before.
-        # When proof mode != fresh mode: abort deterministically (not a ValueError
-        # that looks like an infra error — a typed raise that the caller maps to a
-        # no-submit receipt with SUBMIT_ABORTED_MODE_FLIPPED).
-        _proof_mode = str(actionable.payload.get("proof_execution_mode_intent") or "").strip().upper() or None
-        if _proof_mode is not None and _proof_mode != str(order_mode).strip().upper():
-            raise ValueError(
-                f"SUBMIT_ABORTED_MODE_FLIPPED:"
-                f"proof_mode={_proof_mode}:fresh_mode={order_mode}:"
-                f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
-            )
+        order_mode = _validate_final_order_mode_or_abort(
+            proof_mode=str(actionable.payload.get("proof_execution_mode_intent") or "") or None,
+            fresh_mode=_fresh_mode,
+            fresh_best_bid=fresh_best_bid,
+            fresh_best_ask=fresh_best_ask,
+        )
         # WALL #1 (GATE #85 follow-on, 2026-06-01): the passive-maker context is a
         # MAKER-ONLY structural input. ``FinalExecutionIntent`` only requires it when
         # ``order_policy == "post_only_passive_limit"`` (execution_intent.py:1735); a
@@ -3006,10 +3172,21 @@ def _build_live_execution_command_certificates(
             sweep_expected_fill_price=sweep_expected_fill_price,
             executable_market_context=executable_market_context,
         )
-        # FIX C: the late maker->taker EV-override re-build is subject to the SAME
-        # relative-spread participation guard as every other taker route — a wide
-        # spread forbids crossing unconditionally (the lane is guarded, not the
-        # callers).
+        # P0 mode-authority (operator review 2026-06-10, fix requirement #2): the former
+        # late maker->taker EV-override RE-BUILD lived HERE and unconditionally re-built the
+        # final intent as TAKER whenever the freshly-built (proven-MAKER) intent was post_only
+        # and the FRESH-book EV boundary favored crossing. That was a SECOND independent mode
+        # decision that bypassed the proof-mode validator above — the exact MAKER->TAKER flip
+        # this P0 forbids (a maker that never cleared TAKER recapture full-fee/PRICE_MOVED
+        # entered the taker submit path).
+        #
+        # The flip is REMOVED. The mode is now decided ONCE — by
+        # _validate_final_order_mode_or_abort against the proven proof mode. If the fresh book
+        # makes crossing newly attractive for a proven-MAKER candidate, that is a mode flip:
+        # _select_edli_order_mode would have returned TAKER (its EV-override leg) and the
+        # validator would already have aborted SUBMIT_ABORTED_MODE_FLIPPED for a full re-rank.
+        # We therefore FAIL CLOSED here: a proven-MAKER post_only intent that the fresh-book EV
+        # boundary now wants to cross is an abort, never an inline re-build to taker.
         from src.strategy.live_inference.mode_consistent_ev import (
             taker_spread_guard_reason as _taker_spread_guard_reason,
         )
@@ -3032,25 +3209,11 @@ def _build_live_execution_command_certificates(
                 side=str(actionable.payload.get("side") or "BUY"),
             )
         ):
-            final_intent = build_final_intent_certificate_from_actionable(
-                actionable_cert=actionable,
-                executable_snapshot_cert=executable_snapshot,
-                quote_feasibility_cert=quote_feasibility,
-                cost_model_cert=cost_model,
-                forecast_authority_cert=forecast_authority,
-                decision_source_context=forecast_authority.payload,
-                passive_maker_context=None,
-                decision_time=decision_time,
-                order_mode="TAKER",
-                tick_size=str(_snap_for_depth.min_tick_size) if _snap_for_depth is not None else _required_bound_tick_size(_snap_for_depth, executable_snapshot.payload),
-                min_order_size=_float_or_default(executable_snapshot.payload.get("min_order_size"), 1.0),
-                best_bid=fresh_best_bid,
-                best_ask=fresh_best_ask,
-                    taker_fok_fak_live_enabled=taker_fok_fak_live_enabled,
-                    available_crossable_shares=available_crossable_shares,
-                    sweep_expected_fill_price=sweep_expected_fill_price,
-                    executable_market_context=executable_market_context,
-                )
+            raise _SubmitAbortedModeFlipped(
+                f"{_MODE_FLIPPED_ABORT_PREFIX}:proof_mode={order_mode}:"
+                f"fresh_mode=TAKER:reason=FRESH_BOOK_EV_FAVORS_CROSS_FOR_PROVEN_MAKER:"
+                f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
+            )
         already_locked_reason = _locked_live_opportunity_no_price_improvement_reason(
             live_cap_conn,
             condition_id=str(final_intent.payload["condition_id"]),
@@ -3245,9 +3408,23 @@ def _actionable_payload_from_receipt(
     target_date = receipt.target_date or _event_identity_value(event, "target_date")
     metric = receipt.metric or _event_identity_value(event, "metric") or _event_identity_value(event, "temperature_metric")
     # P0-A (2026-06-10): thread the proof-time mode fields into the actionable
-    # payload so the final-command builder can compare proof mode vs fresh mode
-    # and emit SUBMIT_ABORTED_MODE_FLIPPED on disagreement.
-    proof_mode_fields = _selected_candidate_mode_fields_from_receipt(receipt)
+    # payload so the final-command builder can VALIDATE the proven mode vs the fresh
+    # mode and abort SUBMIT_ABORTED_MODE_FLIPPED on disagreement.
+    #
+    # AUTHORITY ORDER (operator review 2026-06-10 P0 mode-authority, Fitz #4 provenance):
+    # the receipt's first-class execution_mode_intent / maker_limit_price are the SOLE
+    # authority — they were PROVEN through submit recapture under that mode's economics.
+    # The opportunity-book sibling fields (ev_taker/ev_maker/taker_forbidden_reason/...) are
+    # carried for observability but the MODE itself is taken from the receipt field, not the
+    # book back-channel. The receipt field overrides any book value for proof_execution_mode_intent
+    # / proof_maker_limit_price so the final-stage validator can never disagree with the proven mode.
+    proof_mode_fields = dict(_selected_candidate_mode_fields_from_receipt(receipt))
+    if receipt.execution_mode_intent is not None:
+        proof_mode_fields["proof_execution_mode_intent"] = (
+            str(receipt.execution_mode_intent).strip().upper()
+        )
+    if receipt.maker_limit_price is not None:
+        proof_mode_fields["proof_maker_limit_price"] = receipt.maker_limit_price
     return {
         "event_id": receipt.event_id,
         "event_type": event.event_type if event is not None else None,
@@ -6717,6 +6894,11 @@ _SUBMIT_ABORT_RECEIPT_REASON: dict[CandidateLifecycleState, str] = {
     # PR#404 P0-1 — first-class day0 exposure-cap aborts (operator-named reasons).
     CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED: "DAY0_EXPOSURE_CAP_EXHAUSTED",
     CandidateLifecycleState.SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER: "DAY0_EXPOSURE_CAP_BELOW_MIN_ORDER",
+    # P0 mode-authority (operator review 2026-06-10) — the FINAL command builder's proven
+    # maker/taker mode is no longer executable on the fresh book (or is missing,
+    # fail-closed). Distinct from FAMILY_REVERSED / PRICE_MOVED / EDGE_REVERSED: this is
+    # the order-TYPE proof going stale. The submit aborts and defers to a full re-rank.
+    CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED: "SUBMIT_ABORTED_MODE_FLIPPED",
 }
 
 
@@ -7385,13 +7567,14 @@ _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE = frozenset(
 def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bool, str]:
     """Return (live_eligible, mode) for a replacement posterior bundle. Fail-closed.
 
-    Reads provenance_json.replacement_q_mode. Eligible ONLY for the two fused-Normal modes.
+    Reads provenance_json.replacement_q_mode. Eligible ONLY for the two fused-Normal modes
+    (FUSED_NORMAL_FULL / FUSED_NORMAL_PARTIAL). No grandfather clause.
 
-    GRANDFATHERING: pre-change live rows (the 67 already in the DB) have NO replacement_q_mode key
-    but were built with q_shape=="fused_normal_direct" (the constructed fused-Normal shape) — those
-    are treated as a fused-Normal mode so this change does not brick them; the next materialization
-    adds the explicit key. A row with NO mode key AND q_shape != "fused_normal_direct" is the legacy
-    member-vote soft-anchor shape and is NOT live-eligible (fail-closed).
+    GRANDFATHER REVOKED (operator directive 2026-06-10 P0): the former q_shape=="fused_normal_direct"
+    grandfather branch that returned (True, "FUSED_NORMAL_GRANDFATHERED") has been DELETED. Old DB
+    rows with no replacement_q_mode key and q_shape=="fused_normal_direct" are NOT live-eligible —
+    they have no bounds and would size Kelly under fused-Normal q + Wilson/AIFS q_lcb (two-measures
+    disease, root cause of the Milan wrong order). Those rows must rematerialize to get proper bounds.
     """
     provenance = getattr(replacement_bundle, "provenance_json", None)
     if not isinstance(provenance, Mapping):
@@ -7399,10 +7582,10 @@ def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bo
     mode = provenance.get("replacement_q_mode")
     if isinstance(mode, str) and mode:
         return (mode in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE, mode)
-    # No explicit mode key: grandfather only the constructed fused-Normal shape.
+    # No explicit mode key: reject regardless of q_shape (no grandfather).
     q_shape = str(provenance.get("q_shape") or "")
     if q_shape == "fused_normal_direct":
-        return (True, "FUSED_NORMAL_GRANDFATHERED")
+        return (False, "FUSED_NORMAL_GRANDFATHER_REVOKED")
     return (False, "NO_Q_MODE_KEY")
 
 
@@ -7800,23 +7983,19 @@ def _replacement_authority_probability_and_fdr_proof(
     # BEFORE the fix (which have FULL/PARTIAL mode but NULL q_lcb_json / q_ucb_json) and any
     # future code path that might set a live-eligible mode without writing bounds.
     #
-    # Requirement: when q_shape=="fused_normal_direct" (or grandfathered as such), the bundle
-    # MUST carry BOTH q_lcb and q_ucb as non-empty mappings AND q_lcb_basis must equal the
-    # fused-center bootstrap marker. Absent/mismatched => reject with FUSED_NORMAL_BOUNDS_MISSING.
+    # Requirement: when q_shape=="fused_normal_direct" the bundle MUST carry BOTH q_lcb and q_ucb
+    # as non-empty mappings AND q_lcb_basis must equal the fused-center bootstrap marker.
+    # Absent/mismatched => reject with FUSED_NORMAL_BOUNDS_MISSING.
     #
-    # GRANDFATHERED rows (pre-bounds, q_mode="FUSED_NORMAL_GRANDFATHERED") are the hardest case:
-    # they predate bounds materialization entirely and therefore have NO q_lcb/q_ucb. They are
-    # NOT live-eligible now. That is the correct hard line: a row that sizes Kelly under fused-Normal
-    # q but uses the Wilson LCB authority of the REPLACED chain is a regime mismatch regardless of
-    # how it got there. The next materialization will write proper bounds and be admitted.
+    # NOTE: grandfathered rows (q_shape="fused_normal_direct", no mode key) are now rejected by the
+    # FIRST gate above with FUSED_NORMAL_GRANDFATHER_REVOKED (operator directive 2026-06-10 P0).
+    # The `_q_mode == "FUSED_NORMAL_GRANDFATHERED"` branch has been removed — it can never be
+    # reached. The second gate still covers FULL/PARTIAL rows with absent bounds (pre-PR#403 rows).
     _prov_bounds_check = getattr(replacement_bundle, "provenance_json", None) or {}
     _q_shape_for_bounds = str(
         _prov_bounds_check.get("q_shape") if isinstance(_prov_bounds_check, Mapping) else ""
     )
-    _needs_bounds = (
-        _q_shape_for_bounds == "fused_normal_direct"
-        or _q_mode == "FUSED_NORMAL_GRANDFATHERED"
-    )
+    _needs_bounds = _q_shape_for_bounds == "fused_normal_direct"
     if _needs_bounds:
         _bundle_q_lcb = getattr(replacement_bundle, "q_lcb", None) or {}
         _bundle_q_ucb = getattr(replacement_bundle, "q_ucb", None) or {}

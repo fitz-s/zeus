@@ -728,11 +728,17 @@ state_machines:
       - SUBMIT_ABORTED_BELOW_MIN_ORDER
       - SUBMIT_ABORTED_DAY0_CAP_EXHAUSTED
       - SUBMIT_ABORTED_DAY0_CAP_BELOW_MIN_ORDER
+      # 2026-06-10 P0 mode-authority: the final command builder may NOT re-decide
+      # maker/taker mode. The proven proof execution_mode_intent flows to the final
+      # intent; any final-stage mode change (incl. missing/unknown mode, fail-closed)
+      # is a first-class abort that defers to a full re-rank next cycle.
+      - SUBMIT_ABORTED_MODE_FLIPPED
       - PARTIAL_FILL
     invariant_tests:
       - tests/test_exit_family_optimizer.py
       - tests/test_stake_min_order_not_edge_reversed.py
       - tests/test_day0_exposure_cap_kernel.py
+      - tests/engine/test_final_submit_mode_authority.py
 
   reversal_reason:
     owner: src/strategy/redecision.py
@@ -741,11 +747,15 @@ state_machines:
       taxonomy). SUBMIT means the candidate failed submit recapture (fail-closed).
       MIN_ORDER: edge positive at min order but the sized stake could not clear it.
       DAY0_CAP: the per-family day0 notional cap bounded the feasible stake.
+      MODE_FLIPPED: the final-submit maker/taker mode no longer matches the proven
+      proof execution_mode_intent (2026-06-10 P0 mode-authority); first-class
+      order-TYPE reversal, distinct from FAMILY_RANK / EDGE / PRICE.
       Not a venue command state; lives entirely in the redecision strategy layer.
     states:
       - SUBMIT
       - MIN_ORDER
       - DAY0_CAP
+      - MODE_FLIPPED
 
   replacement_q_mode:
     owner: src/data/replacement_forecast_materializer.py
@@ -764,6 +774,7 @@ state_machines:
       - FUSED_NORMAL_FULL
       - FUSED_NORMAL_PARTIAL
       - FUSED_NORMAL_BOUNDS_MISSING
+      - FUSED_NORMAL_GRANDFATHER_REVOKED
       - SOFT_ANCHOR_FALLBACK
       - U0R_CAPTURE_MISSING
       - FUSED_Q_BUILD_FAILED

@@ -178,6 +178,15 @@ class EventSubmissionReceipt:
     # so existing-row hashes stay byte-stable).
     posterior_id: int | None = None
     probability_authority: str | None = None
+    # P0 mode-authority (operator review 2026-06-10): the selected proof's maker/taker
+    # execution_mode_intent and its maker limit price are FIRST-CLASS receipt fields, not
+    # opportunity-book decoration. They are PROVEN through submit recapture under that
+    # mode's economics and are the SOLE mode authority for the final command builder, which
+    # must NOT re-decide the mode. None on legacy / non-priced receipts. The final builder
+    # fails closed (SUBMIT_ABORTED_MODE_FLIPPED) when this is missing at the final stage —
+    # an unproven mode never defaults to a taker submit.
+    execution_mode_intent: str | None = None
+    maker_limit_price: float | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
