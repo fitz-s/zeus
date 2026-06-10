@@ -537,3 +537,174 @@ class TestEmpiricalThresholds:
         threshold, provenance = divergence_threshold_for_city("NYC", "F")
         assert provenance == "empirical" and threshold == pytest.approx(1.0)
         assert 1.4 > threshold  # would NOT have exceeded the old 1.5F guess
+
+
+# ===========================================================================
+# R19 — source-failure discipline + mutex/no-HTTP split (PR#404 P0-2 / P0-3)
+# ===========================================================================
+
+class TestFetchFailureDiscipline:
+    """PR#404 P0-3: a fetch failure after a populated cache must (a) arm the
+    failure throttle (no tight retry storm), (b) serve the old cache ONLY with
+    an explicit stale status, and (c) never emit live-authority events from a
+    cache older than the city's staleness budget."""
+
+    def _emitter_with_cache(self, reports, interval=300.0):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        calls = {"n": 0}
+
+        def fetcher(stations, **kw):
+            calls["n"] += 1
+            return list(reports) if calls["n"] == 1 else []
+
+        emitter = Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=interval)
+        return emitter, calls
+
+    def test_failure_serves_stale_with_explicit_status_and_throttles(self):
+        from src.data.day0_fast_obs import (
+            FETCH_CACHE_HIT,
+            FETCH_FRESH,
+            FETCH_STALE_AFTER_FAILURE,
+        )
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        emitter, calls = self._emitter_with_cache(reports, interval=0.0)
+
+        out, status, _age = emitter._reports_with_status(["RJTT"])
+        assert status == FETCH_FRESH and out and calls["n"] == 1
+
+        # cache now exists; interval 0 -> next call attempts again and FAILS
+        out, status, age = emitter._reports_with_status(["RJTT"])
+        assert calls["n"] == 2
+        assert status == FETCH_STALE_AFTER_FAILURE
+        assert out, "old cache is served, but never silently as fresh"
+
+        # failure-throttle: with a real interval, the next pass must NOT
+        # re-invoke the fetcher (no retry storm during an outage)
+        emitter.min_fetch_interval_s = 3600.0
+        out, status, _age = emitter._reports_with_status(["RJTT"])
+        assert calls["n"] == 2, "failed attempt must arm the throttle"
+        assert status in (FETCH_STALE_AFTER_FAILURE, FETCH_CACHE_HIT)
+
+    def test_stale_cache_beyond_budget_emits_no_live_event_but_updates_kill_memo(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        conn = _world_conn()
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        calls = {"n": 0}
+
+        def fetcher(stations, **kw):
+            calls["n"] += 1
+            return list(reports) if calls["n"] == 1 else []
+
+        emitter = Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=0.0)
+        # pass 1: fresh fetch fills cache
+        pf = emitter.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=5))
+        assert pf.freshness_status == "fresh_fetch"
+        # pass 2: fetch fails -> stale-after-failure; age the cache far beyond
+        # Tokyo's staleness budget (60 min) by rewinding the cache clock.
+        import time as _time
+
+        emitter._cache_fetched_monotonic = _time.monotonic() - 7200.0
+        pf2 = emitter.prefetch(cities=[_tokyo()], decision_time=t0 + timedelta(minutes=10))
+        assert pf2.freshness_status == "stale_cache_after_failure"
+        assert pf2.cache_age_s is not None and pf2.cache_age_s > 3600.0
+
+        n = emitter.emit_prefetched(
+            world_conn=conn, prefetch=pf2,
+            received_at=(t0 + timedelta(minutes=10)).isoformat(), limit=20,
+        )
+        assert n == 0, "stale-beyond-budget cache must NOT emit live-authority events"
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED'"
+        ).fetchone()[0]
+        assert rows == 0
+        # the monotone hard-fact KILL memo still advances (staleness-safe direction)
+        assert emitter.latest_rounded_extreme("Tokyo", "2026-06-10", "high") == 21
+
+    def test_no_cache_failure_is_no_data(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter, FETCH_NO_DATA
+
+        emitter = Day0FastObsEmitter(fetcher=lambda s, **kw: [], min_fetch_interval_s=0.0)
+        out, status, age = emitter._reports_with_status(["RJTT"])
+        assert out == [] and status == FETCH_NO_DATA and age is None
+
+
+class TestMutexNoHttpSplit:
+    """PR#404 P0-2: the world-write mutex must never span HTTP. The write phase
+    (emit_prefetched) performs zero network IO; main.py prefetches BEFORE
+    acquiring the mutex."""
+
+    def test_emit_prefetched_never_invokes_the_fetcher(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter, FastObsPrefetch
+
+        def forbidden_fetcher(stations, **kw):
+            raise AssertionError("HTTP fetch invoked inside the write phase")
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        reports = (_report("RJTT", t0, 21.0, t_group=False),)
+        emitter = Day0FastObsEmitter(fetcher=forbidden_fetcher, min_fetch_interval_s=0.0)
+        from src.data.day0_fast_obs import fast_obs_source_for_city
+
+        city = _tokyo()
+        prefetch = FastObsPrefetch(
+            eligible=((city, fast_obs_source_for_city(city), "2026-06-10"),),
+            reports=reports,
+            freshness_status="fresh_fetch",
+            cache_age_s=0.0,
+            decision_time=t0 + timedelta(minutes=5),
+        )
+        conn = _world_conn()
+        n = emitter.emit_prefetched(
+            world_conn=conn, prefetch=prefetch,
+            received_at=(t0 + timedelta(minutes=5)).isoformat(), limit=20,
+        )
+        assert n == 2  # high + low emitted with ZERO fetcher invocations
+
+    def test_main_prefetches_before_mutex_and_emit_is_write_only(self):
+        """Source-order pin: the HTTP prefetch (_edli_prefetch_day0_fast_obs,
+        which also hosts the open-meteo hourly-vector refresh) happens BEFORE
+        _emit_mutex.acquire(); the mutex-held emit consumes fast_prefetch and
+        the write-phase function contains no fetch/HTTP entry points."""
+        source = open("src/main.py", encoding="utf-8").read()
+        prefetch_at = source.index("_edli_prefetch_day0_fast_obs(decision_time=now)")
+        acquire_at = source.index("_emit_mutex.acquire()")
+        assert prefetch_at < acquire_at, "day0 HTTP prefetch must precede the world-write mutex"
+
+        # the write-phase emit function must not contain network entry points
+        start = source.index("def _edli_emit_day0_extreme_events(")
+        end = source.index("def _edli_day0_settlement_semantics(")
+        emit_body = source[start:end]
+        for forbidden in ("emit_events(", "httpx", "maybe_refresh_day0_hourly_vectors", ".prefetch("):
+            assert forbidden not in emit_body, f"write phase must not contain {forbidden!r}"
+        assert "emit_prefetched(" in emit_body
+        # and the hourly-vector refresh lives in the PREFETCH (pre-mutex) helper
+        pre_start = source.index("def _edli_prefetch_day0_fast_obs(")
+        pre_end = start
+        assert "maybe_refresh_day0_hourly_vectors" in source[pre_start:pre_end]
+
+    def test_publication_clock_missing_denies_live_authority(self):
+        """PR#404 P2: receiptTime absent -> available_at falls back to the obs
+        valid time (never our wall clock) AND live authority is denied."""
+        from src.data.day0_fast_obs import (
+            fast_obs_source_for_city,
+            fast_obs_to_day0_observation,
+            running_extremes_for_local_day,
+        )
+        from src.data.day0_fast_obs import MetarReport
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        report = MetarReport(
+            station_id="RJTT", obs_time=t0, receipt_time=None,
+            temp_c=21.0, metar_type="METAR", raw="METAR RJTT 21/15",
+        )
+        city = _tokyo()
+        ex = running_extremes_for_local_day([report], city=city, target_date="2026-06-10")
+        obs = fast_obs_to_day0_observation(
+            city=city, extremes=ex, metric="high", source=fast_obs_source_for_city(city),
+        )
+        assert obs["observation_available_at"] == obs["observation_time"]
+        assert obs["live_authority_status"] == "NON_LIVE_AUTHORITY"

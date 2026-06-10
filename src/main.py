@@ -5448,6 +5448,21 @@ def _edli_event_reactor_cycle() -> None:
             edli_cfg, "no_submit_proof_limit", default=10, maximum=400
         )
         store = EventStore(conn)
+        #
+        # PR#404 P0-2 (operator merge blocker): the day0 fast lane's network IO
+        # (aviationweather METAR fetch, WU anomaly cross-check, open-meteo
+        # hourly-vector refresh) MUST happen BEFORE the mutex is acquired —
+        # the world-write mutex exists for WAL writer exclusion and must never
+        # span an external HTTP call (a slow venue/API response would serialize
+        # every world writer: ingestor, collateral heartbeat, reactor drain).
+        # The prefetch returns a pure in-memory snapshot; only EventWriter
+        # writes happen inside the mutex.
+        _day0_fast_prefetch = None
+        if (
+            edli_cfg.get("day0_extreme_trigger_enabled")
+            and edli_cfg.get("day0_authority_catchup_scanner_enabled", False)
+        ):
+            _day0_fast_prefetch = _edli_prefetch_day0_fast_obs(decision_time=now)
         # EDLI live-canary contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
         # in-process with the market-channel ingestor. Serialize the whole
@@ -5546,6 +5561,10 @@ def _edli_event_reactor_cycle() -> None:
                         decision_time=now,
                         received_at=received_at,
                         limit=day0_emit_limit,
+                        # PR#404 P0-2: HTTP was prefetched OUTSIDE the mutex
+                        # (_day0_fast_prefetch above, before acquire); this call
+                        # is the pure write phase.
+                        fast_prefetch=_day0_fast_prefetch,
                     )
                 finally:
                     _day0_trade_conn.close()
@@ -6367,6 +6386,55 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
         )
 
 
+def _edli_day0_fast_lane_enabled() -> bool:
+    try:
+        edli_cfg = settings.get("edli_v1", {}) if hasattr(settings, "get") else settings["edli_v1"]
+        return bool(edli_cfg.get("day0_fast_obs_lane_enabled", True))
+    except Exception:
+        return True
+
+
+def _edli_prefetch_day0_fast_obs(*, decision_time: datetime):
+    """HTTP PHASE of the day0 fast lane (PR#404 operator review P0-2).
+
+    Runs OUTSIDE the world-write mutex: METAR batch fetch, WU anomaly
+    cross-check, and the open-meteo hourly-vector refresh (which writes the
+    FORECASTS db under its own writer lock — never the world WAL). Returns a
+    pure in-memory FastObsPrefetch (or None) for the mutex-held write phase.
+    decision_time is captured HERE so event identity uses the prefetch clock,
+    not a lock-held clock. Fail-soft: any error returns None.
+    """
+    if not _edli_day0_fast_lane_enabled():
+        return None
+    prefetch = None
+    try:
+        from src.config import runtime_cities
+        from src.data.day0_fast_obs import get_fast_obs_emitter
+        from src.data.day0_oracle_anomaly import wu_metar_anomaly_check
+
+        prefetch = get_fast_obs_emitter().prefetch(
+            cities=runtime_cities(),
+            decision_time=decision_time,
+            anomaly_check=wu_metar_anomaly_check,
+        )
+    except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive
+        logger.warning(
+            "EDLI day0 fast obs prefetch failed (non-fatal, catch-up lanes continue): %r",
+            _fast_exc,
+        )
+    try:
+        # High-res hourly vector refresh (30-min throttle per city inside the
+        # module; ~17 in-domain cities). open-meteo HTTP + forecasts-DB write —
+        # both forbidden under the world-write mutex, so it lives here.
+        from src.config import runtime_cities as _rc
+        from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+
+        maybe_refresh_day0_hourly_vectors(_rc(), decision_time=decision_time)
+    except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
+        logger.warning("EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc)
+    return prefetch
+
+
 def _edli_emit_day0_extreme_events(
     world_conn,
     trade_conn,
@@ -6374,56 +6442,37 @@ def _edli_emit_day0_extreme_events(
     decision_time: datetime,
     received_at: str,
     limit: int,
+    fast_prefetch=None,
 ) -> int:
     """Emit EDLI Day0 extreme events from live observation truth surfaces.
 
-    Three lanes, freshest first (day0 first-principles review 2026-06-10):
-      1. FAST LANE — free METAR feed (aviationweather.gov, ~3-5 min behind the
-         station) emitting on running-extreme MOVES; carries the WU-vs-METAR
-         oracle-anomaly cross-check (Paris-CDG class, fail-closed pause).
-      2/3. CATCH-UP — the persisted settlement_day_observation_authority and
-         observation_instants scanners (reboot/coverage; hourly-grade
-         staleness, bounded by the stale-obs boundary guard downstream).
+    WRITE PHASE ONLY (PR#404 P0-2): performs NO network IO — safe to call
+    while holding the world-write mutex. The fast lane's HTTP results arrive
+    via ``fast_prefetch`` (built by _edli_prefetch_day0_fast_obs OUTSIDE the
+    mutex); the catch-up scanners below are DB-only by construction.
+
+    Returns the TOTAL emitted across all three lanes (PR#404 P2: the fast-lane
+    count was previously dropped from the return value).
     """
 
     from src.events.event_writer import EventWriter
     from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
 
     fast_emitted = 0
-    try:
-        edli_cfg = settings.get("edli_v1", {}) if hasattr(settings, "get") else settings["edli_v1"]
-        fast_lane_enabled = bool(edli_cfg.get("day0_fast_obs_lane_enabled", True))
-    except Exception:
-        fast_lane_enabled = True
-    if fast_lane_enabled:
+    if fast_prefetch is not None:
         try:
-            from src.config import runtime_cities
             from src.data.day0_fast_obs import get_fast_obs_emitter
-            from src.data.day0_oracle_anomaly import wu_metar_anomaly_check
 
-            fast_emitted = get_fast_obs_emitter().emit_events(
+            fast_emitted = get_fast_obs_emitter().emit_prefetched(
                 world_conn=world_conn,
-                cities=runtime_cities(),
-                decision_time=decision_time,
+                prefetch=fast_prefetch,
                 received_at=received_at,
                 limit=limit,
-                anomaly_check=wu_metar_anomaly_check,
             )
         except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
             logger.warning(
-                "EDLI day0 fast obs lane failed (non-fatal, catch-up lanes continue): %r",
+                "EDLI day0 fast obs emit failed (non-fatal, catch-up lanes continue): %r",
                 _fast_exc,
-            )
-        try:
-            # High-res hourly vector refresh (review item B persistence lane;
-            # 30-min throttle per city inside the module; ~17 in-domain cities).
-            from src.config import runtime_cities as _rc
-            from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
-
-            maybe_refresh_day0_hourly_vectors(_rc(), decision_time=decision_time)
-        except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
-            logger.warning(
-                "EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc
             )
 
     trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
@@ -6440,6 +6489,12 @@ def _edli_emit_day0_extreme_events(
         decision_time=decision_time,
         received_at=received_at,
         limit=limit,
+    )
+    # Structured per-lane counters (PR#404 P2 observability fix).
+    logger.info(
+        "EDLI day0 emit: day0_fast_emitted=%d day0_authority_emitted=%d "
+        "day0_observation_instants_emitted=%d",
+        fast_emitted, len(authority_results), len(observation_results),
     )
     return fast_emitted + len(authority_results) + len(observation_results)
 
