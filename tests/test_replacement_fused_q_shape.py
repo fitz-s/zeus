@@ -36,13 +36,13 @@ from tests.test_bayes_precision_fusion_history_provider_materializer_wiring impo
 def _enable_fused_shape(monkeypatch) -> None:
     from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "replacement_0_1_fused_q_shape_enabled", True)
+    monkeypatch.setitem(settings["edli"], "replacement_0_1_fused_q_shape_enabled", True)
 
 
 def _disable_fused_shape(monkeypatch) -> None:
     from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "replacement_0_1_fused_q_shape_enabled", False)
+    monkeypatch.setitem(settings["edli"], "replacement_0_1_fused_q_shape_enabled", False)
 
 
 def _materialize(conn):

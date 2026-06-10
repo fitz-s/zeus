@@ -53,9 +53,9 @@ def _settlement_db(tmp_path, city, metric, unit, in_bin_value, out_bin_value, n_
 def _set_flag(monkeypatch, enabled: bool):
     from src.config import settings
 
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["q_lcb_settlement_coverage_gate_enabled"] = enabled
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
 
 def _family(city, metric, bin_obj, condition_id="cond0"):

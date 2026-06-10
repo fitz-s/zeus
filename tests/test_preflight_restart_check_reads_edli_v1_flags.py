@@ -1,17 +1,17 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: BLOCKER 1 — preflight_restart_check.py must read flag values from their correct scope (edli_v1 for capture/fusion/arm; feature_flags for soft_anchor) not the top-level cfg dict.
+# Purpose: BLOCKER 1 — preflight_restart_check.py must read flag values from their correct scope (edli for capture/fusion/arm; feature_flags for soft_anchor) not the top-level cfg dict.
 # Reuse: Run with pytest; update if flag scopes or scope-routing in preflight_restart_check.py changes.
 """
-tests/test_preflight_restart_check_reads_edli_v1_flags.py
+tests/test_preflight_restart_check_reads_edli_flags.py
 
 Operator-specified TDD test for BLOCKER 1:
 preflight_restart_check.py must read flag values from their ACTUAL scope
-in config/settings.json (edli_v1 for capture/fusion/arm/caps/qlcb;
+in config/settings.json (edli for capture/fusion/arm/caps/qlcb;
 feature_flags for soft_anchor flags) — NOT from the top-level cfg dict.
 
 Assertion spec (operator-named):
-  edli_v1.replacement_0_1_bayes_precision_fusion_capture_enabled=true
-  + edli_v1.replacement_0_1_bayes_precision_fusion_enabled=false
+  edli.replacement_0_1_bayes_precision_fusion_capture_enabled=true
+  + edli.replacement_0_1_bayes_precision_fusion_enabled=false
   -> stage == ACCRUING (not SHADOW)
   -> next flip == replacement_0_1_bayes_precision_fusion_enabled
 """
@@ -105,7 +105,7 @@ def _settings(*, capture: bool, fusion: bool,
                qlcb: bool = False,
                auth: bool = False, kelly: bool = False, flip: bool = False) -> dict:
     return {
-        "edli_v1": {
+        "edli": {
             "replacement_0_1_bayes_precision_fusion_capture_enabled": capture,
             "replacement_0_1_bayes_precision_fusion_enabled": fusion,
             "replacement_qlcb_settlement_sigma_floor_enabled": qlcb,
@@ -124,9 +124,9 @@ def _settings(*, capture: bool, fusion: bool,
 #   capture=true + fusion=false -> stage ACCRUING, next flip == fusion flag
 # ---------------------------------------------------------------------------
 
-def test_capture_on_fusion_off_reads_edli_v1_stage_is_accruing():
+def test_capture_on_fusion_off_reads_edli_stage_is_accruing():
     """
-    With capture=true + fusion=false in edli_v1, stage must be ACCRUING.
+    With capture=true + fusion=false in edli, stage must be ACCRUING.
     Before the fix, cfg.get() reads top-level (None -> False) so stage
     would fall through to SHADOW — the failure proves the bug exists.
     """
@@ -139,7 +139,7 @@ def test_capture_on_fusion_off_reads_edli_v1_stage_is_accruing():
 
 def test_capture_on_fusion_off_next_flip_is_fusion_flag():
     """
-    With capture=true + fusion=false in edli_v1, next flip must name
+    With capture=true + fusion=false in edli, next flip must name
     replacement_0_1_bayes_precision_fusion_enabled.
     """
     result = _run_preflight(_settings(capture=True, fusion=False))
@@ -174,9 +174,9 @@ def test_fusion_on_no_auth_stage_is_shadow_fusion():
     )
 
 
-def test_arm_flag_reads_from_edli_v1():
+def test_arm_flag_reads_from_edli():
     """
-    arm=true in edli_v1 with fusion=true -> stage ARMED.
+    arm=true in edli with fusion=true -> stage ARMED.
     If arm were read from top-level it would be None -> False -> stage 3 or 2.
     """
     result = _run_preflight(_settings(capture=True, fusion=True, arm=True,
@@ -189,7 +189,7 @@ def test_arm_flag_reads_from_edli_v1():
 
 def test_soft_anchor_flags_read_from_feature_flags():
     """
-    auth/kelly/flip=true in feature_flags (not edli_v1) -> CRITICAL coherence
+    auth/kelly/flip=true in feature_flags (not edli) -> CRITICAL coherence
     warning fires when evidence gate fails (no promotion_evidence file).
     """
     result = _run_preflight(

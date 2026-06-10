@@ -54,7 +54,7 @@ def _full_live_values() -> dict[str, float]:
 def _enable_fused_shape(monkeypatch) -> None:
     from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "replacement_0_1_fused_q_shape_enabled", True)
+    monkeypatch.setitem(settings["edli"], "replacement_0_1_fused_q_shape_enabled", True)
 
 
 class _BundleStub:
@@ -202,7 +202,7 @@ def test_floor_present_widens_sigma_q_flatter(monkeypatch) -> None:
     from src.config import settings
 
     # Floor ON (Paris JJA high has an empirical floor ~4.3C >> the ~1.x sigma_pred).
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", True)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", True)
     conn_on = _conn()
     _seed_history(conn_on, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn_on, values=_full_live_values())
@@ -219,7 +219,7 @@ def test_floor_present_widens_sigma_q_flatter(monkeypatch) -> None:
     assert prov_on["settlement_sigma_floor_c"] > prov_on["bayes_precision_fusion"]["predictive_sigma_c"]
 
     # Floor OFF for the identical cell.
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", False)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", False)
     conn_off = _conn()
     _seed_history(conn_off, decision=date(2026, 6, 7), models=_FULL_MODELS)
     _seed_current_single_runs(conn_off, values=_full_live_values())
@@ -242,8 +242,8 @@ def test_floor_absent_records_reason_does_not_block(monkeypatch) -> None:
     _enable_fused_shape(monkeypatch)
     from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", True)
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_required", False)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", True)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_required", False)
     # Force the floor lookup to report the cell as absent (no empirical floor).
     monkeypatch.setattr(
         mod,
@@ -271,8 +271,8 @@ def test_floor_required_but_absent_degrades_to_partial(monkeypatch) -> None:
     _enable_fused_shape(monkeypatch)
     from src.config import settings
 
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", True)
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_required", True)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", True)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_required", True)
     monkeypatch.setattr(
         mod,
         "_replacement_settlement_sigma_floor_lookup",

@@ -79,10 +79,10 @@ def _setup(monkeypatch, *, coverage_flag: bool, floor_flag: bool):
     feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = True
     monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
 
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["q_lcb_settlement_coverage_gate_enabled"] = coverage_flag
     edli["replacement_qlcb_settlement_sigma_floor_enabled"] = floor_flag
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
     monkeypatch.setattr(hook_factory, "_latest_replacement_readiness", lambda *a, **k: object())
     monkeypatch.setattr(

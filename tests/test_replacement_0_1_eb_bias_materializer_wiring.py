@@ -3,7 +3,7 @@
 # Lifecycle: created=2026-06-07; last_reviewed=2026-06-07; last_reused=2026-06-09
 # 2026-06-09 STALE_LAW re-pin: replacement_0_1_member_vote_smoothing_enabled promoted
 #   to default-ON; _expected_q now mirrors _insert_posterior's smoothing-alpha wiring
-#   (authority: config edli_v1.replacement_0_1_member_vote_smoothing_enabled=true).
+#   (authority: config edli.replacement_0_1_member_vote_smoothing_enabled=true).
 # Purpose: Protect the replacement_forecast_materializer wiring of the per-city EB
 #   bias-correction: flag-OFF materialized posterior byte-identical to today, flag-ON
 #   posterior q matches the direct bias-shifted construction, fail-closed when no shift.

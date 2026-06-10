@@ -789,7 +789,7 @@ def evaluate_edli_stage_readiness(
             artifact = load_canary_artifact(canary_artifact_path) if canary_artifact_path else None
             canary = evaluate_canary_artifact(
                 artifact,
-                max_quote_age_ms=int(_settings_section("edli_v1", {}).get("pre_submit_max_quote_age_ms", 1000)),
+                max_quote_age_ms=int(_settings_section("edli", {}).get("pre_submit_max_quote_age_ms", 1000)),
                 conn=conn if artifact is not None else None,
             )
             if canary.status == FAIL:
@@ -2210,7 +2210,7 @@ def _edli_reactor_active() -> bool:
 def _edli_reactor_pending_backlog_exists(*, conn_factory=None) -> bool:
     """Return True when EDLI has pending opportunity events that should drain first."""
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return False
     owns_connection = conn_factory is None
@@ -3967,7 +3967,7 @@ def _market_discovery_cycle() -> None:
     if _edli_reactor_active():
         logger.info("market_discovery deferred: EDLI reactor active")
         return
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     pending_count = 0
     defer_when_pending = str(
         os.environ.get("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
@@ -4085,11 +4085,11 @@ def _new_listing_scout_cycle() -> None:
         (they are warmed next cycle, not at tail of the round-robin).
 
     Fail-open: any exception is caught and logged; the live path is never affected.
-    EDLI-gated: only fires when edli_v1.enabled is True.
+    EDLI-gated: only fires when edli.enabled is True.
     """
     global _SCOUT_KNOWN_CONDITION_IDS, _NEW_FAMILY_CONDITION_IDS
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
 
@@ -5320,7 +5320,7 @@ def _edli_event_reactor_cycle() -> None:
     accepted by those gates, this job is conservative and side-effect free.
     """
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("event_writer_enabled"):
         return
     if _edli_reactor_active():
@@ -5443,7 +5443,7 @@ def _edli_event_reactor_cycle() -> None:
                     # `cycle-N` source — so it must be FED that source here (the plain emit
                     # previously passed none -> cycle_index frozen at 0 -> A-L permanently dark).
                     # Bounded by `limit` per cycle; covers all 108 (city,metric) families in
-                    # ceil(108/limit) cycles. Gated by edli_v1.coverage_fairness_emit_enabled.
+                    # ceil(108/limit) cycles. Gated by edli.coverage_fairness_emit_enabled.
                     # source ONLY when fairness is ON: a per-cycle `cycle-N` source advances the
                     # round-robin window AND makes the emit re-emit each cycle. Flag-OFF -> None ->
                     # the original one-shot catch-up (byte-identical to pre-fix behavior).
@@ -5789,7 +5789,7 @@ def _edli_bankroll_warm_cycle() -> None:
     fail-closed in the interim).
     """
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
     from src.runtime import bankroll_provider as _bankroll_provider
@@ -5838,7 +5838,7 @@ def _edli_market_substrate_warm_cycle() -> None:
     crashes this job (the next tick retries; consumers stay fail-closed in the interim).
     """
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_world_connection
@@ -5925,7 +5925,7 @@ def _edli_mainstream_warm_cycle() -> None:
     (consumers fail-closed in the interim).
     """
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
     from src.data.mainstream_forecast_source import warm_mainstream_point
@@ -6007,7 +6007,7 @@ def _arm_gate_emit_cycle() -> None:
     transient git/DB/subprocess hiccup never crashes the daemon and never leaves a
     half-written artifact (the producer writes atomically via os.replace).
     """
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled"):
         return
     if not bool(edli_cfg.get("edli_arm_gate_emit_enabled", False)):
@@ -6239,7 +6239,7 @@ def _edli_prune_pending_working_set(store, *, decision_time: datetime) -> None:
     """
 
     global _EDLI_LAST_PRUNE_MONOTONIC
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     # ANTIBODY (2026-06-08, operator directive): the working-set prune is NON-OPTIONAL.
     # It is the ONLY drain of the pending opportunity_event_processing set (archive_expired_
     # candidates + archive_superseded_channel_events). Gating it behind an off-able flag
@@ -6357,7 +6357,7 @@ def _edli_emit_day0_extreme_events(
 
     fast_emitted = 0
     try:
-        edli_cfg = settings.get("edli_v1", {}) if hasattr(settings, "get") else settings["edli_v1"]
+        edli_cfg = settings.get("edli", {}) if hasattr(settings, "get") else settings["edli"]
         fast_lane_enabled = bool(edli_cfg.get("day0_fast_obs_lane_enabled", True))
     except Exception:
         fast_lane_enabled = True
@@ -7123,7 +7123,7 @@ def _edli_user_channel_reconcile_cycle() -> None:
     market-channel data remains quote evidence only.
     """
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
         return
     max_messages = int(edli_cfg.get("edli_user_channel_reconcile_max_messages", 50))
@@ -7344,7 +7344,7 @@ def _edli_boot_fill_bridge_recovery() -> None:
     never fatal (boot must not be blocked by a recovery hiccup; the cycle retries).
     """
     try:
-        edli_cfg = _settings_section("edli_v1", {})
+        edli_cfg = _settings_section("edli", {})
         if not _edli_user_channel_reconcile_runtime_enabled(edli_cfg):
             return
         now = datetime.now(timezone.utc)
@@ -7400,7 +7400,7 @@ def _edli_boot_settlement_redeem_recovery() -> None:
     fail-open — any error is logged, never fatal; the hourly scheduled job retries.
     """
     try:
-        edli_cfg = _settings_section("edli_v1", {})
+        edli_cfg = _settings_section("edli", {})
         live_execution_mode = _live_execution_mode(edli_cfg)
         if not _harvester_should_register(live_execution_mode):
             return
@@ -7496,7 +7496,7 @@ def _edli_market_channel_ingestor_cycle() -> None:
     reconcile authority only.
     """
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     if not edli_cfg.get("enabled") or not edli_cfg.get("market_channel_ingestor_enabled"):
         return
     global _edli_market_channel_thread
@@ -7736,7 +7736,7 @@ def _chain_sync_and_exit_monitor_cycle() -> None:
     )
     from src.state.decision_chain import CycleArtifact
 
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
 
     conn = get_connection()
@@ -8168,7 +8168,7 @@ def main():
 
     # All modes use the SAME CycleRunner with different DiscoveryMode values
     # max_instances=1: prevent concurrent execution if previous cycle still running
-    edli_cfg = _settings_section("edli_v1", {})
+    edli_cfg = _settings_section("edli", {})
     live_execution_mode = _assert_live_execution_mode_contract(edli_cfg)
     _assert_edli_stage_readiness(edli_cfg)
     _assert_emos_ci_license_seasonal_coverage(edli_cfg)
@@ -8292,7 +8292,7 @@ def main():
         # annotates the mainstream/bias agreement value on every candidate (decoupled from
         # mainstream_agreement_reference_enabled), reading the WARM CACHE only — so this job
         # MUST run for the cache to populate, else every receipt carries
-        # mainstream_*=None (unknown). Gated only by edli_v1.enabled (inside the job), NOT
+        # mainstream_*=None (unknown). Gated only by edli.enabled (inside the job), NOT
         # by the reference flag — warming the cache is just a read, off-mutex, safe. The
         # fetch applies Retry-After backoff on 429s; on its own cadence it never serializes
         # a world write. Data-only (no orders); fail-soft. Display-only: the value it warms

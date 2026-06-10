@@ -185,11 +185,11 @@ def _seed_history(conn, *, decision: date, models, n: int = MIN_TRAIN + 5, leak:
 
 
 def _enable_fusion(monkeypatch):
-    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_bayes_precision_fusion_enabled", True)
+    monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_enabled", True)
 
 
 def _enable_capture(monkeypatch):
-    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True)
+    monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True)
 
 
 def _disable_other_layers(monkeypatch):

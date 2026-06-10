@@ -128,7 +128,7 @@ class TestRT4CertDualChainSourceRun:
         from src.config import settings as _settings
 
         monkeypatch.setitem(
-            _settings["edli_v1"], "edli_source_run_dual_chain_enabled", True
+            _settings["edli"], "edli_source_run_dual_chain_enabled", True
         )
 
         event, decision_time, bundle = _build_dual_chain_bundle(
@@ -148,7 +148,7 @@ class TestRT4CertDualChainSourceRun:
         from src.config import settings as _settings
 
         monkeypatch.setitem(
-            _settings["edli_v1"], "edli_source_run_dual_chain_enabled", True
+            _settings["edli"], "edli_source_run_dual_chain_enabled", True
         )
 
         event, decision_time, bundle = _build_dual_chain_bundle(
@@ -169,7 +169,7 @@ class TestRT4CertDualChainSourceRun:
         from src.config import settings as _settings
 
         monkeypatch.setitem(
-            _settings["edli_v1"], "edli_source_run_dual_chain_enabled", False
+            _settings["edli"], "edli_source_run_dual_chain_enabled", False
         )
 
         # Legacy happy path: causal == forecast run (the historical norm).

@@ -52,7 +52,7 @@ def test_value_annotated_with_reference_flag_unset(monkeypatch):
     from src.engine.event_reactor_adapter import _evaluate_and_store_mainstream_agreement
 
     # Reference flag explicitly OFF — annotation must NOT depend on it.
-    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_reference_enabled", False)
+    monkeypatch.setitem(settings["edli"], "mainstream_agreement_reference_enabled", False)
 
     bins = [
         Bin(low=None, high=14, unit="C", label="14°C or below"),
@@ -108,7 +108,7 @@ def test_cache_cold_annotates_unknown_fail_open(monkeypatch):
     from src.types.market import Bin
     from src.engine.event_reactor_adapter import _evaluate_and_store_mainstream_agreement
 
-    monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_reference_enabled", False)
+    monkeypatch.setitem(settings["edli"], "mainstream_agreement_reference_enabled", False)
     bins = [
         Bin(low=None, high=14, unit="C", label="14°C or below"),
         Bin(low=15, high=15, unit="C", label="15°C"),

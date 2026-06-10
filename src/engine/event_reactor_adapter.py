@@ -2217,7 +2217,7 @@ def build_event_bound_no_submit_receipt(
         # DAY0 EXPOSURE CAP (adversarial review 2026-06-10 fix 5 — interim risk
         # bound while the day0 flip/exit machinery is young). The remaining NEW
         # stake for a DAY0-lane event is clamped so (existing family exposure +
-        # new stake) <= edli_v1.day0_family_notional_cap_usd (default modest).
+        # new stake) <= edli.day0_family_notional_cap_usd (default modest).
         # Reduce-only: the cap can only SHRINK a stake, never enable one. Remove
         # after forward evidence; forecast-lane sizing untouched.
         if (
@@ -2403,7 +2403,7 @@ def build_event_bound_no_submit_receipt(
             "bias_decay_applied": bool(_bias_decay_applied),
             "bias_decay_bias_native": _bias_decay_native,
             "bias_decay_reason": _bias_decay_reason,
-            "bias_decay_kelly_factor": float(settings["edli_v1"].get("bias_decay_kelly_factor", 0.5)) if _bias_decay_applied else 1.0,
+            "bias_decay_kelly_factor": float(settings["edli"].get("bias_decay_kelly_factor", 0.5)) if _bias_decay_applied else 1.0,
             "neg_risk": bool(row.get("neg_risk") or False),
             "native_quote_available": True,
             "source_status": FORECAST_LIVE_ELIGIBLE_STATUS,
@@ -4247,7 +4247,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 # differ from the causal event run, e.g. 00Z causal → 12Z
                 # elected). Stamped unconditionally so the payload is
                 # self-describing; the cert's dual-chain binding only consults it
-                # when edli_v1.edli_source_run_dual_chain_enabled is ON (default
+                # when edli.edli_source_run_dual_chain_enabled is ON (default
                 # OFF → legacy single-chain equality, so the merge is inert).
                 "derived_from_source_run_id": forecast_payload.get("source_run_id"),
                 "derived_from_reader_status": forecast_payload.get("reader_status"),
@@ -4419,7 +4419,7 @@ def _build_no_submit_proof_bundle_from_adapter_evidence(
                 "best_bid": _optional_float(selected_snapshot_row.get("orderbook_top_bid")),
                 "best_ask": _optional_float(selected_snapshot_row.get("orderbook_top_ask")),
                 "quote_depth_hash": _hash_jsonish(selected_snapshot_row.get("orderbook_depth_json") or selected_snapshot_row.get("orderbook_depth_jsonb")),
-                "p_fill_lcb_policy_id": "edli_v1.no_submit_visible_depth_fill_lcb",
+                "p_fill_lcb_policy_id": "edli.no_submit_visible_depth_fill_lcb",
                 "native_quote_available": proof.native_quote_available,
                 "execution_price_type": execution_price.__class__.__name__ if execution_price is not None else None,
                 "execution_price_value": execution_price.value if execution_price is not None else None,
@@ -4944,7 +4944,7 @@ _MIN_ROBUST_CAPITAL_EFFICIENCY_ROI = 0.0
 
 # REMOVED 2026-06-08 (operator directive; "bin selection.md" §14 item 8 single-
 # primary-live): the family-selector on/off gate (its env var + its
-# edli_v1 settings key) is GONE. The bin-selection robust marginal-log-utility
+# edli settings key) is GONE. The bin-selection robust marginal-log-utility
 # ranker is the UNCONDITIONAL single live decision surface — there is no disable
 # path to silently flip. A scattered off-able gate is the regression disease the
 # directive abolishes; correctness is enforced by types + relationship tests +
@@ -6848,7 +6848,7 @@ def _replacement_qlcb_settlement_sigma_floor_enabled() -> bool:
     the realized-settlement residual (settlement_sigma_floor) so a tight member cluster
     cannot manufacture an overconfident lower bound (iron rule #6)."""
     try:
-        return bool(settings["edli_v1"].get("replacement_qlcb_settlement_sigma_floor_enabled", False))
+        return bool(settings["edli"].get("replacement_qlcb_settlement_sigma_floor_enabled", False))
     except Exception:
         return False
 
@@ -7314,7 +7314,7 @@ def _replacement_authority_probability_and_fdr_proof(
         prefilter[(condition_id, "buy_no")] = False
     # ITEM 2 (FIX-B) — wire the EXISTING K3 settlement-backward-coverage shrink into the
     # LIVE replacement path (its sole prior call site was the canonical/EMOS path). SAME
-    # helper, SAME flag (edli_v1.q_lcb_settlement_coverage_gate_enabled, default FALSE):
+    # helper, SAME flag (edli.q_lcb_settlement_coverage_gate_enabled, default FALSE):
     # flag OFF → immediate no-op (byte-identical); flag ON → only ever LOWERS the q_lcb,
     # fails open. No-op (INSUFFICIENT_DATA) until ≥min_n replacement markets settle —
     # wired now so the protection is live the moment June fills resolve (one builder; no
@@ -7583,7 +7583,7 @@ def _canonical_probability_and_fdr_proof(
     # EMOS-CI LIVE OVERRIDE (Option B, 2026-06-02, /tmp/design_emos_ci.md §6).
     # Replace the MC q_5pct (lcb_by_direction) with the coverage-honest EMOS analytic CI
     # for LICENSED HIGH-metric cities only. DEFAULT OFF — no live decision change unless
-    # the operator flips edli_v1.edli_emos_ci_live_enabled AND adds the city to
+    # the operator flips edli.edli_emos_ci_live_enabled AND adds the city to
     # state/emos_ci_license.json. Touches ONLY the q_5pct term the robust trade-score
     # consumes; hyp.p_value / prefilter (the FDR edge-space gate) stay on the proven MC
     # engine (lowest blast radius). FAIL-CLOSED: any missing EMOS / exception keeps the
@@ -7600,7 +7600,7 @@ def _canonical_probability_and_fdr_proof(
     # K3 (Phase-2) SETTLEMENT-BACKWARD COVERAGE — license each q_lcb against the
     # REALIZED settlement win-rate in its band, shrinking an UNLICENSED band to the
     # realized rate minus 1pp (source SETTLEMENT_ISOTONIC). SHADOW FLAG, DEFAULT OFF
-    # (edli_v1.q_lcb_settlement_coverage_gate_enabled): with the flag OFF this is a
+    # (edli.q_lcb_settlement_coverage_gate_enabled): with the flag OFF this is a
     # pure no-op and the q_lcb is byte-identical to the EMOS/MC value above. The
     # coverage table is built ONLY through the spine grade_receipt. FAIL-OPEN: any
     # error keeps the upstream lcb (never crash, never widen optimistically).
@@ -7665,10 +7665,10 @@ def _canonical_probability_and_fdr_proof(
     # connection (same transaction), never a fresh get_world_connection().
 
     # EMOS shadow ledger (PIECE 2, 2026-06-02): parallel EMOS-calibrated probabilities.
-    # Flag-gated (edli_v1.edli_emos_shadow_ledger_enabled, default OFF).
+    # Flag-gated (edli.edli_emos_shadow_ledger_enabled, default OFF).
     # FAIL-OPEN/SILENT: any error must not affect the live q_by_condition decision.
     try:
-        if bool(settings["edli_v1"].get("edli_emos_shadow_ledger_enabled", False)):
+        if bool(settings["edli"].get("edli_emos_shadow_ledger_enabled", False)):
             _write_emos_shadow_ledger(
                 event=event,
                 family=family,
@@ -7978,7 +7978,7 @@ def _market_analysis_from_event_snapshot(
     # routes to honest raw (members UN-shifted, identity p_cal), not _maybe_apply_edli_bias_correction.
     _emos_regime = (
         family.event_type != "DAY0_EXTREME_UPDATED"
-        and bool(settings["edli_v1"].get("edli_emos_sole_calibrator_enabled", False))
+        and bool(settings["edli"].get("edli_emos_sole_calibrator_enabled", False))
     )
     if _emos_regime:
         # M1 (critic 2026-06-04): the EMOS branch must degrade to the honest path on ANY failure,
@@ -7999,10 +7999,10 @@ def _market_analysis_from_event_snapshot(
         # builder floors σ at k·σ_settled (DETRENDED settlement std) — max() only WIDENS σ → lower
         # q_lcb → fewer overconfident bets; can NEVER tighten or create a wrong-side trade.
         _apply_settlement_floor = bool(
-            settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False)
+            settings["edli"].get("edli_settlement_sigma_floor_enabled", False)
         )
         _require_settlement_floor = bool(
-            settings["edli_v1"].get("edli_settlement_sigma_floor_required", True)
+            settings["edli"].get("edli_settlement_sigma_floor_required", True)
         )
         try:
             from src.calibration.emos_q_builder import build_emos_q as _build_emos_q
@@ -8128,7 +8128,7 @@ def _market_analysis_from_event_snapshot(
         if _day0_rd_members is None:
             payload["_edli_q_source"] = "bias_platt" if _bias_corrected else "platt"
         # Grid→point representativeness correction (lead-invariant, OOS-validated).
-        # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
+        # Flag-gated (edli.edli_grid_representativeness_correction_enabled, default OFF).
         # Applied on the (potentially bias-corrected) member array so both corrections compose.
         members, _grid_corrected = _maybe_apply_grid_representativeness_correction(
             members, snapshot=snapshot, family=family, city=city, payload=payload
@@ -8222,7 +8222,7 @@ def _market_analysis_from_event_snapshot(
     # paths are exempt (the realized observation replaces the forecast, so forecast
     # sharpness is moot). Otherwise load the settlement MAE for (city, unit, lead)
     # from forecast_skill. The BEHAVIOR (edge suppression) is flag-gated OFF
-    # (edli_v1.forecast_sharpness_gate_enabled) so this evidence is inert on live emit
+    # (edli.forecast_sharpness_gate_enabled) so this evidence is inert on live emit
     # today; only the TYPE is load-bearing now. Any load failure -> fail-closed
     # `missing` evidence (also inert while the flag is OFF).
     forecast_sharpness = _edli_forecast_sharpness_evidence(
@@ -8435,7 +8435,7 @@ def _maybe_bias_decay_kelly_haircut(
     """INTERIM (data-insufficient phase) pre-submit Kelly haircut on high-bias cities.
 
     Operator directive 2026-05-31: if the per-city forecast bias magnitude exceeds the
-    unit-aware threshold (edli_v1.bias_decay_threshold_c for C-settled cities,
+    unit-aware threshold (edli.bias_decay_threshold_c for C-settled cities,
     bias_decay_threshold_f for F-settled SF/Seattle), multiply the Kelly multiplier by
     bias_decay_kelly_factor (0.5 = halve). Sizes DOWN cities whose forecast we cannot yet
     trust enough to fully correct (corrected-#24 showed a full p_raw correction worsens
@@ -8445,12 +8445,12 @@ def _maybe_bias_decay_kelly_haircut(
     bias is degC; for F-settled cities compare |eff_c * 1.8| to the F threshold.
     FAIL-SAFE: no VERIFIED bias row (data absent = the data-insufficient trigger) -> apply
     the haircut + WARN. FAIL-OPEN on UNEXPECTED ERROR only: any exception -> NO haircut +
-    WARN (never crash or zero a live size). Flag-gated: edli_v1.bias_decay_kelly_haircut_enabled.
+    WARN (never crash or zero a live size). Flag-gated: edli.bias_decay_kelly_haircut_enabled.
     """
     try:
         if str(q_source or "").strip().lower() in {"emos", "raw_honest"}:
             return kelly_multiplier, False, None, "one_calibrator_regime"
-        ev = settings["edli_v1"]
+        ev = settings["edli"]
         if not bool(ev.get("bias_decay_kelly_haircut_enabled", False)):
             return kelly_multiplier, False, None, "disabled"
         import contextlib
@@ -8578,8 +8578,8 @@ def _assert_single_temperature_mean_correction(
             "correction AND grid-representativeness correction applied to the same member "
             f"array (city={city!r} target_date={target_date!r}). Both subtract a per-city "
             "mean residual; composing them double-subtracts the warm-shift. Exactly one of "
-            "edli_v1.edli_bias_correction_enabled / "
-            "edli_v1.edli_grid_representativeness_correction_enabled may be active. "
+            "edli.edli_bias_correction_enabled / "
+            "edli.edli_grid_representativeness_correction_enabled may be active. "
             "Failing closed rather than over-correcting q."
         )
 
@@ -8597,17 +8597,17 @@ def _edli_bias_treatment_for_bucket(
     bias is corrected XOR haircut, never both (kills the N1 double penalty). The fail-closed
     BiasTreatment factory refuses NULL/non-VERIFIED authority (#122) and a training_cutoff
     outside the target season (stale-fit gate). Returns ``None`` when:
-      * ``edli_v1.bias_treatment_v2_enabled`` is OFF (legacy paths own the decision), OR
+      * ``edli.bias_treatment_v2_enabled`` is OFF (legacy paths own the decision), OR
       * no VERIFIED row / weight_live<=0 / effective_bias missing, OR
       * the row fails the provenance or staleness gate (fail-closed).
 
     The returned mode is CORRECT whenever the correction would be live for this bucket
-    (``edli_v1.edli_bias_correction_enabled`` ON), else HAIRCUT — so the two consumers are
+    (``edli.edli_bias_correction_enabled`` ON), else HAIRCUT — so the two consumers are
     mutually exclusive by construction. Native unit: degC for C-cities, degF (x1.8) for
     F-settled cities (matches the legacy member-array unit).
     """
     try:
-        ev = settings["edli_v1"]
+        ev = settings["edli"]
         if not bool(ev.get("bias_treatment_v2_enabled", False)):
             return None
         import contextlib
@@ -8717,7 +8717,7 @@ def _maybe_apply_edli_bias_correction(
     convention is ``effective_bias_c = mean(forecast - observed)`` so subtracting it
     de-biases toward observed truth (cold forecast => negative bias_c => members warmed).
 
-    Flag-gated by ``edli_v1.edli_bias_correction_enabled`` (default OFF: prepared, not
+    Flag-gated by ``edli.edli_bias_correction_enabled`` (default OFF: prepared, not
     active). FAIL-CLOSED: any missing flag/row/field or error returns the raw members
     with applied=False, so the live path never breaks and never applies an unverified
     correction. When applied, the caller marks payload['_edli_bias_corrected']=True so
@@ -8725,7 +8725,7 @@ def _maybe_apply_edli_bias_correction(
     lockstep — calibration_pairs were fit on uncorrected p_raw).
     """
     try:
-        if not bool(settings["edli_v1"].get("edli_bias_correction_enabled", False)):
+        if not bool(settings["edli"].get("edli_bias_correction_enabled", False)):
             return members, False
         # Phase-2 K2+N1+#122 (task #167): when bias_treatment_v2_enabled is ON, the typed
         # BiasTreatment gate is the single fail-closed decision. A NULL-authority (#122) or
@@ -8733,7 +8733,7 @@ def _maybe_apply_edli_bias_correction(
         # unverified/out-of-season bias never enters live q. The shift it applies is
         # IDENTICAL to the legacy subtraction (eff_native = eff * (1.8 if F else 1)); only
         # the fail-closed GATE is added. Flag OFF -> this block is skipped -> byte-identical.
-        if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
+        if bool(settings["edli"].get("bias_treatment_v2_enabled", False)):
             _treatment = _edli_bias_treatment_for_bucket(
                 family=family, city=city, snapshot=snapshot
             )
@@ -8907,7 +8907,7 @@ def _edli_representativeness_sigma_native(
                     # The fold therefore widens to the honest predictive σ once, never twice.
                     # Flag OFF -> sigma_native returned unchanged (byte-identical legacy).
                     try:
-                        if bool(settings["edli_v1"].get("bias_treatment_v2_enabled", False)):
+                        if bool(settings["edli"].get("bias_treatment_v2_enabled", False)):
                             import math as _math
                             _n = (
                                 int(row["n_live"])
@@ -9039,7 +9039,7 @@ def _maybe_apply_grid_representativeness_correction(
     obs_daily_max)`` so subtracting it warms cold-biased members toward the settlement
     station point (offset_c is negative for cold cities → subtracting warms).
 
-    Flag-gated by ``edli_v1.edli_grid_representativeness_correction_enabled`` (default OFF).
+    Flag-gated by ``edli.edli_grid_representativeness_correction_enabled`` (default OFF).
     FAIL-CLOSED: any missing flag/table/entry/activated=False/error → return raw members
     with applied=False, so live behavior is byte-identical to today when the flag is absent.
 
@@ -9050,7 +9050,7 @@ def _maybe_apply_grid_representativeness_correction(
     member array is in °F, so offset_native = offset_c × 1.8.
     """
     try:
-        if not bool(settings["edli_v1"].get("edli_grid_representativeness_correction_enabled", False)):
+        if not bool(settings["edli"].get("edli_grid_representativeness_correction_enabled", False)):
             return members, False
         from src.calibration.grid_representativeness import get_offset
         from src.calibration.manager import season_from_date
@@ -9101,7 +9101,7 @@ def _write_emos_shadow_ledger(
     """Write per-bin EMOS shadow ledger rows (PIECE 2 + CI extension 2026-06-02).
 
     Called from _canonical_probability_and_fdr_proof ONLY when
-    edli_v1.edli_emos_shadow_ledger_enabled is True.  FAIL-OPEN: caller
+    edli.edli_emos_shadow_ledger_enabled is True.  FAIL-OPEN: caller
     wraps in try/except so any raise here is silently absorbed.
 
     lcb_by_direction: the live q_5pct in probability space, built at adapter:3107.
@@ -9367,7 +9367,7 @@ def _maybe_override_lcb_with_emos_ci(
     license cell (clamped >= 1.0; sigma is never tightened).
 
     Gating (all must hold or the override is a no-op, MC lcb stands):
-      - settings["edli_v1"].edli_emos_ci_live_enabled is True (default False)
+      - settings["edli"].edli_emos_ci_live_enabled is True (default False)
       - family.metric == "high"
       - family.city in the EMOS-CI license (state/emos_ci_license.json)
       - emos_predictive(city, season, lead_days, members_c) is not None (served == emos)
@@ -9382,7 +9382,7 @@ def _maybe_override_lcb_with_emos_ci(
     import logging as _logging
 
     try:
-        if not bool(settings["edli_v1"].get("edli_emos_ci_live_enabled", False)):
+        if not bool(settings["edli"].get("edli_emos_ci_live_enabled", False)):
             return
     except Exception:
         return
@@ -9545,7 +9545,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
 ) -> None:
     """K3 (Phase-2): shrink an UNLICENSED q_lcb to its realized settlement rate.
 
-    SHADOW FLAG (edli_v1.q_lcb_settlement_coverage_gate_enabled, default FALSE):
+    SHADOW FLAG (edli.q_lcb_settlement_coverage_gate_enabled, default FALSE):
     flag OFF → IMMEDIATE no-op, the q_lcb is byte-identical to the EMOS/MC value.
     Flag ON → for each (cond, direction) build the backward-coverage stream through
     grade_receipt, run settlement_backward_coverage_check, and apply the shrink via
@@ -9558,7 +9558,7 @@ def _maybe_apply_settlement_coverage_to_lcb(
     import logging as _logging
 
     try:
-        if not bool(settings["edli_v1"].get("q_lcb_settlement_coverage_gate_enabled", False)):
+        if not bool(settings["edli"].get("q_lcb_settlement_coverage_gate_enabled", False)):
             return
     except Exception:
         return
@@ -9640,7 +9640,7 @@ def _snapshot_p_raw(
     _validate_snapshot_members_metric_identity(snapshot=snapshot, family=family, payload=payload)
     semantics = SettlementSemantics.for_city(city)
     # A4 (2026-05-31): per-city promoted bias correction on member maxes BEFORE p_raw.
-    # Flag-gated (edli_v1.edli_bias_correction_enabled, default OFF) + FAIL-CLOSED.
+    # Flag-gated (edli.edli_bias_correction_enabled, default OFF) + FAIL-CLOSED.
     # §4.1 guard: skip if caller already hoisted correction (members_already_corrected=True)
     # to prevent double-application when _snapshot_p_raw is called from
     # _market_analysis_from_event_snapshot (which now owns the single correction site).
@@ -9920,14 +9920,14 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
     (suppresses submits); it can never enable a trade. Fail-open returns True.
     """
     try:
-        return bool(settings["edli_v1"].get("day0_stale_obs_boundary_guard_enabled", True))
+        return bool(settings["edli"].get("day0_stale_obs_boundary_guard_enabled", True))
     except Exception:
         return True
 
 
 #: DAY0 per-family notional cap default (USD) — adversarial review fix 5.
 #: Interim risk bound while the day0 flip/exit machinery is young; modest by
-#: design, operator-overridable via edli_v1.day0_family_notional_cap_usd
+#: design, operator-overridable via edli.day0_family_notional_cap_usd
 #: (set <= 0 to disable once forward evidence exists).
 _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD = 25.0
 
@@ -9935,7 +9935,7 @@ _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD = 25.0
 def _day0_family_notional_cap_usd() -> float | None:
     """Per-family day0 notional cap in USD, or None when disabled (<= 0)."""
     try:
-        raw = settings["edli_v1"].get(
+        raw = settings["edli"].get(
             "day0_family_notional_cap_usd", _DAY0_FAMILY_NOTIONAL_CAP_DEFAULT_USD
         )
         value = float(raw)
@@ -9990,7 +9990,7 @@ def _day0_remaining_day_q_enabled() -> bool:
     _edli_day0_q_mode=remaining_day vs the legacy full-day-masked q look sane.
     """
     try:
-        return bool(settings["edli_v1"].get("day0_remaining_day_q_enabled", False))
+        return bool(settings["edli"].get("day0_remaining_day_q_enabled", False))
     except Exception:
         return False
 
@@ -10871,7 +10871,7 @@ def _p_fill_lcb_for_direction(book, *, direction: str, shares: Decimal) -> float
     # Wilson LCB on a fully-covered crossing (p_hat = 1.0) with the depth cushion
     # (available / sized) as the evidence count: deeper books -> tighter LCB -> ~1.0.
     depth_cushion = available / sized
-    floor = max(0.0, min(1.0, float(settings["edli_v1"].get("no_submit_visible_depth_fill_lcb", 0.05))))
+    floor = max(0.0, min(1.0, float(settings["edli"].get("no_submit_visible_depth_fill_lcb", 0.05))))
     return max(floor, min(1.0, _wilson_depth_fill_lcb(coverage=1.0, depth_cushion=depth_cushion)))
 
 
@@ -10893,7 +10893,7 @@ def _wilson_depth_fill_lcb(*, coverage: float, depth_cushion: float) -> float:
     n = max(0.0, depth_cushion)
     if n <= 0.0:
         return 0.0
-    z = float(settings["edli_v1"].get("no_submit_visible_depth_fill_z", 1.645))
+    z = float(settings["edli"].get("no_submit_visible_depth_fill_z", 1.645))
     z2 = z * z
     denom = 1.0 + z2 / n
     center = p_hat + z2 / (2.0 * n)

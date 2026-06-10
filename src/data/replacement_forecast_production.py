@@ -226,7 +226,7 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
 def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
     """THE_PATH BAYES_PRECISION_FUSION-Bayes multi-model SHADOW capture/accrual (CONTINUITY_AND_WIRING.md §4 step 2,
     BAYES_PRECISION_FUSION_SPEC.md §6 F1). Gated by the NEW capture flag
-    ``settings['edli_v1']['replacement_0_1_bayes_precision_fusion_capture_enabled']`` (default FALSE),
+    ``settings['edli']['replacement_0_1_bayes_precision_fusion_capture_enabled']`` (default FALSE),
     SEPARATE from replacement_0_1_bayes_precision_fusion_enabled: when ON it downloads + persists the 8 extra
     OM models (single_runs FORWARD + previous_runs fixed-lead) into raw_model_forecasts on
     zeus-forecasts.db. It writes NOTHING into forecast_posteriors and touches NO posterior/q/
@@ -234,7 +234,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg: dict[str, o
     daily, fail-soft (it NEVER raises into the shadow cycle). Returns None when the flag is OFF or
     there is no forecast_db / no targets."""
     try:
-        if not bool(settings["edli_v1"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
+        if not bool(settings["edli"].get("replacement_0_1_bayes_precision_fusion_capture_enabled", False)):
             return None
     except Exception:
         return None

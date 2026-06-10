@@ -112,9 +112,9 @@ def _run_seam(*, monkeypatch, emos_serves: bool, city: str, mock_legacy_pcal: bo
     table = {"_meta": {"metric": "multi"},
              "cells": {f"{city}|{season}|high": {**_SYNTH_CELL, "served": served}}}
     monkeypatch.setattr(emos_mod, "_emos_table_cache", table, raising=False)
-    monkeypatch.setitem(settings["edli_v1"], "edli_emos_sole_calibrator_enabled", emos_flag)
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_enabled", sigma_floor_flag)
-    monkeypatch.setitem(settings["edli_v1"], "edli_settlement_sigma_floor_required", sigma_floor_required)
+    monkeypatch.setitem(settings["edli"], "edli_emos_sole_calibrator_enabled", emos_flag)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_enabled", sigma_floor_flag)
+    monkeypatch.setitem(settings["edli"], "edli_settlement_sigma_floor_required", sigma_floor_required)
 
     if mock_legacy_pcal:
         def _fake_pcal(_cal, *, snapshot, family, bins, p_raw, payload, decision_time):
@@ -283,7 +283,7 @@ def test_served_raw_uses_honest_raw_not_maze(monkeypatch, caplog):
     city = _served_city_unit_c()
     # Bias correction ON (the maze) — proves the regime BYPASSES it for a served=raw cell,
     # i.e. honest-raw is not merely "bias happened to be off".
-    monkeypatch.setitem(settings["edli_v1"], "edli_bias_correction_enabled", True)
+    monkeypatch.setitem(settings["edli"], "edli_bias_correction_enabled", True)
     with caplog.at_level(logging.WARNING):
         payload, analysis = _run_seam(
             monkeypatch=monkeypatch, emos_serves=False, city=city  # flag ON (regime active)

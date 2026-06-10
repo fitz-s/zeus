@@ -81,7 +81,7 @@ def main() -> int:
 
     # Each flag group lives in its own config sub-object — NOT at the top level.
     # Reading from cfg.get(name) always returns None (wrong posture/next-flip).
-    edli = cfg.get("edli_v1", {})
+    edli = cfg.get("edli", {})
     feature_flags = cfg.get("feature_flags", {})
 
     def f_edli(name, default=False):

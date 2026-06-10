@@ -52,7 +52,7 @@ def _target_local_day_strictly_past(
 
 
 def _intake_phase_filter_enabled() -> bool:
-    """Read edli_v1.edli_intake_phase_filter_enabled (default OFF in code).
+    """Read edli.edli_intake_phase_filter_enabled (default OFF in code).
 
     WAVE-1 W1-T1. FAIL-OPEN: any config-access error → False (filter OFF) so a
     settings glitch never silently suppresses every FSR. The reactor's
@@ -61,13 +61,13 @@ def _intake_phase_filter_enabled() -> bool:
     try:
         from src.config import settings
 
-        return bool(settings["edli_v1"].get("edli_intake_phase_filter_enabled", False))
+        return bool(settings["edli"].get("edli_intake_phase_filter_enabled", False))
     except Exception:  # noqa: BLE001 — config glitch must never zero the FSR stream
         return False
 
 
 def _coverage_fairness_emit_enabled() -> bool:
-    """Read edli_v1.coverage_fairness_emit_enabled (default OFF — shadow-safe).
+    """Read edli.coverage_fairness_emit_enabled (default OFF — shadow-safe).
 
     Phase-2 B4. FAIL-OPEN on any config error → False (legacy ORDER BY).
     When OFF, scan_committed_snapshots uses the legacy
@@ -80,7 +80,7 @@ def _coverage_fairness_emit_enabled() -> bool:
     try:
         from src.config import settings
 
-        return bool(settings["edli_v1"].get("coverage_fairness_emit_enabled", False))
+        return bool(settings["edli"].get("coverage_fairness_emit_enabled", False))
     except Exception:  # noqa: BLE001 — config glitch must never dark all cities
         return False
 
@@ -682,7 +682,7 @@ class ForecastSnapshotReadyTrigger:
                     ),
                 )
         # WAVE-1 W1-T1 intake phase filter. For one-shot catch-up this remains
-        # gated by edli_v1.edli_intake_phase_filter_enabled (default OFF). For
+        # gated by edli.edli_intake_phase_filter_enabled (default OFF). For
         # continuous re-decision (source is per-cycle) it is mandatory: same-day
         # forecast_only families have already entered SETTLEMENT_DAY and must not
         # be re-emitted every minute to consume the bounded decision-proof budget.

@@ -187,7 +187,7 @@ def _seed_current_single_runs(conn, *, live_values: dict[str, float], request=No
 
 def _enable_flag(monkeypatch):
     import src.config as cfg
-    monkeypatch.setitem(cfg.settings["edli_v1"], "replacement_0_1_bayes_precision_fusion_enabled", True)
+    monkeypatch.setitem(cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_enabled", True)
 
 
 def _disable_other_layers(monkeypatch):

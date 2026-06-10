@@ -496,7 +496,7 @@ def _replacement_eb_bias_shift_c(
     try:
         from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
 
-        edli_cfg = settings["edli_v1"]
+        edli_cfg = settings["edli"]
         if not bool(edli_cfg.get("replacement_0_1_eb_bias_correction_enabled", False)):
             return None
 
@@ -563,7 +563,7 @@ def _replacement_fused_q_shape_enabled() -> bool:
     try:
         from src.config import settings  # noqa: PLC0415
 
-        return bool(settings["edli_v1"].get("replacement_0_1_fused_q_shape_enabled", False))
+        return bool(settings["edli"].get("replacement_0_1_fused_q_shape_enabled", False))
     except Exception:
         return False
 
@@ -579,7 +579,7 @@ def _edli_settlement_sigma_floor_enabled() -> bool:
     try:
         from src.config import settings  # noqa: PLC0415
 
-        return bool(settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False))
+        return bool(settings["edli"].get("edli_settlement_sigma_floor_enabled", False))
     except Exception:
         return False
 
@@ -596,7 +596,7 @@ def _edli_settlement_sigma_floor_required() -> bool:
     try:
         from src.config import settings  # noqa: PLC0415
 
-        return bool(settings["edli_v1"].get("edli_settlement_sigma_floor_required", False))
+        return bool(settings["edli"].get("edli_settlement_sigma_floor_required", False))
     except Exception:
         return False
 
@@ -655,7 +655,7 @@ def _replacement_member_vote_smoothing_alpha() -> float | None:
             MEMBER_VOTE_SMOOTHING_ALPHA,
         )
 
-        edli_cfg = settings["edli_v1"]
+        edli_cfg = settings["edli"]
         if not bool(edli_cfg.get("replacement_0_1_member_vote_smoothing_enabled", False)):
             return None
         raw_alpha = edli_cfg.get("replacement_0_1_member_vote_smoothing_alpha", MEMBER_VOTE_SMOOTHING_ALPHA)
@@ -854,7 +854,7 @@ def _replacement_bayes_precision_fusion_override(
     try:
         from src.config import runtime_cities_by_name, settings  # noqa: PLC0415
 
-        edli_cfg = settings["edli_v1"]
+        edli_cfg = settings["edli"]
         if not bool(edli_cfg.get("replacement_0_1_bayes_precision_fusion_enabled", False)):
             return None
 

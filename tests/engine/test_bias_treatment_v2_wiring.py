@@ -2,7 +2,7 @@
 # Last reused or audited: 2026-06-03
 # Authority basis: Phase-2 K2+N1+#122 (task #167). Reactor-wiring relationship tests for
 #   the BiasTreatment v2 path in src/engine/event_reactor_adapter.py. Gated on
-#   edli_v1.bias_treatment_v2_enabled. Proves: (1) flag-OFF is BYTE-IDENTICAL to legacy
+#   edli.bias_treatment_v2_enabled. Proves: (1) flag-OFF is BYTE-IDENTICAL to legacy
 #   for BOTH _maybe_apply_edli_bias_correction and _maybe_bias_decay_kelly_haircut;
 #   (2) flag-ON enforces corrected-XOR-haircut (kills N1 double penalty); (3) flag-ON
 #   fail-closes on NULL-authority (#122) and stale training_cutoff; (4) flag-ON folds the
@@ -87,11 +87,11 @@ def patched(monkeypatch):
 
     monkeypatch.setattr(ens_bias_repo, "read_bias_model", _read)
     # canonical thresholds + haircut ON (legacy baseline behaviour)
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_kelly_haircut_enabled", True)
-    monkeypatch.setitem(era.settings["edli_v1"], "edli_bias_correction_enabled", True)
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_threshold_c", 2.0)
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_threshold_f", 3.0)
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_kelly_factor", 0.5)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_kelly_haircut_enabled", True)
+    monkeypatch.setitem(era.settings["edli"], "edli_bias_correction_enabled", True)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_threshold_c", 2.0)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_threshold_f", 3.0)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_kelly_factor", 0.5)
     return state
 
 
@@ -100,7 +100,7 @@ def patched(monkeypatch):
 # ---------------------------------------------------------------------------
 class TestFlagOffCorrectionFailClosed:
     def test_flag_off_correction_returns_raw_members(self, patched, monkeypatch):
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", False)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", False)
         members = np.array([20.0, 21.0, 22.0, 23.0, 24.0])
         snapshot = {"dataset_id": "ecmwf_opendata_mx2t3_local_calendar_day_max"}
         family = _Family("Tokyo")
@@ -112,7 +112,7 @@ class TestFlagOffCorrectionFailClosed:
         np.testing.assert_allclose(out, members)
 
     def test_flag_off_haircut_byte_identical(self, patched, monkeypatch):
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", False)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", False)
         family = _Family("Tokyo")
         km, applied, native, reason = era._maybe_bias_decay_kelly_haircut(1.0, family=family)
         # legacy: |3.5| > 2.0 -> halve.
@@ -126,7 +126,7 @@ class TestFlagOffCorrectionFailClosed:
 # ---------------------------------------------------------------------------
 class TestNoDoublePenaltyWhenFlagOn:
     def test_corrected_bucket_does_not_also_haircut(self, patched, monkeypatch):
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", True)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", True)
         family = _Family("Tokyo")
         city = era.runtime_cities_by_name()["Tokyo"]
         snapshot = {"dataset_id": "ecmwf_opendata_mx2t3_local_calendar_day_max"}
@@ -145,8 +145,8 @@ class TestNoDoublePenaltyWhenFlagOn:
     def test_uncorrected_bucket_still_haircuts(self, patched, monkeypatch):
         # When the correction would NOT apply (correction flag off for this bucket) the
         # haircut path is still available — XOR, not "never haircut".
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", True)
-        monkeypatch.setitem(era.settings["edli_v1"], "edli_bias_correction_enabled", False)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", True)
+        monkeypatch.setitem(era.settings["edli"], "edli_bias_correction_enabled", False)
         family = _Family("Tokyo")
         km, hc_applied, native, reason = era._maybe_bias_decay_kelly_haircut(1.0, family=family)
         assert km == pytest.approx(0.5)
@@ -158,7 +158,7 @@ class TestNoDoublePenaltyWhenFlagOn:
 # ---------------------------------------------------------------------------
 class TestFailClosedProvenanceAndStale:
     def test_null_authority_row_refused(self, patched, monkeypatch):
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", True)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", True)
         patched["row"] = _row(authority=None)
         family = _Family("Tokyo")
         city = era.runtime_cities_by_name()["Tokyo"]
@@ -171,7 +171,7 @@ class TestFailClosedProvenanceAndStale:
         np.testing.assert_allclose(out, members)
 
     def test_stale_training_cutoff_refused(self, patched, monkeypatch):
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", True)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", True)
         # season_from_date is patched to always "JJA" in the fixture; override it to a
         # real mapping so a May cutoff vs June target is genuinely out-of-season.
         from src.contracts import season as season_mod
@@ -191,7 +191,7 @@ class TestFailClosedProvenanceAndStale:
         np.testing.assert_allclose(out, members)
 
     def test_no_prior_or_paired_support_correction_row_refused(self, patched, monkeypatch):
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", True)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", True)
         patched["row"] = _row(correction_strength=0.8, n_prior=0, n_paired=0)
         family = _Family("Tokyo", target_date="2026-06-15")
         city = era.runtime_cities_by_name()["Tokyo"]
@@ -209,7 +209,7 @@ class TestFailClosedProvenanceAndStale:
 # ---------------------------------------------------------------------------
 class TestLowNWidensRepresentativenessSigma:
     def test_low_n_sigma_gt_high_n_sigma(self, patched, monkeypatch):
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", True)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", True)
         family = _Family("Tokyo")
         city = era.runtime_cities_by_name()["Tokyo"]
         snapshot = {"dataset_id": "ecmwf_opendata_mx2t3_local_calendar_day_max"}
@@ -223,7 +223,7 @@ class TestLowNWidensRepresentativenessSigma:
     def test_flag_off_sigma_unchanged_by_n(self, patched, monkeypatch):
         # With v2 OFF the SE term is NOT folded — sigma depends only on total_residual_sd_c,
         # identical for n=7 and n=50. Byte-identical legacy behaviour.
-        monkeypatch.setitem(era.settings["edli_v1"], "bias_treatment_v2_enabled", False)
+        monkeypatch.setitem(era.settings["edli"], "bias_treatment_v2_enabled", False)
         family = _Family("Tokyo")
         city = era.runtime_cities_by_name()["Tokyo"]
         snapshot = {"dataset_id": "ecmwf_opendata_mx2t3_local_calendar_day_max"}

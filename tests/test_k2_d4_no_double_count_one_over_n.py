@@ -54,9 +54,9 @@ def _stub_row(*, residual_sd_c: float, n_live: int):
 def _sigma_with_flag(monkeypatch, *, flag_on: bool, residual_sd_c: float, n_live: int) -> float:
     from src.config import settings
 
-    edli = dict(settings._data["edli_v1"])
+    edli = dict(settings._data["edli"])
     edli["bias_treatment_v2_enabled"] = flag_on
-    monkeypatch.setitem(settings._data, "edli_v1", edli)
+    monkeypatch.setitem(settings._data, "edli", edli)
 
     row = _stub_row(residual_sd_c=residual_sd_c, n_live=n_live)
 

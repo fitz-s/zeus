@@ -136,7 +136,7 @@ def _mainstream_gate_test_isolation(monkeypatch):
     tests, submit-enforcement OFF, and live Open-Meteo fetches forbidden.
 
     The live reactor reads the MUTABLE operational flag
-    ``settings["edli_v1"]["mainstream_agreement_reference_enabled"]`` (F1 rename of
+    ``settings["edli"]["mainstream_agreement_reference_enabled"]`` (F1 rename of
     the former ``mainstream_agreement_gate_enabled``) and dials
     ``fetch_mainstream_point`` (Open-Meteo). Without this fixture, flipping that
     flag ON for live shadow trading silently changed acceptance-suite behaviour:
@@ -156,7 +156,7 @@ def _mainstream_gate_test_isolation(monkeypatch):
     from src.config import settings
 
     data = getattr(settings, "_data", None)
-    edli_cfg = data.get("edli_v1") if isinstance(data, dict) else None
+    edli_cfg = data.get("edli") if isinstance(data, dict) else None
     if isinstance(edli_cfg, dict):
         monkeypatch.setitem(edli_cfg, "mainstream_agreement_reference_enabled", False)
         monkeypatch.setitem(edli_cfg, "mainstream_agreement_enforce_on_submit", False)

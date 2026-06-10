@@ -22,7 +22,7 @@ def test_live_canary_runtime_requires_operator_unshadow_and_submit_guards():
     enabled together rather than a split shadow/live configuration.
     """
     settings = json.loads(Path("config/settings.json").read_text())
-    edli = settings["edli_v1"]
+    edli = settings["edli"]
 
     assert edli["real_order_submit_enabled"] is True
     assert edli["live_execution_mode"] == "edli_live_canary"

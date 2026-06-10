@@ -48,10 +48,10 @@ def patched(monkeypatch):
     monkeypatch.setattr(cal_manager, "season_from_date", lambda d, lat=None: "JJA")
     # ensure flags ON with canonical thresholds — monkeypatch.setitem auto-restores at
     # teardown so these never leak into other tests (no order-dependent failures).
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_kelly_haircut_enabled", True)
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_threshold_c", 2.0)
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_threshold_f", 3.0)
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_kelly_factor", 0.5)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_kelly_haircut_enabled", True)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_threshold_c", 2.0)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_threshold_f", 3.0)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_kelly_factor", 0.5)
 
     def set_eff(eff_c):
         if eff_c is None:
@@ -116,7 +116,7 @@ def test_no_bias_row_fail_safe_halves(patched):
 
 def test_toggle_off_never_halves(patched, monkeypatch):
     patched(-9.0)  # huge bias, but toggle OFF
-    monkeypatch.setitem(era.settings["edli_v1"], "bias_decay_kelly_haircut_enabled", False)
+    monkeypatch.setitem(era.settings["edli"], "bias_decay_kelly_haircut_enabled", False)
     mult, applied, native, reason = era._maybe_bias_decay_kelly_haircut(0.40, family=_Family("Tokyo"))
     assert applied is False and reason == "disabled"
     assert mult == pytest.approx(0.40)

@@ -91,7 +91,7 @@ def test_mainstream_pass_value_cannot_change_submit_decision(monkeypatch):
     mainstream verdict may produce MAINSTREAM_AGREEMENT_REQUIRED (the deleted branch)."""
     # The config key has NO effect now — set both postures to prove value-independence.
     for enforce_posture in (True, False):
-        monkeypatch.setitem(settings["edli_v1"], "mainstream_agreement_enforce_on_submit", enforce_posture)
+        monkeypatch.setitem(settings["edli"], "mainstream_agreement_enforce_on_submit", enforce_posture)
         reasons = {}
         for verdict in (True, False, None):
             event = _event()

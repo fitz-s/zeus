@@ -1,11 +1,11 @@
 # Lifecycle: created=2026-06-08; last_reviewed=2026-06-08; last_reused=2026-06-08
-# Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli_v1 flag.
+# Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli flag.
 # Reuse: Run with pytest; update if the BAYES_PRECISION_FUSION extra-capture wiring or flag gate in src/main.py changes.
 # Created: 2026-06-08
 # Last reused or audited: 2026-06-08
 # Authority basis: PR#400 review (src/main.py:4909 bare `date` NameError swallowed by
 #   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + BAYES_PRECISION_FUSION_SPEC.md §6 F1 (BAYES_PRECISION_FUSION multi-model
-#   SHADOW capture gated by edli_v1.replacement_0_1_bayes_precision_fusion_capture_enabled).
+#   SHADOW capture gated by edli.replacement_0_1_bayes_precision_fusion_capture_enabled).
 """Relationship regression test for the BAYES_PRECISION_FUSION extra-model capture wiring in src.main.
 
 Relationship under test (plan-row -> BAYES_PRECISION_FUSION download-target boundary, src/main.py
@@ -85,7 +85,7 @@ def _wire(monkeypatch, *, rows, forecast_db="zeus-forecasts.db"):
     """Enable the capture flag and inject the plan builder + downloader. Returns the
     list that records each ``download_bayes_precision_fusion_extra_raw_inputs`` call's kwargs."""
     monkeypatch.setitem(
-        cfg.settings["edli_v1"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True
+        cfg.settings["edli"], "replacement_0_1_bayes_precision_fusion_capture_enabled", True
     )
 
     monkeypatch.setattr(
