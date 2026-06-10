@@ -269,7 +269,7 @@ class ResolvedMarketOutcome:
     range_high: Optional[float]
     yes_won: bool
 
-    def as_v2_outcome_row(self) -> dict:
+    def as_outcome_row(self) -> dict:
         return {
             "condition_id": self.condition_id,
             "token_id": self.yes_token_id,
@@ -1591,7 +1591,7 @@ def _write_settlement_truth(
                 target_date=target_date,
                 temperature_metric=metric_identity.temperature_metric,
                 outcomes=[
-                    outcome.as_v2_outcome_row()
+                    outcome.as_outcome_row()
                     for outcome in resolved_market_outcomes
                 ],
             )

@@ -624,7 +624,7 @@ class TestFixD:
         schema's NOT NULL constraint on p_raw.
         """
         import scripts.refit_platt as rfmod
-        from scripts.refit_platt import refit_v2, RefitStatsV2
+        from scripts.refit_platt import refit, RefitStatsV2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()
@@ -649,7 +649,7 @@ class TestFixD:
         # (dry_run=False, force=True). The mocked _fit_bucket does not
         # actually touch the DB, so this is safe.
         with patch.object(rfmod, "_fit_bucket", side_effect=_mock_fit_bucket):
-            stats = refit_v2(
+            stats = refit(
                 conn,
                 metric_identity=HIGH_LOCALDAY_MAX,
                 dry_run=False,
@@ -676,7 +676,7 @@ class TestFixD:
         so a dry-run-side INSERT would silently mutate the DB.
         """
         import scripts.refit_platt as rfmod
-        from scripts.refit_platt import refit_v2
+        from scripts.refit_platt import refit
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()
@@ -692,7 +692,7 @@ class TestFixD:
         assert pre == 0
 
         with patch.object(rfmod, "_fit_bucket", side_effect=_mock_fit_fail):
-            stats = refit_v2(
+            stats = refit(
                 conn,
                 metric_identity=HIGH_LOCALDAY_MAX,
                 dry_run=True,
@@ -711,7 +711,7 @@ class TestFixD:
     def test_refit_strict_mode_raises_on_any_failure(self):
         """Fix D: --strict mode raises RuntimeError and rolls back all if any bucket fails."""
         import scripts.refit_platt as rfmod
-        from scripts.refit_platt import refit_v2
+        from scripts.refit_platt import refit
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = self._make_refit_conn()
@@ -724,7 +724,7 @@ class TestFixD:
 
         with patch.object(rfmod, "_fit_bucket", side_effect=_always_fail):
             with pytest.raises(RuntimeError, match="strict mode"):
-                refit_v2(
+                refit(
                     conn,
                     metric_identity=HIGH_LOCALDAY_MAX,
                     dry_run=True,

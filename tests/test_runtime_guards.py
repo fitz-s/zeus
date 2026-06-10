@@ -10059,7 +10059,7 @@ def test_evaluate_candidate_rejects_unclassified_strategy_key(monkeypatch):
         with mock.patch("src.engine.evaluator.scan_full_hypothesis_family", return_value=[mock_hypothesis]):
             with mock.patch("src.engine.evaluator._filter_executable_selected_edges", return_value=[target_edge]):
                 with mock.patch("src.engine.evaluator._store_ens_snapshot", return_value="snap123"):
-                    with mock.patch("src.engine.evaluator._read_v2_snapshot_metadata", return_value={"boundary_ambiguous": False}):
+                    with mock.patch("src.engine.evaluator._read_snapshot_metadata", return_value={"boundary_ambiguous": False}):
                         with mock.patch("src.engine.evaluator._store_snapshot_p_raw", return_value=True):
                             with mock.patch("src.engine.evaluator.get_calibrator", return_value=(mock_cal, 1)):
                                 with mock.patch("src.engine.evaluator.ensemble_crosscheck_model", return_value="gfs025"):

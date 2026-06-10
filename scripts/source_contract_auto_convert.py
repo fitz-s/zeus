@@ -438,14 +438,14 @@ def _workspace_locator(
             {
                 "id": "calibration_pairs_rebuild",
                 "path": "scripts/rebuild_calibration_pairs.py",
-                "look_for": ["rebuild_all_v2", "--city", "--dry-run", "--no-dry-run", "--force"],
+                "look_for": ["rebuild_all", "--city", "--dry-run", "--no-dry-run", "--force"],
                 "purpose": "calibration pair rebuild helper",
                 "access": "run_dry_only_from_allowed_command",
             },
             {
                 "id": "platt_refit",
                 "path": "scripts/refit_platt.py",
-                "look_for": ["refit_all_v2", "--cluster", "--season", "--data-version", "--temperature-metric"],
+                "look_for": ["refit_all", "--cluster", "--season", "--data-version", "--temperature-metric"],
                 "purpose": "bucket-scoped Platt refit helper",
                 "access": "exact_command_only",
             },

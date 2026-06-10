@@ -3501,7 +3501,7 @@ _FORECAST_TABLES = (
 )
 
 
-def _ensure_v2_forecast_indexes(conn: sqlite3.Connection) -> None:
+def _ensure_forecast_indexes(conn: sqlite3.Connection) -> None:
     """Idempotent CREATE INDEX IF NOT EXISTS for every v2 forecast-class index.
 
     PLAN-evidence: docs/operations/task_2026-05-14_attach_path_index_fix/PLAN.md
@@ -3874,7 +3874,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # market_events: B3cont (PR3) collapsed market_events_v2 → market_events on
     # forecasts.db; the old v1 shell on world.db (0 rows, missing temperature_metric
     # + recorded_at) was declared legacy_archived but not yet dropped from the live
-    # file. If the ATTACH path picks up that ghost DDL and then _ensure_v2_forecast_indexes
+    # file. If the ATTACH path picks up that ghost DDL and then _ensure_forecast_indexes
     # runs CREATE INDEX ON market_events(temperature_metric), it crashes with
     # "no such column: temperature_metric". Fix: always build via _create_market_events
     # (canonical static DDL in v2_schema.py) and never copy from world_src.
@@ -3952,7 +3952,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
 
         # Post-P2 fallback: world.db may be world-class-only (no legacy forecast
         # table copies). Any registry forecast table not yet on forecasts conn
-        # must be created via static helpers so _ensure_v2_forecast_indexes succeeds.
+        # must be created via static helpers so _ensure_forecast_indexes succeeds.
         _missing_on_fc = {
             tbl for tbl in _registry_forecast_tables
             if not conn.execute(
@@ -4018,7 +4018,7 @@ def init_schema_forecasts(conn: sqlite3.Connection) -> None:
     # missing on the forecasts conn. Run the idempotent helper unconditionally
     # so both branches converge to the canonical v2 index inventory.
     # PLAN-evidence: docs/operations/task_2026-05-14_attach_path_index_fix/PLAN.md
-    _ensure_v2_forecast_indexes(conn)
+    _ensure_forecast_indexes(conn)
 
     # T2 Day0Nowcast — SCHEMA_FORECASTS_VERSION 4 (2026-05-19).
     # These tables are forecast-class only; not in world_src so always created

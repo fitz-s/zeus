@@ -8,7 +8,7 @@ Invariants asserted:
   T1E-REBUILD-SENTINEL-REFUSES: rebuild_calibration_pairs.py exits non-zero
     when .zeus/rebuild_lock.do_not_run_during_live exists. The check fires BEFORE
     any sqlite3.connect call.
-  T1E-REBUILD-TRANSACTION-SHARDED: rebuild_v2 commits per (city, metric) bucket.
+  T1E-REBUILD-TRANSACTION-SHARDED: rebuild commits per (city, metric) bucket.
     commit() call count is > 1 for a multi-city rebuild.
   T1E-REBUILD-COMPLETE-SENTINEL: a live rebuild scope is marked in_progress
     before bucket commits and complete only after all post-write gates pass.
@@ -341,7 +341,7 @@ def test_rebuild_write_mode_with_isolated_db_reaches_existing_write_seam(rebuild
         patch.object(rebuild_mod, "apply_canonical_schema", return_value=None),
         patch.object(
             rebuild_mod,
-            "rebuild_all_v2",
+            "rebuild_all",
             return_value={"high": types.SimpleNamespace(refused=False)},
         ),
     ):
@@ -443,7 +443,7 @@ def test_refit_write_mode_with_isolated_db_reaches_existing_write_seam(tmp_path)
             patch.object(refit_mod, "apply_canonical_schema", return_value=None),
             patch.object(
                 refit_mod,
-                "refit_all_v2",
+                "refit_all",
                 return_value={"high": types.SimpleNamespace(refused=False)},
             ),
         ):
@@ -460,7 +460,7 @@ def test_refit_write_mode_with_isolated_db_reaches_existing_write_seam(tmp_path)
 # ---------------------------------------------------------------------------
 
 def test_rebuild_shards_transactions_commit_per_city(rebuild_mod):
-    """rebuild_v2 commits per (city, metric) bucket; commit count >= 2 for 2 cities.
+    """rebuild commits per (city, metric) bucket; commit count >= 2 for 2 cities.
 
     Uses a mock conn with a counting commit(). Patches all heavy dependencies.
     Asserts conn.commit() is called at least once per city bucket.
@@ -504,7 +504,7 @@ def test_rebuild_shards_transactions_commit_per_city(rebuild_mod):
         }),
     ):
         try:
-            rebuild_mod.rebuild_v2(
+            rebuild_mod.rebuild(
                 mock_conn,
                 dry_run=False,
                 force=True,
@@ -523,10 +523,10 @@ def test_rebuild_shards_transactions_commit_per_city(rebuild_mod):
 
 
 def test_rebuild_all_v2_no_outer_savepoint(rebuild_mod):
-    """rebuild_all_v2 does not wrap all specs in one outer SAVEPOINT.
+    """rebuild_all does not wrap all specs in one outer SAVEPOINT.
 
-    T1E removes the monolithic outer SAVEPOINT from rebuild_all_v2. Each metric
-    spec is processed independently via rebuild_v2. Verify that rebuild_all_v2
+    T1E removes the monolithic outer SAVEPOINT from rebuild_all. Each metric
+    spec is processed independently via rebuild. Verify that rebuild_all
     does not issue a SAVEPOINT v2_rebuild_all command.
     """
     from src.calibration.metric_specs import METRIC_SPECS
@@ -563,7 +563,7 @@ def test_rebuild_all_v2_no_outer_savepoint(rebuild_mod):
         patch.object(rebuild_mod, "METRIC_SPECS", [high_spec]),
     ):
         try:
-            rebuild_mod.rebuild_all_v2(
+            rebuild_mod.rebuild_all(
                 mock_conn,
                 dry_run=False,
                 force=True,
@@ -574,7 +574,7 @@ def test_rebuild_all_v2_no_outer_savepoint(rebuild_mod):
 
     savepoint_all = [s for s in execute_calls if "v2_rebuild_all" in str(s)]
     assert len(savepoint_all) == 0, (
-        f"rebuild_all_v2 should not issue v2_rebuild_all SAVEPOINT (T1E sharding). "
+        f"rebuild_all should not issue v2_rebuild_all SAVEPOINT (T1E sharding). "
         f"Found: {savepoint_all}"
     )
 
@@ -628,7 +628,7 @@ def test_rebuild_marks_scope_in_progress_then_complete(rebuild_mod):
         patch.object(rebuild_mod, "_process_snapshot_v2", side_effect=successful_process),
         patch.object(rebuild_mod, "cities_by_name", {city_a: cities_by_name[city_a]}),
     ):
-        stats = rebuild_mod.rebuild_v2(
+        stats = rebuild_mod.rebuild(
             mock_conn,
             dry_run=False,
             force=True,
@@ -671,7 +671,7 @@ def test_rebuild_validation_failure_leaves_scope_in_progress_not_complete(rebuil
         patch.object(rebuild_mod, "cities_by_name", {city_a: cities_by_name[city_a]}),
     ):
         with pytest.raises(RuntimeError, match="zero pairs"):
-            rebuild_mod.rebuild_v2(
+            rebuild_mod.rebuild(
                 mock_conn,
                 dry_run=False,
                 force=True,
@@ -834,7 +834,7 @@ def test_refit_live_write_requires_complete_rebuild_sentinel_before_model_promot
             patch.object(refit_mod, "_fit_bucket", side_effect=AssertionError("must not fit")),
         ):
             with pytest.raises(RuntimeError, match="missing rebuild_complete sentinel"):
-                refit_mod.refit_v2(
+                refit_mod.refit(
                     mock_conn,
                     metric_identity=HIGH_LOCALDAY_MAX,
                     dry_run=False,
@@ -881,7 +881,7 @@ def test_refit_dry_run_can_inspect_without_rebuild_complete_sentinel():
                 side_effect=AssertionError("dry-run must not require rebuild sentinel"),
             ) as assert_sentinel,
         ):
-            stats = refit_mod.refit_v2(
+            stats = refit_mod.refit(
                 mock_conn,
                 metric_identity=HIGH_LOCALDAY_MAX,
                 dry_run=True,

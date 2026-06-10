@@ -8,7 +8,7 @@ Asserts calibration_pairs and platt_models have zero cross-metric leakage:
   - LOW rebuild does not write HIGH-metric rows.
   - Platt model buckets do not share (temperature_metric, cluster, season) keys across metrics.
 
-R-AZ (TestGateDLowPurityIsolation): insert mixed high+low snapshot rows; run rebuild_v2
+R-AZ (TestGateDLowPurityIsolation): insert mixed high+low snapshot rows; run rebuild
 for each spec; assert no cross-metric rows appear in calibration_pairs; assert
 platt_models model_key is scoped per metric.
 """
@@ -150,13 +150,13 @@ class TestGateDLowPurityIsolation:
     """R-AZ: calibration_pairs and platt_models must have zero cross-metric leakage."""
 
     def test_R_AZ_1_high_rebuild_writes_only_high_rows(self):
-        """R-AZ-1 (RED): rebuild_v2 with HIGH_SPEC must not write any temperature_metric='low' rows.
+        """R-AZ-1 (RED): rebuild with HIGH_SPEC must not write any temperature_metric='low' rows.
 
         Pre-fix: _process_snapshot_v2 has no spec param → SQL pre-filter is the only guard.
-        If the SQL filter in rebuild_v2 is missing or weak, LOW rows from ensemble_snapshots
+        If the SQL filter in rebuild is missing or weak, LOW rows from ensemble_snapshots
         could be processed. Post-fix: spec param + dataset_id assertion makes this impossible.
         """
-        from scripts.rebuild_calibration_pairs import rebuild_v2, CalibrationMetricSpec, RebuildStatsV2
+        from scripts.rebuild_calibration_pairs import rebuild, CalibrationMetricSpec, RebuildStatsV2
         from src.types.metric_identity import HIGH_LOCALDAY_MAX
 
         conn = _make_gate_d_db()
@@ -164,17 +164,17 @@ class TestGateDLowPurityIsolation:
         stats = RebuildStatsV2()
 
         import inspect
-        sig = inspect.signature(rebuild_v2)
+        sig = inspect.signature(rebuild)
         if "spec" not in sig.parameters:
             pytest.fail(
-                "rebuild_v2 has no 'spec' parameter. "
+                "rebuild has no 'spec' parameter. "
                 "Cannot run HIGH-spec rebuild in isolation — cross-metric leakage is structurally unguarded. "
                 f"Current signature: {sig}. "
-                "Fix: add spec: CalibrationMetricSpec param to rebuild_v2 and propagate to _process_snapshot_v2."
+                "Fix: add spec: CalibrationMetricSpec param to rebuild and propagate to _process_snapshot_v2."
             )
 
         try:
-            rebuild_v2(conn, spec=high_spec, n_mc=None, rng=np.random.default_rng(0), stats=stats)
+            rebuild(conn, spec=high_spec, n_mc=None, rng=np.random.default_rng(0), stats=stats)
         except Exception as e:
             # Missing tables or config in :memory: DB may cause early exit — that's OK for Gate D.
             # We only care about what was written before any error.
@@ -609,7 +609,7 @@ class TestGateDLowPurityIsolation:
         ]
 
     def test_R_AZ_2c3_rebuild_dry_run_evaluates_low_contract_and_observation_gates(self):
-        from scripts.rebuild_calibration_pairs import METRIC_SPECS, rebuild_v2
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS, rebuild
         from src.state.db import init_schema
         from src.state.schema.v2_schema import apply_canonical_schema
         from src.types.metric_identity import LOW_LOCALDAY_MIN
@@ -669,7 +669,7 @@ class TestGateDLowPurityIsolation:
             ),
         )
 
-        stats = rebuild_v2(
+        stats = rebuild(
             conn,
             dry_run=True,
             force=False,

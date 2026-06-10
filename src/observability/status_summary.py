@@ -757,7 +757,7 @@ def _legacy_positions_artifact_summary(position_view: dict) -> dict:
     return summary
 
 
-def _get_v2_row_counts(conn) -> dict[str, int]:
+def _get_row_counts(conn) -> dict[str, int]:
     """Query row counts for the 5 v2 tables.
 
     S5 R11 P10B: meta-immune-system sensor. Returns 0 for tables that don't
@@ -1202,7 +1202,7 @@ def write_status(cycle_summary: dict = None) -> None:
     v2_row_counts: dict[str, int] = {}
     try:
         if conn is not None:
-            v2_row_counts = _get_v2_row_counts(conn)
+            v2_row_counts = _get_row_counts(conn)
     except Exception:
         pass
 

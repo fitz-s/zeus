@@ -220,10 +220,10 @@ class TestFlagOffByteIdentity:
         import src.calibration.manager as mgr
         settings_path = _write_settings(tmp_path, _flag_off_settings(tmp_path))
         with mock.patch.object(
-            mgr, "_calibration_bin_source_v2_fit_enabled",
+            mgr, "_calibration_bin_source_fit_enabled",
             return_value=False,
         ):
-            enabled = mgr._calibration_bin_source_v2_fit_enabled()
+            enabled = mgr._calibration_bin_source_fit_enabled()
         assert enabled is False, "Flag-OFF must return False from helper"
 
     def test_flag_off_selects_none_bin_source_filter(self, tmp_path):
@@ -232,10 +232,10 @@ class TestFlagOffByteIdentity:
         with the pre-fix call site."""
         import src.calibration.manager as mgr
 
-        with mock.patch.object(mgr, "_calibration_bin_source_v2_fit_enabled", return_value=False):
+        with mock.patch.object(mgr, "_calibration_bin_source_fit_enabled", return_value=False):
             bin_filter: Optional[str] = (
                 CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
-                if mgr._calibration_bin_source_v2_fit_enabled()
+                if mgr._calibration_bin_source_fit_enabled()
                 else None
             )
         assert bin_filter is None, (
@@ -278,10 +278,10 @@ class TestFlagOnOwnFit:
         canonical constant — not a hardcoded string literal."""
         import src.calibration.manager as mgr
 
-        with mock.patch.object(mgr, "_calibration_bin_source_v2_fit_enabled", return_value=True):
+        with mock.patch.object(mgr, "_calibration_bin_source_fit_enabled", return_value=True):
             bin_filter: Optional[str] = (
                 CANONICAL_CALIBRATION_PAIR_BIN_SOURCE
-                if mgr._calibration_bin_source_v2_fit_enabled()
+                if mgr._calibration_bin_source_fit_enabled()
                 else None
             )
         assert bin_filter == CANONICAL_CALIBRATION_PAIR_BIN_SOURCE, (
@@ -433,7 +433,7 @@ class TestGateFitPopulationAgreement:
 # ── test 4: settings flag read ────────────────────────────────────────────────
 
 class TestSettingsFlagRead:
-    """_calibration_bin_source_v2_fit_enabled reads from settings.json
+    """_calibration_bin_source_fit_enabled reads from settings.json
     feature_flags section; defaults False when absent."""
 
     def test_reads_false_from_settings(self, tmp_path):

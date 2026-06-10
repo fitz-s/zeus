@@ -1,7 +1,7 @@
 # Lifecycle: created=2026-04-18; last_reviewed=2026-04-18; last_reused=never
 # Purpose: Phase 7A R-BH..R-BL invariants: metric-aware rebuild cutover —
 #          _delete_canonical_v2_slice metric scoping, _process_snapshot_v2
-#          write-time metric identity, rebuild_v2 main() METRIC_SPECS iteration,
+#          write-time metric identity, rebuild main() METRIC_SPECS iteration,
 #          outer SAVEPOINT atomicity, refit_platt main() iteration,
 #          backfill_tigge_snapshot_p_raw_v2 metric-scoped writes.
 # Reuse: Anchors on phase7a_contract.md (commit 9a5ef84) + master plan acceptance
@@ -136,37 +136,37 @@ class TestR_BH_DeleteSliceMetricScoped:
 
 
 # ---------------------------------------------------------------------------
-# R-BI: rebuild_v2 main() iterates METRIC_SPECS (both HIGH + LOW)
+# R-BI: rebuild main() iterates METRIC_SPECS (both HIGH + LOW)
 # ---------------------------------------------------------------------------
 
 class TestR_BI_MainIteratesMetricSpecs:
     """R-BI: main() / top-level rebuild entry iterates METRIC_SPECS, processing both tracks."""
 
     def test_R_BI_1_main_iterates_both_specs_in_dry_run(self, conn, capsys):
-        """Top-level rebuild_all_v2 (or main) invokes rebuild_v2 for every METRIC_SPEC."""
-        from scripts.rebuild_calibration_pairs import METRIC_SPECS, rebuild_all_v2
+        """Top-level rebuild_all (or main) invokes rebuild for every METRIC_SPEC."""
+        from scripts.rebuild_calibration_pairs import METRIC_SPECS, rebuild_all
 
-        results = rebuild_all_v2(conn, dry_run=True, force=False)
+        results = rebuild_all(conn, dry_run=True, force=False)
 
-        assert isinstance(results, dict), "rebuild_all_v2 must return per-metric dict of stats"
+        assert isinstance(results, dict), "rebuild_all must return per-metric dict of stats"
         keys = set(results.keys())
         expected_keys = {spec.identity.temperature_metric for spec in METRIC_SPECS}
         assert keys == expected_keys, (
-            f"rebuild_all_v2 must cover exactly {expected_keys}, got {keys}"
+            f"rebuild_all must cover exactly {expected_keys}, got {keys}"
         )
         assert len(results) == 2, "must iterate both HIGH + LOW tracks"
 
     def test_R_BI_2_rebuild_v2_requires_explicit_spec(self, conn):
-        """rebuild_v2 signature must require explicit `spec` (no HIGH default)."""
+        """rebuild signature must require explicit `spec` (no HIGH default)."""
         import inspect
 
-        from scripts.rebuild_calibration_pairs import rebuild_v2
+        from scripts.rebuild_calibration_pairs import rebuild
 
-        sig = inspect.signature(rebuild_v2)
+        sig = inspect.signature(rebuild)
         spec_param = sig.parameters.get("spec")
-        assert spec_param is not None, "rebuild_v2 must accept `spec` kwarg"
+        assert spec_param is not None, "rebuild must accept `spec` kwarg"
         assert spec_param.default is inspect.Parameter.empty, (
-            "rebuild_v2 must NOT default `spec` to HIGH — caller iterates METRIC_SPECS explicitly"
+            "rebuild must NOT default `spec` to HIGH — caller iterates METRIC_SPECS explicitly"
         )
 
 
@@ -175,7 +175,7 @@ class TestR_BI_MainIteratesMetricSpecs:
 # ---------------------------------------------------------------------------
 
 class TestR_BJ_OuterSavepointAtomicity:
-    """R-BJ: B3cont — outer SAVEPOINT removed from rebuild_all_v2.
+    """R-BJ: B3cont — outer SAVEPOINT removed from rebuild_all.
 
     rebuild_calibration_pairs.py:1945 docstring: "No outer SAVEPOINT — each
     bucket is independently atomic." When LOW fails, HIGH writes that already
@@ -189,7 +189,7 @@ class TestR_BJ_OuterSavepointAtomicity:
         After LOW raises, the HIGH row on 2026-06-16 persists (count == 1).
         """
         from scripts.rebuild_calibration_pairs import (
-            METRIC_SPECS, rebuild_all_v2,
+            METRIC_SPECS, rebuild_all,
         )
 
         _insert_canonical_pair(conn, city="Chicago", target_date="2026-06-15",
@@ -209,9 +209,9 @@ class TestR_BJ_OuterSavepointAtomicity:
             else:
                 raise RuntimeError("SIMULATED: LOW-side hard failure, test R-BJ-1")
 
-        with patch("scripts.rebuild_calibration_pairs.rebuild_v2", side_effect=fake_rebuild_v2):
+        with patch("scripts.rebuild_calibration_pairs.rebuild", side_effect=fake_rebuild_v2):
             with pytest.raises(RuntimeError, match="SIMULATED"):
-                rebuild_all_v2(conn, dry_run=False, force=True)
+                rebuild_all(conn, dry_run=False, force=True)
 
         remaining_2026_06_16 = conn.execute(
             "SELECT COUNT(*) FROM calibration_pairs WHERE target_date = '2026-06-16'"
@@ -236,28 +236,28 @@ class TestR_BK_RefitPlattIteratesSpecs:
     """R-BK: refit_platt main() must iterate METRIC_SPECS (both HIGH + LOW)."""
 
     def test_R_BK_1_main_iterates_both_specs(self, conn):
-        """refit_all_v2 (or main) invokes refit_v2 for every METRIC_SPEC."""
-        from scripts.refit_platt import refit_all_v2, METRIC_SPECS
+        """refit_all (or main) invokes refit for every METRIC_SPEC."""
+        from scripts.refit_platt import refit_all, METRIC_SPECS
 
-        results = refit_all_v2(conn, dry_run=True, force=False)
+        results = refit_all(conn, dry_run=True, force=False)
 
-        assert isinstance(results, dict), "refit_all_v2 must return per-metric dict"
+        assert isinstance(results, dict), "refit_all must return per-metric dict"
         keys = set(results.keys())
         expected_keys = {spec.identity.temperature_metric for spec in METRIC_SPECS}
         assert keys == expected_keys, (
-            f"refit_all_v2 must cover exactly {expected_keys}, got {keys}"
+            f"refit_all must cover exactly {expected_keys}, got {keys}"
         )
 
     def test_R_BK_2_refit_v2_requires_explicit_metric_identity(self):
-        """refit_v2 signature must require explicit `metric_identity` (no HIGH default)."""
+        """refit signature must require explicit `metric_identity` (no HIGH default)."""
         import inspect
-        from scripts.refit_platt import refit_v2
+        from scripts.refit_platt import refit
 
-        sig = inspect.signature(refit_v2)
+        sig = inspect.signature(refit)
         param = sig.parameters.get("metric_identity")
-        assert param is not None, "refit_v2 must accept `metric_identity` kwarg"
+        assert param is not None, "refit must accept `metric_identity` kwarg"
         assert param.default is inspect.Parameter.empty, (
-            "refit_v2 must NOT default `metric_identity` — caller iterates METRIC_SPECS explicitly"
+            "refit must NOT default `metric_identity` — caller iterates METRIC_SPECS explicitly"
         )
 
 

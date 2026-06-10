@@ -13,7 +13,7 @@ Cross-module relationship test:
 
 bin_grid_id propagation path (production):
   ensemble_snapshots.bin_grid_id
-    → _read_v2_snapshot_metadata (evaluator.py)
+    → _read_snapshot_metadata (evaluator.py)
     → v2_snapshot_meta["bin_grid_id"]
     → write_nowcast_run(bin_grid_id=...)
     → day0_nowcast_runs.bin_grid_id

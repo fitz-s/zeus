@@ -3,14 +3,14 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-05-24; last_reused=2026-05-24
 # Authority basis: ENS full_transport_v1 REFIT task 2026-05-24
 #   (docs/operations/ENS_REFIT_PLAN_2026-05-24.md).
-# Purpose: Drive refit_all_v2() against an isolated staging DB; rebuild-complete
+# Purpose: Drive refit_all() against an isolated staging DB; rebuild-complete
 #   sentinel gate preserved; supports --error-model flag.
 # Reuse: Run after run_offline_calibration_rebuild.py completes.
-"""Offline driver: run refit_all_v2() against an ISOLATED staging DB.
+"""Offline driver: run refit_all() against an ISOLATED staging DB.
 
 Mirrors run_offline_calibration_rebuild.py. `refit_platt.py main()` wraps the
 refit in an operator promotion preflight that guards the SHARED world DB. This
-driver calls `refit_all_v2` directly against an explicit isolated DB (refusing
+driver calls `refit_all` directly against an explicit isolated DB (refusing
 the canonical world DB). The in-function rebuild-complete sentinel gate
 (`_assert_rebuild_complete_for_refit_source`) is PRESERVED — we do not bypass it
 — so the refit still refuses to train on an incomplete rebuild scope.
@@ -44,7 +44,7 @@ def main() -> int:
     ap.add_argument("--error-model", default="none")
     args = ap.parse_args()
 
-    from scripts.refit_platt import refit_all_v2  # noqa: PLC0415
+    from scripts.refit_platt import refit_all  # noqa: PLC0415
     from scripts.rebuild_calibration_pairs import (  # noqa: PLC0415
         _resolve_isolated_calibration_write_db_path,
     )
@@ -61,7 +61,7 @@ def main() -> int:
     init_schema(conn)
     apply_canonical_schema(conn)
     try:
-        per_metric = refit_all_v2(
+        per_metric = refit_all(
             conn,
             dry_run=False,
             force=True,

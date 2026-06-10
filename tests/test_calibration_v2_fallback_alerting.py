@@ -76,7 +76,7 @@ def _populated_legacy_model() -> dict:
 
 def test_v2_miss_with_legacy_hit_logs_fallback_warning(monkeypatch, caplog):
     """B3cont: legacy fallback path removed from get_calibrator.
-    _emit_v2_legacy_fallback_warning is defined at manager.py:262 but has no
+    _emit_legacy_fallback_warning is defined at manager.py:262 but has no
     callers — the call sites were removed as part of the canonical-only migration.
     When v2 misses, no legacy lookup fires and no fallback warning emits.
     This test now asserts the canonical-only behavior: v2 miss → no warning."""
@@ -155,7 +155,7 @@ def test_both_v2_and_legacy_miss_no_fallback_warning(monkeypatch, caplog):
 def test_repeated_fallback_for_same_bucket_logs_only_once(monkeypatch, caplog):
     """B3cont: legacy fallback call sites removed (manager.py:262 tombstone).
     _V2_FALLBACK_SEEN dedup set exists but is never populated since no caller
-    invokes _emit_v2_legacy_fallback_warning. Running 3 cycles with v2 miss
+    invokes _emit_legacy_fallback_warning. Running 3 cycles with v2 miss
     produces zero fallback warnings — canonical-only path returns None calibrator
     without touching legacy lookup or dedup set."""
     from src.calibration.manager import _V2_FALLBACK_SEEN

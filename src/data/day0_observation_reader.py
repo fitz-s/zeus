@@ -5,7 +5,7 @@
 """Day-0 observation extrema reader — semantics-correct high_so_far / low_so_far.
 
 WIRING STATUS (P0 follow-up §5, verdict 2026-05-23): DEFENSIVE HELPER ONLY — NOT
-WIRED into production.  ``read_day0_observed_extrema_v2`` has zero callers outside
+WIRED into production.  ``read_day0_observed_extrema`` has zero callers outside
 this module.  The LIVE production observed-so-far path is
 ``src.data.observation_client`` (get_current_observation), which computes
 ``high_so_far = max(...)`` over the selected WU rows (already MAX-correct, reading
@@ -153,7 +153,7 @@ def _auth_values() -> tuple[str, ...]:
     return tuple(sorted(_TRUSTED_AUTHORITIES))
 
 
-def read_day0_observed_extrema_v2(
+def read_day0_observed_extrema(
     conn: sqlite3.Connection,
     *,
     city: str,
@@ -262,7 +262,7 @@ def read_day0_observed_extrema_v2(
         "chosen_source": chosen_source,
         "row_count": n_rows,
         "coverage_status": coverage_status,
-        "reader": "src.data.day0_observation_reader.read_day0_observed_extrema_v2",
+        "reader": "src.data.day0_observation_reader.read_day0_observed_extrema",
     }
 
     return Day0ObservedExtrema(
