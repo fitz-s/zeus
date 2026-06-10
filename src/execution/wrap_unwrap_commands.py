@@ -84,6 +84,60 @@ _WRAP_TERMINAL_STATES = frozenset({
     WrapUnwrapState.UNWRAP_FAILED,
 })
 
+# P0-2 CAS guard (2026-06-09): legal predecessor states per target. Every wrap
+# state transition is a compare-and-swap — the UPDATE only fires when the row's
+# CURRENT state is one of the legal predecessors below AND is non-terminal. This
+# makes the state machine atomic under concurrent submitter/reconciler/same-tick
+# interleaving: a stale snapshot can never revert a row that another worker has
+# already advanced (e.g. reconciler reading WRAP_APPROVE_TX_HASHED then trying to
+# mark_wrap_approved AFTER the same-tick path already drove the row to
+# WRAP_CONFIRMED). Terminal states are absorbing: they appear in NO predecessor
+# set, so any terminal -> non-terminal transition is rejected structurally
+# (single SQL guard, not per-caller discipline).
+#
+# fail_* transitions are intentionally permissive on predecessor (any
+# non-terminal state may fail) but still terminal-absorbing — a CONFIRMED row
+# cannot be reverted to FAILED. Encoded as None == "any non-terminal".
+_LEGAL_PREDECESSORS: dict[WrapUnwrapState, frozenset[WrapUnwrapState] | None] = {
+    WrapUnwrapState.WRAP_APPROVE_TX_HASHED: frozenset({WrapUnwrapState.WRAP_REQUESTED}),
+    WrapUnwrapState.WRAP_APPROVED: frozenset({WrapUnwrapState.WRAP_APPROVE_TX_HASHED}),
+    # WRAP_TX_HASHED is reachable from WRAP_APPROVED (the two-step approve-then-
+    # wrap path used in production since 2026-05-19) AND directly from
+    # WRAP_REQUESTED (the legacy single-step `mark_tx_hashed` alias still
+    # exported for backward compat — no approve tx). Both are legal non-terminal
+    # predecessors; the critical anti-reversion guard (terminal states absorbing)
+    # is unaffected because neither is terminal.
+    WrapUnwrapState.WRAP_TX_HASHED: frozenset({
+        WrapUnwrapState.WRAP_APPROVED,
+        WrapUnwrapState.WRAP_REQUESTED,
+    }),
+    WrapUnwrapState.WRAP_CONFIRMED: frozenset({WrapUnwrapState.WRAP_TX_HASHED}),
+    WrapUnwrapState.WRAP_FAILED: None,  # any non-terminal WRAP row may fail
+    WrapUnwrapState.UNWRAP_TX_HASHED: frozenset({WrapUnwrapState.UNWRAP_REQUESTED}),
+    WrapUnwrapState.UNWRAP_CONFIRMED: frozenset({WrapUnwrapState.UNWRAP_TX_HASHED}),
+    WrapUnwrapState.UNWRAP_FAILED: None,  # any non-terminal UNWRAP row may fail
+}
+
+
+class WrapTransitionRejected(RuntimeError):
+    """Raised when a CAS state transition is rejected (rowcount 0).
+
+    The row's current state was not a legal predecessor of the requested
+    target (a concurrent worker already advanced it, or it is terminal). The
+    caller should re-read the row and decide. This is NOT an error condition —
+    it is the structural anti-reversion guard firing as designed — so the
+    reconciler/same-tick callers catch it, log the rejection, and move on.
+    """
+
+    def __init__(self, command_id: str, target: str, observed: str | None) -> None:
+        self.command_id = command_id
+        self.target = target
+        self.observed = observed
+        super().__init__(
+            f"wrap CAS rejected: command_id={command_id} target={target} "
+            f"observed_state={observed!r} (not a legal predecessor / terminal)"
+        )
+
 
 def init_wrap_unwrap_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(WRAP_UNWRAP_SCHEMA)
@@ -302,33 +356,61 @@ def reconcile_pending_wraps(
         if hasattr(receipt, "blockNumber"):
             block_num = receipt.blockNumber
         status = receipt.get("status", 1) if isinstance(receipt, dict) else getattr(receipt, "status", 1)
-        if status == 0:
-            fail_wrap(command_id, error_payload={"reason": "tx_reverted", "tx_hash": tx_hash}, conn=conn)
-            results.append(get_command(command_id, conn))
-            continue
 
-        current_state = row_d["state"]
-        if current_state == WrapUnwrapState.WRAP_APPROVE_TX_HASHED.value:
-            mark_wrap_approved(command_id, conn=conn)
-        elif current_state == WrapUnwrapState.WRAP_TX_HASHED.value:
-            confirm_wrap(
-                command_id,
-                confirmation_count=1,
-                block_number=block_num,
-                conn=conn,
-            )
-            # CLOB ledger refresh on wrap confirmation.
-            try:
-                _refresh_collateral_after_wrap_confirmation(adapter)
-            except Exception as refresh_exc:  # noqa: BLE001
-                # Fail-open: wrap is confirmed, balance refresh is best-effort.
-                # The operator can re-run a collateral refresh manually.
-                import logging
-                logging.getLogger(__name__).warning(
-                    "reconcile_pending_wraps: WRAP_CONFIRMED command_id=%s "
-                    "balance_refresh_failed=%s (fail-open, wrap durable)",
-                    command_id, refresh_exc,
+        # P0-2c: RE-READ the current state immediately before each transition.
+        # The snapshot in `rows` was taken at entry; a concurrent same-tick path
+        # or another worker may have advanced this row since. The CAS in
+        # _transition is the structural guard, but re-reading here lets us route
+        # to the correct transition (and skip rows already advanced past the
+        # reconcilable states) instead of always trusting the stale snapshot.
+        fresh = conn.execute(
+            "SELECT state FROM wrap_unwrap_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        if fresh is None:
+            continue
+        current_state = fresh["state"] if isinstance(fresh, sqlite3.Row) else fresh[0]
+
+        try:
+            if status == 0:
+                fail_wrap(
+                    command_id,
+                    error_payload={"reason": "tx_reverted", "tx_hash": tx_hash},
+                    conn=conn,
                 )
+                results.append(get_command(command_id, conn))
+                continue
+
+            if current_state == WrapUnwrapState.WRAP_APPROVE_TX_HASHED.value:
+                mark_wrap_approved(command_id, conn=conn)
+            elif current_state == WrapUnwrapState.WRAP_TX_HASHED.value:
+                confirm_wrap(
+                    command_id,
+                    confirmation_count=1,
+                    block_number=block_num,
+                    conn=conn,
+                )
+                # CLOB ledger refresh on wrap confirmation.
+                try:
+                    _refresh_collateral_after_wrap_confirmation(adapter)
+                except Exception as refresh_exc:  # noqa: BLE001
+                    # Fail-open: wrap is confirmed, balance refresh is best-effort.
+                    # The operator can re-run a collateral refresh manually.
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "reconcile_pending_wraps: WRAP_CONFIRMED command_id=%s "
+                        "balance_refresh_failed=%s (fail-open, wrap durable)",
+                        command_id, refresh_exc,
+                    )
+            else:
+                # Row already advanced past a reconcilable state since the
+                # snapshot (e.g. same-tick path confirmed it). Nothing to do.
+                continue
+        except WrapTransitionRejected:
+            # A concurrent worker advanced this row between our re-read and the
+            # CAS UPDATE. The anti-reversion guard fired as designed — skip;
+            # the row is already in (or past) its intended state.
+            continue
         results.append(get_command(command_id, conn))
     return results
 
@@ -385,9 +467,25 @@ def _transition(
     _now_utc = datetime.now(timezone.utc).isoformat()
     _first_inclusion = _now_utc if block_number is not None else None
     _finality = _now_utc if (confirmation_count is not None and confirmation_count >= 6) else None
+
+    # P0-2 CAS: build the WHERE state-predicate from the legal-predecessor map.
+    # A transition only fires when the row's CURRENT state is a legal predecessor
+    # of new_state AND is non-terminal. Terminal states never appear in any
+    # predecessor set, so terminal -> anything is rejected structurally. fail_*
+    # (predecessors == None) is "any non-terminal state may fail".
+    _terminal_values = tuple(s.value for s in _WRAP_TERMINAL_STATES)
+    _predecessors = _LEGAL_PREDECESSORS.get(new_state)
+    if _predecessors is None:
+        # Any non-terminal row may transition (fail_* paths).
+        _state_predicate = f"state NOT IN ({','.join('?' * len(_terminal_values))})"
+        _state_params: tuple[str, ...] = _terminal_values
+    else:
+        _pred_values = tuple(s.value for s in _predecessors)
+        _state_predicate = f"state IN ({','.join('?' * len(_pred_values))})"
+        _state_params = _pred_values
     try:
-        conn.execute(
-            """
+        cur = conn.execute(
+            f"""
             UPDATE wrap_unwrap_commands
                SET state = ?,
                    tx_hash = COALESCE(?, tx_hash),
@@ -399,6 +497,7 @@ def _transition(
                    finality_confirmed_time = COALESCE(finality_confirmed_time, ?),
                    tx_kind = COALESCE(?, tx_kind)
              WHERE command_id = ?
+               AND {_state_predicate}
             """,
             (
                 new_state.value,
@@ -411,8 +510,37 @@ def _transition(
                 _finality,
                 tx_kind,
                 command_id,
+                *_state_params,
             ),
         )
+        if cur.rowcount == 0:
+            # CAS lost: the row's current state was not a legal predecessor
+            # (a concurrent worker advanced it, or it is terminal). Re-read the
+            # observed state, log the rejection, and raise so the caller decides.
+            observed_row = conn.execute(
+                "SELECT state FROM wrap_unwrap_commands WHERE command_id = ?",
+                (command_id,),
+            ).fetchone()
+            observed = (
+                (observed_row["state"] if isinstance(observed_row, sqlite3.Row) else observed_row[0])
+                if observed_row is not None
+                else None
+            )
+            import logging
+            logging.getLogger(__name__).warning(
+                "[WRAP_CAS_REJECTED] command_id=%s target=%s observed_state=%s "
+                "(transition rejected: not a legal predecessor / terminal-absorbing)",
+                command_id, new_state.value, observed,
+            )
+            _append_event(
+                conn,
+                command_id,
+                f"CAS_REJECTED:{new_state.value}",
+                {"target": new_state.value, "observed_state": observed},
+            )
+            if own_conn:
+                conn.commit()
+            raise WrapTransitionRejected(command_id, new_state.value, observed)
         _append_event(
             conn,
             command_id,

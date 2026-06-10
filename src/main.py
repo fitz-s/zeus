@@ -1478,8 +1478,13 @@ def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
     wrap_proceeds_now. Fail-soft: any failure logs and defers to the periodic
     wrap jobs (which remain as the resume/backstop path).
 
-    Takes the wrap_submitter dual-run lock so it can never double-submit a Safe
-    tx against the periodic _wrap_submitter_cycle.
+    P0-2 (d) shared logical lock: takes the single `wrap_state_machine` lock
+    shared by _wrap_intent_creator_cycle / _wrap_submitter_cycle /
+    _wrap_reconciler_cycle / this same-tick path. With ONE lock, no two of them
+    ever submit a Safe tx or transition a wrap row concurrently — so a stale
+    snapshot can never drive a duplicate on-chain tx (burned gas) against a row
+    another worker is advancing. The CAS in _transition is the structural
+    anti-reversion guard; this lock is the duplicate-submission guard.
     """
     from src.data.dual_run_lock import acquire_lock
     from src.execution.wrap_unwrap_commands import wrap_proceeds_now
@@ -1491,7 +1496,7 @@ def _wrap_proceeds_same_tick(creds: dict, adapter: Any) -> None:
     except Exception as exc:  # noqa: BLE001 — fail-soft
         logger.warning("wrap_proceeds_same_tick: signer derivation failed: %s", exc)
         return
-    with acquire_lock("wrap_submitter") as acquired:
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_proceeds_same_tick skipped_lock_held")
             return
@@ -1823,7 +1828,8 @@ def _wrap_intent_creator_cycle() -> None:
         logger.info("wrap_intent_creator skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_intent_creator") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_intent_creator").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_intent_creator skipped_lock_held")
             return
@@ -1892,7 +1898,8 @@ def _wrap_submitter_cycle() -> None:
         logger.info("wrap_submitter skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_submitter") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_submitter").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_submitter skipped_lock_held")
             return
@@ -2029,7 +2036,8 @@ def _wrap_reconciler_cycle() -> None:
         logger.info("wrap_reconciler skipped_non_live mode=%s", get_mode())
         return
 
-    with acquire_lock("wrap_reconciler") as acquired:
+    # P0-2 (d): single shared wrap state-machine lock (was "wrap_reconciler").
+    with acquire_lock("wrap_state_machine") as acquired:
         if not acquired:
             logger.info("wrap_reconciler skipped_lock_held")
             return
