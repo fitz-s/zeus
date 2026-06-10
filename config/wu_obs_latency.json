@@ -1,0 +1,727 @@
+{
+  "generated_at": "2026-06-10T00:58:10.529804+00:00",
+  "authority": "measured: zeus-world.db observation_instants(wu_icao_history) raw METAR ts + zeus_trades.db settlement_day_observation_authority(wu_api)",
+  "defaults": {
+    "median_report_interval_min": 60.0,
+    "publication_delay_est_min": 40.0,
+    "staleness_budget_min": 100.0
+  },
+  "cities": {
+    "Amsterdam": {
+      "station_id": "EHAM",
+      "n_raw_reports": 491,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        25,
+        55
+      ],
+      "pipeline_first_seen_delay_med_min": 50.0,
+      "pipeline_first_seen_delay_p90_min": 410.0,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Ankara": {
+      "station_id": "LTAC",
+      "n_raw_reports": 539,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        20,
+        50,
+        26,
+        9
+      ],
+      "pipeline_first_seen_delay_med_min": 85.0,
+      "pipeline_first_seen_delay_p90_min": 385.0,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Atlanta": {
+      "station_id": "KATL",
+      "n_raw_reports": 357,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        52,
+        48,
+        10,
+        6
+      ],
+      "pipeline_first_seen_delay_med_min": 61.0,
+      "pipeline_first_seen_delay_p90_min": 383.0,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Auckland": {
+      "station_id": "NZAA",
+      "n_raw_reports": 430,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 195.3,
+      "pipeline_first_seen_delay_p90_min": 615.1,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Austin": {
+      "station_id": "KAUS",
+      "n_raw_reports": 361,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        53,
+        30,
+        9,
+        6
+      ],
+      "pipeline_first_seen_delay_med_min": 82.1,
+      "pipeline_first_seen_delay_p90_min": 373.2,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Beijing": {
+      "station_id": "ZBAA",
+      "n_raw_reports": 508,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        0,
+        30,
+        37,
+        15
+      ],
+      "pipeline_first_seen_delay_med_min": 135.1,
+      "pipeline_first_seen_delay_p90_min": 495.1,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Buenos Aires": {
+      "station_id": "SAEZ",
+      "n_raw_reports": 354,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30,
+        25,
+        27
+      ],
+      "pipeline_first_seen_delay_med_min": 75.1,
+      "pipeline_first_seen_delay_p90_min": 375.1,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Busan": {
+      "station_id": "RKPK",
+      "n_raw_reports": 349,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        27,
+        47,
+        39
+      ],
+      "pipeline_first_seen_delay_med_min": 135.2,
+      "pipeline_first_seen_delay_p90_min": 555.1,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Cape Town": {
+      "station_id": "FACT",
+      "n_raw_reports": 368,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        27,
+        57,
+        56
+      ],
+      "pipeline_first_seen_delay_med_min": 75.2,
+      "pipeline_first_seen_delay_p90_min": 435.2,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Chengdu": {
+      "station_id": "ZUUU",
+      "n_raw_reports": 336,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0
+      ],
+      "pipeline_first_seen_delay_med_min": 135.2,
+      "pipeline_first_seen_delay_p90_min": 495.2,
+      "live_polls": 5,
+      "live_obs_age_min_min": 9.8,
+      "live_obs_age_med_min": 17.0,
+      "live_obs_age_p90_min": 24.8,
+      "publication_delay_est_min": 0.0,
+      "staleness_budget_min": 60.0
+    },
+    "Chicago": {
+      "station_id": "KORD",
+      "n_raw_reports": 345,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        51,
+        10,
+        12,
+        5
+      ],
+      "pipeline_first_seen_delay_med_min": 84.2,
+      "pipeline_first_seen_delay_p90_min": 325.3,
+      "live_polls": 10,
+      "live_obs_age_min_min": 10.8,
+      "live_obs_age_med_min": 36.9,
+      "live_obs_age_p90_min": 57.6,
+      "publication_delay_est_min": 6.9,
+      "staleness_budget_min": 66.9
+    },
+    "Chongqing": {
+      "station_id": "ZUCK",
+      "n_raw_reports": 337,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0
+      ],
+      "pipeline_first_seen_delay_med_min": 135.2,
+      "pipeline_first_seen_delay_p90_min": 495.2,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Dallas": {
+      "station_id": "KDAL",
+      "n_raw_reports": 362,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        53,
+        34,
+        36,
+        26
+      ],
+      "pipeline_first_seen_delay_med_min": 82.2,
+      "pipeline_first_seen_delay_p90_min": 262.2,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Denver": {
+      "station_id": "KBKF",
+      "n_raw_reports": 356,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        58,
+        14,
+        21,
+        20
+      ],
+      "pipeline_first_seen_delay_med_min": 77.2,
+      "pipeline_first_seen_delay_p90_min": 317.3,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Guangzhou": {
+      "station_id": "ZGGG",
+      "n_raw_reports": 434,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30,
+        13,
+        46
+      ],
+      "pipeline_first_seen_delay_med_min": 135.2,
+      "pipeline_first_seen_delay_p90_min": 495.3,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Helsinki": {
+      "station_id": "EFHK",
+      "n_raw_reports": 498,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        20,
+        50
+      ],
+      "pipeline_first_seen_delay_med_min": 85.4,
+      "pipeline_first_seen_delay_p90_min": 325.3,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Houston": {
+      "station_id": "KHOU",
+      "n_raw_reports": 346,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        53,
+        36,
+        41,
+        37
+      ],
+      "pipeline_first_seen_delay_med_min": 82.3,
+      "pipeline_first_seen_delay_p90_min": 262.3,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Jakarta": {
+      "station_id": "WIHH",
+      "n_raw_reports": 452,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        0,
+        30,
+        14,
+        12
+      ],
+      "pipeline_first_seen_delay_med_min": 135.3,
+      "pipeline_first_seen_delay_p90_min": 435.4,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Jeddah": {
+      "station_id": "OEJN",
+      "n_raw_reports": 336,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0
+      ],
+      "pipeline_first_seen_delay_med_min": 75.4,
+      "pipeline_first_seen_delay_p90_min": 315.3,
+      "live_polls": 23,
+      "live_obs_age_min_min": 1.4,
+      "live_obs_age_med_min": 31.4,
+      "live_obs_age_p90_min": 60.0,
+      "publication_delay_est_min": 1.4,
+      "staleness_budget_min": 61.4
+    },
+    "Jinan": {
+      "station_id": "ZSJN",
+      "n_raw_reports": 317,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30,
+        38,
+        49
+      ],
+      "pipeline_first_seen_delay_med_min": 76.2,
+      "pipeline_first_seen_delay_p90_min": 435.3,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Karachi": {
+      "station_id": "OPKC",
+      "n_raw_reports": 419,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 75.8,
+      "pipeline_first_seen_delay_p90_min": 375.4,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Kuala Lumpur": {
+      "station_id": "WMKK",
+      "n_raw_reports": 444,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30,
+        55,
+        5
+      ],
+      "pipeline_first_seen_delay_med_min": 135.4,
+      "pipeline_first_seen_delay_p90_min": 495.4,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Lagos": {
+      "station_id": "DNMM",
+      "n_raw_reports": 289,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0
+      ],
+      "pipeline_first_seen_delay_med_min": 135.4,
+      "pipeline_first_seen_delay_p90_min": 375.4,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "London": {
+      "station_id": "EGLC",
+      "n_raw_reports": 471,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        20,
+        50
+      ],
+      "pipeline_first_seen_delay_med_min": 115.4,
+      "pipeline_first_seen_delay_p90_min": 355.4,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Los Angeles": {
+      "station_id": "KLAX",
+      "n_raw_reports": 337,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        53,
+        14,
+        33,
+        42
+      ],
+      "pipeline_first_seen_delay_med_min": 82.4,
+      "pipeline_first_seen_delay_p90_min": 322.4,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Lucknow": {
+      "station_id": "VILK",
+      "n_raw_reports": 433,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 75.8,
+      "pipeline_first_seen_delay_p90_min": 375.4,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Madrid": {
+      "station_id": "LEMD",
+      "n_raw_reports": 479,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 75.5,
+      "pipeline_first_seen_delay_p90_min": 315.5,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Manila": {
+      "station_id": "RPLL",
+      "n_raw_reports": 341,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        36,
+        15,
+        17
+      ],
+      "pipeline_first_seen_delay_med_min": 135.4,
+      "pipeline_first_seen_delay_p90_min": 495.5,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Mexico City": {
+      "station_id": "MMMX",
+      "n_raw_reports": 380,
+      "median_report_interval_min": 58.0,
+      "report_minute_marks": [
+        45,
+        42,
+        43,
+        50
+      ],
+      "pipeline_first_seen_delay_med_min": 87.5,
+      "pipeline_first_seen_delay_p90_min": 311.5,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 98.0
+    },
+    "Miami": {
+      "station_id": "KMIA",
+      "n_raw_reports": 350,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        53,
+        0,
+        35,
+        36
+      ],
+      "pipeline_first_seen_delay_med_min": 82.6,
+      "pipeline_first_seen_delay_p90_min": 289.5,
+      "live_polls": 3,
+      "live_obs_age_min_min": 8.4,
+      "live_obs_age_med_min": 10.6,
+      "live_obs_age_p90_min": 58.4,
+      "publication_delay_est_min": 0.0,
+      "staleness_budget_min": 60.0
+    },
+    "Milan": {
+      "station_id": "LIMC",
+      "n_raw_reports": 485,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        20,
+        50
+      ],
+      "pipeline_first_seen_delay_med_min": 115.5,
+      "pipeline_first_seen_delay_p90_min": 325.5,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Munich": {
+      "station_id": "EDDM",
+      "n_raw_reports": 514,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        20,
+        50
+      ],
+      "pipeline_first_seen_delay_med_min": 115.5,
+      "pipeline_first_seen_delay_p90_min": 325.6,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "NYC": {
+      "station_id": "KLGA",
+      "n_raw_reports": 336,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        51,
+        1,
+        37,
+        9
+      ],
+      "pipeline_first_seen_delay_med_min": 84.6,
+      "pipeline_first_seen_delay_p90_min": 324.5,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Panama City": {
+      "station_id": "MPMG",
+      "n_raw_reports": 338,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        37,
+        9,
+        20
+      ],
+      "pipeline_first_seen_delay_med_min": 75.7,
+      "pipeline_first_seen_delay_p90_min": 315.6,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Paris": {
+      "station_id": "LFPB",
+      "n_raw_reports": 444,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 75.7,
+      "pipeline_first_seen_delay_p90_min": 315.6,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Qingdao": {
+      "station_id": "ZSQD",
+      "n_raw_reports": 327,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0
+      ],
+      "pipeline_first_seen_delay_med_min": 135.6,
+      "pipeline_first_seen_delay_p90_min": 495.6,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "San Francisco": {
+      "station_id": "KSFO",
+      "n_raw_reports": 342,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        56,
+        41,
+        36,
+        3
+      ],
+      "pipeline_first_seen_delay_med_min": 79.7,
+      "pipeline_first_seen_delay_p90_min": 319.7,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Sao Paulo": {
+      "station_id": "SBGR",
+      "n_raw_reports": 334,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        8,
+        20
+      ],
+      "pipeline_first_seen_delay_med_min": 75.7,
+      "pipeline_first_seen_delay_p90_min": 315.7,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Seattle": {
+      "station_id": "KSEA",
+      "n_raw_reports": 335,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        53,
+        0,
+        31,
+        2
+      ],
+      "pipeline_first_seen_delay_med_min": 82.7,
+      "pipeline_first_seen_delay_p90_min": 322.6,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Seoul": {
+      "station_id": "RKSI",
+      "n_raw_reports": 467,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 136.5,
+      "pipeline_first_seen_delay_p90_min": 555.7,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Shanghai": {
+      "station_id": "ZSPD",
+      "n_raw_reports": 425,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30,
+        12
+      ],
+      "pipeline_first_seen_delay_med_min": 135.6,
+      "pipeline_first_seen_delay_p90_min": 495.7,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Shenzhen": {
+      "station_id": "ZGSZ",
+      "n_raw_reports": 328,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0
+      ],
+      "pipeline_first_seen_delay_med_min": 135.9,
+      "pipeline_first_seen_delay_p90_min": 495.7,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Singapore": {
+      "station_id": "WSSS",
+      "n_raw_reports": 427,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30,
+        15,
+        45
+      ],
+      "pipeline_first_seen_delay_med_min": 135.9,
+      "pipeline_first_seen_delay_p90_min": 495.6,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Taipei": {
+      "station_id": "RCSS",
+      "n_raw_reports": 417,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30,
+        43,
+        22
+      ],
+      "pipeline_first_seen_delay_med_min": 135.8,
+      "pipeline_first_seen_delay_p90_min": 495.8,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Tokyo": {
+      "station_id": "RJTT",
+      "n_raw_reports": 420,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 136.0,
+      "pipeline_first_seen_delay_p90_min": 555.8,
+      "live_polls": 9,
+      "live_obs_age_min_min": 16.4,
+      "live_obs_age_med_min": 21.4,
+      "live_obs_age_p90_min": 36.4,
+      "publication_delay_est_min": 0.0,
+      "staleness_budget_min": 60.0
+    },
+    "Toronto": {
+      "station_id": "CYYZ",
+      "n_raw_reports": 338,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        23,
+        48,
+        40
+      ],
+      "pipeline_first_seen_delay_med_min": 75.9,
+      "pipeline_first_seen_delay_p90_min": 259.8,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Warsaw": {
+      "station_id": "EPWA",
+      "n_raw_reports": 446,
+      "median_report_interval_min": 30.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 75.9,
+      "pipeline_first_seen_delay_p90_min": 286.0,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 70.0
+    },
+    "Wellington": {
+      "station_id": "NZWN",
+      "n_raw_reports": 406,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0,
+        30
+      ],
+      "pipeline_first_seen_delay_med_min": 195.9,
+      "pipeline_first_seen_delay_p90_min": 615.7,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Wuhan": {
+      "station_id": "ZHHH",
+      "n_raw_reports": 328,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0
+      ],
+      "pipeline_first_seen_delay_med_min": 135.7,
+      "pipeline_first_seen_delay_p90_min": 495.9,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    },
+    "Zhengzhou": {
+      "station_id": "ZHCC",
+      "n_raw_reports": 328,
+      "median_report_interval_min": 60.0,
+      "report_minute_marks": [
+        0
+      ],
+      "pipeline_first_seen_delay_med_min": 76.2,
+      "pipeline_first_seen_delay_p90_min": 495.7,
+      "publication_delay_est_min": 40.0,
+      "staleness_budget_min": 100.0
+    }
+  }
+}
