@@ -1,8 +1,13 @@
 # Created: 2026-05-22
-# Last reused or audited: 2026-05-22
+# Last reused or audited: 2026-06-09
 # Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §4
 #                  + docs/reference/zeus_strategy_spec.md §9 (opening_inertia)
 #                  + docs/reference/zeus_math_spec.md §6 (calibration)
+#                  + Operator directive 2026-06-09 ('全部打开'): promoted out of
+#                    shadow purgatory. The candidate already ran in the pipeline
+#                    (executable_alpha=True); the "NEVER live" promotion-gate
+#                    wording is removed. The calibrated-EV gate (theorem §4) is
+#                    unchanged — it is the strategy's own math, not purgatory.
 """OpeningInertiaRelaxation — calibrated lower-bound EV on opening price discovery.
 
 Theorem (STRATEGY_TAXONOMY_DIRECTIVE §4):
@@ -21,10 +26,13 @@ Theorem (STRATEGY_TAXONOMY_DIRECTIVE §4):
 
   Verifiable params: λ̂, σ_cal, m(0)−p  (NOT win-rate).
 
-Shadow-first: this candidate is SHADOW-ONLY. The existing live evaluator
-routing for opening_inertia (evaluator.py:2244-2272) is NOT changed.
-This candidate shadow-logs the calibrated-EV path alongside the live
-heuristic, providing a comparison cohort for promotion evidence.
+Promotion (operator directive 2026-06-09 '全部打开'): the calibrated-EV
+formulation is promoted out of shadow purgatory. The existing live evaluator
+routing for the registry `opening_inertia` strategy (evaluator.py:2244-2272,
+already live_status=live) is NOT changed by this candidate; this candidate
+runs in the candidate pipeline and emits the calibrated-EV path alongside the
+live heuristic. The "NEVER self-promote" gate is removed; the calibrated-EV
+theorem (§4) remains the economic gate.
 
 Data model: MarketAnalysisVNext provides p_hat, ask, no_ask, cal_p_hats,
 cal_outcomes (calibration set from prior settled markets, same source-family).

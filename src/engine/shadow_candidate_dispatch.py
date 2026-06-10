@@ -91,6 +91,7 @@ def _build_candidate_list() -> List[Any]:
         LiquidityProvisionWithHeartbeat,
         NegRiskBasket,
         OpeningInertiaRelaxation,
+        OpeningStaleQuoteFOK,
         ResolutionWindowMaker,
         SettlementCaptureShadow,
         ShoulderBuyEVT,
@@ -115,6 +116,12 @@ def _build_candidate_list() -> List[Any]:
         ImminentOpenCapturePosteriorCollapse(),
         CenterSellModelNo(),
         ShoulderBuyEVT(),
+        # C-EPIC combination candidate (§14). Wired into the pipeline per
+        # operator directive 2026-06-09 ('全部打开'): it was never instantiated in
+        # the live pipeline (shadow purgatory). Now it evaluates each cycle and
+        # emits its own decision/no_trade rows. Its own EV gate (theorem §14)
+        # remains the economic gate — purgatory wiring, not the math, is removed.
+        OpeningStaleQuoteFOK(),
     ]
 
 

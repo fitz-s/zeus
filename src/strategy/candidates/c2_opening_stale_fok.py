@@ -1,7 +1,12 @@
 # Created: 2026-05-22
-# Last reused or audited: 2026-05-22
+# Last reused or audited: 2026-06-09
 # Authority basis: docs/operations/task_2026-05-21_mainline_completion_authority/STRATEGY_TAXONOMY_DIRECTIVE.md §14
 #                  + docs/reference/zeus_strategy_spec.md combination sections
+#                  + Operator directive 2026-06-09 ('全部打开'): promoted out of
+#                    shadow purgatory — wired into the candidate pipeline and
+#                    executable_alpha flipped True. The §14 EV gate (theorem) and
+#                    FOK no-fill=0-loss remain the economic gate; only the
+#                    "never live until promoted" purgatory wording is removed.
 """C2 — opening_inertia × stale_quote opening-stale-FOK (§14).
 
 THEOREM (STRATEGY_TAXONOMY_DIRECTIVE.md §14):
@@ -27,9 +32,12 @@ DATA-GATED:
     - stale_quote_price=None → OPENING_STALE_FOK_UNWIRED
     - p⁻ − a0 − phi ≤ 0 → OPENING_STALE_FOK_NO_EDGE
 
-SHADOW-FIRST (operator directive 2026-05-22):
-  executable_alpha=False — no live trades until operator promotes.
-  kelly=0: no sizing. Registered via Pipeline B (calibrated stochastic promotion).
+PROMOTED (operator directive 2026-06-09 '全部打开'):
+  executable_alpha=True — the operator has exercised the promotion gate; the
+  candidate is now instantiated in the live candidate pipeline. Sign of edge is
+  governed solely by the §14 theorem (p⁻ − a0 − phi(a0) > 0) and FOK no-fill is
+  0 loss, so promotion does not weaken the economic gate. Registered via
+  Pipeline B (calibrated stochastic promotion).
 """
 
 from __future__ import annotations
@@ -118,7 +126,7 @@ class OpeningStaleQuoteFOK(BaseStrategyCandidate):
                     "EV = Pr(F)·(p⁻ − a0 − phi(a0)). FOK no-fill → 0 loss. "
                     "DATA-GATED: both opening calibration and stale-quote feed must be wired."
                 ),
-                executable_alpha=False,
+                executable_alpha=True,
             )
         )
 
