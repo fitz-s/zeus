@@ -8131,8 +8131,28 @@ def _replacement_authority_probability_and_fdr_proof(
         yes_edge_lcb_positive = yes_price is not None and yes_lcb > yes_cost
         p_values[(condition_id, "buy_yes")] = 0.0 if yes_edge_lcb_positive else 1.0
         prefilter[(condition_id, "buy_yes")] = bool(yes_edge_lcb_positive)
-        p_values[(condition_id, "buy_no")] = 1.0
-        prefilter[(condition_id, "buy_no")] = False
+        # FIX (2026-06-10 funnel autopsy) — buy_no FDR p-value RECONCILED with the
+        # certified fused NO posterior, symmetric to buy_yes above. PROVENANCE/CURRENCY
+        # bug (Fitz #4: correctness != currency): the former hardcode
+        #   p_values[(condition_id, "buy_no")] = 1.0
+        # was written when the native-NO authority was the disabled placeholder
+        # (q_no == 0, no q_ucb), so a constant non-actionable p-value was correct THEN.
+        # The native-NO authority is now LIVE: ``no_lcb`` above is the real robust NO
+        # lower bound 1 - q_ucb_yes (src q_ucb map present on every live bundle), so a
+        # hardcoded p=1.0 makes EVERY buy_no UNCONDITIONALLY fail BH-FDR (q=0.10 can
+        # never admit p=1.0) — the hypothesis test CONTRADICTS the certified probability.
+        # That suppressed real favorite-longshot NO edges (Wuhan/Ankara 27-29C: honest
+        # no_lcb ~0.86 vs cost ~0.72, +14c, all FDR_REJECTED). The p-value here is the
+        # SAME degenerate edge-positivity indicator the YES leg uses (0.0 = the certified
+        # robust lower bound clears the native cost; 1.0 = it does not) computed from the
+        # native NO cost and the native NO q_lcb — NEVER a YES complement, NEVER weakening
+        # BH (the multiplicity accounting and family denominator are unchanged; a non-edge
+        # NO still gets p=1.0 and is rejected). Reconciliation, not gate-weakening.
+        no_price = native_costs.get((condition_id, "buy_no"), (None, None, 0.0, None, None))[1]
+        no_cost = float(no_price.value) if no_price is not None else 1.0
+        no_edge_lcb_positive = no_price is not None and no_lcb > no_cost
+        p_values[(condition_id, "buy_no")] = 0.0 if no_edge_lcb_positive else 1.0
+        prefilter[(condition_id, "buy_no")] = bool(no_edge_lcb_positive)
     # ITEM 2 (FIX-B) — wire the EXISTING K3 settlement-backward-coverage shrink into the
     # LIVE replacement path (its sole prior call site was the canonical/EMOS path). SAME
     # helper, SAME flag (edli_v1.q_lcb_settlement_coverage_gate_enabled, default FALSE):
