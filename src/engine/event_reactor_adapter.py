@@ -593,6 +593,18 @@ def _assert_event_bound_calibration_live_admitted(calibration: DecisionCertifica
         n_samples = None
     if authority == "IDENTITY_FALLBACK_NO_PLATT_BUCKET":
         raise ValueError("EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:IDENTITY_FALLBACK_NO_PLATT_BUCKET")
+    # CERT BRIDGE (2026-06-10, funnel #1 unlock) — the replacement credential without a
+    # coverage VERDICT (no realized backing, or INSUFFICIENT_DATA) is fail-closed: the
+    # credential requires BOTH certified bounds AND a settlement-coverage verdict. Reject
+    # with a DISTINCT reason so the funnel autopsy can separate "no bounds" (IDENTITY) from
+    # "bounds but unbacked coverage" (UNEVALUATED). Mirrors arm_gate_coverage_blocks().
+    if authority == FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY:
+        raise ValueError(
+            "EDLI_LIVE_CALIBRATION_AUTHORITY_BLOCKED:FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
+        )
+    # FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE is the licensed replacement credential — it
+    # ADMITS for live (its n_samples is the settled coverage n, which is >0 by the
+    # licensing rule; the empty-sample guard below still applies as a belt-and-braces).
     if n_samples is not None and n_samples <= 0:
         raise ValueError(f"EDLI_LIVE_CALIBRATION_EMPTY_SAMPLE_BLOCKED:authority={authority or 'missing'}")
 
@@ -5108,6 +5120,30 @@ def _calibration_authority_payload_and_clock(
     city = runtime_cities_by_name().get(family.city)
     if city is None:
         raise ValueError("CALIBRATION_AUTHORITY_EVIDENCE_MISSING:city")
+    # CERT BRIDGE (2026-06-10, funnel #1 unlock) — replacement-chain candidates carry their
+    # OWN calibration credential (fused-center bootstrap bounds + settlement-backward
+    # coverage), stamped onto `payload` by the live replacement builder. When present, mint
+    # the first-class FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE authority and SHORT-CIRCUIT the
+    # legacy Platt-bucket lookup entirely — their q never passed through Platt, so demanding
+    # its credential is a category mismatch. Absent the credential (legacy path, OR a
+    # replacement candidate without certified bounds) we fall through to the Platt path
+    # below unchanged → IDENTITY_FALLBACK reject exactly as today (strictness (a) and (b)).
+    _replacement_credential = payload.get(_REPLACEMENT_CALIBRATION_CREDENTIAL_KEY)
+    if isinstance(_replacement_credential, Mapping):
+        # horizon_profile MUST equal forecast.horizon_profile (verifier round-trip
+        # _validate_calibration_payload); read it from the same forecast/payload sources the
+        # legacy path uses. The bootstrap bounds are model-available at decision time (the
+        # posterior is materialized before the decision), so the clock is the decision time
+        # — identical treatment to the IDENTITY_FALLBACK alternative-credential clock.
+        _horizon_profile = _nonnull(
+            payload.get("horizon_profile") or forecast_payload.get("horizon_profile")
+        )
+        payload_out = _replacement_calibration_payload_from_credential(
+            _replacement_credential,
+            horizon_profile=_horizon_profile,
+            decision_time=decision_time,
+        )
+        return payload_out, EvidenceClock(decision_time, decision_time, decision_time)
     source_id = _nonnull(payload.get("source_id") or forecast_payload.get("forecast_source_id"))
     issue_time = _nonnull(
         payload.get("issue_time")
@@ -7690,6 +7726,242 @@ def _replacement_q_mode_live_eligibility(replacement_bundle: object) -> tuple[bo
     return (False, "NO_Q_MODE_KEY")
 
 
+# CERT BRIDGE (2026-06-10, operator-gated funnel #1 unlock) — first-class calibration
+# authority for replacement-chain candidates. The legacy decision certificate demands a
+# platt_models bucket per (cluster, metric, source_id, cycle, horizon_profile); when
+# absent it stamps authority=IDENTITY_FALLBACK_NO_PLATT_BUCKET and the live gate REJECTS.
+# Replacement-chain candidates' q NEVER passes through Platt — their calibration authority
+# is the fused-center bootstrap bounds (q_lcb_basis=fused_center_bootstrap_p05, 200 draws)
+# + the settlement-backward coverage license. Demanding the legacy chain's credential from
+# them is a CATEGORY MISMATCH. This credential admits EXACTLY the coverage states the ARM
+# gate (settlement_backward_coverage.arm_gate_coverage_blocks) admits — so you can never
+# get a live calibration credential on a coverage state the ARM gate would refuse.
+#
+# STRICTNESS (iron rule — this must not weaken anything):
+#   (a) legacy-path candidates still REQUIRE Platt buckets (this credential is only built
+#       when the candidate's q source is the replacement bundle).
+#   (b) replacement candidates WITHOUT bounds (q_lcb_json null / basis mismatch) get NO
+#       credential here → fall through to the legacy Platt path → IDENTITY_FALLBACK reject
+#       exactly as today.
+#   (c) bounds present but coverage NEVER evaluated the scope (no realized data →
+#       INSUFFICIENT_DATA, or the check could not run) → authority is
+#       FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED, which the gate REJECTS with a distinct reason.
+#       The credential requires BOTH bounds AND a coverage VERDICT (LICENSED/UNLICENSED).
+FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
+FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY = "FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED"
+# The only q_lcb_basis marker the materializer writes for certified fused-center bootstrap
+# bounds; the credential's bounds leg requires an EXACT match (basis-pinned, no aliasing).
+_FUSED_BOOTSTRAP_QLCB_BASIS = "fused_center_bootstrap_p05"
+# Payload key under which the live replacement builder stamps the credential facts onto the
+# threaded `payload` dict so `_calibration_authority_payload_and_clock` can read them
+# without re-reading the bundle (single source of truth at the point of computation; the
+# payload is the per-candidate instance-safe carrier per the #149 one-calibrator-seam fix).
+_REPLACEMENT_CALIBRATION_CREDENTIAL_KEY = "_edli_replacement_calibration_credential"
+
+
+def _replacement_family_coverage_verdict(
+    *,
+    family,
+    forecast_conn: sqlite3.Connection,
+    lcb_by_direction,
+):
+    """Settlement-backward coverage VERDICT for the family scope (flag-INDEPENDENT read).
+
+    The credential needs to know whether the settled record evaluated this scope and what
+    it said. The K3 module docstring is explicit: the live SHRINK is flag-gated, but the
+    VERDICT is observability — the ARM gate reads it UNCONDITIONALLY. We mirror that here:
+    compute the verdict regardless of ``q_lcb_settlement_coverage_gate_enabled`` (we never
+    move the live q_lcb — that stays the shrink helper's job).
+
+    Returns the family-representative ``CoverageVerdict`` (the buy_yes leg of the first
+    candidate whose q_lcb is present), or ``None`` when the check could not run / the scope
+    has no realized data at all. INSUFFICIENT_DATA is a real verdict (returned, not None) —
+    the credential treats it as "no realized backing" and blocks; only a structural failure
+    to evaluate returns None. FAIL-CLOSED: any error returns None (→ UNEVALUATED → blocked).
+    """
+    try:
+        from src.calibration.qlcb_provenance import _qlcb_float
+        from src.calibration.settlement_backward_coverage import (
+            settlement_backward_coverage_check,
+        )
+        from src.contracts.season import season_from_date
+
+        metric = str(getattr(family, "metric", "") or "").lower()
+        city_obj = runtime_cities_by_name().get(family.city)
+        lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+        season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
+    except Exception:
+        return None
+
+    for candidate in family.candidates:
+        condition_id = str(candidate.condition_id or "")
+        bin_obj = getattr(candidate, "bin", None)
+        if bin_obj is None:
+            continue
+        key = (condition_id, "buy_yes")
+        if key not in lcb_by_direction:
+            continue
+        try:
+            claimed = _qlcb_float(lcb_by_direction[key])
+            obs = _settlement_coverage_observations(
+                forecast_conn=forecast_conn,
+                city=family.city,
+                metric=metric,
+                bin=bin_obj,
+                direction="buy_yes",
+                claimed_q_lcb=claimed,
+            )
+            verdict = settlement_backward_coverage_check(
+                city=family.city, metric=metric, season=season,
+                q_lcb=claimed, observations=obs, min_n=30,
+            )
+            return verdict
+        except Exception:
+            continue
+    return None
+
+
+def _build_replacement_calibration_credential(
+    *,
+    replacement_bundle,
+    q_mode: str,
+    coverage_verdict,
+    family,
+) -> dict[str, Any] | None:
+    """Assemble the replacement calibration credential facts for ``payload`` stamping.
+
+    Returns a dict the calibration-authority builder turns into the certificate payload,
+    or ``None`` when the bounds leg is absent (→ caller stamps nothing → legacy Platt path
+    → IDENTITY_FALLBACK reject, strictness (b)). The bounds leg requires: a live-eligible
+    fused-Normal q_mode, a non-empty bundle q_lcb map, AND provenance q_lcb_basis EXACTLY
+    equal to the fused-center bootstrap marker. Coverage verdict is carried as-is (may be
+    None → UNEVALUATED, may be INSUFFICIENT_DATA → UNEVALUATED, both blocked downstream).
+    """
+    if q_mode not in _REPLACEMENT_Q_MODE_LIVE_ELIGIBLE:
+        return None
+    provenance = getattr(replacement_bundle, "provenance_json", None)
+    if not isinstance(provenance, Mapping):
+        provenance = {}
+    q_lcb_map = getattr(replacement_bundle, "q_lcb", None)
+    q_lcb_basis = provenance.get("q_lcb_basis")
+    bounds_ok = (
+        isinstance(q_lcb_map, Mapping)
+        and bool(q_lcb_map)
+        and q_lcb_basis == _FUSED_BOOTSTRAP_QLCB_BASIS
+    )
+    if not bounds_ok:
+        return None
+    season = None
+    try:
+        from src.contracts.season import season_from_date
+
+        city_obj = runtime_cities_by_name().get(family.city)
+        lat = getattr(city_obj, "lat", 90.0) if city_obj else 90.0
+        season = season_from_date(str(getattr(family, "target_date", "")), lat=lat)
+    except Exception:
+        season = None
+    coverage: dict[str, Any] = {"status": None, "coverage_ratio": None, "n": None, "shrink": None}
+    if coverage_verdict is not None:
+        try:
+            shrink = float(coverage_verdict.q_lcb_in) - float(coverage_verdict.q_lcb_out)
+        except (TypeError, ValueError):
+            shrink = None
+        coverage = {
+            "status": str(coverage_verdict.status),
+            "coverage_ratio": coverage_verdict.coverage_ratio,
+            "realized_win_rate": coverage_verdict.realized_win_rate,
+            "n": int(coverage_verdict.n_settlement_observations),
+            "shrink": shrink,
+        }
+    return {
+        "q_mode": q_mode,
+        "q_lcb_basis": _FUSED_BOOTSTRAP_QLCB_BASIS,
+        "bootstrap_draws": provenance.get("q_lcb_bootstrap_draws"),
+        "posterior_id": getattr(replacement_bundle, "posterior_id", None),
+        "season": season,
+        "cohort": f"{family.city}:{str(family.metric).lower()}:{season}",
+        "coverage": coverage,
+    }
+
+
+# Coverage statuses that LICENSE the replacement calibration credential for live. These are
+# EXACTLY the statuses arm_gate_coverage_blocks() does NOT block on the status leg
+# (LICENSED, and UNLICENSED where the shrink was applied — a verdict the settled record
+# backed). INSUFFICIENT_DATA (no realized backing) is excluded → UNEVALUATED → blocked,
+# matching the ARM gate's "coverage_ratio is None → block" rule.
+_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
+
+
+def _replacement_calibration_payload_from_credential(
+    credential: Mapping[str, Any],
+    *,
+    horizon_profile: str | None,
+    decision_time: datetime,
+) -> dict[str, Any]:
+    """Turn the stamped credential facts into the certificate calibration payload.
+
+    Emits authority=FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE when a coverage VERDICT licensed the
+    scope (status in LICENSED/UNLICENSED); otherwise FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED
+    (no verdict, or INSUFFICIENT_DATA) so the gate rejects with the distinct reason. The
+    payload carries the full provenance the receipt/verifier round-trips, plus the fields
+    the verifier's _validate_calibration_payload requires (horizon_profile == forecast's,
+    training_cutoff / model_available_at <= decision_time, a non-empty model_hash).
+    """
+    coverage = credential.get("coverage") or {}
+    status = coverage.get("status")
+    licensed = isinstance(status, str) and status in _FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES
+    authority = (
+        FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY
+        if licensed
+        else FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED_AUTHORITY
+    )
+    q_mode = str(credential.get("q_mode") or "")
+    posterior_id = credential.get("posterior_id")
+    model_key = (
+        "fused_bootstrap_settlement_coverage_v1:"
+        f"{credential.get('cohort')}:{q_mode}:posterior={posterior_id}"
+    )
+    n_samples = coverage.get("n")
+    cutoff_iso = decision_time.astimezone(UTC).isoformat()
+    model_hash = _hash_jsonish(
+        {
+            "model_key": model_key,
+            "calibration_method": "fused_center_bootstrap_settlement_coverage",
+            "q_lcb_basis": credential.get("q_lcb_basis"),
+            "bootstrap_draws": credential.get("bootstrap_draws"),
+            "replacement_q_mode": q_mode,
+            "posterior_id": posterior_id,
+            "cohort": credential.get("cohort"),
+            "coverage_status": status,
+        }
+    )
+    return {
+        "identity": model_key,
+        "calibrator_model_key": model_key,
+        "calibrator_version": model_key,
+        "calibration_method": "fused_center_bootstrap_settlement_coverage",
+        "model_hash": model_hash,
+        "horizon_profile": horizon_profile,
+        "training_cutoff": cutoff_iso,
+        "model_available_at": cutoff_iso,
+        "model_materialized_at": cutoff_iso,
+        "q_lcb_basis": credential.get("q_lcb_basis"),
+        "bootstrap_draws": credential.get("bootstrap_draws"),
+        "replacement_q_mode": q_mode,
+        "posterior_id": posterior_id,
+        "season": credential.get("season"),
+        "cohort": credential.get("cohort"),
+        "coverage_status": status,
+        "coverage_ratio": coverage.get("coverage_ratio"),
+        "coverage_realized_win_rate": coverage.get("realized_win_rate"),
+        "coverage_shrink": coverage.get("shrink"),
+        "input_space": "fused_center_bootstrap_lcb",
+        "maturity_level": 4,
+        "n_samples": n_samples,
+        "authority": authority,
+    }
+
+
 def _replacement_authority_enabled() -> bool:
     try:
         flags = settings["feature_flags"]
@@ -8266,6 +8538,30 @@ def _replacement_authority_probability_and_fdr_proof(
         forecast_conn=conn,
         lcb_by_direction=lcb_by_direction,
     )
+    # CERT BRIDGE (2026-06-10, funnel #1 unlock) — stamp the replacement calibration
+    # credential onto the threaded `payload` so `_calibration_authority_payload_and_clock`
+    # can mint the first-class FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE authority instead of the
+    # legacy IDENTITY_FALLBACK reject. The credential is built HERE (the point where the
+    # certified bounds and the coverage verdict are actually known) — the calibration
+    # builder must NOT re-read the bundle (avoids a second read / provenance drift). The
+    # coverage verdict is the same flag-independent VERDICT the ARM gate reads; we never
+    # move the live q_lcb here (that stays the shrink helper's job, gated by its flag).
+    # When the bounds leg is absent the credential is None and we stamp NOTHING → the
+    # calibration builder falls through to the legacy Platt path → IDENTITY_FALLBACK reject
+    # exactly as today (strictness (b)).
+    _coverage_verdict = _replacement_family_coverage_verdict(
+        family=family,
+        forecast_conn=conn,
+        lcb_by_direction=lcb_by_direction,
+    )
+    _credential = _build_replacement_calibration_credential(
+        replacement_bundle=replacement_bundle,
+        q_mode=_q_mode,
+        coverage_verdict=_coverage_verdict,
+        family=family,
+    )
+    if _credential is not None:
+        payload[_REPLACEMENT_CALIBRATION_CREDENTIAL_KEY] = _credential
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",

@@ -27,8 +27,23 @@ REQUIRED_FORECAST_VALIDATIONS = frozenset(
     }
 )
 IDENTITY_FALLBACK_CALIBRATION_AUTHORITY = "IDENTITY_FALLBACK_NO_PLATT_BUCKET"
+# CERT BRIDGE (2026-06-10, funnel #1 unlock) — first-class replacement-chain calibration
+# authority: fused-center bootstrap bounds (q_lcb_basis=fused_center_bootstrap_p05) licensed
+# by the settlement-backward coverage verdict. A live-admissible authority (the live gate
+# _assert_event_bound_calibration_live_admitted lets it through), so the certificate must
+# round-trip it through verification. Its UNEVALUATED sibling
+# (FUSED_BOOTSTRAP_COVERAGE_UNEVALUATED) is INTENTIONALLY excluded — like IDENTITY_FALLBACK
+# it is evidence-only and the live gate rejects it; it is not minted onto an admitted live
+# certificate, so it is not in the approved set.
+FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY = "FUSED_BOOTSTRAP_SETTLEMENT_COVERAGE"
 APPROVED_CALIBRATION_AUTHORITIES = frozenset(
-    {"VERIFIED", "LIVE", "APPROVED", IDENTITY_FALLBACK_CALIBRATION_AUTHORITY}
+    {
+        "VERIFIED",
+        "LIVE",
+        "APPROVED",
+        IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+    }
 )
 ALLOWED_COST_SOURCES = frozenset({"native_orderbook_ask", "native_orderbook_bid"})
 ALLOWED_QUOTE_SOURCE_KINDS = frozenset({"executable_market_snapshot_native_book"})
@@ -926,7 +941,15 @@ def _validate_calibration_payload(
     maturity = calibration.get("maturity_level")
     if maturity in (None, ""):
         raise CertificateVerificationError("calibration.maturity_level missing")
-    if int(maturity) > 3 and authority != IDENTITY_FALLBACK_CALIBRATION_AUTHORITY:
+    # IDENTITY_FALLBACK and the replacement FUSED_BOOTSTRAP credential are alternative
+    # calibration authorities, NOT Platt maturity levels — their maturity_level field is a
+    # placeholder (4), so the "maturity too low" rule (which guards real Platt models) does
+    # not apply to them. (CERT BRIDGE 2026-06-10: added FUSED_BOOTSTRAP to this carve-out.)
+    _ALT_CREDENTIAL_AUTHORITIES = (
+        IDENTITY_FALLBACK_CALIBRATION_AUTHORITY,
+        FUSED_BOOTSTRAP_CALIBRATION_AUTHORITY,
+    )
+    if int(maturity) > 3 and authority not in _ALT_CREDENTIAL_AUTHORITIES:
         raise CertificateVerificationError("calibration.maturity_level too low for live/no-submit")
     input_space = calibration.get("input_space")
     expected_input_space = model_config.get("calibration_input_space")
