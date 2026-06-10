@@ -4,16 +4,26 @@ Zeus converts weather ensemble forecasts into calibrated trading probabilities o
 
 ## 1. The probability chain
 
+**Strategy of record (2026-06-09 — authority `docs/authority/replacement_final_form_2026_06_09.md`; root `AGENTS.md` probability-chain block):**
+
 ```
-51 ENS members → per-member daily max → Monte Carlo (sensor noise + rounding) → P_raw
-P_raw → Extended Platt (A·logit + B·lead_days + C) → P_cal
-P_cal + P_market → α-weighted fusion → P_posterior
-P_posterior - P_market → Edge (with double-bootstrap CI)
-Edges → BH FDR over active tested candidate family → Selected edges
-Selected → Fractional Kelly (dynamic mult) → Position size
+per-model walk-forward de-bias (u0r_bayes.eb_bias, λ=n/(n+8)) → T2 Bayesian precision
+fusion, Ledoit-Wolf Σ (u0r_bayes.fuse_u0r_posterior) → σ_pred (floor 1.0°C) →
+settlement-preimage bin q (emos.bin_probability_settlement, q_shape fused_normal_direct) →
+q_lcb floor → Edge → BH FDR → Fractional Kelly → Position size
 ```
 
-**Worked example**: Chicago, 3 days out. 51 ensemble members predict daily max temperatures. For each member, add ASOS sensor noise (σ ≈ 0.2–0.5°F), round to integer (WU display), repeat 10,000× → P_raw per bin. Platt calibrates: `P_cal = sigmoid(A·logit(P_raw) + B·3 + C)`. Fuse with market price via α-weighted blend → `P_posterior`. Edge = `P_posterior - P_market`. Bootstrap CI on that edge (3 uncertainty sources). If BH-significant within the active tested family for that market snapshot → Kelly sizes it.
+Live entry `event_reactor_adapter._replacement_authority_probability_and_fdr_proof`; q built in `replacement_forecast_materializer._insert_posterior`.
+
+**Legacy baseline (independent LCB cap only, joined as a floor `effective_q_lcb = min(replacement, baseline)`):**
+
+```
+51 ENS → analytic_p_raw_vector_from_maxes (closed-form Gaussian-mixture; 10k-MC retired) →
+Extended Platt → P_cal → market_fusion.compute_posterior (model_only_v1, NO market blend) →
+bootstrap q_lcb
+```
+
+**The integer-settlement insight (true for both chains):** Polymarket weather markets settle on WU's whole-degree daily high, so probability mass concentrates at bin boundaries — both chains integrate over the settlement preimage (`emos.bin_probability_settlement` does this via a WMO round-half-up preimage of N(μ*, σ)). The baseline's Monte-Carlo path simulated `atmosphere → member → ASOS noise (σ≈0.2–0.5°F) → METAR round → WU integer`; the live chain replaces member-counting + Platt with multimodel Bayesian fusion but keeps the same settlement-preimage integration.
 
 ## 2. Why settlement is integer
 
