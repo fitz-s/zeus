@@ -1,44 +1,44 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
-# Authority basis: "bin selection.md" §3/§5.2/§5.3 (robust q_lcb ΔU sizing,
-#   x_final = x_raw · f_kelly bounded by caps) + §13 (no-trade gates: stake
-#   above allowed depth / Kelly capped) + operator concentration law (each live
-#   bet ~$5-15 on a ~$1k wallet; overconfidence=ruin) + live-branch sizing fix
-#   6c6a60e458 (single-position concentration ceiling: size_usd <=
-#   max_single_position_pct · free-cash, pure UPPER bound, #107-safe) +
-#   tests/test_portfolio_kelly_relationships.py INV-K3/K8 (the same ceiling on
-#   the legacy evaluate_kelly path).
-"""Relationship test — the S5 ΔU stake passes through the SAME concentration ceiling.
+# Last reused or audited: 2026-06-09 (STALE_LAW re-pin, same-day cap deletion)
+# Authority basis: STALE_LAW re-pin 2026-06-09. This file was created earlier the
+#   same day pinning a single-position concentration CEILING (max_single_position_pct
+#   · bankroll) reconciled onto the S5 ΔU sizing path. Hours later the operator
+#   DELETED that cap by design — config note sizing._max_single_position_pct_note
+#   (2026-06-09): "NO concentration CAP. A hard dollar/percent cap is NOT the
+#   system's sizing mechanism and BREAKS Kelly ... 0.0 disables the ceiling on BOTH
+#   money_path_adapters.evaluate_kelly AND the bin-selection ΔU choke point. Position
+#   size is determined SOLELY by the layered fractional Kelly: kelly_multiplier(0.125)
+#   × cash-sizing-base × portfolio-heat × correlation-reduction × ΔU-marginal-log-
+#   utility-with-existing-exposure. The proving-phase ~$5-15 envelope comes from the
+#   small 0.125 fractional Kelly on a ~$1k wallet, NOT a cap."
+#   The live code already honours this: _robust_marginal_utility_optimal_stake_usd
+#   gates the ceiling behind `if max_single_position_pct > 0.0` (event_reactor_adapter
+#   ~L6050), so with the directive's 0.0 the ONLY binding upper bound is the
+#   fractional-Kelly budget (mult · bankroll). Re-pinned to that LAYERED-KELLY law.
+"""Relationship test — the S5 ΔU stake under the no-concentration-cap directive.
 
-THE RECONCILIATION BLOCKER this pins (Fitz methodology: test the property that
-holds ACROSS the module seam, written before relying on the fix):
+CURRENT LAW (operator note sizing._max_single_position_pct_note, 2026-06-09):
+max_single_position_pct == 0.0 -> the single-position concentration ceiling is
+DISABLED on every path. The emitted stake is governed SOLELY by the layered
+fractional Kelly; the only pure upper bound that binds at the S5 choke point is the
+fractional-Kelly budget ``kelly_multiplier · bankroll``.
 
-This worktree replaced the scalar Kelly size with the marginal-utility ranker's
-``RobustCandidateScore.optimal_stake_usd`` (S4/S5). The live decision body
-(``event_reactor_adapter`` ~L2095) OVERRIDES ``money_path_adapters.evaluate_kelly``'s
-``size_usd`` with that q_lcb-grounded ΔU stake. So the single-position
-concentration ceiling restored on the ``evaluate_kelly`` path (live commit
-6c6a60e458; INV-K3) protected NOTHING on the live bin-selection path — a
-strong-edge candidate sized at ~10% of a $1k wallet at the live
-kelly_multiplier=0.125 (and ~83% at full Kelly), re-introducing the exact defect
-6c6a60e458 fixed.
+The cross-module invariants that SURVIVE the cap deletion (each a relationship
+across the ranker-stake -> emitted-notional seam):
 
-The fix reconciles the ceiling at the SINGLE live sizing choke point
-(``_robust_marginal_utility_stake_and_price``): the chosen stake is clamped by the
-tighter of the fractional-Kelly budget and ``max_single_position_pct · bankroll``.
+  KELLY_BUDGET  for ANY candidate the ΔU ranker emits, the final stake <=
+                kelly_multiplier · bankroll (the fractional-Kelly budget is the
+                binding envelope once the cap is 0.0). No hard pct·B cap applies.
+  K107_SAFE     a positive-edge candidate ALWAYS sizes > 0 — the fractional-Kelly
+                budget is a pure UPPER bound and never zeros a positive edge.
+  RANK_INV      sizing magnitude does NOT change which side/bin the ranker selects
+                (the rank is decided by _selected_candidate_proof BEFORE sizing).
+  WEALTH        the stake is fraction-of-capital (Kelly), not a fixed-dollar clamp:
+                doubling the wallet doubles the fractional-Kelly stake.
 
-The cross-module invariants (each a relationship across the
-ranker-stake -> emitted-notional seam):
-
-  ENVELOPE   for ANY candidate the ΔU ranker emits, the final stake <=
-             max_single_position_pct · bankroll (the concentration envelope).
-  K107_SAFE  the ceiling is a pure UPPER bound — it never zeros a positive-edge
-             stake; weak/modest edges keep their full ΔU-proportional stake below
-             the ceiling.
-  RANK_INV   the ceiling clamps the STAKE MAGNITUDE only; it does NOT change which
-             side/bin the ranker selects (the rank is decided before sizing).
-  WEALTH     the ceiling scales with the bankroll (fraction-of-capital, not a
-             fixed-dollar clamp): doubling the wallet doubles the cap.
+CEILING_DISABLED is asserted explicitly so a future reintroduction of a non-zero
+max_single_position_pct (which would re-couple sizing to a hard cap and re-break
+Kelly per the operator note) is caught at this seam.
 """
 from __future__ import annotations
 
@@ -163,37 +163,48 @@ def _stake(proof, all_proofs=None, *, bankroll=BANKROLL, mult=LIVE_KELLY_MULT, e
     ],
 )
 def test_S5_emitted_stake_bounded_by_concentration_ceiling(mult, q_lcb, ask):
-    """ENVELOPE invariant. For every (edge strength × fractional-Kelly multiplier)
-    combination, the live ΔU stake the intent carries is <= max_single_position_pct ·
-    bankroll. This is the concentration envelope the operator law and the live
-    branch's 6c6a60e458 ceiling demand; without the reconciliation the strong-edge
-    rows breach it (83% / 10% of B observed)."""
+    """KELLY_BUDGET invariant. Under the no-concentration-cap directive
+    (max_single_position_pct == 0.0) the ONLY binding upper bound on the live ΔU
+    stake is the fractional-Kelly budget ``mult · bankroll``. For every (edge
+    strength × multiplier) combination the emitted stake is positive and never
+    exceeds that budget."""
     bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
     row = _row(yes_asks=((ask, "1000000"),), snapshot_id="snap-env")
     proof = _proof(direction="buy_yes", row=row, token_id="yes-1",
                    q_posterior=q_lcb + 0.04, q_lcb_5pct=q_lcb, bin_obj=bin_x)
     stake = _stake(proof, mult=mult)
-    ceiling = BANKROLL * MAX_SINGLE_POSITION_PCT
-    assert stake <= ceiling + 1e-6, (
-        f"S5 stake {stake:.4f} ({stake / BANKROLL * 100:.1f}% of B) exceeds the "
-        f"concentration ceiling {ceiling:.4f} ({MAX_SINGLE_POSITION_PCT * 100:.0f}% of B) "
-        f"at mult={mult}, q_lcb={q_lcb}, ask={ask} — the S5 path bypassed the ceiling"
+    kelly_budget = BANKROLL * mult
+    assert 0.0 < stake <= kelly_budget + 1e-6, (
+        f"S5 stake {stake:.4f} ({stake / BANKROLL * 100:.1f}% of B) must be positive "
+        f"and within the fractional-Kelly budget {kelly_budget:.4f} (mult={mult}) at "
+        f"q_lcb={q_lcb}, ask={ask} — no hard concentration cap applies (cap == 0.0)"
     )
 
 
-def test_S5_strong_edge_clamps_exactly_to_ceiling():
-    """The headline reconciliation: a strong-edge candidate whose UNCLAMPED
-    fractional-Kelly stake would breach the ceiling clamps to EXACTLY the ceiling
-    (pct · B), at the LIVE multiplier. Pre-fix this sized ~$104 (10.4% of B)."""
+def test_S5_concentration_ceiling_is_disabled_by_directive():
+    """CEILING_DISABLED guard. The operator directive set max_single_position_pct
+    to 0.0 (no concentration cap). Pin that config truth so a future non-zero
+    reintroduction — which would re-couple sizing to a hard pct·B cap and re-break
+    Kelly per sizing._max_single_position_pct_note — is caught at this seam."""
+    assert MAX_SINGLE_POSITION_PCT == 0.0, (
+        "the no-concentration-cap directive requires max_single_position_pct == 0.0; "
+        f"got {MAX_SINGLE_POSITION_PCT!r} — a hard cap re-breaks layered Kelly"
+    )
+
+
+def test_S5_strong_edge_sized_by_kelly_budget_not_a_hard_cap():
+    """With the ceiling disabled, a strong-edge candidate is bounded by the
+    fractional-Kelly budget (mult · B), NOT clamped to a hard pct·B cap. At the
+    live 1/8 multiplier the stake is positive and within mult·B."""
     bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
     row = _row(yes_asks=(("0.40", "1000000"),), snapshot_id="snap-strong")
     proof = _proof(direction="buy_yes", row=row, token_id="yes-1",
                    q_posterior=0.94, q_lcb_5pct=0.90, bin_obj=bin_x)
     stake = _stake(proof, mult=LIVE_KELLY_MULT)
-    ceiling = BANKROLL * MAX_SINGLE_POSITION_PCT
-    assert stake == pytest.approx(ceiling, abs=1e-6), (
-        f"strong-edge stake {stake:.4f} did not clamp to the concentration ceiling "
-        f"{ceiling:.4f}"
+    kelly_budget = BANKROLL * LIVE_KELLY_MULT
+    assert 0.0 < stake <= kelly_budget + 1e-6, (
+        f"strong-edge stake {stake:.4f} must be positive and within the fractional-"
+        f"Kelly budget {kelly_budget:.4f} (no hard concentration cap applies)"
     )
 
 
@@ -218,20 +229,20 @@ def test_S5_ceiling_never_zeros_a_positive_edge_stake():
         )
 
 
-def test_S5_weak_edge_below_ceiling_is_not_clamped():
-    """K107_SAFE corollary: a weak/modest edge whose fractional-Kelly stake sits
-    BELOW the ceiling keeps its full ΔU-proportional stake (the ceiling is a tail
-    limit, not a flat cash rule). The stake stays strictly between 0 and the
-    ceiling — and lands inside the operator's ~$5-15 envelope on a $1k wallet."""
+def test_S5_weak_edge_keeps_full_delta_u_proportional_stake():
+    """K107_SAFE corollary under the no-cap law: a weak/modest edge keeps its full
+    ΔU-proportional fractional-Kelly stake (sized SOLELY by layered Kelly, no cap
+    clipping). The stake is strictly between 0 and the fractional-Kelly budget and
+    lands inside the operator's ~$5-15 envelope on a $1k wallet at 1/8 Kelly."""
     bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
     row = _row(yes_asks=(("0.52", "1000000"),), snapshot_id="snap-weak")
     proof = _proof(direction="buy_yes", row=row, token_id="yes-1",
                    q_posterior=0.59, q_lcb_5pct=0.55, bin_obj=bin_x)
     stake = _stake(proof, mult=LIVE_KELLY_MULT)
-    ceiling = BANKROLL * MAX_SINGLE_POSITION_PCT
-    assert 0.0 < stake < ceiling, (
-        f"a modest-edge stake {stake:.4f} should sit strictly below the ceiling "
-        f"{ceiling:.4f} (the ceiling clips the strong-edge tail, not modest edges)"
+    kelly_budget = BANKROLL * LIVE_KELLY_MULT
+    assert 0.0 < stake < kelly_budget, (
+        f"a modest-edge stake {stake:.4f} should sit strictly below the fractional-"
+        f"Kelly budget {kelly_budget:.4f} (the ΔU haircut sizes it, not a hard cap)"
     )
 
 
@@ -270,13 +281,14 @@ def test_S5_ceiling_does_not_change_the_delta_u_ranking():
         "ranking invariance: the cheaper-ask bin B is the ΔU primary; the "
         "concentration ceiling (a post-selection magnitude clamp) does not alter it"
     )
-    # The selected winner's stake is bounded by the ceiling (envelope holds for the
-    # family-scoped sizing the live body does), and is positive (#107-safe).
+    # The selected winner's stake is bounded by the fractional-Kelly budget (no hard
+    # cap under the directive), and is positive (#107-safe). The ranking above is
+    # unaffected by the sizing magnitude.
     stake_b = _stake(proof_b, all_proofs=(proof_a, proof_b), mult=1.0)
-    ceiling = BANKROLL * MAX_SINGLE_POSITION_PCT
-    assert stake_b == pytest.approx(ceiling, abs=1e-6), (
-        f"the selected winner's strong-edge stake {stake_b:.4f} should clamp to the "
-        f"ceiling {ceiling:.4f} at full Kelly without the cap altering the selection"
+    kelly_budget = BANKROLL * 1.0
+    assert 0.0 < stake_b <= kelly_budget + 1e-6, (
+        f"the selected winner's strong-edge stake {stake_b:.4f} must be positive and "
+        f"within the full-Kelly budget {kelly_budget:.4f}; sizing does not alter the rank"
     )
 
 
@@ -301,35 +313,38 @@ def test_S5_ranking_unchanged_whether_or_not_winner_is_capped():
         {"family_id": "fam", "event_id": "evt"}, (proof_a, proof_b)
     )
     assert selected is proof_b
-    # CAPPED regime (full Kelly -> the strong-edge stake breaches and clamps to pct·B)
-    # and UNCAPPED regime (live 1/8 Kelly -> the fractional stake sits below pct·B):
-    # both size the winner positively. The rank (bin B) is identical to the uncapped
-    # case above — the clamp is orthogonal to selection.
-    capped = _stake(proof_b, all_proofs=(proof_a, proof_b), mult=1.0)
-    uncapped = _stake(proof_b, all_proofs=(proof_a, proof_b), mult=LIVE_KELLY_MULT)
-    ceiling = BANKROLL * MAX_SINGLE_POSITION_PCT
-    assert capped == pytest.approx(ceiling, abs=1e-6)
-    assert 0.0 < uncapped < ceiling
-    assert capped > 0.0 and uncapped > 0.0
+    # FULL-Kelly regime (mult=1.0) and LIVE 1/8-Kelly regime both size the winner
+    # positively under the no-cap law; each is bounded by its own fractional-Kelly
+    # budget (mult·B). The rank (bin B) is identical regardless of the multiplier —
+    # sizing magnitude is orthogonal to selection.
+    full_kelly = _stake(proof_b, all_proofs=(proof_a, proof_b), mult=1.0)
+    eighth_kelly = _stake(proof_b, all_proofs=(proof_a, proof_b), mult=LIVE_KELLY_MULT)
+    assert 0.0 < full_kelly <= BANKROLL * 1.0 + 1e-6
+    assert 0.0 < eighth_kelly <= BANKROLL * LIVE_KELLY_MULT + 1e-6
+    # the smaller multiplier sizes no larger than the full-Kelly stake
+    assert eighth_kelly <= full_kelly + 1e-6
 
 
 # ===========================================================================
 # WEALTH — the ceiling scales with bankroll (fraction-of-capital, not fixed $).
 # ===========================================================================
-def test_S5_ceiling_scales_with_bankroll():
-    """WEALTH invariant. The ceiling is a FRACTION of the wallet, not a fixed
-    dollar clamp (the distinction from the deleted tiny_live $5 special case):
-    doubling the bankroll doubles the cap the strong-edge stake clamps to."""
+def test_S5_stake_scales_with_bankroll():
+    """WEALTH invariant. Kelly is fraction-of-capital, not a fixed-dollar clamp
+    (the distinction from the deleted tiny_live $5 special case): doubling the
+    bankroll doubles the strong-edge fractional-Kelly stake. A strong edge sizes at
+    the fractional-Kelly budget (mult·B) at both wallet sizes, so the stake scales
+    linearly with the wallet."""
     bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
     row = _row(yes_asks=(("0.40", "1000000"),), snapshot_id="snap-wealth")
     proof = _proof(direction="buy_yes", row=row, token_id="yes-1",
                    q_posterior=0.94, q_lcb_5pct=0.90, bin_obj=bin_x)
     stake_1k = _stake(proof, bankroll=1000.0, mult=LIVE_KELLY_MULT)
     stake_2k = _stake(proof, bankroll=2000.0, mult=LIVE_KELLY_MULT)
-    assert stake_1k == pytest.approx(1000.0 * MAX_SINGLE_POSITION_PCT, abs=1e-6)
-    assert stake_2k == pytest.approx(2000.0 * MAX_SINGLE_POSITION_PCT, abs=1e-6)
-    assert stake_2k == pytest.approx(2.0 * stake_1k, abs=1e-6), (
-        "the concentration ceiling must scale with the wallet (fraction-of-capital), "
+    assert stake_1k > 0.0 and stake_2k > 0.0
+    # Near-exact 2x scaling (rel tol covers the mild ΔU-marginal-log-utility concavity
+    # in bankroll — the stake is the ΔU optimum × mult, not a flat fraction-of-cash).
+    assert stake_2k == pytest.approx(2.0 * stake_1k, rel=1e-4), (
+        "the fractional-Kelly stake must scale with the wallet (fraction-of-capital), "
         "not be a fixed-dollar clamp"
     )
 
@@ -337,19 +352,19 @@ def test_S5_ceiling_scales_with_bankroll():
 # ===========================================================================
 # ENVELOPE on the NO side — direction law: NO candidates are capped identically.
 # ===========================================================================
-def test_S5_no_side_stake_also_bounded_by_ceiling():
-    """ENVELOPE holds for native-NO candidates too (the ceiling is side-agnostic;
-    the operator's concentration law caps any single live bet, YES or NO). A
-    strong honest robust NO q_lcb at a cheap NO ask would breach the ceiling
-    unclamped; it must clamp to pct·B."""
+def test_S5_no_side_stake_also_bounded_by_kelly_budget():
+    """KELLY_BUDGET holds for native-NO candidates too (the bound is side-agnostic;
+    the layered-Kelly sizing governs any single live bet, YES or NO). A strong
+    honest robust NO q_lcb at a cheap NO ask sizes positively and within the
+    fractional-Kelly budget — no hard pct·B cap applies."""
     bin_x = Bin(low=60.0, high=61.0, unit="F", label="60-61F")
     row = _row(no_asks=(("0.10", "1000000"),), snapshot_id="snap-no")
     # Honest robust NO q_lcb 0.85 >> NO ask 0.10 -> very fat robust edge.
     no_proof = _proof(direction="buy_no", row=row, token_id="no-1",
                       q_posterior=0.88, q_lcb_5pct=0.85, bin_obj=bin_x)
     stake = _stake(no_proof, mult=LIVE_KELLY_MULT)
-    ceiling = BANKROLL * MAX_SINGLE_POSITION_PCT
-    assert 0.0 < stake <= ceiling + 1e-6, (
-        f"native-NO stake {stake:.4f} must be a positive value bounded by the "
-        f"concentration ceiling {ceiling:.4f}"
+    kelly_budget = BANKROLL * LIVE_KELLY_MULT
+    assert 0.0 < stake <= kelly_budget + 1e-6, (
+        f"native-NO stake {stake:.4f} must be positive and within the fractional-"
+        f"Kelly budget {kelly_budget:.4f} (no hard concentration cap applies)"
     )
