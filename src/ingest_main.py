@@ -46,6 +46,7 @@ logger = logging.getLogger("zeus.ingest")
 _scheduler: Any | None = None
 FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
 _ORACLE_BRIDGE_LOCK = threading.Lock()
+_ORACLE_SNAPSHOT_LOCK = threading.Lock()
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -1321,6 +1322,62 @@ def _run_bridge_oracle_script() -> str:
         _ORACLE_BRIDGE_LOCK.release()
 
 
+# ---------------------------------------------------------------------------
+# Oracle snapshot tick — daily 10:00 UTC (5 min before the bridge)
+# ---------------------------------------------------------------------------
+
+@_scheduler_job("ingest_oracle_snapshot")
+def _oracle_snapshot_tick():
+    """Capture WU/HKO oracle shadow snapshots daily at 10:00 UTC.
+
+    Promotes oracle_snapshot_listener.py into the ingest_main scheduler
+    (same F35 pattern used by _bridge_oracle_tick) so the snapshot job is
+    co-located with the bridge it feeds and survives daemon restarts without
+    a separate crontab entry.
+
+    Must run at 10:00 UTC — 5 min before the bridge at 10:05 — so today's
+    snapshot is present before the bridge computes comparisons.  The
+    listener is idempotent: re-running with the same target date overwrites
+    the file atomically.
+
+    Zero coupling to any DB — reads only config/cities.json and writes to
+    raw/oracle_shadow_snapshots/.  subprocess.run (not DB executor).
+    """
+    _run_oracle_snapshot_script()
+
+
+def _run_oracle_snapshot_script() -> str:
+    """Run oracle_snapshot_listener.py once as a subprocess."""
+    if not _ORACLE_SNAPSHOT_LOCK.acquire(blocking=False):
+        logger.info("[ORACLE_SNAPSHOT_TICK] skipped lock_held")
+        return "skipped_lock_held"
+    try:
+        venv_python = _etl_subprocess_python()
+        script = Path(__file__).parent.parent / "scripts" / "oracle_snapshot_listener.py"
+        if not script.exists():
+            logger.warning("[ORACLE_SNAPSHOT_TICK] script not found at %s", script)
+            return "missing_script"
+        import subprocess
+        r = subprocess.run(
+            [venv_python, str(script)],
+            capture_output=True, text=True, timeout=300,
+        )
+        stdout_tail = r.stdout[-500:] if r.stdout else ""
+        if r.returncode != 0:
+            logger.warning(
+                "[ORACLE_SNAPSHOT_TICK] FAILED (exit=%d): %s",
+                r.returncode, r.stderr[-500:] if r.stderr else "",
+            )
+            return "failed_subprocess"
+        logger.info("[ORACLE_SNAPSHOT_TICK] OK (exit=0) stdout=%r", stdout_tail)
+        return "ok"
+    except Exception:
+        logger.exception("[ORACLE_SNAPSHOT_TICK] FAILED exception")
+        return "failed_exception"
+    finally:
+        _ORACLE_SNAPSHOT_LOCK.release()
+
+
 def _latest_oracle_snapshot_mtime() -> float | None:
     """Return latest oracle shadow snapshot mtime, or None when no snapshots exist."""
     try:
@@ -1548,6 +1605,8 @@ def _ingest_main_job_specs() -> list[tuple]:
             max_instances=1, coalesce=True, misfire_grace_time=3600)),
         (_market_scan_tick, "interval", dict(minutes=30, id="ingest_market_scan",
             max_instances=1, coalesce=True)),
+        (_oracle_snapshot_tick, "cron", dict(hour=10, minute=0, id="ingest_oracle_snapshot",
+            max_instances=1, coalesce=True, misfire_grace_time=600, executor="fast")),
         (_bridge_oracle_tick, "cron", dict(hour=10, minute=5, id="ingest_oracle_bridge",
             max_instances=1, coalesce=True, misfire_grace_time=600, executor="fast")),
         (_bridge_oracle_startup_catch_up, "date", dict(run_date=now,

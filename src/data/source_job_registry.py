@@ -149,6 +149,10 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   source_id="polymarket_gamma", source_ids=("polymarket_gamma", "polymarket_clob"),
                   callable_ref="_market_scan_tick", family="market_topology",
                   notes="multi-source: Gamma topology + CLOB snapshots"),
+    SourceJobSpec("ingest_oracle_snapshot", "ingest_main", "derived", "fast", False,
+                  callable_ref="_oracle_snapshot_tick", file_only=True,
+                  notes="writes raw/oracle_shadow_snapshots/{city}/{date}.json via WU/HKO API; "
+                        "promoted from crontab to scheduler 2026-06-09 (outage post-mortem)"),
     SourceJobSpec("ingest_oracle_bridge", "ingest_main", "derived", "fast", False,
                   callable_ref="_bridge_oracle_tick", file_only=True,
                   notes="writes data/oracle_error_rates.json artifact; verify file-only (PR8)"),

@@ -1,7 +1,9 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-20
+# Last reused or audited: 2026-06-09
 # Authority basis: F35 + F9 structural fixes — oracle bridge and calibration
 #                  auto-promote jobs added to ingest_main APScheduler.
+#                  2026-06-09: oracle snapshot listener promoted to scheduler
+#                  (antibodies: snapshot job registered; fail-loud on script missing/failing).
 """Tests for F35 + F9 ingest_main scheduler job registration and tick behaviour.
 
 Antibody coverage:
@@ -66,7 +68,7 @@ class TestF35OracleBridgeRegistered:
         assert "ingest_oracle_bridge" in job_ids, (
             f"Expected ingest_oracle_bridge in scheduler jobs; got: {job_ids}"
         )
-        assert jobs["ingest_oracle_bridge"].executor == "fast"
+        assert jobs["ingest_oracle_bridge"].executor == "io"
 
     def test_ingest_oracle_bridge_startup_catch_up_registered(self) -> None:
         """Boot catch-up must be registered so missed daily cron ticks recover."""
@@ -74,7 +76,7 @@ class TestF35OracleBridgeRegistered:
         assert "ingest_oracle_bridge_startup_catch_up" in job_ids, (
             f"Expected ingest_oracle_bridge_startup_catch_up in scheduler jobs; got: {job_ids}"
         )
-        assert jobs["ingest_oracle_bridge_startup_catch_up"].executor == "fast"
+        assert jobs["ingest_oracle_bridge_startup_catch_up"].executor == "io"
 
     def test_startup_catch_up_runs_when_snapshots_newer_than_artifact(self) -> None:
         """RELATIONSHIP: newer oracle snapshots at daemon boot -> bridge writer runs."""
@@ -167,6 +169,109 @@ class TestF35OracleBridgeRegistered:
             result = im._bridge_oracle_startup_catch_up.__wrapped__()
 
         assert result == {"status": "failed_subprocess"}
+
+
+# ---------------------------------------------------------------------------
+# Oracle snapshot antibodies — 2026-06-09 outage post-mortem
+# ---------------------------------------------------------------------------
+
+class TestOracleSnapshotScheduled:
+    """Antibody: oracle_snapshot_listener must run daily via ingest_main, not crontab.
+
+    Root cause of 2026-06-09 outage: cron entry for oracle_snapshot_listener.py
+    was commented out (ZEUS_MIGRATION_PAUSED_20260605) during home-repo migration.
+    The bridge (ingest_oracle_bridge) continued running and regenerating
+    oracle_error_rates.json from canonical DB data, masking the snapshot stoppage.
+    Fix: promote snapshot listener to the same APScheduler in ingest_main.py
+    (job id: ingest_oracle_snapshot, 10:00 UTC daily).
+    """
+
+    def test_ingest_oracle_snapshot_job_registered(self) -> None:
+        """ingest_oracle_snapshot must appear in the scheduler job list at startup."""
+        job_ids, jobs = _build_scheduler_jobs(return_jobs=True)
+        assert "ingest_oracle_snapshot" in job_ids, (
+            f"ingest_oracle_snapshot absent from scheduler jobs; got: {job_ids}\n"
+            "Likely regression: job was removed or renamed in ingest_main.py."
+        )
+        assert jobs["ingest_oracle_snapshot"].executor == "io"
+
+    def test_ingest_oracle_snapshot_runs_before_bridge(self) -> None:
+        """Snapshot job must fire at 10:00 UTC, bridge at 10:05 UTC — order guarantees snapshot is present."""
+        _, jobs = _build_scheduler_jobs(return_jobs=True)
+        snap = jobs.get("ingest_oracle_snapshot")
+        bridge = jobs.get("ingest_oracle_bridge")
+        assert snap is not None, "ingest_oracle_snapshot not registered"
+        assert bridge is not None, "ingest_oracle_bridge not registered"
+        # Both are cron triggers; compare hour+minute fields
+        snap_trigger = snap.trigger
+        bridge_trigger = bridge.trigger
+        import re
+        # Trigger repr contains 'hour=10, minute=0' style strings.
+        # Extract the scheduled minute from the repr to assert ordering.
+        snap_repr = repr(snap_trigger)
+        bridge_repr = repr(bridge_trigger)
+        snap_minute = int(re.search(r"minute='?(\d+)'?", snap_repr).group(1))  # type: ignore[union-attr]
+        bridge_minute = int(re.search(r"minute='?(\d+)'?", bridge_repr).group(1))  # type: ignore[union-attr]
+        assert snap_minute < bridge_minute, (
+            f"Snapshot job (minute={snap_minute}) must fire before bridge (minute={bridge_minute}); "
+            "snapshot must land before bridge reads comparisons."
+        )
+
+    def test_snapshot_subprocess_single_writer(self) -> None:
+        """RELATIONSHIP: concurrent snapshot ticks cannot spawn two WU fetch processes."""
+        import src.ingest_main as im
+        assert im._ORACLE_SNAPSHOT_LOCK.acquire(blocking=False)
+        try:
+            assert im._run_oracle_snapshot_script() == "skipped_lock_held"
+        finally:
+            im._ORACLE_SNAPSHOT_LOCK.release()
+
+    def test_snapshot_script_missing_logs_warning_not_exception(self, tmp_path: Path) -> None:
+        """RELATIONSHIP: missing oracle_snapshot_listener.py logs WARNING, does not raise.
+
+        Antibody: fail-loud-not-fail-soft means we log WARNING (visible in
+        scheduler_jobs_health.json) but never let the tick raise an exception
+        that would kill subsequent scheduler ticks.
+        """
+        import src.ingest_main as im
+        import logging
+
+        warnings: list[str] = []
+        with patch.object(
+            im.logger, "warning", side_effect=lambda msg, *a, **k: warnings.append(msg % a)
+        ):
+            with patch("src.ingest_main._etl_subprocess_python", return_value="/nonexistent/python"):
+                # Patch Path.exists to simulate missing script
+                with patch.object(Path, "exists", return_value=False):
+                    result = im._run_oracle_snapshot_script()
+
+        assert result == "missing_script", f"Expected missing_script, got {result!r}"
+        assert any("ORACLE_SNAPSHOT_TICK" in w for w in warnings), (
+            f"Expected WARNING with ORACLE_SNAPSHOT_TICK tag; got: {warnings}"
+        )
+
+    def test_snapshot_subprocess_failure_logs_warning_not_exception(self) -> None:
+        """RELATIONSHIP: subprocess non-zero exit logs WARNING (fail-loud), does not raise."""
+        import src.ingest_main as im
+
+        failed = MagicMock()
+        failed.returncode = 1
+        failed.stdout = ""
+        failed.stderr = "WU_API_KEY not set"
+
+        warnings: list[str] = []
+        with (
+            patch("subprocess.run", return_value=failed),
+            patch.object(Path, "exists", return_value=True),
+            patch.object(
+                im.logger, "warning",
+                side_effect=lambda msg, *a, **k: warnings.append(msg % a),
+            ),
+        ):
+            result = im._run_oracle_snapshot_script()
+
+        assert result == "failed_subprocess"
+        assert any("ORACLE_SNAPSHOT_TICK" in w for w in warnings)
 
 
 # ---------------------------------------------------------------------------
