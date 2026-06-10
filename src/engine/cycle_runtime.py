@@ -3460,29 +3460,57 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 continue
 
             edge_ctx = refresh_position(conn, clob, pos)
+            # === DAY0 HARD-FACT verdict — computed BEFORE the canonical-write
+            # failure branch (PR#404 operator review P0-4): the hard-fact exit
+            # is settlement-authority evidence and must NOT depend on monitor
+            # telemetry/canonical-event writes succeeding. A deterministic dead
+            # bin exits even when the canonical MONITOR_REFRESHED write fails.
+            _hard_fact = None
+            if _position_state_value(pos) == "day0_window" and city is not None:
+                try:
+                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+                    _hard_fact = evaluate_hard_fact_exit(position=pos, city=city, now=deps._utcnow())
+                except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
+                    deps.logger.warning(
+                        "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
+                    )
             monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
                 conn,
                 pos,
                 deps=deps,
             )
             if not monitor_canonical_written:
-                monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
-                artifact.add_monitor_result(
-                    deps.MonitorResult(
-                        position_id=pos.trade_id,
-                        fresh_prob=monitor_fresh_prob,
-                        fresh_edge=monitor_fresh_edge,
-                        should_exit=False,
-                        exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
-                        neg_edge_count=pos.neg_edge_count,
-                    )
-                )
-                monitor_result_written = True
                 summary["monitor_canonical_write_failed"] = (
                     summary.get("monitor_canonical_write_failed", 0) + 1
                 )
-                summary["monitors"] += 1
-                continue
+                if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                    # P0-4: telemetry failure must not hold a structurally dead
+                    # leg — fall through to the hard-fact exit below. The later
+                    # add_monitor_result records the exit decision.
+                    summary["day0_hard_fact_exit_despite_canonical_write_failure"] = (
+                        summary.get("day0_hard_fact_exit_despite_canonical_write_failure", 0) + 1
+                    )
+                    deps.logger.error(
+                        "MONITOR_CANONICAL_WRITE_FAILED for %s but day0 hard-fact bin death "
+                        "present — proceeding to exit (telemetry failure does not gate "
+                        "settlement-authority exits)",
+                        pos.trade_id,
+                    )
+                else:
+                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos, edge_ctx)
+                    artifact.add_monitor_result(
+                        deps.MonitorResult(
+                            position_id=pos.trade_id,
+                            fresh_prob=monitor_fresh_prob,
+                            fresh_edge=monitor_fresh_edge,
+                            should_exit=False,
+                            exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
+                            neg_edge_count=pos.neg_edge_count,
+                        )
+                    )
+                    monitor_result_written = True
+                    summary["monitors"] += 1
+                    continue
             exit_context = _build_exit_context(
                 pos,
                 edge_ctx,
@@ -3511,16 +3539,8 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
             # is what gives buy_no its day0 exit authority for the hard-fact class).
             # Estimator flips keep the full panic-sell hardening unchanged. The lane
             # is fail-soft: any data gap / oracle-anomaly pause -> None -> the normal
-            # evaluate_exit path runs.
-            _hard_fact = None
-            if _position_state_value(pos) == "day0_window" and city is not None:
-                try:
-                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
-                    _hard_fact = evaluate_hard_fact_exit(position=pos, city=city, now=deps._utcnow())
-                except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
-                    deps.logger.warning(
-                        "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
-                    )
+            # evaluate_exit path runs. (_hard_fact was computed ABOVE, before the
+            # canonical-write failure branch — PR#404 P0-4.)
             if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
                 from src.state.portfolio import ExitDecision as _ExitDecision
 
