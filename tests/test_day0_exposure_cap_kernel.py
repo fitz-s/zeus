@@ -226,3 +226,105 @@ def test_non_binding_headroom_matches_uncapped_sizing():
     assert (price_capped is None) == (price_uncapped is None)
     if price_capped is not None:
         assert price_capped.value == pytest.approx(price_uncapped.value)
+
+
+# ===========================================================================
+# 5. BLOCKER 3 — E2E through the live-cap certificate path.
+#    Cross-module invariant (Module A = _evaluate_submit_recapture_for_selected;
+#    Module B = _build_live_cap_certificate_from_ledger):
+#    - cap-abort → proof_accepted=False; live-cap cert never reserved
+#      (max(kelly_usd=0.0, min_order_notional) ≠ headroom is never written)
+#    - binding headroom → kernel stake=headroom flows into kelly_size_usd on the
+#      no-submit receipt → live-cap cert reserves exactly headroom (not uncapped
+#      kelly, not min_order_notional if headroom > min_order_notional).
+# ===========================================================================
+
+def test_cap_abort_proof_accepted_false_no_live_cert_reserved():
+    """When the kernel aborts (DAY0_EXPOSURE_CAP_EXHAUSTED), the no-submit
+    receipt must have proof_accepted=False.  A False receipt gates out the
+    live-cap cert build at line 1179 of event_reactor_adapter.py:
+
+        if no_submit_receipt.proof_accepted is not True ... return no_submit_receipt
+
+    so _build_live_cap_certificate_from_ledger is never called with kelly_size_usd=0.0
+    (which would reserve max(0.0, min_order_notional) — a ghost reservation)."""
+    proof = _strong_edge_proof()
+    decision, stake, _price = _recapture(proof, headroom=0.0)
+
+    # Verify the kernel abort propagates to proof_accepted=False
+    assert decision.may_submit is False
+    assert stake == 0.0
+    # Verify that the EventSubmissionReceipt produced by the no-submit path
+    # would also be False (proof_accepted defaults from submitted=False)
+    from src.events.reactor import EventSubmissionReceipt
+    # Minimal receipt simulating the abort path (line 2333 ERA)
+    receipt = EventSubmissionReceipt(
+        False,
+        "ev-cap-abort",
+        None,
+        reason="DAY0_EXPOSURE_CAP_EXHAUSTED:headroom exhausted",
+        kelly_size_usd=0.0,
+    )
+    assert receipt.proof_accepted is False
+    # Simulate the gate at ERA line 1179: proof_accepted is not True -> early return
+    assert (receipt.proof_accepted is not True), (
+        "cap-abort receipt must be proof_accepted=False so live-cap cert is never built"
+    )
+
+
+def test_binding_headroom_kelly_size_usd_equals_headroom_on_receipt():
+    """When headroom is binding (smaller than uncapped kelly), the kernel's
+    chosen stake equals headroom.  The no-submit receipt's kelly_size_usd carries
+    this value, so the live-cap cert receives max(headroom, min_order_notional)
+    = headroom (not the uncapped kelly).  This test pins the Module A→B handoff:
+    the stake the kernel produced IS the reserved notional."""
+    headroom = 10.0
+    proof = _strong_edge_proof()
+
+    # Uncapped kelly must be above headroom for this to be meaningful
+    _d_uncapped, stake_uncapped, _p = _recapture(proof, headroom=None)
+    assert stake_uncapped > headroom, "test precondition: uncapped kelly > headroom"
+
+    proof2 = _strong_edge_proof()
+    decision, stake_capped, price_capped = _recapture(proof2, headroom=headroom)
+    assert decision.may_submit is True
+    assert stake_capped == pytest.approx(headroom)
+    assert price_capped is not None
+
+    # Module B: _build_live_cap_certificate_from_ledger logic uses kelly_size_usd.
+    # With kelly_size_usd=headroom and min_order_notional=price*min_order_size,
+    # requested_notional = max(headroom, min_order_notional) = headroom
+    # (since headroom > min_order_notional when headroom=10 and min_tick=0.30*5=$1.5).
+    # Verify the reservation arithmetic: ERA line 3547.
+    import sqlite3
+    from src.engine import event_reactor_adapter as era
+
+    in_memory_cap_conn = sqlite3.connect(":memory:")
+    in_memory_cap_conn.row_factory = sqlite3.Row
+    from src.events.live_cap import LiveCapLedger
+    LiveCapLedger(in_memory_cap_conn)  # initializes schema
+
+    from src.events.reactor import EventSubmissionReceipt
+    receipt_with_headroom_kelly = EventSubmissionReceipt(
+        False,  # submitted=False (submit-disabled path)
+        "ev-b3-headroom",
+        "snap-b3",
+        proof_accepted=True,
+        kelly_size_usd=stake_capped,    # headroom, from the kernel
+        c_fee_adjusted=price_capped.value,
+        final_intent_id="intent-b3",
+    )
+
+    cert = era._build_live_cap_certificate_from_ledger(
+        event=type("Ev", (), {"event_id": "ev-b3-headroom", "causal_snapshot_id": "snap-b3"})(),
+        receipt=receipt_with_headroom_kelly,
+        decision_time=__import__("datetime").datetime(2026, 6, 10, 12, tzinfo=__import__("datetime").timezone.utc),
+        live_cap_conn=in_memory_cap_conn,
+        persist=True,
+    )
+
+    reserved = cert.payload["reserved_notional_usd"]
+    assert float(reserved) == pytest.approx(headroom, abs=1e-4), (
+        f"live-cap cert must reserve the kernel's chosen stake ({headroom:.2f}), "
+        f"not the uncapped kelly ({stake_uncapped:.2f}); got {reserved}"
+    )

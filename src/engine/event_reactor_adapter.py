@@ -1098,24 +1098,52 @@ def event_bound_live_adapter_from_trade_conn(
     )
 
     def _submit_inner(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:
-        # FIX-3 (P1) DAY0_SCOPE_SHADOW_ONLY boundary gate.
-        # When edli_live_scope is "day0_shadow", any event whose type belongs to
-        # the day0 lane gets a deterministic no-submit rejection here at the
-        # FINAL ADAPTER boundary — BEFORE the no-submit proof chain runs and
-        # BEFORE any venue interaction. Fail-closed: an event_type that is not
-        # in the known forecast lane while scope is day0_shadow is treated as
-        # day0 (rejected), with a loud log to surface the anomaly.
-        if edli_live_scope in ("day0_shadow", "forecast_plus_day0"):
-            event_type = getattr(event, "event_type", None)
-            _FORECAST_LANE_EVENT_TYPES: frozenset[str] = frozenset({"FORECAST_SNAPSHOT_READY"})
-            is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
-            is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
+        # FINAL ADAPTER BOUNDARY SCOPE GATE (PR#404 MAJOR 5 + FIX-3 P1).
+        #
+        # Every scope — including the DEFAULT "forecast_only" — explicitly rejects
+        # event types that are out-of-scope.  No scope relies on the caller passing
+        # only the right event types; the boundary is deterministic and fail-closed.
+        #
+        # Reason taxonomy (separately named by scope, never aliased):
+        #   forecast_only  → DAY0_OUT_OF_SCOPE_AT_BOUNDARY  (day0 or unknown)
+        #   day0_shadow    → DAY0_SCOPE_SHADOW_ONLY          (day0 or unknown)
+        #   forecast_plus_day0 → DAY0_SCOPE_SHADOW_ONLY      (unknown only)
+        #
+        # FIX-3 (P1): day0_shadow / forecast_plus_day0 path (unchanged semantics).
+        # MAJOR 5: forecast_only path — explicit day0 + unknown rejection added here
+        #           so that no downstream probe or adapter change can accidentally
+        #           admit a day0-lane event on the forecast-only scope.
+        import logging as _logging
+
+        event_type = getattr(event, "event_type", None)
+        _FORECAST_LANE_EVENT_TYPES: frozenset[str] = frozenset({"FORECAST_SNAPSHOT_READY"})
+        is_forecast_lane = event_type in _FORECAST_LANE_EVENT_TYPES
+        is_day0_lane = event_type in _DAY0_LANE_EVENT_TYPES
+
+        if edli_live_scope == "forecast_only":
+            # MAJOR 5: forecast_only is blind to observation by design
+            # (src/strategy/market_phase.py authority). Any day0-lane or unknown
+            # event type is rejected deterministically here.
+            if not is_forecast_lane:
+                if not is_day0_lane:
+                    _logging.getLogger(__name__).error(
+                        "DAY0_OUT_OF_SCOPE_AT_BOUNDARY: unknown event_type=%r "
+                        "rejected at forecast_only boundary (fail-closed)",
+                        event_type,
+                    )
+                return EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason="DAY0_OUT_OF_SCOPE_AT_BOUNDARY",
+                    proof_accepted=False,
+                )
+        elif edli_live_scope in ("day0_shadow", "forecast_plus_day0"):
             # forecast_plus_day0 admits day0-lane events through this boundary;
             # day0_shadow rejects them. In BOTH scopes, an event type that is
             # neither known lane is fail-closed (treated as day0, rejected).
             day0_lane_blocked_here = edli_live_scope == "day0_shadow"
             if not is_forecast_lane and not is_day0_lane:
-                import logging as _logging
                 _logging.getLogger(__name__).error(
                     "DAY0_SCOPE_SHADOW_ONLY: unknown event_type=%r treated as day0 (fail-closed) "
                     "while edli_live_scope=%r",
