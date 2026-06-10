@@ -1,5 +1,7 @@
 # Zeus Strategy Mathematics & Execution Authority Specification
 
+> **Superseded for probability law (2026-06-09):** the live q chain is `docs/authority/replacement_final_form_2026_06_09.md` (`u0r_bayes.fuse_u0r_posterior` → `emos.bin_probability_settlement`). This spec describes the **legacy baseline**; its proof-form taxonomy still governs, but treat its probability/calibration math as baseline / LCB-cap, not the strategy of record.
+
 **Created:** 2026-05-22  
 **Suggested repo destination:** `docs/reference/zeus_strategy_authority_spec.md`  
 **Purpose:** Provide a permanent strategy-level authority guide for Zeus: every live, shadow, and blocked strategy is expressed as executable mathematics tied to code surfaces, market microstructure, physical weather constraints, and promotion evidence.  
