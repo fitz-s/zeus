@@ -1442,6 +1442,32 @@ def _settlement_guard_report_tick() -> None:
     run_settlement_guard_report()
 
 
+@_scheduler_job("shadow_comparator")
+def _shadow_comparator_tick() -> None:
+    """Daily standing shadow-vs-live comparator (operator-approved, K<<N organ).
+
+    The ONE comparator every promotion uses instead of a bespoke harness. For
+    each registered shadow candidate (immediate customer: day0_remaining_day_q),
+    it READS the persisted shadow + live q for each settled cohort cell, grades
+    both against the VERIFIED settlement via grade_receipt (the ONE Direction-Law
+    truth function — never recomputes domain logic), and emits a running
+    scoreboard with a PROMOTE_SUPPORTED | LIVE_BETTER | INSUFFICIENT_N verdict:
+      - state/shadow_comparator.json (machine)
+      - docs/evidence/shadow_comparisons/<date>_shadow_comparison.md (human)
+    plus a one-line INFO verdict per candidate in this daemon's log.
+
+    Co-located with the settlement-guard tick (same WORLD+forecasts read shape,
+    same daily cadence). Read-only; honest absence (INSUFFICIENT_N) when a
+    candidate's shadow lane is not yet persisting a comparable q — never a
+    fabricated cohort. Import is local to keep src.main import-light.
+    """
+    from src.analysis.shadow_comparator import run_shadow_comparator_job
+
+    report = run_shadow_comparator_job()
+    for cand in report.get("candidates", []):
+        logger.info("shadow_comparator[%s]: %s", cand["name"], cand["verdict_line"])
+
+
 # ---------------------------------------------------------------------------
 # F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
 # ---------------------------------------------------------------------------
@@ -8496,6 +8522,16 @@ def main():
     scheduler.add_job(
         _settlement_guard_report_tick, "cron", hour=9, minute=15,
         id="settlement_guard_report", max_instances=1, coalesce=True,
+    )
+    # Standing shadow-vs-live comparator — 09:20 UTC, just after the settlement-
+    # guard tick (same WORLD+forecasts read shape, settlement truth already
+    # landed). Read-only; writes state/shadow_comparator.json +
+    # docs/evidence/shadow_comparisons/<date>.md + a one-line verdict per
+    # candidate. INSUFFICIENT_N (honest absence) until a shadow lane persists a
+    # comparable q.
+    scheduler.add_job(
+        _shadow_comparator_tick, "cron", hour=9, minute=20,
+        id="shadow_comparator", max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER
