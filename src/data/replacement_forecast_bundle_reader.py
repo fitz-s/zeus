@@ -11,6 +11,13 @@ from datetime import date, datetime, timezone
 from typing import Any, Mapping
 
 from src.config import cities_by_name
+from src.data.replacement_forecast_cycle_policy import (
+    CYCLE_PHASE_INTERMEDIATE,
+    REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
+    classify_cycle_phase,
+    cycle_age_exceeds_bound,
+    replacement_source_cycle_max_age_hours,
+)
 from src.data.replacement_forecast_readiness import (
     PRODUCT_ID,
     READY_STATUS,
@@ -25,25 +32,35 @@ _FORBIDDEN_TRANSCRIPT_ALIAS = "h" + "3"
 
 # H3 (REAUDIT_0_1.md §2): fail-closed staleness horizon. ``readiness.expires_at``
 # was loaded but NEVER compared to decision_time; a forecast cycle this many hours
-# (or older) before the decision is treated as DEAD and refused live authority.
-# Conservative default; operator-tunable via the env override below. The gate
-# lives in the ONE bundle reader so the live 0.1 path AND the legacy hook inherit
-# a single freshness gate (no second per-path gate).
-REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT = 30.0
+# (or older) before the decision is treated as DEAD and refused live authority. The
+# horizon + its env override now live in src/data/replacement_forecast_cycle_policy.py
+# (single source of truth shared with the materialization-side fail-closed gate).
+# Re-exported here for backward compatibility with existing imports.
+_replacement_source_cycle_max_age_hours = replacement_source_cycle_max_age_hours
 
 
-def _replacement_source_cycle_max_age_hours() -> float:
-    import os
+# Operator cycle-physics directive 2026-06-10: a posterior sourced from an intermediate
+# (06/18Z) model cycle carries provenance_json.cycle_phase == "intermediate". The de-bias
+# + fusion weights were trained on ~99% 00Z-cycle history, so an intermediate-phase
+# posterior is produced + readiness-stamped (keeping production alive in the dead zones)
+# but is held to SHADOW-ONLY for LIVE admission by default until a settlement-graded
+# comparison licenses it. Flag default OFF = shadow-only (never weaken a gate).
+_REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG = "replacement_0_1_intermediate_cycle_live_admission_enabled"
 
-    raw = os.environ.get("ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS")
-    if raw is None or not raw.strip():
-        return REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+
+def _replacement_intermediate_cycle_live_admission_enabled() -> bool:
+    """Whether intermediate-phase (06/18Z) posteriors may be admitted LIVE. Default FALSE.
+
+    Fail-closed: any config error -> False (intermediate phase stays shadow-only). The
+    operator promotes this only after a settlement-graded synoptic-vs-intermediate skill
+    comparison; until then 06/18Z posteriors keep production alive without trading live.
+    """
     try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
-    # Fail-closed: a non-positive horizon would disable the gate; ignore it.
-    return value if value > 0.0 else REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+        from src.config import settings  # noqa: PLC0415
+
+        return bool(settings["edli_v1"].get(_REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG, False))
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
@@ -497,12 +514,32 @@ def read_replacement_forecast_bundle(
     # The reader already rejects FUTURE posteriors; this adds the missing STALE
     # bound: a source_cycle_time older than the fail-closed horizon means the data
     # the posterior was built on is too old to trade as live, even if expires_at is
-    # still in the future. Same single-gate location, inherited by both paths.
+    # still in the future. Same single-gate location, inherited by both paths. The
+    # horizon is the SAME constant the materialization-side fail-closed gate uses
+    # (src/data/replacement_forecast_cycle_policy.py) so the two gates can never drift.
     _source_cycle_utc = _parse_utc(str(row_map["source_cycle_time"]), field_name="source_cycle_time")
-    _max_age_hours = _replacement_source_cycle_max_age_hours()
-    if (decision_utc - _source_cycle_utc).total_seconds() > _max_age_hours * 3600.0:
+    if cycle_age_exceeds_bound(decision_utc, _source_cycle_utc):
         return ReplacementForecastBundleReadResult(
             "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+        )
+
+    # Operator cycle-physics directive 2026-06-10 — intermediate-cycle (06/18Z) live gate.
+    # The de-bias + fusion weights were trained on ~99% 00Z-cycle history, so a posterior
+    # built on an intermediate cycle applies a bias correction across cycle phase. Such a
+    # posterior is still PRODUCED + readiness-stamped (production stays alive in dead zones)
+    # but is admitted LIVE only when the operator flag is on (default OFF = shadow-only).
+    # We prefer the explicit provenance tag (recorded at materialization), falling back to
+    # the source_cycle_time hour so a pre-tag posterior is still classified fail-closed.
+    _phase_provenance = _json_mapping(row_map.get("provenance_json"), field_name="provenance_json")
+    _cycle_phase = str(_phase_provenance.get("cycle_phase") or "").strip().lower()
+    if not _cycle_phase:
+        _cycle_phase = classify_cycle_phase(_source_cycle_utc)
+    if (
+        _cycle_phase == CYCLE_PHASE_INTERMEDIATE
+        and not _replacement_intermediate_cycle_live_admission_enabled()
+    ):
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_SHADOW_ONLY"
         )
 
     posterior_dependency = _readiness_dependency_by_role(readiness, "soft_anchor_posterior")

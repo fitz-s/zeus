@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from src.config import cities_by_name
+from src.contracts.replacement_pipeline_files import validate_materialization_request
 from src.data.openmeteo_ecmwf_ifs9_precision_guard import (
     OpenMeteoIfs9PrecisionMetadata,
     evaluate_openmeteo_ecmwf_ifs9_precision_guard,
@@ -225,6 +226,14 @@ def build_replacement_forecast_materialization_request(
     ):
         if optional_key in payload:
             request[optional_key] = payload[optional_key]
+    # BOUNDARY CONTRACT (2026-06-10): validate the assembled request against the
+    # shared producer⇄consumer schema BEFORE returning it READY. This is the
+    # producer half of the contract: a request that passes here is guaranteed to
+    # pass the queue's consumer-side validate_materialization_request, so a
+    # divergence between this assembly site and the consumer's expectations can
+    # never ship a poison file downstream. Authority basis: pipeline-contract
+    # project, operator directive 2026-06-10.
+    validate_materialization_request(request)
     return ReplacementForecastMaterializationRequestBuildResult(
         status="READY",
         reason_codes=("REPLACEMENT_MATERIALIZATION_REQUEST_READY",),

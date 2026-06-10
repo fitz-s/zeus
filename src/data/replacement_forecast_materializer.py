@@ -31,6 +31,11 @@ from src.data.ecmwf_aifs_sampled_2t_localday import (
     AifsSampledLocalDayExtraction,
 )
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
+from src.data.replacement_forecast_cycle_policy import (
+    classify_cycle_phase,
+    cycle_age_exceeds_bound,
+    replacement_source_cycle_max_age_hours,
+)
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
     HIGH_DATA_VERSION as ANCHOR_HIGH_DATA_VERSION,
     LOW_DATA_VERSION as ANCHOR_LOW_DATA_VERSION,
@@ -342,6 +347,17 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
         reasons.append("REPLACEMENT_MATERIALIZATION_DEPENDENCY_AFTER_COMPUTED_AT")
     if request.expires_at is not None and _to_utc(request.expires_at, field_name="expires_at") <= computed_at:
         reasons.append("REPLACEMENT_MATERIALIZATION_EXPIRY_NOT_AFTER_COMPUTED_AT")
+    # BOUNDED STALENESS (operator directive 2026-06-10) — fail-closed at materialization.
+    # Re-materializing the SAME persisted source cycle re-stamps computed_at and grants a
+    # fresh 3h readiness TTL. Unbounded, that launders an arbitrarily-old cycle into "current"
+    # trading inputs forever (exactly what the manual 12Z recovery does ONCE — it must not be
+    # repeatable indefinitely). Cap (computed_at - source_cycle_time) at the SAME horizon the
+    # live-admission belt-and-suspenders gate uses (replacement_forecast_cycle_policy: 30h,
+    # within the empirical max healthy cycle age of 28.8h). Expired-but-rematerializable: the
+    # SAME cycle is allowed only WHILE within this bound. Refusing here means a too-stale cycle
+    # never even gets re-stamped, so the live gate is never the sole line of defence.
+    if cycle_age_exceeds_bound(computed_at, request_source_cycle_time):
+        reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE")
     return tuple(reasons)
 
 
@@ -1461,10 +1477,20 @@ def _insert_posterior(
         capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
     else:
         capture_status = REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT
+    # CYCLE-PHASE PROVENANCE (operator cycle-physics directive 2026-06-10). 00/12Z are the
+    # full synoptic cycles; 06/18Z are intermediate cycles whose skill/bias differ. The
+    # de-bias + fusion weights are trained on ~99% 00Z-cycle history, so an intermediate-cycle
+    # posterior applies a synoptic-fit bias correction across cycle phase. We TAG the phase so
+    # the live bundle reader can hold intermediate-phase posteriors to shadow-only by default
+    # (production stays alive in dead zones; live trading waits for a settlement-graded license).
+    cycle_phase = classify_cycle_phase(_to_utc(request.source_cycle_time, field_name="source_cycle_time"))
     provenance_payload = {
         "anchor_weight": request.anchor_weight,
         "anchor_sigma_c": request.anchor_sigma_c,
         "anchor_value_c": result.anchor_value_c,
+        # Synoptic (00/12Z) vs intermediate (06/18Z) model-cycle phase. The live gate reads
+        # THIS tag (fail-closed to the source_cycle_time hour when absent on legacy rows).
+        "cycle_phase": cycle_phase,
         "aifs_artifact_id": request.aifs_artifact_id,
         "aifs_identity": {
             "identity_decision_valid": request.aifs_extraction.identity_decision_valid,

@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from src.config import PROJECT_ROOT
+from src.contracts.replacement_pipeline_files import (
+    ContractViolation,
+    validate_materialization_request,
+    validate_materialization_seed,
+)
 from src.data.replacement_forecast_materialization_request_builder import (
     build_replacement_forecast_materialization_request,
 )
@@ -252,14 +257,29 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         target_date = str(seed["target_date"])
         metric = str(seed["temperature_metric"])
         baseline_source_run_id = str(seed["baseline_source_run_id"])
+        posterior_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(forecast_posteriors)").fetchall()
+        }
+        # TRADEABLE-GRADE COVERAGE (operator directive 2026-06-10): a covering posterior must
+        # carry q_lcb_json IS NOT NULL. A NULL-q_lcb posterior (U0R_CAPTURE_MISSING /
+        # FUSED_Q_BUILD_FAILED) is NOT live-eligible — the bundle reader's q-mode + bounds gates
+        # reject it — yet it would otherwise satisfy this coverage check and PERMANENTLY mask a
+        # scope that COULD be re-materialized to fusion grade once the capture is healthy. That is
+        # the mask-and-starve category: an untradeable posterior counting as "done forever". The
+        # clause makes it unconstructible — only a tradeable-grade (bounded) posterior counts as
+        # coverage, so a NULL-bound row re-seeds on the next cycle instead of starving the scope.
+        # Schema-conditional (same convention as the readiness clauses below): a stripped
+        # forecast_posteriors table without the column simply omits the bound rather than erroring.
+        tradeable_grade_clause = "AND q_lcb_json IS NOT NULL" if "q_lcb_json" in posterior_columns else ""
         posterior = conn.execute(
-            """
+            f"""
             SELECT 1
             FROM forecast_posteriors
             WHERE source_id = 'openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor'
               AND city = ?
               AND target_date = ?
               AND temperature_metric = ?
+              {tradeable_grade_clause}
               AND json_extract(dependency_source_run_ids_json, '$.baseline_b0') = ?
             LIMIT 1
             """,
@@ -348,18 +368,28 @@ def _validate_request_payload(path: Path) -> tuple[bool, str, str]:
         return False, "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MALFORMED_JSON", str(exc)
     if not isinstance(payload, dict):
         return False, "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_NOT_OBJECT", f"top-level {type(payload).__name__}"
-    missing = [key for key in _REQUEST_REQUIRED_KEYS if not str(payload.get(key) or "").strip()]
-    if missing:
+    # BOUNDARY CONTRACT (2026-06-10): the consumer half of the producer⇄consumer
+    # contract. This replaces the ad-hoc required-key / AIFS-input checks with the
+    # single shared schema in src.contracts.replacement_pipeline_files. The exact
+    # scout-stub shape is rejected here with a ContractViolation whose detail names
+    # every missing field — written verbatim into the failed/ receipt below — and
+    # the file leaves the queue at most once. Authority basis: pipeline-contract
+    # project, operator directive 2026-06-10.
+    try:
+        validate_materialization_request(payload)
+    except ContractViolation as exc:
+        # Preserve the pre-existing reason-code vocabulary the receipt consumers /
+        # tests rely on, while sourcing the precise detail from the shared contract.
+        if exc.detail.startswith("missing_or_empty_required_keys="):
+            reason_code = "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_REQUIRED_KEYS"
+        elif "AIFS input selector" in exc.detail:
+            reason_code = "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_AIFS_INPUT"
+        else:
+            reason_code = "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_CONTRACT_VIOLATION"
         return (
             False,
-            "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_REQUIRED_KEYS",
-            "missing_required_keys=" + ",".join(missing),
-        )
-    if not ("aifs_samples_json" in payload or "aifs_grib_path" in payload):
-        return (
-            False,
-            "REPLACEMENT_SHADOW_MATERIALIZATION_REQUEST_MISSING_AIFS_INPUT",
-            "requires aifs_samples_json or aifs_grib_path",
+            reason_code,
+            exc.detail,
         )
     return True, "", ""
 
@@ -392,6 +422,28 @@ def _prepare_seed_requests(
         try:
             seed = _load_seed_json(seed_json)
             if not _looks_like_seed(seed):
+                continue
+            # BOUNDARY CONTRACT (2026-06-10): the seed consumer half. _looks_like_seed
+            # only discriminates "is this file a seed at all"; the full SEED schema is
+            # enforced here so a seed-shaped-but-malformed file (missing a required field,
+            # wrong-typed number) is routed to failed/ with the precise ContractViolation
+            # detail in the receipt, at most once — never silently passed to the request
+            # builder. Authority basis: pipeline-contract project, operator directive
+            # 2026-06-10.
+            try:
+                validate_materialization_seed(seed)
+            except ContractViolation as exc:
+                moved = _move_request(seed_json, failed_path)
+                _write_sidecar(
+                    moved,
+                    {
+                        "status": "ERROR",
+                        "reason_codes": ["REPLACEMENT_SHADOW_MATERIALIZATION_SEED_CONTRACT_VIOLATION"],
+                        "error": exc.detail,
+                        "request_written": False,
+                    },
+                )
+                failed.append(str(moved))
                 continue
             if _seed_already_covered(forecast_db=forecast_db, seed=seed):
                 moved = _move_request(seed_json, processed_path)

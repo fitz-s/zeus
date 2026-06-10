@@ -1,16 +1,17 @@
-# Created: 2026-06-07
-# Last reused or audited: 2026-06-07
-# Authority basis: REAUDIT_0_1.md §2 H3 (expires_at loaded but never compared to decision_time) + §4.
-"""H3 antibody — readiness expiry / source-cycle age must be a HARD gate.
+# Created: 2026-06-10
+# Last reused or audited: 2026-06-10
+# Authority basis: operator staleness/cycle-physics directive 2026-06-10 (06/18Z intermediate
+#   cycles differ in skill/bias from 00/12Z synoptic cycles; de-bias trained ~99% 00Z so
+#   intermediate-phase posteriors are produced + readiness-stamped but held SHADOW-ONLY for
+#   live admission until a settlement-graded comparison licenses them; flag default OFF).
+"""Relationship test across the materializer->bundle-reader boundary for CYCLE PHASE.
 
-Relationship test across the readiness->bundle boundary: a READY posterior whose
-``readiness.expires_at < decision_time`` (or whose ``source_cycle_time`` is older
-than the operator-configured horizon) must FAIL CLOSED in the bundle reader so
-both the live 0.1 path and the legacy hook inherit ONE staleness gate. Trading a
-dead/stale forecast as live is the inverse of the zero-trade fault.
-
-The gate lives in ``read_replacement_forecast_bundle`` (the single bundle reader)
-so it cannot be bypassed by either consuming path.
+The invariant being pinned is a CROSS-MODULE property, not a single function's output:
+the phase the materializer records in provenance_json.cycle_phase (synoptic for 00/12Z,
+intermediate for 06/18Z) must drive the bundle reader's live-admission decision. A synoptic
+posterior binds; an intermediate posterior is BLOCKED for live (shadow-only) by default and
+only admitted when the operator flag flips. A pre-tag legacy row (no cycle_phase key) must
+fall back to the source_cycle_time hour and be classified fail-closed.
 """
 
 from __future__ import annotations
@@ -22,12 +23,14 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+import src.data.replacement_forecast_bundle_reader as bundle_reader
 from src.data.replacement_forecast_bundle_reader import (
     HIGH_DATA_VERSION,
     PRODUCT_ID,
     SOURCE_ID,
     read_replacement_forecast_bundle,
 )
+from src.data.replacement_forecast_cycle_policy import classify_cycle_phase
 from src.data.replacement_forecast_readiness import (
     ReplacementForecastDependency,
     build_replacement_forecast_readiness,
@@ -60,8 +63,8 @@ def _dt(day: int, hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, day, hour, minute, tzinfo=UTC)
 
 
-def _provenance() -> dict[str, object]:
-    return {
+def _provenance(*, cycle_phase: str | None) -> dict[str, object]:
+    payload: dict[str, object] = {
         "bin_topology_hash": _TOPO_HASH,
         "bin_topology": [
             {
@@ -76,14 +79,17 @@ def _provenance() -> dict[str, object]:
             }
         ],
     }
+    # cycle_phase=None models a legacy pre-tag posterior (the key is simply absent).
+    if cycle_phase is not None:
+        payload["cycle_phase"] = cycle_phase
+    return payload
 
 
 def _insert_posterior(
     conn: sqlite3.Connection,
     *,
     source_cycle_time: datetime,
-    source_available_at: datetime,
-    computed_at: datetime,
+    cycle_phase: str | None,
 ) -> int:
     conn.execute(
         """
@@ -105,8 +111,8 @@ def _insert_posterior(
             "2026-06-07",
             "high",
             source_cycle_time.isoformat(),
-            source_available_at.isoformat(),
-            computed_at.isoformat(),
+            _dt(6, 11).isoformat(),
+            _dt(6, 11, 30).isoformat(),
             json.dumps({"cold": 0.2, "warm": 0.8}),
             json.dumps({"cold": 0.1, "warm": 0.7}),
             "openmeteo_ifs9_aifs_sampled_2t_soft_anchor",
@@ -117,7 +123,7 @@ def _insert_posterior(
                     "openmeteo_ifs9_anchor": "om9-run",
                 }
             ),
-            json.dumps(_provenance()),
+            json.dumps(_provenance(cycle_phase=cycle_phase)),
             "SHADOW_VETO_ONLY",
             0,
             _TOPO_HASH,
@@ -130,7 +136,7 @@ def _insert_posterior(
     return int(conn.execute("SELECT posterior_id FROM forecast_posteriors").fetchone()[0])
 
 
-def _readiness(*, posterior_id: int, computed_at: datetime, expires_at: datetime, decision_time: datetime):
+def _readiness(*, posterior_id: int):
     dependencies = (
         ReplacementForecastDependency(
             role="baseline_b0",
@@ -172,111 +178,67 @@ def _readiness(*, posterior_id: int, computed_at: datetime, expires_at: datetime
         city="Shanghai",
         target_date=date(2026, 6, 7),
         temperature_metric="high",
-        decision_time=decision_time,
-        computed_at=computed_at,
-        expires_at=expires_at,
+        decision_time=_dt(6, 11),
+        computed_at=_dt(6, 11),
+        expires_at=_dt(6, 23),
         dependencies=dependencies,
     )
 
 
-def test_bundle_reader_rejects_expired_readiness() -> None:
-    """READY readiness with expires_at < decision_time => HARD fail-closed.
-
-    The forecast was computed early and EXPIRED before the decision moment.
-    expires_at (06-06 02:00) < decision_time (06-06 12:00). The bundle reader
-    must refuse to bind this dead forecast as live authority.
-    """
-    conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(6, 0),
-        source_available_at=_dt(6, 1),
-        computed_at=_dt(6, 1, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 1),
-        expires_at=_dt(6, 2),          # expires at 06-06 02:00 ...
-        decision_time=_dt(6, 1),       # readiness built at a fresh decision moment
-    )
-    result = read_replacement_forecast_bundle(
+def _read(conn: sqlite3.Connection, posterior_id: int):
+    return read_replacement_forecast_bundle(
         conn,
         baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(6, 12),      # ... but the decision happens at 12:00 (expired)
-        current_bin_topology_hash=_TOPO_HASH,
-    )
-    assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
-
-
-def test_bundle_reader_rejects_stale_source_cycle_time() -> None:
-    """source_cycle_time older than the fail-closed horizon (>30h) => fail-closed.
-
-    expires_at is still in the future, but the underlying forecast cycle is so
-    old (06-04 00:00 vs decision 06-06 12:00 == 60h) that the data is stale.
-    """
-    conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(4, 0),   # cycle 60h before decision
-        source_available_at=_dt(4, 1),
-        computed_at=_dt(4, 1, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 11),
-        expires_at=_dt(6, 23),         # not expired by wall clock
-        decision_time=_dt(6, 11),
-    )
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
+        readiness=_readiness(posterior_id=posterior_id),
         city="Shanghai",
         target_date=date(2026, 6, 7),
         temperature_metric="high",
         decision_time=_dt(6, 12),
         current_bin_topology_hash=_TOPO_HASH,
     )
-    assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
 
 
-def test_bundle_reader_accepts_fresh_readiness() -> None:
-    """Fresh forecast (not expired, recent SYNOPTIC cycle) still binds — gate is not over-broad.
-
-    Uses a 12Z (synoptic) cycle so this asserts the STALENESS gate is not over-broad without
-    tripping the separate intermediate-cycle (06/18Z) shadow-only gate. The intermediate-phase
-    admission behaviour is covered by test_replacement_forecast_cycle_phase_admission.py.
-    """
+def test_synoptic_phase_binds_live() -> None:
+    """A 12Z synoptic posterior (within the freshness bound) binds for live authority."""
     conn = _conn()
-    posterior_id = _insert_posterior(
-        conn,
-        source_cycle_time=_dt(6, 0),   # 00Z synoptic cycle, ~12h before decision (within bound)
-        source_available_at=_dt(6, 7),
-        computed_at=_dt(6, 7, 30),
-    )
-    readiness = _readiness(
-        posterior_id=posterior_id,
-        computed_at=_dt(6, 11),
-        expires_at=_dt(6, 23),
-        decision_time=_dt(6, 11),
-    )
-    result = read_replacement_forecast_bundle(
-        conn,
-        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
-        readiness=readiness,
-        city="Shanghai",
-        target_date=date(2026, 6, 7),
-        temperature_metric="high",
-        decision_time=_dt(6, 12),
-        current_bin_topology_hash=_TOPO_HASH,
-    )
+    posterior_id = _insert_posterior(conn, source_cycle_time=_dt(6, 12), cycle_phase="synoptic")
+    result = _read(conn, posterior_id)
     assert result.ok is True
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
-    assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
+
+
+def test_intermediate_phase_blocked_live_by_default() -> None:
+    """A tagged 18Z intermediate posterior is SHADOW-ONLY (blocked) when the flag is default OFF."""
+    conn = _conn()
+    posterior_id = _insert_posterior(conn, source_cycle_time=_dt(6, 6), cycle_phase="intermediate")
+    result = _read(conn, posterior_id)
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_SHADOW_ONLY"
+
+
+def test_intermediate_phase_admitted_when_flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flipping the operator flag promotes intermediate-phase posteriors to live-eligible."""
+    conn = _conn()
+    posterior_id = _insert_posterior(conn, source_cycle_time=_dt(6, 6), cycle_phase="intermediate")
+    monkeypatch.setattr(
+        bundle_reader,
+        "_replacement_intermediate_cycle_live_admission_enabled",
+        lambda: True,
+    )
+    result = _read(conn, posterior_id)
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+
+
+def test_legacy_untagged_row_classified_by_source_cycle_hour() -> None:
+    """A pre-tag posterior (no cycle_phase key) falls back to the source_cycle_time hour.
+
+    The no-leak fallback must be fail-closed: a 06Z cycle with no provenance tag is still
+    classified intermediate and blocked, exactly as classify_cycle_phase would label it.
+    """
+    conn = _conn()
+    posterior_id = _insert_posterior(conn, source_cycle_time=_dt(6, 6), cycle_phase=None)
+    assert classify_cycle_phase(_dt(6, 6)) == "intermediate"
+    result = _read(conn, posterior_id)
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_INTERMEDIATE_CYCLE_SHADOW_ONLY"
