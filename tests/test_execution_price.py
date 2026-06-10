@@ -424,7 +424,7 @@ class TestEvaluatorWiring:
             ]
 
         monkeypatch.setattr(evaluator_module, "scan_full_hypothesis_family", fake_scan_full_hypothesis_family)
-        monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+        monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
         monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
         monkeypatch.setattr(evaluator_module, "kelly_size", capture_kelly)
         monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, "OK"))

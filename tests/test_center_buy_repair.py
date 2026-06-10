@@ -225,7 +225,7 @@ def _patch_evaluator(
     monkeypatch.setattr(evaluator_module, "compute_alpha", lambda *args, **kwargs: DummyAlpha())
     monkeypatch.setattr(evaluator_module, "MarketAnalysis", DummyAnalysis)
     _stub_full_family_scan(monkeypatch)
-    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges))
+    monkeypatch.setattr(evaluator_module, "fdr_filter", lambda edges, fdr_alpha=0.10: list(edges), raising=False)
     monkeypatch.setattr(evaluator_module, "dynamic_kelly_mult", lambda **kwargs: 0.25)
     monkeypatch.setattr(evaluator_module, "kelly_size", lambda *args, **kwargs: 5.0)
     monkeypatch.setattr(evaluator_module, "check_position_allowed", lambda **kwargs: (True, ""))
