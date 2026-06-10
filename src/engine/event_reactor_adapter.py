@@ -8066,14 +8066,37 @@ def _market_analysis_from_event_snapshot(
             )
             p_cal = np.asarray(p_raw, dtype=float)
     else:
-        members, _bias_corrected = _maybe_apply_edli_bias_correction(
-            raw_members, snapshot=snapshot, family=family, city=city, payload=payload
-        )
+        # === DAY0 REMAINING-DAY MODE (review 2026-06-10 item B, flag-gated OFF) ===
+        # When ON and fresh high-res hourly vectors are persisted for this family
+        # (day0_hourly_vectors lane), the member array becomes the pooled per-model
+        # REMAINING-day extremes (hours >= now, city-local), clamped to the absorbing
+        # physical law (HIGH: max(model_remaining, running max)). This prices
+        # P(remaining excursion | now) instead of the full-day distribution —
+        # below-floor remaining members land IN the floor bin (the post-peak
+        # repricing) rather than being renormalized away. Platt is SKIPPED in this
+        # mode (identity p_cal): the fitted Platt's domain is full-day member
+        # distributions, not remaining-day pools. The absorbing mask below still
+        # applies, and the day0 bootstrap sampler draws from the SAME members.
+        _day0_rd_members = None
+        if family.event_type == "DAY0_EXTREME_UPDATED" and _day0_remaining_day_q_enabled():
+            _day0_rd_members = _day0_remaining_day_members(
+                payload=payload, family=family, unit=unit, decision_time=decision_time
+            )
+        if _day0_rd_members is not None:
+            members = _day0_rd_members
+            _bias_corrected = False
+            payload["_edli_q_source"] = "day0_remaining_day"
+            payload["_edli_day0_q_mode"] = "remaining_day"
+        else:
+            members, _bias_corrected = _maybe_apply_edli_bias_correction(
+                raw_members, snapshot=snapshot, family=family, city=city, payload=payload
+            )
         if _bias_corrected:
             payload["_edli_bias_corrected"] = True
         # #120: maze-fallback calibrator provenance (EMOS did not serve this cell).
         # "bias_platt" = bias-corrected members fed to Platt; "platt" = plain.
-        payload["_edli_q_source"] = "bias_platt" if _bias_corrected else "platt"
+        if _day0_rd_members is None:
+            payload["_edli_q_source"] = "bias_platt" if _bias_corrected else "platt"
         # Grid→point representativeness correction (lead-invariant, OOS-validated).
         # Flag-gated (edli_v1.edli_grid_representativeness_correction_enabled, default OFF).
         # Applied on the (potentially bias-corrected) member array so both corrections compose.
@@ -8104,15 +8127,19 @@ def _market_analysis_from_event_snapshot(
             snapshot, family=family, bins=bins, members=members, payload=payload,
             members_already_corrected=True,
         )
-        p_cal = _snapshot_p_cal(
-            calibration_conn,
-            snapshot=snapshot,
-            family=family,
-            bins=bins,
-            p_raw=p_raw,
-            payload=payload,
-            decision_time=decision_time,
-        )
+        if _day0_rd_members is not None:
+            # remaining-day mode: identity calibration (see block comment above)
+            p_cal = np.asarray(p_raw, dtype=float)
+        else:
+            p_cal = _snapshot_p_cal(
+                calibration_conn,
+                snapshot=snapshot,
+                family=family,
+                bins=bins,
+                p_raw=p_raw,
+                payload=payload,
+                decision_time=decision_time,
+            )
         if family.event_type == "DAY0_EXTREME_UPDATED":
             p_raw = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_raw)
             p_cal = _apply_day0_mask_to_probability_vector(payload=payload, family=family, vector=p_cal)
@@ -9866,6 +9893,80 @@ def _day0_stale_obs_boundary_guard_enabled() -> bool:
         return bool(settings["edli_v1"].get("day0_stale_obs_boundary_guard_enabled", True))
     except Exception:
         return True
+
+
+def _day0_remaining_day_q_enabled() -> bool:
+    """REMAINING-DAY q mode flag (review 2026-06-10 item B). Default FALSE.
+
+    Unlike the conservative-only guards (boundary suppression, anomaly pause,
+    bootstrap LCB), this CHANGES the day0 point q in both directions (it can
+    RAISE q for the bin containing the running extreme post-peak). It must be
+    operator-flipped only after shadow receipts comparing
+    _edli_day0_q_mode=remaining_day vs the legacy full-day-masked q look sane.
+    """
+    try:
+        return bool(settings["edli_v1"].get("day0_remaining_day_q_enabled", False))
+    except Exception:
+        return False
+
+
+def _day0_remaining_day_members(
+    *,
+    payload: dict[str, object],
+    family,
+    unit: str,
+    decision_time: "datetime | None",
+) -> "np.ndarray | None":
+    """Pooled per-model remaining-day extremes in the NATIVE unit, clamped to
+    the absorbing physical law. None (-> legacy full-day path) when no fresh
+    persisted high-res vectors exist for this family.
+
+    Source: day0_hourly_vectors lane (degC storage; converted here at the
+    consumption seam). Clamp: HIGH max(value, running max); LOW min(value,
+    running min) — below-floor remaining mass lands IN the floor bin.
+    """
+    if decision_time is None:
+        return None
+    try:
+        from src.data.day0_hourly_vectors import (
+            read_freshest_day0_hourly_vectors,
+            remaining_day_extremes_c,
+        )
+
+        metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
+        if metric not in {"high", "low"}:
+            return None
+        vectors = read_freshest_day0_hourly_vectors(
+            city=str(family.city), target_date=str(family.target_date), now=decision_time
+        )
+        if not vectors:
+            return None
+        extremes_c = remaining_day_extremes_c(
+            vectors, target_date=str(family.target_date), now=decision_time, metric=metric
+        )
+        if not extremes_c:
+            return None
+        values = np.asarray(extremes_c, dtype=float)
+        if str(unit).upper() == "F":
+            values = values * 9.0 / 5.0 + 32.0
+        rounded = _optional_float(payload.get("rounded_value"))
+        if rounded is not None:
+            values = (
+                np.maximum(values, float(rounded))
+                if metric == "high"
+                else np.minimum(values, float(rounded))
+            )
+        payload["_edli_day0_remaining_models"] = int(values.size)
+        return values
+    except Exception as exc:  # noqa: BLE001 — degrade LOUDLY to the full-day path
+        import logging as _logging
+
+        _logging.getLogger("zeus.day0_remaining_day").warning(
+            "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE city=%s date=%s exc=%s: %s — full-day fallback",
+            getattr(family, "city", "?"), getattr(family, "target_date", "?"),
+            type(exc).__name__, exc,
+        )
+        return None
 
 
 def _apply_day0_mask_to_generated_probabilities(

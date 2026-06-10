@@ -6352,6 +6352,17 @@ def _edli_emit_day0_extreme_events(
                 "EDLI day0 fast obs lane failed (non-fatal, catch-up lanes continue): %r",
                 _fast_exc,
             )
+        try:
+            # High-res hourly vector refresh (review item B persistence lane;
+            # 30-min throttle per city inside the module; ~17 in-domain cities).
+            from src.config import runtime_cities as _rc
+            from src.data.day0_hourly_vectors import maybe_refresh_day0_hourly_vectors
+
+            maybe_refresh_day0_hourly_vectors(_rc(), decision_time=decision_time)
+        except Exception as _vec_exc:  # noqa: BLE001 — additive lane, fail-soft
+            logger.warning(
+                "EDLI day0 hourly-vector refresh failed (non-fatal): %r", _vec_exc
+            )
 
     trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
     authority_results = trigger.scan_authority_rows(
