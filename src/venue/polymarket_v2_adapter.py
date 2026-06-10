@@ -907,6 +907,17 @@ class PolymarketV2Adapter:
         and returns the stub so operator CLI handles it.
         """
 
+        # K3.6 REDEEM PIVOT (operator law 2026-06-10): second defense layer at
+        # the tx-broadcast boundary itself — Zeus never broadcasts a redeem
+        # unless the operator-only override token is hand-set. Raises before
+        # any RPC/signing work; the flag check below is now irrelevant to
+        # safety (a flag flip alone can never re-arm redemption).
+        from src.execution.settlement_commands import (  # noqa: PLC0415 — lazy, avoids cycle
+            assert_redeem_submission_allowed,
+        )
+
+        assert_redeem_submission_allowed("polymarket_v2_adapter.redeem")
+
         # Karachi safety / Path A precedence: default OFF returns the stub
         # verbatim. settlement_commands.py:426-454 already handles this
         # errorCode by routing to REDEEM_OPERATOR_REQUIRED (NOT terminal;

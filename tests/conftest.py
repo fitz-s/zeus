@@ -131,6 +131,28 @@ def r3_default_risk_allocator_for_unit_tests():
 
 
 @pytest.fixture(autouse=True)
+def _redeem_pivot_test_machinery_context(monkeypatch):
+    """K3.6 redeem pivot (operator law 2026-06-10): the redeem SUBMISSION
+    machinery is preserved for supervised manual redrives but hard-refuses in
+    daemon context unless the operator-only override token is set. The legacy
+    redeem-machinery suites (settlement_commands, web3 wire, negRisk routing,
+    cascade liveness...) pin that PRESERVED machinery, so the test session runs
+    in the operator-override context. The antibody itself is pinned by
+    tests/execution/test_redeem_pivot_antibody.py, whose tests explicitly
+    delenv/override this fixture's env per test — the gate's CI teeth live
+    there, not here.
+    """
+    from src.execution.settlement_commands import (
+        REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV,
+        REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN,
+    )
+
+    monkeypatch.setenv(
+        REDEEM_PIVOT_OPERATOR_OVERRIDE_ENV, REDEEM_PIVOT_OPERATOR_OVERRIDE_TOKEN
+    )
+
+
+@pytest.fixture(autouse=True)
 def _mainstream_gate_test_isolation(monkeypatch):
     """Test-isolation antibody (#135): mainstream-agreement reference OFF by default in
     tests, submit-enforcement OFF, and live Open-Meteo fetches forbidden.

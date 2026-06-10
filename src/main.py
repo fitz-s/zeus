@@ -1562,6 +1562,15 @@ def _redeem_submitter_cycle() -> None:
     are re-processed every tick AND any real adapter tx_hash is not durably
     anchored. Per-row commit gives partial-failure tolerance.
     """
+    # K3.6 REDEEM PIVOT (operator law 2026-06-10 "完全抛弃redeem"): the scheduler
+    # NEVER drives redeem submission. Calm skip (no FAILED-noise every tick);
+    # submit_redeem and adapter.redeem each hard-raise as deeper layers. The
+    # operator-only override env exists solely for a supervised manual redrive
+    # run OUTSIDE the daemon.
+    from src.execution.settlement_commands import redeem_submission_allowed
+
+    if not redeem_submission_allowed():
+        return
     from src.data.dual_run_lock import acquire_lock
     from src.data.polymarket_client import (
         resolve_polymarket_credentials,
