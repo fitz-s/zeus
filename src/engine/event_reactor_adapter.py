@@ -2120,6 +2120,12 @@ def build_event_bound_no_submit_receipt(
             portfolio_reservation=portfolio_reservation,
             family=family,
         )
+        # Stake-floor provenance collector (2026-06-09 min-order fix). The recapture
+        # kernel writes stake_floor="VENUE_MIN_ORDER" here when it bumps a positive-edge
+        # candidate's haircut stake up to the venue min order, so the submit receipt
+        # records WHY the stake equals the venue floor (the fractional-Kelly risk intent
+        # was preserved — min order is << the bankroll cap). Empty on the normal path.
+        _stake_floor_provenance: dict[str, object] = {}
         _recapture, _robust_stake_usd, _chosen_stake_price = (
             _evaluate_submit_recapture_for_selected(
                 family_key=str(family.family_id or ""),
@@ -2138,6 +2144,7 @@ def build_event_bound_no_submit_receipt(
                 # called with this same conn at selection) — else a locked / below-min-tick
                 # leg scoped OUT of selection falsely reverses the chosen leg.
                 locked_opportunity_conn=locked_opportunity_conn,
+                stake_floor_out=_stake_floor_provenance,
             )
         )
         kelly = dataclass_replace(
@@ -2315,6 +2322,20 @@ def build_event_bound_no_submit_receipt(
             "family_complete": True,
         }
     )
+    # Stake-floor provenance (2026-06-09 min-order fix): record when the chosen stake
+    # was bumped up to the venue min order because the fractional-Kelly haircut shrank
+    # it below the floor while the robust edge at min order was strictly positive. Absent
+    # on the normal (un-bumped) path. Keeps the receipt honest about why size==min order.
+    if _stake_floor_provenance.get("stake_floor"):
+        raw_receipt["stake_floor"] = _stake_floor_provenance["stake_floor"]
+        if "stake_floor_min_order_usd" in _stake_floor_provenance:
+            raw_receipt["stake_floor_min_order_usd"] = _stake_floor_provenance[
+                "stake_floor_min_order_usd"
+            ]
+        if "stake_floor_delta_u_at_min_order" in _stake_floor_provenance:
+            raw_receipt["stake_floor_delta_u_at_min_order"] = _stake_floor_provenance[
+                "stake_floor_delta_u_at_min_order"
+            ]
     if opportunity_book is not None:
         raw_receipt["opportunity_book"] = opportunity_book.to_receipt_dict()
     if replacement_forecast_receipt_tag is not None:
@@ -5796,6 +5817,29 @@ def _chosen_stake_execution_price(
     return price
 
 
+class _StakeBelowMinOrder(RuntimeError):
+    """The fractional-Kelly chosen stake fell below the venue min order and could NOT
+    be bumped to min order within the bankroll cap.
+
+    This is a SIZING/venue-floor abort, NOT an edge reversal. Raised by the sizing
+    kernel (:func:`_robust_marginal_utility_stake_and_price`) and caught in the submit
+    decision body, where it becomes a distinct ``SUBMIT_ABORTED_BELOW_MIN_ORDER``
+    decision. Never conflated with the zero-stake EDGE_REVERSED gate (antibody for the
+    2026-06-09 false-EDGE_REVERSED regression: a positive-edge candidate whose
+    post-haircut stake was below min order was being mislabeled "no edge").
+    """
+
+
+# Operator guard on the auto-bump-to-min-order action (2026-06-09 fix). When the
+# fractional-Kelly haircut shrinks the chosen stake below the venue min order but the
+# ROBUST (q_lcb-based) ΔU at the min-order notional is strictly positive, the sizing
+# path bumps the stake UP to min order — the fractional-Kelly risk intent is preserved
+# because a $0.05–$0.80 min order on a ~$900 wallet is well under this ceiling. The bump
+# is ALLOWED only when min_order_usd <= this fraction of the SIZING bankroll; above it,
+# the candidate aborts as SUBMIT_ABORTED_BELOW_MIN_ORDER rather than over-committing.
+_MIN_ORDER_BUMP_MAX_BANKROLL_PCT = 0.02
+
+
 def _robust_marginal_utility_stake_and_price(
     *,
     family_key: str,
@@ -5804,6 +5848,7 @@ def _robust_marginal_utility_stake_and_price(
     extra_exposure_by_bin_id: Mapping[str, float] | None,
     bankroll_usd: float,
     kelly_multiplier: float,
+    stake_floor_out: dict[str, object] | None = None,
 ) -> tuple[float, ExecutionPrice | None]:
     """Chosen FRACTIONAL-Kelly stake AND its typed chosen-stake price (spec §5.3 / §14.10).
 
@@ -5833,6 +5878,21 @@ def _robust_marginal_utility_stake_and_price(
     positive-ΔU stake clears min order / depth (a no-trade) or the boundary cannot
     be priced. The selected proof is scored within the WHOLE family so the π /
     exposure / OUTSIDE geometry matches the ranking decision exactly.
+
+    MIN-ORDER FLOOR (2026-06-09 false-EDGE_REVERSED fix). When the fractional-Kelly
+    haircut shrinks the chosen stake below the venue min-order notional but the ROBUST
+    ΔU at min order is strictly positive AND min order is within the bankroll-cap guard
+    (``_MIN_ORDER_BUMP_MAX_BANKROLL_PCT``), the stake is BUMPED to min order and the
+    floor is recorded in ``stake_floor_out`` (if provided) as
+    ``stake_floor="VENUE_MIN_ORDER"``. When the bump is not admissible (bankroll cap
+    fails) it raises :class:`_StakeBelowMinOrder` — a DISTINCT sizing abort the decision
+    body maps to ``SUBMIT_ABORTED_BELOW_MIN_ORDER``, never EDGE_REVERSED. A genuinely
+    reversed candidate (no positive-ΔU stake at ANY admissible size incl. min order)
+    still returns ``(0.0, None)`` -> EDGE_REVERSED.
+
+    ``stake_floor_out`` (optional): a caller-owned dict the kernel writes the stake-floor
+    provenance into on a bump. Left unset by callers that don't need provenance (the
+    behavior is otherwise identical), so existing 2-tuple call sites are unaffected.
     """
     if bankroll_usd <= 0.0 or selected_proof.execution_price is None:
         return 0.0, None
@@ -5908,6 +5968,52 @@ def _robust_marginal_utility_stake_and_price(
         chosen = Decimal(str(min(Decimal(str(fractional)), max_stake)))
         if chosen <= Decimal("0"):
             return 0.0, None
+
+        # MIN-ORDER-AWARE STAKE FLOOR (2026-06-09 false-EDGE_REVERSED fix). The ΔU
+        # optimizer sizes ``optimal_stake_usd`` on the full bankroll; the fractional-
+        # Kelly haircut (×mult, e.g. 0.125) then shrinks the chosen stake. For cheap
+        # low-probability bins the haircut stake can fall BELOW the venue min-order
+        # notional even though the ROBUST (q_lcb-based) edge at min order is strictly
+        # positive. Previously ``_chosen_stake_execution_price`` raised "below min
+        # order" and the generic except mapped it to (0.0, None) -> a FALSE
+        # EDGE_REVERSED. Now: if the haircut stake is below min order BUT ΔU at the
+        # min-order notional is strictly positive AND min order is within the operator
+        # bankroll-cap guard, BUMP the stake up to min order (the fractional-Kelly risk
+        # intent is preserved — a sub-$1 min order on a ~$900 wallet is << the cap) and
+        # record the floor in provenance. Otherwise raise ``_StakeBelowMinOrder`` so the
+        # decision body emits a DISTINCT SUBMIT_ABORTED_BELOW_MIN_ORDER (never
+        # EDGE_REVERSED). ΔU(min_order) is the SAME robust q_lcb-based π/exposure the
+        # ranker used (utility_ranker records it on the score), so the min-order edge is
+        # robust-consistent, never a looser point estimate.
+        min_order_usd = Decimal(str(score.min_order_notional_usd))
+        if min_order_usd > Decimal("0") and chosen < min_order_usd:
+            delta_u_at_min = float(score.delta_u_at_min_order)
+            bankroll_cap = Decimal(str(_MIN_ORDER_BUMP_MAX_BANKROLL_PCT)) * Decimal(
+                str(bankroll_usd)
+            )
+            if delta_u_at_min > 0.0 and min_order_usd <= bankroll_cap:
+                # Edge is genuinely positive at min order and the floor is within the
+                # bankroll cap -> trade at the venue minimum.
+                chosen = min_order_usd
+                if stake_floor_out is not None:
+                    stake_floor_out["stake_floor"] = "VENUE_MIN_ORDER"
+                    stake_floor_out["stake_floor_min_order_usd"] = float(min_order_usd)
+                    stake_floor_out["stake_floor_delta_u_at_min_order"] = delta_u_at_min
+            else:
+                # Either ΔU(min_order) <= 0 (no admissible positive-edge stake — but the
+                # ranker already excluded that via is_no_trade above, so this arm is the
+                # bankroll-cap guard) or min order exceeds the bankroll cap. Distinct
+                # BELOW_MIN_ORDER abort — NOT an edge reversal.
+                raise _StakeBelowMinOrder(
+                    f"chosen stake {float(chosen):.6f} USD below venue min order "
+                    f"{float(min_order_usd):.6f} USD; "
+                    f"delta_u_at_min_order={delta_u_at_min:.6g}, "
+                    f"min_order_usd/bankroll_cap={float(min_order_usd):.6f}/"
+                    f"{float(bankroll_cap):.6f} "
+                    f"(positive edge at min order but stake floor not admissible; "
+                    f"NOT an edge reversal)"
+                )
+
         # S5 boundary: reprice the SELECTED leg at the CHOSEN stake on its OWN curve
         # (the depth-walked avg cost — Hidden #6), as the typed Kelly cost-of-entry.
         curve = score.candidate.executable_cost_curve
@@ -5915,9 +6021,21 @@ def _robust_marginal_utility_stake_and_price(
             return float(chosen), None
         try:
             price = _chosen_stake_execution_price(curve, chosen)
-        except (ValueError, ArithmeticError, ExecutionPriceContractError):
-            # Chosen stake not fillable at this curve (depth/min-order/off-grid) or
-            # the boundary is Kelly-unsafe -> no priced stake (fail closed, §13).
+        except ValueError as exc:
+            # NARROWED except (2026-06-09): a "below min order" ValueError must NOT be
+            # conflated with arithmetic/contract faults. After the bump above the chosen
+            # stake is >= min order on the live path, so a below-min ValueError here is a
+            # genuine venue-floor block -> route to the distinct BELOW_MIN_ORDER abort.
+            # Any OTHER ValueError (depth exhaustion / off-grid) keeps the original
+            # fail-closed behavior (0.0 -> EDGE_REVERSED), unchanged.
+            if "min_order_size" in str(exc) or "below" in str(exc):
+                raise _StakeBelowMinOrder(
+                    f"chosen-stake pricing rejected below min order: {exc}"
+                ) from exc
+            return 0.0, None
+        except (ArithmeticError, ExecutionPriceContractError):
+            # Arithmetic/contract fault on the boundary -> no priced stake (fail closed,
+            # §13). Genuinely unexpected; keep the conservative no-trade behavior.
             return 0.0, None
         return float(chosen), price
     return 0.0, None
@@ -6012,6 +6130,7 @@ def _evaluate_submit_recapture_for_selected(
     kelly_multiplier: float,
     forecast_still_current: bool,
     locked_opportunity_conn: sqlite3.Connection | None = None,
+    stake_floor_out: dict[str, object] | None = None,
 ) -> tuple[SubmitRecaptureDecision, float, ExecutionPrice | None]:
     """THE single fail-closed submit-recapture gate (spec §5 / §7 / §14.9 / §14.10).
 
@@ -6041,8 +6160,13 @@ def _evaluate_submit_recapture_for_selected(
       2. family rank reversed (selected leg no longer the ΔU primary on fresh curves)
          -> FAMILY_REVERSED (abort + defer to full re-rank; a non-primary leg never
          price/edge-checks — Hidden #7 / §5 AbortOrSwitchOnlyAfterFullRerank);
-      3. stake <= 0 (no positive-utility stake on the fresh curve) -> EDGE_REVERSED
-         (utility nonpositive, §5 ``if utility <= 0: Abort``);
+      3. stake <= 0 (no positive-utility stake at ANY admissible size INCLUDING min
+         order on the fresh curve) -> EDGE_REVERSED (utility nonpositive, §5 ``if
+         utility <= 0: Abort``);
+      3b. positive edge at min order but the fractional-Kelly haircut stake is below
+         the venue min order and cannot be bumped within the bankroll cap ->
+         BELOW_MIN_ORDER (a DISTINCT sizing abort, NOT an edge reversal — 2026-06-09
+         antibody; the regret ledger records the true cause);
       4. recaptured all-in cost > ``max_acceptable_price`` -> PRICE_MOVED;
       5. ``edge_lcb = q_lcb - all_in_cost <= 0`` or forecast not current -> EDGE_REVERSED.
 
@@ -6115,21 +6239,48 @@ def _evaluate_submit_recapture_for_selected(
         )
 
     # Recompute the chosen fractional-Kelly stake + chosen-stake price on the FRESH
-    # curve (the S5 kernel — same scored candidate, same curve, no drift).
-    chosen_stake_usd, chosen_price = _robust_marginal_utility_stake_and_price(
-        family_key=family_key,
-        selected_proof=selected_proof,
-        all_proofs=all_proofs,
-        extra_exposure_by_bin_id=extra_exposure_by_bin_id,
-        bankroll_usd=bankroll_usd,
-        kelly_multiplier=kelly_multiplier,
-    )
+    # curve (the S5 kernel — same scored candidate, same curve, no drift). The kernel
+    # raises _StakeBelowMinOrder (a DISTINCT sizing abort) when the haircut stake is
+    # below the venue min order AND cannot be bumped within the bankroll cap — that is
+    # NOT an edge reversal and must NOT be folded into the zero-stake EDGE gate below.
+    try:
+        chosen_stake_usd, chosen_price = _robust_marginal_utility_stake_and_price(
+            family_key=family_key,
+            selected_proof=selected_proof,
+            all_proofs=all_proofs,
+            extra_exposure_by_bin_id=extra_exposure_by_bin_id,
+            bankroll_usd=bankroll_usd,
+            kelly_multiplier=kelly_multiplier,
+            stake_floor_out=stake_floor_out,
+        )
+    except _StakeBelowMinOrder as exc:
+        # GATE 3b (BELOW_MIN_ORDER, 2026-06-09 antibody). Edge is positive at min order
+        # but the sized stake could not clear the venue floor within the bankroll cap.
+        # A DISTINCT first-class abort so the regret ledger records the true cause —
+        # EDGE_REVERSED keeps meaning "no edge at ANY admissible stake".
+        return (
+            SubmitRecaptureDecision(
+                state=CandidateLifecycleState.SUBMIT_ABORTED_BELOW_MIN_ORDER,
+                may_submit=False,
+                reversal_reason=ReversalReason.MIN_ORDER,
+                detail=(
+                    f"recaptured edge positive at min order but fractional-Kelly stake "
+                    f"below venue min order and not bump-admissible within the bankroll "
+                    f"cap: {exc}"
+                ),
+            ),
+            0.0,
+            None,
+        )
 
     # GATE 3 (edge reversed, §5 'utility <= 0: Abort' / §7 edge row). A zero chosen
     # stake on a PRESENT fresh curve is an edge reversal: the recompute found no
-    # positive-utility stake (q_lcb fell, cost rose, or exposure concavity killed it).
-    # Surface it as EDGE_REVERSED directly — feeding stake_usd=0 to the engine would
-    # make avg_cost(0) raise (below min order) and mis-map to PRICE_MOVED.
+    # positive-utility stake at ANY admissible size including min order (q_lcb fell,
+    # cost rose, or exposure concavity killed it). NOTE: a below-min-order-but-positive
+    # edge case is handled by GATE 3b above (distinct BELOW_MIN_ORDER), so reaching here
+    # with stake 0 genuinely means no positive-ΔU stake exists. Surface as EDGE_REVERSED
+    # directly — feeding stake_usd=0 to the engine would make avg_cost(0) raise (below
+    # min order) and mis-map to PRICE_MOVED.
     if chosen_stake_usd <= 0.0:
         return (
             SubmitRecaptureDecision(
@@ -10034,6 +10185,24 @@ def _depth_for_token_or_label(depth: object, *, token_id: str, label: str) -> di
         value = depth.get(key)
         if isinstance(value, dict):
             return value
+    # SINGLE-TOKEN CLOB FORMAT (2026-06-09 depth-JSON fix). The materializer stores a
+    # SINGLE token's raw CLOB /book response directly as orderbook_depth_json:
+    # ``{"asks": [...], "asset_id": "<token>", "bids": [...], ...}`` — the asks/bids are
+    # at the TOP LEVEL (not nested under tokens/outcomes/books, and the token is the
+    # ``asset_id`` field, not a dict key). Pre-fix this format matched NOTHING, so the
+    # curve degraded to the 1-level _explicit_depth_for_selected_token fallback (top_ask
+    # + depth_at_best_ask only) instead of the 30–80 level book actually present. Now we
+    # recognize it and return the full book — CANONICALLY SORTED (asks ascending /
+    # cheapest first, bids descending / highest first) so the depth-walk consumes the
+    # BEST level first. We sort by price rather than trusting array position because the
+    # codebase's own CLOB consumers (_top_book_level_decimal) take min/max over all rows
+    # rather than rely on order — CLOB-native arrays are best-price-LAST, so a raw pass
+    # would walk the WORST level first and corrupt the cost curve. Sorting makes the
+    # ordering-bug category impossible regardless of source order.
+    if str(depth.get("asset_id") or depth.get("token_id") or "") == token_id and (
+        isinstance(depth.get("asks"), list) or isinstance(depth.get("bids"), list)
+    ):
+        return _canonicalize_single_token_book(depth)
     for key in ("tokens", "outcomes", "books"):
         value = depth.get(key)
         if isinstance(value, dict):
@@ -10049,6 +10218,44 @@ def _depth_for_token_or_label(depth: object, *, token_id: str, label: str) -> di
                 if str(item.get("outcome") or item.get("outcome_label") or "").upper() == label:
                     return item
     return None
+
+
+def _canonicalize_single_token_book(book: dict) -> dict[str, object]:
+    """Normalize a raw single-token CLOB book to best-price-FIRST asks/bids.
+
+    The depth-walk (_book_walk_average / ExecutableCostCurve) consumes levels in order
+    and assumes ``levels[0]`` is the best (cheapest ask / highest bid). Raw CLOB arrays
+    are best-price-LAST, so we sort: asks ASCENDING (cheapest first), bids DESCENDING
+    (highest first) — identical to the projector's normalization (project_rest_snapshot).
+    Rows that cannot be parsed to a numeric price are dropped (fail-safe). Returns the
+    ``{"asks": [...], "bids": [...]}`` shape the NativeQuoteBook builder expects.
+    """
+    def _price(row: object) -> Decimal | None:
+        if isinstance(row, dict):
+            raw = row.get("price")
+        else:
+            try:
+                raw, _ = row  # type: ignore[misc]
+            except (TypeError, ValueError):
+                return None
+        if raw in (None, ""):
+            return None
+        try:
+            return Decimal(str(raw))
+        except (ArithmeticError, ValueError, TypeError):
+            return None
+
+    def _sorted(side: object, *, ascending: bool) -> list[object]:
+        if not isinstance(side, list):
+            return []
+        keyed = [(p, row) for row in side if (p := _price(row)) is not None]
+        keyed.sort(key=lambda pr: pr[0], reverse=not ascending)
+        return [row for _, row in keyed]
+
+    return {
+        "asks": _sorted(book.get("asks"), ascending=True),
+        "bids": _sorted(book.get("bids"), ascending=False),
+    }
 
 
 def _explicit_depth_for_selected_token(
