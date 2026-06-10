@@ -1,4 +1,12 @@
-"""Materialize replacement forecast shadow posterior rows into forecast DB."""
+"""Materialize replacement forecast shadow posterior rows into forecast DB.
+
+# Created: 2026-06-08
+# Last reused or audited: 2026-06-09
+# Authority basis: docs/authority/replacement_final_form_2026_06_09.md (the probability chain
+#   §1d-§1e fused-N-direct + settlement sigma floor); FIX 1/FIX 2/FIX 5 (operator-reviewed
+#   2026-06-09): explicit replacement_q_mode authority, settlement-sigma-floor coherence in the
+#   fused-q path, and capture-status provenance.
+"""
 
 from __future__ import annotations
 
@@ -44,6 +52,30 @@ from src.strategy.openmeteo_ecmwf_ifs9_aifs_soft_anchor import SoftAnchorConfig
 
 
 UTC = timezone.utc
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 (2026-06-09) — explicit replacement q-mode authority.
+#
+# A posterior row's `replacement_q_mode` is DERIVED at materialization time (never guessed)
+# and recorded in provenance_json. The live gate (event_reactor_adapter) admits ONLY the two
+# fused-Normal modes; every other mode is a deterministic no-submit. This kills the silent
+# degradation category: with all flags on, a row that fell back to the legacy member-vote
+# soft-anchor q (fusion None / fused-q build failed / flag off) used to differ ONLY by a
+# WARNING log + a q_shape string — live EDLI could size Kelly under a different probability
+# regime than the release evidence assumes. The mode is a fail-closed data-class label.
+# ---------------------------------------------------------------------------
+REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL = "FUSED_NORMAL_FULL"
+REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL = "FUSED_NORMAL_PARTIAL"
+REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK = "SOFT_ANCHOR_FALLBACK"
+REPLACEMENT_Q_MODE_U0R_CAPTURE_MISSING = "U0R_CAPTURE_MISSING"
+REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED = "FUSED_Q_BUILD_FAILED"
+
+# FIX 5 — capture-status provenance (recording only; the live gate enforces via q_mode).
+REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT = "FULL_CURRENT"
+REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT = "PARTIAL_CURRENT"
+REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY = "STALE_HISTORY_ONLY"
+REPLACEMENT_CAPTURE_STATUS_DB_READ_ERROR = "DB_READ_ERROR"
 
 
 @dataclass(frozen=True)
@@ -536,6 +568,76 @@ def _replacement_fused_q_shape_enabled() -> bool:
         return False
 
 
+def _edli_settlement_sigma_floor_enabled() -> bool:
+    """FIX 2 (2026-06-09) — flag gate for the settlement sigma floor in the FUSED-Q path.
+
+    Mirrors the EMOS path's `edli_settlement_sigma_floor_enabled`. When true the fused-q sigma is
+    floored at the SAME empirical settlement dispersion floor the EMOS path uses
+    (src/calibration/emos.settlement_sigma_floor) so the operator-facing "floor enabled" claim
+    actually protects the strategy of record. FAIL-CLOSED: any config error -> False (no floor).
+    """
+    try:
+        from src.config import settings  # noqa: PLC0415
+
+        return bool(settings["edli_v1"].get("edli_settlement_sigma_floor_enabled", False))
+    except Exception:
+        return False
+
+
+def _edli_settlement_sigma_floor_required() -> bool:
+    """FIX 2 (2026-06-09) — whether an AVAILABLE settlement floor is REQUIRED to keep FULL mode.
+
+    Mirrors `edli_settlement_sigma_floor_required` (current config: false). When false a fused-N
+    q built WITHOUT an available floor stays FUSED_NORMAL_FULL (the floor only widens when present);
+    when true a missing floor degrades the q-mode to FUSED_NORMAL_PARTIAL (live gate still admits,
+    but the receipt shows the degraded mode). This NEVER invents a new blocking lane beyond the
+    flag semantics. FAIL-CLOSED: any config error -> False (do not require a floor).
+    """
+    try:
+        from src.config import settings  # noqa: PLC0415
+
+        return bool(settings["edli_v1"].get("edli_settlement_sigma_floor_required", False))
+    except Exception:
+        return False
+
+
+def _replacement_settlement_sigma_floor_lookup(
+    request: "ReplacementForecastMaterializeRequest",
+    *,
+    metric: str,
+) -> tuple[float | None, str | None]:
+    """FIX 2 (2026-06-09) — resolve the SAME settlement sigma floor the EMOS path uses for this cell.
+
+    Returns ``(floor_c, unavailable_reason)``:
+      - ``(value, None)`` when a positive floor exists for the (city, season, metric) cell.
+      - ``(None, reason)`` when the floor lookup is missing/malformed for the cell — recording-only,
+        NEVER blocks shadow materialization. The reason is folded into provenance.
+
+    Single-builder: this calls src.calibration.emos.settlement_sigma_floor (the SAME lookup the
+    EMOS q-builder uses, keyed city|season|metric via emos_cell_key), with required=False so a
+    missing cell returns None rather than raising. Season is derived from target_date + the city's
+    config latitude (the same derivation _replacement_eb_bias_shift_c uses). FAIL-SOFT throughout.
+    """
+    try:
+        from src.config import runtime_cities_by_name  # noqa: PLC0415
+        from src.contracts.season import season_from_date  # noqa: PLC0415
+        from src.calibration.emos import settlement_sigma_floor  # noqa: PLC0415
+
+        city_obj = runtime_cities_by_name().get(request.city)
+        lat = float(getattr(city_obj, "lat", 90.0)) if city_obj is not None else 90.0
+        target_date = _date_text(request.target_date)
+        season = season_from_date(target_date, lat=lat)
+        floor_c = settlement_sigma_floor(request.city, season, str(metric).lower(), required=False)
+        if floor_c is None:
+            return None, f"SETTLEMENT_SIGMA_FLOOR_ABSENT:{request.city}|{season}|{str(metric).lower()}"
+        floor_value = float(floor_c)
+        if not (math.isfinite(floor_value) and floor_value > 0.0):
+            return None, f"SETTLEMENT_SIGMA_FLOOR_NON_POSITIVE:{floor_value}"
+        return floor_value, None
+    except Exception as exc:  # fail-soft: never block shadow materialization
+        return None, f"SETTLEMENT_SIGMA_FLOOR_LOOKUP_ERROR:{type(exc).__name__}"
+
+
 def _replacement_member_vote_smoothing_alpha() -> float | None:
     """Flag-gated additive (Laplace/Dirichlet) smoothing alpha for the AIFS member-vote prior.
 
@@ -599,6 +701,16 @@ class _U0RFusionOverride:
     # substrate is too thin AND no conservative default applies (caller falls back to the
     # AIFS-shape soft-anchor q).
     predictive_sigma_c: float | None = None
+    # FIX 1 (2026-06-09): the K3 decorrelated-provider completeness verdict computed INSIDE the
+    # fusion (the same "served %d/5" determination the materializer already logs). True =
+    # all 5 declared decorrelated providers served (-> FUSED_NORMAL_FULL); False = INCOMPLETE
+    # (-> FUSED_NORMAL_PARTIAL). The materializer REUSES this; it never re-derives a parallel
+    # provider check (single-builder).
+    decorrelated_providers_complete: bool = False
+    # FIX 5 (2026-06-09): capture-status provenance. count of the 5 decorrelated providers whose
+    # CURRENT value entered the fused set for this cell, and the count expected (5). Recording only.
+    decorrelated_providers_served: int = 0
+    decorrelated_providers_expected: int = 5
 
 
 def _read_persisted_current_capture(
@@ -884,6 +996,13 @@ def _replacement_u0r_fusion_override(
             for m in ("ukmo_global_deterministic_10km", "ukmo_uk_deterministic_2km")
         ):
             _missing_providers.append("UKMO/global|uk2km")
+        # FIX 1/FIX 5 (2026-06-09): the SINGLE K3 completeness verdict reused by the q-mode +
+        # capture-status provenance. 5 declared decorrelated providers; served = 5 - missing.
+        # This is the ONLY provider-count determination — the q-mode FULL/PARTIAL split and the
+        # FIX-5 capture_status both read it (no parallel re-derivation).
+        _decorrelated_expected = 5
+        _decorrelated_served = _decorrelated_expected - len(_missing_providers)
+        _decorrelated_complete = not _missing_providers
         if _missing_providers:
             try:
                 import logging  # noqa: PLC0415
@@ -891,7 +1010,7 @@ def _replacement_u0r_fusion_override(
                     "replacement_0_1 U0R fusion decorrelated-provider INCOMPLETE for %s %s: served "
                     "%d/5, missing %s (used=%s). A structurally-unservable provider (e.g. gem 12h-"
                     "cadence single_runs) must be resolved explicitly, not silently dropped.",
-                    request.city, metric, 5 - len(_missing_providers), _missing_providers,
+                    request.city, metric, _decorrelated_served, _missing_providers,
                     list(used_models),
                 )
             except Exception:
@@ -964,6 +1083,9 @@ def _replacement_u0r_fusion_override(
             raw_model_forecast_ids=raw_model_forecast_ids,
             anchor_bridge=anchor_bridge,
             predictive_sigma_c=predictive_sigma_c,
+            decorrelated_providers_complete=_decorrelated_complete,
+            decorrelated_providers_served=_decorrelated_served,
+            decorrelated_providers_expected=_decorrelated_expected,
         )
     except Exception as exc:  # fail-soft: never break shadow materialization
         try:
@@ -1031,6 +1153,17 @@ def _insert_posterior(
     # vector). Bin bounds are CELSIUS (lower_c/upper_c) and so are mu*/sigma_pred; half_step =
     # settlement_step_c/2 (the C-scaled rounding half-width). FAIL-CLOSED: key-set mismatch or
     # any error -> keep the soft-anchor q (loud warning), never a silent half-shape.
+    # FIX 1/FIX 2 (2026-06-09): derive the EXPLICIT q-mode + record the settlement sigma-floor
+    # coherence in provenance. These are derived from the SAME determinations the fused-q path
+    # already makes (no parallel re-derivation). Defaults cover the no-override branches.
+    replacement_q_mode = REPLACEMENT_Q_MODE_U0R_CAPTURE_MISSING
+    settlement_sigma_floor_applied = False
+    settlement_sigma_floor_c: float | None = None
+    floor_unavailable_reason: str | None = None
+    replacement_sigma_basis: str | None = None
+    if u0r_override is not None:
+        # An override exists. Default mode while we attempt the fused-q build below.
+        replacement_q_mode = REPLACEMENT_Q_MODE_SOFT_ANCHOR_FALLBACK
     if (
         u0r_override is not None
         and u0r_override.predictive_sigma_c is not None
@@ -1040,10 +1173,30 @@ def _insert_posterior(
             from src.calibration.emos import bin_probability_settlement  # noqa: PLC0415
 
             _half_step = float(request.settlement_step_c) / 2.0
+            # FIX 2 — settlement sigma floor coherence in the fused-q path. The EMOS path floors
+            # sigma at the empirical settlement dispersion floor (edli_settlement_sigma_floor_enabled);
+            # the fused-q path previously did NOT consult it, so "floor enabled" silently did not
+            # protect the strategy of record. Look up the SAME floor (city|season|metric) and widen:
+            # sigma_used = max(sigma_pred, floor). max() only WIDENS -> flatter q -> fewer overconfident
+            # bets (it can never tighten). Missing/malformed floor -> recorded, NEVER blocks shadow.
+            _sigma_pred = float(u0r_override.predictive_sigma_c)
+            _sigma_used = _sigma_pred
+            replacement_sigma_basis = "fused_center_residual_std"
+            if _edli_settlement_sigma_floor_enabled():
+                _floor_c, _floor_reason = _replacement_settlement_sigma_floor_lookup(
+                    request, metric=metric
+                )
+                if _floor_c is not None:
+                    settlement_sigma_floor_c = float(_floor_c)
+                    if float(_floor_c) > _sigma_used:
+                        _sigma_used = float(_floor_c)
+                    settlement_sigma_floor_applied = True
+                else:
+                    floor_unavailable_reason = _floor_reason
             _fused_q = {
                 b.bin_id: bin_probability_settlement(
                     mu=float(u0r_override.anchor_value_c),
-                    sigma=float(u0r_override.predictive_sigma_c),
+                    sigma=_sigma_used,
                     bin_low=(None if b.lower_c is None else float(b.lower_c)),
                     bin_high=(None if b.upper_c is None else float(b.upper_c)),
                     half_step=_half_step,
@@ -1060,7 +1213,28 @@ def _insert_posterior(
                 raise ValueError(f"fused-q mass not positive-finite: {_total}")
             q = {key: float(value) / _total for key, value in _fused_q.items()}
             q_shape = "fused_normal_direct"
+            # FIX 1 — FULL vs PARTIAL. The fused Normal is the constructed shape either way (so the
+            # live gate admits both); PARTIAL records a degraded fusion. PARTIAL when EITHER the K3
+            # decorrelated-provider set was INCOMPLETE (reuses the override's verdict, not a parallel
+            # check) OR (per flag semantics) a settlement floor was REQUIRED but unavailable for this
+            # cell. With the current config (edli_settlement_sigma_floor_required=false) a missing
+            # floor does NOT degrade the mode.
+            _floor_required_but_missing = (
+                _edli_settlement_sigma_floor_required() and not settlement_sigma_floor_applied
+            )
+            if u0r_override.decorrelated_providers_complete and not _floor_required_but_missing:
+                replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_FULL
+            else:
+                replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_NORMAL_PARTIAL
         except Exception as _exc:
+            # FIX 1 — the fused-q construction itself raised and fails CLOSED to the soft-anchor q.
+            # This is DISTINCT from flag-off / predictive_sigma None (SOFT_ANCHOR_FALLBACK): the
+            # mode records that a fused-q was attempted and failed, so the live gate rejects it with
+            # a mode that is diagnosably different from a deliberate fallback.
+            replacement_q_mode = REPLACEMENT_Q_MODE_FUSED_Q_BUILD_FAILED
+            settlement_sigma_floor_applied = False
+            settlement_sigma_floor_c = None
+            replacement_sigma_basis = None
             try:
                 import logging  # noqa: PLC0415
                 logging.getLogger("zeus.replacement_u0r_fusion").warning(
@@ -1102,6 +1276,22 @@ def _insert_posterior(
         )
     posterior_config_hash = _json_hash(posterior_config)
     family_id = f"{request.city}:{target_date}:{metric}:{bin_topology_hash}"
+    # FIX 5 (2026-06-09) — capture-status provenance (recording only; the FIX-1 live gate is the
+    # enforcement point, and U0R_CAPTURE_MISSING already covers the dangerous no-override case).
+    # Derived from the SAME K3 completeness verdict the fusion computed (no parallel re-derivation):
+    #   FULL_CURRENT     — override present AND all 5 decorrelated providers' current values served.
+    #   PARTIAL_CURRENT  — override present but the decorrelated set was INCOMPLETE (count present).
+    #   STALE_HISTORY_ONLY — no fusion override at all (capture/fusion raised or current capture
+    #                        missing -> the legacy single-anchor q; no current multi-model capture).
+    # DB_READ_ERROR is reserved for an explicit DB read failure surfaced by the capture reader; the
+    # override layer is fail-soft (returns None) so at this seam an absent override reads as
+    # STALE_HISTORY_ONLY (the live gate rejects it via U0R_CAPTURE_MISSING regardless).
+    if u0r_override is None:
+        capture_status = REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY
+    elif u0r_override.decorrelated_providers_complete:
+        capture_status = REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT
+    else:
+        capture_status = REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT
     provenance_payload = {
         "anchor_weight": request.anchor_weight,
         "anchor_sigma_c": request.anchor_sigma_c,
@@ -1123,6 +1313,16 @@ def _insert_posterior(
         "aifs_member_count": len(result.aifs_probabilities.member_values_c),
         "q_point_json_role": "shadow_point_probability_only",
         "q_shape": q_shape,
+        # FIX 1 (2026-06-09): explicit q-mode authority — the live gate reads THIS, not the q_shape
+        # string. FUSED_NORMAL_{FULL,PARTIAL} are live-eligible; every other mode is no-submit.
+        "replacement_q_mode": replacement_q_mode,
+        # FIX 2 (2026-06-09): settlement sigma-floor coherence in the fused-q path.
+        "settlement_sigma_floor_applied": settlement_sigma_floor_applied,
+        "settlement_sigma_floor_c": settlement_sigma_floor_c,
+        "settlement_sigma_floor_unavailable_reason": floor_unavailable_reason,
+        "replacement_sigma_basis": replacement_sigma_basis,
+        # FIX 5 (2026-06-09): capture-status provenance (recording only).
+        "capture_status": capture_status,
         "q_lcb_json_role": "absent_no_calibrated_lcb_available",
         "q_ucb_json_role": "absent_no_calibrated_ucb_available",
         "bin_topology": bin_topology_payload,
@@ -1155,6 +1355,11 @@ def _insert_posterior(
             "raw_model_forecast_ids": list(u0r_override.raw_model_forecast_ids),
             # BLOCKER 3: the ifs025->ifs9 anchor bridge provenance applied to the anchor prior.
             "anchor_bridge": dict(u0r_override.anchor_bridge) if u0r_override.anchor_bridge else None,
+            # FIX 1/FIX 5 (2026-06-09): the K3 decorrelated-provider completeness verdict (the SAME
+            # determination that drives replacement_q_mode FULL vs PARTIAL + capture_status).
+            "decorrelated_providers_complete": bool(u0r_override.decorrelated_providers_complete),
+            "decorrelated_providers_served": int(u0r_override.decorrelated_providers_served),
+            "decorrelated_providers_expected": int(u0r_override.decorrelated_providers_expected),
             "fusion_authority": "SHADOW_ONLY",
         }
     posterior_identity_hash = _json_hash(
