@@ -74,7 +74,30 @@ class TestIngestContractLowGating:
         return base
 
     def test_boundary_ambiguous_sets_training_not_allowed(self):
-        """R-AF (rejection): boundary_ambiguous=True must set training_allowed=False."""
+        """R-AF (rejection): MAJORITY-ambiguous (≥26/51) boundary must set
+        training_allowed=False. STALE_LAW re-pin 2026-06-09: the contract now
+        re-derives boundary_ambiguous from ambiguous_member_count via the MAJORITY
+        threshold (≥26/51), not the old any-member rule (authority: commit
+        1b77ca94db "majority rule + strict <", porting the TIGGE 2026-05-19 fix to
+        the Open Data path; SYNTHESIS.md Addendum 2 §5). A below-majority count no
+        longer quarantines — see the companion test below. Use a count >= 26 so the
+        rejection invariant (majority-ambiguous low blocks training) still fires."""
+        from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
+
+        payload = self._good_low_payload(
+            boundary_policy={"boundary_ambiguous": True, "ambiguous_member_count": 26}
+        )
+        decision = validate_snapshot_contract(payload)
+        assert decision.accepted is True
+        assert decision.training_allowed is False
+        assert decision.causality_status == "REJECTED_BOUNDARY_AMBIGUOUS"
+
+    def test_below_majority_boundary_ambiguous_still_trains(self):
+        """Companion to the majority-rule re-pin: a below-majority ambiguous count
+        (5/51 < 26) is NOT quarantined — the any-member false-quarantine bug fixed
+        by 1b77ca94db. training_allowed stays True even though the legacy
+        boundary_ambiguous flag is set, because the contract re-derives from the
+        member count under the majority threshold."""
         from src.contracts.snapshot_ingest_contract import validate_snapshot_contract
 
         payload = self._good_low_payload(
@@ -82,8 +105,8 @@ class TestIngestContractLowGating:
         )
         decision = validate_snapshot_contract(payload)
         assert decision.accepted is True
-        assert decision.training_allowed is False
-        assert decision.causality_status == "REJECTED_BOUNDARY_AMBIGUOUS"
+        assert decision.training_allowed is True
+        assert decision.causality_status == "OK"
 
     def test_causality_not_a_causal_day_sets_training_not_allowed(self):
         """R-AF (rejection): N/A_CAUSAL_DAY_ALREADY_STARTED causality must block training."""
