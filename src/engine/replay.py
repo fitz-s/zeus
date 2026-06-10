@@ -2794,7 +2794,18 @@ def run_replay(
                 "sizing_bankroll (scenario value or snapshot) or restore "
                 "wallet connectivity."
             )
-        sizing_bankroll = float(_record.value_usd)
+        # NEW-ENTRY sizing must use the conservative dual-bankroll base, not the
+        # loss-threshold value_usd (which HOLDS a possibly-phantom position value
+        # under a blip_held /positions read — 2026-06-09 P1). Prefer the explicit
+        # phantom-free sizing equity, then spendable cash, then value_usd last.
+        _sizing_equity = getattr(_record, "equity_for_new_entry_sizing_usd", None)
+        _spendable = getattr(_record, "spendable_cash_usd", None)
+        if _sizing_equity is not None:
+            sizing_bankroll = float(_sizing_equity)
+        elif _spendable is not None:
+            sizing_bankroll = float(_spendable)
+        else:
+            sizing_bankroll = float(_record.value_usd)
     if float(sizing_bankroll) <= 0.0:
         raise ValueError(
             f"run_replay: sizing_bankroll must be positive (got {sizing_bankroll!r})"

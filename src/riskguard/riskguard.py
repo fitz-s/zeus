@@ -1595,6 +1595,16 @@ def _tick_once() -> RiskLevel:
                     "positions_read_verdict": str(
                         getattr(bankroll_of_record, "positions_read_verdict", "unknown")
                     ),
+                    # Dual-bankroll (2026-06-09 P1): value_usd above is the
+                    # LOSS-THRESHOLD base (holds the blip_held phantom). This is
+                    # the conservative NEW-ENTRY sizing base the event_reactor /
+                    # replay consumers use; under blip_held it excludes the
+                    # phantom so Kelly cannot size off possibly-vanished equity.
+                    "equity_for_new_entry_sizing_usd": (
+                        None
+                        if getattr(bankroll_of_record, "equity_for_new_entry_sizing_usd", None) is None
+                        else round(float(bankroll_of_record.equity_for_new_entry_sizing_usd), 2)
+                    ),
                 },
                 "daily_baseline_total": round(portfolio.daily_baseline_total, 2),
                 "weekly_baseline_total": round(portfolio.weekly_baseline_total, 2),
@@ -1789,6 +1799,29 @@ def _tick_once() -> RiskLevel:
             driving,
             breakdown,
         )
+
+        # Dual-bankroll posture visibility (2026-06-09 P1). Under a blip_held
+        # /positions read the loss-threshold base value_usd HOLDS a phantom
+        # position value (correct — it prevents a false catastrophic RED), but
+        # NEW-ENTRY sizing must NOT arm Kelly off that phantom. The sizing
+        # consumers (event_reactor `_runtime_bankroll_usd`, replay) already use
+        # the conservative `equity_for_new_entry_sizing_usd` base; this WARN makes
+        # the degraded posture explicit in the tick log so an operator reading the
+        # daemon log sees "loss-threshold defended, sizing shrunk" at a glance.
+        _bankroll_verdict = getattr(bankroll_of_record, "positions_read_verdict", "verified")
+        if _bankroll_verdict == "blip_held":
+            _sizing_base = getattr(
+                bankroll_of_record, "equity_for_new_entry_sizing_usd", None
+            )
+            logger.warning(
+                "RiskGuard posture DEGRADED (bankroll blip_held): loss-threshold base "
+                "HELD at $%.2f (defends against false RED) but NEW-ENTRY sizing base is "
+                "conservative $%s (phantom held position value EXCLUDED) — Kelly will "
+                "size off free/corroborated cash only until the /positions read recovers "
+                "or the hold bound elapses.",
+                current_bankroll_usd,
+                "unknown" if _sizing_base is None else f"{float(_sizing_base):.2f}",
+            )
 
         return level
     except sqlite3.OperationalError as exc:
