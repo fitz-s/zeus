@@ -2253,9 +2253,12 @@ def build_event_bound_no_submit_receipt(
         # recaptured ask, so the price-moved ceiling must NOT abort it (it was
         # producing the live sub-3¢ false-abort churn). A taker order crosses and
         # pays the recaptured cost, so the bounded tolerance ceiling still governs.
-        # Mirrors the downstream order-mode authority; the taker no-chase bound lives
-        # at intent build (TOUCH_EXCEEDS_RESERVATION), so this never relaxes a real cross.
-        _order_rests_at_admitted_price = _order_will_rest_at_admitted_price(payload)
+        # P0-B (2026-06-10): use the PROOF's execution_mode_intent (the same single
+        # authority as the final-command builder), NOT the governor's event-payload
+        # inference.  Conservative fail direction: unknown mode → TAKER semantics
+        # (full fee + ceiling).  _order_will_rest_at_admitted_price is kept for
+        # backward-compat but is no longer called on the money path.
+        _order_rests_at_admitted_price = _proof_order_rests_at_admitted_price(proof)
         _recapture, _robust_stake_usd, _chosen_stake_price = (
             _evaluate_submit_recapture_for_selected(
                 family_key=str(family.family_id or ""),
@@ -2765,6 +2768,27 @@ def _build_live_execution_command_certificates(
             fresh_best_bid=fresh_best_bid,
             fresh_best_ask=fresh_best_ask,
         )
+        # P0-A (2026-06-10): mode-flip guard. The proof's execution_mode_intent was
+        # computed at candidate-generation on the snapshot book; the fresh book at
+        # submit time may have changed enough to flip MAKER↔TAKER.  A flip means the
+        # economics the ΔU ranker chose (EV_maker vs EV_taker, maker_limit_price,
+        # spread guard result) are stale — the current cycle must re-evaluate from
+        # scratch rather than submit under the wrong mode.  Outcome: no-submit this
+        # cycle; the event re-queues and re-evaluates on the next pulse.
+        #
+        # When the proof has no mode (legacy path / priced-but-no-mode_ev): skip the
+        # check — we have no baseline to compare against (no-op for backward compat).
+        # When proof mode == fresh mode: consistent, proceed as before.
+        # When proof mode != fresh mode: abort deterministically (not a ValueError
+        # that looks like an infra error — a typed raise that the caller maps to a
+        # no-submit receipt with SUBMIT_ABORTED_MODE_FLIPPED).
+        _proof_mode = str(actionable.payload.get("proof_execution_mode_intent") or "").strip().upper() or None
+        if _proof_mode is not None and _proof_mode != str(order_mode).strip().upper():
+            raise ValueError(
+                f"SUBMIT_ABORTED_MODE_FLIPPED:"
+                f"proof_mode={_proof_mode}:fresh_mode={order_mode}:"
+                f"fresh_bid={fresh_best_bid}:fresh_ask={fresh_best_ask}"
+            )
         # WALL #1 (GATE #85 follow-on, 2026-06-01): the passive-maker context is a
         # MAKER-ONLY structural input. ``FinalExecutionIntent`` only requires it when
         # ``order_policy == "post_only_passive_limit"`` (execution_intent.py:1735); a
@@ -3167,6 +3191,49 @@ def _build_live_execution_command_certificates(
     return base_certs + (live_cap, actionable, final_intent, expressibility, pre_submit, command)
 
 
+def _selected_candidate_mode_fields_from_receipt(
+    receipt: EventSubmissionReceipt,
+) -> dict[str, object]:
+    """Extract the proof-time mode-consistent EV fields for the selected candidate.
+
+    P0-A (2026-06-10): execution_mode_intent and its siblings are computed at
+    candidate-generation time (_generate_candidate_proofs) and stored in the
+    CandidateEvaluation → opportunity_book["candidates"][N]. Thread them into
+    the actionable payload so _build_live_execution_command_certificates can
+    compare the proof's mode against the fresh-snapshot mode and abort on flip.
+
+    Returns an empty dict when the receipt carries no opportunity book or the
+    selected candidate cannot be located (legacy receipts — no-op for callers).
+    """
+    book = receipt.opportunity_book
+    if not isinstance(book, dict):
+        return {}
+    candidate_id = receipt.candidate_id or book.get("selected_candidate_id")
+    if not candidate_id:
+        return {}
+    candidates = book.get("candidates")
+    if not isinstance(candidates, list):
+        return {}
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("candidate_id") or "") == str(candidate_id):
+            result: dict[str, object] = {}
+            for key in (
+                "execution_mode_intent",
+                "ev_taker",
+                "ev_maker",
+                "maker_limit_price",
+                "taker_forbidden_reason",
+                "relative_spread_at_eval",
+            ):
+                val = cand.get(key)
+                if val is not None:
+                    result[f"proof_{key}"] = val
+            return result
+    return {}
+
+
 def _actionable_payload_from_receipt(
     receipt: EventSubmissionReceipt,
     live_cap_cert: DecisionCertificate,
@@ -3177,6 +3244,10 @@ def _actionable_payload_from_receipt(
     city = receipt.city or _event_identity_value(event, "city")
     target_date = receipt.target_date or _event_identity_value(event, "target_date")
     metric = receipt.metric or _event_identity_value(event, "metric") or _event_identity_value(event, "temperature_metric")
+    # P0-A (2026-06-10): thread the proof-time mode fields into the actionable
+    # payload so the final-command builder can compare proof mode vs fresh mode
+    # and emit SUBMIT_ABORTED_MODE_FLIPPED on disagreement.
+    proof_mode_fields = _selected_candidate_mode_fields_from_receipt(receipt)
     return {
         "event_id": receipt.event_id,
         "event_type": event.event_type if event is not None else None,
@@ -3215,6 +3286,7 @@ def _actionable_payload_from_receipt(
         "outcome_label": receipt.outcome_label,
         "unit": receipt.unit,
         "submitted": False,
+        **proof_mode_fields,
     }
 
 
@@ -4085,6 +4157,30 @@ def _order_will_rest_at_admitted_price(snapshot_payload: Any) -> bool:
     # Explicit taker (degraded / shallow / near close) keeps the strict bounded
     # ceiling; any resting / unknown-but-non-taker type rests at admitted price.
     return order_type not in {"FOK", "FAK"}
+
+
+def _proof_order_rests_at_admitted_price(proof: "_CandidateProof") -> bool:
+    """True iff the selected proof's mode-consistent EV chose MAKER.
+
+    P0-B (2026-06-10): the S6 submit-recapture gate must apply TAKER or MAKER
+    semantics based on the SAME mode authority used by the rest of the money
+    path — the proof's execution_mode_intent — not an inference from the event
+    payload via the governor.
+
+    The old _order_will_rest_at_admitted_price read select_global_order_type on
+    the event payload and defaulted to MAKER on error/exception.  That mismatch
+    let recapture use zero-taker-fee cost and skip the PRICE_MOVED ceiling while
+    the final intent could go TAKER: a candidate that never cleared TAKER
+    recapture (full fee + ceiling) could be submitted as a taker order.
+
+    Conservative fail-direction: unknown mode (None / legacy proof without
+    execution_mode_intent) → TAKER semantics (full fee + ceiling).  This is the
+    safe conservative side: over-applying the ceiling aborts some valid maker
+    orders (they re-queue and re-try), while under-applying it can admit a
+    non-viable taker cross.
+    """
+    mode = str(proof.execution_mode_intent or "").strip().upper()
+    return mode == "MAKER"
 
 
 def _post_cross_edge(
