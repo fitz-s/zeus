@@ -653,7 +653,20 @@ class Day0FastObsEmitter:
         reports, status, cache_age = self._reports_with_status(
             [source.station_id for _, source, _ in eligible]
         )
-        if reports and anomaly_check is not None:
+        # ANOMALY-CHECK FRESHNESS GATE (PR#404 round-2 P0-2A): the WU-vs-METAR
+        # cross-check must never CONCLUDE from a stale METAR cache — a METAR
+        # outage plus a fresh WU update would read as divergence and falsely
+        # pause the family (the pause gates entry q, hard-fact exits, AND the
+        # cancel sweep). Only a fresh fetch or an in-interval cache hit may
+        # feed the detector; stale/no-data passes are loudly skipped.
+        anomaly_input_ok = status in (FETCH_FRESH, FETCH_CACHE_HIT)
+        if reports and anomaly_check is not None and not anomaly_input_ok:
+            logger.warning(
+                "DAY0_ORACLE_ANOMALY_CHECK_SKIPPED_METAR_CACHE_STALE status=%s cache_age_s=%s "
+                "(divergence cannot be concluded from a stale METAR window)",
+                status, cache_age,
+            )
+        if reports and anomaly_check is not None and anomaly_input_ok:
             for city, _source, target_date in eligible:
                 try:
                     extremes = running_extremes_for_local_day(

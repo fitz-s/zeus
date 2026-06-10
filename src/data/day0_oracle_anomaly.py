@@ -59,6 +59,12 @@ DIVERGENCE_THRESHOLD = {"F": 1.5, "C": 1.0}
 #: How long a flagged family stays paused without re-confirmation.
 DEFAULT_PAUSE_TTL_HOURS = 24.0
 
+#: METAR-vs-WU coverage tolerance (PR#404 round-2 P0-2B): the METAR window
+#: must reach WU's last obs time to within one report-matching tolerance
+#: (mirrors the 6-min nearest-report tolerance in the divergence measurement)
+#: before a divergence verdict may be concluded.
+_METAR_WU_COVERAGE_TOLERANCE_S = 360.0
+
 _DIVERGENCE_MODEL_CACHE: dict[str, dict] = {}
 
 
@@ -482,6 +488,31 @@ def check_wu_metar_divergence(
         return DivergenceVerdict(
             city=city_name, target_date=str(target_date), unit=unit,
             compared=False, diverged=False, detail="metar_side_no_overlapping_samples",
+        )
+    # METAR COVERAGE GATE (PR#404 round-2 P0-2B): truncating the METAR series
+    # at WU's last obs time only removes FUTURE samples — it never proves the
+    # METAR side actually REACHES that time. A METAR outage plus a fresh WU
+    # update (e.g. METAR through 10:00, WU moved at 12:00) would compare a
+    # 2-hour-stale METAR window against current WU and read as divergence ->
+    # FALSE family pause (which gates entry q, hard-fact exits, and the cancel
+    # sweep). The METAR window must cover WU's last obs time to within one
+    # report-matching tolerance, else the comparison is NOT CONCLUDED.
+    if (
+        truncated.last_obs_time is None
+        or truncated.last_obs_time
+        < wu_last_obs_time.astimezone(UTC) - timedelta(seconds=_METAR_WU_COVERAGE_TOLERANCE_S)
+    ):
+        return DivergenceVerdict(
+            city=city_name, target_date=str(target_date), unit=unit,
+            compared=False, diverged=False,
+            wu_last_obs_time=wu_last_obs_time.astimezone(UTC).isoformat(),
+            metar_samples=truncated.sample_count,
+            detail=(
+                "metar_side_stale_for_wu_window "
+                f"(metar_last_obs={truncated.last_obs_time.isoformat() if truncated.last_obs_time else None} "
+                f"wu_last_obs={wu_last_obs_time.astimezone(UTC).isoformat()} "
+                f"tolerance_s={_METAR_WU_COVERAGE_TOLERANCE_S})"
+            ),
         )
     threshold, threshold_provenance = divergence_threshold_for_city(city_name, unit)
     high_delta = (

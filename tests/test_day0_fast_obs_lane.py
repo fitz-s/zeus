@@ -526,7 +526,9 @@ class TestEmpiricalThresholds:
                 ),
             ],
             wu_high_so_far=21.0, wu_low_so_far=21.0,
-            wu_last_obs_time=datetime(2026, 6, 9, 17, 0, tzinfo=UTC),
+            # within the round-2 coverage tolerance of the METAR window (the
+            # detector now refuses to conclude when METAR lags WU's last obs)
+            wu_last_obs_time=datetime(2026, 6, 9, 16, 4, tzinfo=UTC),
         )
         assert verdict.compared is True
         assert "threshold_provenance=empirical" in verdict.detail
@@ -885,3 +887,88 @@ class TestSplitMemos:
         assert emitter.emit_prefetched(
             world_conn=conn, prefetch=pf2, received_at=t0.isoformat(), limit=20,
         ) == 0
+
+
+class TestAnomalyFreshnessGates:
+    """Round-2 P0-2: the WU-vs-METAR detector must never CONCLUDE from a stale
+    METAR window — at the prefetch layer (A) and inside the detector (B)."""
+
+    def test_prefetch_skips_anomaly_check_on_stale_cache(self):
+        import time as _time
+
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        t0 = datetime(2026, 6, 9, 16, 0, tzinfo=UTC)
+        reports = [_report("RJTT", t0, 21.0, t_group=False)]
+        plan = {"fail": False}
+
+        def fetcher(stations, **kw):
+            return [] if plan["fail"] else list(reports)
+
+        calls = {"n": 0}
+
+        def check(city, extremes, rpts):
+            calls["n"] += 1
+
+        emitter = Day0FastObsEmitter(fetcher=fetcher, min_fetch_interval_s=0.0)
+        pf = emitter.prefetch(
+            cities=[_tokyo()], decision_time=t0 + timedelta(minutes=5), anomaly_check=check,
+        )
+        assert pf.freshness_status == "fresh_fetch" and calls["n"] == 1
+
+        plan["fail"] = True
+        emitter._cache_fetched_monotonic = _time.monotonic() - 600.0
+        pf2 = emitter.prefetch(
+            cities=[_tokyo()], decision_time=t0 + timedelta(minutes=10), anomaly_check=check,
+        )
+        assert pf2.freshness_status == "stale_cache_after_failure"
+        assert calls["n"] == 1, "a stale METAR cache must not feed the divergence detector"
+
+    def test_detector_refuses_conclusion_when_metar_window_lags_wu(self):
+        """Operator scenario: METAR outage since 10:00, WU moved at 12:00 —
+        comparing a 2h-stale METAR window vs current WU is NOT divergence."""
+        from src.data import day0_oracle_anomaly as oa
+
+        # METAR reports through 10:00 UTC only
+        reports = [
+            _report("RJTT", datetime(2026, 6, 10, 9, 0, tzinfo=UTC), 21.0, t_group=False),
+            _report("RJTT", datetime(2026, 6, 10, 10, 0, tzinfo=UTC), 22.0, t_group=False),
+        ]
+        verdict = oa.check_wu_metar_divergence(
+            city=_tokyo(), target_date="2026-06-10", metar_reports=reports,
+            wu_high_so_far=26.0,  # WU moved 4C since the METAR outage began
+            wu_low_so_far=21.0,
+            wu_last_obs_time=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
+        )
+        assert verdict.compared is False and verdict.diverged is False
+        assert "metar_side_stale_for_wu_window" in verdict.detail
+        assert oa.is_day0_family_paused("Tokyo", "2026-06-10",
+                                        conn=sqlite3.connect(":memory:")) is False
+
+    def test_detector_still_fires_on_real_mismatch_with_coverage(self):
+        from src.data import day0_oracle_anomaly as oa
+
+        reports = [
+            _report("RJTT", datetime(2026, 6, 10, 11, 30, tzinfo=UTC), 22.0, t_group=False),
+            _report("RJTT", datetime(2026, 6, 10, 12, 0, tzinfo=UTC), 22.0, t_group=False),
+        ]
+        verdict = oa.check_wu_metar_divergence(
+            city=_tokyo(), target_date="2026-06-10", metar_reports=reports,
+            wu_high_so_far=26.0,  # real same-window mismatch (4C > threshold)
+            wu_low_so_far=21.0,
+            wu_last_obs_time=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),
+        )
+        assert verdict.compared is True and verdict.diverged is True
+
+    def test_coverage_within_tolerance_still_compares(self):
+        from src.data import day0_oracle_anomaly as oa
+
+        reports = [
+            _report("RJTT", datetime(2026, 6, 10, 11, 57, tzinfo=UTC), 22.0, t_group=False),
+        ]
+        verdict = oa.check_wu_metar_divergence(
+            city=_tokyo(), target_date="2026-06-10", metar_reports=reports,
+            wu_high_so_far=22.0, wu_low_so_far=22.0,
+            wu_last_obs_time=datetime(2026, 6, 10, 12, 0, tzinfo=UTC),  # 3 min ahead
+        )
+        assert verdict.compared is True and verdict.diverged is False
