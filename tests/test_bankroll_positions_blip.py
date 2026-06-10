@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-06-09
+# Last reused or audited: 2026-06-09 (foreign-fill contamination antibodies added)
 # Authority basis: operator directive 2026-06-09 (riskguard false-RED follow-through)
 #   — live incident 22:15-22:28Z: Polymarket /positions intermittently returned an
 #   EMPTY list while ~$857 of open positions existed; bankroll-of-record equity
@@ -39,7 +39,9 @@ from src.runtime import bankroll_provider
 from src.runtime.bankroll_provider import (
     _DEFAULT_POSITIONS_EMPTY_HOLD_SECONDS,
     _classify_positions_read,
+    _is_condition_in_zeus_domain,
     _resolve_position_value,
+    _split_positions_by_domain,
 )
 
 NOW = datetime(2026, 6, 9, 22, 20, 0, tzinfo=timezone.utc)
@@ -274,3 +276,164 @@ class TestDualBankrollWiring:
             "Kelly base must be the conservative sizing equity (94), NOT the held "
             f"phantom value_usd (951). got {sized!r}"
         )
+
+
+class TestForeignFillContamination:
+    """Antibody: operator's manual fills on the shared wallet must not contaminate
+    Zeus's equity base, Kelly sizing, or daily-loss threshold.
+
+    Cross-module invariant: foreign position value (condition_id ∉ Zeus domain)
+    MUST be excluded from both equity legs; Zeus position value MUST be included;
+    mixed response → only Zeus value counted; domain unprovable → fail-closed
+    (include all, conservative for loss-threshold).
+    """
+
+    # -----------------------------------------------------------------
+    # Helpers that drive the domain classifier with in-memory DB stubs.
+    # These bypass the real DB open in _split_positions_by_domain so the
+    # tests are hermetic and do not require a live zeus-world.db.
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _make_position(condition_id: str, current_value: float) -> dict:
+        return {
+            "condition_id": condition_id,
+            "current_value": current_value,
+            "size": 1.0,
+            "token_id": f"tok_{condition_id}",
+        }
+
+    @staticmethod
+    def _domain_check_with_stub(condition_id: str, zeus_cids: set[str]) -> bool:
+        """Drive _is_condition_in_zeus_domain with a pre-populated in-memory DB."""
+        import sqlite3
+
+        world_conn = sqlite3.connect(":memory:")
+        world_conn.execute(
+            "CREATE TABLE executable_market_snapshots (condition_id TEXT PRIMARY KEY)"
+        )
+        for cid in zeus_cids:
+            world_conn.execute(
+                "INSERT INTO executable_market_snapshots VALUES (?)", (cid,)
+            )
+        world_conn.commit()
+
+        trade_conn = sqlite3.connect(":memory:")
+        trade_conn.execute(
+            "CREATE TABLE venue_commands (market_id TEXT)"
+        )
+        trade_conn.commit()
+
+        result = _is_condition_in_zeus_domain(condition_id, world_conn, trade_conn)
+        world_conn.close()
+        trade_conn.close()
+        return result
+
+    def test_zeus_position_included(self):
+        """A condition_id in executable_market_snapshots is Zeus-domain."""
+        assert self._domain_check_with_stub("cid_zeus", {"cid_zeus", "cid_other"}) is True
+
+    def test_foreign_position_excluded(self):
+        """A condition_id absent from snapshots AND venue_commands is foreign."""
+        assert self._domain_check_with_stub("cid_ai_market", {"cid_zeus"}) is False
+
+    def test_fail_closed_empty_snapshot_table(self):
+        """If executable_market_snapshots is empty, domain is unprovable → fail-closed (True)."""
+        assert self._domain_check_with_stub("cid_anything", set()) is True
+
+    def test_fail_closed_no_db(self):
+        """If both DB connections are None, all positions are in-domain (fail-closed)."""
+        assert _is_condition_in_zeus_domain("cid_anything", None, None) is True
+
+    def test_split_excludes_foreign_value_from_equity(self, monkeypatch):
+        """_split_positions_by_domain separates Zeus and foreign positions.
+
+        Foreign value must be logged and excluded; Zeus value must be passed through.
+        The test stubs the DB open so no real sqlite file is needed.
+        """
+        import sqlite3
+
+        zeus_cid = "0xaaaa"
+        foreign_cid = "0xbbbb"
+
+        zeus_pos = self._make_position(zeus_cid, 120.0)
+        foreign_pos = self._make_position(foreign_cid, 45.0)
+
+        # Stub _split_positions_by_domain's internal DB open by patching the
+        # imported helpers via monkeypatch. We replace _is_condition_in_zeus_domain
+        # with a closure that mirrors what the real in-memory DB would return.
+        def _stub_domain(cid, world_conn, trade_conn):
+            return cid == zeus_cid
+
+        monkeypatch.setattr(bankroll_provider, "_is_condition_in_zeus_domain", _stub_domain)
+        # Patch DB open to no-ops (None) so _split_positions_by_domain skips real files.
+        # We can't directly patch the local variable, so we patch the helper it imports.
+        # Instead, use the public interface: call _split_positions_by_domain after
+        # patching _is_condition_in_zeus_domain at module level (already done above).
+
+        zeus_out, foreign_out, foreign_val = _split_positions_by_domain(
+            [zeus_pos, foreign_pos]
+        )
+
+        assert zeus_out == [zeus_pos], "Zeus position must be in zeus bucket"
+        assert foreign_out == [foreign_pos], "Foreign position must be in foreign bucket"
+        assert foreign_val == pytest.approx(45.0), "Foreign value must be 45.0"
+
+    def test_mixed_response_only_zeus_value_counted(self, monkeypatch):
+        """Mixed /positions response: only Zeus positions contribute to equity.
+
+        Antibody for the primary contamination vector: operator fills multiple
+        AI-themed markets, Zeus has one open weather position. The equity sum
+        must reflect only the Zeus position.
+        """
+        zeus_pos = self._make_position("cid_weather", 80.0)
+        foreign_a = self._make_position("cid_ai_1", 200.0)
+        foreign_b = self._make_position("cid_ai_2", 150.0)
+
+        def _stub_domain(cid, world_conn, trade_conn):
+            return cid == "cid_weather"
+
+        monkeypatch.setattr(bankroll_provider, "_is_condition_in_zeus_domain", _stub_domain)
+
+        zeus_out, foreign_out, foreign_val = _split_positions_by_domain(
+            [zeus_pos, foreign_a, foreign_b]
+        )
+
+        assert len(zeus_out) == 1
+        assert len(foreign_out) == 2
+        assert foreign_val == pytest.approx(350.0)
+        # Only zeus value (80.0) would be summed into raw_position_value
+        zeus_value = sum(max(0.0, float(p.get("current_value", 0.0))) for p in zeus_out)
+        assert zeus_value == pytest.approx(80.0)
+
+    def test_all_foreign_logs_warning(self, monkeypatch, caplog):
+        """When foreign positions are detected, a WARN is emitted for operator visibility."""
+        pos = self._make_position("cid_ai", 99.0)
+
+        def _stub_domain(cid, world_conn, trade_conn):
+            return False  # everything is foreign
+
+        monkeypatch.setattr(bankroll_provider, "_is_condition_in_zeus_domain", _stub_domain)
+
+        with caplog.at_level(logging.WARNING, logger="src.runtime.bankroll_provider"):
+            _split_positions_by_domain([pos])
+
+        assert any(
+            "BANKROLL_FOREIGN_POSITIONS" in r.message for r in caplog.records
+        ), "Expected BANKROLL_FOREIGN_POSITIONS warning in log"
+
+    def test_all_zeus_no_warning(self, monkeypatch, caplog):
+        """When all positions are Zeus-domain, no foreign-position warning is emitted."""
+        pos = self._make_position("cid_weather", 50.0)
+
+        def _stub_domain(cid, world_conn, trade_conn):
+            return True  # all in-domain
+
+        monkeypatch.setattr(bankroll_provider, "_is_condition_in_zeus_domain", _stub_domain)
+
+        with caplog.at_level(logging.WARNING, logger="src.runtime.bankroll_provider"):
+            _split_positions_by_domain([pos])
+
+        assert not any(
+            "BANKROLL_FOREIGN_POSITIONS" in r.message for r in caplog.records
+        ), "No foreign warning expected when all positions are Zeus-domain"

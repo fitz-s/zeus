@@ -1,5 +1,5 @@
 # Created: 2026-05-01
-# Last reused/audited: 2026-05-01
+# Last reused/audited: 2026-06-09
 # Authority basis: docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
 """Polymarket bankroll provider — single source of truth for live-mode bankroll.
 
@@ -307,6 +307,149 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _is_condition_in_zeus_domain(
+    condition_id: str,
+    world_conn: "sqlite3.Connection | None",
+    trade_conn: "sqlite3.Connection | None",
+) -> bool:
+    """Whether a condition_id belongs to a market Zeus has ever discovered or traded.
+
+    Mirrors the logic of exchange_reconcile._is_market_in_zeus_domain for the
+    position-value contamination surface.
+
+    Fail-closed contract: if the snapshot surface is missing/empty (DB unavailable,
+    tables absent, or executable_market_snapshots is empty), the condition is
+    treated as IN-DOMAIN — it is included in equity, not silently excluded.
+    This is the conservative direction: false-positives inflate equity slightly
+    (tightening Kelly sizing is safe); false-negatives would silently exclude
+    genuine Zeus position value from the loss-threshold base, which risks a false
+    GREEN during a drawdown.
+    """
+    import sqlite3 as _sqlite3
+
+    if not condition_id:
+        return True  # unidentifiable → treat as Zeus (fail-closed)
+
+    # Try zeus-world.db: executable_market_snapshots (condition_id column)
+    if world_conn is not None:
+        try:
+            snapshot_total = world_conn.execute(
+                "SELECT COUNT(*) FROM executable_market_snapshots"
+            ).fetchone()
+            if snapshot_total is not None and int(snapshot_total[0]) > 0:
+                in_snapshots = world_conn.execute(
+                    "SELECT 1 FROM executable_market_snapshots WHERE condition_id = ? LIMIT 1",
+                    (condition_id,),
+                ).fetchone()
+                if in_snapshots is not None:
+                    return True
+                # Table is populated → domain is probeable. Check venue_commands.
+                if trade_conn is not None:
+                    try:
+                        in_commands = trade_conn.execute(
+                            "SELECT 1 FROM venue_commands WHERE market_id = ? LIMIT 1",
+                            (condition_id,),
+                        ).fetchone()
+                        return in_commands is not None
+                    except _sqlite3.OperationalError:
+                        return False  # snapshot table populated + command lookup failed → foreign
+                return False  # snapshot table populated, not found, no trade conn
+        except _sqlite3.OperationalError:
+            pass  # table absent → fall through to fail-closed
+
+    return True  # cannot prove domain → fail-closed, treat as Zeus
+
+
+def _split_positions_by_domain(
+    positions: "list[dict]",
+) -> "tuple[list[dict], list[dict], float]":
+    """Split /positions response into (zeus_positions, foreign_positions, foreign_value_usd).
+
+    Opens zeus-world.db and zeus_trades.db read-only for domain membership lookup.
+    Fail-closed: any DB error or empty snapshot surface → ALL positions treated as
+    Zeus-domain (included in equity).
+
+    FOREIGN-FILL CONTAMINATION guard (2026-06-09): the operator manually trades
+    AI-themed markets on the same proxy wallet. When those positions fill and appear
+    in /positions, their current_value would otherwise inflate Zeus's equity base,
+    distorting both Kelly sizing and the daily-loss threshold. This function
+    excludes foreign-domain position value from the equity sum.
+
+    Edge case — foreign redemption into shared wallet (operator note): when a
+    foreign position redeems, free_pusd jumps. The blip-guard's cash-corroboration
+    heuristic compares (free_pusd - prev_spendable_cash) against
+    _REDEMPTION_CASH_CORROBORATION_FRACTION * prev_ZEUS_position_value. A large
+    foreign redemption could trigger "redemption_corroborated" verdict on Zeus
+    positions (accepting their /positions empty read as genuine closure). The result
+    is conservative — it accepts zero Zeus position value, which tightens rather
+    than loosens the loss-threshold base. No code hardening applied here; documented
+    for future sessions.
+    """
+    import sqlite3 as _sqlite3
+
+    # Lazy import to avoid pulling DB state into modules that only care about
+    # the typed bankroll contract.
+    try:
+        from src.state.db import ZEUS_WORLD_DB_PATH, _zeus_trade_db_path
+
+        world_conn: "_sqlite3.Connection | None" = None
+        trade_conn: "_sqlite3.Connection | None" = None
+        try:
+            world_conn = _sqlite3.connect(str(ZEUS_WORLD_DB_PATH), timeout=2.0)
+            world_conn.row_factory = _sqlite3.Row
+        except Exception:
+            world_conn = None
+        try:
+            trade_conn = _sqlite3.connect(str(_zeus_trade_db_path()), timeout=2.0)
+            trade_conn.row_factory = _sqlite3.Row
+        except Exception:
+            trade_conn = None
+    except Exception:
+        world_conn = None
+        trade_conn = None
+
+    zeus_positions: list[dict] = []
+    foreign_positions: list[dict] = []
+    foreign_value_usd: float = 0.0
+
+    try:
+        for position in positions:
+            cid = str(position.get("condition_id") or "")
+            if _is_condition_in_zeus_domain(cid, world_conn, trade_conn):
+                zeus_positions.append(position)
+            else:
+                foreign_positions.append(position)
+                try:
+                    foreign_value_usd += max(
+                        0.0, float(position.get("current_value", 0.0) or 0.0)
+                    )
+                except (TypeError, ValueError):
+                    pass
+    finally:
+        if world_conn is not None:
+            try:
+                world_conn.close()
+            except Exception:
+                pass
+        if trade_conn is not None:
+            try:
+                trade_conn.close()
+            except Exception:
+                pass
+
+    if foreign_positions:
+        logger.warning(
+            "[BANKROLL_FOREIGN_POSITIONS] %d foreign (non-Zeus-domain) position(s) "
+            "worth $%.2f excluded from Zeus equity base (condition_ids: %s). "
+            "Operator manual fills on shared wallet do not count as Zeus capital.",
+            len(foreign_positions),
+            foreign_value_usd,
+            ", ".join(str(p.get("condition_id", "?")) for p in foreign_positions[:5]),
+        )
+
+    return zeus_positions, foreign_positions, foreign_value_usd
+
+
 def _fetch_balance() -> tuple[float, float, float]:
     """Single underlying call site for Polymarket account equity.
 
@@ -316,6 +459,11 @@ def _fetch_balance() -> tuple[float, float, float]:
     - free_pusd = spendable BUY collateral.
     - equity_for_new_entry_sizing = free cash + ONLY corroborated position value
       (under blip_held the phantom is excluded), the conservative Kelly base.
+
+    FOREIGN-FILL CONTAMINATION (2026-06-09): positions are domain-classified
+    before valuation. Foreign (non-Zeus-domain) positions are excluded from the
+    equity sum and logged. Fail-closed: if domain membership is unprovable,
+    all positions are treated as Zeus-domain.
 
     Imported lazily to avoid pulling polymarket SDK into modules that only
     care about the typed contract.
@@ -327,7 +475,12 @@ def _fetch_balance() -> tuple[float, float, float]:
     # NOTE: `or []` also coerces a None (failed/declined read) to empty — both
     # routes flow through the blip classifier below, which is the point: an
     # empty/failed positions read must not silently zero the equity base.
-    positions = client.get_positions_from_api() or []
+    all_positions = client.get_positions_from_api() or []
+
+    # Domain-classify: exclude operator's manual fills on the shared wallet.
+    zeus_positions, _foreign, _foreign_value = _split_positions_by_domain(all_positions)
+    positions = zeus_positions
+
     raw_position_value = 0.0
     for position in positions:
         try:
