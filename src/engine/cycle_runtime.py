@@ -3503,7 +3503,45 @@ def execute_monitoring_phase(conn, clob, portfolio, artifact, tracker, summary: 
                 )
             p_market = exit_context.current_market_price
             portfolio_dirty = True
-            exit_decision = pos.evaluate_exit(exit_context)
+            # === DAY0 HARD-FACT EXIT LANE (adversarial review 2026-06-10 fix 1) ===
+            # SEPARATE from the estimator-evidence lane below: a position whose bin
+            # is absorbing-boundary DEAD by a settlement-grade hard fact (WU + the
+            # METAR fast lane, margin per config/wu_metar_divergence.json) exits NOW
+            # — no maturity gate, no CI separation, no fresh_prob dependency (this
+            # is what gives buy_no its day0 exit authority for the hard-fact class).
+            # Estimator flips keep the full panic-sell hardening unchanged. The lane
+            # is fail-soft: any data gap / oracle-anomaly pause -> None -> the normal
+            # evaluate_exit path runs.
+            _hard_fact = None
+            if _position_state_value(pos) == "day0_window" and city is not None:
+                try:
+                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+                    _hard_fact = evaluate_hard_fact_exit(position=pos, city=city, now=deps._utcnow())
+                except Exception as _hf_exc:  # noqa: BLE001 — lane must never break the monitor
+                    deps.logger.warning(
+                        "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
+                    )
+            if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                from src.state.portfolio import ExitDecision as _ExitDecision
+
+                pos.applied_validations = list(
+                    dict.fromkeys([*(pos.applied_validations or []), "day0_hard_fact_exit_lane"])
+                )
+                exit_decision = _ExitDecision(
+                    True,
+                    f"DAY0_HARD_FACT_BIN_DEAD ({_hard_fact.reason}; source={_hard_fact.source})",
+                    urgency="immediate",
+                    trigger="DAY0_HARD_FACT_BIN_DEAD",
+                    selected_method=pos.selected_method or pos.entry_method,
+                    applied_validations=list(pos.applied_validations),
+                )
+                summary["day0_hard_fact_exits"] = summary.get("day0_hard_fact_exits", 0) + 1
+            else:
+                if _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+                    summary["day0_hard_fact_structural_win_holds"] = (
+                        summary.get("day0_hard_fact_structural_win_holds", 0) + 1
+                    )
+                exit_decision = pos.evaluate_exit(exit_context)
             if _summary_risk_level(summary) == "ORANGE":
                 orange_decision = _orange_favorable_exit_decision(
                     pos,
