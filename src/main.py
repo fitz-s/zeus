@@ -1016,6 +1016,53 @@ def _assert_edli_live_scope(edli_cfg: dict) -> None:
         raise RuntimeError("DAY0_OUT_OF_SCOPE_FOR_PR332")
 
 
+def _build_edli_status_pulse(
+    *,
+    started_at: str,
+    completed_at: str,
+    candidates: int,
+    processed: int,
+    proof_accepted: int,
+    rejected: int,
+    retried: int,
+    dead_lettered: int,
+    rejection_reason_counts: dict,
+    submit_disabled_effective_mode: bool,
+    live_submit_attempts: int,
+) -> dict:
+    """Build the EDLI reactor status pulse dict.
+
+    FIX-4 (P2, 2026-06-09): separates proof_accepted from live_submit_attempts.
+    ``proof_accepted`` counts events whose money-path proof was accepted (i.e.,
+    final intent was built). ``live_submit_attempts`` counts ONLY actual venue
+    submit calls made this cycle — 0 in no-submit / degraded cycles. Dashboards
+    MUST NOT treat proof_accepted as evidence of a venue interaction.
+    """
+    return {
+        "mode": "edli_event_reactor",
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "candidates": candidates,
+        "candidates_evaluated": candidates,
+        "processed": processed,
+        "proof_accepted": proof_accepted,
+        "final_intents_built": proof_accepted,
+        "submit_attempts": live_submit_attempts,
+        "venue_acks": 0,
+        "no_trades": rejected + retried + dead_lettered,
+        "rejected": rejected,
+        "retried": retried,
+        "dead_lettered": dead_lettered,
+        "rejection_reason_counts": rejection_reason_counts,
+        "top_no_trade_reasons": rejection_reason_counts,
+        "deterministic_rejections": (
+            {"real_order_submit_disabled": proof_accepted}
+            if submit_disabled_effective_mode and proof_accepted > 0
+            else {}
+        ),
+    }
+
+
 def _assert_emos_ci_license_seasonal_coverage(edli_cfg: dict) -> None:
     """Season-pin boot guard for the EMOS-CI live override (#90 pattern).
 
@@ -5207,6 +5254,7 @@ def _edli_event_reactor_cycle() -> None:
 
         regret_ledger = NoTradeRegretLedger(conn)
         reactor_mode = str(edli_cfg.get("reactor_mode", "live_no_submit"))
+        edli_live_scope = str(edli_cfg.get("edli_live_scope") or "forecast_only")
         real_order_submit_enabled = bool(edli_cfg.get("real_order_submit_enabled", False))
         submit_disabled_effective_mode = reactor_mode == "live_no_submit"
         live_bridge_mode = reactor_mode in {"live", "submit_disabled_live_bridge"}
@@ -5325,6 +5373,9 @@ def _edli_event_reactor_cycle() -> None:
                     decision_time=process_pending_decision_time,
                 ),
                 operator_arm=operator_arm,
+                # FIX-3 (P1): pass scope so the adapter can enforce
+                # DAY0_SCOPE_SHADOW_ONLY at the final submit boundary.
+                edli_live_scope=edli_live_scope,
             )
             if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(
@@ -5370,33 +5421,30 @@ def _edli_event_reactor_cycle() -> None:
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
         _rejection_counts = dict(Counter(_rr.rejection_reasons))
         _edli_candidates = int(_rr.proof_accepted + _rr.rejected + _rr.retried + _rr.dead_lettered)
+        # FIX-4 (P2): read the per-cycle live-submit call counter from the adapter.
+        # The live adapter exposes _live_submit_count (a mutable 1-element list)
+        # after FIX-4; the no-submit adapter and any legacy adapter do not, so
+        # getattr returns the default [0] → live_submit_attempts=0 (correct for
+        # no-submit cycles).
+        _live_submit_count_ref = getattr(submit_adapter, "_live_submit_count", [0])
+        _live_submit_attempts = int(_live_submit_count_ref[0])
         try:
             from src.observability.status_summary import write_cycle_pulse
 
             write_cycle_pulse(
-                {
-                    "mode": "edli_event_reactor",
-                    "started_at": process_pending_decision_time.isoformat(),
-                    "completed_at": datetime.now(timezone.utc).isoformat(),
-                    "candidates": _edli_candidates,
-                    "candidates_evaluated": _edli_candidates,
-                    "processed": int(_rr.processed),
-                    "proof_accepted": int(_rr.proof_accepted),
-                    "final_intents_built": int(_rr.proof_accepted),
-                    "submit_attempts": int(_rr.proof_accepted),
-                    "venue_acks": 0,
-                    "no_trades": int(_rr.rejected + _rr.retried + _rr.dead_lettered),
-                    "rejected": int(_rr.rejected),
-                    "retried": int(_rr.retried),
-                    "dead_lettered": int(_rr.dead_lettered),
-                    "rejection_reason_counts": _rejection_counts,
-                    "top_no_trade_reasons": _rejection_counts,
-                    "deterministic_rejections": (
-                        {"real_order_submit_disabled": int(_rr.proof_accepted)}
-                        if submit_disabled_effective_mode and _rr.proof_accepted > 0
-                        else {}
-                    ),
-                }
+                _build_edli_status_pulse(
+                    started_at=process_pending_decision_time.isoformat(),
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                    candidates=_edli_candidates,
+                    processed=int(_rr.processed),
+                    proof_accepted=int(_rr.proof_accepted),
+                    rejected=int(_rr.rejected),
+                    retried=int(_rr.retried),
+                    dead_lettered=int(_rr.dead_lettered),
+                    rejection_reason_counts=_rejection_counts,
+                    submit_disabled_effective_mode=submit_disabled_effective_mode,
+                    live_submit_attempts=_live_submit_attempts,
+                )
             )
         except Exception as exc:
             logger.error(
