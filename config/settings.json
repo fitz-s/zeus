@@ -120,7 +120,6 @@
     "market_channel_refresh_window_seconds": 60,
     "pre_submit_max_quote_age_ms": 1000,
     "pre_submit_balance_allowance_check_enabled": true,
-    "stale_book_directional_trading_enabled": true,
     "real_order_submit_enabled": true,
     "taker_fok_fak_live_enabled": true,
     "live_canary_enabled": true,
@@ -137,7 +136,7 @@
     "edli_live_min_realized_edge_bps": 0,
     "no_submit_visible_depth_fill_lcb": 0.05,
     "mainstream_agreement_reference_enabled": true,
-    "forecast_sharpness_gate_enabled": true,
+    "forecast_sharpness_gate_enabled": false,
     "forecast_sharpness_mae_multiplier": 1.5,
     "_forecast_sharpness_gate_note": "2026-06-03 Phase-2 K1 (SHADOW, default OFF). When ON, MarketAnalysis emits ZERO edges for a market whose settlement MAE (forecast_skill, native unit) is >= forecast_sharpness_mae_multiplier * bin_width — a flat forecast spreads probability so thin that the cheap-tail buy_no clears the CI bar everywhere (root cause K1: flat-q -> 96% buy_no). The ForecastSharpnessEvidence TYPE is REQUIRED at MarketAnalysis construction regardless of this flag (omission is a TypeError — the antibody); this flag only controls whether the edge-rejection BEHAVIOR fires, so flag-OFF live emit is byte-identical to legacy. The gate lives at ONE site (MarketAnalysis._sharpness_suppresses_edges, consumed by find_edges + scan_full_hypothesis_family). Day0/imminent paths pass day0_exempt evidence (obs replaces forecast). MISSING forecast_skill row fails CLOSED (suppresses). Threshold is operator-tunable: 1.5x passes ~9/51 cities, 2.0x ~20/51; calibrate against settlement MAE before promotion.",
     "mainstream_warm_max_families_per_cycle": 8,
@@ -149,7 +148,7 @@
     "replacement_qlcb_settlement_sigma_floor_enabled": false,
     "replacement_0_1_fused_q_shape_enabled": true,
     "_replacement_0_1_fused_q_shape_note": "2026-06-09 operator-directed promotion (the 'optimal final mathematical form'): the replacement q is built DIRECTLY from N(mu*, sigma_pred) via emos.bin_probability_settlement (ONE integrator), replacing the AIFS member-vote shape AND the anchor_weight=0.8 heuristic on the replacement path. Evidence: AIFS-replacement experiment n=39 settled cells — the AIFS shape put EXACTLY ZERO on the winning bin in 11/39 (support truncation; unconstructable under a Normal); LogLoss 11.07->1.51, hit 25.6%->46.2%; mu* MAE 0.77C vs anchor 1.27C. sigma_pred = sqrt(fused_sd^2 + walk-forward fused-center residual std^2), floor 1.0C (conservative per the experiment's lead-0 tight-sigma caveat). FAIL-CLOSED to the soft-anchor q on any construction error. /tmp/aifs_replacement_experiment.md",
-    "_mass_enable_note_2026_06_09": "Operator directive 2026-06-09 ('全部打开' + corrections): ENABLED q_lcb_settlement_coverage_gate (q_lcb coverage license), forecast_sharpness_gate (edge suppression = decision-level), stale_book_directional_trading (opening-hunt lane). DELETED mainstream_agreement_enforce_on_submit (manual test item, not a production gate). KEPT FALSE pending data-impact review (operator rule: bias paths that change ORDER DATA, not decisions, need review first): bias_treatment_v2_enabled, replacement_0_1_eb_bias_correction_enabled (also settlement-refuted wrong-set). KEPT FALSE: edli_settlement_sigma_floor_required (floor-table coverage unverified). NOTE: legacy edli_bias_correction_enabled=true also changes order data (shifts p_raw) — under the same operator rule it is flagged for the same review (left untouched: it has settlement-backed activation evidence 2026-05-31).",
+    "_mass_enable_note_2026_06_09": "Operator directive 2026-06-09 ('全部打开') + flag-implementation review verdicts (/tmp/flag_implementation_review.md): ENABLED q_lcb_settlement_coverage_gate (verified wired, decision-level, only lowers LCB, fail-open). REVERTED forecast_sharpness_gate_enabled to FALSE — at 1.5x multiplier it suppresses edges for 50/54 cities (season-blended MAE defect, 3 cities fail-closed on missing rows); re-enable only after per-season MAE query + recalibrated multiplier. DELETED stale_book_directional_trading_enabled (zero consumers in src/, dead key; OpeningStaleQuoteFOK never instantiated live) and mainstream_agreement_enforce_on_submit (operator: manual test item). KEPT FALSE pending data-impact review: bias_treatment_v2_enabled (would change DAY0 Kelly sizes), replacement_0_1_eb_bias_correction_enabled (settlement-refuted wrong-set AND silent no-op: data_version key deleted), edli_settlement_sigma_floor_required (LOW floor rows missing for 44/54 cities -> would dead-letter low families). NOTE: legacy edli_bias_correction_enabled + bias_decay haircut are INERT on the primary FORECAST lane while edli_emos_sole_calibrator_enabled=true (bias maze bypassed); they fire only on DAY0/emos-miss.",
     "_redecision_cap_note_2026_06_09": "Throughput audit /tmp/throughput_audit.md: 96 eligible families vs cap 50 = every cycle silently dropped half the universe (2-cycle full coverage). Raised to the code ceiling 200 (_edli_positive_int_or_unbounded maximum=200)."
   },
   "entry_forecast": {
