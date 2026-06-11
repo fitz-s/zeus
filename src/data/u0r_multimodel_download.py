@@ -589,6 +589,66 @@ def _prune_old(conn, *, cutoff_iso: str) -> int:
     return int(cur.rowcount or 0)
 
 
+def _persist_chunk_with_lock_retry(
+    forecast_db: Path | str,
+    rows: Sequence[dict],
+    *,
+    cutoff_iso: str | None = None,
+    attempts: int = 6,
+) -> tuple[int, int]:
+    """Durably persist one CHUNK of capture rows (and optionally prune), retrying
+    transient writer locks with the rows held in memory.
+
+    CHUNKED-DURABILITY (2026-06-11, operator class-kill): the capture pass spends
+    10-40 MINUTES of network fetches; persisting once at the END made every fetched
+    row hostage to a single instant — a daemon restart OR a transient writer lock at
+    that moment rolled the WHOLE pass to zero (observed three times in one morning).
+    Persisting per chunk (per target) bounds any loss to the in-flight chunk; rows
+    are idempotent on their full identity so overlap/retry never double-writes.
+    Semantics inside each attempt are unchanged: BLOCKER-4 conflict audit on
+    autocommit BEFORE the rollback-on-error BEGIN, one transaction per chunk.
+    """
+    from src.state.db import _connect  # noqa: PLC0415
+    from src.state.schema.v2_schema import (  # noqa: PLC0415
+        ensure_replacement_forecast_shadow_schema,
+    )
+
+    written = 0
+    pruned = 0
+    for _attempt in range(attempts):
+        conn = _connect(Path(forecast_db), write_class="live")
+        try:
+            ensure_replacement_forecast_shadow_schema(conn)
+            if rows:
+                _scan_and_audit_request_conflicts(conn, rows)
+            conn.execute("BEGIN")
+            try:
+                if rows:
+                    written = _persist_rows(conn, rows)
+                if cutoff_iso is not None:
+                    pruned = _prune_old(conn, cutoff_iso=cutoff_iso)
+                conn.execute("COMMIT")
+            except Exception:
+                with contextlib.suppress(Exception):
+                    conn.execute("ROLLBACK")
+                raise
+            return written, pruned
+        except sqlite3.OperationalError as lock_exc:
+            if "locked" not in str(lock_exc).lower() or _attempt + 1 >= attempts:
+                raise
+            _LOG.warning(
+                "U0R persist hit transient writer lock (attempt %d/%d) — retrying in 20s "
+                "with fetched rows held in memory: %s",
+                _attempt + 1,
+                attempts,
+                lock_exc,
+            )
+            time.sleep(20)
+        finally:
+            conn.close()
+    return written, pruned
+
+
 def download_u0r_extra_raw_inputs(
     *,
     forecast_db: Path,
@@ -616,6 +676,7 @@ def download_u0r_extra_raw_inputs(
 
     target_list = list(targets)
     rows: list[tuple] = []
+    total_written = 0
     dropped: list[str] = []
     domain_excluded: list[str] = []
 
@@ -723,58 +784,16 @@ def download_u0r_extra_raw_inputs(
                     **_u0r_product_identity(model, "previous_runs", t),
                 })
 
-    # ---- single-connection / single-DB persist + prune (INV-37) ----
-    from src.state.db import _connect  # noqa: PLC0415
-    from src.state.schema.v2_schema import (  # noqa: PLC0415
-        ensure_replacement_forecast_shadow_schema,
-    )
+        # CHUNKED DURABILITY (2026-06-11): persist THIS target's rows now — a restart or
+        # crash later in the pass can no longer destroy completed targets' fetches.
+        if rows:
+            chunk_written, _ = _persist_chunk_with_lock_retry(forecast_db, rows)
+            total_written += chunk_written
+            rows = []
 
-    written = 0
-    pruned = 0
-    # LOCK-TOLERANT PERSIST (2026-06-11): the capture pass spends ~10-40 MINUTES of
-    # network fetches and then persists in ONE end-of-pass transaction. A transient
-    # writer lock at that instant (materializer fusion tick, availability-poll insert)
-    # used to throw the whole pass away — every fetched row lost, full re-fetch
-    # required (observed live: a 16-target pass died on "database is locked" at the
-    # persist step). The fetched rows are in memory; ONLY the DB section retries,
-    # bounded, with backoff. Semantics unchanged inside each attempt: same conflict
-    # audit, same single transaction, same rollback-on-error.
-    _persist_attempts = 6
-    for _attempt in range(_persist_attempts):
-        conn = _connect(Path(forecast_db), write_class="live")
-        try:
-            ensure_replacement_forecast_shadow_schema(conn)
-            # BLOCKER 4 — DURABLE conflict audit BEFORE the rollback-on-error BEGIN. A corrected
-            # request (same logical key, different product_id/request_url_hash) writes its audit row
-            # on autocommit here and raises, so the forensic trail survives even though the capture
-            # rows are never inserted. Running this inside the BEGIN below would let the ROLLBACK
-            # erase the audit — the very silent-drop the operator demanded we make loud.
-            if rows:
-                _scan_and_audit_request_conflicts(conn, rows)
-            conn.execute("BEGIN")
-            try:
-                if rows:
-                    written = _persist_rows(conn, rows)
-                pruned = _prune_old(conn, cutoff_iso=cutoff_iso)
-                conn.execute("COMMIT")
-            except Exception:
-                with contextlib.suppress(Exception):
-                    conn.execute("ROLLBACK")
-                raise
-            break
-        except sqlite3.OperationalError as lock_exc:
-            if "locked" not in str(lock_exc).lower() or _attempt + 1 >= _persist_attempts:
-                raise
-            _LOG.warning(
-                "U0R persist hit transient writer lock (attempt %d/%d) — retrying in 20s "
-                "with fetched rows held in memory: %s",
-                _attempt + 1,
-                _persist_attempts,
-                lock_exc,
-            )
-            time.sleep(20)
-        finally:
-            conn.close()
+    # ---- CHUNKED-DURABLE persist happened per target above; final pass prunes only ----
+    written = total_written
+    _, pruned = _persist_chunk_with_lock_retry(forecast_db, (), cutoff_iso=cutoff_iso)
 
     if domain_excluded:
         _LOG.info(
