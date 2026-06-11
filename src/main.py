@@ -5830,6 +5830,16 @@ def _edli_event_reactor_cycle() -> None:
         # EVERY real submit (canary included) at the EDLI boundary by TYPE. The mainline
         # executor never constructs this adapter, so the 293-order mainline is untouched.
         operator_arm = require_operator_arm(edli_cfg)
+        # Decision-triggered targeted family snapshot refresher (zero-order wall fix
+        # 2026-06-11): when the adapter is about to decide and the SELECTED bin's
+        # elected snapshot row is price-stale, it captures FRESH books for THAT family
+        # NOW through the sanctioned warm-job capture path, then re-elects the latest
+        # row. Synchronizes the warm-job's ~5.4min per-family cadence with the 30s
+        # decision price-freshness window at the only point that matters. Topology
+        # authority = forecasts_conn (owns market_events); snapshot WRITE = zeus_trades.
+        _decision_family_snapshot_refresher = _edli_decision_family_snapshot_refresher(
+            forecasts_conn
+        )
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5877,6 +5887,7 @@ def _edli_event_reactor_cycle() -> None:
                 # FIX-3 (P1): pass scope so the adapter can enforce
                 # DAY0_SCOPE_SHADOW_ONLY at the final submit boundary.
                 edli_live_scope=edli_live_scope,
+                family_snapshot_refresher=_decision_family_snapshot_refresher,
             )
             if (live_submit_effective and operator_arm is not None)
             else event_bound_no_submit_adapter_from_trade_conn(
@@ -5894,6 +5905,7 @@ def _edli_event_reactor_cycle() -> None:
                 replacement_forecast_refit_decision=replacement_forecast_refit_decision,
                 replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+                family_snapshot_refresher=_decision_family_snapshot_refresher,
             )
         )
 
@@ -6894,6 +6906,100 @@ def _edli_pre_submit_jit_book_quote_provider():
             return clob.get_orderbook_snapshot(token_id)
 
     return _fetch
+
+
+def _edli_decision_family_snapshot_refresher(topology_conn):
+    """Build the decision-triggered targeted family snapshot refresher (zero-order
+    wall fix 2026-06-11).
+
+    The substrate warm job refreshes ``executable_market_snapshots`` on a fair
+    rotating cursor whose per-family cadence (~5.4 min live) is far slower than the
+    30s price-freshness window the decision path enforces on the SELECTED bin. On
+    that cadence any family is decidable only ~9% of wall-clock time and every
+    transient requeue lands price-stale → the built maker final intents dead-letter
+    MONEY_PATH_TRANSIENT_EXHAUSTED. This callable lets the adapter, AT decision time
+    when the elected row is stale, capture FRESH books for THAT family NOW through
+    the SANCTIONED warm-job capture path (topology reconstruct + CLOB /book +
+    ``snapshot_repo.insert_snapshot``), scoped to ONE family.
+
+    Built in main.py (the CLOB client lives here) and injected into the adapter as a
+    plain callable, so the adapter never imports venue code (architecture ban,
+    tests/engine/test_event_reactor_no_bypass.py).
+
+    LOCK LAW (#95 / INV-37 / three-phase venue-sync): the refresher opens its OWN
+    short-lived write trade connection; the adapter has ALREADY dropped its trade-DB
+    read snapshot (``trade_conn.commit()``) before calling this, so the [NET] /book
+    fetch is never wrapped by an open trade-DB txn — same posture as the submit-time
+    JIT witness /book fetch. ``topology_conn`` (forecasts DB, read-only here) owns
+    ``market_events``; the snapshot WRITE targets zeus_trades only.
+
+    Returns True if it captured/persisted fresh rows, False on a fail-soft skip; the
+    caller re-elects the latest row and the freshness gate still fail-closes if the
+    re-elected row remains stale.
+    """
+
+    def _refresh(*, city, target_date, metric, condition_ids=(), selected_token_id=None):
+        from src.data.market_scanner import (
+            reconstruct_weather_market_from_static_topology,
+            refresh_executable_market_substrate_snapshots,
+        )
+        from src.data.polymarket_client import PolymarketClient
+        from src.engine.event_reactor_adapter import _event_family_market_topology_rows
+        from src.state.db import get_trade_connection
+
+        payload = {"city": city, "target_date": target_date, "metric": metric}
+        try:
+            topology_rows = _event_family_market_topology_rows(topology_conn, payload)
+        except Exception as exc:  # noqa: BLE001 — fail-soft: stale rejection stands
+            logger.warning(
+                "decision family refresh: topology lookup failed for %s/%s/%s: %s",
+                city, target_date, metric, exc,
+            )
+            return False
+        if not topology_rows:
+            return False
+
+        _clob_timeout = max(
+            1.0,
+            float(os.environ.get("ZEUS_DISCOVERY_CLOB_TIMEOUT_SECONDS", "5.0")),
+        )
+        write_conn = get_trade_connection(write_class="live")
+        try:
+            market = reconstruct_weather_market_from_static_topology(
+                write_conn,
+                topology_rows=topology_rows,
+                now_utc=datetime.now(timezone.utc),
+            )
+            if market is None:
+                # Static topology cannot reconstruct the full token map (a sibling
+                # lost executable identity). The warm-job Gamma slug path owns that
+                # recovery; the decision-time fast path does NOT do a Gamma fetch.
+                return False
+            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+                summary = refresh_executable_market_substrate_snapshots(
+                    write_conn,
+                    markets=[market],
+                    clob=clob,
+                    captured_at=datetime.now(timezone.utc),
+                    scan_authority="VERIFIED",
+                    refresh_reason="decision_triggered_targeted_refresh",
+                    # UNLIMITED: capture EVERY bin of THIS family (siblings feed the
+                    # FDR full-family proof + capital-efficiency economics; refreshing
+                    # only the selected bin would leave stale sibling prices in q/FDR).
+                    max_outcomes=0,
+                )
+            write_conn.commit()
+            return int(summary.get("inserted", 0) or 0) > 0
+        except Exception as exc:  # noqa: BLE001 — fail-soft: never block the decision
+            logger.warning(
+                "decision family refresh: capture failed for %s/%s/%s: %s",
+                city, target_date, metric, exc,
+            )
+            return False
+        finally:
+            write_conn.close()
+
+    return _refresh
 
 
 def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):

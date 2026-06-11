@@ -15,7 +15,7 @@ import ast
 import json
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3891,3 +3891,167 @@ def test_third_path_missing_same_bin_yes_posterior_is_caught_by_receipt_gate():
     assert reason == "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", (
         f"Expected starvation rejection but got: stage={stage!r} reason={reason!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11)
+#
+# RELATIONSHIP (warm-job capture cadence ⟷ decision-time price-freshness gate):
+# The substrate warm job refreshes executable_market_snapshots on a rotating
+# cursor whose per-family cadence (~5.4min live) is far slower than the 30s
+# price-freshness window the decision path enforces on the SELECTED bin
+# (_snapshot_price_stale_reason, event_reactor_adapter.py:1894). Every top-
+# liquidity family was therefore decidable only ~9% of wall-clock time and the
+# six built maker final intents all dead-lettered MONEY_PATH_TRANSIENT_EXHAUSTED.
+#
+# The fix synchronizes the two cadences at the only point that matters: when the
+# adapter is about to decide and the elected row is price-stale, it captures
+# FRESH books for THAT family through the SANCTIONED refresher callable, re-elects
+# the latest row, and proceeds. The freshness CONTRACT is unchanged: if the
+# refresh fails or the re-elected row is still stale, the existing
+# EXECUTABLE_SNAPSHOT_STALE fail-closed path stands.
+# ---------------------------------------------------------------------------
+
+
+def _stale_freshness_deadline_for(decision_time: datetime) -> str:
+    """A freshness_deadline strictly BEFORE decision_time → selected row stale."""
+    return (decision_time - timedelta(seconds=60)).astimezone(timezone.utc).isoformat()
+
+
+def _fresh_freshness_deadline_for(decision_time: datetime) -> str:
+    return (decision_time + timedelta(seconds=600)).astimezone(timezone.utc).isoformat()
+
+
+def _insert_fresh_family_snapshots(conn: sqlite3.Connection, decision_time: datetime) -> None:
+    """Mimic the SANCTIONED warm-job capture: executable_market_snapshots is
+    APPEND-ONLY (NC-NEW-B), so a real refresh INSERTS new rows with a fresh
+    captured_at / freshness_deadline; the latest-row election then picks them up
+    (ORDER BY captured_at DESC). We clone each current row with a new snapshot_id."""
+    fresh_deadline = _fresh_freshness_deadline_for(decision_time)
+    fresh_captured = decision_time.astimezone(timezone.utc).isoformat()
+    cols = [str(row[1]) for row in conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()]
+    existing = [dict(r) for r in conn.execute("SELECT * FROM executable_market_snapshots").fetchall()]
+    for seed in existing:
+        seed = dict(seed)
+        seed["snapshot_id"] = f"{seed['snapshot_id']}-refreshed"
+        seed["freshness_deadline"] = fresh_deadline
+        seed["captured_at"] = fresh_captured
+        conn.execute(
+            f"INSERT INTO executable_market_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+            [seed[col] for col in cols],
+        )
+    conn.commit()
+
+
+def test_stale_selected_row_triggers_targeted_refresh_then_decides():
+    """Elected row stale + refresher yields fresh rows ⇒ the decision PROCEEDS
+    (no EXECUTABLE_SNAPSHOT_STALE) and consumes the REFRESHED prices."""
+    decision_time = DECISION_TIME
+    # All bins captured with a deadline already lapsed at decision time.
+    conn = _trade_conn_with_snapshot(
+        freshness_deadline=_stale_freshness_deadline_for(decision_time),
+        captured_at="2026-05-24T08:00:00+00:00",
+    )
+
+    calls: list[dict] = []
+
+    def _refresher(**kwargs):
+        # SANCTIONED single-authority refresh: append fresh rows for the family
+        # (what a real CLOB recapture + snapshot_repo.insert_snapshot does).
+        calls.append(kwargs)
+        _insert_fresh_family_snapshots(conn, decision_time)
+        return True
+
+    receipt = _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher
+    )
+
+    assert calls, "refresher MUST be called when the elected row is stale"
+    assert not str(receipt.reason or "").startswith("EXECUTABLE_SNAPSHOT_STALE")
+    assert receipt.proof_accepted is True
+    assert receipt.q_live is not None and receipt.q_live > 0.60
+    # The refresher was scoped to the deciding family.
+    assert calls[0].get("city") == "Chicago"
+    assert calls[0].get("target_date") == "2026-05-25"
+    assert calls[0].get("metric") == "high"
+
+
+def test_refresh_failure_falls_through_to_stale_rejection():
+    """Refresher raises / returns nothing ⇒ existing EXECUTABLE_SNAPSHOT_STALE
+    receipt, fail-closed unchanged."""
+    decision_time = DECISION_TIME
+    conn = _trade_conn_with_snapshot(
+        freshness_deadline=_stale_freshness_deadline_for(decision_time),
+        captured_at="2026-05-24T08:00:00+00:00",
+    )
+
+    def _refresher_raises(**_kwargs):
+        raise RuntimeError("CLOB unreachable")
+
+    receipt_raise = _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher_raises
+    )
+    assert str(receipt_raise.reason or "").startswith("EXECUTABLE_SNAPSHOT_STALE")
+    assert receipt_raise.proof_accepted is False
+
+    # A refresher that runs but does NOT make the row fresh (returns falsey) →
+    # the re-elected row is STILL stale → same fail-closed rejection.
+    conn2 = _trade_conn_with_snapshot(
+        freshness_deadline=_stale_freshness_deadline_for(decision_time),
+        captured_at="2026-05-24T08:00:00+00:00",
+    )
+
+    def _refresher_noop(**_kwargs):
+        return False
+
+    receipt_noop = _receipt(
+        _bound_forecast_event(), conn2, decision_time=decision_time, family_snapshot_refresher=_refresher_noop
+    )
+    assert str(receipt_noop.reason or "").startswith("EXECUTABLE_SNAPSHOT_STALE")
+    assert receipt_noop.proof_accepted is False
+
+
+def test_fresh_row_skips_refresh():
+    """Already-fresh elected row ⇒ refresher NOT called (rate budget)."""
+    decision_time = DECISION_TIME
+    conn = _trade_conn_with_snapshot(
+        freshness_deadline=_fresh_freshness_deadline_for(decision_time),
+    )
+
+    calls: list[dict] = []
+
+    def _refresher(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    receipt = _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher
+    )
+
+    assert calls == [], "fresh row must NOT trigger a refresh (rate budget)"
+    assert receipt.proof_accepted is True
+
+
+def test_refresher_never_called_inside_open_txn():
+    """LOCK LAW (#95 / INV-37): the refresher (which performs NET I/O) must be
+    invoked with NO transaction open on the trade connection — the [NET] fetch is
+    never wrapped by an open trade-DB write txn."""
+    decision_time = DECISION_TIME
+    conn = _trade_conn_with_snapshot(
+        freshness_deadline=_stale_freshness_deadline_for(decision_time),
+        captured_at="2026-05-24T08:00:00+00:00",
+    )
+
+    observed: list[bool] = []
+
+    def _refresher(**_kwargs):
+        observed.append(conn.in_transaction)
+        _insert_fresh_family_snapshots(conn, decision_time)
+        return True
+
+    _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher
+    )
+
+    assert observed, "refresher must have been invoked on the stale row"
+    assert observed[0] is False, "no trade-DB txn may be open across the refresher's NET fetch"

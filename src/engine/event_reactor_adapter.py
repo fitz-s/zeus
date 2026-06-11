@@ -1,3 +1,9 @@
+# Last reused or audited: 2026-06-11 (decision-triggered targeted family snapshot
+#   refresh: when the elected SELECTED-bin row is price-stale, capture fresh family
+#   books NOW via an injected FamilySnapshotRefresher, re-elect the latest row, then
+#   re-run the UNCHANGED freshness gate — kills the warm-job-cadence vs 30s-window
+#   zero-order wall, MONEY_PATH_TRANSIENT_EXHAUSTED. Bug fix, no flag, fail-soft,
+#   lock-law preserved [#95/INV-37]. Authority basis: live evidence 2026-06-11 22:00-23:30Z)
 # Last reused or audited: 2026-06-11 (K=1 STAGE 1: persist fresh JIT /book (R8) as a
 #   first-class JIT_PRESUBMIT executable_market_snapshots row before consume; flag
 #   edli_v1.k1_persist_presubmit_snapshot_enabled default OFF, fail-soft, dark-safe —
@@ -241,6 +247,35 @@ from src.calibration.emos import (
 
 
 UTC = timezone.utc
+
+
+# Decision-triggered targeted snapshot refresh (zero-order wall fix 2026-06-11).
+#
+# The substrate warm job refreshes executable_market_snapshots on a fair rotating
+# cursor whose per-family cadence (~5.4 min live) is far slower than the 30s price-
+# freshness window the decision path enforces on the SELECTED bin
+# (``_snapshot_price_stale_reason``). On that cadence any family is decidable only
+# ~9% of wall-clock time and every retry lands price-stale → the six built maker
+# final intents all dead-lettered MONEY_PATH_TRANSIENT_EXHAUSTED (live 2026-06-11).
+#
+# This callable lets the decision path synchronize the two cadences AT the only
+# point that matters: when about to decide and the elected row is price-stale, it
+# captures FRESH books for THAT family through the SANCTIONED warm-job capture path
+# (Gamma topology reconstruct + CLOB /book + ``snapshot_repo.insert_snapshot``),
+# scoped to one family. It is wired in main.py (where the CLOB client lives) — the
+# adapter never imports venue code (architecture ban,
+# tests/engine/test_event_reactor_no_bypass.py).
+#
+# LOCK LAW (#95 / INV-37 / three-phase venue-sync): the refresher runs OUTSIDE the
+# reactor's trade-DB transaction (the caller drops the read snapshot via
+# ``trade_conn.commit()`` BEFORE invoking it) and opens its OWN short-lived write
+# connection; the [NET] /book fetch is never wrapped by an open trade-DB txn —
+# same posture as the submit-time JIT witness /book fetch.
+#
+# Returns True if it captured/persisted fresh rows; False/None on a fail-soft skip.
+# The freshness CONTRACT is unchanged: after the refresh the core re-elects the
+# latest row and STILL rejects with EXECUTABLE_SNAPSHOT_STALE if it remains stale.
+FamilySnapshotRefresher = Callable[..., bool]
 
 
 @dataclass(frozen=True)
@@ -1128,6 +1163,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
     replacement_forecast_refit_decision: ReplacementForecastRefitDecision | None = None,
     replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
+    family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build a proof-only final-intent receipt adapter for EDLI events.
 
@@ -1190,6 +1226,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
                 replacement_forecast_hook=resolved_replacement_forecast_hook,
                 replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+                family_snapshot_refresher=family_snapshot_refresher,
             )
         finally:
             try:
@@ -1233,6 +1270,7 @@ def event_bound_live_adapter_from_trade_conn(
     taker_fok_fak_live_enabled: bool = False,
     operator_arm: "OperatorArm | None" = None,
     edli_live_scope: str = "forecast_only",
+    family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -1393,6 +1431,7 @@ def event_bound_live_adapter_from_trade_conn(
             replacement_forecast_hook=resolved_replacement_forecast_hook,
             replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
             replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+            family_snapshot_refresher=family_snapshot_refresher,
         )
         if force_shadow:
             # day0-shadow-receipt-enrichment (operator directive 2026-06-10).
@@ -1814,6 +1853,7 @@ def _build_event_bound_no_submit_receipt_core(
     replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
     provenance_capture: dict[str, Any] | None = None,
+    family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -1892,6 +1932,95 @@ def _build_event_bound_no_submit_receipt_core(
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
+    # DECISION-TRIGGERED TARGETED REFRESH (zero-order wall fix 2026-06-11).
+    # The warm job's per-family cadence (~5.4min) is far slower than this 30s price-
+    # freshness window, so the elected row is price-stale ~91% of wall-clock time and
+    # every transient requeue lands stale again → MONEY_PATH_TRANSIENT_EXHAUSTED. When
+    # the elected row is stale AND a sanctioned family refresher is wired, capture FRESH
+    # books for THIS family NOW (one family ≈ 11 CLOB books, 1-2s) through the warm-job
+    # capture path, then re-elect the latest row. This is a BUG FIX (fetch fresh data
+    # instead of failing on stale data), NOT a gate weakening: the freshness contract is
+    # UNCHANGED — if the refresh fails or the re-elected row is STILL stale, the existing
+    # EXECUTABLE_SNAPSHOT_STALE fail-closed path below stands.
+    #
+    # LOCK LAW (#95 / INV-37): the refresher does its OWN [NET] /book fetch + short-lived
+    # zeus_trades write on its OWN connection. We drop this core's trade-DB read snapshot
+    # (commit/rollback) BEFORE invoking it so (a) the refresher's NET fetch is never
+    # wrapped by an open trade-DB txn and (b) the subsequent re-read SEES the refresher's
+    # committed rows (a held read snapshot would not). Fail-soft: any refresher exception
+    # logs and falls through to the unchanged stale rejection.
+    #
+    # SCOPE (selected-row-vs-family): we refresh the WHOLE family (one CLOB recapture of
+    # all bins), not just the selected bin. The downstream proof consumes SIBLING prices
+    # (FDR full-family + capital-efficiency over the MECE family in _generate_candidate_
+    # proofs, which receives snapshot_rows=family_rows), so refreshing only the selected
+    # row would feed stale sibling prices into the economics — dishonest. The warm-job
+    # capture path already captures the full family in one scoped call, so full-family is
+    # both the honest and the cheaper-to-wire choice.
+    if selected_stale_reason is not None and family_snapshot_refresher is not None:
+        refreshed = False
+        try:
+            # Drop the read snapshot so the NET fetch holds no trade-DB txn and the
+            # re-read observes the refresher's committed rows (WAL visibility).
+            try:
+                trade_conn.commit()
+            except Exception:  # noqa: BLE001 — commit here is only a lock-release boundary
+                pass
+            refreshed = bool(
+                family_snapshot_refresher(
+                    city=str(payload.get("city") or ""),
+                    target_date=str(payload.get("target_date") or ""),
+                    metric=str(payload.get("metric") or payload.get("temperature_metric") or ""),
+                    condition_ids=family_condition_ids,
+                    selected_token_id=str(payload.get("token_id") or "") or None,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — refresh is fail-soft; stale rejection stands
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "decision-triggered family snapshot refresh failed (non-blocking, "
+                "falling through to stale rejection): %s",
+                exc,
+            )
+            refreshed = False
+        if refreshed:
+            # Re-elect the latest row and REBUILD every downstream consumer of the
+            # pre-refresh rows (snapshot_token_maps + topology feed the decision engine;
+            # family_rows feeds _generate_candidate_proofs). Verify consistency before
+            # re-running the staleness gate.
+            refreshed_family_rows = _latest_snapshot_rows_for_event_family(
+                trade_conn,
+                event,
+                condition_ids=family_condition_ids,
+                fresh_at=decision_time,
+                require_fresh=False,
+            )
+            if refreshed_family_rows:
+                family_rows = refreshed_family_rows
+                snapshot_token_maps = _snapshot_token_maps_by_condition(family_rows)
+                try:
+                    topology = tuple(
+                        _topology_candidate_from_market_event(
+                            topology_row,
+                            snapshot_token_maps.get(str(topology_row.get("condition_id") or "")),
+                            payload,
+                        )
+                        for topology_row in family_topology_rows
+                    )
+                except ValueError as exc:
+                    return EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
+                    )
+                refreshed_row = _selected_snapshot_row_for_event(family_rows, payload)
+                if refreshed_row is not None:
+                    row = refreshed_row
+                    if provenance_capture is not None:
+                        provenance_capture["snapshot_row"] = row
+                    selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
     if selected_stale_reason is not None:
         return EventSubmissionReceipt(
             False,
@@ -2999,6 +3128,7 @@ def build_event_bound_no_submit_receipt(
     replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
     replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
+    family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
 ) -> EventSubmissionReceipt:
     """DecisionProvenanceEnvelope wrapper (operator law 2026-06-11) around the receipt core.
 
@@ -3031,6 +3161,7 @@ def build_event_bound_no_submit_receipt(
         replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
         replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
         provenance_capture=provenance_capture,
+        family_snapshot_refresher=family_snapshot_refresher,
     )
     if receipt.envelope_json is not None:
         return receipt
