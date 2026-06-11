@@ -412,3 +412,34 @@ anchor_basis provenance + cross-check; terrain/coastal cities NEVER substitute. 
 whitelist itself must be fixed from multi-run multi-valid-time measurements (tonight's
 is a single-snapshot first cut), recorded in the time/grid registry — no guessed
 thresholds. True 0.1 direct waits for ECMWF 0p1 publication (probe weekly).
+
+## K4.0c RUN-SELECTION SINGLE AUTHORITY (2026-06-11 ~09:55Z) — twin-authority kill #4 (commits 1f910e3b3a + ca5cb7a26d)
+
+**Incident (the operator's "00Z 拖了 4+ 小时" + "0 订单就是错"):** while the probe-resolved
+poll and the rung-3 bucket transport were landing 00Z legs, TWO other lanes still derived
+"which run to fetch" from `now − release_lag(14h)` (the guess factory `_parse_cycle(None,…)`):
+
+1. The cron'd download cycle requested unpublished 12Z/18Z runs nightly → rung-2 meta guard
+   refused (correctly: "provider declares run 06:00 but caller wants 18:00") → the refusal
+   raised out of the WHOLE download→materialize job → daemon exit 1, zero posteriors.
+2. The u0r/bayes_precision_fusion extras capture used the same guessed clock → extras
+   high-water froze at 06-10T06Z → every fresh posterior materialized with q_lcb NULL =
+   honest no-edge = zero orders even on fresh data.
+
+**K-decision:** "which run to fetch" has exactly ONE authority — provider probes
+(`_probe_resolved_available_cycle`: newest pair-complete cycle the probes confirm).
+Corollaries, each an antibody:
+- `_parse_cycle(None)` raises — the guess path is unconstructable (AST + unit pins).
+- The anchor probe must mirror EVERY downloader transport rung (bucket probe added; a rung
+  the probe cannot see is a rung the authority starves).
+- Probes unresolvable → skip-with-receipt (`CYCLE_PROBE_UNRESOLVED_SKIP`), never a guess.
+- `source_available_at = min(captured_at, cycle+lag)` — proof-of-possession bound, else
+  probe-early fetches are future-stamped and invisible to seed discovery until the lag.
+- The extras lane rides the SAME poll tick (including the legs-current path) — leg currency
+  never implies extras currency (today's exact q_lcb-NULL shape).
+- Per-city anchor fault isolation (om agent): no rung serves a city ⇒ skip the city,
+  never abort the batch.
+
+Tests: tests/data/test_run_selection_single_authority.py (8 antibodies); dead-law tests
+rewritten (premature-cron guard, currency-gate wiring, u0r covered-rows). release_lag
+survives ONLY as source_available_at metadata, never as run selection.
