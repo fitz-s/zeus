@@ -30,9 +30,12 @@ money path is byte-identical whether or not this job runs (gated by the SEPARATE
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
+import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -728,27 +731,50 @@ def download_u0r_extra_raw_inputs(
 
     written = 0
     pruned = 0
-    conn = _connect(Path(forecast_db), write_class="live")
-    try:
-        ensure_replacement_forecast_shadow_schema(conn)
-        # BLOCKER 4 — DURABLE conflict audit BEFORE the rollback-on-error BEGIN. A corrected
-        # request (same logical key, different product_id/request_url_hash) writes its audit row
-        # on autocommit here and raises, so the forensic trail survives even though the capture
-        # rows are never inserted. Running this inside the BEGIN below would let the ROLLBACK
-        # erase the audit — the very silent-drop the operator demanded we make loud.
-        if rows:
-            _scan_and_audit_request_conflicts(conn, rows)
-        conn.execute("BEGIN")
+    # LOCK-TOLERANT PERSIST (2026-06-11): the capture pass spends ~10-40 MINUTES of
+    # network fetches and then persists in ONE end-of-pass transaction. A transient
+    # writer lock at that instant (materializer fusion tick, availability-poll insert)
+    # used to throw the whole pass away — every fetched row lost, full re-fetch
+    # required (observed live: a 16-target pass died on "database is locked" at the
+    # persist step). The fetched rows are in memory; ONLY the DB section retries,
+    # bounded, with backoff. Semantics unchanged inside each attempt: same conflict
+    # audit, same single transaction, same rollback-on-error.
+    _persist_attempts = 6
+    for _attempt in range(_persist_attempts):
+        conn = _connect(Path(forecast_db), write_class="live")
         try:
+            ensure_replacement_forecast_shadow_schema(conn)
+            # BLOCKER 4 — DURABLE conflict audit BEFORE the rollback-on-error BEGIN. A corrected
+            # request (same logical key, different product_id/request_url_hash) writes its audit row
+            # on autocommit here and raises, so the forensic trail survives even though the capture
+            # rows are never inserted. Running this inside the BEGIN below would let the ROLLBACK
+            # erase the audit — the very silent-drop the operator demanded we make loud.
             if rows:
-                written = _persist_rows(conn, rows)
-            pruned = _prune_old(conn, cutoff_iso=cutoff_iso)
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-    finally:
-        conn.close()
+                _scan_and_audit_request_conflicts(conn, rows)
+            conn.execute("BEGIN")
+            try:
+                if rows:
+                    written = _persist_rows(conn, rows)
+                pruned = _prune_old(conn, cutoff_iso=cutoff_iso)
+                conn.execute("COMMIT")
+            except Exception:
+                with contextlib.suppress(Exception):
+                    conn.execute("ROLLBACK")
+                raise
+            break
+        except sqlite3.OperationalError as lock_exc:
+            if "locked" not in str(lock_exc).lower() or _attempt + 1 >= _persist_attempts:
+                raise
+            _LOG.warning(
+                "U0R persist hit transient writer lock (attempt %d/%d) — retrying in 20s "
+                "with fetched rows held in memory: %s",
+                _attempt + 1,
+                _persist_attempts,
+                lock_exc,
+            )
+            time.sleep(20)
+        finally:
+            conn.close()
 
     if domain_excluded:
         _LOG.info(
