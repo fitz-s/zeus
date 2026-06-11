@@ -117,6 +117,20 @@ class Walker:
                 self.add("2 raw_artifacts", "WARN", f"no per-city anchor artifact | {detail}")
             else:
                 self.add("2 raw_artifacts", "PASS", detail)
+                # PROBE-BLIND RECONCILIATION: stage 1 probes the PROVIDERS (network +
+                # optional ecmwf.opendata lib); an environment where the probe machinery
+                # is blind (lib missing / egress blocked) reports "no pair-complete
+                # cycle provable" even while capture already POSSESSES both legs.
+                # Possession is the stronger evidence (authority order: artifacts >
+                # probes), so a stage-1 FAIL with both legs present downgrades to WARN
+                # and must not be the first-failing-stage verdict — that verdict misled
+                # a live diagnosis on 2026-06-11 (probes blind, data flowing, walker
+                # still said the funnel was stuck at stage 1).
+                for i, (stage, verdict, d) in enumerate(self.rows):
+                    if stage == "1 provider_probes" and verdict == "FAIL" and "no pair-complete cycle provable" in d:
+                        self.rows[i] = (stage, "WARN", d + " | DOWNGRADED: both legs possessed (stage 2)")
+                        if self.first_fail == stage:
+                            self.first_fail = None
         finally:
             conn.close()
 
