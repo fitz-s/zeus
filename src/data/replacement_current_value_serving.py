@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-06-11  (Task #40 freshness/row-selection fix)
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — generalize the gem_global
 #   previous_runs exception (edc598b440 / K2 2026-06-09) into the operator law 没有新的就用老的
 #   applied to fusion membership: a provider absent from single_runs at the selected cycle serves
@@ -135,6 +135,21 @@ def read_current_instrument_values(
     has_captured_at = "captured_at" in columns
     captured_select = ", captured_at" if has_captured_at else ""
 
+    # ORDER suffix depends on whether captured_at is present in the schema:
+    #   With captured_at: ORDER BY captured_at DESC NULLS LAST, raw_model_forecast_id DESC
+    #     (1) Freshest-row-per-natural-key: a later corrected row (higher captured_at or
+    #         higher raw_model_forecast_id as tiebreak) wins — `if model in out: continue`
+    #         takes the FIRST row seen per model, so DESC order means freshest arrives first.
+    #     (2) NULL captured_at fails CLOSED: NULLS LAST puts unstamped rows after all stamped
+    #         siblings — a stamped sibling always outranks a NULL-captured_at row. A solo
+    #         NULL-captured_at row (no stamped sibling) still serves, branded age_hours=0.0.
+    #   Without captured_at (stripped schema): deterministic by raw_model_forecast_id DESC
+    #     only — still freshest-by-id, fail-open on stripped schema (same as before the fix).
+    if has_captured_at:
+        order_clause = "captured_at DESC NULLS LAST, raw_model_forecast_id DESC"
+    else:
+        order_clause = "raw_model_forecast_id DESC"
+
     def _rows(endpoint: str) -> list:
         try:
             return conn.execute(
@@ -143,7 +158,7 @@ def read_current_instrument_values(
                 FROM raw_model_forecasts
                 WHERE city = ? AND metric = ? AND target_date = ?
                   AND source_cycle_time = ? AND endpoint = ?
-                ORDER BY model, lead_days, raw_model_forecast_id
+                ORDER BY model, lead_days, {order_clause}
                 """,
                 (city, metric, target_date, source_cycle_time_iso, endpoint),
             ).fetchall()
@@ -151,7 +166,8 @@ def read_current_instrument_values(
             return []
 
     out: dict[str, ServedInstrumentValue] = {}
-    # (1) forward single_runs capture — always wins. First row per model (deterministic ORDER BY).
+    # (1) forward single_runs capture — always wins. First row per model = freshest row (DESC
+    #     ORDER BY captured_at NULLS LAST, raw_model_forecast_id; `if model in out` skips rest).
     for row in _rows(SERVED_VIA_SINGLE_RUNS):
         try:
             rid = int(row[0])
