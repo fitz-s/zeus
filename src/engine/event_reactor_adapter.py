@@ -2548,6 +2548,11 @@ def build_event_bound_no_submit_receipt(
             "q_live": proof.q_posterior,
             "q_lcb_5pct": proof.q_lcb_5pct,
             "q_lcb_calibration_source": proof.q_lcb_calibration_source,
+            # Independently-materialized YES-bin posterior (== yes_q from the
+            # q-vector; never a complement). Carried so the post-submit receipt-level
+            # buy-NO conservative-evidence gate sees the SAME input the adapter gate
+            # did — closing ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING.
+            "same_bin_yes_posterior": proof.same_bin_yes_posterior,
             "q_source": proof.q_source,  # #120 calibrator provenance
             # H2_E2E: typed posterior link carried to the receipt (None on canonical).
             "posterior_id": proof.posterior_id,
@@ -2751,6 +2756,7 @@ def _event_submission_receipt_from_typed_receipt_payload(
         mainstream_fetched_at_utc=raw_receipt.get("mainstream_fetched_at_utc"),
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
         q_lcb_calibration_source=raw_receipt.get("q_lcb_calibration_source"),
+        same_bin_yes_posterior=_optional_float(raw_receipt.get("same_bin_yes_posterior")),
         posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
         probability_authority=raw_receipt.get("probability_authority"),  # H2_E2E
         strategy_key=raw_receipt.get("strategy_key"),
