@@ -391,3 +391,24 @@ total open-meteo outage. 20 relationship tests; zero regressions vs HEAD baselin
    labels that must NOT be blindly renamed (provenance identities, version-suffix law);
    the 0.1 feed's nearest-gridpoint distances differ from 0.25 history — extraction must
    pin the grid explicitly and record it.
+
+## K4.0b(f) RUNG-3 MEASUREMENT VERDICT (2026-06-11 ~05:30Z) — operator challenge confirmed
+Q: can other native-0.1 channels directly substitute the open-meteo 9km anchor? MEASURED: NO.
+1. ECMWF open data 0p1 does NOT exist yet (404 on azure/ecmwf/aws; oper serves 0.25°,
+   1440x721, verified by grib header; the opendata client already supports resol="0p1" —
+   wire-ready the day ECMWF publishes it).
+2. Free native-0.1-class IFS = open-meteo EXCLUSIVELY (their 9km includes elevation/
+   lapse-rate interpolation — exactly the value the raw grid lacks). Other native-9km
+   channels are paid (ECMWF real-time dissemination license, meteoblue, etc.).
+3. Same-run same-valid-time comparison, openmeteo 9km vs ECMWF 0.25 nearest-gridpoint,
+   n=40 city-payloads (evidence docs/evidence/anchor_channels/): mean|d|=0.58C,
+   max=3.49C (Los Angeles), 6 cities >1.0C (LA +3.5, Moscow +2.1, HK -1.5,
+   Singapore -1.2, Tokyo -1.1, Tel Aviv +1.0) — coastal/terrain cities. The earlier
+   "<=0.5C basis delta" estimate was WRONG by 7x at the worst city (LA delta ≈ the full
+   3.0C anchor sigma — materially fusion-shifting).
+RUNG-3 REDESIGN: 0.25-direct may serve ONLY a per-city whitelist measured |d|<=0.3C
+(~20 flat/inland cities in the evidence file), as an emergency-freshness path with
+anchor_basis provenance + cross-check; terrain/coastal cities NEVER substitute. The
+whitelist itself must be fixed from multi-run multi-valid-time measurements (tonight's
+is a single-snapshot first cut), recorded in the time/grid registry — no guessed
+thresholds. True 0.1 direct waits for ECMWF 0p1 publication (probe weekly).

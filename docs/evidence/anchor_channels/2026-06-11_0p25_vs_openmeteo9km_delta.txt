@@ -1,0 +1,41 @@
+Los Angeles     openmeteo9km   24.1C  ecmwf0.25   20.6C  delta  +3.5C
+Moscow          openmeteo9km   24.6C  ecmwf0.25   22.5C  delta  +2.1C
+Moscow          openmeteo9km   24.6C  ecmwf0.25   22.5C  delta  +2.1C
+Hong Kong       openmeteo9km   25.1C  ecmwf0.25   26.6C  delta  -1.5C
+Singapore       openmeteo9km   25.3C  ecmwf0.25   26.5C  delta  -1.2C
+Tokyo           openmeteo9km   17.6C  ecmwf0.25   18.7C  delta  -1.1C
+Tel Aviv        openmeteo9km   24.0C  ecmwf0.25   23.0C  delta  +1.0C
+Tel Aviv        openmeteo9km   24.0C  ecmwf0.25   23.0C  delta  +1.0C
+Jeddah          openmeteo9km   30.1C  ecmwf0.25   31.0C  delta  -0.9C
+Chongqing       openmeteo9km   21.5C  ecmwf0.25   22.4C  delta  -0.9C
+Busan           openmeteo9km   16.5C  ecmwf0.25   15.8C  delta  +0.7C
+Panama City     openmeteo9km   30.9C  ecmwf0.25   30.2C  delta  +0.7C
+Guangzhou       openmeteo9km   25.2C  ecmwf0.25   24.6C  delta  +0.6C
+Shenzhen        openmeteo9km   25.2C  ecmwf0.25   25.8C  delta  -0.6C
+Shenzhen        openmeteo9km   25.2C  ecmwf0.25   25.8C  delta  -0.6C
+Paris           openmeteo9km   16.2C  ecmwf0.25   15.7C  delta  +0.5C
+Cape Town       openmeteo9km   13.8C  ecmwf0.25   13.4C  delta  +0.4C
+Seattle         openmeteo9km   16.6C  ecmwf0.25   16.2C  delta  +0.4C
+Shanghai        openmeteo9km   21.3C  ecmwf0.25   21.7C  delta  -0.4C
+Warsaw          openmeteo9km   15.1C  ecmwf0.25   15.4C  delta  -0.3C
+Wellington      openmeteo9km   11.4C  ecmwf0.25   11.1C  delta  +0.3C
+Madrid          openmeteo9km   31.7C  ecmwf0.25   31.4C  delta  +0.3C
+Madrid          openmeteo9km   31.7C  ecmwf0.25   31.4C  delta  +0.3C
+Seoul           openmeteo9km   17.6C  ecmwf0.25   17.3C  delta  +0.3C
+Seoul           openmeteo9km   17.6C  ecmwf0.25   17.3C  delta  +0.3C
+Chengdu         openmeteo9km   23.5C  ecmwf0.25   23.2C  delta  +0.3C
+Lucknow         openmeteo9km   30.9C  ecmwf0.25   30.7C  delta  +0.2C
+Dallas          openmeteo9km   34.0C  ecmwf0.25   34.1C  delta  -0.1C
+Helsinki        openmeteo9km   11.9C  ecmwf0.25   12.0C  delta  -0.1C
+Wuhan           openmeteo9km   23.0C  ecmwf0.25   23.1C  delta  -0.1C
+Amsterdam       openmeteo9km   13.1C  ecmwf0.25   13.0C  delta  +0.1C
+Buenos Aires    openmeteo9km   17.2C  ecmwf0.25   17.3C  delta  -0.1C
+Munich          openmeteo9km   13.0C  ecmwf0.25   13.1C  delta  -0.1C
+Munich          openmeteo9km   13.0C  ecmwf0.25   13.1C  delta  -0.1C
+Atlanta         openmeteo9km   31.4C  ecmwf0.25   31.4C  delta  +0.0C
+Sao Paulo       openmeteo9km   21.5C  ecmwf0.25   21.5C  delta  -0.0C
+Sao Paulo       openmeteo9km   21.5C  ecmwf0.25   21.5C  delta  -0.0C
+London          openmeteo9km   14.9C  ecmwf0.25   14.9C  delta  +0.0C
+Kuala Lumpur    openmeteo9km   24.4C  ecmwf0.25   24.4C  delta  +0.0C
+Kuala Lumpur    openmeteo9km   24.4C  ecmwf0.25   24.4C  delta  +0.0C
+n=40 mean|d|=0.58C max|d|=3.49C  >0.5C: 15  >1.0C: 6
