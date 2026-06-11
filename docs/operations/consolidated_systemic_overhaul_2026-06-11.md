@@ -354,3 +354,15 @@ DEFERRED (not reached; no code touched):
 DECISION-NEEDED (operator):
 - K6.5 branch strategy. - Promotion of day0 (separate, on comparator evidence).
 - Two-agents-one-branch collision risk (see /tmp/overhaul_report.md co-editing incident).
+
+## K4.0b(f) STATUS (2026-06-11 ~04:45Z): IMPLEMENTED + DEPLOYED (commits c6f618998b + 6841760702)
+Anchor transport ladder live in forecast-live (13 jobs): availability poll (15min,
+probe-resolved, no lag constant — AST-pinned) + single-runs→meta-stamped degradation
+(HTTP-400 class ONLY) + hourly retro cross-check antibody (receipts
+state/anchor_cross_check.json; MISMATCH ⇒ ERROR + lineage review). Measured correction
+recorded: the 2026-06-10 anchor starvation was an open-meteo 9km FEED stall (06Z stuck
+22.5h), not single-runs archival policy; the ladder removes every latency WE added and
+activates the instant the provider publishes, via whichever transport serves first.
+REMAINING for full independence: ECMWF-direct 0.25 anchor SHADOW lineage (new
+data_version + calibration, operator-gated promotion) — the only path that survives a
+total open-meteo outage. 20 relationship tests; zero regressions vs HEAD baseline.
