@@ -119,6 +119,12 @@ class ReplacementForecastMaterializeRequest:
     anchor_weight: float = 0.80
     anchor_sigma_c: float = 3.00
     settlement_step_c: float = 1.0
+    # Task #32 honest provenance: set to "instrument_set_expansion" when this materialization was
+    # enqueued by the fusion-upgrade trigger (a re-materialization because a strictly-larger
+    # decorrelated-provider set became capturable at the same cycle). None for a normal first
+    # materialization. Threaded verbatim into provenance_json so the re-materialized posterior
+    # records WHY it was produced.
+    upgrade_trigger: str | None = None
 
 
 @dataclass(frozen=True)
@@ -406,6 +412,10 @@ def _insert_anchor(conn: sqlite3.Connection, request: ReplacementForecastMateria
         "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
+    # Task #32: honest re-materialization provenance. Recorded ONLY when the trigger set it, so a
+    # normal first materialization's provenance_json is byte-identical to before this change.
+    if request.upgrade_trigger:
+        provenance["upgrade_trigger"] = str(request.upgrade_trigger)
     anchor_identity_hash = _json_hash(
         {
             "source_id": ANCHOR_SOURCE_ID,
@@ -1004,29 +1014,29 @@ def _replacement_u0r_fusion_override(
         # icon_global) / CMC(gem) / JMA(jma). gem_global's single_runs is unavailable at 06z/18z
         # cycles (12h cadence) so the ensemble silently ran as 3 -> a permanently-unservable model
         # must never masquerade as a transient drop. Log expected-vs-served providers per cell.
-        _missing_providers = []
-        # 2026-06-09 promotion: provider families are rep-based — NBM is the NCEP rep in-CONUS
-        # (replacing gfs_global) and the UKV 2km nest is the UKMO rep in the UK, so each family
-        # check accepts ANY of its members. 5 declared decorrelated providers since the
-        # ukmo_global promotion.
-        if not any(m in used_models for m in ("gfs_global", "ncep_nbm_conus")):
-            _missing_providers.append("NCEP/gfs_global|nbm")
-        if not any(m in used_models for m in ("icon_d2", "icon_eu", "icon_global")):
-            _missing_providers.append("DWD/icon")
-        if "gem_global" not in used_models:
-            _missing_providers.append("CMC/gem_global")
-        if "jma_seamless" not in used_models:
-            _missing_providers.append("JMA/jma_seamless")
-        if not any(
-            m in used_models
-            for m in ("ukmo_global_deterministic_10km", "ukmo_uk_deterministic_2km")
-        ):
-            _missing_providers.append("UKMO/global|uk2km")
+        # SINGLE-AUTHORITY provider-family mapping (Task #32): the model->decorrelated-provider
+        # family map lives in replacement_fusion_upgrade_trigger.DECORRELATED_PROVIDER_FAMILIES so
+        # the fusion's served/missing determination and the upgrade trigger's served/capturable
+        # comparison can never drift on what counts as a provider. 2026-06-09 promotion: families
+        # are rep-based — NBM is the NCEP rep in-CONUS, the UKV 2km nest the UKMO rep in the UK —
+        # so each family is served when ANY of its members is in used_models.
+        from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
+            DECORRELATED_PROVIDER_FAMILIES,
+            EXPECTED_DECORRELATED_PROVIDER_COUNT,
+            decorrelated_provider_families_of,
+        )
+
+        _served_families = decorrelated_provider_families_of(set(used_models))
+        _missing_providers = [
+            f"{fam}/{'|'.join(DECORRELATED_PROVIDER_FAMILIES[fam])}"
+            for fam in DECORRELATED_PROVIDER_FAMILIES
+            if fam not in _served_families
+        ]
         # FIX 1/FIX 5 (2026-06-09): the SINGLE K3 completeness verdict reused by the q-mode +
         # capture-status provenance. 5 declared decorrelated providers; served = 5 - missing.
         # This is the ONLY provider-count determination — the q-mode FULL/PARTIAL split and the
         # FIX-5 capture_status both read it (no parallel re-derivation).
-        _decorrelated_expected = 5
+        _decorrelated_expected = EXPECTED_DECORRELATED_PROVIDER_COUNT
         _decorrelated_served = _decorrelated_expected - len(_missing_providers)
         _decorrelated_complete = not _missing_providers
         if _missing_providers:

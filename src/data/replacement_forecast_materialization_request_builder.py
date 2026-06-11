@@ -229,6 +229,10 @@ def build_replacement_forecast_materialization_request(
         "openmeteo_anchor_artifact_id",
         "latitude",
         "longitude",
+        # Task #32: honest re-materialization provenance. When the seed was written by the
+        # fusion-upgrade trigger it carries upgrade_trigger="instrument_set_expansion"; thread it
+        # through verbatim so the materializer can record it in the posterior provenance_json.
+        "upgrade_trigger",
     ):
         if optional_key in payload:
             request[optional_key] = payload[optional_key]

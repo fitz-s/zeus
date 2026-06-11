@@ -122,3 +122,33 @@ def test_member_downloads_owned_by_ingest_daemon() -> None:
     assert "ingest_replacement_availability_poll" in registry
     daemon = _read("src/ingest/forecast_live_daemon.py")
     assert "MOVED to the data-ingest daemon" in daemon
+
+
+# ---------------------------------------------------------------------------------
+# 9. FUSION-UPGRADE INSTRUMENT-SET COMPARISON — "does a scope need re-materialization
+#    because a strictly-larger decorrelated-provider set is now capturable" is computed
+#    in exactly ONE function (replacement_fusion_upgrade_trigger), and the model->provider
+#    FAMILY mapping it uses is the SAME object the materializer's served/missing check uses
+#    (no parallel re-derivation). (Task #32: PARTIAL fusions never upgraded when late
+#    instruments published — the missing-instrument dimension must not acquire a second site.)
+# ---------------------------------------------------------------------------------
+def test_member_fusion_upgrade_comparison_single_authority() -> None:
+    member = ROOT / "tests" / "data" / "test_fusion_upgrade_trigger.py"
+    assert member.exists(), "member antibody deleted: fusion-upgrade comparison single authority"
+    trigger = _read("src/data/replacement_fusion_upgrade_trigger.py")
+    # The comparison + the provider-family map live in ONE module.
+    assert "def scope_capture_offers_larger_provider_set" in trigger
+    assert "DECORRELATED_PROVIDER_FAMILIES" in trigger
+    # The materializer's served/missing determination IMPORTS that same map — it must not keep a
+    # parallel inline provider list (the old per-provider `if ... in used_models` ladder).
+    materializer = _read("src/data/replacement_forecast_materializer.py")
+    assert "from src.data.replacement_fusion_upgrade_trigger import" in materializer
+    assert "decorrelated_provider_families_of" in materializer
+    assert 'JMA/jma_seamless' not in materializer, (
+        "materializer re-derived the provider family map inline — the model->family mapping must "
+        "live ONLY in replacement_fusion_upgrade_trigger.DECORRELATED_PROVIDER_FAMILIES"
+    )
+    # The enqueue rides the EXISTING availability-poll lane (no new daemon) and writes into the
+    # SAME seed surface the materialize cycle drains.
+    production = _read("src/data/replacement_forecast_production.py")
+    assert "_enqueue_fusion_upgrade_reseeds_if_needed" in production

@@ -475,7 +475,51 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     u0r_report = _download_u0r_extra_raw_inputs_if_needed(cfg)
     if u0r_report is not None:
         report["u0r_extras_status"] = u0r_report.get("status")
+    # Task #32 — PARTIAL-fusion UPGRADE TRIGGER. The extras fetch above may have just landed a
+    # decorrelated provider's current value (single_runs row) for a scope whose latest posterior
+    # was fused from a strictly smaller instrument set. This availability-poll lane already KNOWS
+    # the moment new rows land, so the upgrade re-seed rides the SAME tick (operator law
+    # 下载有自己的daemon — no new daemon, no parallel materialization path). It writes a seed into
+    # the SAME seed_dir the materialize cycle drains; idempotent per (scope, cycle,
+    # capturable-family-superset) via the fusion_upgrade_enqueues marker. Fail-soft: a trigger
+    # error is logged and never breaks the poll.
+    upgrade_report = _enqueue_fusion_upgrade_reseeds_if_needed(cfg)
+    if upgrade_report is not None:
+        report["fusion_upgrade_status"] = upgrade_report.get("status")
+        report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
+        if upgrade_report.get("upgrades_detected"):
+            report["fusion_upgrade_detail"] = {
+                k: upgrade_report.get(k)
+                for k in ("upgrades_detected", "seeds_enqueued", "already_enqueued", "enqueued")
+            }
     return report
+
+
+def _enqueue_fusion_upgrade_reseeds_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+    """Task #32 — enqueue re-materialization seeds for PARTIAL-fusion scopes whose 5th (or Nth)
+    decorrelated provider became capturable since the last materialization. Delegates the ENTIRE
+    instrument-set comparison to the single-authority module so the rule lives at exactly one
+    site. Returns the trigger report (None when the seed_dir / forecast_db / raw_manifest_dir are
+    not configured). Fail-soft: any error returns a status dict, never raises into the poll."""
+    forecast_db = cfg.get("forecast_db")
+    seed_dir = cfg.get("seed_dir")
+    raw_manifest_dir = cfg.get("raw_manifest_dir")
+    if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
+        return None
+    try:
+        from src.data.replacement_fusion_upgrade_trigger import (  # noqa: PLC0415
+            enqueue_fusion_upgrade_reseeds,
+        )
+
+        return enqueue_fusion_upgrade_reseeds(
+            forecast_db=Path(str(forecast_db)),
+            seed_dir=Path(str(seed_dir)),
+            raw_manifest_dir=Path(str(raw_manifest_dir)),
+            limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
+        )
+    except Exception as exc:  # noqa: BLE001 — fail-soft: the trigger never breaks the poll
+        logger.warning("fusion-upgrade trigger skipped (fail-soft): %s", exc)
+        return {"status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
 @_scheduler_job("anchor_meta_stamp_cross_check")
