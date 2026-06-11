@@ -3119,14 +3119,30 @@ def _fresh_rest_then_cross_mode(
     Inputs mirror the proof side: the candidate's q_lcb and fee-adjusted
     reservation from the actionable payload; the taker all-in cost recomputed on
     the FRESH ask with the same taker fee law (0.05*p*(1-p)); minutes to event
-    end from the snapshot's market_end_at. Rest-state flags are False here: the
-    HOLD/escalation lanes were already adjudicated at proof time, and the
-    validator only needs mode EQUALITY under the shared policy. Missing fresh
-    inputs degrade to MAKER (the conservative resting default), matching the
-    policy's own unknown-horizon behavior.
-    """
-    from src.strategy.live_inference.mode_consistent_ev import select_rest_then_cross_mode
+    end from the snapshot's market_end_at.
 
+    Rest-state flags: the proof's adjudicated POLICY LANE is the single
+    authority for them (it travels on the payload as ``rest_then_cross_policy``).
+    A proof in the escalated lane (TAKER_ESCALATED_AFTER_REST) re-evaluates
+    fresh WITH ``escalated_after_rest=True`` — hardcoding False here
+    re-adjudicated the lane and made every deadline cross recompute as
+    REST_DEFAULT/MAKER, i.e. a guaranteed MODE_FLIPPED abort loop on exactly
+    the orders the escalation job exists to place (external review finding,
+    2026-06-11). The fresh evaluation still subordinates to the fresh book: if
+    the fresh taker lane is inadmissible (spread guard), the policy rests and
+    the validator aborts the cross — the correct outcome.
+    ``unexpired_family_rest`` stays False: the HOLD lane yields chosen_ev=-inf
+    at proof time and never reaches submit. Missing fresh inputs degrade to
+    MAKER (the conservative resting default), matching the policy's own
+    unknown-horizon behavior.
+    """
+    from src.strategy.live_inference.mode_consistent_ev import (
+        POLICY_TAKER_ESCALATED_AFTER_REST,
+        select_rest_then_cross_mode,
+    )
+
+    proof_policy = str(actionable_payload.get("rest_then_cross_policy") or "").strip()
+    escalated_after_rest = proof_policy == POLICY_TAKER_ESCALATED_AFTER_REST
     q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
     reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
     taker_all_in = None
@@ -3152,7 +3168,7 @@ def _fresh_rest_then_cross_mode(
         reservation=float(reservation),
         minutes_to_event_end=minutes_to_event_end,
         unexpired_family_rest=False,
-        escalated_after_rest=False,
+        escalated_after_rest=escalated_after_rest,
     )
     chosen = str(getattr(mode_ev, "chosen_mode", "") or "").strip().upper()
     return chosen if chosen in {"MAKER", "TAKER"} else "MAKER"

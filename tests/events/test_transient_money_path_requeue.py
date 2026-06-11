@@ -233,6 +233,39 @@ def test_price_moved_retries_bounded_then_dead_letter():
     assert attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES
 
 
+def test_transient_exhaustion_dead_letter_carries_honest_category():
+    """ANTIBODY (external review 2026-06-11): money-path transients share the
+    executable-snapshot retry disposition, so exhaustion used to dead-letter as
+    EXECUTABLE_SNAPSHOT_BLOCKED / 'snapshot not captured' — masking the actual
+    submit-race category and hiding the churn from the ledgers. The terminal
+    dead-letter row must carry the LAST transient reason; the generic snapshot
+    label is reserved for genuinely uncapturable snapshots."""
+    conn, store = _store()
+    event = _event("snap-honest-label")
+    store.insert_or_ignore(event)
+    reactor = _reactor_with_reason(conn, store, _PRICE_MOVED_REASON)
+
+    for _ in range(MAX_EXECUTABLE_SNAPSHOT_RETRIES + 2):
+        reactor.process_pending(decision_time=_DT, limit=10)
+        if _status(conn, event.event_id) == "dead_letter":
+            break
+
+    row = conn.execute(
+        "SELECT failure_stage, error_message FROM event_dead_letters WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None
+    failure_stage, error_message = row[0], row[1]
+    assert failure_stage == "MONEY_PATH_TRANSIENT_EXHAUSTED", (
+        "transient exhaustion must NOT be labeled EXECUTABLE_SNAPSHOT_BLOCKED: "
+        f"got {failure_stage!r}"
+    )
+    assert "SUBMIT_ABORTED_PRICE_MOVED" in (error_message or ""), (
+        "the dead-letter must carry the last transient reason: "
+        f"got {error_message!r}"
+    )
+
+
 _MODE_FLIPPED_REASON = (
     "SUBMIT_ABORTED_MODE_FLIPPED:SUBMIT_ABORTED_MODE_FLIPPED:proof_mode=MAKER:"
     "fresh_mode=TAKER:fresh_bid=0.73:fresh_ask=0.77"

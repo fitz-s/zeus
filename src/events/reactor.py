@@ -332,6 +332,16 @@ class OpportunityEventReactor:
         # docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md.
         self._decision_provenance_hook = decision_provenance_hook
         self._family_logged: set[str] = set()
+        # Last transient money-path reason per event_id (external review finding
+        # 2026-06-11): price-race requeues (SUBMIT_ABORTED_PRICE_MOVED /
+        # SUBMIT_ABORTED_MODE_FLIPPED / would_cross_book / source-recapture)
+        # share the executable-snapshot retry disposition, so exhaustion used to
+        # dead-letter as EXECUTABLE_SNAPSHOT_BLOCKED — masking the actual
+        # category and hiding submit-race churn from the ledgers. The dict keeps
+        # the honest cause for the terminal label. In-memory only: lost on
+        # restart the label degrades to the generic snapshot reason, never lies
+        # about a cause it does not know.
+        self._transient_requeue_reasons: dict[str, str] = {}
         from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
         from src.decision_kernel.compiler import DecisionCompiler
         from src.decision_kernel.ledger import DecisionCertificateLedger
@@ -658,12 +668,28 @@ class OpportunityEventReactor:
         if disposition == _EXECUTABLE_SNAPSHOT_RETRY:
             attempts = self._store.attempt_count(event.event_id)
             if attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES:
-                # Genuinely uncapturable after repeated cycles → terminal.
-                self._reject_event(event, "EXECUTABLE_QUOTE", "EXECUTABLE_SNAPSHOT_BLOCKED", result, decision_time=decision_time)
+                # Terminal after repeated cycles. HONEST CATEGORY LABEL (external
+                # review finding 2026-06-11): when the retries were money-path
+                # transients (price race / mode flip / would-cross), the terminal
+                # label carries that cause — EXECUTABLE_SNAPSHOT_BLOCKED is
+                # reserved for genuinely uncapturable snapshots.
+                last_transient = self._transient_requeue_reasons.pop(event.event_id, None)
+                if last_transient:
+                    stage_label = "MONEY_PATH_TRANSIENT_EXHAUSTED"
+                    reason_label = f"{stage_label}:{last_transient}"
+                    error_message = (
+                        f"money-path transient still unresolved after {attempts} attempts; "
+                        f"last reason: {last_transient}"
+                    )
+                else:
+                    stage_label = "EXECUTABLE_SNAPSHOT_BLOCKED"
+                    reason_label = "EXECUTABLE_SNAPSHOT_BLOCKED"
+                    error_message = f"executable snapshot not captured after {attempts} attempts"
+                self._reject_event(event, "EXECUTABLE_QUOTE", reason_label, result, decision_time=decision_time)
                 self._store.mark_dead_letter(
                     event,
-                    failure_stage="EXECUTABLE_SNAPSHOT_BLOCKED",
-                    error_message=f"executable snapshot not captured after {attempts} attempts",
+                    failure_stage=stage_label,
+                    error_message=error_message,
                     created_at=decision_time.astimezone(UTC).isoformat(),
                 )
                 result.dead_lettered += 1
@@ -677,6 +703,7 @@ class OpportunityEventReactor:
         # ledgers were written in _process_one_pre_submit). The legacy single-pass
         # flow marked such drained-rejection events processed and counted them as
         # ``processed`` (the event is consumed, not retried). Preserve that exactly.
+        self._transient_requeue_reasons.pop(event.event_id, None)
         self._store.mark_processed(event.event_id, processed_at=decision_time.astimezone(UTC).isoformat())
         result.processed += 1
 
@@ -899,6 +926,8 @@ class OpportunityEventReactor:
             # start. The receipt is NOT persisted for the aborted attempt — the requeued
             # decision writes its own honest receipt.
             if _is_transient_money_path_reason(receipt.reason):
+                if receipt.reason:
+                    self._transient_requeue_reasons[event.event_id] = str(receipt.reason)
                 return _EXECUTABLE_SNAPSHOT_RETRY
             proof_bundle = receipt.decision_proof_bundle
             if proof_bundle is None:
@@ -992,6 +1021,7 @@ class OpportunityEventReactor:
             # the pre-submit family identity gate and the adapter's JIT scoring.
             # Requeue for the next cycle instead of terminally consuming the
             # opportunity (bounded by MAX_EXECUTABLE_SNAPSHOT_RETRIES).
+            self._transient_requeue_reasons[event.event_id] = str(reason)
             return _EXECUTABLE_SNAPSHOT_RETRY
         self._reject_event(event, stage, reason, result, receipt=receipt, decision_time=decision_time)
         return None
