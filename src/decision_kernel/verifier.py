@@ -599,12 +599,22 @@ def _verify_final_intent_payload(
     # unconditionally now that the tiny_live cap-enabled flag is deleted — it is a
     # cert-chain consistency check (order size matches the reservation), not a
     # dollar limit.
+    #
+    # FLOAT ROUND-TRIP TOLERANCE (live 2026-06-11, Amsterdam 20:26/20:56Z +
+    # Lucknow 21:38Z dead-letters): the maker share sizing is
+    # size = reserved/price (desired_shares_for_reserved_notional, float
+    # contract) and the intent notional is size*price — IEEE754 makes
+    # (r/p)*p exceed r by ~1 ULP (~1e-15 relative) for a large fraction of
+    # (r, p) pairs, so the strict > comparison hard-killed correctly-sized
+    # maker intents at random. The guard's intent is "order matches the
+    # reservation", not "bit-exact float equality": a relative 1e-9 tolerance
+    # (six orders of magnitude above the ULP noise, ~$1e-8 on a $15 order)
+    # passes the round-trip artifact while any MATERIAL excess still raises.
     reserved_notional = actionable.get("live_cap_reserved_notional_usd")
-    if (
-        reserved_notional is not None
-        and notional > _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd")
-    ):
-        raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
+    if reserved_notional is not None:
+        reserved_f = _finite_float(reserved_notional, "actionable live_cap_reserved_notional_usd")
+        if notional > reserved_f * (1.0 + 1e-9) + 1e-12:
+            raise CertificateVerificationError("final intent notional_usd exceeds live cap reserved notional")
     _assert_order_type_tuple_coherent(payload, surface="final intent")
     if payload.get("source") != "existing_final_intent_builder":
         raise CertificateVerificationError("final intent source must be existing_final_intent_builder")
