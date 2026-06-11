@@ -39,11 +39,32 @@ from datetime import datetime, timezone
 UTC = timezone.utc
 
 
-# H3 / operator directive: fail-closed staleness horizon (hours). A source cycle this many
-# hours (or more) before the reference time is too old to trade as live, even if readiness
-# has not yet expired. Worst legitimate gap: cycle cadence 6h + publication lag ~14h +
-# processing slack, with margin — and within the empirical max of 28.8h healthy cycle age.
-REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT = 30.0
+# H3 / operator directives 2026-06-10 + 2026-06-11 ("这个数字取决于该发布频率的tolerance
+# 而不是瞎猜"): fail-closed staleness horizon, DERIVED from the measured publication
+# rhythm — serve the last fetched data until the provider has had the chance to deliver
+# TWO newer live-eligible cycles and we still hold nothing newer; only then is the old
+# data "extremely stale" and refused.
+#
+#   bound = 2 x LIVE_REFRESH_INTERVAL + P50 publication lag
+#         = 2 x 12h (live-eligible cycles are 00Z/12Z only, operator cycle policy)
+#           + 6h   (MEASURED anchor publication lag, healthy: open-meteo bucket meta
+#                   showed 06-10 06Z run completed +5.9h; AIFS open-data index 8-10h;
+#                   p50 of the binding healthy leg ~= 6h — see
+#                   docs/evidence/anchor_channels/ + rule1_audits/2026-06-10)
+#         = 30h
+#
+# Cross-checks: empirical healthy cycle age over forecast_posteriors ran min 9.5h /
+# avg 18.9h / max 28.8h (n=1168) — all admitted; the 2026-06-10 single-cycle provider
+# skip (12Z never published) kept the 00Z row served at 26.8h — correctly within bound;
+# a SECOND consecutive miss crosses 30h and fails closed. The availability poll
+# (replacement_cycle_availability) eliminated our own fetch delay (publication + <=15min),
+# so publication lag is the only stochastic term left in the derivation.
+# tests/data/test_cycle_staleness_derivation.py pins the formula to these inputs.
+LIVE_CYCLE_REFRESH_INTERVAL_HOURS = 12.0  # 00Z/12Z live-eligible cadence (operator policy)
+MEASURED_P50_PUBLICATION_LAG_HOURS = 6.0  # basis=MEASURED 2026-06-11 (see derivation above)
+REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT = (
+    2.0 * LIVE_CYCLE_REFRESH_INTERVAL_HOURS + MEASURED_P50_PUBLICATION_LAG_HOURS
+)
 _MAX_AGE_ENV = "ZEUS_REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS"
 
 # Cycle-phase labels (provenance_json.cycle_phase). Synoptic = the full 00Z/12Z assimilation;
