@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from src.events.event_priority import day0_emit_priority
 from src.events.event_writer import EventWriter, EventWriteResult
 from src.events.opportunity_event import Day0ExtremeUpdatedPayload, OpportunityEvent, make_day0_extreme_updated_event
 
@@ -45,6 +46,7 @@ def build_day0_extreme_updated_event(
     settlement_semantics: Any,
     decision_time: datetime,
     received_at: str,
+    day0_is_tradeable: bool = True,
 ) -> OpportunityEvent:
     available_at = _parse_utc(observation["observation_available_at"], "observation_available_at")
     if available_at > decision_time.astimezone(UTC):
@@ -81,13 +83,23 @@ def build_day0_extreme_updated_event(
         received_at=received_at,
         payload=payload,
         causal_snapshot_id=str(observation.get("observation_context_id") or ""),
-        priority=20,
+        # Emission-priority half of the 2026-06-11 anti-starvation fix. This is a
+        # WITHIN-TIER sub-sort (the scope-aware claim tier in fetch_pending is the
+        # cross-tier authority); under day0_shadow we still stamp the lower
+        # PRIORITY_DAY0_SHADOW so the two surfaces agree. Single source of truth:
+        # src.events.event_priority.day0_emit_priority.
+        priority=day0_emit_priority(day0_is_tradeable=day0_is_tradeable),
     )
 
 
 class Day0ExtremeUpdatedTrigger:
-    def __init__(self, writer: EventWriter) -> None:
+    def __init__(self, writer: EventWriter, *, day0_is_tradeable: bool = True) -> None:
         self._writer = writer
+        # Stamp the scope-aware emission priority (2026-06-11 anti-starvation).
+        # Default True = historical priority=PRIORITY_DAY0_TRADEABLE. The caller in
+        # main.py passes False under edli_live_scope='day0_shadow' so shadow-only
+        # day0 events sub-sort below tradeable forecast candidates.
+        self._day0_is_tradeable = day0_is_tradeable
 
     def emit_from_observation(
         self,
@@ -102,6 +114,7 @@ class Day0ExtremeUpdatedTrigger:
             settlement_semantics=settlement_semantics,
             decision_time=decision_time,
             received_at=received_at,
+            day0_is_tradeable=self._day0_is_tradeable,
         )
         return self._writer.write(event)
 

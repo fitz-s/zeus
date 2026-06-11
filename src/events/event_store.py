@@ -81,8 +81,19 @@ class EventStore:
             )
         return inserted
 
-    def fetch_pending(self, *, decision_time: str, limit: int = 100) -> list[OpportunityEvent]:
+    def fetch_pending(
+        self, *, decision_time: str, limit: int = 100, day0_is_tradeable: bool = True
+    ) -> list[OpportunityEvent]:
         """Fetch pending events in deterministic replay/inference order.
+
+        ``day0_is_tradeable`` (default True = historical behaviour) controls the
+        scope-aware claim tier: under ``edli_live_scope='day0_shadow'`` a
+        DAY0_EXTREME_UPDATED event can only ever produce DAY0_SCOPE_SHADOW_ONLY,
+        so the caller passes False to DEMOTE day0 below tradeable
+        FORECAST_SNAPSHOT_READY and stop the shadow flood from starving tradeable
+        forecast families (2026-06-11 live incident). The tier authority lives in
+        ``src.events.event_priority.claim_tier_case_sql`` — one ordering law,
+        shared with the emit-priority constants, never a magic number here.
 
         STEP 3 timeliness fix (consolidated timeliness/tradeability design):
 
@@ -106,12 +117,19 @@ class EventStore:
         """
 
         self._require_world_event_tables()
+        from src.events.event_priority import claim_tier_case_sql
+
         parsed_decision_time = _parse_utc(decision_time)
         stale_processing_before = (
             parsed_decision_time - timedelta(seconds=self.processing_lease_seconds)
         ).isoformat()
+        # Scope-aware claim tier (ONE ordering authority, shared with the emit
+        # constants). day0_is_tradeable=False omits the DAY0_EXTREME_UPDATED Tier-0
+        # clause so shadow-only day0 events fall to Tier 2 — strictly below the
+        # tradeable FORECAST_SNAPSHOT_READY Tier 1 (2026-06-11 live anti-starvation).
+        _claim_tier_sql = claim_tier_case_sql(day0_is_tradeable=day0_is_tradeable)
         rows = self.conn.execute(
-            """
+            f"""
             SELECT e.*
             FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
             JOIN opportunity_events e
@@ -135,26 +153,18 @@ class EventStore:
               )
             ORDER BY
               -- Tier 0: DAY0_EXTREME_UPDATED hard facts — realized observations are the freshest
-              --         actionable alpha source and must not sit behind forecast redecision backlog.
+              --         actionable alpha source, BUT ONLY while day0 is a tradeable lane. Under
+              --         day0_shadow (day0_is_tradeable=False) the Tier-0 clause is omitted and
+              --         day0 falls to Tier 2 so shadow-only events never starve tradeable FSR.
               -- Tier 1: window-complete FORECAST_SNAPSHOT_READY — direct receipt candidates.
               --         Run-level PARTIAL can still carry a COMPLETE/LIVE_ELIGIBLE
               --         target window, so source_run completeness is not the queue authority.
-              -- Tier 2: Other decision-trigger events — still actionable or cheaply
-              --         dead-letterable; must not be starved by market-channel.
+              -- Tier 2: Other decision-trigger events (incl. shadow-only day0) — still actionable
+              --         or cheaply dead-letterable; must not be starved by market-channel.
               -- Tier 3: Market-channel cache-hydration events (BEST_BID_ASK_CHANGED, BOOK_SNAPSHOT,
               --         NEW_MARKET_DISCOVERED) — they get rejected NO_DIRECT_STALE_TRADE immediately
               --         but can accumulate to 300k+; without explicit demotion they starve all FSR.
-              CASE
-                WHEN e.event_type = 'DAY0_EXTREME_UPDATED'
-                THEN 0
-                WHEN e.event_type = 'FORECAST_SNAPSHOT_READY'
-                 AND json_extract(e.payload_json, '$.coverage_completeness_status') = 'COMPLETE'
-                 AND json_extract(e.payload_json, '$.coverage_readiness_status') = 'LIVE_ELIGIBLE'
-                THEN 1
-                WHEN e.event_type IN ('BEST_BID_ASK_CHANGED', 'BOOK_SNAPSHOT', 'NEW_MARKET_DISCOVERED')
-                THEN 3
-                ELSE 2
-              END ASC,
+              {_claim_tier_sql},
               e.priority DESC,
               -- FRESHEST-TARGET-FIRST: reach fresh candidates before the per-cycle
               -- budget is spent on stale ones. NULL target_date (non-forecast

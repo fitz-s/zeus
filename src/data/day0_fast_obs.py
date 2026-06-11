@@ -689,6 +689,7 @@ class Day0FastObsEmitter:
         prefetch: FastObsPrefetch,
         received_at: str,
         limit: int = 50,
+        day0_is_tradeable: bool = True,
     ) -> int:
         """DB-write phase: emit DAY0_EXTREME_UPDATED events from a prefetch.
 
@@ -696,6 +697,11 @@ class Day0FastObsEmitter:
         DENIED for stale-after-failure data older than the city's staleness
         budget and for observations without live authority (publication clock
         missing, etc.) — those may only advance the monotone kill memo (P0-3).
+
+        ``day0_is_tradeable`` (default True) flows to the trigger so day0 events
+        emitted under day0_shadow carry the lower PRIORITY_DAY0_SHADOW sub-sort
+        (2026-06-11 anti-starvation; the scope-aware claim tier in fetch_pending
+        is the cross-tier authority).
         """
         from src.events.event_writer import EventWriter
         from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
@@ -706,7 +712,9 @@ class Day0FastObsEmitter:
             return 0
         reports = list(prefetch.reports)
         decision_time = prefetch.decision_time
-        trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
+        trigger = Day0ExtremeUpdatedTrigger(
+            EventWriter(world_conn), day0_is_tradeable=day0_is_tradeable
+        )
         emitted = 0
         for city, source, target_date in prefetch.eligible:
             if emitted >= max(1, int(limit)):

@@ -5504,6 +5504,7 @@ def _edli_event_reactor_cycle() -> None:
         riskguard_allows_new_entries,
     )
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
+    from src.events.event_priority import day0_is_tradeable_for_scope
     from src.events.event_store import EventStore
     from src.events.reactor import OpportunityEventReactor, ReactorConfig
     from src.riskguard.riskguard import get_current_level
@@ -5699,6 +5700,11 @@ def _edli_event_reactor_cycle() -> None:
                         # (_day0_fast_prefetch above, before acquire); this call
                         # is the pure write phase.
                         fast_prefetch=_day0_fast_prefetch,
+                        # 2026-06-11 anti-starvation: stamp the scope-aware emission
+                        # priority so day0_shadow events sub-sort below tradeable FSR.
+                        day0_is_tradeable=day0_is_tradeable_for_scope(
+                            str(edli_cfg.get("edli_live_scope") or "forecast_only")
+                        ),
                     )
                 finally:
                     _day0_trade_conn.close()
@@ -5888,6 +5894,12 @@ def _edli_event_reactor_cycle() -> None:
                 # config/settings.json; this reads it without writing it).
                 edge_zone_admission_enabled=bool(edli_cfg.get("edge_zone_admission_enabled", False)),
                 edge_zone_min_ev_per_dollar=float(edli_cfg.get("edge_zone_min_ev_per_dollar", 0.0)),
+                # Scope-aware claim tier (2026-06-11 anti-starvation): under
+                # day0_shadow a DAY0_EXTREME_UPDATED event can only ever produce a
+                # DAY0_SCOPE_SHADOW_ONLY receipt, so it must NOT outrank tradeable
+                # FORECAST_SNAPSHOT_READY in the reactor claim. day0_is_tradeable
+                # is True ONLY for the forecast_plus_day0 (day0-submittable) lane.
+                day0_is_tradeable=day0_is_tradeable_for_scope(edli_live_scope),
             ),
         )
         _rr = reactor.process_pending(decision_time=process_pending_decision_time, limit=proof_limit)
@@ -6655,6 +6667,7 @@ def _edli_emit_day0_extreme_events(
     received_at: str,
     limit: int,
     fast_prefetch=None,
+    day0_is_tradeable: bool = True,
 ) -> int:
     """Emit EDLI Day0 extreme events from live observation truth surfaces.
 
@@ -6680,6 +6693,7 @@ def _edli_emit_day0_extreme_events(
                 prefetch=fast_prefetch,
                 received_at=received_at,
                 limit=limit,
+                day0_is_tradeable=day0_is_tradeable,
             )
         except Exception as _fast_exc:  # noqa: BLE001 — fast lane is additive; never block catch-up
             logger.warning(
@@ -6687,7 +6701,9 @@ def _edli_emit_day0_extreme_events(
                 _fast_exc,
             )
 
-    trigger = Day0ExtremeUpdatedTrigger(EventWriter(world_conn))
+    trigger = Day0ExtremeUpdatedTrigger(
+        EventWriter(world_conn), day0_is_tradeable=day0_is_tradeable
+    )
     authority_results = trigger.scan_authority_rows(
         observation_conn=trade_conn,
         settlement_semantics=_edli_day0_settlement_semantics,

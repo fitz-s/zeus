@@ -220,6 +220,14 @@ class ReactorConfig:
     # positive one. See src/contracts/edge_zone_admission.py.
     edge_zone_admission_enabled: bool = False
     edge_zone_min_ev_per_dollar: float = 0.0
+    # Scope-aware claim tier (2026-06-11 anti-starvation). True (default) =
+    # historical behaviour: DAY0_EXTREME_UPDATED ranks at the top claim tier
+    # (realized obs = freshest tradeable alpha). False = day0 is shadow-only
+    # (edli_live_scope='day0_shadow'); the reactor demotes DAY0_EXTREME_UPDATED
+    # below tradeable FORECAST_SNAPSHOT_READY so the shadow flood cannot starve
+    # tradeable forecast families out of the per-cycle proof budget. Derived from
+    # the scope via src.events.event_priority.day0_is_tradeable_for_scope.
+    day0_is_tradeable: bool = True
 
 
 # An executable market snapshot for the family may simply not be captured yet on the cycle
@@ -306,6 +314,7 @@ class OpportunityEventReactor:
             events = self._store.fetch_pending(
                 decision_time=decision_time.astimezone(UTC).isoformat(),
                 limit=request_limit,
+                day0_is_tradeable=self._config.day0_is_tradeable,
             )
             if not events:
                 break
