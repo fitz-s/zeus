@@ -1611,6 +1611,12 @@ def _insert_posterior(
         "trade_authority_status": "SHADOW_ONLY",
         "training_allowed": False,
     }
+    # Task #32: honest re-materialization provenance ON THE POSTERIOR. The first threading
+    # placed this only on the anchor provenance dict — but the anchor INSERT is OR-IGNOREd on a
+    # same-cycle re-materialization (the existing anchor row wins), so the note never surfaced.
+    # The posterior row is the artifact the upgrade actually produces; the note belongs here.
+    if request.upgrade_trigger:
+        provenance_payload["upgrade_trigger"] = str(request.upgrade_trigger)
     if u0r_override is not None:
         provenance_payload["u0r_fusion"] = {
             "method": u0r_override.method,

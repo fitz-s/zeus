@@ -475,3 +475,23 @@ def test_flag_on_previous_runs_substitution_fuses_identically_and_is_branded(mon
     serving_a = prov_a["current_value_serving"]
     assert serving_a["jma_seamless"]["served_via"] == "single_runs"
     assert serving_a["jma_seamless"]["previous_run_substitution"] is False
+
+
+def test_upgrade_trigger_note_lands_on_the_posterior_provenance(monkeypatch) -> None:
+    """Task #32: the honest re-materialization note must live on the POSTERIOR provenance —
+    the anchor row is INSERT-OR-IGNOREd on a same-cycle re-materialization (the existing anchor
+    wins), so an anchor-only note never surfaces (live finding 2026-06-11: the first 8 upgraded
+    posteriors carried current_value_serving but upgrade_trigger=None)."""
+    import dataclasses
+
+    _disable_other_layers(monkeypatch)
+    conn = _conn()
+    req = dataclasses.replace(_request(), upgrade_trigger="instrument_set_expansion")
+    pid = mod._insert_posterior(conn, req, metric="high", anchor_id=1)
+    prov = json.loads(_row(conn, pid)["provenance_json"])
+    assert prov.get("upgrade_trigger") == "instrument_set_expansion"
+    # A normal request (no trigger) stays byte-identical: no key at all.
+    conn_plain = _conn()
+    pid_plain = mod._insert_posterior(conn_plain, _request(), metric="high", anchor_id=1)
+    prov_plain = json.loads(_row(conn_plain, pid_plain)["provenance_json"])
+    assert "upgrade_trigger" not in prov_plain
