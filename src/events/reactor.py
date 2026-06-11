@@ -1350,6 +1350,14 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
         decision and submit (NYC 16:22:33Z). Narrowed to the would_cross
         sub-reason ONLY; every other certificate build failure stays terminal
         (except the pre-existing db-lock transients).
+      * SUBMIT_ABORTED_MODE_FLIPPED — third flavor of the SAME race: the proof
+        priced a MAKER rest into an empty own-ask, and by final submit the book
+        had a live ask (fresh_mode=TAKER), so the P0-1 mode-intent authority
+        correctly refused the stale-mode plan. Live: 17:23:33Z four cities
+        (Chongqing/Wellington/Shanghai/Milan 06-13 buy_no, Kelly $9-35) were
+        terminally consumed while the FRESH ask carried +6..+19% conservative
+        EV. The requeue re-decides on the fresh book and prices TAKER from the
+        start — the abort itself proves the venue order was never placed.
     """
     if not reason:
         return False
@@ -1358,6 +1366,7 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
         "SOURCE_CAPTURED_AFTER_DECISION_TIME" in reason
         or "EXECUTABLE_SNAPSHOT_STALE" in reason
         or "SUBMIT_ABORTED_PRICE_MOVED" in reason
+        or "SUBMIT_ABORTED_MODE_FLIPPED" in reason
         or (
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:" in reason
             and (

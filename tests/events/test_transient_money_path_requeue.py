@@ -231,3 +231,18 @@ def test_price_moved_retries_bounded_then_dead_letter():
     )
     attempts = store.attempt_count(event.event_id)
     assert attempts >= MAX_EXECUTABLE_SNAPSHOT_RETRIES
+
+
+_MODE_FLIPPED_REASON = (
+    "SUBMIT_ABORTED_MODE_FLIPPED:SUBMIT_ABORTED_MODE_FLIPPED:proof_mode=MAKER:"
+    "fresh_mode=TAKER:fresh_bid=0.73:fresh_ask=0.77"
+)
+
+
+def test_mode_flipped_is_transient():
+    # Third flavor of the stale-decision-vs-fresh-book race (live 2026-06-11
+    # 17:23:33Z: four cities priced MAKER into an empty ask; the book grew a live
+    # ask by submit; P0-1 refused the stale-mode plan and the events were
+    # terminally consumed while the fresh ask carried +6..+19% conservative EV).
+    # The requeue re-decides fresh and prices TAKER from the start.
+    assert _is_transient_money_path_reason(_MODE_FLIPPED_REASON)
