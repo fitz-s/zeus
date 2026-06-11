@@ -303,8 +303,12 @@ class Walker:
     def last_decision(self) -> None:
         conn = _ro(WORLD)
         try:
+            # envelope_json is additive (operator law 2026-06-11); guard for older DBs that
+            # predate the column so the walker still runs on a not-yet-migrated copy.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(no_trade_regret_events)")}
+            envelope_select = ", envelope_json" if "envelope_json" in cols else ""
             row = conn.execute(
-                """SELECT decision_time, rejection_stage, rejection_reason, bin_label
+                f"""SELECT decision_time, rejection_stage, rejection_reason, bin_label{envelope_select}
                    FROM no_trade_regret_events
                    WHERE city=? AND target_date=? AND metric=?
                    ORDER BY decision_time DESC LIMIT 1""",
@@ -316,6 +320,20 @@ class Walker:
                 self.add("9 last_decision", "INFO",
                          f"[{row['decision_time']}] stage={row['rejection_stage']} "
                          f"reason={row['rejection_reason']} bin={row['bin_label']}")
+                # FULL provenance envelope — the operator's "一切可被溯源" query entry. Pretty-print
+                # (indented JSON, colon-free-safe) so every age / data-combination / settlement
+                # delta / FULL rejection reason for the latest decision is human-readable here.
+                envelope_text = row["envelope_json"] if "envelope_json" in cols else None
+                if envelope_text:
+                    try:
+                        from src.contracts.decision_provenance import pretty_envelope
+
+                        self.add("9 envelope", "INFO", "\n" + pretty_envelope(json.loads(envelope_text)))
+                    except Exception as exc:  # noqa: BLE001 — display-only; never fail the walk
+                        self.add("9 envelope", "WARN", f"envelope present but unrenderable: {exc}")
+                else:
+                    self.add("9 envelope", "WARN", "no provenance envelope on this receipt "
+                             "(legacy row predating the envelope, or builder fail-soft NULL)")
         finally:
             conn.close()
 

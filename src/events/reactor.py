@@ -171,6 +171,18 @@ class EventSubmissionReceipt:
     replacement_forecast: dict[str, Any] | None = None
     unit: str | None = None
     q_lcb_calibration_source: str | None = None
+    # Independently-materialized YES-bin posterior for the SAME settlement bin as
+    # this candidate (== yes_q from the q-vector; NEVER a 1-price / 1-q_no
+    # complement). It is the buy-NO conservative-evidence gate input: the ADAPTER
+    # gate (event_reactor_adapter.py) evaluates the gate WITH this value, then the
+    # post-submit receipt-level re-enforcement (_receipt_money_path_blocker) MUST
+    # see the SAME value — without this field the receipt-level gate defaulted the
+    # posterior to None and rejected every buy_no with
+    # ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING (Shanghai 32°C 2026-06-11,
+    # docs/evidence/settlement_guard/2026-06-11_yesq_wiring_plan.md). None on
+    # buy-YES / canonical / legacy receipts; omitted-when-None from receipt_json so
+    # those receipts keep byte-identical hashes.
+    same_bin_yes_posterior: float | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order
     # is SQL-reconstructable forecast(posterior_id) -> ... -> fill WITHOUT
     # JSON_EXTRACT. None on canonical/legacy receipts (observability only — these
@@ -195,6 +207,10 @@ class EventSubmissionReceipt:
     # legacy receipts (omit-when-None keeps existing hashes stable).
     rest_then_cross_policy: str | None = None
     rest_escalation_deadline_minutes: float | None = None
+    # DecisionProvenanceEnvelope (operator law 2026-06-11): the complete decision-time provenance
+    # blob (canonical JSON) for this no-submit decision. None on legacy receipts (omit-when-None
+    # from receipt_json keeps existing receipt_hash byte-stable). Observability only; never gates.
+    envelope_json: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
@@ -273,6 +289,7 @@ class OpportunityEventReactor:
         reject: Reject,
         config: ReactorConfig | None = None,
         regret_ledger: Any | None = None,
+        decision_provenance_hook: Any | None = None,
     ) -> None:
         self._store = store
         self._source_truth_gate = source_truth_gate
@@ -282,6 +299,13 @@ class OpportunityEventReactor:
         self._reject = reject
         self._config = config or ReactorConfig()
         self._regret_ledger = regret_ledger
+        # DecisionProvenanceEnvelope (operator law 2026-06-11): an OPTIONAL fail-soft accessor
+        # returning (bundle, forecast_conn) for the event being rejected, so the regret envelope
+        # can carry the full forecast data-combination + per-input ages. None => the envelope is
+        # still built from the world-DB snapshot + receipt economics + the FULL rejection reason
+        # (never less than that). Observability only; never gates. See
+        # docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md.
+        self._decision_provenance_hook = decision_provenance_hook
         self._family_logged: set[str] = set()
         from src.events.no_submit_receipts import EdliNoSubmitReceiptLedger
         from src.decision_kernel.compiler import DecisionCompiler
@@ -944,12 +968,16 @@ class OpportunityEventReactor:
             )
 
         payload = _payload_dict(event)
+        envelope_json = self._build_regret_envelope_json(
+            event, stage, reason, receipt=receipt, decision_time=decision_time, payload=payload
+        )
         self._regret_ledger.insert_idempotent(
             NoTradeRegretEvent(
                 event_id=event.event_id,
                 rejection_stage=stage,  # type: ignore[arg-type]
                 rejection_reason=reason,
                 regret_bucket=_regret_bucket_for(reason),  # type: ignore[arg-type]
+                envelope_json=envelope_json,
                 market_slug=payload.get("market_slug"),
                 condition_id=_receipt_or_payload(receipt, payload, "condition_id"),
                 token_id=_receipt_or_payload(receipt, payload, "token_id"),
@@ -979,6 +1007,86 @@ class OpportunityEventReactor:
                 executable_snapshot_id=_receipt_or_payload(receipt, payload, "executable_snapshot_id"),
             )
         )
+
+    def _build_regret_envelope_json(
+        self,
+        event: OpportunityEvent,
+        stage: str,
+        reason: str,
+        *,
+        receipt: EventSubmissionReceipt | None,
+        decision_time: datetime | None,
+        payload: dict[str, Any],
+    ) -> str | None:
+        """Fail-soft DecisionProvenanceEnvelope JSON for a rejection (operator law 2026-06-11).
+
+        NEVER raises and NEVER alters the decision — a build failure simply yields None and the
+        rejection still records its full reason in the typed columns. The envelope carries the
+        FULL rejection reason (untruncated), the decision economics, the world-DB executable book
+        snapshot, and — when the optional decision_provenance_hook supplies (bundle, forecast_conn)
+        — the complete forecast data-combination + per-input ages + time-to-settlement.
+        """
+        try:
+            from src.contracts.decision_provenance import (
+                build_decision_provenance_envelope,
+                envelope_to_json,
+            )
+
+            bundle = None
+            forecast_conn = None
+            if self._decision_provenance_hook is not None:
+                try:
+                    hook_result = self._decision_provenance_hook(event, receipt, decision_time)
+                    if hook_result is not None:
+                        bundle, forecast_conn = hook_result
+                except Exception:  # noqa: BLE001 — hook is best-effort, never fatal
+                    bundle, forecast_conn = None, None
+
+            snapshot_row = None
+            snapshot_id = _receipt_or_payload(receipt, payload, "executable_snapshot_id")
+            if snapshot_id:
+                try:
+                    saved = self._store.conn.row_factory
+                    self._store.conn.row_factory = sqlite3.Row
+                    try:
+                        snapshot_row = self._store.conn.execute(
+                            "SELECT snapshot_id, captured_at, orderbook_top_bid, orderbook_top_ask, "
+                            "market_end_at, condition_id FROM executable_market_snapshots "
+                            "WHERE snapshot_id = ?",
+                            (str(snapshot_id),),
+                        ).fetchone()
+                    finally:
+                        self._store.conn.row_factory = saved
+                except sqlite3.Error:
+                    snapshot_row = None
+
+            economics = {
+                "q_live": _receipt_or_payload(receipt, payload, "q_live"),
+                "q_lcb_5pct": _receipt_or_payload(receipt, payload, "q_lcb_5pct"),
+                "c_fee_adjusted": _receipt_or_payload(receipt, payload, "c_fee_adjusted"),
+                "trade_score": _receipt_or_payload(receipt, payload, "trade_score"),
+                "kelly_size_usd": getattr(receipt, "kelly_size_usd", None) if receipt is not None else None,
+            }
+            envelope = build_decision_provenance_envelope(
+                forecast_conn,
+                self._store.conn,
+                bundle=bundle,
+                decision_time=decision_time if decision_time is not None else datetime.now(UTC),
+                condition_id=_receipt_or_payload(receipt, payload, "condition_id"),
+                token_id=_receipt_or_payload(receipt, payload, "token_id"),
+                executable_snapshot_row=snapshot_row,
+                economics=economics,
+                direction=_receipt_or_payload(receipt, payload, "direction"),
+                mainstream=None,
+                rejection={"stage": stage, "reason": reason},
+                # city/target_date from the event payload so time-to-settlement is populated even
+                # for early-stage rejections (EVENT_FILTER / SOURCE_TRUTH) that have no bundle yet.
+                city=_receipt_or_payload(receipt, payload, "city"),
+                target_date=_receipt_or_payload(receipt, payload, "target_date"),
+            )
+            return envelope_to_json(envelope)
+        except Exception:  # noqa: BLE001 — provenance is observability; never fail a rejection write
+            return None
 
     def _log_family_once(self, event: OpportunityEvent) -> None:
         family_key = event.entity_key.rsplit("|", 1)[0]
@@ -1134,6 +1242,12 @@ def _receipt_money_path_blocker(
             q_lcb=receipt.q_lcb_5pct,
             execution_price=receipt.c_fee_adjusted,
             q_lcb_calibration_source=receipt.q_lcb_calibration_source,
+            # The same independently-materialized YES-bin posterior the ADAPTER gate
+            # evaluated against (proof.same_bin_yes_posterior). Carrying it on the
+            # receipt closes the proof->receipt input-loss that rejected every buy_no
+            # with ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING. NEVER a
+            # 1-price / 1-q_no complement — the field is the q-vector YES mass.
+            same_bin_yes_posterior=receipt.same_bin_yes_posterior,
         )
         if buy_no_conservative_reason is not None:
             return "TRADE_SCORE", buy_no_conservative_reason

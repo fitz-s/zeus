@@ -86,7 +86,8 @@ class EdliNoSubmitReceiptLedger:
                 mainstream_point, mainstream_delta, mainstream_bin_label,
                 mainstream_source, mainstream_fetched_at_utc,
                 alpha_gap,
-                posterior_id, probability_authority, q_lcb_calibration_source
+                posterior_id, probability_authority, q_lcb_calibration_source,
+                envelope_json
             ) VALUES (
                 :receipt_id, :event_id, :causal_snapshot_id, :decision_time,
                 :family_id, :candidate_id, :condition_id, :token_id, :direction,
@@ -99,7 +100,8 @@ class EdliNoSubmitReceiptLedger:
                 :mainstream_point, :mainstream_delta, :mainstream_bin_label,
                 :mainstream_source, :mainstream_fetched_at_utc,
                 :alpha_gap,
-                :posterior_id, :probability_authority, :q_lcb_calibration_source
+                :posterior_id, :probability_authority, :q_lcb_calibration_source,
+                :envelope_json
             )
             """,
             {
@@ -165,6 +167,10 @@ class EdliNoSubmitReceiptLedger:
                 "posterior_id": receipt.posterior_id,
                 "probability_authority": receipt.probability_authority,
                 "q_lcb_calibration_source": receipt.q_lcb_calibration_source,
+                # DecisionProvenanceEnvelope (operator law 2026-06-11): the complete decision-time
+                # provenance blob. NULL on legacy receipts; observability only — never gates and is
+                # omit-when-None in receipt_json so existing receipt_hash stays byte-stable.
+                "envelope_json": receipt.envelope_json,
             },
         )
         return receipt_id
@@ -241,6 +247,20 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload.pop("posterior_id", None)
     if payload.get("probability_authority") is None:
         payload.pop("probability_authority", None)
+    # same_bin_yes_posterior: omit when None so legacy / buy-YES / canonical receipts
+    # that never carried the YES-bin posterior keep byte-identical receipt_json (and
+    # therefore receipt_hash). Present (set) only on buy-NO receipts whose proof
+    # carried the materialized YES posterior — persisted so the gate input is
+    # recoverable from the blob too. Mirrors the alpha_gap / q_source / posterior_id
+    # omit-when-None pattern above.
+    if payload.get("same_bin_yes_posterior") is None:
+        payload.pop("same_bin_yes_posterior", None)
+    # DecisionProvenanceEnvelope (operator law 2026-06-11): omit when None so legacy / canonical
+    # receipts that never carried the envelope keep byte-identical receipt_json (and therefore
+    # receipt_hash). Present (set) only when the envelope was assembled; persisted so the full
+    # decision provenance is recoverable from the blob too. Mirrors the omit-when-None pattern.
+    if payload.get("envelope_json") is None:
+        payload.pop("envelope_json", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

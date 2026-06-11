@@ -661,6 +661,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/observability/status_summary.py",  # RO: status dashboard read-only
         "src/execution/exchange_reconcile.py",  # read_only_ro_uri: settled-external absorber reads canonical market_events (zeus-forecasts) mode=ro, short-lived, SELECT-only — docs/evidence/settlement_guard/2026-06-11_settled_external_absorber_plan.md
         "scripts/verify_e2e_money_path.py",  # read_only_ro_uri: e2e money-path walker opens every DB mode=ro, SELECT-only (operator-demanded full-chain diagnostic, 2026-06-11)
+        "scripts/query_decision_provenance.py",  # read_only_ro_uri: decision-provenance query opens zeus-world.db mode=ro, SELECT-only over regret/no_submit receipts — operator "一切可被溯源" query entry 2026-06-11 (docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md)
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
