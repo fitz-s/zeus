@@ -1,3 +1,7 @@
+# Last reused or audited: 2026-06-11 (K=1 STAGE 1: persist fresh JIT /book (R8) as a
+#   first-class JIT_PRESUBMIT executable_market_snapshots row before consume; flag
+#   edli_v1.k1_persist_presubmit_snapshot_enabled default OFF, fail-soft, dark-safe —
+#   docs/operations/k1_final_snapshot_authority_plan_2026-06-11.md §4)
 # Last reused or audited: 2026-06-10 (P0 mode-authority, operator review 2026-06-10):
 #   the FINAL command builder no longer re-selects maker/taker mode. The selected proof's
 #   PROVEN execution_mode_intent + maker_limit_price are first-class receipt fields that
@@ -178,7 +182,11 @@ from src.engine.replacement_forecast_reactor_hook import ReplacementForecastReac
 from src.data.replacement_forecast_refit_gate import ReplacementForecastRefitDecision
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastPromotionEvidence
 from src.data.replacement_forecast_runtime_policy import ReplacementForecastCapitalObjectiveEvidence
-from src.state.snapshot_repo import executable_snapshot_from_row, get_snapshot
+from src.state.snapshot_repo import (
+    executable_snapshot_from_row,
+    get_snapshot,
+    insert_snapshot,
+)
 from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
@@ -327,6 +335,141 @@ class PreSubmitAuthorityWitness:
     balance_allowance_checked_at: str
     checked_at: str | None = None
     max_quote_age_ms: int = 1000
+
+
+# K=1 STAGE 1 (docs/operations/k1_final_snapshot_authority_plan_2026-06-11.md §4):
+# the fresh submit-time JIT /book fetch (R8) is today ephemeral (witness only).
+# Stage 1 gives it a durable, first-class executable_market_snapshots identity so
+# the receipt can prove the economics it submitted under. Pure additive
+# persistence + provenance — ZERO behavior change (the witness ALSO still flows
+# through the existing R9-R15 path untouched). Gated by
+# edli_v1.k1_persist_presubmit_snapshot_enabled (default OFF => no write).
+JIT_PRESUBMIT_PROVENANCE_SOURCE = "JIT_PRESUBMIT"
+_K1_PERSIST_PRESUBMIT_FLAG = "k1_persist_presubmit_snapshot_enabled"
+# The fresh JIT book carries the SAME price freshness window as the elected DB
+# row's executable window: captured_at + the snapshot freshness window. We mirror
+# the elected row's own window rather than fabricate a new constant.
+_K1_DEFAULT_PRESUBMIT_FRESHNESS_SECONDS = 30.0
+
+
+def build_presubmit_snapshot_row(
+    elected_snapshot: ExecutableMarketSnapshot,
+    *,
+    witness: PreSubmitAuthorityWitness,
+    decision_time: datetime,
+    freshness_window_seconds: float | None = None,
+) -> ExecutableMarketSnapshot:
+    """Build the Stage-1 JIT-presubmit snapshot row (pure, no I/O).
+
+    Mirror minimally: the elected DB snapshot carries the full family identity
+    (gamma/event/condition/question/token map/fee details/hashes) — the JIT fetch
+    does NOT. We inherit that identity and overlay ONLY the fresh JIT book:
+    best_bid/best_ask, captured_at = the fetch instant (witness observation time),
+    a fresh immutable snapshot_id, and a provenance tag ``JIT_PRESUBMIT`` carried
+    in the tradeability_status provenance envelope (the schema has no dedicated
+    ``source`` column; ``authority_tier`` honestly says CLOB — a live /book read).
+
+    Fitz #4 (data provenance): captured_at is anchored to the fetch instant, NOT
+    the elected row's stale captured_at, and the provenance_source field makes the
+    row's lineage self-describing.
+    """
+
+    import hashlib
+
+    captured_at = decision_time.astimezone(timezone.utc)
+    window = (
+        float(freshness_window_seconds)
+        if freshness_window_seconds is not None
+        else _K1_DEFAULT_PRESUBMIT_FRESHNESS_SECONDS
+    )
+    freshness_deadline = captured_at + timedelta(seconds=max(0.0, window))
+
+    fresh_bid = Decimal(str(witness.current_best_bid))
+    fresh_ask = Decimal(str(witness.current_best_ask))
+
+    # raw_orderbook_hash must be a 64-char sha256 hex digest (contract invariant).
+    # The witness book_hash is the venue's opaque hash string; sha256 it together
+    # with the fresh top-of-book so the row's orderbook-lineage hash is a valid,
+    # deterministic digest of exactly the JIT book that was witnessed.
+    raw_orderbook_hash = hashlib.sha256(
+        f"{JIT_PRESUBMIT_PROVENANCE_SOURCE}|{witness.book_hash}|{fresh_bid}|{fresh_ask}".encode("utf-8")
+    ).hexdigest()
+
+    # New immutable identity — never collides with the elected row's snapshot_id.
+    snapshot_id = (
+        f"jitpresub-{elected_snapshot.snapshot_id}-"
+        f"{hashlib.sha256((str(captured_at.isoformat()) + raw_orderbook_hash).encode('utf-8')).hexdigest()[:16]}"
+    )
+
+    # Provenance envelope (Fitz #4): inherit the elected row's tradeability facts
+    # (the JIT fetch does not re-observe gamma/clob tradeability) and stamp the
+    # source so the row is self-describing. provenance_source round-trips through
+    # ExecutableTradeabilityStatus.from_mapping/to_json_dict; the book hash and
+    # fetch instant are already captured in raw_orderbook_hash / captured_at.
+    base_status = elected_snapshot.tradeability_status
+    status_payload = dict(base_status.to_json_dict()) if base_status is not None else {}
+    status_payload["provenance_source"] = JIT_PRESUBMIT_PROVENANCE_SOURCE
+
+    return dataclass_replace(
+        elected_snapshot,
+        snapshot_id=snapshot_id,
+        orderbook_top_bid=fresh_bid,
+        orderbook_top_ask=fresh_ask,
+        orderbook_depth_jsonb="{}",
+        raw_orderbook_hash=raw_orderbook_hash,
+        authority_tier="CLOB",
+        captured_at=captured_at,
+        freshness_deadline=freshness_deadline,
+        # depth/microstructure are not re-derived from the single top-of-book JIT
+        # fetch; reset to the neutral defaults rather than carry stale elected depth.
+        wide_spread_display_substitution=False,
+        depth_at_best_ask=0,
+        tradeability_status=status_payload,
+    )
+
+
+def persist_presubmit_jit_snapshot(
+    trade_conn: sqlite3.Connection | None,
+    elected_snapshot: ExecutableMarketSnapshot | None,
+    *,
+    witness: PreSubmitAuthorityWitness,
+    decision_time: datetime,
+    enabled: bool,
+) -> str | None:
+    """Persist exactly ONE JIT-presubmit snapshot row, fail-soft and flag-gated.
+
+    Returns the new snapshot_id on a successful write, or ``None`` when the flag is
+    OFF, inputs are missing, or the write fails. A failed persist MUST NEVER block
+    or delay the submit (§4 Stage 1 fail-soft): the persist is observability /
+    Stage-2 substrate, not a gate.
+
+    §5.2 SQLite discipline: the JIT /book fetch [NET] has ALREADY happened by the
+    time this is called (the witness is built from it); this only opens the
+    short-lived zeus_trades write + commit. The trade WAL lock is never held across
+    the network fetch. The write targets zeus_trades (executable_market_snapshots),
+    NOT zeus-world — the #95 world-mutex law is untouched.
+    """
+
+    if not enabled:
+        return None
+    if trade_conn is None or elected_snapshot is None:
+        return None
+    try:
+        row = build_presubmit_snapshot_row(
+            elected_snapshot,
+            witness=witness,
+            decision_time=decision_time,
+        )
+        insert_snapshot(trade_conn, row)
+        trade_conn.commit()
+        return row.snapshot_id
+    except Exception as exc:  # noqa: BLE001 - fail-soft: persistence must never block submit
+        import logging as _logging
+
+        _logging.getLogger(__name__).warning(
+            "K1 Stage 1 presubmit snapshot persist failed (non-blocking): %s", exc
+        )
+        return None
 
 
 class _LiveOpportunityAlreadyLocked(RuntimeError):
@@ -3298,6 +3441,35 @@ def _build_live_execution_command_certificates(
         )
         fresh_best_bid = float(authority_witness.current_best_bid)
         fresh_best_ask = float(authority_witness.current_best_ask)
+        # K=1 STAGE 1 (k1_final_snapshot_authority_plan_2026-06-11.md §4): persist the
+        # fresh submit-time JIT book (R8 — already fetched [NET] above, inside the
+        # witness provider) as ONE first-class executable_market_snapshots row tagged
+        # source=JIT_PRESUBMIT, BEFORE it is consumed below. Pure additive persistence
+        # + provenance; the witness STILL flows through the existing R9-R15 path
+        # untouched. Gated by edli_v1.k1_persist_presubmit_snapshot_enabled (default
+        # OFF => no write, byte-identical). Fail-soft: a failed persist never blocks
+        # submit. §5.2 SQLite discipline: the [NET] fetch is done; this opens a
+        # short-lived zeus_trades write+commit only — the trade WAL lock is never held
+        # across the fetch, and zeus-world (#95 mutex) is untouched.
+        if bool(settings["edli_v1"].get(_K1_PERSIST_PRESUBMIT_FLAG, False)) and trade_conn is not None:
+            _k1_elected_id = str(
+                executable_snapshot.payload.get("identity")
+                or executable_snapshot.payload.get("selected_snapshot_id")
+                or ""
+            )
+            _k1_elected_snapshot = None
+            if _k1_elected_id:
+                try:
+                    _k1_elected_snapshot = get_snapshot(trade_conn, _k1_elected_id)
+                except Exception:  # noqa: BLE001 - fail-soft: never block submit on a read
+                    _k1_elected_snapshot = None
+            persist_presubmit_jit_snapshot(
+                trade_conn,
+                _k1_elected_snapshot,
+                witness=authority_witness,
+                decision_time=decision_time,
+                enabled=True,
+            )
         best_bid = _optional_float(quote_payload.get("best_bid"))
         best_ask = _optional_float(quote_payload.get("best_ask"))
         # P0 mode-authority (operator review 2026-06-10, fix requirement #1+#2): the
