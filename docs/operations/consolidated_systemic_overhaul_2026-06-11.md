@@ -366,3 +366,28 @@ activates the instant the provider publishes, via whichever transport serves fir
 REMAINING for full independence: ECMWF-direct 0.25 anchor SHADOW lineage (new
 data_version + calibration, operator-gated promotion) — the only path that survives a
 total open-meteo outage. 20 relationship tests; zero regressions vs HEAD baseline.
+
+## OPERATOR DIRECTIVES 2026-06-11 ~05:00Z (cycle policy + acquisition)
+1. LIVE CYCLES = 00Z + 12Z ONLY (standing; the cycle-phase gate already enforces).
+2. 06/18Z qualification = DEEP OFFLINE INVESTIGATION, explicitly NOT live shadow-wiring
+   ("不要再shadow验证…极易导致接线断裂"). Method (K4.0b-g): BACKFILL the last ~4 days of
+   06/18Z raw inputs — AIFS from ECMWF mirror retention (azure/ecmwf/aws hold recent past
+   cycles), anchors from single-runs (measured tonight: serves runs ≥~22h old, i.e. it IS
+   the backfill transport; meta-stamped standard API is the current-run transport — the
+   two compose with zero new suppliers). Materialize via the replay/backtest path (NOT the
+   live materializer), settlement-grade 06/18Z vs same-day 00/12Z on identical
+   family-days: coverage of certified bounds, LogLoss, per-bin win-rate, de-bias residual
+   distribution by cycle phase. Verdict gates any future 06/18Z live admission; operator
+   decides on the evidence. No live pipeline file is touched by the study.
+3. Anchor acquisition redundancy ("镜像把最新数据拿出来"): rung-3 design = ECMWF open data
+   HRES direct (operator: feed is now 0.1°, not 0.25°) from the three mirrors, point
+   extraction at city coords, 3-hourly steps. Activates ONLY when a MAIN cycle's anchor is
+   unavailable from open-meteo; basis delta (3h sampling vs hourly; raw gridpoint vs
+   elevation-interpolated) is ≤~0.5°C, which is ~1/6 of the anchor's OWN declared sigma
+   (3.0°C soft anchor) — materially within the chain's stated uncertainty, hence lawful
+   without a shadow lineage; provenance carries anchor_basis + the existing cross-check
+   antibody extends to compare rung-3 vs open-meteo same-cycle on recovery. Grid caveats
+   for implementation: product_id strings "ecmwf_opendata_ifs_ens_0p25" are identity
+   labels that must NOT be blindly renamed (provenance identities, version-suffix law);
+   the 0.1 feed's nearest-gridpoint distances differ from 0.25 history — extraction must
+   pin the grid explicitly and record it.
