@@ -11,7 +11,12 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 #   dead-letter only for junk run identity (twin-authority #8, 16:33:51Z six-city
 #   incident); (b) price-race aborts (SUBMIT_ABORTED_PRICE_MOVED, would_cross_book
 #   certificate failure) classify TRANSIENT → bounded requeue (Miami/NYC 16:22Z);
-#   (c) pre-event cycle-budget check caps overrun to one in-flight event.
+#   (c) pre-event cycle-budget check caps overrun to one in-flight event;
+#   (d) claim-storm kill (17:51Z): Window A BEGIN IMMEDIATE (busy handler engaged
+#   deterministically, BUSY_SNAPSHOT category closed), lock-bounce rollback +
+#   claim_lock_bounces visibility, pre-fetch dangling-txn guard. Root cause was
+#   main._edli_pending_entity_keys leaking PRAGMA busy_timeout=250 onto the
+#   shared claim conn (now save/restore-scoped).
 # Prior: #95 SEV-2.1 — world_write_mutex MUST NOT be held across the
 #   injected submit callable's network I/O (JIT /book HTTP fetch + venue order
 #   POST). _process_event_unit split into two committed world-DB write windows
@@ -285,6 +290,11 @@ class ReactorResult:
     proof_accepted: int = 0
     dead_lettered: int = 0
     retried: int = 0
+    # VISIBILITY (2026-06-11 claim-storm incident): claim() lock bounces were
+    # silently folded into ``retried`` — a 0/250 storm cycle was indistinguishable
+    # from 250 honest snapshot-pending retries (reasons=[]). Counted separately so
+    # the status pulse / logs expose lock contention as lock contention.
+    claim_lock_bounces: int = 0
     rejection_reasons: list[str] = field(default_factory=list)
 
     @property
@@ -349,6 +359,22 @@ class OpportunityEventReactor:
             # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
             # taken under the world-DB write mutex.  limit=None means drain the current
             # admissible queue in batches; the batch size is pagination, not a total cap.
+            #
+            # STALE-SNAPSHOT GUARD (2026-06-11 claim-storm): the read must NEVER run
+            # inside a dangling write txn on this conn — that pins a read snapshot
+            # that any concurrent writer's commit turns stale, after which every
+            # claim() UPDATE fails SQLITE_BUSY_SNAPSHOT instantly (busy handler
+            # bypassed). The claim lock-bounce path now rolls back, but this guard
+            # makes the CATEGORY impossible for any future path that leaks a txn.
+            if getattr(self._store.conn, "in_transaction", False):
+                with contextlib.suppress(Exception):
+                    self._store.conn.rollback()
+                import logging as _logging
+
+                _logging.getLogger("zeus.events.reactor").warning(
+                    "reactor: rolled back dangling world txn before fetch_pending "
+                    "(stale-snapshot guard)"
+                )
             request_limit = batch_limit if remaining is None else min(batch_limit, remaining)
             events = self._store.fetch_pending(
                 decision_time=decision_time.astimezone(UTC).isoformat(),
@@ -421,10 +447,40 @@ class OpportunityEventReactor:
         should_submit = False
         try:
             try:
+                # CLAIM-STORM FIX (2026-06-11 17:51Z): acquire the WAL write lock
+                # DETERMINISTICALLY with BEGIN IMMEDIATE (full busy_timeout engaged
+                # at BEGIN) instead of letting claim()'s UPDATE upgrade lazily.
+                # A lazily-upgraded txn whose snapshot predates another writer's
+                # commit fails SQLITE_BUSY_SNAPSHOT IMMEDIATELY — the busy handler
+                # never engages for snapshot-upgrade conflicts — which is how one
+                # bounced claim poisoned every later claim in the cycle. Mirrors
+                # Window B's BEGIN IMMEDIATE discipline (line ~497).
+                if not self._store.conn.in_transaction:
+                    self._store.conn.execute("BEGIN IMMEDIATE")
                 claimed = self._store.claim(event.event_id, claimed_at=decision_time.astimezone(UTC).isoformat())
             except Exception as exc:
                 if _is_sqlite_lock_error(exc):
+                    # CLAIM-STORM FIX (storm amplifier): ALWAYS roll back. The old
+                    # path returned with the implicit txn left OPEN on the store
+                    # conn; the next fetch_pending then read INSIDE that dangling
+                    # txn, pinning a stale snapshot, and every subsequent claim
+                    # failed BUSY_SNAPSHOT instantly => the whole-cycle 0/250
+                    # bounce storm. Rollback resets the conn so the next event
+                    # starts a fresh txn under the full busy handler.
+                    _was_in_txn = bool(getattr(self._store.conn, "in_transaction", False))
+                    with contextlib.suppress(Exception):
+                        self._store.conn.rollback()
+                    result.claim_lock_bounces += 1
                     result.retried += 1
+                    import logging as _logging
+
+                    _logging.getLogger("zeus.events.reactor").warning(
+                        "reactor claim lock-bounce event_id=%s txn_open_at_bounce=%s exc=%s "
+                        "(rolled back; event stays pending; counted in claim_lock_bounces)",
+                        event.event_id,
+                        _was_in_txn,
+                        exc,
+                    )
                     return
                 raise
             if not claimed:

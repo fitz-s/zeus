@@ -5971,8 +5971,10 @@ def _edli_event_reactor_cycle() -> None:
                 exc_info=True,
             )
         logger.info(
-            "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d reasons=%r",
-            _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered, _rr.rejection_reasons[:8],
+            "EDLI reactor cycle result: processed=%d proof_accepted=%d rejected=%d retried=%d dead=%d "
+            "claim_lock_bounces=%d reasons=%r",
+            _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered,
+            getattr(_rr, "claim_lock_bounces", 0), _rr.rejection_reasons[:8],
         )
         conn.commit()
     finally:
@@ -6488,25 +6490,49 @@ def _edli_pending_entity_keys(world_conn) -> set[str]:
 
     Passed as ``already_pending_keys`` to the continuous re-decision emit so families with a
     re-decision event already queued are not re-emitted (bounds the pending queue; the rate
-    self-regulates to families the reactor has already drained)."""
+    self-regulates to families the reactor has already drained).
+
+    CLAIM-STORM ROOT CAUSE (2026-06-11 17:51Z incident): this helper used to run
+    ``PRAGMA busy_timeout = 250`` on ``world_conn`` WITHOUT RESTORING IT. PRAGMA
+    busy_timeout is CONNECTION-WIDE and PERMANENT — and ``world_conn`` here is the
+    SAME connection the EventStore wraps for the reactor's ``claim()`` writes. One
+    cycle after the first emit pass, every claim on the shared conn waited at most
+    250 ms (instead of the configured 30 s) before raising "database is locked":
+    measured live as 44-250 claim bounces per cycle (processed=0 retried=250)
+    whenever any of the in-process world writers (collateral/venue heartbeat 2 s,
+    market-channel ingestor, wrap reconciler 30 s, user-channel reconcile 60 s)
+    overlapped a 250 ms window. The downgrade is now SCOPED: saved, applied for
+    this single WAL read only, and restored in ``finally`` — a read helper's
+    defensive timeout must never leak into the shared connection's WRITE path.
+    """
+    saved_busy_timeout_ms: int | None = None
     try:
         try:
+            row = world_conn.execute("PRAGMA busy_timeout").fetchone()
+            saved_busy_timeout_ms = int(row[0]) if row is not None else None
             world_conn.execute("PRAGMA busy_timeout = 250")
         except Exception:  # noqa: BLE001
-            pass
-        rows = world_conn.execute(
+            saved_busy_timeout_ms = None
+        try:
+            rows = world_conn.execute(
+                """
+                SELECT DISTINCT e.entity_key
+                FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+                JOIN opportunity_events e ON e.event_id = p.event_id
+                WHERE p.consumer_name = 'edli_reactor_v1'
+                  AND p.processing_status IN ('pending', 'processing', 'claimed')
+                  AND e.event_type = 'FORECAST_SNAPSHOT_READY'
             """
-            SELECT DISTINCT e.entity_key
-            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
-            JOIN opportunity_events e ON e.event_id = p.event_id
-            WHERE p.consumer_name = 'edli_reactor_v1'
-              AND p.processing_status IN ('pending', 'processing', 'claimed')
-              AND e.event_type = 'FORECAST_SNAPSHOT_READY'
-        """
-        ).fetchall()
-    except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
-        return set()
-    return {str(r[0]) for r in rows}
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — fail-open: no skip set (cap still bounds)
+            return set()
+        return {str(r[0]) for r in rows}
+    finally:
+        if saved_busy_timeout_ms is not None:
+            try:
+                world_conn.execute("PRAGMA busy_timeout = %d" % saved_busy_timeout_ms)
+            except Exception:  # noqa: BLE001 — restore best-effort; next get_world_connection reapplies
+                pass
 
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
