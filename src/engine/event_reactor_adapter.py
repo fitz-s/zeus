@@ -6393,6 +6393,15 @@ def _generate_candidate_proofs(
         q_by_condition=q_by_condition,
         probability_evidence=probability_evidence,
     )
+    # Doctrine buy_no half (operator standing law, restored 2026-06-11): the only
+    # bin banned for buy_no is the FORECAST BIN — where the canonically-rounded
+    # center settles. Rounding is the per-city settlement preimage (#24 K-cut;
+    # HKO truncation differs from WMO half-up), resolved ONCE per family here and
+    # threaded to every candidate check. None on failure -> the pure module falls
+    # back to the contract's WMO half-up default.
+    direction_law_mu_settled = _direction_law_mu_settled_for_family(
+        family=family, mu=direction_law_mu
+    )
     # K4.0 REST-THEN-CROSS family-level inputs, computed ONCE per family:
     # event-end distance (None -> rest, conservative), and the family rest state
     # from venue truth (open rest -> HOLD antibody; expired-unfilled rest ->
@@ -6567,6 +6576,7 @@ def _generate_candidate_proofs(
                 direction=direction,
                 mu=direction_law_mu,
                 predictive_sigma=direction_law_sigma,
+                mu_settled=direction_law_mu_settled,
             )
             if direction_law_reason is not None:
                 score = 0.0
@@ -6985,6 +6995,7 @@ def _direction_law_reason_for_candidate(
     direction: str,
     mu: float | None,
     predictive_sigma: float | None,
+    mu_settled: float | None = None,
 ) -> str | None:
     """Per-candidate direction-law verdict (FIX A). None = admissible.
 
@@ -7004,7 +7015,33 @@ def _direction_law_reason_for_candidate(
         bin_unit=str(bin_obj.unit),
         mu=mu,
         predictive_sigma=predictive_sigma,
+        mu_settled=mu_settled,
     )
+
+
+def _direction_law_mu_settled_for_family(*, family, mu: float | None) -> float | None:
+    """Canonical per-city settlement rounding of the family center, in bin unit.
+
+    The per-city preimage contract (#24 K-cut; SettlementSemantics.for_city) owns
+    the rounding rule — WMO half-up for standard cities, HKO/UMA truncation for
+    Hong Kong, etc. ``mu`` arrives ALREADY converted to the family bin unit by
+    ``_direction_law_family_center``, and a city's settlement measurement_unit is
+    that same bin unit, so the rounding is applied directly. Fail-soft None: the
+    pure direction-law module then falls back to the contract's WMO half-up
+    default (correct for every non-truncation city).
+    """
+    if mu is None:
+        return None
+    try:
+        from src.contracts.settlement_semantics import SettlementSemantics
+
+        city_obj = runtime_cities_by_name().get(family.city)
+        if city_obj is None:
+            return None
+        semantics = SettlementSemantics.for_city(city_obj)
+        return float(semantics.round_values([float(mu)])[0])
+    except Exception:  # noqa: BLE001 — fail-soft; pure-module WMO default applies
+        return None
 
 
 def _per_bin_yes_q_lcb(

@@ -235,3 +235,118 @@ class TestDistanceAndUnits:
             )
             is not None
         )
+
+
+class TestBuyNoDoctrineHalf:
+    """Operator standing law restored 2026-06-11: buy_no ⟺ bin≠forecast.
+
+    The ONLY banned bin for buy_no is the FORECAST BIN — the bin the canonically
+    rounded center settles into (grade_receipt symmetry: the one bin where buy_no
+    loses if the forecast settles exactly). The σ-distance over-implementation
+    banned every adjacent bin and structurally zeroed the favorite-longshot
+    harvest (live incident: 18 cities' positive-EV adjacent-bin NO candidates,
+    +0.14..+0.40 ev/$, all killed while coverage-LICENSED — 2026-06-11 16:07Z).
+    """
+
+    def test_moscow_adjacent_bin_buy_no_admitted(self):
+        # Live incident replay: mu=30.795 settles 31; the 30C bin is NOT the
+        # forecast bin -> buy_no admissible regardless of sigma.
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_no",
+                bin_low=30.0,
+                bin_high=30.0,
+                bin_unit="C",
+                mu=30.7950,
+                predictive_sigma=1.9102,
+            )
+            is None
+        )
+
+    def test_moscow_forecast_bin_buy_no_rejected(self):
+        # mu=30.795 settles 31 -> the 31C bin IS the forecast bin -> banned.
+        reason = direction_law_rejection_reason(
+            direction="buy_no",
+            bin_low=31.0,
+            bin_high=31.0,
+            bin_unit="C",
+            mu=30.7950,
+            predictive_sigma=1.9102,
+        )
+        assert reason is not None and "forecast_bin" in reason
+
+    def test_fahrenheit_range_bin_rounding(self):
+        # Atlanta replay: mu_F=93.5186 settles 94 (WMO half-up) -> the 92-93 bin
+        # is NOT the forecast bin (admitted); the 94-95 bin IS (banned).
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_no",
+                bin_low=92.0,
+                bin_high=93.0,
+                bin_unit="F",
+                mu=93.5186,
+                predictive_sigma=1.8287,
+            )
+            is None
+        )
+        reason = direction_law_rejection_reason(
+            direction="buy_no",
+            bin_low=94.0,
+            bin_high=95.0,
+            bin_unit="F",
+            mu=93.5186,
+            predictive_sigma=1.8287,
+        )
+        assert reason is not None and "forecast_bin" in reason
+
+    def test_caller_supplied_truncation_preimage_wins(self):
+        # Hong Kong class (HKO/UMA truncation): mu=30.795 truncates to 30 — the
+        # caller passes the per-city mu_settled and the 30C bin becomes the
+        # forecast bin (banned) while 31C is admissible: the OPPOSITE of WMO.
+        reason = direction_law_rejection_reason(
+            direction="buy_no",
+            bin_low=30.0,
+            bin_high=30.0,
+            bin_unit="C",
+            mu=30.7950,
+            predictive_sigma=1.5,
+            mu_settled=30.0,
+        )
+        assert reason is not None and "forecast_bin" in reason
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_no",
+                bin_low=31.0,
+                bin_high=31.0,
+                bin_unit="C",
+                mu=30.7950,
+                predictive_sigma=1.5,
+                mu_settled=30.0,
+            )
+            is None
+        )
+
+    def test_open_ended_forecast_bin_still_banned(self):
+        # "31C or higher" with mu settling 31 -> the open tail bin IS the
+        # forecast bin -> buy_no banned (unchanged protective behavior).
+        reason = direction_law_rejection_reason(
+            direction="buy_no",
+            bin_low=31.0,
+            bin_high=None,
+            bin_unit="C",
+            mu=31.2,
+            predictive_sigma=2.0,
+        )
+        assert reason is not None and "forecast_bin" in reason
+
+    def test_buy_yes_half_byte_identical(self):
+        # Milan killer untouched: far buy_yes still rejected on the sigma band.
+        reason = direction_law_rejection_reason(
+            direction="buy_yes",
+            bin_low=24.0,
+            bin_high=24.0,
+            bin_unit="C",
+            mu=INCIDENT_MU_C,
+            predictive_sigma=INCIDENT_SIGMA_C,
+        )
+        assert reason is not None and "buy_yes" in reason

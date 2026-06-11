@@ -14,9 +14,21 @@ direction law is the structural cut that survives any q_lcb pathology: a buy_yes
 whose bin is far from our own posterior center contradicts our own belief and is
 rejected DETERMINISTICALLY, before ranking, FDR, sizing, or execution.
 
-Law (operator doctrine, both halves):
+Law (operator doctrine, both halves; buy_no half restored to the doctrine's own
+words on 2026-06-11 — operator standing law "buy_yes ⟺ bin≈forecast; buy_no ⟺
+bin≠forecast" — after the σ-distance over-implementation banned every adjacent-bin
+NO and structurally zeroed the favorite-longshot harvest):
   buy_yes admissible  iff  distance(bin, mu*) <= T
-  buy_no  admissible  iff  distance(bin, mu*) >  T
+  buy_no  admissible  iff  the bin is NOT the forecast bin — i.e. settled(mu*)
+                           (the canonical per-city settlement rounding of the
+                           fused center) does NOT land inside [low, high].
+                           This mirrors grade_receipt exactly: buy_no WINS iff
+                           settled_bin != traded_bin, so the ONLY bin banned is
+                           the one that LOSES if our own forecast settles exactly.
+                           Center uncertainty is priced by q_lcb (a conservative
+                           lower bound), the material-YES conservative-evidence
+                           gate, and the settlement-coverage license — belief
+                           gates, where it belongs; not by a geometry ban.
   T = max(1 x settlement_step, k x predictive_sigma)   (k conservative, default 1.0)
 
 distance(bin, mu*) = 0 when mu* lies inside [low, high]; otherwise the distance to
@@ -123,6 +135,7 @@ def direction_law_rejection_reason(
     mu: float | None,
     predictive_sigma: float | None,
     sigma_k: float = DIRECTION_LAW_SIGMA_K,
+    mu_settled: float | None = None,
 ) -> str | None:
     """Return the deterministic rejection reason, or None when admissible.
 
@@ -132,6 +145,12 @@ def direction_law_rejection_reason(
     the incident category) and fail-OPEN for buy_no (the legacy buy_no surface
     must not be broken by a missing center; its own conservative-evidence and
     capital-efficiency gates still apply).
+
+    ``mu_settled`` is the canonical per-city settlement rounding of ``mu`` in the
+    bin unit (SettlementSemantics.for_city(...).round_values — the per-city
+    preimage contract handles HKO truncation etc.). When the caller cannot supply
+    it, the WMO half-up default from the settlement-semantics contract is applied
+    here (single authority: the formula is imported, never re-derived).
     """
     if direction not in ("buy_yes", "buy_no"):
         return None
@@ -148,9 +167,26 @@ def direction_law_rejection_reason(
             f"{DIRECTION_LAW_REASON}:direction=buy_yes:"
             f"distance={distance:.4f}:threshold={threshold:.4f}:mu={float(mu):.4f}"
         )
-    if direction == "buy_no" and distance <= threshold:
-        return (
-            f"{DIRECTION_LAW_REASON}:direction=buy_no:"
-            f"distance={distance:.4f}:threshold={threshold:.4f}:mu={float(mu):.4f}"
+    if direction == "buy_no":
+        # Doctrine half (operator standing law): buy_no ⟺ bin≠forecast. The ONLY
+        # banned bin is the FORECAST BIN — the bin the canonically-rounded center
+        # settles into (grade_receipt symmetry: that is the one bin where buy_no
+        # LOSES if our own forecast settles exactly). Adjacent bins are admissible;
+        # their residual YES mass is policed by q_lcb + the material-YES
+        # conservative-evidence gate + the settlement-coverage license.
+        if mu_settled is not None and math.isfinite(float(mu_settled)):
+            settled = float(mu_settled)
+        else:
+            from src.contracts.settlement_semantics import round_wmo_half_up_value
+
+            settled = round_wmo_half_up_value(float(mu))
+        settled_distance = bin_forecast_distance(
+            bin_low=bin_low, bin_high=bin_high, mu=settled
         )
+        if settled_distance == 0.0:
+            return (
+                f"{DIRECTION_LAW_REASON}:direction=buy_no:"
+                f"forecast_bin:mu={float(mu):.4f}:mu_settled={settled:.4f}:"
+                f"bin=[{bin_low},{bin_high}]"
+            )
     return None
