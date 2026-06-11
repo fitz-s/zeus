@@ -212,6 +212,32 @@ Authority: src/contracts/time_semantics.py registry (21 entries, 13 relations, 1
      - Maker fee bonus cited: maker pays zero taker fee -> saves spread (~4.0%
        notional measured) PLUS fee (1.0-2.5% at our band) per avoided cross.
      - DEFERRED: hazard-curve/lambda auto-recal from escalation receipts (K4.3).]
+4.0b **[RULE-1 ROOT CAUSE 2026-06-11 ~03:20Z — freshness-cadence structure]** The overnight
+    no-trade window decoded end-to-end: live-eligible refresh = MAIN cycles only (00/12Z;
+    operator cycle-physics directive keeps 06/18Z shadow-only — honest gate, untouched).
+    Each main cycle gets ONE download fire (cron (cycle+14h)%24 :10) with NO per-leg retry;
+    2026-06-10 12Z's anchor leg 400'd at the provider (open-meteo single-runs had not
+    published the run) ⇒ the 02:10Z fire was 12Z's only shot ⇒ next live-eligible data =
+    06-11 00Z at the 14:10Z cron ⇒ a structural ~12h zero-refresh window while books moved.
+    Items (no gate weakening anywhere):
+    a) ANCHOR-RETRY ORGAN: when a main cycle's anchor leg is unavailable, poll availability
+       (30-60min) and complete the cycle's instrument set on arrival, until superseded by
+       the next cycle. (Stopgap tonight: session watcher re-runs the sanctioned downloader
+       on first 200; build the daemon job + tests.)
+    b) RELEASE-LAG MEASUREMENT (K4-class): download_release_lag_hours=14 is a GUESS costing
+       ~5-6h freshness per cycle (AIFS-ENS publishes ~+8h). Measure per-leg publication
+       lags (AIFS opendata; open-meteo single-runs) into the time registry, then propose
+       the per-leg lag schedule to the operator (settings = operator domain).
+    c) LIVENESS THRESHOLDS FROM REGISTRY (K5.1 sharpening): verify_pipeline_liveness's flat
+       ≤8h artifact bound reported PIPELINE_ALIVE through a 6.5h substrate freeze.
+       Per-stage bounds derive from the time registry (download ≤ cycle+lag+1h; posterior
+       ≤ download+1h); breach ⇒ push notification, not a log line.
+    d) CROSS-PHASE DE-BIAS EVIDENCE (the real unlock for 06/18Z): fit per-cycle-phase
+       walk-forward bias corrections + settlement-graded validation so intermediate cycles
+       can EARN live admission. Promotion = operator decision on evidence; until then the
+       cycle-phase gate stands.
+    e) Cycle→tradeable-posterior latency becomes a standing measured metric (06Z set
+       materialized ~21h after cycle tonight; target ≤ lag+1h) in the K5.2 daily funnel.
 4.1 For each basis=guess entry: build the measurement (from existing telemetry where possible)
     and replace guess→measured with the evidence recorded in the registry. Priority: maker
     p_fill by distance-from-touch (fill_tracker resting facts; auto-recalibration trigger at

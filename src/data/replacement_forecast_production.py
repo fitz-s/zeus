@@ -294,6 +294,153 @@ def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str
         return {"status": "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
+def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | None:
+    """Per-leg high-water mark of downloaded raw-input cycles (None = unknown → fetch).
+
+    Same fail-open contract as _max_downloaded_current_target_cycle, but for ONE leg, so
+    the availability poll can complete a cycle leg-by-leg as the provider publishes
+    (2026-06-10 incident: AIFS 12Z published hours before the open-meteo 12Z anchor;
+    the one-shot whole-cycle download could only fail the pair together)."""
+    from src.state.db import _connect  # noqa: PLC0415
+
+    try:
+        conn = _connect(Path(forecast_db))
+        try:
+            row = conn.execute(
+                "SELECT MAX(source_cycle_time) FROM raw_forecast_artifacts"
+                " WHERE source_id = ?",
+                (source_id,),
+            ).fetchone()
+            if row is None or row[0] is None:
+                return None
+            return datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
+    """PROBE-RESOLVED raw-input fetch (operator directive 2026-06-11: automatic, ahead of
+    need, no guessed numbers — K4.0b(a) availability-poll organ).
+
+    Every poll tick:
+      1. Resolve per-leg published state of the recent cycles by PROBING the providers
+         (src/data/replacement_cycle_availability.py). The release-lag constant takes NO
+         part in this decision; it remains only the legacy cron's backstop schedule.
+      2. Fetch any published leg the journal does not yet hold, newest cycle first —
+         per leg, so one provider lagging (the 12Z-anchor case) never delays the other.
+    Idempotent: per-leg high-water marks short-circuit; the underlying downloader also
+    skips already-present manifests. Fail-soft per leg: a failed leg is retried on the
+    next tick. Returns a compact report dict (None when the feature flag is off)."""
+    if not bool(cfg.get("download_current_targets_enabled", False)):
+        return None
+    forecast_db = cfg.get("forecast_db")
+    output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
+    if forecast_db is None or output_dir is None:
+        return None
+    from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+        download_current_target_raw_inputs,
+    )
+    from src.data.replacement_cycle_availability import (  # noqa: PLC0415
+        newest_complete_cycle,
+        probe_aifs_cycle_available,
+        probe_openmeteo_single_run_available,
+        resolve_cycle_leg_availability,
+    )
+
+    now = datetime.now(timezone.utc)
+    availability = resolve_cycle_leg_availability(
+        now,
+        probe_aifs=probe_aifs_cycle_available,
+        probe_anchor=probe_openmeteo_single_run_available,
+    )
+    aifs_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "ecmwf_aifs_ens")
+    anchor_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "openmeteo_ecmwf_ifs_9km")
+    newest_aifs_published = next((a.cycle for a in availability if a.aifs_available), None)
+    newest_anchor_published = next((a.cycle for a in availability if a.anchor_available), None)
+
+    fetch_aifs_cycle = (
+        newest_aifs_published
+        if newest_aifs_published is not None
+        and (aifs_have is None or newest_aifs_published > aifs_have)
+        else None
+    )
+    fetch_anchor_cycle = (
+        newest_anchor_published
+        if newest_anchor_published is not None
+        and (anchor_have is None or newest_anchor_published > anchor_have)
+        else None
+    )
+    report: dict[str, object] = {
+        "status": "AVAILABILITY_POLL",
+        "now": now.isoformat(),
+        "newest_aifs_published": newest_aifs_published.isoformat() if newest_aifs_published else None,
+        "newest_anchor_published": newest_anchor_published.isoformat() if newest_anchor_published else None,
+        "newest_complete_published": (
+            newest_complete_cycle(availability).isoformat()
+            if newest_complete_cycle(availability)
+            else None
+        ),
+        "aifs_downloaded_cycle": aifs_have.isoformat() if aifs_have else None,
+        "anchor_downloaded_cycle": anchor_have.isoformat() if anchor_have else None,
+        "legs_fetched": [],
+    }
+    if fetch_aifs_cycle is None and fetch_anchor_cycle is None:
+        report["status"] = "AVAILABILITY_POLL_CURRENT"
+        return report
+    for leg, cycle, skip_aifs, skip_openmeteo in (
+        ("aifs", fetch_aifs_cycle, False, True),
+        ("anchor", fetch_anchor_cycle, True, False),
+    ):
+        if cycle is None:
+            continue
+        try:
+            download_current_target_raw_inputs(
+                forecast_db=Path(str(forecast_db)),
+                output_dir=Path(str(output_dir)),
+                cycle=cycle,
+                limit=int(cfg.get("download_limit") or 10),
+                write_db=True,
+                skip_aifs=skip_aifs,
+                skip_openmeteo=skip_openmeteo,
+                release_lag_hours=float(cfg.get("download_release_lag_hours") or 14.0),
+                anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
+                aifs_retries=int(cfg.get("download_aifs_retries") or 4),
+                include_covered=True,
+            )
+            report["legs_fetched"].append({"leg": leg, "cycle": cycle.isoformat()})  # type: ignore[union-attr]
+        except Exception as exc:  # noqa: BLE001 — per-leg fail-soft; next tick retries
+            logger.warning(
+                "availability-poll %s leg fetch failed for cycle %s (retry next tick): %s",
+                leg,
+                cycle.isoformat(),
+                exc,
+            )
+            report.setdefault("legs_failed", []).append(  # type: ignore[union-attr]
+                {"leg": leg, "cycle": cycle.isoformat(), "error": str(exc)[:200]}
+            )
+    return report
+
+
+@_scheduler_job("replacement_cycle_availability_poll")
+def _replacement_cycle_availability_poll() -> None:
+    """Interval job: probe provider publication state and fetch fresh raw-input legs the
+    moment they exist — BEFORE the engine needs them (operator directive 2026-06-11).
+    Runs on the download lane; never blocks the 5-min materialize cycle."""
+    flags = _replacement_forecast_runtime_flags_from_settings()
+    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+        return
+    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    report = _replacement_cycle_availability_poll_if_needed(cfg)
+    if report is None:
+        return
+    if report.get("status") == "AVAILABILITY_POLL_CURRENT":
+        logger.debug("cycle availability poll current: %s", report)
+    else:
+        logger.info("cycle availability poll report: %s", report)
+
+
 @_scheduler_job("replacement_forecast_shadow_materialize")
 def _replacement_forecast_download_cycle() -> None:
     """Proactive raw-input PRE-FETCH for the U0R/replacement soft-anchor forecast.

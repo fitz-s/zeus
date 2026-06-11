@@ -51,6 +51,7 @@ FORECAST_LIVE_SOURCE_HEALTH_JOB_ID = "forecast_live_source_health_probe"
 REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
 REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_shadow_materialize"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
+REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 # SEPARATE lane for the heavy download (publish-time cron + boot catch-up). The download
 # runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
@@ -932,6 +933,19 @@ def _replacement_forecast_download_job() -> None:
     _replacement_forecast_download_cycle.__wrapped__()
 
 
+@_scheduler_job(REPLACEMENT_AVAILABILITY_POLL_JOB_ID)
+def _replacement_cycle_availability_poll_job() -> None:
+    """PROBE-RESOLVED freshness owner (operator directive 2026-06-11: automatic download,
+    ahead of need, no guessed numbers). Polls provider publication state and fetches any
+    newly-published raw-input leg immediately; the publish-time cron above is backstop."""
+    from src.data.replacement_forecast_production import (
+        _replacement_cycle_availability_poll,
+    )
+
+    # Undecorated inner: same single-health-writer pattern as the download wrapper above.
+    _replacement_cycle_availability_poll.__wrapped__()
+
+
 @_scheduler_job(REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID)
 def _replacement_forecast_materialize_job() -> None:
     """LIGHT seed_discovery -> seed -> materialize on already-downloaded manifests (no download).
@@ -1033,6 +1047,21 @@ def _register_replacement_forecast_production_jobs(
         max_instances=1,
         coalesce=True,
         misfire_grace_time=120,
+    )
+    # Availability poll (operator directive 2026-06-11 — automatic, ahead of need, no
+    # guessed numbers): PROBE the providers for newly-published cycles and fetch each leg
+    # the moment it exists. The publish-time cron above stays as a backstop only; this
+    # poll is the primary freshness owner. 15-min cadence is a probe rate (a few KB per
+    # tick when current), not an availability assumption.
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _replacement_cycle_availability_poll_job,
+        "interval",
+        minutes=15,
+        id=REPLACEMENT_AVAILABILITY_POLL_JOB_ID,
+        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=300,
     )
     logger.info(
         "replacement-forecast production jobs registered (download cron hour=%s min=10 + boot "
