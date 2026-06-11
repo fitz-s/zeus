@@ -1,8 +1,12 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-11
 # Authority basis: docs/operations/consolidated_systemic_overhaul_2026-06-11.md K4.0
 # (operator escalation: REST-THEN-CROSS) +
 # docs/evidence/maker_taker/2026-06-10_taker_only_root_cause.md (KM deadline basis).
+# 2026-06-11 audit (dependency_db_locked antibody): VERDICT CURRENT_REUSABLE. Already
+# read-only on the DB and cancel-only on the venue; split into snapshot
+# (find_expired_resting_entries) + pure-network cancel (run_cancels_for_expired_rests)
+# so the read connection is closed before any venue cancel (close-before-network).
 """K4.0 maker-rest escalation: the DEADLINE owner for resting maker entries.
 
 THE PLAN this module completes: the REST-THEN-CROSS policy
@@ -109,20 +113,21 @@ def find_expired_resting_entries(
     return out
 
 
-def run_maker_rest_escalation_cycle(
-    conn: sqlite3.Connection,
+def run_cancels_for_expired_rests(
+    expired: list[dict[str, Any]],
     clob: Any,
     *,
-    now: datetime | None = None,
     deadline_minutes: float | None = None,
 ) -> dict[str, int]:
-    """Cancel every expired resting maker entry. Returns counters."""
-    now = now or datetime.now(UTC)
-    stats = {"scanned": 0, "cancelled": 0, "cancel_failed": 0}
-    expired = find_expired_resting_entries(
-        conn, now=now, deadline_minutes=deadline_minutes
-    )
-    stats["scanned"] = len(expired)
+    """Cancel each already-snapshotted expired resting maker entry. Returns counters.
+
+    PURE NETWORK phase (dependency_db_locked clean shape, 2026-06-11): this half
+    holds NO DB connection — it operates only on the ``expired`` list captured by
+    ``find_expired_resting_entries`` on a now-closed connection. Splitting the
+    snapshot from the cancels structurally guarantees no connection is open while
+    the venue cancels run.
+    """
+    stats = {"scanned": len(expired), "cancelled": 0, "cancel_failed": 0}
     for entry in expired:
         order_id = str(entry.get("venue_order_id") or "")
         try:
@@ -149,3 +154,25 @@ def run_maker_rest_escalation_cycle(
             float(deadline_minutes if deadline_minutes is not None else _deadline_minutes()),
         )
     return stats
+
+
+def run_maker_rest_escalation_cycle(
+    conn: sqlite3.Connection,
+    clob: Any,
+    *,
+    now: datetime | None = None,
+    deadline_minutes: float | None = None,
+) -> dict[str, int]:
+    """Cancel every expired resting maker entry. Returns counters.
+
+    Composed from the two clean halves: ``find_expired_resting_entries`` (DB
+    snapshot) then ``run_cancels_for_expired_rests`` (venue cancels, no conn). The
+    live scheduled job calls the halves directly so the read connection is closed
+    before any cancel; this combined entry point is retained for callers/tests
+    that pass an already-open connection.
+    """
+    now = now or datetime.now(UTC)
+    expired = find_expired_resting_entries(
+        conn, now=now, deadline_minutes=deadline_minutes
+    )
+    return run_cancels_for_expired_rests(expired, clob, deadline_minutes=deadline_minutes)

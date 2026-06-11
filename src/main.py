@@ -6050,17 +6050,29 @@ def _maker_rest_escalation_cycle() -> None:
     if get_mode() != "live":
         return
     from src.data.polymarket_client import PolymarketClient
-    from src.execution.maker_rest_escalation import run_maker_rest_escalation_cycle
+    from src.execution.maker_rest_escalation import (
+        find_expired_resting_entries,
+        run_cancels_for_expired_rests,
+    )
     from src.state.db import get_trade_connection_read_only
 
+    # Clean shape (dependency_db_locked antibody, 2026-06-11): SNAPSHOT the
+    # expired-rest candidates on a short read-only connection and CLOSE it before
+    # any venue cancel. The read-only connection never takes a WAL write lock, so
+    # holding it across cancels could not have caused the incident — but
+    # close-before-network is the structural shape this lane should still follow,
+    # so a future edit cannot silently turn this into a write-conn-across-network
+    # regression. The cancel loop holds no connection.
     conn = get_trade_connection_read_only()
     try:
-        clob = PolymarketClient()
-        stats = run_maker_rest_escalation_cycle(conn, clob)
-        if stats["scanned"]:
-            logger.info("maker_rest_escalation: %s", stats)
+        expired = find_expired_resting_entries(conn, now=datetime.now(timezone.utc))
     finally:
         conn.close()
+
+    clob = PolymarketClient()
+    stats = run_cancels_for_expired_rests(expired, clob)
+    if stats["scanned"]:
+        logger.info("maker_rest_escalation: %s", stats)
 
 
 @_scheduler_job("edli_market_substrate_warm")
