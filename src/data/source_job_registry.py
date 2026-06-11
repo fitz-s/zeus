@@ -187,6 +187,33 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   file_only=True, notes="writes forecast-live heartbeat JSON only"),
     SourceJobSpec("forecast_live_source_health_probe", "forecast_live_daemon", "diagnostic", "fast", False,
                   file_only=True),
+    # Replacement-forecast production jobs (operator directive 2026-06-11: moved to this
+    # daemon from src/main so downloads never share a lifecycle with trading restarts).
+    # These run on dedicated single-worker APScheduler executor lanes ("replacement_download"
+    # and "replacement_production") — mapped to "default" here (not "fast") because they are
+    # NOT file-only and must not starve under the file-only "fast" constraint.
+    SourceJobSpec("replacement_forecast_download", "forecast_live_daemon", "live", "default", False,
+                  source_ids=("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"),
+                  callable_ref="_replacement_forecast_download_job",
+                  misfire_grace_time=3600, family="forecast",
+                  notes="probe-resolved AIFS+OM raw-input pre-fetch; cron at publish times; "
+                        "runs on dedicated replacement_download executor lane"),
+    SourceJobSpec("replacement_forecast_download_startup_catch_up", "forecast_live_daemon", "backfill", "default", False,
+                  source_ids=("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"),
+                  callable_ref="_replacement_forecast_download_job",
+                  dispatch_kind="startup", family="forecast",
+                  notes="one-shot date trigger 90s after boot; same download job as cron path"),
+    SourceJobSpec("replacement_forecast_shadow_materialize", "forecast_live_daemon", "shadow", "default", True,
+                  callable_ref="_replacement_forecast_materialize_job",
+                  misfire_grace_time=120, family="forecast",
+                  notes="interval-driven seed_discovery→seed→materialize on already-downloaded "
+                        "manifests; runs on dedicated replacement_production executor lane"),
+    SourceJobSpec("anchor_meta_stamp_cross_check", "forecast_live_daemon", "diagnostic", "default", False,
+                  source_ids=("openmeteo_ecmwf_ifs_9km",),
+                  callable_ref="_anchor_meta_stamp_cross_check_job",
+                  misfire_grace_time=600, family="forecast",
+                  notes="hourly belt-and-suspenders: re-verify meta-stamped anchor artifacts "
+                        "against single-runs API (K4.0b(f)); file-writes only, no DB write"),
 )
 
 # ---------------------------------------------------------------------------
@@ -270,7 +297,21 @@ def live_producing_jobs() -> list[SourceJobSpec]:
 #       here is an admission of a live bug, never an excuse — every entry must name the decision.
 #
 # Anything in NEITHER list is an UNTRACKED violation and fails the E gate fail-closed.
-_ACKNOWLEDGED_SAFE_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {}
+_ACKNOWLEDGED_SAFE_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
+    # ingest_main.ingest_replacement_availability_poll probes provider publication state and
+    # triggers lightweight extras fetches; forecast_live_daemon.replacement_forecast_download
+    # does the heavy AIFS+OM raw-input pre-fetch.  Both touch openmeteo_ecmwf_ifs_9km as a
+    # source, but they are complementary operations on a shared source — not a competing
+    # authority conflict.  The poll runs in the data-ingest daemon (independent of trading
+    # restarts); the download runs in the forecast-live daemon on a dedicated lane.  Verified
+    # safe 2026-06-11: probe→download separation was the explicit operator directive that
+    # decoupled the ~365MB download from the 5-min materialize cycle.
+    ("forecast", "openmeteo_ecmwf_ifs_9km"): (
+        "ACKNOWLEDGED_SAFE: ingest_main.ingest_replacement_availability_poll (probe+extras) + "
+        "forecast_live_daemon.replacement_forecast_download (heavy pre-fetch) are complementary "
+        "operations on the same source; operator directive 2026-06-11 explicitly split them."
+    ),
+}
 
 _KNOWN_OPEN_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
     # ACTIVE_DUPLICATE verified 2026-05-24 (sonnet forensic). Both live daemons collect WU daily

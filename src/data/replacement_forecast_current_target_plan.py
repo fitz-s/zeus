@@ -262,10 +262,13 @@ def build_replacement_forecast_current_target_plan(
     """Return current market targets and the replacement artifacts needed for them."""
 
     db_path = Path(forecast_db)
+    # Use now_utc as the reference clock when min_target_date is not explicit — avoids
+    # wall-clock drift against fixtures or callers that pass a fixed now_utc.
+    _ref_clock = (now_utc or datetime.now(tz=timezone.utc)).astimezone(timezone.utc)
     minimum_target_date = (
         min_target_date.isoformat()
         if isinstance(min_target_date, date)
-        else str(min_target_date or datetime.now(tz=timezone.utc).date().isoformat())
+        else str(min_target_date or _ref_clock.date().isoformat())
     )
     if not db_path.exists():
         return ReplacementForecastCurrentTargetPlan(

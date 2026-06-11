@@ -524,7 +524,7 @@ def _replacement_cycle_availability_poll() -> None:
         logger.info("cycle availability poll report: %s", report)
 
 
-@_scheduler_job("replacement_forecast_shadow_materialize")
+@_scheduler_job("replacement_forecast_download")
 def _replacement_forecast_download_cycle() -> None:
     """Proactive raw-input PRE-FETCH for the U0R/replacement soft-anchor forecast.
 
@@ -592,6 +592,7 @@ def _replacement_forecast_download_cycle() -> None:
             _wsh("u0r_multimodel_capture", failed=False)
 
 
+@_scheduler_job("replacement_forecast_shadow_materialize")
 def _replacement_forecast_shadow_materialize_cycle() -> None:
     flags = _replacement_forecast_runtime_flags_from_settings()
     if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):

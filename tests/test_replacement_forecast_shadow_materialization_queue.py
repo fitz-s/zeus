@@ -205,7 +205,10 @@ def test_materialization_queue_lock_blocks_parallel_processor(tmp_path) -> None:
     request_dir = tmp_path / "requests"
     request_dir.mkdir()
     (request_dir / "a.json").write_text(_minimal_valid_request(), encoding="utf-8")
-    (tmp_path / ".materialization_queue.lock").write_text("pid=already-running", encoding="utf-8")
+    # Use the current process PID — the stale-lock self-heal only steals a lock whose holder
+    # is dead.  A LIVE pid (this test process) keeps the lock live and must trigger LOCKED.
+    import os as _os
+    (tmp_path / ".materialization_queue.lock").write_text(f"pid={_os.getpid()} acquired_at=fake", encoding="utf-8")
     calls: list[tuple[str, ...]] = []
 
     report = process_replacement_forecast_shadow_materialization_queue(
@@ -502,6 +505,14 @@ def test_main_shadow_materialization_cycle_processes_configured_queue_when_enabl
 
 
 def test_main_shadow_materialization_cycle_downloads_missing_current_targets(monkeypatch, tmp_path) -> None:
+    """Operator directive 2026-06-08/2026-06-11: downloads are a SEPARATE job
+    (_replacement_forecast_download_cycle on the download lane in forecast_live_daemon).
+    The materialize cycle (_replacement_forecast_shadow_materialize_cycle) only runs
+    seed_discovery→seed→materialize on already-downloaded manifests — it NEVER triggers
+    a download itself.  This test verifies that the queue is invoked with the correct
+    config kwargs including forecast_db and raw_manifest_dir, which proves the cycle
+    passes those parameters through even when manifests are missing (the download job
+    handles the missing-manifest case independently)."""
     flags = dict(main_module.settings["feature_flags"])
     flags[SHADOW_FLAG] = True
     monkeypatch.setitem(main_module.settings._data, "feature_flags", flags)
@@ -527,28 +538,7 @@ def test_main_shadow_materialization_cycle_downloads_missing_current_targets(mon
             "materialization_limit_per_cycle": 3,
         },
     )
-
-    class _Plan:
-        ready = False
-        missing_aifs_manifest_count = 1
-        missing_openmeteo_manifest_count = 1
-
-        def as_dict(self):
-            return {"status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE"}
-
-    captured_download: dict[str, object] = {}
-
-    def fake_plan(path):
-        captured_download["plan_path"] = path
-        return _Plan()
-
-    def fake_parse_cycle(value, *, now, release_lag_hours):
-        captured_download["release_lag_hours"] = release_lag_hours
-        return now
-
-    def fake_download(**kwargs):
-        captured_download.update(kwargs)
-        return {"status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"}
+    captured_queue: dict[str, object] = {}
 
     class _Report:
         failed_count = 0
@@ -557,29 +547,22 @@ def test_main_shadow_materialization_cycle_downloads_missing_current_targets(mon
         def as_dict(self):
             return {"status": "NO_REQUESTS"}
 
-    monkeypatch.setattr(
-        "src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan",
-        fake_plan,
-    )
-    monkeypatch.setattr("scripts.download_replacement_forecast_current_targets._parse_cycle", fake_parse_cycle)
-    monkeypatch.setattr(
-        "scripts.download_replacement_forecast_current_targets.download_current_target_raw_inputs",
-        fake_download,
-    )
+    def fake_process(**kwargs):
+        captured_queue.update(kwargs)
+        return _Report()
+
     monkeypatch.setattr(
         "src.data.replacement_forecast_shadow_materialization_queue.process_replacement_forecast_shadow_materialization_queue",
-        lambda **kwargs: _Report(),
+        fake_process,
     )
 
     main_module._replacement_forecast_shadow_materialize_cycle.__wrapped__()
 
-    assert captured_download["forecast_db"] == forecast_db
-    assert captured_download["output_dir"] == raw_dir
-    assert captured_download["limit"] == 7
-    assert captured_download["write_db"] is True
-    assert captured_download["release_lag_hours"] == 11.0
-    assert captured_download["anchor_sigma_c"] == 2.5
-    assert captured_download["aifs_retries"] == 2
+    # The materialize cycle must pass through the forecast_db and raw_manifest_dir config
+    # so seed_discovery can locate manifests, even when downloads are outstanding.
+    assert captured_queue["forecast_db"] == forecast_db
+    assert captured_queue["raw_manifest_dir"] == raw_dir
+    assert captured_queue["limit"] == 3
 
 
 def test_main_shadow_materialization_cycle_roots_relative_config_paths(monkeypatch) -> None:

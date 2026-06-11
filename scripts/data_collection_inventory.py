@@ -66,6 +66,25 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     "redeem_submitter", "redeem_reconciler",                  # chain redemption ops
     "wrap_intent_creator", "wrap_submitter", "wrap_reconciler",  # chain wrap ops
     "deployment_freshness",                                   # deploy-freshness gate
+    # Trading-adjacent analysis + ops (classified 2026-06-11: not raw data collection;
+    # these read already-collected data and produce derived outputs or control signals).
+    "settlement_guard_report",    # settlement audit: reads trade/settlement tables → JSON report
+    "shadow_comparator",          # shadow vs live comparison (analysis, not source data)
+    "day0_shadow_enrichment",     # enriches shadow receipts from settlement data (derived)
+    "new_listing_scout",          # new market detection → intents (trading control, not raw data)
+    "edli_event_reactor",         # EDLI event reactor (trading engine, not data collection)
+    "edli_bankroll_warm",         # bankroll cache warm (trading prep, not collection)
+    "edli_command_recovery",      # venue command recovery (execution layer)
+    "maker_rest_escalation",      # REST maker order escalation (execution layer)
+    "edli_market_substrate_warm", # market substrate cache warm (trading prep)
+    "edli_mainstream_warm",       # mainstream consensus warm (trading prep)
+    "arm_gate_emit",              # ARM gate signal emitter (trading control)
+    "world_wal_checkpoint",       # WAL checkpoint (DB maintenance, not data collection)
+    "edli_user_channel_reconcile",  # EDLI user-channel order reconcile (execution layer)
+    "edli_market_channel_ingestor", # EDLI market-channel event ingestor (exchange events,
+                                    # NOT raw weather/settlement data; classified non-collection
+                                    # because it receives venue execution events, not source data)
+    "chain_sync_and_exit_monitor",  # chain sync + graceful-exit monitor (control plane)
 })
 
 
