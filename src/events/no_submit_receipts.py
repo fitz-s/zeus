@@ -255,12 +255,14 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # omit-when-None pattern above.
     if payload.get("same_bin_yes_posterior") is None:
         payload.pop("same_bin_yes_posterior", None)
-    # DecisionProvenanceEnvelope (operator law 2026-06-11): omit when None so legacy / canonical
-    # receipts that never carried the envelope keep byte-identical receipt_json (and therefore
-    # receipt_hash). Present (set) only when the envelope was assembled; persisted so the full
-    # decision provenance is recoverable from the blob too. Mirrors the omit-when-None pattern.
-    if payload.get("envelope_json") is None:
-        payload.pop("envelope_json", None)
+    # DecisionProvenanceEnvelope (operator law 2026-06-11): ALWAYS excluded from receipt_json —
+    # never hashed. The envelope embeds decision_time-dependent ages (cycle_age_h, book age_s),
+    # so a retried event would recompute different envelope bytes for the SAME
+    # (event_id, final_intent_id) key and the idempotent insert would raise
+    # EdliReceiptHashDriftError on the money path. The envelope's canonical home is the
+    # envelope_json COLUMN (queryable, full provenance); receipt_json/receipt_hash stay
+    # byte-identical to pre-envelope receipts.
+    payload.pop("envelope_json", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 

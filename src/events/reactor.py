@@ -1021,16 +1021,32 @@ class OpportunityEventReactor:
         """Fail-soft DecisionProvenanceEnvelope JSON for a rejection (operator law 2026-06-11).
 
         NEVER raises and NEVER alters the decision — a build failure simply yields None and the
-        rejection still records its full reason in the typed columns. The envelope carries the
-        FULL rejection reason (untruncated), the decision economics, the world-DB executable book
-        snapshot, and — when the optional decision_provenance_hook supplies (bundle, forecast_conn)
-        — the complete forecast data-combination + per-input ages + time-to-settlement.
+        rejection still records its full reason in the typed columns.
+
+        PRIMARY path (production): the adapter's receipt-builder wrapper has ALREADY assembled the
+        envelope materials at decision time (served bundle, per-input ages, anchor transport, the
+        selected executable snapshot row — all bound IN the adapter where forecast/trade conns
+        live) and attached them as receipt.envelope_json. Here we only MERGE the final rejection
+        {stage, reason FULL TEXT} into those materials.
+
+        FALLBACK path: receipts without an attached envelope (pre-receipt rejections, foreign
+        receipt builders) get the minimal envelope built from what the reactor can reach.
         """
         try:
             from src.contracts.decision_provenance import (
                 build_decision_provenance_envelope,
                 envelope_to_json,
             )
+
+            if receipt is not None and getattr(receipt, "envelope_json", None):
+                try:
+                    materials = json.loads(receipt.envelope_json)
+                    if isinstance(materials, dict):
+                        # FULL TEXT — storage never truncates (operator law).
+                        materials["rejection"] = {"stage": stage, "reason": reason}
+                        return json.dumps(materials, sort_keys=True, separators=(",", ":"), default=str)
+                except (ValueError, TypeError):
+                    pass  # unreadable materials -> rebuild minimally below
 
             bundle = None
             forecast_conn = None

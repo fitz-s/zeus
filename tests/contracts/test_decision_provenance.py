@@ -278,3 +278,278 @@ def test_money_path_byte_identical_when_envelope_builder_disabled(monkeypatch):
     assert with_envelope[:7] == without_envelope[:7]
     # The decision surface (stage/reason/economics) is unchanged; only the envelope differs.
     assert without_envelope[7] is None  # builder disabled -> NULL envelope, decision intact
+
+
+# --- call-site threading (production starvation fix, operator verification 2026-06-11) ----------
+#
+# Live row Karachi|2026-06-12|high @13:54:40Z proved the builder fired but the regret call site
+# starved the data-combination half (anchor_transport/fusion/dependency/book all UNAVAILABLE)
+# because bundle/forecast_conn/snapshot_row never reached the reactor. The fix threads a
+# provenance_capture dict down the adapter chain and attaches the assembled envelope to EVERY
+# receipt in the public-builder wrapper; the reactor MERGES the final rejection into it.
+
+
+def test_adapter_capture_binds_replacement_bundle_before_gates(monkeypatch):
+    """RELATIONSHIP: the served bundle is captured at the bind, BEFORE the q-mode/bounds gates,
+    so every rejection raised after the read still carries the exact data combination examined."""
+    from types import SimpleNamespace
+
+    from src.config import settings
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import replacement_forecast_hook_factory as hook_factory
+    from src.contracts.execution_price import ExecutionPrice
+    from src.types.market import Bin
+
+    feature_flags = dict(settings._data.get("feature_flags", {}))
+    feature_flags["openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled"] = True
+    monkeypatch.setitem(settings._data, "feature_flags", feature_flags)
+    served_bundle = SimpleNamespace(
+        posterior_id=777,
+        product_id="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor_v1",
+        q={"bin-27": 0.20, "bin-28": 0.80},
+        q_lcb=None,
+        provenance_json={
+            "replacement_q_mode": "FUSED_NORMAL_FULL",
+            "q_shape": "fused_normal_direct",
+            "bin_topology": [
+                {"bin_id": "bin-27", "lower_c": 27.0, "upper_c": 27.0},
+                {"bin_id": "bin-28", "lower_c": 28.0, "upper_c": 28.0},
+            ],
+        },
+    )
+    monkeypatch.setattr(hook_factory, "_latest_replacement_readiness", lambda *a, **k: object())
+    monkeypatch.setattr(
+        reader,
+        "read_replacement_forecast_bundle",
+        lambda *a, **k: SimpleNamespace(ok=True, bundle=served_bundle, reason_code="READY"),
+    )
+    family = SimpleNamespace(
+        city="Testopolis",
+        target_date="2026-06-09",
+        metric="high",
+        candidates=(
+            SimpleNamespace(
+                condition_id="cond-27", yes_token_id="yes-27", no_token_id="no-27",
+                bin=Bin(low=27.0, high=27.0, unit="C", label="27°C"),
+            ),
+            SimpleNamespace(
+                condition_id="cond-28", yes_token_id="yes-28", no_token_id="no-28",
+                bin=Bin(low=28.0, high=28.0, unit="C", label="28°C"),
+            ),
+        ),
+    )
+    capture: dict[str, Any] = {}
+    try:
+        adapter._replacement_authority_probability_and_fdr_proof(
+            event=SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY"),
+            payload={},
+            family=family,
+            conn=object(),
+            native_costs={
+                ("cond-27", "buy_yes"): (None, ExecutionPrice(0.30, "ask", fee_deducted=True, currency="probability_units"), 0.30, None, None),
+                ("cond-28", "buy_yes"): (None, ExecutionPrice(0.55, "ask", fee_deducted=True, currency="probability_units"), 0.55, None, None),
+                ("cond-27", "buy_no"): (None, ExecutionPrice(0.70, "ask", fee_deducted=True, currency="probability_units"), 0.70, None, None),
+                ("cond-28", "buy_no"): (None, ExecutionPrice(0.45, "ask", fee_deducted=True, currency="probability_units"), 0.45, None, None),
+            },
+            decision_time=DECISION,
+            promotion_evidence=None,
+            capital_objective_evidence=None,
+            provenance_capture=capture,
+        )
+    except Exception:  # noqa: BLE001 — gates after the bind may reject; capture must survive
+        pass
+    assert capture.get("replacement_bundle") is served_bundle, (
+        "the served bundle must be captured at the bind, before any downstream gate"
+    )
+
+
+_PROV_MARKET_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS market_events (
+    market_slug TEXT, city TEXT, target_date TEXT, temperature_metric TEXT,
+    condition_id TEXT, token_id TEXT, range_label TEXT, range_low REAL, range_high REAL,
+    outcome TEXT, created_at TEXT
+)
+"""
+
+_PROV_SNAPSHOTS_DDL = """
+CREATE TABLE IF NOT EXISTS executable_market_snapshots (
+    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    condition_id TEXT NOT NULL, market_slug TEXT, market_start_at TEXT, market_end_at TEXT,
+    orderbook_top_bid REAL, orderbook_top_ask REAL, captured_at TEXT NOT NULL,
+    freshness_deadline TEXT, active INTEGER DEFAULT 1, closed INTEGER DEFAULT 0
+)
+"""
+
+
+def test_real_post_snapshot_rejection_carries_populated_book_and_settlement():
+    """RELATIONSHIP through the REAL public builder: a rejection fired AFTER the executable
+    snapshot bind (OPENING_INERTIA_MARKET_TOO_OLD) carries an envelope whose book and
+    time-to-settlement are POPULATED (not UNAVAILABLE) — the production-starvation pin."""
+    from datetime import timedelta
+
+    from src.engine.event_reactor_adapter import build_event_bound_no_submit_receipt
+    from src.events.opportunity_event import make_opportunity_event
+    from src.riskguard.risk_level import RiskLevel
+
+    condition_id = "0xprovenance001"
+    now = datetime(2026, 6, 9, 12, 0, 0, tzinfo=UTC)
+    opened = now - timedelta(hours=30)  # 30h old -> OPENING_INERTIA_MARKET_TOO_OLD for buy_no
+    market_end = "2026-07-01T22:59:00+00:00"
+
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.execute(_PROV_SNAPSHOTS_DDL)
+    trade_conn.execute(
+        """
+        INSERT INTO executable_market_snapshots
+            (condition_id, market_start_at, market_end_at, orderbook_top_bid, orderbook_top_ask,
+             captured_at, freshness_deadline, active, closed)
+        VALUES (?, ?, ?, 0.35, 0.40, ?, ?, 1, 0)
+        """,
+        (
+            condition_id,
+            opened.isoformat(),
+            market_end,
+            (now - timedelta(seconds=10)).isoformat(),
+            (now + timedelta(hours=6)).isoformat(),
+        ),
+    )
+    trade_conn.commit()
+    topo_conn = sqlite3.connect(":memory:")
+    topo_conn.execute(_PROV_MARKET_EVENTS_DDL)
+    topo_conn.execute(
+        """
+        INSERT INTO market_events
+            (market_slug, city, target_date, temperature_metric, condition_id, token_id,
+             range_label, range_low, range_high, outcome, created_at)
+        VALUES ('london-max-2026-07-01', 'London', '2026-07-01', 'max', ?, '0xtok',
+                '>30°C', 30.0, NULL, 'YES', ?)
+        """,
+        (condition_id, opened.isoformat()),
+    )
+    topo_conn.commit()
+
+    event = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key=condition_id,
+        source="test",
+        observed_at="2026-06-09T12:00:00+00:00",
+        available_at="2026-06-09T12:00:00+00:00",
+        received_at="2026-06-09T12:00:00+00:00",
+        causal_snapshot_id="snap-001",
+        payload={
+            "condition_id": condition_id,
+            "direction": "buy_no",
+            "city": "London",
+            "target_date": "2026-07-01",
+            "metric": "max",
+            "temperature_metric": "max",
+            "market_slug": "london-max-2026-07-01",
+        },
+    )
+    receipt = build_event_bound_no_submit_receipt(
+        event=event,
+        trade_conn=trade_conn,
+        topology_conn=topo_conn,
+        forecast_conn=topo_conn,
+        calibration_conn=topo_conn,
+        decision_time=now,
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+    assert receipt.submitted is False
+    assert "OPENING_INERTIA_MARKET_TOO_OLD" in (receipt.reason or "")
+    assert receipt.envelope_json, "every adapter receipt must carry the provenance envelope"
+    env = json.loads(receipt.envelope_json)
+    # book POPULATED from the captured snapshot row (the production-starved half)
+    assert env["book"]["best_bid"] == pytest.approx(0.35)
+    assert env["book"]["best_ask"] == pytest.approx(0.40)
+    assert env["book"]["snapshot_id"] is not None
+    assert isinstance(env["book"]["age_s"], float)
+    # time-to-settlement: BOTH halves populated (market_end_at came with the snapshot)
+    tts = env["time_to_settlement"]
+    assert isinstance(tts["hours_to_local_day_end"], float)
+    assert tts["market_end_at"] == market_end
+    assert isinstance(tts["hours_to_market_end"], float)
+    # pre-bundle on this fixture (no replacement posterior in the conns): honesty markers
+    assert str(env["posterior_id"]).startswith("UNAVAILABLE")
+    # rejection is merged later by the reactor; the adapter materials carry none yet
+    assert env["rejection"] is None
+
+
+def test_reactor_merges_rejection_into_adapter_envelope_materials():
+    """RELATIONSHIP: reactor._write_regret MERGES the final {stage, reason FULL TEXT} into the
+    adapter-attached materials — the populated data-combination half survives to the regret row."""
+    import importlib
+
+    harness = importlib.import_module("tests.events.test_reactor")
+    from src.events.reactor import EventSubmissionReceipt
+
+    conn, store = harness._store()
+    event = harness._day0_event()
+    store.insert_or_ignore(event)
+    reactor, _rejected, _submitted = harness._reactor(store, gates=False)
+
+    fc = _forecast_conn_with_anchor()
+    try:
+        materials = build_decision_provenance_envelope(
+            fc,
+            None,
+            bundle=_bundle(),
+            decision_time=DECISION,
+            condition_id="0xcond",
+            token_id="tok-1",
+            executable_snapshot_row=_snapshot_row(),
+            economics={"q_live": 0.62, "q_lcb_5pct": 0.55, "c_fee_adjusted": 0.44, "trade_score": 0.18},
+            direction="NO",
+            rejection=None,
+        )
+    finally:
+        fc.close()
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        reason="KELLY_SIZE_BELOW_VENUE_MINIMUM:size=0.83:min=1.00",
+        envelope_json=envelope_to_json(materials),
+    )
+    huge_reason = "KELLY_SIZE_BELOW_VENUE_MINIMUM:" + ("detail," * 400)
+    reactor._write_regret(event, "KELLY", huge_reason, receipt=receipt, decision_time=DECISION)
+
+    row = conn.execute(
+        "SELECT rejection_reason, envelope_json FROM no_trade_regret_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert row is not None and row[1]
+    env = json.loads(row[1])
+    # the POPULATED materials survive (not rebuilt/starved)
+    assert env["posterior_id"] == 1752
+    assert env["fusion_instruments"]["used_models"] == ["ecmwf_ifs", "gem_global", "jma_seamless"]
+    assert env["anchor_transport"]["openmeteo_ifs9_anchor"]["run_authority"] == "run_pinned_single_runs"
+    assert isinstance(env["per_input_ages"]["openmeteo_ifs9_anchor"]["cycle_age_h"], float)
+    assert isinstance(env["time_to_settlement"]["hours_to_local_day_end"], float)
+    # and the final rejection was MERGED in, FULL text
+    assert env["rejection"]["stage"] == "KELLY"
+    assert env["rejection"]["reason"] == huge_reason == row[0]
+
+
+def test_receipt_json_always_excludes_envelope_json():
+    """Hash-stability antibody: the envelope (decision_time-dependent ages) must NEVER enter
+    receipt_json/receipt_hash — a retried event would otherwise raise EdliReceiptHashDriftError.
+    The envelope's canonical home is the envelope_json COLUMN."""
+    from src.events.no_submit_receipts import _receipt_json
+    from src.events.reactor import EventSubmissionReceipt
+
+    base = dict(
+        submitted=False,
+        event_id="evt-1",
+        causal_snapshot_id="snap-1",
+        final_intent_id="intent-1",
+        side_effect_status="NO_SUBMIT",
+        proof_accepted=True,
+    )
+    without_env = EventSubmissionReceipt(**base)
+    with_env = EventSubmissionReceipt(**base, envelope_json='{"decision_time":"2026-06-11T13:00:00+00:00"}')
+    j_without = _receipt_json(without_env)
+    j_with = _receipt_json(with_env)
+    assert "envelope_json" not in j_with
+    assert j_with == j_without, "receipt_json must be byte-identical with or without the envelope"

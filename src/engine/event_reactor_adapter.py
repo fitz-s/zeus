@@ -1610,7 +1610,7 @@ def _forecast_only_phase_admits(evidence: "_market_phase_evidence.MarketPhaseEvi
     return evidence.phase in _FORECAST_ONLY_ADMIT_PHASES
 
 
-def build_event_bound_no_submit_receipt(
+def _build_event_bound_no_submit_receipt_core(
     event: OpportunityEvent,
     *,
     trade_conn: sqlite3.Connection,
@@ -1626,6 +1626,7 @@ def build_event_bound_no_submit_receipt(
     replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
     replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
+    provenance_capture: dict[str, Any] | None = None,
 ) -> EventSubmissionReceipt:
     """Produce a typed no-submit EDLI proof without running the cycle runner.
 
@@ -1695,6 +1696,12 @@ def build_event_bound_no_submit_receipt(
             reason=f"EVENT_BOUND_MARKET_TOPOLOGY_INVALID:{exc}",
         )
     row = _selected_snapshot_row_for_event(family_rows, payload)
+    # DecisionProvenanceEnvelope (operator law 2026-06-11): record the EXACT executable
+    # snapshot row this decision binds to (book + market_end_at + captured_at). The wrapper
+    # assembles the envelope from this capture for EVERY receipt — including every rejection
+    # raised after this point. Observability only; never read back into a gate.
+    if provenance_capture is not None and row is not None:
+        provenance_capture["snapshot_row"] = row
     if row is None:
         return EventSubmissionReceipt(False, event.event_id, event.causal_snapshot_id, reason="EVENT_BOUND_SELECTED_SNAPSHOT_MISSING")
     selected_stale_reason = _snapshot_price_stale_reason(row, decision_time=decision_time)
@@ -1790,6 +1797,7 @@ def build_event_bound_no_submit_receipt(
             decision_time=decision_time,
             promotion_evidence=replacement_forecast_promotion_evidence,
             capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+            provenance_capture=provenance_capture,
         )
     except ValueError as exc:
         return EventSubmissionReceipt(
@@ -2683,6 +2691,101 @@ def build_event_bound_no_submit_receipt(
         event,
         decision_proof_bundle=proof_bundle,
     )
+
+
+def build_event_bound_no_submit_receipt(
+    event: OpportunityEvent,
+    *,
+    trade_conn: sqlite3.Connection,
+    decision_time: datetime,
+    get_current_level: Callable[[], RiskLevel],
+    forecast_conn: sqlite3.Connection | None = None,
+    topology_conn: sqlite3.Connection | None = None,
+    calibration_conn: sqlite3.Connection | None = None,
+    bankroll_usd_provider: Callable[[], float | None] | None = None,
+    portfolio_state_provider: "Callable[[], Any] | None" = None,
+    portfolio_reservation: "PortfolioReservationLedger | list[tuple[str, float]] | None" = None,
+    locked_opportunity_conn: sqlite3.Connection | None = None,
+    replacement_forecast_hook: Callable[["_CandidateProof", OpportunityEvent, datetime], ReplacementForecastReactorHookResult | None] | None = None,
+    replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
+    replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
+) -> EventSubmissionReceipt:
+    """DecisionProvenanceEnvelope wrapper (operator law 2026-06-11) around the receipt core.
+
+    K=1 threading decision: the core has dozens of receipt return sites; instead of patching
+    each, the chain (core -> _generate_candidate_proofs -> _live_yes_probabilities ->
+    _replacement_authority_probability_and_fdr_proof) records the served replacement bundle and
+    the selected executable snapshot row into ONE per-call capture dict at the moment they are
+    bound, and this wrapper attaches the assembled envelope to WHATEVER receipt comes back —
+    every rejection stage included. Pre-bundle rejections honestly carry
+    "UNAVAILABLE: bundle not provided" (no bundle was bound). The reactor merges the final
+    rejection {stage, reason} into the envelope at regret-write time.
+
+    Fail-soft and observability-only: any envelope failure returns the core receipt UNCHANGED
+    (asserted byte-identical by test); the envelope can never alter a decision.
+    """
+    provenance_capture: dict[str, Any] = {}
+    receipt = _build_event_bound_no_submit_receipt_core(
+        event,
+        trade_conn=trade_conn,
+        decision_time=decision_time,
+        get_current_level=get_current_level,
+        forecast_conn=forecast_conn,
+        topology_conn=topology_conn,
+        calibration_conn=calibration_conn,
+        bankroll_usd_provider=bankroll_usd_provider,
+        portfolio_state_provider=portfolio_state_provider,
+        portfolio_reservation=portfolio_reservation,
+        locked_opportunity_conn=locked_opportunity_conn,
+        replacement_forecast_hook=replacement_forecast_hook,
+        replacement_forecast_promotion_evidence=replacement_forecast_promotion_evidence,
+        replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
+        provenance_capture=provenance_capture,
+    )
+    if receipt.envelope_json is not None:
+        return receipt
+    try:
+        from src.contracts.decision_provenance import (  # noqa: PLC0415 — lazy, no import cycle
+            build_decision_provenance_envelope,
+            envelope_to_json,
+        )
+
+        payload = _payload(event)
+        mainstream = None
+        if receipt.mainstream_agreement_pass is not None or receipt.mainstream_point is not None:
+            mainstream = {
+                "agreement_pass": receipt.mainstream_agreement_pass,
+                "agreement_fail_reason": receipt.mainstream_agreement_fail_reason,
+                "point": receipt.mainstream_point,
+                "delta": receipt.mainstream_delta,
+                "bin_label": receipt.mainstream_bin_label,
+                "source": receipt.mainstream_source,
+                "fetched_at_utc": receipt.mainstream_fetched_at_utc,
+            }
+        envelope = build_decision_provenance_envelope(
+            forecast_conn,
+            trade_conn,
+            bundle=provenance_capture.get("replacement_bundle"),
+            decision_time=decision_time,
+            condition_id=receipt.condition_id or (str(payload.get("condition_id") or "") or None),
+            token_id=receipt.token_id or (str(payload.get("token_id") or "") or None),
+            executable_snapshot_row=provenance_capture.get("snapshot_row"),
+            economics={
+                "q_live": receipt.q_live,
+                "q_lcb_5pct": receipt.q_lcb_5pct,
+                "c_fee_adjusted": receipt.c_fee_adjusted,
+                "trade_score": receipt.trade_score,
+                "kelly_size_usd": receipt.kelly_size_usd,
+            },
+            direction=receipt.direction,
+            mainstream=mainstream,
+            rejection=None,  # the reactor merges the final {stage, reason} at regret-write
+            city=receipt.city or (str(payload.get("city") or "") or None),
+            target_date=receipt.target_date or (str(payload.get("target_date") or "") or None),
+        )
+        return dataclass_replace(receipt, envelope_json=envelope_to_json(envelope))
+    except Exception:  # noqa: BLE001 — observability must never alter or fail a decision
+        return receipt
 
 
 def _event_submission_receipt_from_typed_receipt_payload(
@@ -6020,6 +6123,7 @@ def _generate_candidate_proofs(
     decision_time: datetime,
     promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
+    provenance_capture: dict[str, Any] | None = None,
 ) -> tuple[_CandidateProof, ...]:
     native_costs = _native_costs_by_candidate_direction(family=family, snapshot_rows=snapshot_rows)
     (
@@ -6038,6 +6142,7 @@ def _generate_candidate_proofs(
         decision_time=decision_time,
         promotion_evidence=promotion_evidence,
         capital_objective_evidence=capital_objective_evidence,
+        provenance_capture=provenance_capture,
     )
     proofs: list[_CandidateProof] = []
     rows_by_direction = _snapshot_rows_by_condition_and_direction(snapshot_rows)
@@ -7822,6 +7927,7 @@ def _live_yes_probabilities(
     decision_time: datetime,
     promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
+    provenance_capture: dict[str, Any] | None = None,
 ) -> tuple[
     dict[str, float],
     dict[tuple[str, str], float],
@@ -7845,6 +7951,7 @@ def _live_yes_probabilities(
             decision_time=decision_time,
             promotion_evidence=promotion_evidence,
             capital_objective_evidence=capital_objective_evidence,
+            provenance_capture=provenance_capture,
         )
         if replacement is not None:
             return replacement
@@ -8529,6 +8636,7 @@ def _replacement_authority_probability_and_fdr_proof(
     decision_time: datetime,
     promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
+    provenance_capture: dict[str, Any] | None = None,
 ) -> tuple[
     dict[str, float],
     dict[tuple[str, str], float],
@@ -8578,6 +8686,12 @@ def _replacement_authority_probability_and_fdr_proof(
     if not bundle_result.ok or bundle_result.bundle is None:
         raise ValueError(f"REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED:{bundle_result.reason_code}")
     replacement_bundle = bundle_result.bundle
+    # DecisionProvenanceEnvelope (operator law 2026-06-11): record the SERVED bundle the moment it
+    # is bound — BEFORE the q-mode / bounds gates below — so every rejection raised after the read
+    # (q-mode ineligible, bounds missing, floor missing, ...) still carries the exact data
+    # combination it examined. Observability only; never read back into any gate.
+    if provenance_capture is not None:
+        provenance_capture["replacement_bundle"] = replacement_bundle
     # FIX 1 (2026-06-09) — q-mode live eligibility gate. Real submit is allowed ONLY when the
     # replacement posterior's q was built as a fused-Normal (FUSED_NORMAL_FULL/PARTIAL, or a
     # grandfathered q_shape=="fused_normal_direct" row). Every other mode (soft-anchor fallback,
