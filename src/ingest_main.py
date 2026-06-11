@@ -827,6 +827,33 @@ def _harvester_truth_writer_tick():
     logger.info("harvester_truth_writer_tick: %s", result)
 
 
+@_scheduler_job("ingest_replacement_availability_poll")
+def _replacement_availability_poll_tick():
+    """Probe-resolved replacement raw-input fetch (anchor + AIFS legs + u0r extras).
+
+    OPERATOR DIRECTIVE 2026-06-11 ("下载有自己的daemon"): weather downloading lives in
+    the data-ingest daemon — ITS OWN download daemon — decoupled from forecast-live /
+    live-trading restarts. The in-daemon forecast-live copy of this job kept dying with
+    that daemon's restarts: a 10-40min extras pass with an end-of-pass insert was rolled
+    back to zero three times in one morning. data-ingest is restart-quiet, so the pass
+    survives. Fail-soft: any error logs and the next tick retries; every lane it calls
+    is idempotent per persisted row/manifest.
+    """
+    from src.data.replacement_forecast_production import (  # noqa: PLC0415
+        _replacement_cycle_availability_poll_if_needed,
+        _replacement_forecast_shadow_materialization_queue_config,
+    )
+
+    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    report = _replacement_cycle_availability_poll_if_needed(cfg)
+    if report is None:
+        return
+    if report.get("status") == "AVAILABILITY_POLL_CURRENT":
+        logger.info("replacement availability poll current (extras=%s)", report.get("u0r_extras_status"))
+    else:
+        logger.info("replacement availability poll report: %s", report)
+
+
 @_scheduler_job("ingest_automation_analysis")
 def _automation_analysis_cycle():
     """Daily automation analysis diagnostic (ingest daemon copy)."""
@@ -1556,6 +1583,12 @@ def _ingest_main_job_specs() -> list[tuple]:
             max_instances=1, coalesce=True, misfire_grace_time=1800)),
         (_automation_analysis_cycle, "cron", dict(hour=9, minute=0, id="ingest_automation_analysis",
             max_instances=1, coalesce=True)),
+        # OPERATOR DIRECTIVE 2026-06-11: downloads live in the data-ingest daemon, first
+        # fire IMMEDIATE at boot (next_run_time=now), then every 5 minutes — downloading
+        # never again waits on a daemon's first interval nor dies with trading restarts.
+        (_replacement_availability_poll_tick, "interval", dict(minutes=5,
+            id="ingest_replacement_availability_poll", max_instances=1, coalesce=True,
+            misfire_grace_time=240, next_run_time=now)),
     ]
 
     # ECMWF Open Data daily live jobs — conditional on ingest_main owning OpenData (singleton).

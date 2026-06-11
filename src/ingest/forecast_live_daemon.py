@@ -1060,21 +1060,12 @@ def _register_replacement_forecast_production_jobs(
         coalesce=True,
         misfire_grace_time=120,
     )
-    # Availability poll (operator directive 2026-06-11 — automatic, ahead of need, no
-    # guessed numbers): PROBE the providers for newly-published cycles and fetch each leg
-    # the moment it exists. The publish-time cron above stays as a backstop only; this
-    # poll is the primary freshness owner. 15-min cadence is a probe rate (a few KB per
-    # tick when current), not an availability assumption.
-    scheduler.add_job(  # type: ignore[attr-defined]
-        _replacement_cycle_availability_poll_job,
-        "interval",
-        minutes=15,
-        id=REPLACEMENT_AVAILABILITY_POLL_JOB_ID,
-        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
-        max_instances=1,
-        coalesce=True,
-        misfire_grace_time=300,
-    )
+    # Availability poll MOVED to the data-ingest daemon (operator directive 2026-06-11
+    # "下载有自己的daemon"): downloads must not share a lifecycle with this restart-heavy
+    # daemon — three in-flight extras passes died with forecast-live restarts in one
+    # morning. ingest_main registers ingest_replacement_availability_poll (first fire
+    # IMMEDIATE at boot, then 5-min). The wrapper below stays importable for tests and
+    # manual one-shots but is NO LONGER scheduled here.
     # Retro cross-check of meta-stamped anchor artifacts vs single-runs (K4.0b(f)
     # belt-and-suspenders): hourly, bounded to one fetch per pending cycle.
     scheduler.add_job(  # type: ignore[attr-defined]

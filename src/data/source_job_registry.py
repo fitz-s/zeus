@@ -110,6 +110,14 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   source_id="polymarket_gamma", callable_ref="_harvester_truth_writer_tick", family="settlement"),
     SourceJobSpec("ingest_automation_analysis", "ingest_main", "derived", "default", True,
                   callable_ref="_automation_analysis_cycle"),
+    SourceJobSpec("ingest_replacement_availability_poll", "ingest_main", "live", "default", True,
+                  source_ids=("ecmwf_open_data", "openmeteo_ecmwf_ifs_9km"),
+                  callable_ref="_replacement_availability_poll_tick", family="forecast",
+                  misfire_grace_time=240,
+                  notes="operator directive 2026-06-11: weather downloading lives in ITS OWN "
+                        "daemon (data-ingest), decoupled from forecast-live/trading restarts. "
+                        "Probe-resolved per-leg raw-input fetch + u0r extras; first fire "
+                        "IMMEDIATE at boot (next_run_time=now), then every 5min."),
     SourceJobSpec("ingest_opendata_daily_mx2t6", "ingest_main", "live", "default", True,
                   source_id="ecmwf_open_data", callable_ref="_opendata_mx2t6_cycle", owner_gated=True,
                   misfire_grace_time=3600, family="forecast",
