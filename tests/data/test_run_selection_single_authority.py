@@ -187,3 +187,41 @@ def test_manifest_availability_is_proof_of_possession_bounded() -> None:
         "min(captured_at, nominal) — a future-stamped manifest is invisible to seed "
         "discovery until the lag elapses, defeating probe-resolved early fetch"
     )
+
+
+def test_availability_poll_also_feeds_the_extras_lane(monkeypatch, tmp_path) -> None:
+    """Relationship pin: the probe-driven poll tick invokes the u0r extras lane so
+    fusion's same-cycle multimodel rows (the q_lcb substrate) arrive with the legs —
+    never hours later on a lag-modeled cron."""
+    import src.data.replacement_cycle_availability as availability
+    import src.data.replacement_forecast_production as production
+
+    cycle = datetime(2026, 6, 11, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(
+        availability, "probe_aifs_cycle_available", lambda c, **kw: c <= cycle
+    )
+    monkeypatch.setattr(
+        availability, "probe_anchor_available_any", lambda c, **kw: c <= cycle
+    )
+    monkeypatch.setattr(
+        production, "_per_leg_downloaded_cycle", lambda db, sid: cycle
+    )
+    extras_calls: list[dict] = []
+
+    def _record_extras(cfg):
+        extras_calls.append(dict(cfg))
+        return {"status": "U0R_EXTRA_RAW_INPUTS_DOWNLOADED"}
+
+    monkeypatch.setattr(
+        production, "_download_u0r_extra_raw_inputs_if_needed", _record_extras
+    )
+    report = production._replacement_cycle_availability_poll_if_needed(
+        {
+            "download_current_targets_enabled": True,
+            "forecast_db": tmp_path / "f.db",
+            "download_output_dir": tmp_path,
+        }
+    )
+    assert report is not None
+    assert extras_calls, "poll tick must feed the extras lane (q_lcb substrate)"
+    assert report["u0r_extras_status"] == "U0R_EXTRA_RAW_INPUTS_DOWNLOADED"

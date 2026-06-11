@@ -430,8 +430,10 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
         "legs_fetched": [],
     }
     if fetch_aifs_cycle is None and fetch_anchor_cycle is None:
+        # Legs current — but do NOT return yet: the extras lane below must still run.
+        # Leg currency does not imply the same-cycle multimodel extras exist (2026-06-11:
+        # legs poll-fetched at 00Z while every extras row sat unfetched → q_lcb NULL).
         report["status"] = "AVAILABILITY_POLL_CURRENT"
-        return report
     for leg, cycle, skip_aifs, skip_openmeteo in (
         ("aifs", fetch_aifs_cycle, False, True),
         ("anchor", fetch_anchor_cycle, True, False),
@@ -463,6 +465,16 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
             report.setdefault("legs_failed", []).append(  # type: ignore[union-attr]
                 {"leg": leg, "cycle": cycle.isoformat(), "error": str(exc)[:200]}
             )
+    # The u0r/bayes_precision_fusion extras ride the SAME probe-driven tick (run-selection
+    # single authority): fusion needs same-cycle multimodel rows to produce q_lcb, and the
+    # lag-modeled cron (next fire hours away) left q_lcb NULL long after the probe poll had
+    # already fetched the anchor/AIFS legs (2026-06-11: 00Z posteriors materialized with
+    # q_lcb NULL = honest no-edge = no orders, while every extras row sat unfetched).
+    # Idempotent per persisted (model, city, target, metric, cycle, endpoint) row;
+    # flag-gated + fail-soft inside — it never breaks the poll.
+    u0r_report = _download_u0r_extra_raw_inputs_if_needed(cfg)
+    if u0r_report is not None:
+        report["u0r_extras_status"] = u0r_report.get("status")
     return report
 
 
