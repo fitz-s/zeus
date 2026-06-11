@@ -2157,6 +2157,80 @@ def _order_ids_for_unrecorded_trade_findings(conn: sqlite3.Connection) -> frozen
     return frozenset(order_ids)
 
 
+_SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS = 24.0
+_SETTLED_EXTERNAL_RESOLUTION = "position_drift_settled_external_suppressed"
+
+
+def _market_calendar_terminal_evidence(
+    token_ids: tuple[str, ...] | frozenset[str] | set[str],
+    *,
+    observed_at: datetime,
+) -> dict[str, dict[str, str]]:
+    """token_id -> market-calendar terminal evidence, for tokens whose market's target
+    local day ended >= _SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS ago.
+
+    Authority: the canonical market registry (zeus-forecasts market_events: slug, city,
+    target_date) + the city timezone from src.config — never a slug parse, never a venue
+    call. A market this far past its question date is settled at the venue; tokens for it
+    are no longer an open trading concern. FAIL-CLOSED: registry unreadable, token absent,
+    or timezone unknown -> the token is simply not classified terminal (the drift finding
+    stays open and the operator-ack path remains the only door).
+
+    Read-only, short-lived connection (three-phase contract: no connection outlives the
+    lookup, nothing is held across any other I/O).
+    """
+    tokens = tuple(sorted({str(t) for t in token_ids if str(t).strip()}))
+    if not tokens:
+        return {}
+    try:
+        from datetime import time as _time, timedelta as _timedelta  # noqa: PLC0415
+        from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+        from src.config import cities_by_name  # noqa: PLC0415
+        from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415
+
+        placeholders = ", ".join("?" for _ in tokens)
+        ro = sqlite3.connect(f"file:{ZEUS_FORECASTS_DB_PATH}?mode=ro", uri=True, timeout=5.0)
+        try:
+            ro.row_factory = sqlite3.Row
+            rows = ro.execute(
+                f"""
+                SELECT token_id, market_slug, city, target_date, condition_id
+                  FROM market_events
+                 WHERE token_id IN ({placeholders})
+                """,
+                tokens,
+            ).fetchall()
+        finally:
+            ro.close()
+        out: dict[str, dict[str, str]] = {}
+        for row in rows:
+            city_cfg = cities_by_name.get(str(row["city"]))
+            if city_cfg is None:
+                continue
+            try:
+                target = datetime.fromisoformat(str(row["target_date"])).date()
+                tz = ZoneInfo(str(city_cfg.timezone))
+            except Exception:  # noqa: BLE001 — fail-closed per token
+                continue
+            local_day_end = datetime.combine(target + _timedelta(days=1), _time(0, 0), tzinfo=tz)
+            terminal_after = local_day_end.astimezone(timezone.utc) + _timedelta(
+                hours=_SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS
+            )
+            if observed_at.astimezone(timezone.utc) >= terminal_after:
+                out[str(row["token_id"])] = {
+                    "market_slug": str(row["market_slug"]),
+                    "city": str(row["city"]),
+                    "target_date": str(row["target_date"]),
+                    "condition_id": str(row["condition_id"] or ""),
+                    "terminal_after_utc": terminal_after.isoformat(),
+                }
+        return out
+    except Exception as exc:  # noqa: BLE001 — fail-closed: nothing classified terminal
+        logger.debug("market-calendar terminal lookup unavailable (fail-closed): %s", exc)
+        return {}
+
+
 def _resolve_position_drift_tokens_from_current_truth(
     conn: sqlite3.Connection,
     *,
@@ -2165,6 +2239,7 @@ def _resolve_position_drift_tokens_from_current_truth(
     open_orders: list[Any] | None = None,
     observed_at: datetime,
 ) -> None:
+    calendar_terminal = _market_calendar_terminal_evidence(token_ids, observed_at=observed_at)
     exchange = _exchange_positions_by_token(positions)
     confirmed_journal = _journal_positions_by_token(
         conn,
@@ -2278,6 +2353,48 @@ def _resolve_position_drift_tokens_from_current_truth(
                 conn,
                 token,
                 resolution="position_drift_recent_fill_suppressed",
+                resolved_at=observed_at,
+            )
+            continue
+        # SETTLED-CLASS EXTERNAL CLOSE (2026-06-11, redeem-abandonment follow-through):
+        # the operator's standing third-party auto-redeemer sweeps EVERY settled position
+        # off the shared wallet, so "venue 0 + confirmed journal long + market's target
+        # local day over by 24h+" is the EXPECTED terminal state, not a drift. The duty
+        # of registering settled winners in token_suppression used to live in the
+        # harvester and DIED with the abandoned redeem subsystem — leaving each swept
+        # winner as a permanent latch-closing finding (HK 06-09: 11h submit freeze).
+        # Auto-register the suppression with market-calendar evidence; the suppression
+        # door above keeps it resolved on every future sweep. A NON-terminal
+        # disappearance never matches here and still requires the operator-ack path
+        # below (the theft/bug surface is preserved). Money truth is untouched: no
+        # synthetic exit is booked — settlement P&L stays with the settlement organs +
+        # the Confirm-pending-deposit check.
+        settled_terminal = calendar_terminal.get(token)
+        if (
+            settled_terminal is not None
+            and exchange_size <= Decimal("0")
+            and confirmed_wallet_size > Decimal("0")
+            and open_sell_locked_size <= Decimal("0")
+        ):
+            from src.state.db import record_token_suppression  # noqa: PLC0415
+
+            record_token_suppression(
+                conn,
+                token_id=token,
+                suppression_reason="settled_position",
+                source_module="exchange_reconcile.settled_external_absorber",
+                condition_id=settled_terminal.get("condition_id") or None,
+                evidence={
+                    "absorber": "settled_external_close",
+                    "journal_size": str(confirmed_wallet_size),
+                    "exchange_size": str(exchange_size),
+                    **settled_terminal,
+                },
+            )
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution=_SETTLED_EXTERNAL_RESOLUTION,
                 resolved_at=observed_at,
             )
             continue

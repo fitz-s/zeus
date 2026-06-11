@@ -659,6 +659,7 @@ SQLITE_CONNECT_ALLOWLIST: frozenset[str] = frozenset(
         "src/main.py",                  # read_only_ro_uri: live boot verifies zeus-forecasts.db user_version with mode=ro + query_only
         "src/data/replacement_forecast_live_dry_run.py",  # read_only_ro_uri: replacement switch dry-run inventory opens forecasts DB mode=ro + query_only; SELECT-only
         "src/observability/status_summary.py",  # RO: status dashboard read-only
+        "src/execution/exchange_reconcile.py",  # read_only_ro_uri: settled-external absorber reads canonical market_events (zeus-forecasts) mode=ro, short-lived, SELECT-only — docs/evidence/settlement_guard/2026-06-11_settled_external_absorber_plan.md
         "src/riskguard/discord_alerts.py",  # WRITE risk_state.db only; not in world-db BULK lock universe
         "src/control/cli/promote_entry_forecast.py",  # RO: operator CLI opens world-db with mode=ro
         # K1 workload-class split (2026-05-12): PR #112 Option (c) split of
