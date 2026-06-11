@@ -238,8 +238,17 @@ def _orderbook_prefetch_target_window_seconds() -> float:
 
 
 def _readiness_ttl_hours() -> float:
-    # src/data/replacement_forecast_materializer.py: computed_at + timedelta(hours=3).
-    return 3.0
+    # SINGLE freshness authority (operator 2026-06-11, RULE-1 twin-clock incident):
+    # readiness expires at source_cycle_time + the derived staleness bound
+    # (replacement_readiness_expires_at in replacement_forecast_cycle_policy) — the old
+    # computed_at+3h second clock re-killed data the 30h law declared lawful. The
+    # registry value is the bound itself; the effective per-row window is
+    # (cycle + bound) − computed_at.
+    from src.data.replacement_forecast_cycle_policy import (
+        replacement_source_cycle_max_age_hours,
+    )
+
+    return replacement_source_cycle_max_age_hours()
 
 
 def _download_release_lag_hours() -> float:
@@ -463,9 +472,9 @@ REGISTRY: list[Entry] = [
         kind=Kind.TTL,
         operation="how long a materialized replacement-forecast readiness stays LIVE_ELIGIBLE",
         source=_readiness_ttl_hours,
-        source_ref="src/data/replacement_forecast_materializer.py:1660 "
-        "(computed_at + timedelta(hours=3))",
-        basis_kind=BasisKind.GUESS,
+        source_ref="src/data/replacement_forecast_cycle_policy.py "
+        "replacement_readiness_expires_at (source_cycle_time + derived staleness bound)",
+        basis_kind=BasisKind.DERIVED,
         basis=(
             "3h is a guess — needs measurement against how often a scope can actually "
             "be re-materialized. The dead-zone incident (2026-06-10) proved the TTL "

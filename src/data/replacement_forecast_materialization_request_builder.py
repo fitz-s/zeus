@@ -156,10 +156,16 @@ def build_replacement_forecast_materialization_request(
         raise ValueError("temperature_metric must be high or low")
     source_cycle_time = _dt(payload.get("source_cycle_time"), field_name="source_cycle_time")
     computed_at = _dt(payload.get("computed_at"), field_name="computed_at")
+    # SINGLE freshness authority (operator directive 2026-06-11): derive readiness expiry
+    # from the cycle's staleness bound — same function as the materializer stamp site.
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        replacement_readiness_expires_at,
+    )
+
     expires_at = (
         _dt(payload.get("expires_at"), field_name="expires_at")
         if payload.get("expires_at") is not None
-        else computed_at + timedelta(hours=3)
+        else replacement_readiness_expires_at(source_cycle_time)
     )
     if expires_at <= computed_at:
         raise ValueError("expires_at must be after computed_at")

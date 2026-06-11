@@ -1730,10 +1730,19 @@ def _build_readiness(
 ):
     expected = expected_replacement_dependency_identity_by_role(metric)
     computed_at = _to_utc(request.computed_at, field_name="computed_at")
+    # SINGLE freshness authority (operator directive 2026-06-11, RULE-1 twin-clock
+    # incident): readiness expiry derives from the cycle's staleness bound, never a
+    # second guessed clock (the old computed_at+3h killed lawful 26h-old data live).
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        replacement_readiness_expires_at,
+    )
+
     expires_at = (
         _to_utc(request.expires_at, field_name="expires_at")
         if request.expires_at is not None
-        else computed_at + timedelta(hours=3)
+        else replacement_readiness_expires_at(
+            _to_utc(request.source_cycle_time, field_name="source_cycle_time")
+        )
     )
     return build_replacement_forecast_readiness(
         city=request.city,

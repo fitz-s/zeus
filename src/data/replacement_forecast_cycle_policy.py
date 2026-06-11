@@ -91,6 +91,27 @@ def replacement_source_cycle_max_age_hours() -> float:
     return value if value > 0.0 else REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
 
 
+def replacement_readiness_expires_at(source_cycle_time: datetime) -> datetime:
+    """THE single readiness-expiry derivation (operator directive 2026-06-11 RULE-1 incident).
+
+    Readiness previously expired at ``computed_at + 3h`` (a GUESS, stamped identically at
+    TWO sites — materializer + request builder), while the staleness law above says the
+    cycle's data is lawful for ``max_age_hours`` after the CYCLE time. Two freshness clocks
+    ⇒ the 3h clock re-killed data the 30h law declared lawful: on 2026-06-11 the 06Z rows'
+    readiness died at ~06:31Z and every scope went
+    REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED while the cycle was only ~26h old.
+
+    ONE clock now: readiness expires exactly when the cycle's staleness bound expires.
+    The H3 expires_at gate and the cycle-age gate in the bundle reader thereby verify the
+    SAME bound from two directions (belt-and-suspenders on one number, never two numbers).
+    tests/data/test_cycle_staleness_derivation.py pins both stamp sites to this function.
+    """
+    from datetime import timedelta  # noqa: PLC0415
+
+    cycle = source_cycle_time if source_cycle_time.tzinfo else source_cycle_time.replace(tzinfo=UTC)
+    return cycle.astimezone(UTC) + timedelta(hours=replacement_source_cycle_max_age_hours())
+
+
 def cycle_age_hours(reference_time: datetime, source_cycle_time: datetime) -> float:
     """``(reference_time - source_cycle_time)`` in hours, both coerced to UTC.
 
