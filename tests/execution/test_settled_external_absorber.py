@@ -32,7 +32,8 @@ from src.execution.exchange_reconcile import (
 )
 
 NOW = datetime(2026, 6, 11, 10, 30, tzinfo=timezone.utc)
-TOKEN = "43002927367061661305591090516749828572523174830019673318541620671727"
+TOKEN = "43002927367061661305591090516749828572523174830019673318541620671727"  # the held NO side
+YES_TOKEN = "37002767290866925317834458295773494445422665081252227034849232828492"
 CONDITION = "0x70b824aa5fd4f3355cea55a681bd6ec8006a945ba813f1d2d95861d1bda30c45"
 
 _SUPPRESSION_DDL = """
@@ -63,6 +64,13 @@ CREATE TABLE venue_commands (
   state TEXT,
   updated_at TEXT
 );
+CREATE TABLE executable_market_snapshots (
+  snapshot_id TEXT PRIMARY KEY,
+  condition_id TEXT,
+  yes_token_id TEXT,
+  no_token_id TEXT,
+  selected_outcome_token_id TEXT
+);
 """
 
 
@@ -71,6 +79,10 @@ def _trades_conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     init_exchange_reconcile_schema(conn)
     conn.executescript(_SUPPRESSION_DDL)
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES ('snap1', ?, ?, ?, ?)",
+        (CONDITION, YES_TOKEN, TOKEN, TOKEN),
+    )
     return conn
 
 
@@ -81,9 +93,12 @@ def _forecasts_db(tmp_path, *, target_date: str) -> str:
         "CREATE TABLE market_events (token_id TEXT, market_slug TEXT, city TEXT,"
         " target_date TEXT, condition_id TEXT)"
     )
+    # Production truth: the registry row carries ONLY the YES-side token. The held NO
+    # token is reachable exclusively through the condition_id bridge — the exact shape
+    # that kept the HK 06-09 sweep unresolvable when matching was token-only.
     conn.execute(
         "INSERT INTO market_events VALUES (?, 'highest-temperature-in-hong-kong', 'Hong Kong', ?, ?)",
-        (TOKEN, target_date, CONDITION),
+        (YES_TOKEN, target_date, CONDITION),
     )
     conn.commit()
     conn.close()
@@ -223,8 +238,20 @@ def test_terminal_evidence_respects_local_day_plus_buffer(monkeypatch, tmp_path)
     )
     before = datetime(2026, 6, 10, 15, 0, tzinfo=timezone.utc)
     after = datetime(2026, 6, 10, 17, 0, tzinfo=timezone.utc)
-    assert _market_calendar_terminal_evidence((TOKEN,), observed_at=before) == {}
-    evidence = _market_calendar_terminal_evidence((TOKEN,), observed_at=after)
+    bridge = {TOKEN: CONDITION}
+    assert (
+        _market_calendar_terminal_evidence((TOKEN,), observed_at=before, conditions_by_token=bridge)
+        == {}
+    )
+    evidence = _market_calendar_terminal_evidence(
+        (TOKEN,), observed_at=after, conditions_by_token=bridge
+    )
     assert TOKEN in evidence
     assert evidence[TOKEN]["city"] == "Hong Kong"
     assert evidence[TOKEN]["condition_id"] == CONDITION
+    assert evidence[TOKEN]["matched_via"] == "condition_id_bridge"
+    # YES-side token still matches directly (registry row token).
+    direct = _market_calendar_terminal_evidence((YES_TOKEN,), observed_at=after)
+    assert YES_TOKEN in direct and "matched_via" not in direct[YES_TOKEN]
+    # Without the bridge, the NO side is unreachable — fail-closed, not guessed.
+    assert _market_calendar_terminal_evidence((TOKEN,), observed_at=after) == {}

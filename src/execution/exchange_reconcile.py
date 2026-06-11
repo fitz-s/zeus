@@ -2161,10 +2161,52 @@ _SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS = 24.0
 _SETTLED_EXTERNAL_RESOLUTION = "position_drift_settled_external_suppressed"
 
 
+def _condition_ids_for_tokens(
+    conn: sqlite3.Connection,
+    tokens: tuple[str, ...],
+) -> dict[str, str]:
+    """token_id -> condition_id via executable_market_snapshots (local, same conn).
+
+    The canonical market registry stores ONE token per row (the YES side), so a NO-side
+    holding can never be matched by token alone — exactly how the HK 06-09 NO x19 sweep
+    stayed an unresolvable drift for 11h. The snapshot table carries both sides
+    (yes/no/selected token columns); any side maps to the market's condition_id.
+    Fail-soft: missing table / no rows -> empty mapping.
+    """
+    if not tokens or not _table_exists(conn, "executable_market_snapshots"):
+        return {}
+    placeholders = ", ".join("?" for _ in tokens)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT yes_token_id, no_token_id, selected_outcome_token_id, condition_id
+              FROM executable_market_snapshots
+             WHERE yes_token_id IN ({placeholders})
+                OR no_token_id IN ({placeholders})
+                OR selected_outcome_token_id IN ({placeholders})
+            """,
+            (*tokens, *tokens, *tokens),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — fail-soft: token simply stays unmapped
+        return {}
+    wanted = set(tokens)
+    out: dict[str, str] = {}
+    for row in rows:
+        condition = str(row["condition_id"] or "")
+        if not condition:
+            continue
+        for col in ("yes_token_id", "no_token_id", "selected_outcome_token_id"):
+            value = str(row[col] or "")
+            if value in wanted:
+                out.setdefault(value, condition)
+    return out
+
+
 def _market_calendar_terminal_evidence(
     token_ids: tuple[str, ...] | frozenset[str] | set[str],
     *,
     observed_at: datetime,
+    conditions_by_token: Mapping[str, str] | None = None,
 ) -> dict[str, dict[str, str]]:
     """token_id -> market-calendar terminal evidence, for tokens whose market's target
     local day ended >= _SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS ago.
@@ -2172,7 +2214,10 @@ def _market_calendar_terminal_evidence(
     Authority: the canonical market registry (zeus-forecasts market_events: slug, city,
     target_date) + the city timezone from src.config — never a slug parse, never a venue
     call. A market this far past its question date is settled at the venue; tokens for it
-    are no longer an open trading concern. FAIL-CLOSED: registry unreadable, token absent,
+    are no longer an open trading concern. Matching is by token_id OR by the token's
+    condition_id (``conditions_by_token``, from executable_market_snapshots): the
+    registry stores only the YES-side token per row, so NO-side holdings are reachable
+    only through the condition bridge. FAIL-CLOSED: registry unreadable, token unmatched,
     or timezone unknown -> the token is simply not classified terminal (the drift finding
     stays open and the operator-ack path remains the only door).
 
@@ -2182,6 +2227,12 @@ def _market_calendar_terminal_evidence(
     tokens = tuple(sorted({str(t) for t in token_ids if str(t).strip()}))
     if not tokens:
         return {}
+    condition_map = {
+        str(token): str(condition)
+        for token, condition in (conditions_by_token or {}).items()
+        if str(condition).strip()
+    }
+    conditions = tuple(sorted(set(condition_map.values())))
     try:
         from datetime import time as _time, timedelta as _timedelta  # noqa: PLC0415
         from zoneinfo import ZoneInfo  # noqa: PLC0415
@@ -2189,7 +2240,8 @@ def _market_calendar_terminal_evidence(
         from src.config import cities_by_name  # noqa: PLC0415
         from src.state.db import ZEUS_FORECASTS_DB_PATH  # noqa: PLC0415
 
-        placeholders = ", ".join("?" for _ in tokens)
+        token_ph = ", ".join("?" for _ in tokens)
+        condition_ph = ", ".join("?" for _ in conditions) if conditions else "''"
         ro = sqlite3.connect(f"file:{ZEUS_FORECASTS_DB_PATH}?mode=ro", uri=True, timeout=5.0)
         try:
             ro.row_factory = sqlite3.Row
@@ -2197,13 +2249,15 @@ def _market_calendar_terminal_evidence(
                 f"""
                 SELECT token_id, market_slug, city, target_date, condition_id
                   FROM market_events
-                 WHERE token_id IN ({placeholders})
+                 WHERE token_id IN ({token_ph})
+                    OR condition_id IN ({condition_ph})
                 """,
-                tokens,
+                (*tokens, *conditions),
             ).fetchall()
         finally:
             ro.close()
-        out: dict[str, dict[str, str]] = {}
+        evidence_by_token: dict[str, dict[str, str]] = {}
+        evidence_by_condition: dict[str, dict[str, str]] = {}
         for row in rows:
             city_cfg = cities_by_name.get(str(row["city"]))
             if city_cfg is None:
@@ -2217,14 +2271,27 @@ def _market_calendar_terminal_evidence(
             terminal_after = local_day_end.astimezone(timezone.utc) + _timedelta(
                 hours=_SETTLED_EXTERNAL_TERMINAL_BUFFER_HOURS
             )
-            if observed_at.astimezone(timezone.utc) >= terminal_after:
-                out[str(row["token_id"])] = {
-                    "market_slug": str(row["market_slug"]),
-                    "city": str(row["city"]),
-                    "target_date": str(row["target_date"]),
-                    "condition_id": str(row["condition_id"] or ""),
-                    "terminal_after_utc": terminal_after.isoformat(),
-                }
+            if observed_at.astimezone(timezone.utc) < terminal_after:
+                continue
+            evidence = {
+                "market_slug": str(row["market_slug"]),
+                "city": str(row["city"]),
+                "target_date": str(row["target_date"]),
+                "condition_id": str(row["condition_id"] or ""),
+                "terminal_after_utc": terminal_after.isoformat(),
+            }
+            evidence_by_token[str(row["token_id"])] = evidence
+            if evidence["condition_id"]:
+                evidence_by_condition[evidence["condition_id"]] = evidence
+        out: dict[str, dict[str, str]] = {}
+        for token in tokens:
+            direct = evidence_by_token.get(token)
+            if direct is not None:
+                out[token] = direct
+                continue
+            bridged = evidence_by_condition.get(condition_map.get(token, ""))
+            if bridged is not None:
+                out[token] = {**bridged, "matched_via": "condition_id_bridge"}
         return out
     except Exception as exc:  # noqa: BLE001 — fail-closed: nothing classified terminal
         logger.debug("market-calendar terminal lookup unavailable (fail-closed): %s", exc)
@@ -2239,7 +2306,13 @@ def _resolve_position_drift_tokens_from_current_truth(
     open_orders: list[Any] | None = None,
     observed_at: datetime,
 ) -> None:
-    calendar_terminal = _market_calendar_terminal_evidence(token_ids, observed_at=observed_at)
+    calendar_terminal = _market_calendar_terminal_evidence(
+        token_ids,
+        observed_at=observed_at,
+        conditions_by_token=_condition_ids_for_tokens(
+            conn, tuple(sorted(str(item) for item in token_ids))
+        ),
+    )
     exchange = _exchange_positions_by_token(positions)
     confirmed_journal = _journal_positions_by_token(
         conn,
