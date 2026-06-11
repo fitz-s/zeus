@@ -112,4 +112,37 @@ Option 1 directly closes the C3 gap, reuses the existing single blending authori
 (`market_fusion.compute_posterior` semantics + `edge.base_alpha` per-level), leaves C4
 untouched (market ≈ model there ⇒ near-neutral), and needs no settled fused-q record.
 
-(Implementation + flag + antibody tests documented in the commit; see §B wiring below.)
+### B wiring (implemented)
+
+- **New pure module** `src/strategy/live_inference/market_anchor.py` —
+  `market_anchored_no_lcb(q_lcb_no, q_model_no, market_no_price, alpha, bin_distance_steps)`.
+  Reuses legacy α-fusion semantics (`raw = α·q_model + (1−α)·q_market`); one-sided cap
+  `q_lcb_no_out = min(q_lcb_no, q_anchor_no)`. No I/O, no settings reads.
+- **Adapter wiring** `src/engine/event_reactor_adapter.py` `_generate_candidate_proofs` seam
+  (~6582): after the NO all-in `execution_price` is known (= market-implied NO), a near-center
+  buy_no's `q_lcb` is capped BEFORE score/gates/proof. Helper
+  `_market_anchor_no_lcb_for_candidate` converts the bin+μ to settlement-step distance (reuses
+  `direction_law.bin_forecast_distance` + `_SETTLEMENT_STEP_BY_UNIT`). α from the SINGLE legacy
+  registry `edge.base_alpha.level3` (`_market_anchor_alpha`), not a new constant. Capped events
+  log to the existing `zeus.replacement_qlcb_shadow` logger.
+- **Flag** `edli_v1.replacement_q_market_anchor_enabled` = **false** (default OFF, HIGH risk).
+  Flag OFF ⇒ the block is not entered ⇒ byte-identical to today. Direction-law bans STAY.
+- **Antibodies** (23 relationship pins, all green): `tests/strategy/live_inference/
+  test_market_anchor.py` (17 — class-conditional cap bound, C4-untouched, one-sided
+  monotonicity grid, fail-open on missing/non-finite market, α monotonicity) +
+  `tests/engine/test_market_anchor_wiring.py` (6 — flag-default-off, α-from-legacy-registry,
+  near-center cap, far-NO untouched, F/C step scaling, no-bin → None).
+
+### C — suites + restart
+
+- Green: `tests/strategy/live_inference/` (187), `tests/architecture/` (29), the two new anchor
+  suites (23), `test_replacement_fused_q_shape`, direction-law/Milan/arm-gate suites.
+- **Pre-existing, unrelated:** 2 failures in `tests/engine/test_replacement_0_1_qlcb_dispersion_
+  floor.py` (fused-normal bounds fixture, `adapter:9209`) — fail IDENTICALLY on pristine HEAD
+  (verified by temp-swap). Not in scope, not touched.
+- **Commit:** `46787b176f`.
+- **Restart need:** NONE to land the change OFF (flag default false ⇒ live path byte-identical;
+  materializer subprocesses already pick up code hot). To ACTIVATE: flip
+  `replacement_q_market_anchor_enabled=true` (operator word only) — the selection daemon reads
+  settings live; restart it only if the running process caches settings at boot.
+
