@@ -2346,3 +2346,39 @@ def test_market_channel_events_do_not_starve_fsr():
         f"COMPLETE FSR not in top-10 fetch despite tier-0 priority. "
         f"Fetched types: {[e.event_type for e in fetched][:10]}"
     )
+
+
+# --- antibody: reactor._build_regret_envelope_json must not mutate store.conn.row_factory --------
+# Task #42 (2026-06-11): same footgun as the PRAGMA busy_timeout leak in the claim storm — a
+# connection-global attribute mutated inside a shared-conn path is visible to every concurrent
+# reader.  The cursor-local row_factory approach removes the mutation entirely.
+
+
+def _sentinel_row_factory(cursor, row):  # noqa: ARG001
+    """Detectable sentinel factory — identity observable with 'is'."""
+    return row
+
+
+def test_build_regret_envelope_json_does_not_mutate_store_conn_row_factory():
+    """ANTIBODY (Task #42): reactor._build_regret_envelope_json snapshot fetch must not set
+    store.conn.row_factory.  A sentinel factory pinned before the call must survive after it,
+    including through the sqlite3.Error exception path (table absent)."""
+    conn, store = _store()
+    # Pin a sentinel — not sqlite3.Row, not None; identity is the assertion.
+    conn.row_factory = _sentinel_row_factory
+
+    decision_time = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
+    reactor, rejected, _submitted = _reactor(store, gates=False)
+
+    event = _day0_event()
+    store.insert_or_ignore(event)
+
+    # Process; the rejection writes a regret row and calls _build_regret_envelope_json,
+    # which tries to fetch from executable_market_snapshots (absent in the in-memory schema =>
+    # the query either returns None or raises — in both cases conn.row_factory must be untouched).
+    reactor.process_pending(decision_time=decision_time, limit=1)
+
+    assert conn.row_factory is _sentinel_row_factory, (
+        "reactor._build_regret_envelope_json mutated store.conn.row_factory — "
+        "cursor-local row_factory must be used instead of conn-level save/restore"
+    )

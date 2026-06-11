@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-11
+# Last reused or audited: 2026-06-11 (row_factory isolation fix, Task #42)
 # Authority basis: docs/evidence/settlement_guard/2026-06-11_decision_provenance_plan.md
 #   — OPERATOR LAW 2026-06-11 ~13:20Z (verbatim): "我要每一个下单决定receipt都有来自那些
 #   数据组合，距离发布多久，距离结算多久等等所有的详细数据全部被记录，每一个被拒绝的具体原因
@@ -170,38 +170,38 @@ def _anchor_transport(
         return _unavailable("forecast_conn not provided")
     if not dependency_source_run_ids:
         return _unavailable("dependency_source_run_ids absent")
-    saved = forecast_conn.row_factory
-    forecast_conn.row_factory = sqlite3.Row
     transports: dict[str, Any] = {}
-    try:
-        for role, source_run_id in dependency_source_run_ids.items():
-            if not source_run_id:
-                continue
-            try:
-                rows = forecast_conn.execute(
-                    """
-                    SELECT source_id, artifact_metadata_json
-                    FROM raw_forecast_artifacts
-                    WHERE json_extract(artifact_metadata_json, '$.source_run_id') = ?
-                    ORDER BY captured_at DESC
-                    LIMIT 1
-                    """,
-                    (str(source_run_id),),
-                ).fetchall()
-            except sqlite3.Error as exc:
-                transports[role] = _unavailable(f"artifact query failed: {exc}")
-                continue
-            if not rows:
-                transports[role] = _unavailable(f"no raw_forecast_artifacts for run {source_run_id}")
-                continue
-            md = _json_obj(_row_get(rows[0], "artifact_metadata_json"))
-            transports[role] = {
-                "source_id": _row_get(rows[0], "source_id"),
-                "run_authority": md.get("run_authority"),
-                "openmeteo_endpoint": md.get("openmeteo_endpoint"),
-            }
-    finally:
-        forecast_conn.row_factory = saved
+    # Use a cursor-local row_factory (Python 3.14 sqlite3) so the shared connection's
+    # row_factory is never mutated — eliminates the save/restore concurrency footgun.
+    cur = forecast_conn.cursor()
+    cur.row_factory = sqlite3.Row
+    for role, source_run_id in dependency_source_run_ids.items():
+        if not source_run_id:
+            continue
+        try:
+            cur.execute(
+                """
+                SELECT source_id, artifact_metadata_json
+                FROM raw_forecast_artifacts
+                WHERE json_extract(artifact_metadata_json, '$.source_run_id') = ?
+                ORDER BY captured_at DESC
+                LIMIT 1
+                """,
+                (str(source_run_id),),
+            )
+            rows = cur.fetchall()
+        except sqlite3.Error as exc:
+            transports[role] = _unavailable(f"artifact query failed: {exc}")
+            continue
+        if not rows:
+            transports[role] = _unavailable(f"no raw_forecast_artifacts for run {source_run_id}")
+            continue
+        md = _json_obj(_row_get(rows[0], "artifact_metadata_json"))
+        transports[role] = {
+            "source_id": _row_get(rows[0], "source_id"),
+            "run_authority": md.get("run_authority"),
+            "openmeteo_endpoint": md.get("openmeteo_endpoint"),
+        }
     return transports or _unavailable("no anchor artifacts matched any dependency run id")
 
 
@@ -227,36 +227,36 @@ def _per_input_ages(
     }
     if forecast_conn is None or not dependency_source_run_ids:
         return ages
-    saved = forecast_conn.row_factory
-    forecast_conn.row_factory = sqlite3.Row
-    try:
-        for role, source_run_id in dependency_source_run_ids.items():
-            if not source_run_id:
-                continue
-            try:
-                row = forecast_conn.execute(
-                    """
-                    SELECT source_cycle_time, source_available_at, captured_at
-                    FROM raw_forecast_artifacts
-                    WHERE json_extract(artifact_metadata_json, '$.source_run_id') = ?
-                    ORDER BY captured_at DESC
-                    LIMIT 1
-                    """,
-                    (str(source_run_id),),
-                ).fetchone()
-            except sqlite3.Error as exc:
-                ages[role] = _unavailable(f"artifact query failed: {exc}")
-                continue
-            if row is None:
-                ages[role] = _unavailable(f"no raw_forecast_artifacts for run {source_run_id}")
-                continue
-            ages[role] = {
-                "cycle_age_h": _age_hours(decision_utc, _row_get(row, "source_cycle_time")),
-                "available_age_h": _age_hours(decision_utc, _row_get(row, "source_available_at")),
-                "capture_age_h": _age_hours(decision_utc, _row_get(row, "captured_at")),
-            }
-    finally:
-        forecast_conn.row_factory = saved
+    # Use a cursor-local row_factory (Python 3.14 sqlite3) so the shared connection's
+    # row_factory is never mutated — eliminates the save/restore concurrency footgun.
+    cur = forecast_conn.cursor()
+    cur.row_factory = sqlite3.Row
+    for role, source_run_id in dependency_source_run_ids.items():
+        if not source_run_id:
+            continue
+        try:
+            cur.execute(
+                """
+                SELECT source_cycle_time, source_available_at, captured_at
+                FROM raw_forecast_artifacts
+                WHERE json_extract(artifact_metadata_json, '$.source_run_id') = ?
+                ORDER BY captured_at DESC
+                LIMIT 1
+                """,
+                (str(source_run_id),),
+            )
+            row = cur.fetchone()
+        except sqlite3.Error as exc:
+            ages[role] = _unavailable(f"artifact query failed: {exc}")
+            continue
+        if row is None:
+            ages[role] = _unavailable(f"no raw_forecast_artifacts for run {source_run_id}")
+            continue
+        ages[role] = {
+            "cycle_age_h": _age_hours(decision_utc, _row_get(row, "source_cycle_time")),
+            "available_age_h": _age_hours(decision_utc, _row_get(row, "source_available_at")),
+            "capture_age_h": _age_hours(decision_utc, _row_get(row, "captured_at")),
+        }
     return ages
 
 

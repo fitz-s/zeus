@@ -1204,17 +1204,19 @@ class OpportunityEventReactor:
             snapshot_id = _receipt_or_payload(receipt, payload, "executable_snapshot_id")
             if snapshot_id:
                 try:
-                    saved = self._store.conn.row_factory
-                    self._store.conn.row_factory = sqlite3.Row
-                    try:
-                        snapshot_row = self._store.conn.execute(
-                            "SELECT snapshot_id, captured_at, orderbook_top_bid, orderbook_top_ask, "
-                            "market_end_at, condition_id FROM executable_market_snapshots "
-                            "WHERE snapshot_id = ?",
-                            (str(snapshot_id),),
-                        ).fetchone()
-                    finally:
-                        self._store.conn.row_factory = saved
+                    # Use a cursor-local row_factory so the shared connection's
+                    # row_factory is never mutated — eliminates the save/restore
+                    # concurrency footgun (same class as the 2026-06-11 claim storm
+                    # PRAGMA busy_timeout leak, src/events/reactor.py header §(d)).
+                    _snap_cur = self._store.conn.cursor()
+                    _snap_cur.row_factory = sqlite3.Row
+                    _snap_cur.execute(
+                        "SELECT snapshot_id, captured_at, orderbook_top_bid, orderbook_top_ask, "
+                        "market_end_at, condition_id FROM executable_market_snapshots "
+                        "WHERE snapshot_id = ?",
+                        (str(snapshot_id),),
+                    )
+                    snapshot_row = _snap_cur.fetchone()
                 except sqlite3.Error:
                     snapshot_row = None
 

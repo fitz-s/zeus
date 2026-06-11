@@ -553,3 +553,130 @@ def test_receipt_json_always_excludes_envelope_json():
     j_with = _receipt_json(with_env)
     assert "envelope_json" not in j_with
     assert j_with == j_without, "receipt_json must be byte-identical with or without the envelope"
+
+
+# --- antibody: envelope building NEVER mutates conn.row_factory (Task #42, row_factory isolation) --
+#
+# Same class as the PRAGMA busy_timeout leak that caused the 2026-06-11 claim storm: a mutation to
+# a connection-global attribute is visible to every other thread/coroutine sharing that connection.
+# The fix (cursor-local row_factory) is verified here: a sentinel factory set before the call
+# must be identical to the factory observed after the call, even on exception paths.
+
+
+def _sentinel_factory(cursor, row):  # noqa: ARG001
+    """Sentinel row_factory — returns rows unchanged; presence is detectable by identity."""
+    return row
+
+
+def _forecast_conn_for_isolation_test() -> sqlite3.Connection:
+    """Minimal forecast DB with raw_forecast_artifacts to exercise the full anchor/ages paths."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL,
+            source_cycle_time TEXT NOT NULL,
+            source_available_at TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            artifact_metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO raw_forecast_artifacts
+            (source_id, source_cycle_time, source_available_at, captured_at, artifact_metadata_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "openmeteo_ecmwf_ifs_9km",
+            "2026-06-11T00:00:00+00:00",
+            "2026-06-11T11:00:00+00:00",
+            "2026-06-11T11:30:00+00:00",
+            json.dumps({
+                "source_run_id": "openmeteo-anchor-isolation-test",
+                "run_authority": "run_pinned_single_runs",
+                "openmeteo_endpoint": "single_runs_api",
+            }),
+        ),
+    )
+    conn.commit()
+    return conn
+
+
+def test_envelope_building_leaves_forecast_conn_row_factory_untouched():
+    """ANTIBODY (Task #42): build_decision_provenance_envelope must NOT mutate forecast_conn's
+    row_factory.  A sentinel factory set before the call must be present after it, including
+    through the anchor-transport and per-input-ages code paths that previously save/restored it."""
+    fc = _forecast_conn_for_isolation_test()
+    fc.row_factory = _sentinel_factory  # sentinel — identity observable by 'is'
+
+    bundle = _FakeBundle(
+        posterior_id=99,
+        city="Helsinki",
+        target_date="2026-06-12",
+        temperature_metric="high",
+        data_version="v1",
+        source_cycle_time="2026-06-11T00:00:00+00:00",
+        source_available_at="2026-06-11T11:00:00+00:00",
+        computed_at="2026-06-11T12:40:00+00:00",
+        dependency_json={"openmeteo_ifs9_anchor": "openmeteo-anchor-isolation-test"},
+        provenance_json={"replacement_q_mode": "FUSED_NORMAL_PARTIAL"},
+    )
+
+    build_decision_provenance_envelope(
+        fc,
+        None,
+        bundle=bundle,
+        decision_time=DECISION,
+        rejection={"stage": "TRADE_SCORE", "reason": "isolation_test"},
+    )
+
+    assert fc.row_factory is _sentinel_factory, (
+        "forecast_conn.row_factory was mutated by envelope building — "
+        "cursor-local row_factory must be used instead"
+    )
+    fc.close()
+
+
+def test_envelope_building_leaves_forecast_conn_row_factory_untouched_on_query_error():
+    """ANTIBODY exception path (Task #42): even when the artifact query raises, the sentinel
+    row_factory must survive — cursor-local isolation removes the need for try/finally restore."""
+    fc = sqlite3.connect(":memory:")
+    # raw_forecast_artifacts table absent -> every query raises sqlite3.OperationalError;
+    # the old save/restore try/finally would still restore; the cursor-local approach needs
+    # NO finally because the connection was never touched.
+    fc.row_factory = _sentinel_factory
+
+    bundle = _FakeBundle(
+        posterior_id=88,
+        city="Helsinki",
+        target_date="2026-06-12",
+        temperature_metric="high",
+        data_version="v1",
+        source_cycle_time="2026-06-11T00:00:00+00:00",
+        source_available_at="2026-06-11T11:00:00+00:00",
+        computed_at="2026-06-11T12:40:00+00:00",
+        dependency_json={"openmeteo_ifs9_anchor": "openmeteo-anchor-missing-table"},
+        provenance_json={"replacement_q_mode": "FUSED_NORMAL_PARTIAL"},
+    )
+
+    # Must not raise; must not mutate fc.row_factory.
+    env = build_decision_provenance_envelope(
+        fc,
+        None,
+        bundle=bundle,
+        decision_time=DECISION,
+        rejection={"stage": "EVENT_FILTER", "reason": "exception_path_test"},
+    )
+
+    assert fc.row_factory is _sentinel_factory, (
+        "forecast_conn.row_factory was mutated on the exception path — "
+        "cursor-local row_factory eliminates this risk entirely"
+    )
+    # Fail-soft: the builder must still produce UNAVAILABLE markers, not raise.
+    assert str(env["anchor_transport"]).startswith("UNAVAILABLE") or isinstance(
+        env["anchor_transport"], dict
+    )
+    fc.close()
