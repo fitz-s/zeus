@@ -1468,6 +1468,29 @@ def _shadow_comparator_tick() -> None:
         logger.info("shadow_comparator[%s]: %s", cand["name"], cand["verdict_line"])
 
 
+@_scheduler_job("day0_shadow_enrichment")
+def _day0_shadow_enrichment_tick() -> None:
+    """Grade SETTLED candidate-bearing day0 shadow receipts against VERIFIED truth.
+
+    Closes the day0-evidence gap (operator 2026-06-11): later_outcome /
+    would_have_won were 0% populated on the day0 lane because no writer existed.
+    This tick joins no_trade_regret_events (day0 shadow rows carrying
+    direction + bin_label) to VERIFIED forecasts.settlement_outcomes, grades each
+    through the canonical grade_receipt (Direction Law + HK preimage), and writes
+    the outcome via NoTradeRegretLedger.enrich_after_settlement. PURE-DB (no
+    network) and NEVER-SUBMIT / NEVER-FABRICATE: only already-candidate-bearing
+    receipts with a VERIFIED settlement are graded. Co-located with the
+    shadow-comparator tick (same WORLD+forecasts read shape, same cadence).
+    """
+    from src.analysis.day0_shadow_enrichment import run_day0_shadow_enrichment_job
+
+    report = run_day0_shadow_enrichment_job()
+    logger.info(
+        "day0_shadow_enrichment: status=%s enriched=%s",
+        report.get("status"), report.get("enriched", report.get("error")),
+    )
+
+
 # ---------------------------------------------------------------------------
 # F14 + F16 cascade-liveness pollers (2026-05-16, SCAFFOLD §K v5)
 # ---------------------------------------------------------------------------
@@ -8840,6 +8863,15 @@ def main():
     scheduler.add_job(
         _shadow_comparator_tick, "cron", hour=9, minute=20,
         id="shadow_comparator", max_instances=1, coalesce=True,
+    )
+    # Day0 shadow-receipt outcome enrichment — 09:25 UTC, after the shadow
+    # comparator (settlement truth already landed). Grades SETTLED candidate-bearing
+    # day0 receipts (later_outcome / would_have_won) against VERIFIED truth via the
+    # canonical grade_receipt. PURE-DB, idempotent, never-submit/never-fabricate.
+    # Closes the 0%-populated day0 grading layer (operator 2026-06-11).
+    scheduler.add_job(
+        _day0_shadow_enrichment_tick, "cron", hour=9, minute=25,
+        id="day0_shadow_enrichment", max_instances=1, coalesce=True,
     )
 
     # Boot-time fail-closed cascade-liveness contract check. MUST run AFTER
