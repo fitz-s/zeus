@@ -201,6 +201,15 @@ def _candidate_targets(
     tables = _table_names(conn)
     skip_covered_sql = ""
     if _coverage_skip_schema_ready(conn, tables):
+        # TRADEABLE-GRADE COVERAGE (2026-06-11, third site of the 2026-06-10 K-decision):
+        # only a q_lcb-bearing posterior counts as coverage. A capture-missing (NULL
+        # q_lcb) row otherwise masks its own fusion repair (the mask-and-starve
+        # category) — same clause as the queue antibody and the plan builder.
+        _tradeable = (
+            "AND p.q_lcb_json IS NOT NULL"
+            if "q_lcb_json" in _columns(conn, "forecast_posteriors")
+            else ""
+        )
         skip_covered_sql = f"""
           AND (
               NOT EXISTS (
@@ -212,6 +221,7 @@ def _candidate_targets(
                     AND p.temperature_metric = c.temperature_metric
                     AND p.training_allowed = 0
                     AND p.trade_authority_status IN ('SHADOW_ONLY', 'SHADOW_VETO_ONLY')
+                    {_tradeable}
                     AND json_extract(p.dependency_source_run_ids_json, '$.baseline_b0') = c.source_run_id
               )
               OR NOT EXISTS (
