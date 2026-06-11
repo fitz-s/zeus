@@ -87,45 +87,27 @@ def _capturable_models_for_scope(
 ) -> set[str]:
     """Models whose CURRENT value the materializer COULD fuse for this (scope, cycle) RIGHT NOW.
 
-    Mirrors _read_persisted_current_capture's source rule EXACTLY: single_runs rows are the
-    current value for every model, with the SOLE gem_global previous_runs exception (its
-    single_runs is structurally unservable). Any other model's current value comes ONLY from a
-    single_runs row — a previous_runs-only row (jma at an off-cadence cycle) is NOT a current
-    value and does not count, so this never claims an instrument the materializer cannot actually
-    fuse. Fail-soft: any read error -> empty set (treated as nothing newly capturable).
+    Delegates ENTIRELY to the single serving authority
+    (replacement_current_value_serving.read_current_instrument_values) — the SAME function the
+    materializer's q path consumes — so "capturable" and "what the fusion will actually serve"
+    can never drift (registry member #10). This includes the generalized previous-runs
+    substitution (没有新的就用老的): a provider structurally unpublished on this cycle's
+    single_runs leg (JMA at 06Z-cadence cycles) counts as capturable via its previous-runs row.
+    Fail-soft: any read error -> empty set (nothing newly capturable).
     """
+    from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+        read_current_instrument_values,
+    )
+
     try:
-        sr = {
-            str(r[0])
-            for r in conn.execute(
-                """
-                SELECT DISTINCT model FROM raw_model_forecasts
-                WHERE city = ? AND target_date = ? AND metric = ?
-                  AND source_cycle_time = ? AND endpoint = 'single_runs'
-                """,
-                (city, target_date, metric, source_cycle_iso),
-            ).fetchall()
-        }
+        return set(
+            read_current_instrument_values(
+                conn, city=city, metric=metric, target_date=target_date,
+                source_cycle_time_iso=source_cycle_iso,
+            ).keys()
+        )
     except Exception:
         return set()
-    # gem_global declared exception: its CURRENT value is served from previous_runs (same GDPS
-    # product its de-bias history is fit on). Mirror the materializer's gem fallback exactly.
-    if "gem_global" not in sr:
-        try:
-            gem = conn.execute(
-                """
-                SELECT 1 FROM raw_model_forecasts
-                WHERE city = ? AND target_date = ? AND metric = ?
-                  AND source_cycle_time = ? AND endpoint = 'previous_runs' AND model = 'gem_global'
-                LIMIT 1
-                """,
-                (city, target_date, metric, source_cycle_iso),
-            ).fetchone()
-        except Exception:
-            gem = None
-        if gem is not None:
-            sr.add("gem_global")
-    return sr
 
 
 def _latest_posterior_served(
@@ -346,7 +328,13 @@ def enqueue_fusion_upgrade_reseeds(
     try:
         ensure_replacement_forecast_shadow_schema(conn)
         enqueued = 0
-        for row in plan.rows:
+        # NEAREST-TARGET-FIRST (mirrors the seed-budget K-decision, registry member #6): the
+        # plan's native order is target_date DESC, which would spend the per-tick enqueue budget
+        # on far-date shadow scopes while the tradeable day0/day1 money scopes starve.
+        for row in sorted(
+            plan.rows,
+            key=lambda r: (str(r.target_date), str(r.city), str(r.temperature_metric)),
+        ):
             if enqueued >= max(1, int(limit)):
                 break
             city = str(row.city)

@@ -197,10 +197,13 @@ def test_gem_previous_runs_counts_as_capturable() -> None:
     assert "CMC" in verdict["new_families"]
 
 
-def test_previous_runs_only_non_gem_is_not_capturable() -> None:
-    """A non-gem model present ONLY via previous_runs (e.g. jma at an off-cadence cycle) is NOT a
-    current value the materializer can fuse — it must NOT count as capturable, or the trigger would
-    re-seed a scope that cannot actually upgrade (Beijing 06Z jma case)."""
+def test_previous_runs_only_non_gem_is_capturable_and_upgrades() -> None:
+    """SUPERSEDED LAW (Task #32 follow-up, operator 2026-06-11): the original pin here said a
+    non-gem previous_runs-only model is NOT capturable. That law is dead — the generalized
+    没有新的就用老的 serving rule (replacement_current_value_serving) serves ANY provider absent
+    from single_runs at the cycle from its previous_runs row at the same natural key, branded.
+    The Beijing-06Z JMA case is therefore now CAPTURABLE, and a posterior that dropped JMA is
+    exactly the PARTIAL fusion the upgrade trigger must detect — THE live σ lever."""
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"
     _insert_posterior(
@@ -211,7 +214,8 @@ def test_previous_runs_only_non_gem_is_not_capturable() -> None:
         conn, city="Testville", target_date="2026-06-13", metric="high", cycle_iso=cyc,
         models=[_NCEP, _DWD],
     )
-    # jma only via previous_runs (NOT the gem exception) — must not become capturable.
+    # jma only via previous_runs at the same natural key (JMA publishes 00/12Z — structurally
+    # absent from a 06Z cycle's single_runs): served by substitution => capturable.
     conn.execute(
         """
         INSERT INTO raw_model_forecasts
@@ -225,8 +229,12 @@ def test_previous_runs_only_non_gem_is_not_capturable() -> None:
     verdict = scope_capture_offers_larger_provider_set(
         conn, city="Testville", target_date="2026-06-13", metric="high"
     )
-    assert verdict["is_upgrade"] is False
-    assert "JMA" not in verdict["capturable_families"]
+    assert "JMA" in verdict["capturable_families"], (
+        "a previous_runs-substitutable provider must count as capturable — the serving authority "
+        "(read_current_instrument_values) is the shared single rule and WILL fuse it"
+    )
+    assert verdict["is_upgrade"] is True
+    assert verdict["new_families"] == ["JMA"]
 
 
 # ---------------------------------------------------------------------------

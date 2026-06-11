@@ -747,6 +747,12 @@ class _U0RFusionOverride:
     # CURRENT value entered the fused set for this cell, and the count expected (5). Recording only.
     decorrelated_providers_served: int = 0
     decorrelated_providers_expected: int = 5
+    # Task #32 follow-up (brand law): per-instrument serving provenance for every model that
+    # entered the fused set — which endpoint served its CURRENT value (served_via), the served
+    # row id/cycle/capture stamp/age, and its lead bucket. A previous_runs substitution (a
+    # provider whose selected cycle has no single_runs row, e.g. JMA at 06Z-cadence cycles) is
+    # therefore RECORDED in the posterior provenance, never silent.
+    current_value_serving: Mapping[str, Mapping[str, object]] | None = None
 
 
 def _read_persisted_current_capture(
@@ -758,82 +764,34 @@ def _read_persisted_current_capture(
     lead_days: int,
     source_cycle_time_iso: str,
 ) -> dict[str, tuple[float, int]]:
-    """BLOCKER 5 — read the PERSISTED current single_runs rows for this cycle.
+    """BLOCKER 5 — read the PERSISTED current rows for this cycle ({model: (value_c, rid)}).
 
-    Returns {model: (forecast_value_c, raw_model_forecast_id)} for the single_runs rows the
-    download job persisted for THIS (city, metric, target_date, source_cycle_time). The q path
-    consumes THESE rows (never a network fetch), so the traded q is reconstructable to the exact
-    persisted inputs (model, params, url hash, source_available_at). Empty dict -> the current
-    capture is missing for this cycle (the caller blocks / falls back with a reason).
-    Fail-soft: any DB error -> empty dict (treated as missing capture, never raises).
+    SHAPE ADAPTER ONLY (Task #32 follow-up, 2026-06-11): the serving RULE — which endpoint
+    serves each model's current value — lives in the SINGLE authority
+    ``replacement_current_value_serving.read_current_instrument_values`` (registry member #10).
+    The old gem_global-only previous_runs exception (edc598b440) is now one instance of the
+    generalized 没有新的就用老的 rule: a provider absent from single_runs at the selected cycle
+    (JMA at every 06Z-cadence cycle — it publishes 00/12Z only; gfs during an HTTP-400 outage)
+    serves its previous_runs row at the SAME natural key, BRANDED served_via="previous_runs" in
+    the fusion provenance, instead of being dropped. The substituted value is the SAME physical
+    product the model's walk-forward de-bias history is fit on, so the lead-bucket residual
+    variance already prices the older run — no manual down-weighting anywhere.
 
-    LEAD_DAYS IS NOT A FILTER (2026-06-09 fix): (city, metric, target_date, source_cycle_time)
-    already uniquely identifies the forecast, and lead_days is a DERIVED field = target - cycle.
-    The download persists lead_days on the cycle/UTC calendar; this reader previously re-derived
-    it from ``computed_at`` on the CITY-LOCAL calendar (BLOCKER 6) — a different reference time
-    AND a different calendar — so the leads disagreed (e.g. Wuhan: download lead=2 from cycle
-    06-08, reader lead=1 from computed_at 06-09 local) and this read returned EMPTY for ~all live
-    cells, silently disabling the ENTIRE multi-model fusion (0/598 posteriors fused -> cold
-    soft-anchor fallback). Matching on the natural key (no lead filter) makes that
-    download/materialize lead-calendar mismatch unconstructable. ``lead_days`` is retained as a
-    parameter for call-site compatibility but is no longer used to filter.
-
-    K2 gem_global DECLARED EXCEPTION (2026-06-09, curl-verified): the open-meteo single-runs API
-    does not serve cmc_gem_gdps_15km AT ALL (even cadence-valid 00z runs return
-    modelRunUnavailable), so gem_global can never have a single_runs row. Its current value is
-    served from its previous_runs row at the SAME natural key — the SAME GDPS product its
-    walk-forward de-bias history is fit on (source-identical; the ECMWF anchor needs an
-    ifs025->ifs9 bridge precisely because its history product != live product — gem has no such
-    mismatch). The exception is scoped to gem_global ONLY: any other model missing its
-    single_runs row stays missing/LOUD (no silent endpoint masking of a broken capture).
+    LEAD_DAYS IS NOT A FILTER (2026-06-09 fix, preserved in the authority): the natural key
+    (city, metric, target_date, source_cycle_time) uniquely identifies the forecast; lead_days
+    is retained as a parameter for call-site compatibility only. Fail-soft: any DB error ->
+    empty dict (missing capture; the caller falls back with a logged reason).
     """
-    try:
-        rows = conn.execute(
-            """
-            SELECT raw_model_forecast_id, model, forecast_value_c
-            FROM raw_model_forecasts
-            WHERE city = ? AND metric = ? AND target_date = ?
-              AND source_cycle_time = ? AND endpoint = 'single_runs'
-            ORDER BY model, lead_days, raw_model_forecast_id
-            """,
-            (city, metric, target_date, source_cycle_time_iso),
-        ).fetchall()
-    except Exception:
-        return {}
-    out: dict[str, tuple[float, int]] = {}
-    for row in rows:
-        try:
-            rid = int(row[0] if not isinstance(row, sqlite3.Row) else row["raw_model_forecast_id"])
-            model = row[1] if not isinstance(row, sqlite3.Row) else row["model"]
-            value = float(row[2] if not isinstance(row, sqlite3.Row) else row["forecast_value_c"])
-        except Exception:
-            continue
-        # First row per model wins (deterministic ORDER BY); a model is captured once per cycle.
-        out.setdefault(model, (value, rid))
-    if "gem_global" not in out:
-        try:
-            gem_rows = conn.execute(
-                """
-                SELECT raw_model_forecast_id, forecast_value_c
-                FROM raw_model_forecasts
-                WHERE city = ? AND metric = ? AND target_date = ?
-                  AND source_cycle_time = ? AND endpoint = 'previous_runs'
-                  AND model = 'gem_global'
-                ORDER BY lead_days, raw_model_forecast_id
-                """,
-                (city, metric, target_date, source_cycle_time_iso),
-            ).fetchall()
-        except Exception:
-            gem_rows = []
-        for row in gem_rows:
-            try:
-                rid = int(row[0] if not isinstance(row, sqlite3.Row) else row["raw_model_forecast_id"])
-                value = float(row[1] if not isinstance(row, sqlite3.Row) else row["forecast_value_c"])
-            except Exception:
-                continue
-            out["gem_global"] = (value, rid)
-            break
-    return out
+    del lead_days  # not a filter (2026-06-09); kept for call-site/test compatibility
+    from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+        read_current_instrument_values,
+    )
+
+    served = read_current_instrument_values(
+        conn, city=city, metric=metric, target_date=target_date,
+        source_cycle_time_iso=source_cycle_time_iso,
+    )
+    return {m: (s.value_c, s.raw_model_forecast_id) for m, s in served.items()}
 
 
 def _u0r_city_local_lead_days(
@@ -936,12 +894,24 @@ def _replacement_u0r_fusion_override(
         source_cycle_iso = _to_utc(
             request.source_cycle_time, field_name="source_cycle_time"
         ).isoformat()
+        # SINGLE-AUTHORITY current-value serving (Task #32 follow-up): the rich serving map
+        # carries per-instrument served_via/served_cycle/age provenance (brand law — a
+        # previous_runs substitution is recorded, never silent); persisted_current is its
+        # (value, rid) view for the fetch seam below.
+        from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+            read_current_instrument_values,
+        )
+
+        served_current: dict[str, object] = {}
         persisted_current: dict[str, tuple[float, int]] = {}
         if conn is not None:
-            persisted_current = _read_persisted_current_capture(
+            served_current = read_current_instrument_values(
                 conn, city=request.city, metric=metric, target_date=target_date,
-                lead_days=lead_days, source_cycle_time_iso=source_cycle_iso,
+                source_cycle_time_iso=source_cycle_iso,
             )
+            persisted_current = {
+                m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()
+            }
 
         # An explicitly-assigned _live_fetch is honored ONLY as a per-model override seam for
         # models WITHOUT a persisted current row (legacy/test injection). It is never consulted
@@ -1105,6 +1075,16 @@ def _replacement_u0r_fusion_override(
                     _sigma_resid = 1.5
         predictive_sigma_c = max(1.0, (float(fused.sd) ** 2 + _sigma_resid ** 2) ** 0.5)
 
+        # Task #32 follow-up (brand law): per-instrument serving provenance for the FUSED set.
+        # served_current is the single-authority serving map (read_current_instrument_values);
+        # restricting to used_models keeps the record scoped to what actually entered the q. A
+        # previous_runs substitution surfaces here as served_via="previous_runs" — never silent.
+        _current_value_serving = {
+            m: served_current[m].as_provenance()  # type: ignore[union-attr]
+            for m in used_models
+            if m in served_current
+        } or None
+
         return _U0RFusionOverride(
             anchor_value_c=float(fused.mu),
             anchor_sigma_c=float(fused.sd),
@@ -1122,6 +1102,7 @@ def _replacement_u0r_fusion_override(
             decorrelated_providers_complete=_decorrelated_complete,
             decorrelated_providers_served=_decorrelated_served,
             decorrelated_providers_expected=_decorrelated_expected,
+            current_value_serving=_current_value_serving,
         )
     except Exception as exc:  # fail-soft: never break shadow materialization
         try:
@@ -1655,6 +1636,16 @@ def _insert_posterior(
             "decorrelated_providers_complete": bool(u0r_override.decorrelated_providers_complete),
             "decorrelated_providers_served": int(u0r_override.decorrelated_providers_served),
             "decorrelated_providers_expected": int(u0r_override.decorrelated_providers_expected),
+            # Task #32 follow-up (brand law): per-instrument serving record — which endpoint
+            # served each fused model's CURRENT value (served_via), the served row id / cycle /
+            # capture stamp / age_hours, and its lead bucket. A previous_runs substitution (a
+            # provider structurally unpublished on this cycle's single_runs, e.g. JMA at 06Z)
+            # is RECORDED here, never silent.
+            "current_value_serving": (
+                {m: dict(v) for m, v in u0r_override.current_value_serving.items()}
+                if u0r_override.current_value_serving
+                else None
+            ),
             "fusion_authority": "SHADOW_ONLY",
         }
     posterior_identity_hash = _json_hash(

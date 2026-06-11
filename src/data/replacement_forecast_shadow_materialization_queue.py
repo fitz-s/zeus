@@ -445,7 +445,17 @@ def _prepare_seed_requests(
                 )
                 failed.append(str(moved))
                 continue
-            if _seed_already_covered(forecast_db=forecast_db, seed=seed):
+            # UPGRADE RE-SEED BYPASS (Task #32, 2026-06-11): a seed written by the fusion-upgrade
+            # trigger (upgrade_trigger="instrument_set_expansion") INTENTIONALLY re-materializes a
+            # covered scope — "a tradeable posterior exists" is precisely the state it supersedes
+            # (that posterior was fused from a strictly smaller instrument set). Coverage-skipping
+            # it would make every upgrade seed die as SKIPPED_ALREADY_COVERED and the PARTIAL
+            # fusion could never heal. The upgrade seed's idempotency authority is the
+            # fusion_upgrade_enqueues marker (at most one enqueue per (scope, cycle,
+            # capturable-family-superset) transition), NOT coverage — so this bypass cannot loop.
+            if not seed.get("upgrade_trigger") and _seed_already_covered(
+                forecast_db=forecast_db, seed=seed
+            ):
                 moved = _move_request(seed_json, processed_path)
                 _write_sidecar(
                     moved,

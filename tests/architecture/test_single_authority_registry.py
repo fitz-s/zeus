@@ -152,3 +152,35 @@ def test_member_fusion_upgrade_comparison_single_authority() -> None:
     # SAME seed surface the materialize cycle drains.
     production = _read("src/data/replacement_forecast_production.py")
     assert "_enqueue_fusion_upgrade_reseeds_if_needed" in production
+
+
+# ---------------------------------------------------------------------------------
+# 10. CURRENT-VALUE SERVING — "which endpoint serves each instrument's CURRENT value"
+#     (single_runs always wins; a provider absent from single_runs at the cycle serves its
+#     previous_runs row at the same natural key, branded — the generalized 没有新的就用老的
+#     rule that superseded the gem-only exception) is decided by exactly ONE function,
+#     consumed by BOTH the materializer's q path and the upgrade trigger's capturable set.
+#     (Task #32 follow-up 2026-06-11: JMA publishes 00/12Z only, so at 06Z-cadence cycles it
+#     could never appear in single_runs and the fusion silently ran served=4/5.)
+# ---------------------------------------------------------------------------------
+def test_member_current_value_serving_single_authority() -> None:
+    member = ROOT / "tests" / "data" / "test_previous_runs_substitution.py"
+    assert member.exists(), "member antibody deleted: previous-runs substitution serving"
+    serving = _read("src/data/replacement_current_value_serving.py")
+    assert "def read_current_instrument_values" in serving
+    assert "PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS" in serving
+    # The materializer's q path consumes the authority and keeps NO inline serving rule: the old
+    # gem-only previous_runs query (the pre-generalization second site) must be dead.
+    materializer = _read("src/data/replacement_forecast_materializer.py")
+    assert "read_current_instrument_values" in materializer
+    assert "AND model = 'gem_global'" not in materializer, (
+        "materializer regrew an inline gem serving ladder — the current-value serving rule "
+        "lives ONLY in replacement_current_value_serving.read_current_instrument_values"
+    )
+    # The trigger's capturable set is the SAME function's key set — no endpoint SQL of its own.
+    trigger = _read("src/data/replacement_fusion_upgrade_trigger.py")
+    assert "read_current_instrument_values" in trigger
+    assert "endpoint = 'single_runs'" not in trigger and "endpoint = 'previous_runs'" not in trigger, (
+        "the upgrade trigger regrew its own endpoint-serving SQL — capturable must derive from "
+        "the single serving authority"
+    )

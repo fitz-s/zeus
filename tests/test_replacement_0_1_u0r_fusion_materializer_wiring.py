@@ -399,3 +399,79 @@ def test_flag_on_dedup_drops_icon_seamless(monkeypatch) -> None:
 # ---- resolver flag discipline ----
 def test_resolver_default_flag_off_returns_none() -> None:
     assert mod._replacement_u0r_fusion_override(_request(), metric="high", anchor_value_corrected_c=27.0) is None
+
+
+# =====================================================================================
+# (e) Task #32 follow-up (2026-06-11): generalized previous_runs current-value substitution.
+# RELATIONSHIP PIN: an instrument whose CURRENT value is served via the previous_runs
+# substitution (same value, same history) fuses BYTE-IDENTICALLY to the same instrument
+# served via single_runs — there is NO special-casing / manual down-weighting of a
+# substituted instrument; the lead-bucket walk-forward residual variance is the ONLY
+# mechanism pricing the older run. The substitution is BRANDED in provenance
+# (current_value_serving.<model>.served_via = "previous_runs"), never silent.
+# =====================================================================================
+def _seed_current_previous_runs(conn, *, model: str, value: float, request=None):
+    """Persist one model's current value as a previous_runs row at the SAME natural key
+    (the JMA-at-06Z shape: no single_runs row exists for this model at the cycle)."""
+    from datetime import date as _date
+    req = request if request is not None else _request()
+    target_date = mod._date_text(req.target_date)
+    cyc = mod._to_utc(req.source_cycle_time, field_name="source_cycle_time").isoformat()
+    lead = mod._u0r_city_local_lead_days(
+        computed_at=mod._to_utc(req.computed_at, field_name="computed_at"),
+        target_local_date=_date.fromisoformat(target_date), tz_name=req.city_timezone,
+    )
+    conn.execute(
+        """INSERT INTO raw_model_forecasts
+           (model, city, target_date, metric, source_cycle_time, source_available_at,
+            captured_at, lead_days, forecast_value_c, endpoint, model_name, source_family)
+           VALUES (?, ?, ?, 'high', ?, 'avail', 'cap', ?, ?, 'previous_runs', ?,
+                   'openmeteo_previous_runs')""",
+        (model, req.city, target_date, cyc, lead, value, model),
+    )
+
+
+def test_flag_on_previous_runs_substitution_fuses_identically_and_is_branded(monkeypatch) -> None:
+    _disable_other_layers(monkeypatch)
+    _enable_flag(monkeypatch)
+    live = {"gfs_global": 23.0, "icon_global": 23.5, "gem_global": 22.5,
+            "jma_seamless": 24.0, "icon_eu": 23.2}
+    hist = ["ecmwf_ifs", "gfs_global", "icon_global", "gem_global", "jma_seamless", "icon_eu"]
+
+    # A: jma served via single_runs (the forward capture).
+    _install_seams(monkeypatch, live_values=live, history_models=hist)
+    conn_a = _conn()
+    _seed_current_single_runs(conn_a, live_values=live)
+    pid_a = mod._insert_posterior(conn_a, _request(), metric="high", anchor_id=1)
+    row_a = _row(conn_a, pid_a)
+
+    # B: jma's single_runs row ABSENT (the JMA-at-06Z structural case); the SAME value persisted
+    # as its previous_runs row at the same natural key. The injected live seam serves NOTHING for
+    # jma (None), so if the substitution broke, jma would be DROPPED and q would differ — the
+    # byte-identity below is therefore discriminating, not vacuous.
+    live_without_jma = {k: v for k, v in live.items() if k != "jma_seamless"}
+    _install_seams(monkeypatch, live_values=live_without_jma, history_models=hist)
+    conn_b = _conn()
+    _seed_current_single_runs(conn_b, live_values=live_without_jma)
+    _seed_current_previous_runs(conn_b, model="jma_seamless", value=24.0)
+    pid_b = mod._insert_posterior(conn_b, _request(), metric="high", anchor_id=1)
+    row_b = _row(conn_b, pid_b)
+
+    assert row_a["q_json"] == row_b["q_json"], (
+        "the fused q must be BYTE-IDENTICAL whether jma's current value arrived via single_runs "
+        "or via the previous_runs substitution — any divergence means the substituted instrument "
+        "was special-cased (manual down-weighting / drop), which is forbidden: the lead-bucket "
+        "history residual variance is the only honest pricing of the older run"
+    )
+    prov_a = json.loads(row_a["provenance_json"])["u0r_fusion"]
+    prov_b = json.loads(row_b["provenance_json"])["u0r_fusion"]
+    assert prov_a["used_models"] == prov_b["used_models"]
+    assert prov_a["decorrelated_providers_served"] == prov_b["decorrelated_providers_served"]
+    # Brand law: the substitution is recorded per instrument, never silent.
+    serving_b = prov_b["current_value_serving"]
+    assert serving_b["jma_seamless"]["served_via"] == "previous_runs"
+    assert serving_b["jma_seamless"]["previous_run_substitution"] is True
+    assert serving_b["gfs_global"]["served_via"] == "single_runs"
+    serving_a = prov_a["current_value_serving"]
+    assert serving_a["jma_seamless"]["served_via"] == "single_runs"
+    assert serving_a["jma_seamless"]["previous_run_substitution"] is False
