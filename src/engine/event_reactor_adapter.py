@@ -1516,6 +1516,19 @@ def event_bound_live_adapter_from_trade_conn(
             # the submit-outcome receipt for settlement attribution (operator 2026-06-10).
             execution_mode_intent=no_submit_receipt.execution_mode_intent,
             maker_limit_price=no_submit_receipt.maker_limit_price,
+            # FIX (third-path input starvation, 2026-06-11): same_bin_yes_posterior and
+            # settlement_coverage_status were omitted here, so the buy_no gate in
+            # _receipt_money_path_blocker always received None → ADMISSION_BUY_NO_INDEPENDENT_
+            # YES_POSTERIOR_MISSING → receipt.reason set, trade_score_positive=False,
+            # rejection_stage=TRADE_SCORE. Thread them unconditionally from no_submit_receipt
+            # (single authority: same field names, same values set by _generate_candidate_proofs).
+            # Also carry q_lcb_calibration_source, posterior_id, probability_authority for
+            # provenance completeness — same omission category.
+            q_lcb_calibration_source=no_submit_receipt.q_lcb_calibration_source,
+            same_bin_yes_posterior=no_submit_receipt.same_bin_yes_posterior,
+            settlement_coverage_status=no_submit_receipt.settlement_coverage_status,
+            posterior_id=no_submit_receipt.posterior_id,
+            probability_authority=no_submit_receipt.probability_authority,
         )
 
     def _submit(event: OpportunityEvent, decision_time: datetime) -> EventSubmissionReceipt:

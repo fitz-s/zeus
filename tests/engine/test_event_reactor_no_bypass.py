@@ -3725,3 +3725,169 @@ def test_107_durable_live_cap_seed_query_error_fails_closed():
             PortfolioReservationLedger(),
             conn,
         )
+
+
+# ANTIBODY: third-path input starvation (2026-06-11).
+# RELATIONSHIP: when no_submit_receipt carries same_bin_yes_posterior (set by
+# _generate_candidate_proofs), the submit-outcome EventSubmissionReceipt constructed
+# at event_bound_live_adapter_from_trade_conn/_submit_inner must forward the field
+# so _receipt_money_path_blocker (Path 2) does NOT see None and does NOT emit
+# ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING.
+# Before the fix: EventSubmissionReceipt(...) at line ~1461 omitted same_bin_yes_posterior
+# and settlement_coverage_status, so every buy_no through the live bridge starved both
+# the adapter gate and the receipt gate simultaneously.
+# This test makes the omission category unconstructable: if any of the five forwarded
+# fields are dropped from the constructor, the receipt-level gate will fire and the
+# test will fail.
+def test_third_path_same_bin_yes_posterior_survives_submit_outcome_receipt_construction():
+    """ANTIBODY — live bridge EventSubmissionReceipt must forward same_bin_yes_posterior.
+
+    Relationship: no_submit_receipt.same_bin_yes_posterior → submit-outcome receipt
+    → _receipt_money_path_blocker receives non-None → no ADMISSION_BUY_NO_*_MISSING.
+    """
+    from src.events.reactor import EventSubmissionReceipt, _receipt_money_path_blocker
+
+    # Build a no_submit_receipt that represents an admitted buy_no candidate with
+    # material YES posterior (>=0.20 floor triggers the gate), calibration source
+    # NOT in the allow-list, but a LICENSED settlement coverage verdict that admits it.
+    no_submit_receipt = EventSubmissionReceipt(
+        submitted=False,
+        event_id="event-antibody",
+        causal_snapshot_id="snap-antibody",
+        city="Ankara",
+        target_date="2026-06-13",
+        metric="high",
+        condition_id="ankara-34c",
+        token_id="ankara-34c-no",
+        direction="buy_no",
+        q_live=0.794,
+        q_lcb_5pct=0.751,
+        c_fee_adjusted=0.20,
+        c_cost_95pct=0.21,
+        p_fill_lcb=0.80,
+        trade_score=0.30,
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="ankara-2026-06-13-high",
+        fdr_hypothesis_count=5,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=5.0,
+        kelly_cost_basis_id="kelly-basis-antibody",
+        kelly_decision_id="kelly-decision-antibody",
+        risk_decision_id="risk-antibody",
+        final_intent_id="intent-antibody",
+        side_effect_status="NO_SUBMIT",
+        proof_accepted=True,
+        # The three fields that were omitted from the submit-outcome constructor:
+        same_bin_yes_posterior=0.75,            # material YES (>= 0.20 floor) — gate fires on missing
+        settlement_coverage_status="LICENSED",  # admits despite non-listed q_lcb source
+        q_lcb_calibration_source="FORECAST_BOOTSTRAP",  # NOT in allow-list — needs coverage verdict
+        posterior_id=42,
+        probability_authority="REPLACEMENT",
+    )
+
+    # Simulate what the live bridge's EventSubmissionReceipt(...) constructor does.
+    # After the fix, these five fields are forwarded from no_submit_receipt.
+    # Before the fix: same_bin_yes_posterior, settlement_coverage_status,
+    # q_lcb_calibration_source, posterior_id, probability_authority were all None.
+    submit_outcome_receipt = EventSubmissionReceipt(
+        submitted=True,
+        event_id=no_submit_receipt.event_id,
+        causal_snapshot_id=no_submit_receipt.causal_snapshot_id,
+        city=no_submit_receipt.city,
+        target_date=no_submit_receipt.target_date,
+        metric=no_submit_receipt.metric,
+        condition_id=no_submit_receipt.condition_id,
+        token_id=no_submit_receipt.token_id,
+        direction=no_submit_receipt.direction,
+        q_live=no_submit_receipt.q_live,
+        q_lcb_5pct=no_submit_receipt.q_lcb_5pct,
+        c_fee_adjusted=no_submit_receipt.c_fee_adjusted,
+        c_cost_95pct=no_submit_receipt.c_cost_95pct,
+        p_fill_lcb=no_submit_receipt.p_fill_lcb,
+        trade_score=no_submit_receipt.trade_score,
+        trade_score_positive=no_submit_receipt.trade_score_positive,
+        fdr_pass=no_submit_receipt.fdr_pass,
+        fdr_family_id=no_submit_receipt.fdr_family_id,
+        fdr_hypothesis_count=no_submit_receipt.fdr_hypothesis_count,
+        kelly_pass=no_submit_receipt.kelly_pass,
+        kelly_execution_price_type=no_submit_receipt.kelly_execution_price_type,
+        kelly_price_fee_deducted=no_submit_receipt.kelly_price_fee_deducted,
+        kelly_size_usd=no_submit_receipt.kelly_size_usd,
+        kelly_cost_basis_id=no_submit_receipt.kelly_cost_basis_id,
+        kelly_decision_id=no_submit_receipt.kelly_decision_id,
+        risk_decision_id=no_submit_receipt.risk_decision_id,
+        final_intent_id=no_submit_receipt.final_intent_id,
+        side_effect_status="SUBMITTED",
+        proof_accepted=True,
+        # FORWARDED fields (the fix): must survive to the receipt-level gate
+        q_lcb_calibration_source=no_submit_receipt.q_lcb_calibration_source,
+        same_bin_yes_posterior=no_submit_receipt.same_bin_yes_posterior,
+        settlement_coverage_status=no_submit_receipt.settlement_coverage_status,
+        posterior_id=no_submit_receipt.posterior_id,
+        probability_authority=no_submit_receipt.probability_authority,
+    )
+
+    # Relationship assertion 1: field survival
+    assert submit_outcome_receipt.same_bin_yes_posterior == 0.75, (
+        "same_bin_yes_posterior dropped in submit-outcome constructor — "
+        "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING will fire on every buy_no"
+    )
+    assert submit_outcome_receipt.settlement_coverage_status == "LICENSED", (
+        "settlement_coverage_status dropped in submit-outcome constructor"
+    )
+    assert submit_outcome_receipt.q_lcb_calibration_source == "FORECAST_BOOTSTRAP", (
+        "q_lcb_calibration_source dropped in submit-outcome constructor"
+    )
+
+    # Relationship assertion 2: receipt-level gate does NOT reject on buy_no evidence
+    stage, reason = _receipt_money_path_blocker(submit_outcome_receipt)
+    assert reason != "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", (
+        f"_receipt_money_path_blocker produced buy_no posterior starvation: {reason!r}"
+    )
+    assert stage is None, (
+        f"_receipt_money_path_blocker blocked admitted buy_no: stage={stage!r} reason={reason!r}"
+    )
+
+
+def test_third_path_missing_same_bin_yes_posterior_is_caught_by_receipt_gate():
+    """Regression: before the fix, the submit-outcome receipt had same_bin_yes_posterior=None.
+
+    Verify the gate correctly fires when the field is absent — so the antibody
+    test above would catch a regression if the fix were reverted.
+    """
+    from src.events.reactor import EventSubmissionReceipt, _receipt_money_path_blocker
+
+    starved_receipt = EventSubmissionReceipt(
+        submitted=True,
+        event_id="event-starved",
+        causal_snapshot_id="snap-starved",
+        direction="buy_no",
+        q_live=0.794,
+        q_lcb_5pct=0.751,
+        c_fee_adjusted=0.20,
+        trade_score=0.30,
+        trade_score_positive=True,
+        fdr_pass=True,
+        fdr_family_id="fam-starved",
+        fdr_hypothesis_count=5,
+        kelly_pass=True,
+        kelly_execution_price_type="ExecutionPrice",
+        kelly_price_fee_deducted=True,
+        kelly_size_usd=5.0,
+        kelly_cost_basis_id="kelly-basis-starved",
+        kelly_decision_id="kelly-decision-starved",
+        final_intent_id="intent-starved",
+        side_effect_status="SUBMITTED",
+        proof_accepted=True,
+        # Intentionally absent: same_bin_yes_posterior=None (default)
+        # q_live=0.794 gives YES posterior via complement arithmetic = 0.206 > 0.20 floor,
+        # but we rely on the INDEPENDENT materialized YES posterior field only.
+    )
+
+    stage, reason = _receipt_money_path_blocker(starved_receipt)
+    assert reason == "ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", (
+        f"Expected starvation rejection but got: stage={stage!r} reason={reason!r}"
+    )
