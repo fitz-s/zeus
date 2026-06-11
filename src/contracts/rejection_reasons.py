@@ -79,7 +79,18 @@ class RejectionReason(str, Enum):
         "EVENT_BOUND_SELECTED_CANDIDATE_MISSING",
         RejectionCategory.HONEST_MARKET,
         "Full-family scan produced no positive-deltaU candidate (all bins gated or "
-        "non-positive). Funnel autopsy 2026-06-10 section 3: honest.",
+        "non-positive). Funnel autopsy 2026-06-10 section 3: honest. Reserved now for "
+        "the genuine ZERO-PROOF family (annotated :family_candidates=..:proofs=..); the "
+        "all-priced-rejected case carries EVENT_BOUND_ALL_CANDIDATES_REJECTED instead.",
+    )
+    EVENT_BOUND_ALL_CANDIDATES_REJECTED = (
+        "EVENT_BOUND_ALL_CANDIDATES_REJECTED",
+        RejectionCategory.HONEST_MARKET,
+        "Every priced candidate in the family was gate-rejected (capital-efficiency "
+        "EV<=0 / direction-law / buy-NO-evidence), the efficient-market normal state. "
+        "Carries per-class counts + the closest-to-tradeable leg. Replaces the "
+        "NATIVE_ASK_MISSING / bare SELECTED_CANDIDATE_MISSING label lie (2026-06-11) "
+        "when the books were actually live two-sided.",
     )
     OPENING_INERTIA_MARKET_TOO_OLD = (
         "OPENING_INERTIA_MARKET_TOO_OLD",

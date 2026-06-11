@@ -1854,17 +1854,38 @@ def _build_event_bound_no_submit_receipt_core(
                         "mainstream_source": _best_v.get("mainstream_source"),
                         "mainstream_fetched_at_utc": _best_v.get("mainstream_fetched_at_utc"),
                     }
+        # REJECTION-LABEL TRUTH (operator law 2026-06-11). The selector returned no
+        # live primary. Two structurally distinct causes share this site:
+        #   (1) proofs were generated but EVERY priced candidate was gate-rejected
+        #       (the efficient-market normal state) AND no bookless proof existed to
+        #       surface as a fallback -> the honest label is ALL_CANDIDATES_REJECTED
+        #       carrying the per-class counts + the closest-to-tradeable leg.
+        #   (2) NO candidate proofs were produced at all (zero-proof family) -> the
+        #       bare SELECTED_CANDIDATE_MISSING, now annotated with the diagnosed
+        #       structural precondition (Ankara repro: family_candidates / proofs /
+        #       priced counts) so a queried receipt says WHICH precondition emptied it.
+        _all_rejected_reason = _family_all_candidates_rejected_reason(opportunity_book)
+        if _all_rejected_reason is not None:
+            _selected_missing_reason = _all_rejected_reason
+        else:
+            _priced_proofs = sum(1 for p in proofs if p.execution_price is not None)
+            _selected_missing_reason = (
+                "EVENT_BOUND_SELECTED_CANDIDATE_MISSING:"
+                f"family_candidates={len(getattr(family, 'candidates', ()) or ())}"
+                f":proofs={len(proofs)}:priced={_priced_proofs}"
+            )
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason="EVENT_BOUND_SELECTED_CANDIDATE_MISSING",
+            reason=_selected_missing_reason,
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
             family_id=family.family_id,
             source_status="MATCH",
             family_complete=True,
+            opportunity_book=opportunity_book.to_receipt_dict() if opportunity_book is not None else None,
             **_missing_mav_fields,  # type: ignore[arg-type]
         )
     candidate = proof.candidate
@@ -1872,11 +1893,26 @@ def _build_event_bound_no_submit_receipt_core(
     direction = proof.direction
     execution_price = proof.execution_price
     if execution_price is None:
+        # REJECTION-LABEL TRUTH (operator law 2026-06-11). A non-executable proof was
+        # surfaced as the best-belief fallback. EXECUTABLE_NATIVE_ASK_MISSING is the
+        # HONEST label ONLY when the family genuinely lacked books on every bin. When
+        # the family ALSO had priced candidates that were all gate-rejected (the
+        # measured Beijing 2026-06-12 lie: 7/8 bins had live two-sided NO books, yet
+        # the receipt claimed NATIVE_ASK_MISSING), the truth is ALL_CANDIDATES_REJECTED
+        # with the per-class counts — the fallback bin's q_lcb on an askless bin is not
+        # a decision. _family_all_candidates_rejected_reason returns None iff NO priced
+        # candidate exists, which is exactly the genuine-no-books case.
+        _all_rejected_reason = _family_all_candidates_rejected_reason(opportunity_book)
+        _native_ask_reason = (
+            _all_rejected_reason
+            if _all_rejected_reason is not None
+            else f"EXECUTABLE_NATIVE_ASK_MISSING:{proof.missing_reason or 'native executable quote unavailable'}"
+        )
         return EventSubmissionReceipt(
             False,
             event.event_id,
             event.causal_snapshot_id,
-            reason=f"EXECUTABLE_NATIVE_ASK_MISSING:{proof.missing_reason or 'native executable quote unavailable'}",
+            reason=_native_ask_reason,
             city=family.city,
             target_date=family.target_date,
             metric=family.metric,
@@ -1895,6 +1931,7 @@ def _build_event_bound_no_submit_receipt_core(
             native_quote_available=False,
             source_status="MATCH",
             family_complete=True,
+            opportunity_book=opportunity_book.to_receipt_dict() if opportunity_book is not None else None,
         )
     untradeable_limit_reason = _candidate_limit_price_untradeable_reason(proof)
     if untradeable_limit_reason is not None:
@@ -2693,6 +2730,67 @@ def _build_event_bound_no_submit_receipt_core(
     )
 
 
+# Per-candidate fate fields carried into the envelope's candidate_book. The decision
+# provenance must let an operator query, for a REJECTED family, every candidate's fate
+# (operator law 2026-06-11: 每一个做的决策为什么都需要被查阅). The full OpportunityBook
+# receipt dict is large and decision-time-noisy; the envelope home is a compact,
+# size-capped projection of exactly the fate-relevant fields.
+_CANDIDATE_BOOK_FIELDS: tuple[str, ...] = (
+    "candidate_id",
+    "bin_label",
+    "direction",
+    "q_posterior",
+    "q_lcb_5pct",
+    "execution_price",
+    "trade_score",
+    "missing_reason",
+    "execution_mode_intent",
+    "admitted",
+)
+_CANDIDATE_BOOK_STR_CAP = 200
+
+
+def _candidate_book_for_envelope(opportunity_book_dict: Any) -> list[dict[str, Any]] | None:
+    """Compact per-candidate fate projection from the receipt's opportunity_book dict.
+
+    Serializes every candidate's (bin_label, direction, q, q_lcb, execution_price,
+    missing_reason, trade_score, mode, admitted) with string values truncated to
+    _CANDIDATE_BOOK_STR_CAP chars, and flags the fallback the receipt surfaced as the
+    decision via ``is_selected_fallback``. Returns None when the book carries no
+    candidates. Pure + fail-soft: the envelope can never alter or fail a decision.
+    """
+    if not isinstance(opportunity_book_dict, Mapping):
+        return None
+    candidates = opportunity_book_dict.get("candidates")
+    if not isinstance(candidates, (list, tuple)) or not candidates:
+        return None
+    # The book records the ΔU winner (a priced selection) as selected_candidate_id; on
+    # a rejection the receipt instead surfaced a best-belief fallback, recorded here as
+    # actual_receipt_selected_candidate_id. Flag whichever the receipt actually used.
+    selected_id = (
+        opportunity_book_dict.get("actual_receipt_selected_candidate_id")
+        or opportunity_book_dict.get("selected_candidate_id")
+    )
+
+    def _cap(value: Any) -> Any:
+        if isinstance(value, str) and len(value) > _CANDIDATE_BOOK_STR_CAP:
+            return value[:_CANDIDATE_BOOK_STR_CAP]
+        return value
+
+    out: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        entry: dict[str, Any] = {
+            field: _cap(candidate.get(field)) for field in _CANDIDATE_BOOK_FIELDS
+        }
+        entry["is_selected_fallback"] = bool(
+            selected_id is not None and candidate.get("candidate_id") == selected_id
+        )
+        out.append(entry)
+    return out or None
+
+
 def build_event_bound_no_submit_receipt(
     event: OpportunityEvent,
     *,
@@ -2783,6 +2881,15 @@ def build_event_bound_no_submit_receipt(
             city=receipt.city or (str(payload.get("city") or "") or None),
             target_date=receipt.target_date or (str(payload.get("target_date") or "") or None),
         )
+        # Persist the per-candidate fates (operator law 2026-06-11: every candidate's
+        # rejection reason queryable). The full OpportunityBook rides on the receipt for
+        # ACCEPTED + every relabeled rejection; project its compact fate view into the
+        # envelope's candidate_book. envelope_json is the home — it is EXCLUDED from
+        # receipt_json/receipt_hash (no_submit_receipts._receipt_json) so adding this can
+        # never drift the money-path receipt hash. Fail-soft: absent book -> key omitted.
+        candidate_book = _candidate_book_for_envelope(receipt.opportunity_book)
+        if candidate_book is not None:
+            envelope["candidate_book"] = candidate_book
         return dataclass_replace(receipt, envelope_json=envelope_to_json(envelope))
     except Exception:  # noqa: BLE001 — observability must never alter or fail a decision
         return receipt
@@ -6055,6 +6162,117 @@ def _opportunity_book_proofs_with_selection_rejections(
             )
         )
     return tuple(annotated)
+
+
+# REJECTION-LABEL TRUTH (operator law 2026-06-11: 每一个被拒绝的具体原因都要写出来).
+# When the family selector returns no live primary, the receipt must say WHY in the
+# aggregate — not a single bin's label and not a lie about missing books. These two
+# helpers turn the per-candidate missing_reasons (already on the proofs) into one
+# deterministic family-level rejection class taxonomy + reason string. Observability
+# only: they read proofs, change no gate, and never decide a trade. The class names are
+# stable identifiers (snake_case) so the receipt string is greppable in regret SQL.
+_REJECTION_CLASS_PREFIXES: tuple[tuple[str, str], ...] = (
+    # (missing_reason prefix, stable class name). Ordered most-specific first; the
+    # first prefix that matches a missing_reason wins. CAPITAL_EFFICIENCY_LCB_EV
+    # (the EV<=0 efficient-market normal state) is the dominant class in the wild.
+    ("ADMISSION_CAPITAL_EFFICIENCY_LCB_EV", "capital_efficiency_lcb_ev"),
+    ("ADMISSION_CAPITAL_EFFICIENCY", "capital_efficiency"),
+    ("COVERAGE_UNLICENSED_TAIL", "coverage_unlicensed_tail"),
+    ("ADMISSION_BUY_NO_CONSERVATIVE_EVIDENCE", "buy_no_evidence"),
+    ("ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING", "buy_no_evidence"),
+    ("DIRECTION_LAW_BIN_FORECAST_MISMATCH", "direction_law"),
+    ("ADMISSION_WIN_RATE_FLOOR", "win_rate_floor"),
+    ("ADMISSION_LCB_CONSISTENCY", "lcb_consistency"),
+    # Genuinely-no-book classes (proof had execution_price None): the maker-quote
+    # lane's own-ask-empty marker, plus the structural pre-pricing misses.
+    ("clob_no_ask_illiquid", "native_ask_missing"),
+    ("missing executable snapshot row", "native_ask_missing"),
+    ("missing token id", "native_ask_missing"),
+)
+
+
+def _classify_rejection_missing_reason(missing_reason: str | None) -> str:
+    """Map ONE per-candidate missing_reason to its stable rejection class.
+
+    A candidate that was priced but gate-rejected carries the gate's reason; a
+    candidate with no executable book carries a native-ask marker. Anything that
+    matches no known prefix is bucketed as ``other`` (still counted, never lost) so
+    a new gate's reason is visible in the aggregate the day it ships rather than
+    silently collapsing into a misleading class.
+    """
+    text = str(missing_reason or "").strip()
+    if not text:
+        return "other"
+    for prefix, class_name in _REJECTION_CLASS_PREFIXES:
+        if text.startswith(prefix):
+            return class_name
+    return "other"
+
+
+def _family_all_candidates_rejected_reason(book: OpportunityBook) -> str | None:
+    """Deterministic family-level rejection label aggregated from the book.
+
+    Returns a reason of the form::
+
+        EVENT_BOUND_ALL_CANDIDATES_REJECTED:n=16 capital_efficiency_lcb_ev=12 \
+            native_ask_missing=3 direction_law=1; best=<bin> <dir> q_lcb=.. price=.. \
+            ev_per_dollar=..
+
+    when at least one candidate was PRICED-and-rejected (a real "no edge" family).
+    Returns None when EVERY evaluated candidate genuinely lacks a book (no priced
+    proof at all) — that case keeps the honest EXECUTABLE_NATIVE_ASK_MISSING label.
+
+    The ``best`` candidate is the highest-conservative-EV-per-dollar PRICED proof
+    (deterministic argmax on ``(q_lcb-price)/price`` then bin/direction tiebreak),
+    so a queried receipt names the closest-to-tradeable leg and its exact numbers.
+    Pure: reads the book's evaluations, decides nothing.
+    """
+    evaluations = tuple(book.evaluations)
+    if not evaluations:
+        return None
+    class_counts: dict[str, int] = {}
+    priced_rejected: list[CandidateEvaluation] = []
+    for ev in evaluations:
+        # Reaching this function means the selector chose no live primary, so every
+        # evaluation is a loser. Each priced loser carries the gate's verdict in
+        # ``missing_reason`` (set at proof generation when capital-efficiency /
+        # direction-law / buy-NO-evidence rejected it); a bookless loser carries a
+        # native-ask marker. The class taxonomy reads that verdict verbatim.
+        class_name = _classify_rejection_missing_reason(ev.missing_reason)
+        class_counts[class_name] = class_counts.get(class_name, 0) + 1
+        if ev.execution_price is not None:
+            priced_rejected.append(ev)
+    if not priced_rejected:
+        # No priced candidate at all -> genuinely missing books; not an
+        # all-candidates-rejected family. Caller keeps NATIVE_ASK_MISSING.
+        return None
+
+    def _ev_per_dollar(ev: CandidateEvaluation) -> float:
+        price = ev.execution_price
+        if price is None or price <= 0.0:
+            return float("-inf")
+        return (float(ev.q_lcb_5pct) - float(price)) / float(price)
+
+    best = max(
+        priced_rejected,
+        key=lambda ev: (
+            _ev_per_dollar(ev),
+            str(ev.bin_label or ""),
+            str(ev.direction or ""),
+        ),
+    )
+    counts_str = " ".join(
+        f"{name}={class_counts[name]}" for name in sorted(class_counts)
+    )
+    best_price = best.execution_price
+    return (
+        "EVENT_BOUND_ALL_CANDIDATES_REJECTED:"
+        f"n={len(evaluations)} {counts_str};"
+        f" best={best.bin_label or '?'} {best.direction or '?'}"
+        f" q_lcb={float(best.q_lcb_5pct):.4f}"
+        f" price={float(best_price):.4f}"
+        f" ev_per_dollar={_ev_per_dollar(best):.4f}"
+    )
 
 
 def _opportunity_book_from_proofs(
