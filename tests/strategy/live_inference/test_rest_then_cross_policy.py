@@ -154,15 +154,43 @@ class TestExceptionLanes:
         )
         assert decision.chosen_mode == "MAKER"
 
-    def test_fleeting_edge_crosses(self):
-        decision = _decide(
+    def test_fleeting_edge_crosses_only_near_event_end(self):
+        # OPERATOR DIRECTIVE 2026-06-11 (Denver first fill: lane 2 crossed a
+        # 5-cent spread 26h before settlement, paying $0.43 mark-to-mid). A big
+        # edge FAR from the event end is STRUCTURAL, not fleeting -> REST.
+        far = _decide(
             q_lcb=HEALTHY["taker_all_in_cost"]
             + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
             + 0.01,
             minutes_to_event_end=20 * 60.0,
         )
-        assert decision.chosen_mode == "TAKER"
-        assert decision.policy == POLICY_TAKER_FLEETING_EDGE
+        assert far.chosen_mode == "MAKER"
+        assert far.policy == POLICY_REST_DEFAULT
+        # Inside the near-end window (>= the 180m unconditional floor, < 360m)
+        # the lane still crosses on a huge edge.
+        near = _decide(
+            q_lcb=HEALTHY["taker_all_in_cost"]
+            + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
+            + 0.01,
+            minutes_to_event_end=300.0,
+        )
+        assert near.chosen_mode == "TAKER"
+        assert near.policy == POLICY_TAKER_FLEETING_EDGE
+        # Unknown horizon is conservative: REST.
+        unknown = _decide(
+            q_lcb=HEALTHY["taker_all_in_cost"]
+            + TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD
+            + 0.01,
+            minutes_to_event_end=None,
+        )
+        assert unknown.chosen_mode == "MAKER"
+        # Nesting relation: the fleeting window sits ABOVE the unconditional
+        # event-end floor, else lane 5 is dead code.
+        from src.strategy.live_inference.mode_consistent_ev import (
+            TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END,
+            TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES as _floor,
+        )
+        assert TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END > _floor
 
     def test_sub_fleeting_edge_rests(self):
         decision = _decide(

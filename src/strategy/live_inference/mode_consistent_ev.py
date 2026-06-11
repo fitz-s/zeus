@@ -143,6 +143,21 @@ TAKER_IMMEDIATE_EVENT_END_FLOOR_MINUTES = 180.0
 # narrow — resting stays the default for everything we actually traded.
 TAKER_IMMEDIATE_FLEETING_EDGE_THRESHOLD = 0.15
 
+# OPERATOR DIRECTIVE 2026-06-11 (Denver first fill: crossed a 5-cent spread on a
+# 26h-to-settlement book under this lane, paying $0.43 mark-to-mid): a LARGE edge
+# on a weather book is STRUCTURAL (favorite-longshot mispricing that persists for
+# hours), not fleeting — the coverage-licensed harvest class itself carries
+# +0.15..+0.40 edges, so an unconditional 0.15 trigger inverted REST_DEFAULT for
+# every trade we actually want. Lane 2 is therefore admissible ONLY near the
+# event end, where books genuinely reprice fast enough for an edge to vanish
+# inside one rest deadline. Nesting relation (pinned in tests):
+#   < EVENT_END_FLOOR (180m)            -> lane 4 crosses unconditionally
+#   [180m, FLEETING_MAX (360m))         -> lane 5 crosses only on a huge edge
+#   >= 360m or horizon unknown          -> REST_DEFAULT (rest post_only, escalate
+#                                          at the measured 120m deadline, 39%
+#                                          measured deadline fill rate)
+TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END = 360.0
+
 # Policy verdicts (travel on receipts; the settlement loop groups by these).
 POLICY_REST_DEFAULT = "REST_DEFAULT"
 POLICY_HOLD_REST_IN_PROGRESS = "HOLD_REST_IN_PROGRESS"
@@ -532,8 +547,18 @@ def select_rest_then_cross_mode(
     ):
         return _as_taker(POLICY_TAKER_EVENT_END_NEAR)
 
-    # 5. Fleeting edge: resting would likely forfeit it.
-    if taker_admissible and taker_all_in_cost is not None:
+    # 5. Fleeting edge: resting would likely forfeit it. OPERATOR DIRECTIVE
+    #    2026-06-11 (Denver $0.43 spread cross): admissible ONLY near the event
+    #    end — a structural weather edge hours from settlement is NOT fleeting,
+    #    and the licensed harvest class itself exceeds the edge threshold, so an
+    #    unconditional trigger would invert REST_DEFAULT for every good trade.
+    #    Unknown horizon is conservative: REST.
+    if (
+        taker_admissible
+        and taker_all_in_cost is not None
+        and minutes_to_event_end is not None
+        and float(minutes_to_event_end) < TAKER_FLEETING_EDGE_MAX_MINUTES_TO_EVENT_END
+    ):
         raw_taker_edge = float(q_lcb) - float(taker_all_in_cost)
         if raw_taker_edge >= float(fleeting_edge_threshold):
             return _as_taker(POLICY_TAKER_FLEETING_EDGE)

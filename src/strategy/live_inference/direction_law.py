@@ -55,6 +55,12 @@ DIRECTION_LAW_REASON = "DIRECTION_LAW_BIN_FORECAST_MISMATCH"
 # max(1, 1.0 x 1.263) = 1.263 -> rejected.
 DIRECTION_LAW_SIGMA_K = 1.0
 
+# Boundary zone for the buy_no half (operator directive 2026-06-11, Denver first
+# fill): when the raw center is within this fraction of a settlement step of a
+# preimage boundary, BOTH straddling bins count as forecast bins for the buy_no
+# ban — the rounding is a coin flip and the forecast materially points at both.
+DIRECTION_LAW_BOUNDARY_ZONE_STEP_FRACTION = 0.25
+
 # Settlement step per bin unit: C point bins cover 1 settled degree, F range bins
 # cover 2 settled degrees (src/types/market.py Bin width law).
 _SETTLEMENT_STEP_BY_UNIT = {"C": 1.0, "F": 2.0}
@@ -168,8 +174,8 @@ def direction_law_rejection_reason(
             f"distance={distance:.4f}:threshold={threshold:.4f}:mu={float(mu):.4f}"
         )
     if direction == "buy_no":
-        # Doctrine half (operator standing law): buy_no ⟺ bin≠forecast. The ONLY
-        # banned bin is the FORECAST BIN — the bin the canonically-rounded center
+        # Doctrine half (operator standing law): buy_no ⟺ bin≠forecast. The
+        # banned set is the FORECAST BIN — the bin the canonically-rounded center
         # settles into (grade_receipt symmetry: that is the one bin where buy_no
         # LOSES if our own forecast settles exactly). Adjacent bins are admissible;
         # their residual YES mass is policed by q_lcb + the material-YES
@@ -189,4 +195,34 @@ def direction_law_rejection_reason(
                 f"forecast_bin:mu={float(mu):.4f}:mu_settled={settled:.4f}:"
                 f"bin=[{bin_low},{bin_high}]"
             )
+        # BOUNDARY ZONE (operator directive 2026-06-11, Denver first fill): when
+        # the RAW center sits within BOUNDARY_ZONE_STEP_FRACTION of a settlement
+        # preimage boundary, the point-rounding is a coin flip and the forecast
+        # materially points at BOTH bins (Denver: mu=89.37F, 0.13F from the
+        # 89/90 boundary; q_yes 0.211 vs 0.207 — co-modal). Betting NO on the
+        # runner-up bin is betting against our own forecast's plausible landing
+        # spot -> banned. Implemented as: the bin is also a forecast bin when
+        # the center shifted by ±zone (in bin units) settles into it. Moscow
+        # replay stays open (mu=30.795 is 0.295 step from the 30.5 boundary >
+        # 0.25 -> only the 31 bin is banned).
+        step = _SETTLEMENT_STEP_BY_UNIT.get(bin_unit, 1.0)
+        zone = DIRECTION_LAW_BOUNDARY_ZONE_STEP_FRACTION * step
+        for shifted in (float(mu) - zone, float(mu) + zone):
+            if mu_settled is not None and math.isfinite(float(mu_settled)):
+                # Per-city preimage came from the caller; approximate the zone
+                # test with the same WMO default only when no caller preimage —
+                # otherwise shift in the same rounding family via the contract.
+                from src.contracts.settlement_semantics import round_wmo_half_up_value
+
+                shifted_settled = settled + round_wmo_half_up_value(shifted) - round_wmo_half_up_value(float(mu))
+            else:
+                from src.contracts.settlement_semantics import round_wmo_half_up_value
+
+                shifted_settled = round_wmo_half_up_value(shifted)
+            if bin_forecast_distance(bin_low=bin_low, bin_high=bin_high, mu=shifted_settled) == 0.0:
+                return (
+                    f"{DIRECTION_LAW_REASON}:direction=buy_no:"
+                    f"forecast_boundary_zone:mu={float(mu):.4f}:zone={zone:.4f}:"
+                    f"bin=[{bin_low},{bin_high}]"
+                )
     return None

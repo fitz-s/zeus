@@ -276,19 +276,11 @@ class TestBuyNoDoctrineHalf:
         assert reason is not None and "forecast_bin" in reason
 
     def test_fahrenheit_range_bin_rounding(self):
-        # Atlanta replay: mu_F=93.5186 settles 94 (WMO half-up) -> the 92-93 bin
-        # is NOT the forecast bin (admitted); the 94-95 bin IS (banned).
-        assert (
-            direction_law_rejection_reason(
-                direction="buy_no",
-                bin_low=92.0,
-                bin_high=93.0,
-                bin_unit="F",
-                mu=93.5186,
-                predictive_sigma=1.8287,
-            )
-            is None
-        )
+        # Atlanta replay: mu_F=93.5186 settles 94 (WMO half-up) -> the 94-95 bin
+        # is the forecast bin (banned). The center sits 0.0186F from the 93.5
+        # boundary — inside the boundary zone (0.25 x 2F step = 0.5F) — so the
+        # straddling 92-93 bin is ALSO banned (operator directive 2026-06-11,
+        # Denver knife-edge class). The next bin out stays admissible.
         reason = direction_law_rejection_reason(
             direction="buy_no",
             bin_low=94.0,
@@ -298,6 +290,26 @@ class TestBuyNoDoctrineHalf:
             predictive_sigma=1.8287,
         )
         assert reason is not None and "forecast_bin" in reason
+        zone_reason = direction_law_rejection_reason(
+            direction="buy_no",
+            bin_low=92.0,
+            bin_high=93.0,
+            bin_unit="F",
+            mu=93.5186,
+            predictive_sigma=1.8287,
+        )
+        assert zone_reason is not None and "forecast_boundary_zone" in zone_reason
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_no",
+                bin_low=96.0,
+                bin_high=97.0,
+                bin_unit="F",
+                mu=93.5186,
+                predictive_sigma=1.8287,
+            )
+            is None
+        )
 
     def test_caller_supplied_truncation_preimage_wins(self):
         # Hong Kong class (HKO/UMA truncation): mu=30.795 truncates to 30 — the
@@ -350,3 +362,63 @@ class TestBuyNoDoctrineHalf:
             predictive_sigma=INCIDENT_SIGMA_C,
         )
         assert reason is not None and "buy_yes" in reason
+
+
+class TestBoundaryZone:
+    """Operator directive 2026-06-11 (Denver first fill): mu within 0.25 step of
+    a preimage boundary makes BOTH straddling bins forecast bins for buy_no —
+    we bought NO at 0.60 on the 90-91F bin while mu=89.37F sat 0.13F from the
+    89/90 boundary (q_yes 0.211 vs 0.207, co-modal): betting against our own
+    forecast's plausible landing spot, plus spread and fee."""
+
+    def test_denver_replay_both_straddling_bins_banned(self):
+        # mu=89.37F settles 89 -> 88-89 is the forecast bin (banned) AND the
+        # boundary zone (89.37+0.5=89.87 -> settles 90) bans 90-91 too.
+        for low, high in ((88.0, 89.0), (90.0, 91.0)):
+            reason = direction_law_rejection_reason(
+                direction="buy_no",
+                bin_low=low,
+                bin_high=high,
+                bin_unit="F",
+                mu=89.37,
+                predictive_sigma=3.6,
+            )
+            assert reason is not None, (low, high)
+        # the next bin out (92-93) stays admissible.
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_no",
+                bin_low=92.0,
+                bin_high=93.0,
+                bin_unit="F",
+                mu=89.37,
+                predictive_sigma=3.6,
+            )
+            is None
+        )
+
+    def test_moscow_replay_stays_open(self):
+        # mu=30.795C: 0.295 step from the 30.5 boundary (> 0.25 zone) -> only
+        # the 31C forecast bin is banned; the 30C bin stays admissible.
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_no",
+                bin_low=30.0,
+                bin_high=30.0,
+                bin_unit="C",
+                mu=30.7950,
+                predictive_sigma=1.91,
+            )
+            is None
+        )
+        assert (
+            direction_law_rejection_reason(
+                direction="buy_no",
+                bin_low=31.0,
+                bin_high=31.0,
+                bin_unit="C",
+                mu=30.7950,
+                predictive_sigma=1.91,
+            )
+            is not None
+        )
