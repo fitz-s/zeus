@@ -50,6 +50,22 @@ _AVAILABLE_AT = "2026-06-03T03:45:00+00:00"
 _DECISION_TIME = datetime(2026, 6, 3, 5, 0, tzinfo=UTC)
 
 
+@pytest.fixture(autouse=True)
+def _pin_replacement_filter_off(monkeypatch: Any) -> None:
+    """HERMETIC PIN (2026-06-11): scan_committed_snapshots adds an
+    ``AND EXISTS(... forecast_posteriors ...)`` filter when the LIVE config flag
+    ``openmeteo_ecmwf_ifs9_aifs_soft_anchor_trade_authority_enabled`` is True.
+    These fixtures carry no posteriors, so with the live flag ON every candidate
+    vanished and all four fairness tests failed for a reason unrelated to the
+    fairness contract (live-config leak into the test). Pin the filter OFF —
+    the fairness contract under test is orthogonal to the replacement filter.
+    """
+    monkeypatch.setattr(
+        "src.events.triggers.forecast_snapshot_ready._replacement_trade_authority_enabled",
+        lambda: False,
+    )
+
+
 def _make_city_id(name: str) -> str:
     return name.lower().replace(" ", "_")
 

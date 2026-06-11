@@ -219,3 +219,45 @@ def test_member_settlement_coverage_licensing_single_authority() -> None:
         "the upgrade trigger regrew its own endpoint-serving SQL — capturable must derive from "
         "the single serving authority"
     )
+
+
+# ---------------------------------------------------------------------------------
+# 8. SERVE-FRESHEST-ELIGIBLE (没有新的就用老的) — the rule "a newer not-yet-eligible
+#    run never blocks serving the freshest ELIGIBLE older run" has ONE serving
+#    authority: the bundle reader (tradeable-latest at proof time). Its TWO other
+#    sites are reconciled, not re-implemented:
+#      * the reactor's SOURCE_TRUTH intake gate DEFERS — it no longer dead-letters
+#        on the EVENT's branded coverage statuses (2026-06-11T16:33:51Z incident:
+#        six low-metric families dead-lettered in one second on PARTIAL/BLOCKED
+#        coverage while an eligible posterior was servable);
+#      * the producer's per-family election prefers LIVE_ELIGIBLE over any fresher
+#        non-eligible row, so the minted payload statuses match the row served.
+# ---------------------------------------------------------------------------------
+def test_member_serve_freshest_eligible_gate_defers_to_reader() -> None:
+    # Member antibodies exist.
+    assert (ROOT / "tests" / "events" / "test_fsr_emit_prefers_live_eligible_run.py").exists(), (
+        "member antibody deleted: producer election prefers LIVE_ELIGIBLE"
+    )
+    assert (ROOT / "tests" / "data" / "test_serve_freshest_available.py").exists(), (
+        "member antibody deleted: reader serve-freshest-available"
+    )
+    reactor = _read("src/events/reactor.py")
+    # The intake gate must NOT re-implement coverage eligibility on the event payload.
+    assert 'coverage_completeness != "COMPLETE"' not in reactor, (
+        "the SOURCE_TRUTH intake gate regrew the coverage-eligibility clause — "
+        "eligibility is the serving authority's call (bundle reader at proof time)"
+    )
+    assert 'coverage_readiness != "LIVE_ELIGIBLE"' not in reactor, (
+        "the SOURCE_TRUTH intake gate regrew the readiness-eligibility clause — "
+        "eligibility is the serving authority's call (bundle reader at proof time)"
+    )
+    # The kept half: structurally junk run identity still dead-letters.
+    assert 'src_completeness not in {"COMPLETE", "PARTIAL"}' in reactor, (
+        "the junk-payload dead-letter floor was removed — malformed run identity "
+        "must not flow to the serving authority"
+    )
+    # The producer election prefers LIVE_ELIGIBLE within each family partition.
+    producer = _read("src/events/triggers/forecast_snapshot_ready.py")
+    assert "readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1" in producer, (
+        "the producer election lost its LIVE_ELIGIBLE-first rank"
+    )

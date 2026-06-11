@@ -55,11 +55,18 @@ def _world_conn() -> sqlite3.Connection:
     return conn
 
 
-def _tradeable_fsr(city: str, snapshot_id: str, *, available_at: str, received_at: str):
+def _tradeable_fsr(
+    city: str,
+    snapshot_id: str,
+    *,
+    available_at: str,
+    received_at: str,
+    target_date: str = _TARGET_DATE,
+):
     """A COMPLETE + LIVE_ELIGIBLE FSR for ``city`` — Tier 1 tradeable."""
     payload = ForecastSnapshotReadyPayload(
         city=city,
-        target_date=_TARGET_DATE,
+        target_date=target_date,
         metric="high",
         source_id="ecmwf-open-data",
         source_run_id="run-1",
@@ -84,7 +91,7 @@ def _tradeable_fsr(city: str, snapshot_id: str, *, available_at: str, received_a
     )
     return make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
-        entity_key=f"{city}|{_TARGET_DATE}|high|{snapshot_id}",
+        entity_key=f"{city}|{target_date}|high|{snapshot_id}",
         source="forecast_snapshot_ready_trigger",
         observed_at="2026-06-11T00:10:00+00:00",
         available_at=available_at,
@@ -342,4 +349,107 @@ def test_within_city_freshness_order_is_preserved():
     assert [e.event_id for e in claimed] == [newer.event_id, older.event_id], (
         "within a single city the fresher (newer available_at) event must still be "
         "claimed first — round-robin must not invert intra-city freshness"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2026-06-11 ~16:30Z operator follow-up: stale-target flooding antibodies.
+# The within-(tier, city) order is target_date DESC FIRST, available_at DESC
+# second — so the live-eligible day-ahead class always precedes the same-day
+# (day0-shadow-scope) class no matter how frequently the same-day snapshots
+# refresh with newer available_at.
+# ---------------------------------------------------------------------------
+
+def test_day_ahead_target_precedes_fresher_same_day_within_city():
+    """ANTIBODY: a city holding a FRESH same-day-target FSR (decisions are
+    day0-scope => deterministic DAY0_SCOPE_SHADOW_ONLY under day0_shadow) and an
+    OLDER day-ahead FSR must yield the day-ahead FIRST. target_date DESC dominates
+    available_at DESC within (tier, city) — the same-day refresh churn cannot
+    starve the live-eligible day-ahead candidate."""
+    conn = _world_conn()
+    store = EventStore(conn)
+    city = _REAL_CITIES[0]
+    # Same-day target (2026-06-11 at the 12:00Z decision time) with the NEWEST
+    # available_at — the flooding class.
+    same_day_fresh = _tradeable_fsr(
+        city,
+        "snap-sameday",
+        target_date="2026-06-11",
+        available_at="2026-06-11T11:30:00+00:00",
+        received_at="2026-06-11T11:31:00+00:00",
+    )
+    # Day-ahead target with an OLDER available_at — the class that must win.
+    day_ahead_older = _tradeable_fsr(
+        city,
+        "snap-dayahead",
+        target_date="2026-06-12",
+        available_at="2026-06-11T00:00:00+00:00",
+        received_at="2026-06-11T00:01:00+00:00",
+    )
+    store.insert_or_ignore(same_day_fresh)
+    store.insert_or_ignore(day_ahead_older)
+
+    claimed = store.fetch_pending(
+        decision_time=_DECISION_TIME, limit=1, day0_is_tradeable=False
+    )
+    assert len(claimed) == 1
+    assert claimed[0].event_id == day_ahead_older.event_id, (
+        "the older day-ahead FSR must be claimed before the fresher same-day FSR "
+        "(target_date DESC dominates available_at DESC within the city)"
+    )
+
+
+def test_fresh_day0_event_does_not_precede_older_day_ahead_fsr():
+    """ANTIBODY (operator-specified shape): a city holding a FRESH day0 event and
+    an OLDER day-ahead FSR yields the day-ahead first under day0_shadow
+    (day0_is_tradeable=False => day0 is Tier 2, below the tradeable FSR Tier 1).
+    Day0 events still process AFTER the live ones — never dropped (the shadow
+    evaluation needs the receipts)."""
+    from src.events.event_priority import PRIORITY_DAY0_SHADOW
+    from src.events.opportunity_event import (
+        Day0ExtremeUpdatedPayload,
+        make_day0_extreme_updated_event,
+    )
+
+    conn = _world_conn()
+    store = EventStore(conn)
+    city = _REAL_CITIES[0]
+    day0_payload = Day0ExtremeUpdatedPayload(
+        city=city,
+        target_date="2026-06-11",
+        metric="high",
+        settlement_source="metar",
+        station_id="st0",
+        observation_time="2026-06-11T11:45:00+00:00",
+        observation_available_at="2026-06-11T11:45:00+00:00",
+        raw_value=30.0,
+        rounded_value=30,
+        high_so_far=30.0,
+        low_so_far=20.0,
+    )
+    day0_fresh = make_day0_extreme_updated_event(
+        entity_key=f"{city}|2026-06-11|high|st0",
+        source="day0_extreme_updated_trigger",
+        observed_at="2026-06-11T11:45:00+00:00",
+        received_at="2026-06-11T11:46:00+00:00",
+        payload=day0_payload,
+        causal_snapshot_id="ctx-st0",
+        priority=PRIORITY_DAY0_SHADOW,
+    )
+    day_ahead_older = _tradeable_fsr(
+        city,
+        "snap-dayahead-vs-day0",
+        target_date="2026-06-12",
+        available_at="2026-06-11T00:00:00+00:00",
+        received_at="2026-06-11T00:01:00+00:00",
+    )
+    store.insert_or_ignore(day0_fresh)
+    store.insert_or_ignore(day_ahead_older)
+
+    claimed = store.fetch_pending(
+        decision_time=_DECISION_TIME, limit=2, day0_is_tradeable=False
+    )
+    assert [e.event_id for e in claimed] == [day_ahead_older.event_id, day0_fresh.event_id], (
+        "day-ahead FSR (Tier 1) must precede the fresh day0 shadow event (Tier 2); "
+        "the day0 event must still be CLAIMABLE after it (processed, not dropped)"
     )

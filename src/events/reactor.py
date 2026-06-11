@@ -5,8 +5,14 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 `src.execution`.
 """
 
-# Last reused/audited: 2026-06-05
-# Authority basis: #95 SEV-2.1 — world_write_mutex MUST NOT be held across the
+# Last reused/audited: 2026-06-11
+# Authority basis (2026-06-11 operator follow-up): (a) SOURCE_TRUTH intake gate
+#   defers to the serving authority — coverage PARTIAL/BLOCKED passes through,
+#   dead-letter only for junk run identity (twin-authority #8, 16:33:51Z six-city
+#   incident); (b) price-race aborts (SUBMIT_ABORTED_PRICE_MOVED, would_cross_book
+#   certificate failure) classify TRANSIENT → bounded requeue (Miami/NYC 16:22Z);
+#   (c) pre-event cycle-budget check caps overrun to one in-flight event.
+# Prior: #95 SEV-2.1 — world_write_mutex MUST NOT be held across the
 #   injected submit callable's network I/O (JIT /book HTTP fetch + venue order
 #   POST). _process_event_unit split into two committed world-DB write windows
 #   around the network submit boundary; contract is db.py world_write_lock /
@@ -352,6 +358,17 @@ class OpportunityEventReactor:
             if not events:
                 break
             for event in events:
+                # PRE-EVENT budget check (2026-06-11 cadence guard): if the budget
+                # is ALREADY spent, stop BEFORE claiming another event. The
+                # post-event check below cannot interrupt a long event mid-flight
+                # (live: a 22-candidate family decision ran p99=59s, max=460s vs a
+                # 30s budget), and without this pre-check every event in the
+                # already-fetched batch could extend the overrun by another full
+                # decision. Caps the worst-case overrun to ONE in-flight event;
+                # the rest stay PENDING (not consumed, not dropped) for the next
+                # cycle.
+                if budget is not None and (time.monotonic() - cycle_start) >= budget:
+                    return result
                 self._process_event_unit(event, decision_time=decision_time, result=result)
                 if remaining is not None:
                     remaining -= 1
@@ -691,28 +708,45 @@ class OpportunityEventReactor:
             self._reject_event(event, "EXECUTABLE_QUOTE", "MARKET_CHANNEL_EVENT_NO_DIRECT_STALE_TRADE", result, decision_time=decision_time)
             return None, False
         if event.event_type == "FORECAST_SNAPSHOT_READY":
-            # A run-level PARTIAL can still contain a COMPLETE/LIVE_ELIGIBLE target
-            # window.  Dead-letter only payloads whose window authority cannot
-            # satisfy the certificate contract.
+            # SERVE-FRESHEST-ELIGIBLE RECONCILIATION (2026-06-11, twin-authority #8).
+            #
+            # The event's coverage statuses describe the run the PRODUCER minted the
+            # event against — typically the NEWEST run, which is PARTIAL/BLOCKED for
+            # the whole cycle-build window (4x/day, every cycle). The bundle the
+            # money path actually trades on is chosen by the SERVING AUTHORITY
+            # (replacement_forecast_bundle_reader: tradeable-latest, 没有新的就用老的 —
+            # a newer not-yet-eligible run NEVER blocks serving the freshest ELIGIBLE
+            # older run; staleness/readiness BRANDS provenance, never blocks). The
+            # adapter's read (_replacement_authority_probability_and_fdr_proof →
+            # _latest_replacement_readiness + read_replacement_forecast_bundle) is
+            # keyed by (city, target_date, metric) — NOT pinned to this event's
+            # source_run — so the event's coverage statuses are ADVISORY here, not
+            # binding. Dead-lettering on them was the SAME serve-freshest rule
+            # re-implemented (wrongly) at a second site: live 2026-06-11T16:33:51Z
+            # all six live-eligible cities were dead-lettered in one second on the
+            # 12Z build window (coverage PARTIAL/BLOCKED) while a COMPLETE 06Z
+            # posterior was servable — Miami had gone to SUBMIT on exactly that 06Z
+            # substrate 12 minutes earlier.
+            #
+            # The gate now DEFERS to the reader: coverage PARTIAL/BLOCKED passes
+            # THROUGH; when nothing eligible exists the adapter rejects honestly
+            # with the full reason chain (REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_
+            # BLOCKED + provenance envelope) — the certificate contract reads its
+            # statuses from the SERVED bundle at proof time, never from this event
+            # payload. Dead-letter remains ONLY for structurally junk payloads
+            # (source_run_completeness_status outside {COMPLETE, PARTIAL} =
+            # malformed/unknown producer state — no serving authority can vouch
+            # for an event whose own run identity is unparseable).
             try:
                 payload = json.loads(event.payload_json) if isinstance(event.payload_json, str) else event.payload_json
                 src_completeness = str(payload.get("source_run_completeness_status", "") or "")
-                coverage_completeness = str(payload.get("coverage_completeness_status", "") or "")
-                coverage_readiness = str(payload.get("coverage_readiness_status", "") or "")
             except Exception:
                 src_completeness = ""
-                coverage_completeness = ""
-                coverage_readiness = ""
-            if (
-                src_completeness not in {"COMPLETE", "PARTIAL"}
-                or coverage_completeness != "COMPLETE"
-                or coverage_readiness != "LIVE_ELIGIBLE"
-            ):
+            if src_completeness not in {"COMPLETE", "PARTIAL"}:
                 error_msg = (
-                    "FSR forecast authority not live eligible: "
-                    f"source_run_completeness_status={src_completeness!r}; "
-                    f"coverage_completeness_status={coverage_completeness!r}; "
-                    f"coverage_readiness_status={coverage_readiness!r}; dead-lettering"
+                    "FSR payload structurally junk (run identity unparseable): "
+                    f"source_run_completeness_status={src_completeness!r} not in "
+                    "{'COMPLETE', 'PARTIAL'}; dead-lettering"
                 )
                 self._reject_event(event, "SOURCE_TRUTH", "FSR_WINDOW_AUTHORITY_NOT_LIVE_ELIGIBLE", result, decision_time=decision_time)
                 self._store.mark_dead_letter(
@@ -1296,18 +1330,41 @@ def _receipt_money_path_blocker(
 
 
 def _is_transient_money_path_reason(reason: str | None) -> bool:
+    """Stale-decision-vs-fresh-book races and DB-lock blips are TRANSIENT: requeue
+    (bounded by MAX_EXECUTABLE_SNAPSHOT_RETRIES → dead-letter) so the next cycle
+    RE-DECIDES with a fresh book. The retry re-runs the full gate chain and
+    re-prices from scratch — it NEVER resubmits the same envelope, so the
+    no-verbatim-retry venue rule is untouched (and in every reason below the
+    venue order was never placed: PRICE_MOVED aborts pre-POST, would_cross_book
+    fails the pre-submit revalidation certificate).
+
+    TRANSIENT (2026-06-11 live additions):
+      * SUBMIT_ABORTED_PRICE_MOVED — taker flavor: JIT recapture found the all-in
+        cost above max_acceptable_price + bounded tolerance. Live: Miami 16:22:35Z
+        cleared EVERY gate, aborted on a moved book, and was terminally consumed
+        even though EV at the NEW price was still strongly positive (q_lcb 0.6776
+        vs cost 0.5136). Same shape as EXECUTABLE_SNAPSHOT_STALE, which already
+        requeues.
+      * EDLI_LIVE_CERTIFICATE_BUILD_FAILED + would_cross_book — maker flavor of
+        the SAME race: a post-only limit crossed because the book moved between
+        decision and submit (NYC 16:22:33Z). Narrowed to the would_cross
+        sub-reason ONLY; every other certificate build failure stays terminal
+        (except the pre-existing db-lock transients).
+    """
     if not reason:
         return False
     reason_lower = reason.lower()
     return (
         "SOURCE_CAPTURED_AFTER_DECISION_TIME" in reason
         or "EXECUTABLE_SNAPSHOT_STALE" in reason
+        or "SUBMIT_ABORTED_PRICE_MOVED" in reason
         or (
             "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:" in reason
             and (
                 "database is locked" in reason_lower
                 or "database table is locked" in reason_lower
                 or "database is busy" in reason_lower
+                or "would_cross_book" in reason_lower
             )
         )
     )

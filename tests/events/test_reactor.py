@@ -2055,12 +2055,20 @@ def _fsr_event(key_suffix: str, completeness: str, available_at: str, received_a
     )
 
 
-def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
-    """Relationship test: PARTIAL FSR events dead-letter immediately; COMPLETE FSR events
-    are dequeued before PARTIAL ones even when PARTIAL has an older available_at.
+def test_partial_coverage_fsr_passes_gate_complete_fsr_dequeued_first():
+    """SERVE-FRESHEST-ELIGIBLE RECONCILIATION (2026-06-11, twin-authority #8).
 
-    Invariant: a PARTIAL-payload FSR event can NEVER produce a receipt (cert requires COMPLETE).
-    The reactor must drain them permanently rather than letting them clog the queue.
+    The event's coverage statuses are ADVISORY — the serving authority is the
+    bundle reader (tradeable-latest, 没有新的就用老的), which the adapter consults
+    at proof time. A coverage-PARTIAL/BLOCKED event therefore passes the
+    SOURCE_TRUTH intake gate and reaches the adapter (which rejects honestly
+    when nothing eligible is servable). Live incident: 16:33:51Z six low-metric
+    families dead-lettered in one second on branded PARTIAL/BLOCKED coverage
+    while an eligible replacement posterior was servable.
+
+    Ordering still holds: the COMPLETE/LIVE_ELIGIBLE event (claim Tier 1) is
+    dequeued BEFORE the PARTIAL one (Tier 2) even when PARTIAL has an older
+    available_at.
     """
     conn, store = _store()
 
@@ -2086,7 +2094,7 @@ def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
 
     def _submit(event, _dt):
         submitted_order.append(event.event_id)
-        return None  # no receipt — source_truth_gate rejects before here in a real run
+        return None  # no receipt — terminal consume downstream of the gate under test
 
     reactor = OpportunityEventReactor(
         store,
@@ -2099,32 +2107,73 @@ def test_partial_fsr_dead_letters_complete_fsr_dequeued_first():
     )
 
     dt = datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc)
-    result = reactor.process_pending(decision_time=dt, limit=100)
+    reactor.process_pending(decision_time=dt, limit=100)
 
-    # PARTIAL event must be dead-lettered, not processed normally
+    # ANTIBODY: the PARTIAL-coverage event must NOT be dead-lettered at intake —
+    # it flows to the adapter, whose tradeable-latest bundle read decides.
     partial_status = conn.execute(
         "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
         (partial_event.event_id,),
     ).fetchone()[0]
-    assert partial_status == "dead_letter", f"PARTIAL FSR should dead-letter, got {partial_status}"
-
-    # PARTIAL event must appear in event_dead_letters
+    assert partial_status != "dead_letter", (
+        f"PARTIAL-coverage FSR must pass the intake gate (serving authority decides), "
+        f"got {partial_status}"
+    )
     partial_dl = conn.execute(
         "SELECT COUNT(*) FROM event_dead_letters WHERE event_id = ?",
         (partial_event.event_id,),
     ).fetchone()[0]
-    assert partial_dl == 1, "PARTIAL FSR must have a dead_letter entry"
+    assert partial_dl == 0, "PARTIAL-coverage FSR must NOT have a dead_letter entry"
 
-    # COMPLETE event must NOT be dead-lettered (it proceeds through the pipeline)
-    complete_status = conn.execute(
-        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
-        (complete_event.event_id,),
-    ).fetchone()[0]
-    assert complete_status != "dead_letter", f"COMPLETE FSR must not dead-letter at intake, got {complete_status}"
-
-    # COMPLETE event must be processed (reached submit), PARTIAL must not reach submit
+    # Both reach the adapter; the COMPLETE (Tier 1) one FIRST.
     assert complete_event.event_id in submitted_order, "COMPLETE FSR must reach submit"
-    assert partial_event.event_id not in submitted_order, "PARTIAL FSR must not reach submit"
+    assert partial_event.event_id in submitted_order, (
+        "PARTIAL-coverage FSR must reach the adapter (the serving authority, not the "
+        "event payload, owns eligibility)"
+    )
+    assert submitted_order.index(complete_event.event_id) < submitted_order.index(partial_event.event_id), (
+        "COMPLETE/LIVE_ELIGIBLE (claim Tier 1) must be dequeued before PARTIAL (Tier 2)"
+    )
+
+
+def test_junk_src_completeness_fsr_still_dead_letters():
+    """ANTIBODY (the kept half of the intake gate): a STRUCTURALLY JUNK payload —
+    source_run_completeness_status outside {COMPLETE, PARTIAL} (malformed/unknown
+    producer state) — still dead-letters at intake. The serving-authority deferral
+    applies only to honest, branded coverage statuses."""
+    import dataclasses as _dc
+
+    conn, store = _store()
+    base = _fsr_event(
+        key_suffix="junk",
+        completeness="COMPLETE",
+        available_at="2026-05-24T04:00:00+00:00",
+        received_at="2026-05-24T04:01:00+00:00",
+    )
+    # Corrupt the run-identity field only (coverage stays honest).
+    payload = json.loads(base.payload_json)
+    payload["source_run_completeness_status"] = "GARBAGE_STATE"
+    junk = _dc.replace(base, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    store.insert_or_ignore(junk)
+
+    submitted_order = []
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda event, _dt: submitted_order.append(event.event_id),
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+    reactor.process_pending(decision_time=datetime(2026, 5, 24, 18, 10, tzinfo=timezone.utc), limit=10)
+
+    status = conn.execute(
+        "SELECT processing_status FROM opportunity_event_processing WHERE event_id = ?",
+        (junk.event_id,),
+    ).fetchone()[0]
+    assert status == "dead_letter", f"junk src_completeness must dead-letter, got {status}"
+    assert junk.event_id not in submitted_order
 
 
 def test_source_run_partial_window_complete_fsr_reaches_submit():

@@ -142,3 +142,65 @@ def test_no_decision_path_calls_openmeteo_fetch_directly():
     ).replace("fetch_mainstream", ""), (
         "reactor decision path must not call a blocking openmeteo fetch directly"
     )
+
+
+def test_pre_event_budget_check_stops_before_claiming_next_event(monkeypatch):
+    """CADENCE GUARD (2026-06-11): the budget is also checked BEFORE each event.
+
+    The post-event check cannot interrupt a long event mid-flight (live: a
+    22-candidate family decision ran p99=59s vs a 30s budget), and a slow
+    fetch_pending can consume the budget before the first event even starts.
+    When the budget is ALREADY exhausted at loop entry, process_pending must
+    return WITHOUT processing any event — the old post-event-only check would
+    have processed one full (possibly 60s+) event first, extending the overrun.
+    """
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("ZEUS_REACTOR_CYCLE_BUDGET_SECONDS", "0.05")
+
+    conn, store = _store()
+    for i in range(3):
+        store.insert_or_ignore(_event(f"snap-pre-{i}", f"2026-06-04T0{i}:00:00+00:00"))
+
+    # Slow fetch: consumes the whole budget BEFORE the first event is processed.
+    original_fetch = store.fetch_pending
+
+    def _slow_fetch(**kwargs):
+        time.sleep(0.1)  # > 0.05 budget
+        return original_fetch(**kwargs)
+
+    store.fetch_pending = _slow_fetch  # type: ignore[method-assign]
+
+    processed_events: list[str] = []
+
+    def _submit(event, _decision_time):
+        processed_events.append(event.event_id)
+        return None
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _e: True,
+        executable_snapshot_gate=lambda _e, _d: True,
+        riskguard_gate=lambda _e: True,
+        final_intent_submit=_submit,
+        reject=lambda *_a: None,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    decision_time = datetime(2026, 6, 5, 6, 0, tzinfo=timezone.utc)
+    result = reactor.process_pending(decision_time=decision_time)
+
+    assert processed_events == [], (
+        "budget exhausted before the first event => the pre-event check must stop "
+        "the cycle without claiming/processing ANY event"
+    )
+    assert result.processed == 0 and result.rejected == 0 and result.dead_lettered == 0
+    # Every event stays PENDING for the next cycle.
+    statuses = [
+        row[0]
+        for row in conn.execute(
+            "SELECT processing_status FROM opportunity_event_processing"
+        ).fetchall()
+    ]
+    assert statuses and all(s == "pending" for s in statuses)
