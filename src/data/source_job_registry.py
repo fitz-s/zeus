@@ -70,6 +70,14 @@ class SourceJobSpec:
     misfire_grace_time: Optional[int] = None  # real APScheduler grace (sec); None = adapter default
     dispatch_kind: DispatchKind = "scheduled"  # scheduled add_job | long_running thread | startup one-shot
     family: Optional[Family] = None         # data family (coverage/frontier federation key, PR #329 C)
+    # COVER vs BUILD at job grain (2026-06-11): False = the owner daemon schedules this job
+    # ITSELF (dedicated executor lane / custom trigger; e.g. the replacement-forecast
+    # production jobs on the replacement_download/replacement_production lanes) and the
+    # registry covers it for inventory/frontier/singleton ONLY. Such jobs are excluded from
+    # the registry-BUILD expected set (expected_registry_job_ids) and from build_job_specs —
+    # otherwise the boot assert counts them as "expected but not built" and refuses to boot
+    # the daemon (built 8 vs expected 12 -> total forecast-collection outage).
+    registry_built: bool = True
     notes: str = ""
 
     @property
@@ -189,29 +197,31 @@ _FORECAST_LIVE: tuple[SourceJobSpec, ...] = (
                   file_only=True),
     # Replacement-forecast production jobs (operator directive 2026-06-11: moved to this
     # daemon from src/main so downloads never share a lifecycle with trading restarts).
-    # These run on dedicated single-worker APScheduler executor lanes ("replacement_download"
-    # and "replacement_production") — mapped to "default" here (not "fast") because they are
-    # NOT file-only and must not starve under the file-only "fast" constraint.
+    # registry_built=False: these are scheduled by _register_replacement_forecast_production_
+    # jobs on dedicated single-worker executor lanes ("replacement_download" /
+    # "replacement_production") in EVERY scheduler branch — they are NOT built from the
+    # registry, so they must not enter the boot-assert expected set. Registered here for
+    # the inventory mirror (--check) + frontier/singleton coverage only.
     SourceJobSpec("replacement_forecast_download", "forecast_live_daemon", "live", "default", False,
                   source_ids=("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"),
                   callable_ref="_replacement_forecast_download_job",
-                  misfire_grace_time=3600, family="forecast",
+                  misfire_grace_time=3600, family="forecast", registry_built=False,
                   notes="probe-resolved AIFS+OM raw-input pre-fetch; cron at publish times; "
                         "runs on dedicated replacement_download executor lane"),
     SourceJobSpec("replacement_forecast_download_startup_catch_up", "forecast_live_daemon", "backfill", "default", False,
                   source_ids=("ecmwf_aifs_ens", "openmeteo_ecmwf_ifs_9km"),
                   callable_ref="_replacement_forecast_download_job",
-                  dispatch_kind="startup", family="forecast",
+                  dispatch_kind="startup", family="forecast", registry_built=False,
                   notes="one-shot date trigger 90s after boot; same download job as cron path"),
     SourceJobSpec("replacement_forecast_shadow_materialize", "forecast_live_daemon", "shadow", "default", True,
                   callable_ref="_replacement_forecast_materialize_job",
-                  misfire_grace_time=120, family="forecast",
+                  misfire_grace_time=120, family="forecast", registry_built=False,
                   notes="interval-driven seed_discovery→seed→materialize on already-downloaded "
                         "manifests; runs on dedicated replacement_production executor lane"),
     SourceJobSpec("anchor_meta_stamp_cross_check", "forecast_live_daemon", "diagnostic", "default", False,
                   source_ids=("openmeteo_ecmwf_ifs_9km",),
                   callable_ref="_anchor_meta_stamp_cross_check_job",
-                  misfire_grace_time=600, family="forecast",
+                  misfire_grace_time=600, family="forecast", registry_built=False,
                   notes="hourly belt-and-suspenders: re-verify meta-stamped anchor artifacts "
                         "against single-runs API (K4.0b(f)); file-writes only, no DB write"),
 )

@@ -149,6 +149,11 @@ def build_job_specs(owner_daemon: Optional[str] = None) -> list[JobBuildSpec]:
         # at all. Either would, if built, double-schedule a live producer.
         if j.owner_daemon == "main" or j.dispatch_kind == "long_running":
             continue
+        if not j.registry_built:
+            # COVER vs BUILD at job grain (2026-06-11): daemon-scheduled on a dedicated lane
+            # (replacement_forecast_* jobs); never emitted as a registry build spec, or it
+            # would double-schedule the job / crash the boot assert.
+            continue
         if owner_daemon is not None and j.owner_daemon != owner_daemon:
             continue
         ec = executor_class_for(j)
@@ -229,6 +234,12 @@ def expected_registry_job_ids(owner_daemon: str, forecast_live_owner_env: str) -
         if j.owner_daemon != owner_daemon:
             continue
         if j.dispatch_kind == "long_running":   # threads are not add_job'able
+            continue
+        if not j.registry_built:
+            # COVER vs BUILD at job grain (2026-06-11): the daemon schedules this job itself on
+            # a dedicated lane (e.g. replacement_forecast_* via _register_replacement_forecast_
+            # production_jobs); the registry covers it for inventory only. Counting it here
+            # would make the boot assert see "expected but not built" and refuse to boot.
             continue
         if j.owner_gated:
             # OpenData ownership asymmetry (PR #329 review #2): ingest_main runs REGARDLESS of
