@@ -282,3 +282,106 @@ def run_bucket_anchor_cross_check_cycle(forecast_db: Path) -> dict[str, Any]:
             report["errors"].append(f"{cycle_iso}: {type(exc).__name__}: {str(exc)[:140]}")
     _write_receipts(receipts)
     return report
+
+
+def run_bucket_downscaled_anchor_cross_check_cycle(forecast_db: Path) -> dict[str, Any]:
+    """Audit DOWNSCALED bucket artifacts against single-runs; populate the downscaled whitelist.
+
+    The downscaled transport (cell_selection=land terrain cell + lapse-rate elevation
+    correction — src.data.openmeteo_ecmwf_ifs9_bucket_transport.fetch_bucket_anchor_payload_
+    downscaled) carries ``run_authority=bucket_partial_run_downscaled_unverified``. Once the
+    run-pinned single-runs API serves that run, the stored DOWNSCALED series is compared to the
+    API series for the SAME city. VERIFIED (<=0.1C) ⇒ the city joins the downscaled whitelist
+    class (receipt key ``<cycle>::bucket_downscaled::<city>``) and is served downscaled by
+    rung 3; MISMATCH ⇒ ERROR + receipt — the city STAYS quarantined (the tolerance is NEVER
+    weakened; a city the downscaling cannot reproduce honestly falls through to rungs 1-2).
+
+    Identical structure to ``run_bucket_anchor_cross_check_cycle`` but on the downscaled
+    authority and the ``bucket_downscaled`` receipt sub-key, so the raw and downscaled
+    verdicts for one city never collide. Bounded: one single-runs fetch per pending
+    (cycle, city) per pass. Fail-soft per cycle."""
+    import sqlite3
+
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        build_anchor_request,
+        fetch_openmeteo_ecmwf_ifs9_anchor_payload,
+    )
+    from src.state.db import _connect
+
+    receipts = _load_receipts()
+    report: dict[str, Any] = {"checked": [], "pending": [], "errors": []}
+    try:
+        conn = _connect(Path(forecast_db))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT source_cycle_time, request_params_json, artifact_metadata_json
+            FROM raw_forecast_artifacts
+            WHERE source_id = 'openmeteo_ecmwf_ifs_9km'
+              AND artifact_metadata_json LIKE '%bucket_partial_run_downscaled_unverified%'
+            ORDER BY source_cycle_time DESC
+            """
+        ).fetchall()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        report["errors"].append(f"journal read: {exc}")
+        return report
+    by_cycle_city: dict[tuple[str, str], sqlite3.Row] = {}
+    for row in rows:
+        try:
+            _meta = json.loads(row["artifact_metadata_json"] or "{}")
+        except Exception:  # noqa: BLE001
+            _meta = {}
+        city = str(_meta.get("city") or "")
+        by_cycle_city.setdefault((str(row["source_cycle_time"]), city), row)
+    for (cycle_iso, city), row in by_cycle_city.items():
+        receipt_key = (
+            f"{cycle_iso}::bucket_downscaled::{city}" if city else f"{cycle_iso}::bucket_downscaled"
+        )
+        if receipts.get(receipt_key, {}).get("verdict") == "VERIFIED":
+            continue
+        try:
+            meta = json.loads(row["artifact_metadata_json"] or "{}")
+            payload_path = Path(str(meta.get("openmeteo_payload_json") or ""))
+            if not payload_path.exists():
+                report["errors"].append(f"{cycle_iso}: stored downscaled payload missing")
+                continue
+            stored_payload = json.loads(payload_path.read_text())
+            params = json.loads(row["request_params_json"] or "{}")
+            cycle = datetime.fromisoformat(cycle_iso.replace("Z", "+00:00"))
+            request = build_anchor_request(
+                latitude=float(params["latitude"]),
+                longitude=float(params["longitude"]),
+                run=cycle,
+                timezone_name=str(params.get("timezone") or "UTC"),
+                forecast_hours=int(params.get("forecast_hours") or 120),
+            )
+            try:
+                pinned_payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request)
+            except Exception:
+                report["pending"].append(cycle_iso)
+                continue
+            result = compare_hourly_series(
+                stored_payload, pinned_payload, tolerance_c=BUCKET_VS_API_TOLERANCE_C
+            )
+            result["checked_at"] = datetime.now(UTC).isoformat()
+            result["transport"] = "bucket_partial_run_downscaled"
+            result["city"] = meta.get("city")
+            receipts[receipt_key] = result
+            report["checked"].append({"cycle": cycle_iso, **result})
+            if result["verdict"] == "MISMATCH":
+                logger.error(
+                    "ANCHOR BUCKET-DOWNSCALED MISMATCH cycle=%s city=%s max_abs_delta_c=%s — "
+                    "the downscaled (cell_selection=land + lapse-rate) series diverged from the "
+                    "run-pinned API beyond %.3fC; city STAYS quarantined (tolerance not weakened; "
+                    "falls through to rungs 1-2) (receipts: %s)",
+                    cycle_iso,
+                    meta.get("city"),
+                    result["max_abs_delta_c"],
+                    BUCKET_VS_API_TOLERANCE_C,
+                    RECEIPT_PATH,
+                )
+        except Exception as exc:  # noqa: BLE001 — per-cycle fail-soft
+            report["errors"].append(f"{cycle_iso}: {type(exc).__name__}: {str(exc)[:140]}")
+    _write_receipts(receipts)
+    return report

@@ -176,10 +176,12 @@ def _try_bucket_rung_three(
 
     from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
         BucketTransportNotAdmissible,
-        city_is_bucket_whitelisted,
+        capture_city_target_elevation,
         fetch_bucket_anchor_payload,
+        fetch_bucket_anchor_payload_downscaled,
         fetch_bucket_run_manifest,
         local_day_hourly_valid_times,
+        resolve_bucket_serve_method,
         select_declaring_manifest,
     )
 
@@ -192,11 +194,15 @@ def _try_bucket_rung_three(
             f"bucket does not declare wanted run {request.run.isoformat()} "
             f"(rung-2 refusal: {meta_refusal})"
         )
-    if not city_is_bucket_whitelisted(city):
-        # condition 3 fails: serving this city raw would risk a biased anchor (coastal/terrain
-        # city not cross-check-verified). Skip — it falls to rungs 1-2 next tick.
+    # condition 3: HOW may the bucket serve this city — "raw" (nearest-gridpoint read verified)
+    # OR "downscaled" (terrain land-cell + lapse-rate read verified) OR None (quarantined).
+    # A city verified by NEITHER class stays quarantined and falls to rungs 1-2 (honest; the
+    # 0.1C cross-check tolerance is never weakened — coastal/terrain cities the downscaling
+    # cannot reproduce do not get served).
+    serve_method = resolve_bucket_serve_method(city)
+    if serve_method is None:
         raise BucketTransportNotAdmissible(
-            f"city {city} not on bucket cross-check whitelist "
+            f"city {city} not on bucket cross-check whitelist (raw or downscaled) "
             f"(rung-2 refusal: {meta_refusal})"
         )
     needed = local_day_hourly_valid_times(
@@ -206,14 +212,30 @@ def _try_bucket_rung_three(
         forecast_hours=request.forecast_hours,
     )
     try:
-        result = fetch_bucket_anchor_payload(  # re-checks admission (condition 2) internally
-            latitude=request.latitude,
-            longitude=request.longitude,
-            run=request.run,
-            timezone_name=timezone_name,
-            needed_valid_times=needed,
-            manifest=manifest,
-        )
+        if serve_method == "downscaled":
+            # target elevation = the API-reported 90m-DEM elevation (captured once per city,
+            # cached with provenance). This is the SAME authority that VERIFIED the city.
+            target_elev = capture_city_target_elevation(
+                city, request.latitude, request.longitude
+            )
+            result = fetch_bucket_anchor_payload_downscaled(  # re-checks admission internally
+                latitude=request.latitude,
+                longitude=request.longitude,
+                target_elevation_m=target_elev,
+                run=request.run,
+                timezone_name=timezone_name,
+                needed_valid_times=needed,
+                manifest=manifest,
+            )
+        else:  # "raw"
+            result = fetch_bucket_anchor_payload(  # re-checks admission (condition 2) internally
+                latitude=request.latitude,
+                longitude=request.longitude,
+                run=request.run,
+                timezone_name=timezone_name,
+                needed_valid_times=needed,
+                manifest=manifest,
+            )
     except ValueError as admission_exc:
         # condition 2 fails: a needed local-day timestep is not yet written. Skip this city
         # this cycle (no extrapolation) — it falls to a higher rung next tick.
