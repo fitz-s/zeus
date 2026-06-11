@@ -89,11 +89,14 @@ def day0_is_tradeable_for_scope(edli_live_scope: str | None) -> bool:
     return str(edli_live_scope or "") == "forecast_plus_day0"
 
 
-def claim_tier_case_sql(*, day0_is_tradeable: bool) -> str:
-    """The scope-aware claim-tier CASE expression for ``fetch_pending`` ORDER BY.
+def claim_tier_expr_sql(*, day0_is_tradeable: bool) -> str:
+    """The scope-aware claim-tier CASE EXPRESSION (no sort direction).
 
-    ONE ordering authority. The tier CASE is the cross-tier rank; ``e.priority
-    DESC`` (appended by the caller) is the within-tier sub-sort.
+    This is the single tier authority as a bare ``CASE ... END`` that evaluates
+    to the tier integer for a row. It is usable both as a SELECT column (e.g. to
+    PARTITION a per-city round-robin window by tier) and — via
+    :func:`claim_tier_case_sql`, which appends ``ASC`` — as an ORDER BY key. One
+    source, two consumers; the ``ASC`` form can never drift from the column form.
 
     Tiers (lower integer = claimed first):
       0  DAY0_EXTREME_UPDATED  — ONLY when ``day0_is_tradeable`` (realized obs is
@@ -126,5 +129,16 @@ def claim_tier_case_sql(*, day0_is_tradeable: bool) -> str:
         "                WHEN e.event_type IN ('BEST_BID_ASK_CHANGED', 'BOOK_SNAPSHOT', 'NEW_MARKET_DISCOVERED')\n"
         "                THEN 3\n"
         "                ELSE 2\n"
-        "              END ASC"
+        "              END"
     )
+
+
+def claim_tier_case_sql(*, day0_is_tradeable: bool) -> str:
+    """The scope-aware claim-tier CASE expression for ``fetch_pending`` ORDER BY.
+
+    ONE ordering authority. The tier CASE is the cross-tier rank; ``e.priority
+    DESC`` (appended by the caller) is the within-tier sub-sort. Derived from
+    :func:`claim_tier_expr_sql` by appending the ``ASC`` sort direction, so the
+    ORDER BY form and the column form are the same expression by construction.
+    """
+    return claim_tier_expr_sql(day0_is_tradeable=day0_is_tradeable) + " ASC"

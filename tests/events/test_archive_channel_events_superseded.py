@@ -606,10 +606,15 @@ def test_fetch_pending_query_uses_processing_status_index():
 
     conn.executed_sql.clear()
     store.fetch_pending(decision_time=decision_time, limit=90)
+    # Locate fetch_pending's main claim query by its stable signature: it joins
+    # the processing table via the active-status index and computes the per-city
+    # round-robin rank (_city_round). Format-robust — does not depend on the
+    # SELECT-list being on one line (the query is now a CTE: WITH candidates ...).
     fetch_sql, fetch_params = next(
         (sql, params)
         for sql, params in conn.executed_sql
-        if "SELECT e.*" in sql and "FROM opportunity_event_processing" in sql
+        if "INDEXED BY idx_opportunity_event_processing_status" in sql
+        and "_city_round" in sql
     )
 
     plan_text = _plan_text(conn, fetch_sql, fetch_params)
