@@ -201,6 +201,7 @@ from src.strategy.market_phase import (
     market_phase_admits,
 )
 from src.strategy.live_inference.live_admission import (
+    SETTLEMENT_COVERAGE_LICENSING_STATUSES,
     coverage_unlicensed_tail_rejection_reason,
     live_buy_no_conservative_evidence_rejection_reason,
     live_capital_efficiency_rejection_reason,
@@ -267,6 +268,13 @@ class _CandidateProof:
     q_source: str | None = None
     q_lcb_calibration_source: str | None = None
     same_bin_yes_posterior: float | None = None
+    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
+    # coverage VERDICT status ("LICENSED"/"UNLICENSED"/"INSUFFICIENT_DATA"; None on
+    # the canonical path). Computed ONCE per family on the replacement path and
+    # carried on the proof — exactly how same_bin_yes_posterior travels — so the
+    # receipt-level twin admission gate evaluates the SAME settled-record evidence
+    # the proof-generation gate saw (never starved, never recomputed).
+    settlement_coverage_status: str | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): carry the bundle posterior_id +
     # probability_authority from the evidence dict
     # (_replacement_authority_probability_and_fdr_proof :5752-5754) through to the
@@ -2598,6 +2606,11 @@ def _build_event_bound_no_submit_receipt_core(
             # buy-NO conservative-evidence gate sees the SAME input the adapter gate
             # did — closing ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING.
             "same_bin_yes_posterior": proof.same_bin_yes_posterior,
+            # Twin-authority reconciliation #7: the family coverage verdict status,
+            # carried the same way same_bin_yes_posterior travels so the receipt-level
+            # twin gate (events.reactor._receipt_money_path_blocker) evaluates the
+            # SAME settled-record evidence — lockstep, never starved.
+            "settlement_coverage_status": proof.settlement_coverage_status,
             "q_source": proof.q_source,  # #120 calibrator provenance
             # H2_E2E: typed posterior link carried to the receipt (None on canonical).
             "posterior_id": proof.posterior_id,
@@ -2967,6 +2980,11 @@ def _event_submission_receipt_from_typed_receipt_payload(
         q_source=raw_receipt.get("q_source"),  # #120 calibrator provenance
         q_lcb_calibration_source=raw_receipt.get("q_lcb_calibration_source"),
         same_bin_yes_posterior=_optional_float(raw_receipt.get("same_bin_yes_posterior")),
+        settlement_coverage_status=(
+            str(raw_receipt["settlement_coverage_status"])
+            if raw_receipt.get("settlement_coverage_status") is not None
+            else None
+        ),
         posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
         probability_authority=raw_receipt.get("probability_authority"),  # H2_E2E
         strategy_key=raw_receipt.get("strategy_key"),
@@ -6037,6 +6055,7 @@ def _candidate_evaluation_from_proof(
         q_lcb_5pct=float(proof.q_lcb_5pct),
         q_lcb_calibration_source=proof.q_lcb_calibration_source,
         same_bin_yes_posterior=proof.same_bin_yes_posterior,
+        settlement_coverage_status=proof.settlement_coverage_status,
         c_cost_95pct=_optional_float(proof.c_cost_95pct),
         p_fill_lcb=float(proof.p_fill_lcb),
         trade_score=float(proof.trade_score),
@@ -6382,6 +6401,18 @@ def _generate_candidate_proofs(
     _rtc_unexpired_rest, _rtc_escalated = _family_rest_state(
         trade_conn, family=family, decision_time=decision_time
     )
+    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
+    # coverage verdict status, computed ONCE on the replacement path and threaded via
+    # the probability evidence. Read ONCE per family here; passed to the buy-NO
+    # admission gate AND carried on every proof so the receipt-level twin gate
+    # (events.reactor._receipt_money_path_blocker) evaluates the SAME evidence —
+    # the 21a4c14ee2 twin-gate lockstep lesson. None on the canonical path.
+    _settlement_coverage_status_raw = probability_evidence.get("settlement_coverage_status")
+    settlement_coverage_status = (
+        str(_settlement_coverage_status_raw)
+        if _settlement_coverage_status_raw is not None
+        else None
+    )
     for candidate in family.candidates:
         condition_id = str(candidate.condition_id or "")
         yes_q = q_by_condition.get(condition_id)
@@ -6521,6 +6552,7 @@ def _generate_candidate_proofs(
                 execution_price=execution_price.value if execution_price is not None else None,
                 q_lcb_calibration_source=q_lcb_source,
                 same_bin_yes_posterior=yes_q,
+                settlement_coverage_status=settlement_coverage_status,
             )
             if buy_no_conservative_evidence_reason is not None:
                 score = 0.0
@@ -6596,6 +6628,7 @@ def _generate_candidate_proofs(
                     # payload instance (#149 fix), so this is the actual q_source.
                     q_source=payload.get("_edli_q_source"),
                     same_bin_yes_posterior=yes_q,
+                    settlement_coverage_status=settlement_coverage_status,
                     # H2_E2E: carry posterior_id + probability_authority from the
                     # probability evidence dict. Present only on the replacement_0_1
                     # path; None (absent key) on canonical. posterior_id is emitted
@@ -8452,7 +8485,12 @@ def _build_replacement_calibration_credential(
 # (LICENSED, and UNLICENSED where the shrink was applied — a verdict the settled record
 # backed). INSUFFICIENT_DATA (no realized backing) is excluded → UNEVALUATED → blocked,
 # matching the ARM gate's "coverage_ratio is None → block" rule.
-_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = frozenset({"LICENSED", "UNLICENSED"})
+#
+# SINGLE AUTHORITY (twin-authority reconciliation #7, 2026-06-11): the set itself now has
+# ONE home — live_admission.SETTLEMENT_COVERAGE_LICENSING_STATUSES — read by BOTH the
+# buy-NO admission gate and this cert credential. This alias keeps the cert-layer name;
+# it must never regrow an inline frozenset literal (registry entry #11).
+_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = SETTLEMENT_COVERAGE_LICENSING_STATUSES
 
 
 def _replacement_calibration_payload_from_credential(
@@ -9135,6 +9173,15 @@ def _replacement_authority_probability_and_fdr_proof(
     payload["_edli_q_source"] = "replacement_0_1"
     return q_by_condition, lcb_by_direction, p_values, prefilter, {
         "probability_authority": "replacement_0_1",
+        # Twin-authority reconciliation #7 (2026-06-11): the family's settlement-
+        # backward coverage VERDICT status — the SINGLE computation above (the same
+        # verdict object the cert credential was built from; never a second verdict)
+        # threaded to the proof-construction seam so the buy-NO admission gate reads
+        # the SAME settled-record evidence the cert layer licenses on. None/absent on
+        # the canonical path and when the verdict could not be evaluated.
+        "settlement_coverage_status": (
+            str(_coverage_verdict.status) if _coverage_verdict is not None else None
+        ),
         # FIX A (direction law; 2026-06-10 Milan-24C incident): thread the fused
         # posterior center + predictive sigma (°C) to the proof-construction seam
         # so candidate admission can enforce buy_yes <=> bin ~= forecast. Read

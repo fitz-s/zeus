@@ -255,6 +255,14 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # omit-when-None pattern above.
     if payload.get("same_bin_yes_posterior") is None:
         payload.pop("same_bin_yes_posterior", None)
+    # settlement_coverage_status (twin-authority reconciliation #7, 2026-06-11): omit
+    # when None so canonical / legacy / verdict-unevaluated receipts keep byte-identical
+    # receipt_json (and therefore receipt_hash). Present only on replacement-path
+    # receipts whose family coverage verdict was evaluated — persisted so the receipt-
+    # level twin gate's input is recoverable from the blob, mirroring
+    # same_bin_yes_posterior above.
+    if payload.get("settlement_coverage_status") is None:
+        payload.pop("settlement_coverage_status", None)
     # DecisionProvenanceEnvelope (operator law 2026-06-11): ALWAYS excluded from receipt_json —
     # never hashed. The envelope embeds decision_time-dependent ages (cycle_age_h, book age_s),
     # so a retried event would recompute different envelope bytes for the SAME

@@ -177,6 +177,41 @@ def test_member_current_value_serving_single_authority() -> None:
         "materializer regrew an inline gem serving ladder — the current-value serving rule "
         "lives ONLY in replacement_current_value_serving.read_current_instrument_values"
     )
+
+
+# ---------------------------------------------------------------------------------
+# 11. SETTLEMENT-COVERAGE LICENSING SET — "which coverage verdict statuses license a
+#     fused-bootstrap q_lcb for live" has ONE home (live_admission.SETTLEMENT_COVERAGE_
+#     LICENSING_STATUSES), read by BOTH the buy-NO admission gate and the adapter's cert
+#     credential. The admission gate and the cert layer read the SAME family verdict
+#     (computed once on the replacement path, threaded — never recomputed). (Twin-
+#     authority #7, 2026-06-11: the admission gate used the OLD source-brand vocabulary
+#     and never saw the verdict — 12 positive-EV families killed per burst; category
+#     inversion: record-BACKED bootstrap rejected, record-REFUTED-then-shrunk accepted.)
+# ---------------------------------------------------------------------------------
+def test_member_settlement_coverage_licensing_single_authority() -> None:
+    member = ROOT / "tests" / "strategy" / "test_settlement_coverage_admission_licensing.py"
+    assert member.exists(), "member antibody deleted: coverage-licensing single authority"
+    admission = _read("src/strategy/live_inference/live_admission.py")
+    assert "SETTLEMENT_COVERAGE_LICENSING_STATUSES" in admission
+    adapter = _read("src/engine/event_reactor_adapter.py")
+    # The cert-layer alias must POINT at the one home, never regrow an inline literal.
+    assert (
+        "_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = SETTLEMENT_COVERAGE_LICENSING_STATUSES"
+        in adapter
+    ), "cert licensing set must alias live_admission's single home"
+    assert '_FUSED_BOOTSTRAP_COVERAGE_LICENSING_STATUSES = frozenset(' not in adapter, (
+        "cert layer regrew an inline licensing frozenset — the set lives ONLY in "
+        "live_admission.SETTLEMENT_COVERAGE_LICENSING_STATUSES"
+    )
+    # BOTH twin gate sites thread the verdict status (proof-generation + receipt-level).
+    assert adapter.count("settlement_coverage_status=settlement_coverage_status") >= 1, (
+        "proof-generation gate site lost the verdict threading"
+    )
+    reactor = _read("src/events/reactor.py")
+    assert "settlement_coverage_status=receipt.settlement_coverage_status" in reactor, (
+        "receipt-level twin gate site lost the verdict threading (21a4c14ee2 lesson)"
+    )
     # The trigger's capturable set is the SAME function's key set — no endpoint SQL of its own.
     trigger = _read("src/data/replacement_fusion_upgrade_trigger.py")
     assert "read_current_instrument_values" in trigger

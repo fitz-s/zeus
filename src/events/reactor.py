@@ -183,6 +183,15 @@ class EventSubmissionReceipt:
     # buy-YES / canonical / legacy receipts; omitted-when-None from receipt_json so
     # those receipts keep byte-identical hashes.
     same_bin_yes_posterior: float | None = None
+    # Twin-authority reconciliation #7 (2026-06-11): the family settlement-backward
+    # coverage VERDICT status ("LICENSED"/"UNLICENSED"/"INSUFFICIENT_DATA"; None on
+    # canonical/legacy receipts). Mirrors same_bin_yes_posterior's travel exactly:
+    # the ADAPTER admission gate evaluated buy-NO conservative evidence WITH this
+    # verdict, so the receipt-level re-enforcement (_receipt_money_path_blocker)
+    # MUST see the SAME value — a starved receipt-level twin would re-reject every
+    # coverage-licensed buy_no it had just admitted (the 21a4c14ee2 lesson).
+    # Omitted-when-None from receipt_json so existing hashes stay byte-stable.
+    settlement_coverage_status: str | None = None
     # H2_E2E (REAUDIT_0_1.md §2/§4): typed carriers so every replacement_0_1 order
     # is SQL-reconstructable forecast(posterior_id) -> ... -> fill WITHOUT
     # JSON_EXTRACT. None on canonical/legacy receipts (observability only — these
@@ -1264,6 +1273,9 @@ def _receipt_money_path_blocker(
             # with ADMISSION_BUY_NO_INDEPENDENT_YES_POSTERIOR_MISSING. NEVER a
             # 1-price / 1-q_no complement — the field is the q-vector YES mass.
             same_bin_yes_posterior=receipt.same_bin_yes_posterior,
+            # Twin-authority reconciliation #7: the SAME family coverage verdict the
+            # adapter gate evaluated (carried on the receipt; single computation).
+            settlement_coverage_status=receipt.settlement_coverage_status,
         )
         if buy_no_conservative_reason is not None:
             return "TRADE_SCORE", buy_no_conservative_reason
