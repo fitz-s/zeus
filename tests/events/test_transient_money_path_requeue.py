@@ -246,3 +246,52 @@ def test_mode_flipped_is_transient():
     # terminally consumed while the fresh ask carried +6..+19% conservative EV).
     # The requeue re-decides fresh and prices TAKER from the start.
     assert _is_transient_money_path_reason(_MODE_FLIPPED_REASON)
+
+
+def test_mode_flipped_no_submit_state_requeues_not_consumed():
+    """ANTIBODY (live 2026-06-11 17:30:20Z, Busan x2): MODE_FLIPPED arrives as a
+    VERIFIED NO_SUBMIT *state* (P0-1), not a rejection — it bypassed the
+    _reject_or_retry_post_submit classifier and was terminally consumed as
+    proof_accepted while the fresh ask carried +6.7% conservative EV
+    (q_lcb 0.828 vs ask 0.77). The NO_SUBMIT branch must classify transient
+    reasons BEFORE persisting the receipt: the event requeues PENDING and the
+    aborted attempt writes no receipt."""
+    conn, store = _store()
+    event = _event("snap-mf")
+    store.insert_or_ignore(event)
+
+    def _submit(ev, _decision_time):
+        return EventSubmissionReceipt(
+            submitted=False,
+            proof_accepted=True,
+            event_id=ev.event_id,
+            causal_snapshot_id=ev.causal_snapshot_id,
+            city="Busan",
+            target_date="2026-06-13",
+            metric="high",
+            side_effect_status="NO_SUBMIT",
+            trade_score_positive=True,
+            reason=(
+                "SUBMIT_ABORTED_MODE_FLIPPED:SUBMIT_ABORTED_MODE_FLIPPED:"
+                "proof_mode=MAKER:fresh_mode=TAKER:fresh_bid=0.64:fresh_ask=0.77"
+            ),
+        )
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda _event, _dt: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=_submit,
+        reject=lambda _e, _s, _r: None,
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+    result = reactor.process_pending(decision_time=_DT, limit=10)
+
+    assert result.retried == 1
+    assert result.proof_accepted == 0, (
+        "a transient-reason NO_SUBMIT receipt must NOT count as an accepted proof"
+    )
+    assert _status(conn, event.event_id) == "pending"
+    n_receipts = conn.execute("SELECT count(*) FROM edli_no_submit_receipts").fetchone()[0]
+    assert n_receipts == 0, "the aborted attempt must not persist a receipt"

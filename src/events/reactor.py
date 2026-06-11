@@ -831,6 +831,19 @@ class OpportunityEventReactor:
                 decision_time=decision_time,
             )
         if receipt.side_effect_status == "NO_SUBMIT":
+            # PRICE-RACE NO_SUBMIT STATES (2026-06-11 live): SUBMIT_ABORTED_MODE_FLIPPED
+            # arrives as a VERIFIED no-submit STATE (P0-1 design), not a rejection — so
+            # the transient classifier in _reject_or_retry_post_submit never saw it and
+            # the event was terminally consumed as proof_accepted while the FRESH book
+            # carried positive EV (Busan 17:30:20Z, q_lcb 0.828 vs fresh ask 0.77,
+            # twice in one cycle). A transient-classified reason on a NO_SUBMIT receipt
+            # is the SAME stale-decision-vs-fresh-book race: requeue (bounded by
+            # MAX_EXECUTABLE_SNAPSHOT_RETRIES via the shared disposition) so the next
+            # cycle re-decides on the fresh book and prices the fresh mode from the
+            # start. The receipt is NOT persisted for the aborted attempt — the requeued
+            # decision writes its own honest receipt.
+            if _is_transient_money_path_reason(receipt.reason):
+                return _EXECUTABLE_SNAPSHOT_RETRY
             proof_bundle = receipt.decision_proof_bundle
             if proof_bundle is None:
                 compile_result = self._decision_compiler.compile_no_submit(
