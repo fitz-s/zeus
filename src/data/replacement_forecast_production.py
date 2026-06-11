@@ -155,6 +155,33 @@ def _max_downloaded_current_target_cycle(forecast_db: Path) -> datetime | None:
         return None
 
 
+def _probe_resolved_available_cycle() -> datetime | None:
+    """SINGLE run-selection authority for every production download lane (K4.0b(a)).
+
+    The fetchable cycle is whatever the providers' probes CONFIRM is published for BOTH
+    legs (AIFS open-data index + the anchor transport ladder incl. the S3 bucket) — never
+    a wall-clock − release-lag guess. The guessed clock asked for unpublished 12Z/18Z
+    runs every night; the rung-2 meta guard refused them (correctly) and the refusal
+    aborted the whole download→materialize cycle (2026-06-11 incident,
+    logs/zeus-forecast-live.err: "provider declares run 06:00 but caller wants 18:00").
+    None = no pair-complete cycle provable right now → callers SKIP the tick with a
+    receipt and retry next tick; they must never fall back to a guessed run.
+    """
+    from src.data.replacement_cycle_availability import (  # noqa: PLC0415
+        newest_complete_cycle,
+        probe_aifs_cycle_available,
+        probe_anchor_available_any,
+        resolve_cycle_leg_availability,
+    )
+
+    availability = resolve_cycle_leg_availability(
+        datetime.now(timezone.utc),
+        probe_aifs=probe_aifs_cycle_available,
+        probe_anchor=probe_anchor_available_any,
+    )
+    return newest_complete_cycle(availability)
+
+
 def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
     if not bool(cfg.get("download_current_targets_enabled", False)):
         return None
@@ -163,7 +190,6 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     if forecast_db is None or output_dir is None:
         raise ValueError("replacement current-target download requires forecast_db and raw_manifest_dir/download_output_dir")
     from scripts.download_replacement_forecast_current_targets import (
-        _parse_cycle,
         download_current_target_raw_inputs,
     )
     from src.data.replacement_forecast_current_target_plan import (
@@ -177,10 +203,20 @@ def _download_replacement_forecast_current_targets_if_needed(cfg: dict[str, obje
     # for ~24h while Open-Meteo was serving 06-09T00 (it answered 200 OK to the U0R leg of the
     # SAME job run). Both early returns now additionally require the downloaded high-water mark
     # to have reached the currently-available cycle.
+    #
+    # RUN-SELECTION AUTHORITY (2026-06-11, twin-authority kill): the available cycle is
+    # probe-resolved, NEVER now − release_lag (that guess requested unpublished runs and the
+    # rung-2 refusal aborted the whole cycle). release_lag_hours survives ONLY as the
+    # source_available_at metadata model passed to the downloader — it takes no part in
+    # deciding WHICH run to fetch.
     release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-    available_cycle = _parse_cycle(
-        None, now=datetime.now(timezone.utc), release_lag_hours=release_lag_hours
-    )
+    available_cycle = _probe_resolved_available_cycle()
+    if available_cycle is None:
+        return {
+            "status": "CYCLE_PROBE_UNRESOLVED_SKIP",
+            "detail": "no pair-complete cycle provable by provider probes this tick; "
+            "retrying next tick — a guessed run is never requested",
+        }
     downloaded_cycle = _max_downloaded_current_target_cycle(Path(str(forecast_db)))
     cycle_is_current = downloaded_cycle is not None and downloaded_cycle >= available_cycle
 
@@ -242,9 +278,8 @@ def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str
     if forecast_db is None:
         return None
     try:
-        from datetime import date, datetime as _dt, timezone as _tz  # noqa: PLC0415
+        from datetime import date  # noqa: PLC0415
 
-        from scripts.download_replacement_forecast_current_targets import _parse_cycle  # noqa: PLC0415
         from src.config import cities_by_name  # noqa: PLC0415
         from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
             build_replacement_forecast_current_target_plan,
@@ -255,7 +290,15 @@ def _download_u0r_extra_raw_inputs_if_needed(cfg: dict[str, object]) -> dict[str
         )
 
         release_lag_hours = float(cfg.get("download_release_lag_hours") or 14.0)
-        cycle = _parse_cycle(None, now=_dt.now(_tz.utc), release_lag_hours=release_lag_hours)
+        # RUN-SELECTION AUTHORITY (2026-06-11): the capture cycle is the SAME probe-resolved
+        # pair-complete cycle the anchor/AIFS lanes fetch — fusion binds same-cycle rows, so
+        # capture at a guessed (now − lag) cycle either targets an unpublished run (every
+        # extras fetch 400s, high-water froze at 06-10T06Z, q_lcb stayed NULL on every fresh
+        # posterior) or a stale one. Per-model publication gaps inside the cycle stay
+        # fail-soft in the downloader (per-row skip).
+        cycle = _probe_resolved_available_cycle()
+        if cycle is None:
+            return {"status": "U0R_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"}
 
         # CYCLE-CURRENCY (2026-06-09, K-root instance #5 — same structural decision as the
         # anchor downloader's include_covered): plan 'covered' has NO cycle-awareness, so
@@ -434,11 +477,21 @@ def _anchor_meta_stamp_cross_check() -> None:
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
         return
-    from src.data.anchor_cross_check import run_anchor_cross_check_cycle  # noqa: PLC0415
+    from src.data.anchor_cross_check import (  # noqa: PLC0415
+        run_anchor_cross_check_cycle,
+        run_bucket_anchor_cross_check_cycle,
+    )
 
     report = run_anchor_cross_check_cycle(Path(str(forecast_db)))
     if report.get("checked") or report.get("errors"):
         logger.info("anchor meta-stamp cross-check report: %s", report)
+
+    # Rung-3 bucket transport antibody: re-verify bucket artifacts against single-runs once
+    # the run is served there. VERIFIED receipts grow the city whitelist that gates future
+    # bucket serves; MISMATCH ⇒ ERROR + receipt (coastal/terrain city stays off the whitelist).
+    bucket_report = run_bucket_anchor_cross_check_cycle(Path(str(forecast_db)))
+    if bucket_report.get("checked") or bucket_report.get("errors"):
+        logger.info("anchor bucket-transport cross-check report: %s", bucket_report)
 
 
 @_scheduler_job("replacement_cycle_availability_poll")

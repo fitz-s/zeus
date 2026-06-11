@@ -107,6 +107,18 @@ def _wire(monkeypatch, *, rows, forecast_db="zeus-forecasts.db"):
 
     monkeypatch.setattr(dl_mod, "download_u0r_extra_raw_inputs", _fake_download)
 
+    # Run-selection single authority (2026-06-11): the capture lane resolves its cycle
+    # via provider probes (never the dead now-minus-lag guess). Pin a deterministic
+    # probe-resolved cycle so lead_days assertions are exact and offline.
+    import src.data.replacement_forecast_production as production
+
+    probed_cycle = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    monkeypatch.setattr(
+        production, "_probe_resolved_available_cycle", lambda: probed_cycle
+    )
+
     cfg_dict = {"forecast_db": forecast_db, "download_release_lag_hours": 14.0}
     return cfg_dict, calls
 
@@ -141,26 +153,26 @@ def test_does_not_raise_nameerror_and_attempts_capture(monkeypatch) -> None:
     assert t.target_date == target_date
     # lead_days is the cross-boundary value the fix unblocks:
     #   max(0, date.fromisoformat(target_date) - cycle.date()).days
-    # Recompute the expected value with the SAME cycle the function uses (via the same
-    # _parse_cycle + 14h release lag) so the assertion is exact, not time-of-day flaky.
-    from scripts.download_replacement_forecast_current_targets import _parse_cycle
-
-    cycle = _parse_cycle(
-        None, now=datetime.now(timezone.utc), release_lag_hours=14.0
-    )
+    # The function now uses the probe-resolved cycle pinned in _wire (today 00Z), so the
+    # expected value is exact and offline.
+    cycle = calls[0]["cycle"]
     expected_lead = max(0, (date.fromisoformat(target_date) - cycle.date()).days)
     assert t.lead_days == expected_lead
     assert t.lead_days >= 0
 
 
 # ---------------------------------------------------------------------------------------
-# (3) covered rows are excluded; only uncovered rows reach the downloader
+# (3) covered rows are INCLUDED (CYCLE-CURRENCY, K-root instance #5): plan 'covered' has
+# no cycle-awareness, so excluding covered rows froze covered targets on stale-cycle
+# extras (Madrid 06-10 fused with icon_global off the 06-08T12 row). The extras job
+# feeds ALL current targets; the downloader itself dedups per persisted
+# (model, city, target, metric, cycle, endpoint) row.
 # ---------------------------------------------------------------------------------------
-def test_covered_rows_excluded_from_targets(monkeypatch) -> None:
+def test_covered_rows_still_reach_the_downloader(monkeypatch) -> None:
     today = datetime.now(timezone.utc).date()
     td = (today + timedelta(days=3)).isoformat()
     rows = [
-        _row(city="Amsterdam", target_date=td, covered=True),   # excluded
+        _row(city="Amsterdam", target_date=td, covered=True),   # included (currency)
         _row(city="Ankara", target_date=td, covered=False),     # included
     ]
     cfg_dict, calls = _wire(monkeypatch, rows=rows)
@@ -170,7 +182,10 @@ def test_covered_rows_excluded_from_targets(monkeypatch) -> None:
     assert report.get("status") != "U0R_EXTRA_CAPTURE_FAILSOFT_SKIPPED", report
     assert len(calls) == 1
     cities = sorted(t.city for t in calls[0]["targets"])
-    assert cities == ["Ankara"]
+    assert cities == ["Amsterdam", "Ankara"], (
+        "covered rows must NOT be filtered from the extras capture — coverage is not "
+        "currency (K-root instance #5); per-row dedup lives in the downloader"
+    )
 
 
 # ---------------------------------------------------------------------------------------

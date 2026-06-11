@@ -104,30 +104,60 @@ def probe_openmeteo_single_run_available(
         return False
 
 
+def probe_bucket_run_declared(cycle: datetime) -> bool:
+    """True iff the S3 data_spatial bucket declares this run (rung-3 transport probe).
+
+    Declaration (a latest/in-progress manifest with reference_time == cycle) is the
+    necessary condition for the bucket transport; per-city timestep admission and the
+    cross-check whitelist gate at FETCH time (per-city fail-soft skip in the downloader),
+    so declaration alone marks the leg fetchable for the poll. Any probe error → False
+    (treated not-yet-available; the poll retries next tick)."""
+    try:
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
+            fetch_bucket_run_manifest,
+            select_declaring_manifest,
+        )
+
+        manifests = fetch_bucket_run_manifest()
+        return (
+            select_declaring_manifest(manifests, wanted_run=cycle.astimezone(UTC))
+            is not None
+        )
+    except Exception as exc:  # noqa: BLE001 — probe noise = not available yet
+        logger.debug("bucket run probe error (treated unavailable): %s", exc)
+        return False
+
+
 def probe_anchor_available_any(
     cycle: datetime,
     *,
     urlopen: Callable[..., object] = urllib.request.urlopen,
 ) -> bool:
-    """True iff the anchor leg can be fetched for this cycle by EITHER transport.
+    """True iff the anchor leg can be fetched for this cycle by ANY ladder transport.
 
     Transport ladder mirror (K4.0b(f)): run-pinned single-runs OR the meta-stamped
-    standard API (provider meta declares exactly this run as its current completed run).
-    Either path yields a journalable anchor artifact with explicit run authority, so the
-    availability poll may treat the leg as published when either probe passes."""
+    standard API (provider meta declares exactly this run as its current completed run)
+    OR the S3 data_spatial bucket declaring the run (rung 3 — serves a run's steps the
+    moment they are written, hours before the API publishes; 2026-06-11 the 00Z run was
+    bucket-only while meta still declared 06-10T06Z). Every path yields a journalable
+    anchor artifact with explicit run authority, so the availability poll may treat the
+    leg as published when any probe passes. The probe set MUST stay a superset-mirror of
+    the downloader's ladder: a rung the probe cannot see is a rung the run-selection
+    authority will starve (the downloader only ever fetches probe-confirmed cycles)."""
     if probe_openmeteo_single_run_available(cycle, urlopen=urlopen):
         return True
     try:
         from src.data.openmeteo_ecmwf_ifs9_anchor import fetch_openmeteo_ifs9_model_meta
 
         meta = fetch_openmeteo_ifs9_model_meta()
-        return (
+        if (
             meta["run_initialisation_utc"] == cycle.astimezone(UTC)
             and meta["run_availability_utc"] >= meta["run_initialisation_utc"]
-        )
+        ):
+            return True
     except Exception as exc:  # noqa: BLE001 — probe noise = not available yet
         logger.debug("anchor meta probe error (treated unavailable): %s", exc)
-        return False
+    return probe_bucket_run_declared(cycle)
 
 
 def probe_aifs_cycle_available(

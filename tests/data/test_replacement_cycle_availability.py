@@ -133,6 +133,13 @@ class TestPollFetchDecision:
         monkeypatch.setattr(
             rca, "probe_openmeteo_single_run_available", lambda c, **k: c <= anchor_pub
         )
+        # Hermetic boundary: probe_anchor_available_any now also consults the provider
+        # meta endpoint and the S3 bucket manifest (rung-2/3 mirrors). Stub the whole
+        # anchor probe so the poll decision test never touches the network and the
+        # publication state is exactly the declared fixture.
+        monkeypatch.setattr(
+            rca, "probe_anchor_available_any", lambda c, **k: c <= anchor_pub
+        )
         monkeypatch.setattr(
             prod,
             "_per_leg_downloaded_cycle",

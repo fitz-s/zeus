@@ -1042,32 +1042,47 @@ def test_replacement_publish_cron_applies_release_lag(monkeypatch) -> None:
     assert set(hours) == {9, 15, 21, 3}
 
 
-def test_premature_cron_fire_resolves_newest_available_cycle_not_trigger_hour() -> None:
-    """SAFETY GUARD: adding the 06Z/18Z crons cannot download a not-yet-published cycle.
+def test_premature_cron_fire_cannot_request_a_guessed_cycle() -> None:
+    """SAFETY GUARD (rewritten 2026-06-11, run-selection single authority).
 
-    The download job always resolves the newest *available* cycle via
-    ``_parse_cycle(None, now, release_lag_hours)`` (floors now-lag to the latest
-    {0,6,12,18} cycle), independent of the cron trigger hour. So a cron that fires at
-    20:10Z (the 06Z-cycle slot) while the 06Z cycle is NOT yet published (lag not yet
-    elapsed) re-resolves to the latest cycle that IS published — never an unavailable
-    one. This is why scheduling all four cycles is safe: a premature fire downloads the
-    current cycle (a clean no-op once already downloaded), not a wrong/missing cycle."""
+    The old guard pinned the now-minus-release-lag floor as the resolver of "newest
+    available cycle". That guessed clock requested unpublished 12Z/18Z runs every night;
+    the rung-2 meta guard refused them and the refusal aborted the whole
+    download->materialize cycle. The guess path is now DEAD: ``_parse_cycle(None, ...)``
+    raises, and cron fires (premature or not) resolve the cycle exclusively through the
+    probe-resolved authority ``_probe_resolved_available_cycle`` -- so a premature fire
+    can only ever fetch a cycle some provider probe CONFIRMS is published, or skip."""
+    import pytest
+
     from scripts.download_replacement_forecast_current_targets import _parse_cycle
 
-    lag = 14.0
-    # now = 20:10Z. now - 14h = 06:10Z -> floors to the 06Z cycle (just published).
-    now_06z_ready = datetime(2026, 6, 10, 20, 10, tzinfo=timezone.utc)
-    resolved = _parse_cycle(None, now=now_06z_ready, release_lag_hours=lag)
-    assert resolved == datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)
-    assert resolved.hour in {0, 6, 12, 18}
+    # The guess path is unconstructable.
+    with pytest.raises(ValueError, match="probe-resolved"):
+        _parse_cycle(None, now=datetime(2026, 6, 10, 20, 10, tzinfo=timezone.utc), release_lag_hours=14.0)
 
-    # now = 20:10Z but lag 14h not yet elapsed for the 06Z cycle (publishes 20:00Z):
-    # at 19:10Z, now - 14h = 05:10Z -> floors back to the 00Z cycle (06Z not yet ready).
-    now_06z_pending = datetime(2026, 6, 10, 19, 10, tzinfo=timezone.utc)
-    resolved_pending = _parse_cycle(None, now=now_06z_pending, release_lag_hours=lag)
-    assert resolved_pending == datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc)
-    # A premature fire NEVER resolves to an unpublished cycle: resolved cycle's
-    # source-available time is always <= now.
-    from scripts.download_replacement_forecast_current_targets import _source_available_at
+    # The explicit operator path still parses and validates.
+    explicit = _parse_cycle(
+        "2026-06-10T06:00:00+00:00",
+        now=datetime(2026, 6, 10, 20, 10, tzinfo=timezone.utc),
+        release_lag_hours=14.0,
+    )
+    assert explicit == datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)
 
-    assert _source_available_at(resolved_pending, release_lag_hours=lag) <= now_06z_pending
+    # The production resolver is the probe authority: it returns exactly the newest
+    # cycle whose BOTH legs the injected probes confirm, independent of any lag.
+    import src.data.replacement_forecast_production as production
+    from src.data.replacement_cycle_availability import (
+        newest_complete_cycle,
+        resolve_cycle_leg_availability,
+    )
+
+    published = {datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc),
+                 datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)}
+    availability = resolve_cycle_leg_availability(
+        datetime(2026, 6, 10, 20, 10, tzinfo=timezone.utc),
+        probe_aifs=lambda c: c in published,
+        probe_anchor=lambda c: c in published,
+    )
+    assert newest_complete_cycle(availability) == datetime(2026, 6, 10, 6, 0, tzinfo=timezone.utc)
+    # And the production module exposes the single authority the jobs call.
+    assert callable(production._probe_resolved_available_cycle)
