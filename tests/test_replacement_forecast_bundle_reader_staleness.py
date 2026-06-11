@@ -179,12 +179,13 @@ def _readiness(*, posterior_id: int, computed_at: datetime, expires_at: datetime
     )
 
 
-def test_bundle_reader_rejects_expired_readiness() -> None:
-    """READY readiness with expires_at < decision_time => HARD fail-closed.
+def test_bundle_reader_serves_expired_readiness_with_brand() -> None:
+    """OPERATOR LAW (2026-06-11, "没有新的就用老的"): expired readiness BRANDS, never blocks.
 
-    The forecast was computed early and EXPIRED before the decision moment.
-    expires_at (06-06 02:00) < decision_time (06-06 12:00). The bundle reader
-    must refuse to bind this dead forecast as live authority.
+    The forecast was computed early and its readiness EXPIRED before the decision
+    moment. The reader serves the freshest tradeable row that exists, carrying the
+    expiry as a staleness_violations provenance brand (plan:
+    docs/evidence/settlement_guard/2026-06-11_serve_freshest_available_plan.md).
     """
     conn = _conn()
     posterior_id = _insert_posterior(
@@ -209,15 +210,17 @@ def test_bundle_reader_rejects_expired_readiness() -> None:
         decision_time=_dt(6, 12),      # ... but the decision happens at 12:00 (expired)
         current_bin_topology_hash=_TOPO_HASH,
     )
-    assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+    assert result.ok is True
+    violations = (result.bundle.provenance_json or {}).get("staleness_violations") or []
+    assert any("READINESS_EXPIRED" in v for v in violations), violations
 
 
-def test_bundle_reader_rejects_stale_source_cycle_time() -> None:
-    """source_cycle_time older than the fail-closed horizon (>30h) => fail-closed.
+def test_bundle_reader_serves_stale_source_cycle_with_brand() -> None:
+    """A source cycle beyond the staleness bound (60h) serves WITH the age brand.
 
-    expires_at is still in the future, but the underlying forecast cycle is so
-    old (06-04 00:00 vs decision 06-06 12:00 == 60h) that the data is stale.
+    OPERATOR LAW: the bound drives the download/re-seed pursuit and the brand —
+    never darkness. The served bundle's provenance carries the parseable
+    CYCLE_AGE_EXCEEDS_BOUND violation (source_cycle + age_hours).
     """
     conn = _conn()
     posterior_id = _insert_posterior(
@@ -242,8 +245,9 @@ def test_bundle_reader_rejects_stale_source_cycle_time() -> None:
         decision_time=_dt(6, 12),
         current_bin_topology_hash=_TOPO_HASH,
     )
-    assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+    assert result.ok is True
+    violations = (result.bundle.provenance_json or {}).get("staleness_violations") or []
+    assert any("CYCLE_AGE_EXCEEDS_BOUND" in v and "age_hours=60.0" in v for v in violations), violations
 
 
 def test_bundle_reader_accepts_fresh_readiness() -> None:

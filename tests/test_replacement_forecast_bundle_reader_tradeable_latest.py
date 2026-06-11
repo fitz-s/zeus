@@ -316,7 +316,7 @@ def test_both_bounded_newest_wins() -> None:
 # Relationship 3: older FUSED row beyond the staleness bound -> NOT served
 #   (fail-closed, no silent laundering of a stale cycle into live authority).
 # ---------------------------------------------------------------------------
-def test_older_fused_beyond_staleness_not_served() -> None:
+def test_older_fused_beyond_staleness_served_with_brand() -> None:
     conn = _conn()
     # FUSED but the cycle is 06-04 00Z vs decision 06-06 12:00 == 60h > 30h bound.
     _insert_posterior(
@@ -343,8 +343,13 @@ def test_older_fused_beyond_staleness_not_served() -> None:
         decision_time=_dt(6, 11, 30),
     )
     result = _read(conn, readiness, decision_time=_dt(6, 12))
-    assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+    # OPERATOR LAW (2026-06-11 "没有新的就用老的"): the fused row is the freshest
+    # TRADEABLE row that exists; its over-bound age brands provenance, never blocks.
+    # The newer bounds-less shadow row still cannot clobber it (tradeable-latest).
+    assert result.ok is True
+    assert (result.bundle.provenance_json or {}).get("tradeable_latest_selection") is not None
+    violations = (result.bundle.provenance_json or {}).get("staleness_violations") or []
+    assert any("CYCLE_AGE_EXCEEDS_BOUND" in v for v in violations), violations
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import math
 import sqlite3
 from dataclasses import dataclass
@@ -61,6 +62,8 @@ _replacement_source_cycle_max_age_hours = replacement_source_cycle_max_age_hours
 # posterior is produced + readiness-stamped (keeping production alive in the dead zones)
 # but is held to SHADOW-ONLY for LIVE admission by default until a settlement-graded
 # comparison licenses it. Flag default OFF = shadow-only (never weaken a gate).
+logger = logging.getLogger("zeus.replacement_forecast_bundle_reader")
+
 _REPLACEMENT_INTERMEDIATE_CYCLE_LIVE_FLAG = "replacement_0_1_intermediate_cycle_live_admission_enabled"
 
 
@@ -510,14 +513,32 @@ def read_replacement_forecast_bundle(
         raise ValueError("decision_time must be timezone-aware")
     decision_utc = decision_utc.astimezone(timezone.utc)
 
-    # H3 (REAUDIT_0_1.md §2) — HARD staleness gate, fail-closed. readiness.expires_at
-    # was previously loaded but never compared. A READY posterior whose expiry is at
-    # or before decision_time is DEAD; binding it as live authority is the inverse of
-    # the zero-trade fault (trading a stale forecast as live). This gate is in the
-    # ONE bundle reader so both the live 0.1 path and the legacy hook inherit it.
+    # SERVE-FRESHEST-AVAILABLE (operator law, stated three times, last 2026-06-11
+    # "没有新的就用老的" — plan: docs/evidence/settlement_guard/
+    # 2026-06-11_serve_freshest_available_plan.md). The former H3 HARD block here turned
+    # whole scopes DARK at the staleness bound even when nothing fresher existed anywhere
+    # (2026-06-11T12:00Z: every bucket-whitelist-excluded city died hours before its 00Z
+    # replacement could structurally exist). The bound's job is to PURSUE fresher data
+    # (downloads / polls / re-seeds key off it, unchanged) and to BRAND age honestly —
+    # never to refuse the freshest row that exists. Expiry is recorded as a provenance
+    # staleness violation on the served bundle (observable, alarm-able) instead of a
+    # block. Selection below serves the freshest tradeable-grade row by construction, so
+    # the served row is always the best available.
+    staleness_violations: list[str] = []
     if readiness.expires_at is not None and readiness.expires_at <= decision_utc:
-        return ReplacementForecastBundleReadResult(
-            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+        staleness_violations.append(
+            "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED:"
+            f"expires_at={readiness.expires_at.isoformat()}"
+        )
+        logger.warning(
+            "serve-freshest-available: readiness expired for %s %s %s "
+            "(expires_at=%s <= decision=%s) — serving freshest tradeable row with "
+            "staleness brand instead of going dark",
+            city,
+            target_date_text,
+            metric,
+            readiness.expires_at.isoformat(),
+            decision_utc.isoformat(),
         )
 
     # TRADEABLE-LATEST read semantics (operator clobber-category directive 2026-06-10).
@@ -586,8 +607,23 @@ def read_replacement_forecast_bundle(
     # (src/data/replacement_forecast_cycle_policy.py) so the two gates can never drift.
     _source_cycle_utc = _parse_utc(str(row_map["source_cycle_time"]), field_name="source_cycle_time")
     if cycle_age_exceeds_bound(decision_utc, _source_cycle_utc):
-        return ReplacementForecastBundleReadResult(
-            "BLOCKED", "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_EXPIRED"
+        # SERVE-FRESHEST-AVAILABLE (operator law — see the readiness-expiry brand above):
+        # the selected row IS the freshest tradeable row that exists for this scope; an
+        # over-bound age becomes a provenance brand + WARN, never darkness. The bound
+        # keeps driving the download/re-seed pursuit unchanged.
+        _age_hours = (decision_utc - _source_cycle_utc).total_seconds() / 3600.0
+        staleness_violations.append(
+            "REPLACEMENT_0_1_LIVE_AUTHORITY_CYCLE_AGE_EXCEEDS_BOUND:"
+            f"source_cycle={_source_cycle_utc.isoformat()}:age_hours={_age_hours:.1f}"
+        )
+        logger.warning(
+            "serve-freshest-available: %s %s %s serving cycle %s aged %.1fh beyond the "
+            "staleness bound — freshest tradeable row that exists; branded, not blocked",
+            city,
+            target_date_text,
+            metric,
+            _source_cycle_utc.isoformat(),
+            _age_hours,
         )
 
     # Operator cycle-physics directive 2026-06-10 — intermediate-cycle (06/18Z) live gate.
@@ -669,6 +705,13 @@ def read_replacement_forecast_bundle(
                 "newer_shadow_posterior_id": _newer_shadow_posterior_id,
                 "reason": "newer_row_not_tradeable_grade_served_older_certified_bounds",
             },
+        }
+    if staleness_violations:
+        # SERVE-FRESHEST-AVAILABLE brand: the served bundle carries its staleness
+        # violations in provenance (telemetry/alarm surface; receipts inherit it).
+        provenance = {
+            **provenance,
+            "staleness_violations": list(staleness_violations),
         }
     bundle = ReplacementForecastPosteriorBundle(
         posterior_id=int(row_map["posterior_id"]),
