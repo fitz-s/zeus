@@ -18,6 +18,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -259,8 +261,36 @@ def download_current_target_raw_inputs(
                 timezone_name=city_config.timezone,
                 forecast_hours=120,
             )
+            anchor_transport_provenance: dict[str, object] = {
+                "openmeteo_endpoint": "single_runs_api",
+                "run_authority": "run_pinned_single_runs",
+            }
             if not payload_path.exists():
-                payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request)
+                # Transport ladder (operator directive 2026-06-11, K4.0b(f)): run-pinned
+                # single-runs FIRST (strongest provenance); when it does not yet serve the
+                # wanted run, fall back to the meta-stamped standard API (provider-declared
+                # run identity + pre/post atomicity check). Both serve the same model feed;
+                # only the transport + run-authority differ, and the manifest records which.
+                try:
+                    payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request)
+                except httpx.HTTPStatusError as single_runs_exc:
+                    # ONLY the run-not-yet-served class (HTTP 400 from single-runs) may
+                    # degrade to the meta-stamped transport. Every other failure (auth,
+                    # 5xx, schema, transport) must raise loudly — degrading on those
+                    # would mask real defects behind a transport switch.
+                    if single_runs_exc.response.status_code != 400:
+                        raise
+                    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+                        fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped,
+                    )
+
+                    payload, meta_provenance = (
+                        fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(request)
+                    )
+                    anchor_transport_provenance = dict(meta_provenance)
+                    anchor_transport_provenance["single_runs_fallback_reason"] = (
+                        f"HTTP 400 run not yet served: {str(single_runs_exc)[:160]}"
+                    )
                 _write_json(payload_path, payload)
             _write_json(precision_path, _precision_metadata(target.city, target.target_date, anchor_sigma_c=anchor_sigma_c))
             downloaded["openmeteo_payload_count"] = int(downloaded["openmeteo_payload_count"]) + 1
@@ -285,6 +315,7 @@ def download_current_target_raw_inputs(
                         ),
                         "openmeteo_payload_json": str(payload_path),
                         "precision_metadata_json": str(precision_path),
+                        **anchor_transport_provenance,
                     },
                 )
             )

@@ -104,6 +104,32 @@ def probe_openmeteo_single_run_available(
         return False
 
 
+def probe_anchor_available_any(
+    cycle: datetime,
+    *,
+    urlopen: Callable[..., object] = urllib.request.urlopen,
+) -> bool:
+    """True iff the anchor leg can be fetched for this cycle by EITHER transport.
+
+    Transport ladder mirror (K4.0b(f)): run-pinned single-runs OR the meta-stamped
+    standard API (provider meta declares exactly this run as its current completed run).
+    Either path yields a journalable anchor artifact with explicit run authority, so the
+    availability poll may treat the leg as published when either probe passes."""
+    if probe_openmeteo_single_run_available(cycle, urlopen=urlopen):
+        return True
+    try:
+        from src.data.openmeteo_ecmwf_ifs9_anchor import fetch_openmeteo_ifs9_model_meta
+
+        meta = fetch_openmeteo_ifs9_model_meta()
+        return (
+            meta["run_initialisation_utc"] == cycle.astimezone(UTC)
+            and meta["run_availability_utc"] >= meta["run_initialisation_utc"]
+        )
+    except Exception as exc:  # noqa: BLE001 — probe noise = not available yet
+        logger.debug("anchor meta probe error (treated unavailable): %s", exc)
+        return False
+
+
 def probe_aifs_cycle_available(
     cycle: datetime,
     *,

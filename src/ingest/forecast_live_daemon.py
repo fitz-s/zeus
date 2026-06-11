@@ -52,6 +52,7 @@ REPLACEMENT_FORECAST_DOWNLOAD_JOB_ID = "replacement_forecast_download"
 REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID = "replacement_forecast_shadow_materialize"
 REPLACEMENT_FORECAST_STARTUP_JOB_ID = "replacement_forecast_download_startup_catch_up"
 REPLACEMENT_AVAILABILITY_POLL_JOB_ID = "replacement_cycle_availability_poll"
+ANCHOR_META_CROSS_CHECK_JOB_ID = "anchor_meta_stamp_cross_check"
 REPLACEMENT_FORECAST_EXECUTOR_LANE = "replacement_production"
 # SEPARATE lane for the heavy download (publish-time cron + boot catch-up). The download
 # runs for tens of minutes (8 Open-Meteo models x all cities; slowed further by fail-soft
@@ -933,6 +934,17 @@ def _replacement_forecast_download_job() -> None:
     _replacement_forecast_download_cycle.__wrapped__()
 
 
+@_scheduler_job(ANCHOR_META_CROSS_CHECK_JOB_ID)
+def _anchor_meta_stamp_cross_check_job() -> None:
+    """Hourly belt-and-suspenders: re-verify meta-stamped anchor artifacts against the
+    run-pinned single-runs API once the run appears there (K4.0b(f))."""
+    from src.data.replacement_forecast_production import (
+        _anchor_meta_stamp_cross_check,
+    )
+
+    _anchor_meta_stamp_cross_check.__wrapped__()
+
+
 @_scheduler_job(REPLACEMENT_AVAILABILITY_POLL_JOB_ID)
 def _replacement_cycle_availability_poll_job() -> None:
     """PROBE-RESOLVED freshness owner (operator directive 2026-06-11: automatic download,
@@ -1062,6 +1074,18 @@ def _register_replacement_forecast_production_jobs(
         max_instances=1,
         coalesce=True,
         misfire_grace_time=300,
+    )
+    # Retro cross-check of meta-stamped anchor artifacts vs single-runs (K4.0b(f)
+    # belt-and-suspenders): hourly, bounded to one fetch per pending cycle.
+    scheduler.add_job(  # type: ignore[attr-defined]
+        _anchor_meta_stamp_cross_check_job,
+        "interval",
+        minutes=60,
+        id=ANCHOR_META_CROSS_CHECK_JOB_ID,
+        executor=REPLACEMENT_FORECAST_DOWNLOAD_EXECUTOR_LANE,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=600,
     )
     logger.info(
         "replacement-forecast production jobs registered (download cron hour=%s min=10 + boot "

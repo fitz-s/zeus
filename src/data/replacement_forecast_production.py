@@ -345,7 +345,7 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
         probe_aifs_cycle_available,
-        probe_openmeteo_single_run_available,
+        probe_anchor_available_any,
         resolve_cycle_leg_availability,
     )
 
@@ -353,7 +353,7 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     availability = resolve_cycle_leg_availability(
         now,
         probe_aifs=probe_aifs_cycle_available,
-        probe_anchor=probe_openmeteo_single_run_available,
+        probe_anchor=probe_anchor_available_any,
     )
     aifs_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "ecmwf_aifs_ens")
     anchor_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "openmeteo_ecmwf_ifs_9km")
@@ -421,6 +421,24 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
                 {"leg": leg, "cycle": cycle.isoformat(), "error": str(exc)[:200]}
             )
     return report
+
+
+@_scheduler_job("anchor_meta_stamp_cross_check")
+def _anchor_meta_stamp_cross_check() -> None:
+    """Hourly: re-verify meta-stamped anchor artifacts against single-runs once the same
+    run is served there (K4.0b(f) belt-and-suspenders; MISMATCH ⇒ ERROR + receipt)."""
+    flags = _replacement_forecast_runtime_flags_from_settings()
+    if not bool(flags.get("openmeteo_ecmwf_ifs9_aifs_soft_anchor_shadow_enabled", False)):
+        return
+    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    forecast_db = cfg.get("forecast_db")
+    if forecast_db is None:
+        return
+    from src.data.anchor_cross_check import run_anchor_cross_check_cycle  # noqa: PLC0415
+
+    report = run_anchor_cross_check_cycle(Path(str(forecast_db)))
+    if report.get("checked") or report.get("errors"):
+        logger.info("anchor meta-stamp cross-check report: %s", report)
 
 
 @_scheduler_job("replacement_cycle_availability_poll")
