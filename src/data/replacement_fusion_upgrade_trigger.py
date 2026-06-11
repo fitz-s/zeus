@@ -340,6 +340,13 @@ def enqueue_fusion_upgrade_reseeds(
             city = str(row.city)
             target_date = str(row.target_date)
             metric = str(row.temperature_metric)
+            # DAY0 GUARD (live-run finding 2026-06-11): a started local day's scope needs the
+            # observed-extreme path, not a plain re-materialization — the seed discovery's
+            # can_seed excludes these and the upgrade re-seed must too (same plan flag, same
+            # reason). Without it the first live enqueue burned 18 budget slots on day0 scopes.
+            if bool(getattr(row, "day0_observed_extreme_required", False)):
+                report["day0_skipped"] = int(report.get("day0_skipped", 0)) + 1  # type: ignore[arg-type]
+                continue
             report["scopes_checked"] = int(report["scopes_checked"]) + 1
             try:
                 verdict = scope_capture_offers_larger_provider_set(
@@ -352,6 +359,23 @@ def enqueue_fusion_upgrade_reseeds(
                 continue
             report["upgrades_detected"] = int(report["upgrades_detected"]) + 1
             source_cycle_iso = str(verdict["source_cycle_time"])
+            # CYCLE-AGE GUARD (live-run finding 2026-06-11): the materializer refuses a request
+            # whose cycle exceeds the staleness bound (cycle_age_exceeds_bound -> CYCLE_TOO_OLD),
+            # so enqueueing an upgrade for a posterior stuck on an over-age cycle only spawns a
+            # guaranteed-failure subprocess. The SAME policy function decides here (single
+            # authority: replacement_forecast_cycle_policy) — such a scope heals on the next
+            # fresh-cycle materialization instead.
+            try:
+                from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+                    cycle_age_exceeds_bound,
+                )
+
+                _cycle_dt = datetime.fromisoformat(source_cycle_iso.replace("Z", "+00:00"))
+                if cycle_age_exceeds_bound(now, _cycle_dt):
+                    report["cycle_too_old_skipped"] = int(report.get("cycle_too_old_skipped", 0)) + 1  # type: ignore[arg-type]
+                    continue
+            except Exception:  # noqa: BLE001 — unparseable cycle: let the materializer decide
+                pass
             capturable_key = _family_set_key(set(verdict["capturable_families"]))  # type: ignore[arg-type]
             served_key = _family_set_key(set(verdict["served_families"]))  # type: ignore[arg-type]
             if _already_enqueued(
