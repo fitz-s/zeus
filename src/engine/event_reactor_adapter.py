@@ -3067,6 +3067,61 @@ class _SubmitAbortedModeFlipped(ValueError):
     """
 
 
+def _fresh_rest_then_cross_mode(
+    *,
+    actionable_payload: Mapping[str, Any],
+    executable_snapshot: "DecisionCertificate",
+    fresh_best_bid: float | None,
+    fresh_best_ask: float | None,
+    tick_size: float,
+    decision_time: datetime,
+) -> str:
+    """Fresh-book mode via the SAME K4.0 rest-then-cross policy as the proof.
+
+    Single mode authority (twin-authority #9): the validator compares proof mode
+    against a policy-consistent fresh evaluation — same doctrine, fresh inputs.
+    Inputs mirror the proof side: the candidate's q_lcb and fee-adjusted
+    reservation from the actionable payload; the taker all-in cost recomputed on
+    the FRESH ask with the same taker fee law (0.05*p*(1-p)); minutes to event
+    end from the snapshot's market_end_at. Rest-state flags are False here: the
+    HOLD/escalation lanes were already adjudicated at proof time, and the
+    validator only needs mode EQUALITY under the shared policy. Missing fresh
+    inputs degrade to MAKER (the conservative resting default), matching the
+    policy's own unknown-horizon behavior.
+    """
+    from src.strategy.live_inference.mode_consistent_ev import select_rest_then_cross_mode
+
+    q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
+    reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+    taker_all_in = None
+    if fresh_best_ask is not None and 0.0 < float(fresh_best_ask) < 1.0:
+        ask = float(fresh_best_ask)
+        taker_all_in = ask + 0.05 * ask * (1.0 - ask)
+    minutes_to_event_end: float | None = None
+    market_end_raw = executable_snapshot.payload.get("market_end_at")
+    end_dt = _parse_utc(str(market_end_raw)) if market_end_raw else None
+    if end_dt is not None:
+        minutes_to_event_end = max(
+            0.0, (end_dt - decision_time.astimezone(UTC)).total_seconds() / 60.0
+        )
+    if q_lcb is None or reservation is None:
+        return "MAKER"
+    mode_ev = select_rest_then_cross_mode(
+        q_lcb=float(q_lcb),
+        taker_all_in_cost=taker_all_in,
+        p_fill_taker=1.0,
+        best_bid=fresh_best_bid,
+        best_ask=fresh_best_ask,
+        tick_size=float(tick_size),
+        reservation=float(reservation),
+        minutes_to_event_end=minutes_to_event_end,
+        unexpired_family_rest=False,
+        escalated_after_rest=False,
+    )
+    chosen = str(getattr(mode_ev, "chosen_mode", "") or "").strip().upper()
+    return chosen if chosen in {"MAKER", "TAKER"} else "MAKER"
+
+
 def _validate_final_order_mode_or_abort(
     *,
     proof_mode: str | None,
@@ -3210,18 +3265,37 @@ def _build_live_execution_command_certificates(
         #
         # Fail-closed: a missing/unknown proven mode at the final stage is treated as
         # unproven and ALSO aborts here (never a default taker submit).
-        _fresh_mode = _select_edli_order_mode(
-            actionable_payload=actionable.payload,
-            quote_payload=quote_payload,
-            best_bid=best_bid,
-            best_ask=best_ask,
-            executable_snapshot=executable_snapshot,
-            canary_force_taker=canary_force_taker,
-            # FIX C: the spread participation guard reads the freshest book
-            # (pre-submit authority witness), never only the quote cert's copy.
-            fresh_best_bid=fresh_best_bid,
-            fresh_best_ask=fresh_best_ask,
-        )
+        # SINGLE MODE AUTHORITY (twin-authority #9, 2026-06-11 live): the proof
+        # mode comes from the K4.0 rest-then-cross policy; the validator's fresh
+        # mode MUST come from the SAME policy evaluated on the FRESH book —
+        # otherwise the two doctrines disagree systematically and every plan
+        # aborts MODE_FLIPPED. Live incident: after the fleeting-edge narrowing
+        # (operator directive, Denver \$0.43 spread cross) the proof said
+        # REST_DEFAULT/MAKER for the whole licensed class while the legacy
+        # governor+EV-override re-derivation here still said TAKER — a 100%
+        # flip rate that silently requeued the entire day-ahead lane to the
+        # retry cap. The canary force-taker knob keeps its legacy bypass via
+        # _select_edli_order_mode (operator knob, default off).
+        if canary_force_taker:
+            _fresh_mode = _select_edli_order_mode(
+                actionable_payload=actionable.payload,
+                quote_payload=quote_payload,
+                best_bid=best_bid,
+                best_ask=best_ask,
+                executable_snapshot=executable_snapshot,
+                canary_force_taker=canary_force_taker,
+                fresh_best_bid=fresh_best_bid,
+                fresh_best_ask=fresh_best_ask,
+            )
+        else:
+            _fresh_mode = _fresh_rest_then_cross_mode(
+                actionable_payload=actionable.payload,
+                executable_snapshot=executable_snapshot,
+                fresh_best_bid=fresh_best_bid,
+                fresh_best_ask=fresh_best_ask,
+                tick_size=float(provisional_final_intent.payload["tick_size"]),
+                decision_time=decision_time,
+            )
         order_mode = _validate_final_order_mode_or_abort(
             proof_mode=str(actionable.payload.get("proof_execution_mode_intent") or "") or None,
             fresh_mode=_fresh_mode,

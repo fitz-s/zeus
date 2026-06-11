@@ -348,3 +348,63 @@ class TestPayloadInferencePathDead:
         # Verify it is still callable (does not raise on import/access).
         # We don't assert its return value — the money path no longer uses it.
         assert callable(_order_will_rest_at_admitted_price)
+
+
+class TestSingleModeAuthorityFreshSide:
+    """Twin-authority #9 antibody (2026-06-11 live): the validator's fresh mode
+    comes from the SAME K4.0 rest-then-cross policy as the proof — after the
+    fleeting-edge narrowing, the legacy governor+EV-override re-derivation said
+    TAKER while every proof said REST_DEFAULT/MAKER: a 100% MODE_FLIPPED rate
+    that silently requeued the whole day-ahead lane to the retry cap."""
+
+    def test_far_horizon_two_sided_book_fresh_mode_is_maker(self):
+        from types import SimpleNamespace
+        from datetime import datetime, timezone
+        from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
+
+        mode = _fresh_rest_then_cross_mode(
+            actionable_payload={"q_lcb_5pct": 0.78, "c_fee_adjusted": 0.66},
+            executable_snapshot=SimpleNamespace(
+                payload={"market_end_at": "2026-06-12T12:00:00+00:00"}
+            ),
+            fresh_best_bid=0.55,
+            fresh_best_ask=0.60,
+            tick_size=0.01,
+            decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
+        )
+        assert mode == "MAKER", (
+            "26h out on a two-sided book the shared policy rests — the proof said "
+            "the same, so the validator must AGREE, not flip"
+        )
+
+    def test_near_end_huge_edge_fresh_mode_is_taker(self):
+        from types import SimpleNamespace
+        from datetime import datetime, timezone
+        from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
+
+        mode = _fresh_rest_then_cross_mode(
+            actionable_payload={"q_lcb_5pct": 0.85, "c_fee_adjusted": 0.66},
+            executable_snapshot=SimpleNamespace(
+                payload={"market_end_at": "2026-06-11T14:00:00+00:00"}
+            ),
+            fresh_best_bid=0.55,
+            fresh_best_ask=0.60,
+            tick_size=0.01,
+            decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
+        )
+        assert mode == "TAKER"
+
+    def test_missing_inputs_default_maker(self):
+        from types import SimpleNamespace
+        from datetime import datetime, timezone
+        from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
+
+        mode = _fresh_rest_then_cross_mode(
+            actionable_payload={},
+            executable_snapshot=SimpleNamespace(payload={}),
+            fresh_best_bid=None,
+            fresh_best_ask=None,
+            tick_size=0.01,
+            decision_time=datetime(2026, 6, 11, 10, 0, tzinfo=timezone.utc),
+        )
+        assert mode == "MAKER"
