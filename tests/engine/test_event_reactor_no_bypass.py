@@ -1117,14 +1117,43 @@ def test_engine_adapter_has_no_cycle_or_executor_boundary():
     assert "final_intents_built" not in source
 
 
-def test_adapter_source_truth_allows_complete_forecast_only():
-    complete = _forecast_event("COMPLETE")
-    partial_payload = json.loads(complete.payload_json)
-    partial_payload["completeness_status"] = "PARTIAL_ALLOWED"
-    partial = replace(complete, payload_json=json.dumps(partial_payload, sort_keys=True, separators=(",", ":")))
+def test_adapter_source_truth_label_is_advisory_structure_binds():
+    """Serving-authority ruling (incident 2026-06-11T16:33:51Z, second site
+    2026-06-11T18:20Z+): the trigger event's completeness label is ADVISORY —
+    the money path serves the freshest ELIGIBLE bundle keyed by
+    (city, target_date, metric) and rejects honestly at proof time. The gate
+    binds ONLY structural identity. ANTIBODY relationship: the gate verdict is
+    invariant across the entire known completeness vocabulary; only structural
+    junk (unknown label / missing identity fields / missing causal snapshot)
+    is blocked. Live incident replay: all six live-eligible cities' low
+    families (HK/London/Miami/NYC/Paris/Shanghai) were SOURCE_TRUTH_BLOCKED on
+    the newest run's PARTIAL_BLOCKED window label while COMPLETE LIVE_ELIGIBLE
+    bundles from the prior cycle were servable."""
+    from typing import get_args
 
-    assert edli_source_truth_gate(complete) is True
-    assert edli_source_truth_gate(partial) is False
+    from src.events.forecast_completeness import ForecastCompletenessStatus
+
+    complete = _forecast_event("COMPLETE")
+
+    def _with(payload_updates=None, **event_updates):
+        payload = json.loads(complete.payload_json)
+        payload.update(payload_updates or {})
+        return replace(
+            complete,
+            payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")),
+            **event_updates,
+        )
+
+    # Invariance across the WHOLE known vocabulary (the antibody: any future
+    # re-binding of an advisory label at this gate breaks this loop).
+    for label in get_args(ForecastCompletenessStatus):
+        event = _with({"completeness_status": label})
+        assert edli_source_truth_gate(event) is True, label
+
+    # Structural junk stays blocked (fail-closed unchanged):
+    assert edli_source_truth_gate(_with({"completeness_status": "GARBAGE"})) is False
+    assert edli_source_truth_gate(_with({"required_fields_present": False})) is False
+    assert edli_source_truth_gate(_with(causal_snapshot_id=None)) is False
 
 
 def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():

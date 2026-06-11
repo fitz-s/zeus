@@ -132,7 +132,7 @@ from dataclasses import dataclass, replace as dataclass_replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from collections.abc import Mapping
-from typing import Any, Callable
+from typing import Any, Callable, get_args
 
 import numpy as np
 
@@ -183,6 +183,7 @@ from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.candidate_evaluation import CandidateEvaluation
 from src.events.decision_engine import EventBoundDecisionEngine, EventBoundDecisionRequest
 from src.events.event_store import EventStore
+from src.events.forecast_completeness import ForecastCompletenessStatus
 from src.events.live_order_aggregate import LiveOrderAggregateLedger
 from src.events.money_path_adapters import evaluate_fdr_full_family, evaluate_kelly, evaluate_riskguard
 from src.events.opportunity_book import OpportunityBook, build_family_opportunity_book
@@ -701,16 +702,38 @@ def build_event_reactor(
     )
 
 
+# Known forecast-snapshot completeness vocabulary (single authority:
+# src/events/forecast_completeness.ForecastCompletenessStatus). An event whose
+# label is outside this set has unparseable producer state and stays blocked.
+_FORECAST_COMPLETENESS_VOCAB = frozenset(get_args(ForecastCompletenessStatus))
+
+
 def edli_source_truth_gate(event: OpportunityEvent) -> bool:
     """Fail closed unless an EDLI event is source-eligible for a live cycle."""
 
     payload = _payload(event)
     if event.event_type == "FORECAST_SNAPSHOT_READY":
+        # Coverage labels are ADVISORY at the event gate (serving-authority
+        # ruling, incident 2026-06-11T16:33:51Z — see the FSR pass-through block
+        # in src/events/reactor.py): the bundle the money path trades on is
+        # chosen by the SERVING AUTHORITY keyed by (city, target_date, metric),
+        # never pinned to this trigger event's run, and the adapter rejects
+        # honestly (REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED) when nothing
+        # eligible is servable. Binding the event's own completeness label here
+        # was the same serve-freshest rule re-implemented (wrongly) at a second
+        # site: live 2026-06-11T18:20Z+ all six live-eligible cities' low
+        # families (HK/London/Miami/NYC/Paris/Shanghai) were SOURCE_TRUTH_BLOCKED
+        # on the newest run's PARTIAL_BLOCKED window label while COMPLETE
+        # LIVE_ELIGIBLE bundles from the prior cycle were servable.
+        # The gate binds ONLY structural identity: a parseable causal snapshot,
+        # required identity fields present, and a label from the known
+        # vocabulary (single authority: src/events/forecast_completeness).
+        # required_fields_present=False also covers the time-violation
+        # classifications (AVAILABLE_AT_IN_FUTURE etc.), which stay blocked.
         return (
             bool(event.causal_snapshot_id)
-            and payload.get("completeness_status") == "COMPLETE"
+            and payload.get("completeness_status") in _FORECAST_COMPLETENESS_VOCAB
             and payload.get("required_fields_present") is True
-            and payload.get("required_steps_present") is True
         )
     if event.event_type == "DAY0_EXTREME_UPDATED":
         return (
