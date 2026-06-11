@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-11
 # Authority basis: operator direction doctrine "buy_yes <=> bin ~= forecast" made
 #   code after incident 0b5c305e26524042 (Milan 24C first fill, 2026-06-10T02:58Z;
 #   docs/evidence/2026_06_10_milan_24c_first_fill_rootcause.md FIX A). The doctrine
@@ -46,6 +46,7 @@ Pure module: no I/O, no settings reads, no engine imports.
 from __future__ import annotations
 
 import math
+from typing import Callable
 
 DIRECTION_LAW_REASON = "DIRECTION_LAW_BIN_FORECAST_MISMATCH"
 
@@ -142,6 +143,7 @@ def direction_law_rejection_reason(
     predictive_sigma: float | None,
     sigma_k: float = DIRECTION_LAW_SIGMA_K,
     mu_settled: float | None = None,
+    settle_value: Callable[[float], float] | None = None,
 ) -> str | None:
     """Return the deterministic rejection reason, or None when admissible.
 
@@ -152,11 +154,26 @@ def direction_law_rejection_reason(
     must not be broken by a missing center; its own conservative-evidence and
     capital-efficiency gates still apply).
 
-    ``mu_settled`` is the canonical per-city settlement rounding of ``mu`` in the
-    bin unit (SettlementSemantics.for_city(...).round_values — the per-city
-    preimage contract handles HKO truncation etc.). When the caller cannot supply
-    it, the WMO half-up default from the settlement-semantics contract is applied
-    here (single authority: the formula is imported, never re-derived).
+    ``settle_value``, when provided, is the SINGLE rounding authority for the
+    buy_no half: both the primary forecast-bin test (settled = settle_value(mu))
+    and the boundary-zone shifted tests (shifted_settled = settle_value(shifted))
+    use it exclusively.  This is the fix for non-WMO cities (HKO truncation
+    etc.): the old WMO-delta approximation in the boundary-zone loop could ban
+    the wrong runner-up bin or miss the right one when the city uses a different
+    rounding family.  When ``settle_value`` is present it WINS over ``mu_settled``
+    for all computations.  Module purity is preserved: settle_value is a plain
+    callable, no I/O or settings access inside this module.
+
+    ``mu_settled`` is kept for backward compatibility (existing callers that
+    cannot construct a SettlementSemantics object pass the pre-rounded scalar
+    directly).  When ``settle_value`` is absent and ``mu_settled`` is supplied,
+    the boundary-zone loop falls back to the old WMO-delta approximation
+    (correct for WMO half-up cities; a known gap for truncation cities that the
+    settle_value parameter exists to close).
+
+    When neither is supplied, the WMO half-up default from the
+    settlement-semantics contract is used throughout (single authority: the
+    formula is imported, never re-derived here).
     """
     if direction not in ("buy_yes", "buy_no"):
         return None
@@ -180,7 +197,13 @@ def direction_law_rejection_reason(
         # LOSES if our own forecast settles exactly). Adjacent bins are admissible;
         # their residual YES mass is policed by q_lcb + the material-YES
         # conservative-evidence gate + the settlement-coverage license.
-        if mu_settled is not None and math.isfinite(float(mu_settled)):
+        #
+        # Rounding authority priority: settle_value callable > mu_settled scalar >
+        # WMO half-up default. settle_value is authoritative for BOTH the primary
+        # test and the boundary-zone shifted tests.
+        if settle_value is not None:
+            settled = float(settle_value(float(mu)))
+        elif mu_settled is not None and math.isfinite(float(mu_settled)):
             settled = float(mu_settled)
         else:
             from src.contracts.settlement_semantics import round_wmo_half_up_value
@@ -208,10 +231,15 @@ def direction_law_rejection_reason(
         step = _SETTLEMENT_STEP_BY_UNIT.get(bin_unit, 1.0)
         zone = DIRECTION_LAW_BOUNDARY_ZONE_STEP_FRACTION * step
         for shifted in (float(mu) - zone, float(mu) + zone):
-            if mu_settled is not None and math.isfinite(float(mu_settled)):
-                # Per-city preimage came from the caller; approximate the zone
-                # test with the same WMO default only when no caller preimage —
-                # otherwise shift in the same rounding family via the contract.
+            if settle_value is not None:
+                # Single authority: the caller-supplied callable is the rounding
+                # family for this city. Apply it directly to the shifted center —
+                # no WMO-delta approximation, no cross-family error.
+                shifted_settled = float(settle_value(shifted))
+            elif mu_settled is not None and math.isfinite(float(mu_settled)):
+                # Per-city preimage came from the caller as a scalar; approximate
+                # the zone test within the WMO family (correct for WMO cities,
+                # known gap for truncation cities — use settle_value to close it).
                 from src.contracts.settlement_semantics import round_wmo_half_up_value
 
                 shifted_settled = settled + round_wmo_half_up_value(shifted) - round_wmo_half_up_value(float(mu))

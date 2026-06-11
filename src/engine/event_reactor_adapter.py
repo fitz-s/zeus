@@ -6528,6 +6528,14 @@ def _generate_candidate_proofs(
     direction_law_mu_settled = _direction_law_mu_settled_for_family(
         family=family, mu=direction_law_mu
     )
+    # Single rounding authority for the boundary-zone shifted tests (FIX: the old
+    # WMO-delta approximation inside direction_law.py used the wrong rounding family
+    # for truncation cities such as HK, potentially banning the wrong runner-up bin
+    # or missing the right one). The callable is built ONCE per family here and
+    # passed through; it WINS over mu_settled for both the primary and zone tests.
+    # Fail-soft None -> pure-module WMO half-up default applies (correct for all
+    # non-truncation cities).
+    direction_law_settle_value = _direction_law_settle_value_for_family(family=family)
     # K4.0 REST-THEN-CROSS family-level inputs, computed ONCE per family:
     # event-end distance (None -> rest, conservative), and the family rest state
     # from venue truth (open rest -> HOLD antibody; expired-unfilled rest ->
@@ -6733,6 +6741,7 @@ def _generate_candidate_proofs(
                 mu=direction_law_mu,
                 predictive_sigma=direction_law_sigma,
                 mu_settled=direction_law_mu_settled,
+                settle_value=direction_law_settle_value,
             )
             if direction_law_reason is not None:
                 score = 0.0
@@ -7152,12 +7161,19 @@ def _direction_law_reason_for_candidate(
     mu: float | None,
     predictive_sigma: float | None,
     mu_settled: float | None = None,
+    settle_value: "Callable[[float], float] | None" = None,
 ) -> str | None:
     """Per-candidate direction-law verdict (FIX A). None = admissible.
 
     A candidate with no bin object cannot be measured against the center; it is
     structurally untradeable on this path anyway (bin-binding gates), so the law
     abstains rather than inventing a distance.
+
+    ``settle_value``, when provided, is the per-city rounding callable (from
+    ``_direction_law_settle_value_for_family``).  It is the single rounding
+    authority for BOTH the primary forecast-bin test and the boundary-zone shifted
+    tests inside ``direction_law_rejection_reason``.  When absent, the law module
+    falls back to ``mu_settled`` (scalar) then the WMO half-up default.
     """
     from src.strategy.live_inference.direction_law import direction_law_rejection_reason
 
@@ -7172,6 +7188,7 @@ def _direction_law_reason_for_candidate(
         mu=mu,
         predictive_sigma=predictive_sigma,
         mu_settled=mu_settled,
+        settle_value=settle_value,
     )
 
 
@@ -7226,6 +7243,10 @@ def _direction_law_mu_settled_for_family(*, family, mu: float | None) -> float |
     that same bin unit, so the rounding is applied directly. Fail-soft None: the
     pure direction-law module then falls back to the contract's WMO half-up
     default (correct for every non-truncation city).
+
+    Kept for backward compat; callers that already pass ``settle_value`` from
+    ``_direction_law_settle_value_for_family`` need not call this separately —
+    the callable produced there subsumes this scalar lookup.
     """
     if mu is None:
         return None
@@ -7238,6 +7259,34 @@ def _direction_law_mu_settled_for_family(*, family, mu: float | None) -> float |
         semantics = SettlementSemantics.for_city(city_obj)
         return float(semantics.round_values([float(mu)])[0])
     except Exception:  # noqa: BLE001 — fail-soft; pure-module WMO default applies
+        return None
+
+
+def _direction_law_settle_value_for_family(*, family) -> "Callable[[float], float] | None":
+    """Build the per-city rounding callable for the direction-law boundary-zone test.
+
+    Returns a callable ``settle_value(v: float) -> float`` backed by
+    ``SettlementSemantics.for_city(city).round_values([v])[0]`` — the single
+    authority for this city's preimage rounding (WMO half-up, HKO truncation,
+    etc.).  When the city object is not available or construction fails, returns
+    None; the direction-law module then falls back to its WMO half-up default
+    (correct for all non-truncation cities, a known gap for truncation cities).
+
+    This callable is the fix for the boundary-zone approximation bug: the old
+    path used a WMO-delta shift even for truncation cities, which could ban the
+    wrong runner-up bin or miss the right one.  Passing ``settle_value`` to
+    ``direction_law_rejection_reason`` closes the gap by applying the city's
+    actual rounding rule directly to each shifted point.
+    """
+    try:
+        from src.contracts.settlement_semantics import SettlementSemantics
+
+        city_obj = runtime_cities_by_name().get(family.city)
+        if city_obj is None:
+            return None
+        semantics = SettlementSemantics.for_city(city_obj)
+        return lambda v: float(semantics.round_values([v])[0])
+    except Exception:  # noqa: BLE001 — fail-soft; WMO default applies
         return None
 
 
