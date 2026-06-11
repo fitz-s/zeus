@@ -6572,6 +6572,36 @@ def _generate_candidate_proofs(
                     )
                 except ValueError as exc:
                     missing_reason = str(exc)
+            # MARKET ANCHOR (objective-math audit 2026-06-11, flag default OFF): cap a
+            # near-center buy_no's tradable q_lcb at the legacy α-blend of model-NO with
+            # the market-implied NO. The σ-flattened fused q manufactures a phantom NO
+            # edge in the adjacent-center ring (Part A: C3 −4.8pt mean, 30-54pt tail) by
+            # under-weighting its OWN near bins vs the sharper market; the ranking
+            # objective max(q_lcb−price) then ranks it first. The cap reuses the SINGLE
+            # blending authority (market_fusion semantics) and only ever LOWERS q_lcb_no
+            # (one-sided), so it can never create a trade. Flag OFF -> byte-identical: the
+            # block is not entered. Applied to buy_no only, before score/gates/proof.
+            if (
+                direction == "buy_no"
+                and execution_price is not None
+                and _replacement_q_market_anchor_enabled()
+            ):
+                _anchor = _market_anchor_no_lcb_for_candidate(
+                    candidate=candidate,
+                    q_lcb_no=q_lcb,
+                    q_model_no=q_value,
+                    market_no_price=float(execution_price.value),
+                    mu=direction_law_mu,
+                )
+                if _anchor is not None and _anchor.capped:
+                    import logging as _logging
+
+                    _logging.getLogger("zeus.replacement_qlcb_shadow").info(
+                        "market_anchor cap %s %s: q_lcb_no %.4f->%.4f (q_market_no=%.4f alpha=%.3f)",
+                        condition_id, direction, q_lcb, _anchor.q_lcb_no_out,
+                        _anchor.q_market_no, _anchor.alpha,
+                    )
+                    q_lcb = float(_anchor.q_lcb_no_out)
             # FIX C (mode-consistent EV; operator directive 2026-06-10): the
             # trade_score is the CHOSEN execution mode's EV, never the hybrid
             # taker-cost x visible-depth-p_fill. TAKER-chosen scores are
@@ -7090,6 +7120,47 @@ def _direction_law_reason_for_candidate(
         mu=mu,
         predictive_sigma=predictive_sigma,
         mu_settled=mu_settled,
+    )
+
+
+def _market_anchor_no_lcb_for_candidate(
+    *,
+    candidate,
+    q_lcb_no: float,
+    q_model_no: float,
+    market_no_price: float,
+    mu: float | None,
+):
+    """Per-candidate market-anchor cap (flag-gated caller checks enablement first).
+
+    Computes the bin's |distance(bin, mu)| in settlement steps so the pure module can
+    scope the cap to the near-center classes (C1-C3) and leave the far-NO harvest (C4)
+    untouched. ``mu`` arrives ALREADY in the bin unit (from _direction_law_family_center),
+    exactly as the direction-law uses it. Returns a MarketAnchorResult or None when the
+    bin cannot be measured (no cap — fail toward leaving the value unchanged)."""
+    from src.strategy.live_inference.direction_law import (
+        bin_forecast_distance,
+        _SETTLEMENT_STEP_BY_UNIT,
+    )
+    from src.strategy.live_inference.market_anchor import market_anchored_no_lcb
+
+    bin_obj = getattr(candidate, "bin", None)
+    if bin_obj is None:
+        return None
+    step = _SETTLEMENT_STEP_BY_UNIT.get(str(bin_obj.unit))
+    dist_steps: float | None = None
+    if mu is not None and step:
+        try:
+            raw = bin_forecast_distance(bin_low=bin_obj.low, bin_high=bin_obj.high, mu=float(mu))
+            dist_steps = float(raw) / float(step)
+        except Exception:  # noqa: BLE001 — unmeasurable distance -> near-center default
+            dist_steps = None
+    return market_anchored_no_lcb(
+        q_lcb_no=q_lcb_no,
+        q_model_no=q_model_no,
+        market_no_price=market_no_price,
+        alpha=_market_anchor_alpha(),
+        bin_distance_steps=dist_steps,
     )
 
 
@@ -8692,6 +8763,37 @@ def _replacement_qlcb_settlement_sigma_floor_enabled() -> bool:
         return bool(settings["edli_v1"].get("replacement_qlcb_settlement_sigma_floor_enabled", False))
     except Exception:
         return False
+
+
+def _replacement_q_market_anchor_enabled() -> bool:
+    """Market-anchor cap flag (objective-math audit 2026-06-11, default FALSE).
+
+    When OFF the tradable NO q_lcb is byte-identical to today — the market anchor is
+    NEVER consulted (no extra read; the NO all-in execution price is already in scope).
+    When ON, a buy_no candidate whose bin is within the near-center reach has its
+    tradable q_lcb_no CAPPED at the legacy α-blend of model-NO with the market-implied
+    NO (src/strategy/market_fusion semantics, single authority). One-sided: the cap only
+    ever LOWERS the lower bound, so it can never create a trade — it only kills the
+    phantom near-center NO edge the σ-flattened fused q manufactures (Part A: C3 −4.8pt
+    mean, 30-54pt tail). The direction-law bans STAY as defense-in-depth."""
+    try:
+        return bool(settings["edli_v1"].get("replacement_q_market_anchor_enabled", False))
+    except Exception:
+        return False
+
+
+def _market_anchor_alpha() -> float:
+    """Conservative per-decision α for the market-anchor cap, from the SINGLE legacy
+    registry (config edge.base_alpha). The calibration level is not threaded to this
+    selection seam, so a single conservative level (level-3) is used — NOT a new α: the
+    value comes from the same compute_alpha registry the legacy chain blended with. A
+    lower α = stronger market anchor; level-3 (0.4) is the conservative mid-trust point."""
+    try:
+        return float(settings["edge"]["base_alpha"]["level3"])
+    except Exception:
+        from src.strategy.live_inference.market_anchor import DEFAULT_FALLBACK_ALPHA
+
+        return DEFAULT_FALLBACK_ALPHA
 
 
 def _replacement_settlement_grounded_lcb(
