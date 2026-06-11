@@ -1,6 +1,9 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-06-10
+# Last reused or audited: 2026-06-11
 # Authority basis: 10h production dead-zone incident 2026-06-10 (operator: "连下载都没接上,一上线卡了整整10小时")
+#   + operator 2026-06-11: "这纯粹是我要求的e2e验证下载到下单的不完全验证。甚至没有人probe过是否能下载"
+#   — the download legs themselves must be ACTIVELY PROBED (real provider round-trips),
+#   not inferred from journal freshness alone.
 """Standing e2e DATA-SUPPLY liveness check for the replacement chain.
 
 The order-side e2e verifier (verify_fill_e2e.py) proved fills are correct but
@@ -94,6 +97,64 @@ def check() -> tuple[int, dict]:
     out["stages"]["readiness_ready_scopes"] = {"count": ready_n, "ok": ready_ok}
     if not ready_ok:
         failures.append(f"readiness READY scopes {ready_n} < {MIN_READY_SCOPES}")
+
+    # DOWNLOAD-LEG PROBES (operator 2026-06-11): real provider round-trips proving each
+    # source CAN be downloaded right now, plus published-vs-journaled gap per leg. A leg
+    # fails when the provider has a newer cycle than the journal AND the journal copy is
+    # older than one cycle interval + slack — that is exactly the silent-starvation shape
+    # of 2026-06-10 (provider moved on, we never noticed we couldn't/didn't download).
+    out["download_legs"] = {}
+    try:
+        from src.data.replacement_cycle_availability import (
+            probe_aifs_cycle_available,
+            probe_anchor_available_any,
+            resolve_cycle_leg_availability,
+        )
+
+        availability = resolve_cycle_leg_availability(
+            now,
+            probe_aifs=probe_aifs_cycle_available,
+            probe_anchor=probe_anchor_available_any,
+        )
+        newest_aifs_pub = next((a.cycle for a in availability if a.aifs_available), None)
+        newest_anchor_pub = next((a.cycle for a in availability if a.anchor_available), None)
+        for leg, source_id, newest_pub in (
+            ("aifs", "ecmwf_aifs_ens", newest_aifs_pub),
+            ("anchor", "openmeteo_ecmwf_ifs_9km", newest_anchor_pub),
+        ):
+            have = f.execute(
+                "SELECT MAX(source_cycle_time) FROM raw_forecast_artifacts WHERE source_id=?",
+                (source_id,),
+            ).fetchone()[0]
+            have_age = _age_hours(now, have)
+            gap_h = None
+            if newest_pub is not None and have:
+                try:
+                    have_dt = dt.datetime.fromisoformat(str(have).replace("Z", "+00:00"))
+                    if have_dt.tzinfo is None:
+                        have_dt = have_dt.replace(tzinfo=dt.timezone.utc)
+                    gap_h = (newest_pub - have_dt).total_seconds() / 3600.0
+                except ValueError:
+                    pass
+            # probe_ok: the provider answered our availability round-trip at all
+            probe_ok = newest_pub is not None
+            # leg_ok: nothing published that we lack by more than one cycle (6h) + slack
+            leg_ok = probe_ok and (gap_h is None or gap_h <= 6.0)
+            out["download_legs"][leg] = {
+                "provider_probe_ok": probe_ok,
+                "newest_published_cycle": newest_pub.isoformat() if newest_pub else None,
+                "journaled_cycle": have,
+                "journal_age_hours": have_age,
+                "published_minus_journaled_hours": gap_h,
+                "ok": leg_ok,
+            }
+            if not leg_ok:
+                failures.append(
+                    f"download leg {leg}: published={newest_pub} journaled={have} gap={gap_h}h"
+                )
+    except Exception as exc:  # noqa: BLE001 — probe machinery itself failing IS a failure
+        out["download_legs"]["error"] = str(exc)[:200]
+        failures.append(f"download-leg probes errored: {exc}")
 
     out["failures"] = failures
     return (2 if failures else 0), out
