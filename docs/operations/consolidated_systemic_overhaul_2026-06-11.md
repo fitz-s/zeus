@@ -443,3 +443,33 @@ Corollaries, each an antibody:
 Tests: tests/data/test_run_selection_single_authority.py (8 antibodies); dead-law tests
 rewritten (premature-cron guard, currency-gate wiring, u0r covered-rows). release_lag
 survives ONLY as source_available_at metadata, never as run selection.
+
+## K4.0d SEED-BUDGET STARVATION + LOST-FLAG LAW + SETTLED-EXTERNAL ABSORBER (2026-06-11 ~11:10Z)
+
+Three walls felled during the RULE-1 active loop (operator: 不要再等问题出现, 恢复成交前不准 idle):
+
+1. **Lost operator flag (commit 1a9ae392f4):** the 2026-06-10 intermediate-cycle admission
+   flip never landed in settings.json (mtime matched the flip window, key absent, never in
+   git) → 10h of INTERMEDIATE_CYCLE_SHADOW_ONLY blocks. LAW: every operator flag flip =
+   atomic edit + resolver read-back in a fresh interpreter + immediate git commit (a
+   silent revert becomes a visible diff).
+
+2. **Settled-external absorber (6629d35a54 + 88713748c6):** "suppress settled winners"
+   died with the abandoned redeem harvester → every position swept by the operator's
+   third-party auto-redeemer = permanent latch-closing position_drift (HK 06-09, 11h
+   freeze). Reconciler now auto-registers token_suppression('settled_position') for
+   market-calendar-terminal sweeps; NO-side tokens reach the registry via the
+   executable_market_snapshots condition_id bridge (the registry stores only YES tokens —
+   token-only matching made every NO holding structurally invisible). Production-verified:
+   finding resolved 60s after deploy; latch cleared 10:42:10Z.
+
+3. **Seed-budget starvation (68187a6205):** discovery sliced [:limit] BEFORE the
+   per-target manifest check, far-date-first — ten permanently-failing 06-13 targets
+   (cities off the rung-3 bucket whitelist at the fresh cycle) ate the whole 5-min budget
+   deterministically; zero seeds written for hours while tradeable day0/day1 fusion-grade
+   scopes starved. Fix: nearest-target-date first + budget counts only WRITTEN seeds.
+
+OPS NOTE (extras lane): the u0r extras pass is ~40min with a SINGLE end-of-pass insert
+transaction — every daemon restart rolls back the in-flight pass to zero. This is why no
+00Z extras landed all morning despite continuous downloading. Mitigated today by a
+detached one-shot pass; the standing fix (chunked per-city durable inserts) is open.
