@@ -260,6 +260,26 @@ class EventSubmissionReceipt:
     # the receipt hash (it is internal plumbing, never serialized into receipt_json). None on every
     # legacy / gate-reject receipt that never reached candidate-proof generation.
     belief_payload: "dict[str, Any] | None" = field(default=None, repr=False, compare=False)
+    # SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12; root cause
+    # /tmp/allpass_nosubmit_rootcause.md). Records WHICH submit adapter actually
+    # ran this decision so a full-pass receipt emitted by the no-submit adapter
+    # during a live-arm degrade can never be confused with a genuine
+    # decision-declined no-submit. Values:
+    #   "LIVE"              — live adapter, real_order_submit_enabled True (the real
+    #                          submit lane; either SUBMITTED / SUBMIT_DISABLED build /
+    #                          a TYPED NO_SUBMIT abort — never the default reason).
+    #   "SUBMIT_DISABLED"   — live adapter, real_order_submit_enabled False (the
+    #                          submit-disabled-bridge build lane).
+    #   "NO_SUBMIT_ADAPTER" — the no-submit adapter ran (the degrade lane). On a
+    #                          full-pass its reason names the degrade cause that drove
+    #                          the selector off the live lane (NO_SUBMIT_ADAPTER_LANE:
+    #                          <cause>), NEVER the default literal.
+    #   "SHADOW"            — day0 force_shadow path (DAY0_SCOPE_SHADOW_ONLY).
+    # This is DECISION provenance (which lane decided), not transport metadata, so it
+    # IS serialized into receipt_json. None on legacy / pre-stamp receipts; omit-when-
+    # None in receipt_json keeps existing receipt_hash byte-stable, and readers MUST
+    # tolerate its absence (only NEW writes carry/enforce it).
+    submit_lane: str | None = None
 
     def __post_init__(self) -> None:
         if self.proof_accepted is None:
@@ -267,6 +287,24 @@ class EventSubmissionReceipt:
 
 
 Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionReceipt]
+
+
+class LiveLaneDarkInvariantError(RuntimeError):
+    """Raised at the no-submit persist boundary when a full-pass receipt would be
+    booked as accepted while the live lane was nominally armed and stamped LIVE.
+
+    The combination (nominally-armed live daemon + proof_accepted=True +
+    side_effect_status=NO_SUBMIT + submit_lane="LIVE") is IMPOSSIBLE for a genuine
+    full-pass: the live lane either SUBMITs, returns a SUBMIT_DISABLED build, or
+    carries a TYPED abort reason (never a default no-submit). If this combination
+    reaches persistence the live lane silently ate a tradeable full-pass entry —
+    the 2026-06-12 11:51-12:12Z silent-kill incident — so we RAISE instead of
+    persisting a kill indistinguishable from normal no-submit accounting.
+
+    A no-submit receipt produced by the legitimate degrade lane carries
+    submit_lane="NO_SUBMIT_ADAPTER" + a named degrade cause and is NOT impacted by
+    this invariant (it persists, honestly labelled).
+    """
 
 
 @dataclass
@@ -286,6 +324,15 @@ class ReactorConfig:
     # tradeable forecast families out of the per-cycle proof budget. Derived from
     # the scope via src.events.event_priority.day0_is_tradeable_for_scope.
     day0_is_tradeable: bool = True
+    # SUBMIT-LANE INVARIANT (silent-trade-kill antibody 2026-06-12). The SAME
+    # operator-arm authority the main.py submit-adapter selector reads
+    # (edli_cfg["edli_live_operator_authorized"] is True, via require_operator_arm).
+    # Threaded here so the no-submit persist boundary can recognise a NOMINALLY-ARMED
+    # live daemon and refuse to silently book a full-pass receipt stamped LIVE as a
+    # NO_SUBMIT accepted terminal. NOT a second authority: it is the same flag value,
+    # passed in, read-only. Default False => byte-identical legacy behaviour (the
+    # invariant only fires when the operator has actually armed AND reactor_mode=live).
+    edli_live_operator_authorized: bool = False
 
 
 # An executable market snapshot for the family may simply not be captured yet on the cycle
@@ -1235,6 +1282,19 @@ class OpportunityEventReactor:
                     receipt=receipt,
                     decision_time=decision_time,
                 )
+            # SUBMIT-LANE PERSIST-BOUNDARY INVARIANT (silent-trade-kill antibody
+            # 2026-06-12; /tmp/allpass_nosubmit_rootcause.md). A VERIFIED, full-pass
+            # (proof_accepted=True) NO_SUBMIT receipt is about to be booked as an
+            # accepted terminal. If the daemon is NOMINALLY ARMED (reactor_mode=live AND
+            # the operator arm is on — read the SAME way the main.py selector reads it,
+            # no second authority) the receipt MUST NOT carry submit_lane="LIVE": the
+            # live lane never produces a full-pass NO_SUBMIT with proof_accepted — it
+            # SUBMITs, returns a SUBMIT_DISABLED build, or carries a typed abort reason.
+            # submit_lane="LIVE" here means the live lane silently ate a tradeable entry
+            # (the 11:51-12:12Z incident). Raise rather than persist the kill. Receipts
+            # from the honest degrade lane (submit_lane="NO_SUBMIT_ADAPTER" + named
+            # cause) and legacy pre-stamp receipts (submit_lane=None) pass through.
+            self._assert_no_submit_lane_invariant(receipt)
             self._no_submit_receipt_ledger.insert_idempotent(receipt, decision_time=decision_time)
         elif receipt.side_effect_status in EXECUTION_RECEIPT_TERMINAL_STATUSES:
             certificates = _execution_receipt_certificate_bundle(receipt)
@@ -1273,6 +1333,37 @@ class OpportunityEventReactor:
                 )
                 return None
         result.proof_accepted += 1
+
+    def _assert_no_submit_lane_invariant(self, receipt: EventSubmissionReceipt) -> None:
+        """Refuse to persist a full-pass NO_SUBMIT receipt stamped LIVE on an armed
+        live daemon (silent-trade-kill antibody 2026-06-12).
+
+        Backward compatible: legacy receipts carry submit_lane=None and pass through;
+        only a NEW write that is simultaneously (a) on a nominally-armed live daemon,
+        (b) proof_accepted, (c) NO_SUBMIT, and (d) stamped LIVE trips the invariant —
+        the impossible combination that, in the incident, silently booked $16 Kelly
+        full-pass candidates as accepted no-submits with zero signal the live lane was
+        dark.
+        """
+        nominally_armed = (
+            self._config.reactor_mode == "live"
+            and bool(self._config.edli_live_operator_authorized)
+        )
+        if not nominally_armed:
+            return
+        if (
+            receipt.proof_accepted is True
+            and receipt.side_effect_status == "NO_SUBMIT"
+            and receipt.submit_lane == "LIVE"
+        ):
+            raise LiveLaneDarkInvariantError(
+                "LIVE_LANE_DARK_FULL_PASS_NO_SUBMIT: a proof_accepted NO_SUBMIT receipt "
+                f"stamped submit_lane=LIVE reached the persist boundary on an armed live "
+                f"daemon (reactor_mode=live, operator_authorized=True). event_id="
+                f"{receipt.event_id} final_intent_id={receipt.final_intent_id} reason="
+                f"{receipt.reason!r}. The live lane never produces a full-pass NO_SUBMIT — "
+                "this is a silently-consumed tradeable entry."
+            )
 
     def _reject_or_retry_post_submit(
         self,
@@ -1721,6 +1812,20 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # submit the book grew a live ask (fresh_mode=TAKER) and P0-1 refused the
     # stale-mode plan (17:23:33Z four cities, fresh ask carried +6..+19% EV).
     "SUBMIT_ABORTED_MODE_FLIPPED",
+    # SUBMIT-LANE DEGRADE (silent-trade-kill antibody 2026-06-12;
+    # /tmp/allpass_nosubmit_rootcause.md). A FULL-PASS candidate decided on the
+    # no-submit (degrade) adapter while the live lane was dark this cycle
+    # (live_submit_effective False / operator_arm None during a crash-loop). The
+    # live-lane-dark condition is intrinsically TRANSIENT — it clears when the
+    # allocator/portfolio/operator arm recovers. Requeue the candidate (re-decide
+    # on the next cycle's substrate, on the live lane if it is back up) rather than
+    # terminally consuming a tradeable $16-Kelly full-pass entry as an "accepted"
+    # no-submit. This is the strongest form of the fix: the silent-kill category is
+    # impossible because the entry is never consumed while the lane is degraded.
+    # Honest no-edge declines on the same adapter keep their SPECIFIC reason
+    # (FDR_REJECTED / TRADE_SCORE_NON_POSITIVE / ...) and stay terminal — only the
+    # full-pass-default rewrite carries this base.
+    "NO_SUBMIT_ADAPTER_LANE",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)

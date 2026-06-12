@@ -1168,6 +1168,84 @@ def replacement_forecast_baseline_bundle_provider_from_forecast_conn(
     return _provider
 
 
+# SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12; root cause
+# /tmp/allpass_nosubmit_rootcause.md). Canonical lane labels written onto every
+# EventSubmissionReceipt at adapter construction so a full-pass no-submit can never
+# be mistaken for a genuine decision-declined no-submit.
+SUBMIT_LANE_LIVE = "LIVE"
+SUBMIT_LANE_SUBMIT_DISABLED = "SUBMIT_DISABLED"
+SUBMIT_LANE_NO_SUBMIT_ADAPTER = "NO_SUBMIT_ADAPTER"
+SUBMIT_LANE_SHADOW = "SHADOW"
+
+# The default no-submit reason hardcoded by the serializer. Honest ONLY where no
+# degrade drove the lane (shadow / test). On the NO_SUBMIT_ADAPTER lane a full-pass
+# receipt carrying THIS reason is the silent-kill signature, so the lane stamp
+# rewrites it to name the degrade cause.
+_DEFAULT_NO_SUBMIT_REASON = "event_bound_final_intent_no_submit"
+
+
+def _stamp_no_submit_adapter_lane(
+    receipt: EventSubmissionReceipt, *, degrade_cause: str
+) -> EventSubmissionReceipt:
+    """Stamp submit_lane=NO_SUBMIT_ADAPTER and, for a full-pass receipt carrying the
+    DEFAULT no-submit reason, derive a named degrade reason from the selector's typed
+    cause (single source of truth, mirrors _SUBMIT_ABORT_RECEIPT_REASON).
+
+    The default literal is the silent-kill signature on this lane (a full-pass
+    candidate that WOULD have submitted on the live lane, consumed with a reason
+    indistinguishable from a genuine decline). For such receipts the reason becomes
+    ``NO_SUBMIT_ADAPTER_LANE:<degrade_cause>`` so the receipt itself names why the
+    live lane was dark this cycle. Receipts that already carry a SPECIFIC reason (a
+    gate rejection — TRADE_SCORE_NON_POSITIVE, FDR_REJECTED, etc.) keep it: those are
+    honest no-edge declines, not a lane degrade, and are only lane-stamped.
+
+    ``degrade_cause`` is REQUIRED and must be non-empty — the no-submit adapter is
+    only ever selected because of a typed degrade (live_submit_effective False /
+    operator_arm None), so a full-pass on this lane MUST be able to name it. An empty
+    cause makes the named-degrade unconstructable and raises.
+    """
+    if not degrade_cause:
+        raise ValueError(
+            "NO_SUBMIT_ADAPTER lane requires a non-empty degrade_cause; a full-pass "
+            "receipt on this lane must name why the live lane was dark"
+        )
+    is_full_pass_default = (
+        receipt.proof_accepted is True
+        and receipt.side_effect_status == "NO_SUBMIT"
+        and (receipt.reason or _DEFAULT_NO_SUBMIT_REASON) == _DEFAULT_NO_SUBMIT_REASON
+    )
+    if is_full_pass_default:
+        return dataclass_replace(
+            receipt,
+            submit_lane=SUBMIT_LANE_NO_SUBMIT_ADAPTER,
+            reason=f"NO_SUBMIT_ADAPTER_LANE:{degrade_cause}",
+        )
+    return dataclass_replace(receipt, submit_lane=SUBMIT_LANE_NO_SUBMIT_ADAPTER)
+
+
+def _stamp_live_adapter_lane(
+    receipt: EventSubmissionReceipt, *, real_order_submit_enabled: bool
+) -> EventSubmissionReceipt:
+    """Stamp the live adapter's lane onto a receipt it produced.
+
+    The day0 force_shadow receipt (reason=DAY0_SCOPE_SHADOW_ONLY) is the SHADOW lane
+    regardless of submit flag — it can NEVER reach a submit/order-build path. Every
+    other receipt is the real submit lane (LIVE) when real_order_submit_enabled, else
+    the submit-disabled-bridge build lane (SUBMIT_DISABLED). Idempotent: a receipt
+    already carrying a lane (defensive — the live adapter builds fresh receipts) is
+    left untouched.
+    """
+    if receipt.submit_lane is not None:
+        return receipt
+    if receipt.reason == "DAY0_SCOPE_SHADOW_ONLY":
+        lane = SUBMIT_LANE_SHADOW
+    elif real_order_submit_enabled:
+        lane = SUBMIT_LANE_LIVE
+    else:
+        lane = SUBMIT_LANE_SUBMIT_DISABLED
+    return dataclass_replace(receipt, submit_lane=lane)
+
+
 def event_bound_no_submit_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
@@ -1188,8 +1266,19 @@ def event_bound_no_submit_adapter_from_trade_conn(
     replacement_forecast_promotion_evidence: ReplacementForecastPromotionEvidence | None = None,
     replacement_forecast_capital_objective_evidence: ReplacementForecastCapitalObjectiveEvidence | None = None,
     family_snapshot_refresher: "FamilySnapshotRefresher | None" = None,
+    degrade_cause: str = "live_lane_unselected",
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build a proof-only final-intent receipt adapter for EDLI events.
+
+    SUBMIT-LANE STAMP (silent-trade-kill antibody 2026-06-12): ``degrade_cause`` is the
+    TYPED reason the main.py selector chose this no-submit adapter over the live lane
+    (e.g. ``live_submit_effective_false:<sub-reason>`` or ``operator_arm_none``). Every
+    receipt this adapter emits is stamped submit_lane=NO_SUBMIT_ADAPTER, and a full-pass
+    receipt that would otherwise carry the DEFAULT no-submit reason has its reason
+    rewritten to ``NO_SUBMIT_ADAPTER_LANE:<degrade_cause>`` so a full-pass entry consumed
+    on the degrade lane names why the live lane was dark — never the default literal that
+    is byte-identical to a genuine decline. The default ``"live_lane_unselected"`` keeps
+    shadow/test construction working; main.py threads the real cause.
 
     Task #107 (portfolio/multi Kelly): ``portfolio_state_provider`` (mirrors
     ``bankroll_usd_provider``) lets Kelly size against the bankroll NET of
@@ -1235,7 +1324,7 @@ def event_bound_no_submit_adapter_from_trade_conn(
         # per-event windows). In-memory reservation ledger is unaffected; no gate or
         # decision semantics change — this only bounds the lock-hold.
         try:
-            return build_event_bound_no_submit_receipt(
+            receipt = build_event_bound_no_submit_receipt(
                 event,
                 trade_conn=trade_conn,
                 decision_time=decision_time,
@@ -1252,6 +1341,10 @@ def event_bound_no_submit_adapter_from_trade_conn(
                 replacement_forecast_capital_objective_evidence=replacement_forecast_capital_objective_evidence,
                 family_snapshot_refresher=family_snapshot_refresher,
             )
+            # SUBMIT-LANE STAMP: this adapter is the degrade lane. Stamp every receipt
+            # NO_SUBMIT_ADAPTER and rewrite a full-pass default reason to name the
+            # degrade cause that drove the selector here (single source of truth).
+            return _stamp_no_submit_adapter_lane(receipt, degrade_cause=degrade_cause)
         finally:
             try:
                 trade_conn.commit()
@@ -1794,7 +1887,19 @@ def event_bound_live_adapter_from_trade_conn(
         # by a trade_conn.commit() here. No gate is weakened: the commit only
         # bounds the lock-hold; it changes no decision, gate, or submit semantics.
         try:
-            return _submit_inner(event, decision_time)
+            receipt = _submit_inner(event, decision_time)
+            # SUBMIT-LANE STAMP: the live adapter ran. Every receipt it returns is
+            # stamped with the live-adapter lane so the persist boundary can tell a
+            # genuine live-lane decision from a degrade-lane no-submit. The day0
+            # force_shadow return (reason=DAY0_SCOPE_SHADOW_ONLY) is the SHADOW lane;
+            # everything else is LIVE when real submit is enabled, else SUBMIT_DISABLED
+            # (the submit-disabled-bridge build lane). This lane is the operator's
+            # truth: the live adapter never produces a full-pass NO_SUBMIT carrying the
+            # default reason, so a LIVE-stamped proof_accepted NO_SUBMIT is the
+            # silent-kill signature the reactor invariant rejects.
+            return _stamp_live_adapter_lane(
+                receipt, real_order_submit_enabled=real_order_submit_enabled
+            )
         finally:
             try:
                 trade_conn.commit()

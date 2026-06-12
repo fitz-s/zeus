@@ -308,6 +308,12 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
     # envelope_json COLUMN (queryable, full provenance); receipt_json/receipt_hash stay
     # byte-identical to pre-envelope receipts.
     payload.pop("envelope_json", None)
+    # submit_lane (silent-trade-kill antibody 2026-06-12): omit when None so legacy /
+    # pre-stamp receipts keep byte-identical receipt_json (and therefore receipt_hash).
+    # Present (set) on every NEW adapter-produced receipt — persisted because WHICH lane
+    # decided is first-class decision provenance, recoverable from the blob forever.
+    if payload.get("submit_lane") is None:
+        payload.pop("submit_lane", None)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
