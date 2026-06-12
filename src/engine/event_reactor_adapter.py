@@ -10028,6 +10028,40 @@ def _side_q_lcb_from_yes_samples(
     return q_lcb_yes, q_lcb_no
 
 
+def _native_no_edge_positivity(
+    *,
+    native_costs: dict,
+    condition_id: str,
+    q_lcb_no: float,
+) -> tuple[float, bool]:
+    """FINDING-D relationship invariant (external review 2026-06-12).
+
+    Return ``(no_p_value, no_prefilter)`` for the buy-NO leg from its OWN native NO cost
+    and OWN native NO robust lower bound ``q_lcb_no`` (= 1 - q_ucb_yes) — INDEPENDENT of
+    the YES token's market state.
+
+    ``scan_full_hypothesis_family`` only ever emits buy_yes hypotheses (its buy_no loop
+    body is a bare ``continue``), so the canonical builder never had a NO hypothesis and
+    used to hardcode p=1.0 / prefilter=False for EVERY buy_no — making the native NO leg
+    unconditionally fail BH-FDR even when the NO posterior cleared its native cost. The
+    NO posterior is a native authority (the per-sample complement of YES) that exists
+    regardless of YES executability, so its admissibility must be reconciled to it. This
+    mirrors the live replacement path's fix (commit 9ddad492d8); it is the SAME degenerate
+    edge-positivity indicator the YES leg uses:
+
+        p_value = 0.0  (admissible)   iff  a native NO ask exists AND q_lcb_no > no_cost
+        p_value = 1.0  (rejected)     otherwise
+
+    Reconciliation, NEVER gate-weakening: BH multiplicity is unchanged, a non-edge NO
+    still gets p=1.0, and the leg is still gated downstream by its OWN execution data
+    (a missing native NO ask -> rejected). Never a YES-complement price.
+    """
+    no_price = native_costs.get((condition_id, "buy_no"), (None, None, 0.0, None, None))[1]
+    no_cost = float(no_price.value) if no_price is not None else 1.0
+    no_edge_lcb_positive = no_price is not None and float(q_lcb_no) > no_cost
+    return (0.0 if no_edge_lcb_positive else 1.0), bool(no_edge_lcb_positive)
+
+
 def _canonical_probability_and_fdr_proof(
     *,
     event: OpportunityEvent,
@@ -10135,21 +10169,40 @@ def _canonical_probability_and_fdr_proof(
             )
             prefilter[(condition_id, "buy_yes")] = bool(yes_hyp.passed_prefilter)
             # NO direction: q_lcb_no is the native-NO robust lower bound (1 - q_ucb_yes).
-            # FDR for NO follows the NO hypothesis when the NO side is executable; absent
-            # a NO hypothesis the NO direction is recorded non-actionable (rejected
-            # downstream by the missing native NO ask, never a complement price).
             _set_qlcb_provenance(
                 lcb_by_direction,
                 (condition_id, "buy_no"),
                 q_lcb_no,
                 source="FORECAST_BOOTSTRAP",
             )
+            # FINDING-D FIX (external review 2026-06-12) — reconcile the NO-side FDR
+            # p_value/prefilter to the CERTIFIED native-NO authority, independent of YES
+            # executability. ``scan_full_hypothesis_family`` emits ONLY buy_yes
+            # hypotheses (its buy_no loop body is a bare ``continue``), so ``no_hyp`` is
+            # ALWAYS None here and the prior code hardcoded p=1.0 / prefilter=False for
+            # EVERY buy_no — making the native NO leg UNCONDITIONALLY fail BH-FDR even
+            # when the NO posterior clears its own native cost. This is the SAME defect
+            # class already fixed on the live replacement path (commit 9ddad492d8): the
+            # NO posterior (q_lcb_no = 1 - q_ucb_yes) is a native authority that exists
+            # regardless of the YES token's market state. Compute the NO leg's edge from
+            # its OWN native NO cost and OWN native NO q_lcb — the SAME degenerate
+            # edge-positivity indicator the YES leg uses (0.0 = the robust NO lower bound
+            # clears the native NO cost; 1.0 = it does not). Reconciliation, NEVER
+            # gate-weakening: BH multiplicity is unchanged, a non-edge NO still gets
+            # p=1.0, and the NO leg is still gated downstream by its OWN execution data
+            # (a missing native NO ask -> EXECUTABLE_NATIVE_ASK_MISSING). NEVER a YES
+            # complement price.
             if no_hyp is not None and no_hyp.p_value is not None:
                 p_values[(condition_id, "buy_no")] = float(no_hyp.p_value)
                 prefilter[(condition_id, "buy_no")] = bool(no_hyp.passed_prefilter)
             else:
-                p_values[(condition_id, "buy_no")] = 1.0
-                prefilter[(condition_id, "buy_no")] = False
+                _no_p_value, _no_prefilter = _native_no_edge_positivity(
+                    native_costs=native_costs,
+                    condition_id=condition_id,
+                    q_lcb_no=q_lcb_no,
+                )
+                p_values[(condition_id, "buy_no")] = _no_p_value
+                prefilter[(condition_id, "buy_no")] = _no_prefilter
         else:
             # scan_full_hypothesis_family skips a bin entirely when its YES side has no
             # executable market. Emit neutral, non-actionable values for BOTH directions:
