@@ -1,10 +1,12 @@
-# Created: 2026-06-12
-# Last reused or audited: 2026-06-12
-# Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") —
-#   light smoke coverage for the three new ops scripts. Asserts the FAIL-SOFT contract
-#   (a locked/empty/missing DB degrades one section to ERR, the rest still render) and
-#   that each script runs read-only against temp DBs. No live DB is touched.
-"""Smoke tests for scripts/zeus_status.py, deploy_live.py, gen_schema_cheatsheet.py."""
+# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
+# Purpose: light smoke coverage for the three new ops scripts (zeus_status,
+#   deploy_live, generate_schema_cheatsheet).
+# Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
+#   section to ERR, the rest still render) and that each script runs read-only
+#   against temp DBs. No live DB is touched.
+# Last reused/audited: 2026-06-12
+# Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
+"""Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
 
 import importlib.util
@@ -154,7 +156,7 @@ def test_deploy_live_unknown_daemon_rejected(capsys):
 # --------------------------------------------------------------------------
 def test_gen_schema_cheatsheet_on_temp_db(tmp_path, capsys):
     """Generator runs read-only over a temp DB and renders table names + types."""
-    gsc = _load("gen_schema_smoke", "gen_schema_cheatsheet.py")
+    gsc = _load("gen_schema_smoke", "generate_schema_cheatsheet.py")
     db = tmp_path / "mini.db"
     conn = sqlite3.connect(str(db))
     conn.execute("CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT, qty REAL)")
@@ -178,9 +180,25 @@ def test_gen_schema_cheatsheet_on_temp_db(tmp_path, capsys):
     conn.close()
 
 
+def test_gen_schema_cheatsheet_without_rowid_table(tmp_path):
+    """WITHOUT ROWID tables hit the bounded-COUNT fallback, not '?'.
+
+    `SELECT max(rowid)` raises on a WITHOUT ROWID table (no such column) —
+    the fallback must catch that and produce a real count.
+    """
+    gsc = _load("gen_schema_smoke3", "generate_schema_cheatsheet.py")
+    db = tmp_path / "wr.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID")
+    conn.executemany("INSERT INTO kv VALUES (?, ?)", [("a", "1"), ("b", "2")])
+    conn.commit()
+    assert gsc.row_estimate(conn, "kv") == "2"
+    conn.close()
+
+
 def test_gen_schema_cheatsheet_handles_missing_db(tmp_path):
     """A missing DB renders an ERR line, does not raise."""
-    gsc = _load("gen_schema_smoke2", "gen_schema_cheatsheet.py")
+    gsc = _load("gen_schema_smoke2", "generate_schema_cheatsheet.py")
     gsc.DBS = [("ghost.db", str(tmp_path / "nope.db"))]
     content = gsc.build()
     assert "## ghost.db" in content

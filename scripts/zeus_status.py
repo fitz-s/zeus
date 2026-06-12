@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# Created: 2026-06-12
-# Last reused or audited: 2026-06-12
-# Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") —
-#   the heartbeat funnel CLI that answers '为什么没单' in 5 seconds. READ-ONLY over the
-#   three live DBs (zeus-world.db / zeus_trades.db / zeus-forecasts.db) via file:...?mode=ro.
-#   Registered in SQLITE_CONNECT_ALLOWLIST (src/state/db_writer_lock.py). ISO-T cutoff law
-#   (probe_lib §law1) baked in: never compare T-format timestamps to datetime('now') — the
-#   'T'>' ' lexicographic trap silently widens every window to "all of today".
+# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
+# Purpose: heartbeat funnel CLI that answers '为什么没单' in 5 seconds — one invocation
+#   prints the full money path (daemons → events → blocks → surface → positions).
+# Reuse: READ-ONLY over the three live DBs (zeus-world.db / zeus_trades.db /
+#   zeus-forecasts.db) via file:...?mode=ro. Registered in SQLITE_CONNECT_ALLOWLIST
+#   (src/state/db_writer_lock.py). ISO-T cutoff law (probe_lib §law1) baked in: never
+#   compare T-format timestamps to datetime('now') — the 'T'>' ' lexicographic trap
+#   silently widens every window to "all of today".
+# Last reused/audited: 2026-06-12
+# Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Zeus money-funnel heartbeat — one invocation, full picture, ~5 seconds.
 
 Prints, top to bottom, the path money would travel and where it stops:

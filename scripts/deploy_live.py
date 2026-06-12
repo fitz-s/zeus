@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Created: 2026-06-12
-# Last reused or audited: 2026-06-12
+# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
+# Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
+#   checkout's runtime surface (src/ config/) is uncommitted or unpushed.
+# Reuse: read-mostly (git status/rev-parse + launchctl list); the only state change is
+#   kickstart after the clean-tree gate passes. Opens NO database.
+# Last reused/audited: 2026-06-12
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
-#   into live money. This script makes daemon restarts SAFE by refusing to kickstart while
-#   the LIVE checkout's runtime surface (src/ config/) is uncommitted or unpushed. It does
-#   NOT open any DB. Registered in SQLITE_CONNECT_ALLOWLIST defensively (no connect today).
+#   into live money.
 """deploy_live — make live daemon restarts safe (deploy/dev split).
 
 The Zeus daemons run from the LIVE main checkout at /Users/leofitz/zeus.
@@ -47,14 +49,15 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 
 # The LIVE checkout the daemons boot from (NOT this worktree).
 LIVE_REPO = "/Users/leofitz/zeus"
 
-# launchd GUI domain for the operator user (gui/<uid>).
-GUI_DOMAIN = "gui/501"
+# launchd GUI domain for the operator user (gui/<uid>); ZEUS_GUI_DOMAIN overrides.
+GUI_DOMAIN = os.environ.get("ZEUS_GUI_DOMAIN") or f"gui/{os.getuid()}"
 
 # Short label -> full launchd label. "all" expands to every entry here.
 DAEMONS = {
@@ -111,8 +114,16 @@ def unpushed_state(branch: str) -> tuple[bool, str]:
 
 
 def daemon_pid_uptime(label: str) -> tuple[str, str]:
-    """(pid, status) for a launchd label, or ('-', '-') if not loaded."""
-    res = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=8.0)
+    """(pid, status) for a launchd label, or ('-', '-') if not loaded.
+
+    Fail-soft when launchctl is unavailable (non-macOS, e.g. Linux CI).
+    """
+    try:
+        res = subprocess.run(
+            ["launchctl", "list"], capture_output=True, text=True, timeout=8.0
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return "-", "-"
     for ln in res.stdout.splitlines():
         if label in ln:
             parts = ln.split("\t") if "\t" in ln else ln.split()

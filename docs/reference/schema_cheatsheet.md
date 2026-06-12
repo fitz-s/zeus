@@ -1,7 +1,7 @@
 # Zeus live-DB schema cheatsheet
 
 Generated: `2026-06-12T20:39:46.454610+00:00`
-Generator: `.venv/bin/python scripts/gen_schema_cheatsheet.py`
+Generator: `.venv/bin/python scripts/generate_schema_cheatsheet.py`
 
 > Regenerate after schema changes. The schema-fingerprint test pins the SCHEMA; this file pins the NAMES (column names + types) for humans/agents, to kill the PRAGMA-trial-and-error tax. Row counts are cheap estimates (max(rowid)); tables over 1M rows show `rows≈-`. READ-ONLY (mode=ro).
 

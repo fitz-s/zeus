@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Created: 2026-06-12
-# Last reused or audited: 2026-06-12
-# Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") —
-#   kills the PRAGMA-trial-and-error tax (6+ failed probes on wrong column names in one
-#   night). READ-ONLY over the three live DBs (mode=ro): reads sqlite_master + PRAGMA
-#   table_info only; emits docs/reference/schema_cheatsheet.md. Registered in
-#   SQLITE_CONNECT_ALLOWLIST (src/state/db_writer_lock.py).
+# Lifecycle: created=2026-06-12; last_reviewed=2026-06-12; last_reused=2026-06-12
+# Purpose: kill the PRAGMA-trial-and-error tax — pin live-DB table/column NAMES in one
+#   regenerable reference doc (docs/reference/schema_cheatsheet.md).
+# Reuse: READ-ONLY over the three live DBs (file:...?mode=ro); reads sqlite_master +
+#   PRAGMA table_info only. Registered in SQLITE_CONNECT_ALLOWLIST
+#   (src/state/db_writer_lock.py). Regenerate after schema changes.
+# Last reused/audited: 2026-06-12
+# Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Generate docs/reference/schema_cheatsheet.md from the three live DBs.
 
 For each DB (zeus-world / zeus_trades / zeus-forecasts), for each base table:
@@ -17,8 +18,8 @@ This file pins NAMES for humans/agents; the schema-fingerprint test pins the
 SCHEMA itself. Regenerate after schema changes.
 
 USAGE
-    .venv/bin/python scripts/gen_schema_cheatsheet.py
-    .venv/bin/python scripts/gen_schema_cheatsheet.py --stdout   # don't write file
+    .venv/bin/python scripts/generate_schema_cheatsheet.py
+    .venv/bin/python scripts/generate_schema_cheatsheet.py --stdout   # don't write file
 """
 from __future__ import annotations
 
@@ -66,8 +67,13 @@ def row_estimate(conn: sqlite3.Connection, table: str) -> str:
     Never runs a full COUNT(*) on a >1M-row table.
     """
     try:
-        row = conn.execute(f"SELECT max(rowid) FROM '{table}'").fetchone()
-        est = row[0] if row is not None else None
+        try:
+            row = conn.execute(f"SELECT max(rowid) FROM '{table}'").fetchone()
+            est = row[0] if row is not None else None
+        except sqlite3.Error:
+            # WITHOUT ROWID table: "no such column: rowid" raises here rather
+            # than returning NULL — route it to the bounded-count fallback.
+            est = None
         if est is None:
             # No rowid (WITHOUT ROWID) or empty. Probe size with a bounded count.
             probe = conn.execute(
@@ -104,7 +110,7 @@ def build() -> str:
     out.append("# Zeus live-DB schema cheatsheet")
     out.append("")
     out.append(f"Generated: `{ts}`")
-    out.append("Generator: `.venv/bin/python scripts/gen_schema_cheatsheet.py`")
+    out.append("Generator: `.venv/bin/python scripts/generate_schema_cheatsheet.py`")
     out.append("")
     out.append("> Regenerate after schema changes. The schema-fingerprint test pins the "
                "SCHEMA; this file pins the NAMES (column names + types) for humans/agents, "

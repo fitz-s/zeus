@@ -65,6 +65,7 @@ file_naming:
 
         data_completeness_audit.py: legacy word-order exception; keep until renamed
         deep_heartbeat.py: established runtime heartbeat helper
+        deploy_live.py: operator-facing deploy gate command; verb-first name retained because 'deploy' is the operator action (restart-safety gate, PR #407)
         deprecate_legacy_state_files.py: established repair command name
         digest_profiles_export.py: derived digest profile mirror exporter; name retained because it mirrors the generated artifact module name
         _build_pm_truth.py: packet-generated PM settlement export builder retained as evidence utility
@@ -122,6 +123,7 @@ file_naming:
         topology_section_audit.py: harness-debate audit utility; word order retained to match the audited topology section surface
         venus_autonomy_gate.py: established Venus boundary gate
         venus_sensing_report.py: established Venus boundary report
+        zeus_status.py: operator-facing money-funnel heartbeat CLI; noun-first name retained per zpkt.py precedent (PR #407)
         zpkt.py: Packet Runtime CLI; noun command retained as the operator-facing packet lifecycle tool
     packet_ephemeral:
       pattern: "task_YYYY-MM-DD_<purpose>.py"
