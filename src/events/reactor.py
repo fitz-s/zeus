@@ -5,7 +5,10 @@ must flow through injected final-intent/executor seams owned by `src.engine` and
 `src.execution`.
 """
 
-# Last reused/audited: 2026-06-11
+# Last reused/audited: 2026-06-12
+# Authority basis (2026-06-12 external deep-review): registered TRANSIENT money-path
+#   reason base LIVE_DEPTH_AUTHORITY_MISSING for the event_reactor_adapter FINDING-A
+#   fail-closed taker-depth twin-authority fix (B/C reasons added in their own commits).
 # Authority basis (2026-06-11 operator follow-up): (a) SOURCE_TRUTH intake gate
 #   defers to the serving authority — coverage PARTIAL/BLOCKED passes through,
 #   dead-letter only for junk run identity (twin-authority #8, 16:33:51Z six-city
@@ -2064,6 +2067,16 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # (FDR_REJECTED / TRADE_SCORE_NON_POSITIVE / ...) and stay terminal — only the
     # full-pass-default rewrite carries this base.
     "NO_SUBMIT_ADAPTER_LANE",
+    # FINDING-A (external review 2026-06-12): the FINAL taker size was being swept
+    # from the elected DB snapshot's DEPTH while the limit price was the FRESH
+    # submit-time witness price (which carries no depth). When the elected snapshot's
+    # top-of-book no longer agrees with the witnessed touch, the depth that would be
+    # swept is UNWITNESSED (stale-size vs fresh-price twin authority). The adapter
+    # fails CLOSED with this base rather than sizing from the stale depth; the book
+    # divergence is intrinsically TRANSIENT (a fresh snapshot capture re-establishes
+    # matching price+depth authority), so the candidate requeues with a refresh —
+    # mirroring EXECUTABLE_SNAPSHOT_STALE's shape.
+    "LIVE_DEPTH_AUTHORITY_MISSING",
 })
 
 # A reason whose BASE is in this set is TERMINAL (a genuine, non-race rejection)

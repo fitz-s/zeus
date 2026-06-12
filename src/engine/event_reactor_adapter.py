@@ -1,3 +1,13 @@
+# Last reused/audited: 2026-06-12 (external deep-review fixes A-E: A taker depth
+#   twin-authority — fail closed LIVE_DEPTH_AUTHORITY_MISSING when the fresh-price
+#   witness does not match the swept snapshot depth; B free-cash bound under injected
+#   bankroll provider — fail closed BANKROLL_FREE_CASH_MISSING, never size unclamped;
+#   C settlement-coverage shrinker — fail closed QLCB_COVERAGE_AUTHORITY_FAULT on a
+#   structural exception in live mode, not fail-open on the unshrunk q_lcb; D legacy
+#   probability builder — NO-side edge-positivity reconciled to the native NO q_lcb
+#   independent of YES executability; E min-order bump — DELETE the 2% bankroll cap,
+#   replace with honest EV-at-venue-minimum + free-cash bound. Authority basis:
+#   external code review 2026-06-12, operator direct-fix order.)
 # Last reused or audited: 2026-06-11 (decision-triggered targeted family snapshot
 #   refresh: when the elected SELECTED-bin row is price-stale, capture fresh family
 #   books NOW via an injected FamilySnapshotRefresher, re-elect the latest row, then
@@ -525,6 +535,44 @@ def persist_presubmit_jit_snapshot(
             "K1 Stage 1 presubmit snapshot persist failed (non-blocking): %s", exc
         )
         return None
+
+
+def _assert_taker_depth_authority_fresh(
+    *,
+    snapshot: "ExecutableMarketSnapshot",
+    direction: str,
+    witness_touch: Decimal,
+    tick_size: Decimal,
+) -> None:
+    """FINDING-A relationship invariant (external review 2026-06-12).
+
+    The final TAKER size is swept from ``snapshot``'s DEPTH while the limit price is
+    the FRESH submit-time witness touch. The witness proves PRICE only (it carries no
+    depth/size field), so sweeping the snapshot's depth is sound ONLY when that
+    snapshot describes the SAME top-of-book the witness witnessed. If the snapshot's
+    own top-of-book on THIS side is absent, or diverges from the witness touch by more
+    than one tick, the depth that would be swept is STALE relative to the fresh price
+    (e.g. a 300-share DB book behind a 5-share live book) — an oversized FOK/FAK or a
+    wrong VWAP. Fail CLOSED with the typed TRANSIENT reason ``LIVE_DEPTH_AUTHORITY_MISSING``
+    (registered in ``src.events.reactor.TRANSIENT_MONEY_PATH_REASONS``) so the candidate
+    requeues with a snapshot refresh, NEVER sizing from the stale depth.
+
+    The tolerance is exactly one tick: a book that moved by a single level is still the
+    same depth authority for the FOK sweep; a larger move (or a missing touch) means the
+    witness saw a book whose depth we do not hold.
+    """
+    if direction.startswith("buy_"):
+        snap_touch = getattr(snapshot, "orderbook_top_ask", None)
+    else:
+        snap_touch = getattr(snapshot, "orderbook_top_bid", None)
+    if snap_touch is None or abs(Decimal(str(snap_touch)) - witness_touch) > tick_size:
+        raise ValueError(
+            "LIVE_DEPTH_AUTHORITY_MISSING:"
+            f"side={direction}:"
+            f"witness_touch={witness_touch}:"
+            f"snapshot_touch={snap_touch}:"
+            f"tick={tick_size}"
+        )
 
 
 class _LiveOpportunityAlreadyLocked(RuntimeError):
@@ -3918,6 +3966,30 @@ def _build_live_execution_command_certificates(
                         )
                     _limit_price_d = _fresh_touch
                     _rounding_mode = "down"
+                # FINDING-A FIX (twin-authority kill, external review 2026-06-12):
+                # the FINAL taker size is swept from this snapshot's DEPTH, but the
+                # limit price (_fresh_touch) is the FRESH submit-time WITNESS price.
+                # The witness (PreSubmitAuthorityWitness) proves PRICE only — it
+                # carries NO depth/size-at-best field — so sizing from the elected DB
+                # snapshot's depth pairs FRESH price authority with STALE size
+                # authority. If the elected snapshot saw a DIFFERENT top-of-book than
+                # the witness (a fresher/thinner book — e.g. 300-share DB depth behind
+                # a 5-share live book), the swept size is sized against liquidity that
+                # is no longer witnessed: an oversized FOK/FAK reject or a wrong VWAP.
+                # The depth is trustworthy ONLY when the snapshot's own top-of-book on
+                # THIS side agrees with the witnessed touch (same book → same depth).
+                # On any divergence (or a missing snapshot touch on this side) the
+                # fresh book's depth is UNWITNESSED: fail CLOSED with a typed TRANSIENT
+                # reason so the candidate requeues with a snapshot refresh, rather than
+                # sweeping the stale depth. The check is a named relationship invariant
+                # (_assert_taker_depth_authority_fresh) so it is unit-testable apart from
+                # the full cert-build path.
+                _assert_taker_depth_authority_fresh(
+                    snapshot=_snap_for_depth,
+                    direction=_direction_for_depth,
+                    witness_touch=_fresh_touch,
+                    tick_size=_tick_size_d,
+                )
                 # Tick-align the marketable touch using the canonical tick_size:
                 # BUY rounds up to keep crossing; SELL rounds down to keep crossing.
                 import math as _math
