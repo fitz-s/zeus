@@ -1953,18 +1953,38 @@ def _recapture_fresh_entry_snapshot_if_needed(
         raise ValueError("recaptured executable snapshot min_order_size mismatch")
     if fresh.neg_risk != final_intent.neg_risk:
         raise ValueError("recaptured executable snapshot neg_risk mismatch")
-    sweep = simulate_clob_sweep(
-        snapshot=fresh,
-        direction=final_intent.direction,
-        requested_size_kind="shares",
-        requested_size_value=Decimal(str(submitted_shares)),
-        limit_price=final_intent.final_limit_price,
-    )
-    if sweep.depth_status != "PASS" or sweep.average_price != final_intent.expected_fill_price_before_fee:
-        raise ValueError(
-            "recaptured executable snapshot changed final-intent economics: "
-            f"depth_status={sweep.depth_status} average_price={sweep.average_price}"
+    # MODE-CORRECT ECONOMICS VALIDATION (live 2026-06-12 02:16:49Z, Helsinki
+    # POST_ONLY 219.77@0.14): the crossable-depth sweep is TAKER economics — a
+    # post_only maker rest ADDS liquidity and by construction has no crossable
+    # depth at its own limit, so the sweep returned DEPTH_INSUFFICIENT and this
+    # check killed every resting maker whose elected snapshot went stale before
+    # the executor ran (fourth instance of a taker-shaped check strangling the
+    # maker lane; same family as WALL #1 passive_maker_context). Maker
+    # economics depend only on the rest still being NON-CROSSING on the fresh
+    # book: if the fresh ask moved through our limit the post_only premise is
+    # gone and the abort is correct; an empty fresh ask is a bid-establishing
+    # rest and stands.
+    _is_maker_rest = bool(getattr(final_intent, "post_only", False))
+    if _is_maker_rest:
+        fresh_ask = fresh.orderbook_top_ask
+        if fresh_ask is not None and Decimal(str(final_intent.final_limit_price)) >= Decimal(str(fresh_ask)):
+            raise ValueError(
+                "recaptured executable snapshot changed final-intent economics: "
+                f"post_only limit {final_intent.final_limit_price} would cross fresh ask {fresh_ask}"
+            )
+    else:
+        sweep = simulate_clob_sweep(
+            snapshot=fresh,
+            direction=final_intent.direction,
+            requested_size_kind="shares",
+            requested_size_value=Decimal(str(submitted_shares)),
+            limit_price=final_intent.final_limit_price,
         )
+        if sweep.depth_status != "PASS" or sweep.average_price != final_intent.expected_fill_price_before_fee:
+            raise ValueError(
+                "recaptured executable snapshot changed final-intent economics: "
+                f"depth_status={sweep.depth_status} average_price={sweep.average_price}"
+            )
     return replace(
         legacy_intent,
         executable_snapshot_id=fresh.snapshot_id,
