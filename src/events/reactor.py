@@ -390,6 +390,29 @@ _TRANSIENT_DISARM_ENV = "ZEUS_REACTOR_TRANSIENT_DISARM"
 # _process_one; process_pending must NOT double-count or attempt mark_processed on this path.
 _FSR_PARTIAL_DEAD_LETTER = "FSR_PARTIAL_DEAD_LETTER"
 
+# ALWAYS-DECIDABLE invariant (operator law 2026-06-12 "RULE 1 在任何情况下都生效…
+# 从来都不应该有一个找不到机会的时间点出现"): a TRANSIENT SUBSTRATE block must trigger that
+# substrate's refresh as part of the SAME handling, so requeue-WITHOUT-refresh-attempt is
+# structurally impossible for refreshable substrate classes. The reactor used to classify an
+# executable-snapshot block as a transient and requeue it forever (until horizon) without ever
+# making the substrate fresh — the decision-time family_snapshot_refresher lived PAST the
+# reactor's gate and was never reached for an event blocked AT the gate. Build 1 threads the
+# SAME refresher into the reactor and invokes it after the blocked event's unit-of-work closes
+# (no network inside the world SAVEPOINT / trade read txn — three-phase law).
+#
+# Debounce window: DERIVED from the snapshot freshness window itself, never a bare magic number.
+# The freshness window is FRESHNESS_WINDOW_DEFAULT (30s); we debounce per-family at HALF that
+# window. Rationale: a refresh writes rows fresh for the full window, so a second refresh of the
+# same family is worthless until the captured rows are at least half-aged — refreshing more often
+# only burns /book fetches while the prior capture is still fresh. Half-window (not full) keeps a
+# safety margin so the next decision cycle still finds genuinely-fresh rows even after capture +
+# election latency.
+from src.contracts.executable_market_snapshot import (  # noqa: E402
+    FRESHNESS_WINDOW_DEFAULT as _SNAPSHOT_FRESHNESS_WINDOW,
+)
+
+_FAMILY_REFRESH_DEBOUNCE_SECONDS = max(1.0, _SNAPSHOT_FRESHNESS_WINDOW.total_seconds() / 2.0)
+
 
 @dataclass
 class ReactorResult:
@@ -404,6 +427,13 @@ class ReactorResult:
     # the status pulse / logs expose lock contention as lock contention.
     claim_lock_bounces: int = 0
     rejection_reasons: list[str] = field(default_factory=list)
+    # ALWAYS-DECIDABLE invariant (2026-06-12): how many family-substrate refreshes the reactor
+    # invoked this cycle in response to transient substrate blocks, and how many single-family
+    # cycle-advance reseeds it enqueued for stale/absent posterior blocks. Visibility only — the
+    # invariant is enforced structurally, these counters just make it observable in the status
+    # pulse (a transient-requeue cycle with snapshot_refreshes==0 would be the regression).
+    snapshot_refreshes: int = 0
+    cycle_advance_enqueues: int = 0
 
     @property
     def submitted(self) -> int:
@@ -423,6 +453,9 @@ class OpportunityEventReactor:
         config: ReactorConfig | None = None,
         regret_ledger: Any | None = None,
         decision_provenance_hook: Any | None = None,
+        family_snapshot_refresher: "Callable[..., bool] | None" = None,
+        cycle_advance_enqueuer: "Callable[..., bool] | None" = None,
+        held_family_provider: "Callable[[], frozenset[tuple[str, str, str]]] | None" = None,
     ) -> None:
         self._store = store
         self._source_truth_gate = source_truth_gate
@@ -432,6 +465,37 @@ class OpportunityEventReactor:
         self._reject = reject
         self._config = config or ReactorConfig()
         self._regret_ledger = regret_ledger
+        # ALWAYS-DECIDABLE invariant (operator law 2026-06-12). The SAME decision-time targeted
+        # family snapshot refresher the adapter uses (main._edli_decision_family_snapshot_refresher,
+        # injected so the reactor never imports venue code — architecture ban, no_bypass test). When
+        # an event is classified EXECUTABLE_SNAPSHOT-transient AT the reactor gate, the reactor
+        # invokes this to capture FRESH books for THAT family — AFTER the event's unit-of-work
+        # closes and BEFORE the next claim (no network inside the world SAVEPOINT or the trade read
+        # txn). Absent (legacy callers / most tests) => no refresh, byte-identical pre-invariant
+        # behavior (the event still requeues, the horizon still bounds it).
+        self._family_snapshot_refresher = family_snapshot_refresher
+        # Build 2: single-family cycle-advance reseed enqueuer (reuses the cycle-advance
+        # re-materialization lane scoped to ONE family) for a posterior-staleness block. Same
+        # discipline: no network/heavy work in txn, debounced, fail-soft. Absent => no-op.
+        self._cycle_advance_enqueuer = cycle_advance_enqueuer
+        # ORDERING (operator correction 2026-06-12): refresh fan-out is NOT liquidity-ordered —
+        # opportunity is uncorrelated with liquidity (small markets can carry denser sophisticated
+        # competition; liquidity's only role stays in sizing/fill). The ONLY ordering bias is
+        # HELD-POSITION-FIRST: a family with money at risk RIGHT NOW (the exit monitor reads its
+        # belief) is refreshed before new-money families. ``held_family_provider`` returns the
+        # current held (city, target_date, metric) set, read-only and fail-soft (absent / raising =>
+        # no held bias, pure fair rotation). The reactor owns zeus-world only; this provider is
+        # injected (it reads zeus_trades.position_current) so the reactor never opens a trades conn.
+        self._held_family_provider = held_family_provider
+        # Per-family debounce: family-key -> last successful refresh-attempt monotonic time. The
+        # window is DERIVED from the snapshot freshness window (half of it), never a magic number.
+        self._family_refresh_last_at: dict[str, float] = {}
+        self._family_cycle_advance_last_at: dict[str, float] = {}
+        # FAIR-CURSOR fan-out (Wave1B precedent): blocked families discovered this cycle queue here
+        # in encounter order; the cursor rotates which family is refreshed FIRST across cycles so no
+        # single family monopolizes the per-cycle refresh fan-out and ALL blocked families are
+        # covered across a bounded number of cycles (no numeric drop-cap on the candidate set).
+        self._family_refresh_cursor: int = 0
         # DecisionProvenanceEnvelope (operator law 2026-06-11): an OPTIONAL fail-soft accessor
         # returning (bundle, forecast_conn) for the event being rejected, so the regret envelope
         # can carry the full forecast data-combination + per-input ages. None => the envelope is
@@ -469,6 +533,12 @@ class OpportunityEventReactor:
 
     def process_pending(self, *, decision_time: datetime, limit: int | None = 100) -> ReactorResult:
         result = ReactorResult()
+        # ALWAYS-DECIDABLE invariant (2026-06-12): families blocked on a refreshable substrate
+        # THIS cycle, accumulated during processing and drained AFTER all per-event units of work
+        # close (no network inside any open world/trade txn). Per-cycle scope so a family that
+        # un-blocks stops being refreshed.
+        self._pending_snapshot_refreshes: list[tuple[str, str, str]] = []
+        self._pending_cycle_advances: list[tuple[str, str, str]] = []
         # E1 (STEP 8): per-cycle wall-clock budget. A cycle must not run unbounded;
         # once the budget is exceeded, stop after the current event and leave the
         # rest PENDING (not consumed, not dropped) for the next cycle. This caps a
@@ -479,7 +549,8 @@ class OpportunityEventReactor:
         cycle_start = time.monotonic()
         batch_limit = 250 if limit is None else max(1, int(limit))
         remaining = None if limit is None else batch_limit
-        while remaining is None or remaining > 0:
+        try:
+          while remaining is None or remaining > 0:
             # fetch_pending is a READ — WAL permits concurrent readers, so it is NOT
             # taken under the world-DB write mutex.  limit=None means drain the current
             # admissible queue in batches; the batch size is pagination, not a total cap.
@@ -528,6 +599,13 @@ class OpportunityEventReactor:
                     return result
             if len(events) < request_limit:
                 break
+        finally:
+            # ALWAYS-DECIDABLE drain (2026-06-12): runs on EVERY exit path (normal completion,
+            # budget overrun early-return, batch-limit early-return). At this point no per-event
+            # world/trade txn is open (each unit-of-work committed + released its mutex before the
+            # loop body returned), so the refresher's network I/O is structurally outside any txn.
+            with contextlib.suppress(Exception):
+                self._drain_substrate_refreshes(result=result)
         return result
 
     def _process_event_unit(
@@ -806,6 +884,147 @@ class OpportunityEventReactor:
             if not timely:
                 return ("TIMELINESS_FLOOR_PAST", "target local day strictly past")
         return None
+
+    @staticmethod
+    def _family_identity(event: OpportunityEvent) -> tuple[str, str, str] | None:
+        """The (city, target_date, metric) family key from the event payload, or None when the
+        event is not a forecast-decision family event (no refreshable substrate). Fail-soft: a
+        malformed payload yields None and the always-decidable refresh is simply skipped."""
+        payload = _payload_dict(event)
+        city = str(payload.get("city") or "").strip()
+        target_date = str(payload.get("target_date") or "").strip()
+        metric = str(payload.get("metric") or "").strip()
+        if not city or not target_date or metric not in {"high", "low"}:
+            return None
+        return (city, target_date, metric)
+
+    def _record_substrate_block(
+        self, event: OpportunityEvent, *, kind: str
+    ) -> None:
+        """ALWAYS-DECIDABLE invariant (2026-06-12): record that THIS event was blocked on a
+        REFRESHABLE substrate this cycle so the post-unit-of-work drain refreshes that substrate.
+
+        ``kind`` is ``"snapshot"`` (executable-snapshot block -> family_snapshot_refresher) or
+        ``"posterior"`` (stale/absent replacement posterior -> single-family cycle-advance reseed).
+        De-duplicated per family per cycle (a family blocked by many bins refreshes ONCE). The
+        intents are drained AFTER the event's unit-of-work closes (no network in any open txn).
+        """
+        family = self._family_identity(event)
+        if family is None:
+            return
+        bucket = self._pending_snapshot_refreshes if kind == "snapshot" else self._pending_cycle_advances
+        if family not in bucket:
+            bucket.append(family)
+
+    def _drain_substrate_refreshes(self, *, result: ReactorResult) -> None:
+        """Invoke the substrate refreshers for every family blocked this cycle, OUTSIDE any world
+        write SAVEPOINT / trade read txn (the drain runs at end-of-cycle in process_pending, where
+        no per-event txn is open — the structural no-network-in-txn guarantee).
+
+        FAIR-CURSOR fan-out: rotate which blocked family is refreshed first across cycles so no one
+        family monopolizes; ALL blocked families are covered across bounded cycles (no drop-cap).
+        Per-family debounce (window derived from the snapshot freshness window) skips a family
+        refreshed too recently. Fail-soft: a refresh failure logs once and never raises — the event
+        already requeued and the horizon bounds it.
+        """
+        # HELD-POSITION set, computed ONCE per cycle (fail-soft): families with money at risk now.
+        held = self._held_families_failsoft()
+        if held:
+            import logging as _logging
+
+            _logging.getLogger("zeus.events.reactor").debug(
+                "always-decidable drain ordering: held-position-first (%d held), then fair "
+                "rotation; basis=position_current", len(held),
+            )
+        self._drain_one_bucket(
+            self._pending_snapshot_refreshes,
+            refresher=self._family_snapshot_refresher,
+            last_at=self._family_refresh_last_at,
+            counter_attr="snapshot_refreshes",
+            label="snapshot",
+            result=result,
+            held=held,
+        )
+        self._drain_one_bucket(
+            self._pending_cycle_advances,
+            refresher=self._cycle_advance_enqueuer,
+            last_at=self._family_cycle_advance_last_at,
+            counter_attr="cycle_advance_enqueues",
+            label="cycle-advance",
+            result=result,
+            held=held,
+        )
+        self._pending_snapshot_refreshes.clear()
+        self._pending_cycle_advances.clear()
+
+    def _held_families_failsoft(self) -> frozenset[tuple[str, str, str]]:
+        """Current held (city, target_date, metric) families, or empty on absence/error. Read-only,
+        fail-soft: a provider that raises or is absent yields no held bias (pure fair rotation)."""
+        if self._held_family_provider is None:
+            return frozenset()
+        try:
+            return frozenset(self._held_family_provider())
+        except Exception:  # noqa: BLE001 — held-position bias is best-effort, never fatal
+            return frozenset()
+
+    def _drain_one_bucket(
+        self,
+        families: list[tuple[str, str, str]],
+        *,
+        refresher: "Callable[..., bool] | None",
+        last_at: dict[str, float],
+        counter_attr: str,
+        label: str,
+        result: ReactorResult,
+        held: "frozenset[tuple[str, str, str]]" = frozenset(),
+    ) -> None:
+        if refresher is None or not families:
+            return
+        import logging as _logging
+
+        _log = _logging.getLogger("zeus.events.reactor")
+        # ORDERING (operator correction 2026-06-12): held-position families FIRST (money at risk),
+        # then FAIR ROTATION over the rest. Rationale for fair rotation as the new-money order:
+        # the per-cycle drain has NO drop-cap — it covers EVERY family it was handed this cycle —
+        # so the only thing the cursor decides is WHICH family is touched first within the cycle,
+        # which matters solely if a future per-cycle fan-out cap is introduced. Fair (round-robin)
+        # rotation gives the best WORST-CASE time-to-full-coverage under any such future cap: every
+        # family advances to the front within n cycles, so no family can be starved past n cycles —
+        # a bounded, liquidity-blind guarantee. Staleness-first was rejected because it has no cap
+        # here (full coverage already happens each cycle) and would re-introduce a per-family
+        # priority signal the operator's RULE-1 (every family decidable) does not want.
+        held_fams = [f for f in families if f in held]
+        rest = [f for f in families if f not in held]
+        n = len(rest)
+        start = self._family_refresh_cursor % n if n else 0
+        rotated_rest = rest[start:] + rest[:start]
+        # Advance the cursor only over the rotated (non-held) set; held families are ordering-
+        # exempt (always first) so they do not consume rotation slots.
+        self._family_refresh_cursor = (self._family_refresh_cursor + 1) % n if n else 0
+        ordered = held_fams + rotated_rest
+        now = time.monotonic()
+        for city, target_date, metric in ordered:
+            key = f"{city}|{target_date}|{metric}"
+            prev = last_at.get(key)
+            if prev is not None and (now - prev) < _FAMILY_REFRESH_DEBOUNCE_SECONDS:
+                # Debounced: a refresh of this family within the window is still fresh; skip.
+                continue
+            # Mark BEFORE the call so a slow/failing refresh still debounces the next cycle (the
+            # window is the minimum spacing between ATTEMPTS, not between successes).
+            last_at[key] = now
+            try:
+                refreshed = bool(
+                    refresher(city=city, target_date=target_date, metric=metric)
+                )
+            except Exception as exc:  # noqa: BLE001 — fail-soft: never raise into the cycle
+                _log.warning(
+                    "always-decidable %s refresh failed for %s/%s/%s (fail-soft; event "
+                    "already requeued, horizon-bounded): %s",
+                    label, city, target_date, metric, exc,
+                )
+                continue
+            if refreshed:
+                setattr(result, counter_attr, getattr(result, counter_attr) + 1)
 
     def _note_transient_requeue(self, event: OpportunityEvent) -> None:
         """Bump the per-event requeue counter and log with dedup (LOG HYGIENE ONLY).
@@ -1100,6 +1319,16 @@ class OpportunityEventReactor:
         if not self._executable_snapshot_gate(event, decision_time.astimezone(UTC)):
             # Transient: the family's executable snapshots may not be captured yet this cycle.
             # Signal a retry instead of consuming the event (see process_pending).
+            #
+            # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): a transient SUBSTRATE block
+            # MUST trigger that substrate's refresh as part of the SAME handling — requeue-without-
+            # refresh-attempt is structurally impossible here now. Record the blocked family; the
+            # end-of-cycle drain captures FRESH books for it (outside any txn — three-phase law) so
+            # the NEXT cycle finds the substrate fresh and the event PROCESSES instead of spinning
+            # against the gate until horizon. This is the fix for "an event blocked AT the reactor
+            # gate never reaches the refresher" — the refresher is now reached for exactly it.
+            self._transient_requeue_reasons[event.event_id] = "EXECUTABLE_SNAPSHOT_BLOCKED"
+            self._record_substrate_block(event, kind="snapshot")
             return _EXECUTABLE_SNAPSHOT_RETRY, False
         self._log_family_once(event)
         if not self._riskguard_gate(event):
@@ -1374,6 +1603,16 @@ class OpportunityEventReactor:
         receipt: EventSubmissionReceipt | None,
         decision_time: datetime,
     ) -> str | None:
+        # ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12): a family blocked because
+        # its replacement posterior is STALE or ABSENT (the adapter raises
+        # REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING / ..._BUNDLE_BLOCKED) is a REFRESHABLE
+        # SUBSTRATE block — the belief substrate needs re-materialization, not an endless requeue
+        # against an unchanging posterior. Record it for the end-of-cycle drain, which enqueues a
+        # single-family cycle-advance reseed (outside any txn, debounced, fail-soft). The
+        # disposition below is unchanged: a transient reason still requeues, a terminal one still
+        # rejects — the enqueue is an ADDITIONAL same-handling action, never a behavior change.
+        if _is_posterior_staleness_reason(reason):
+            self._record_substrate_block(event, kind="posterior")
         if _is_transient_money_path_reason(reason):
             # Transient: the forecast source was re-ingested after this cycle's
             # decision moment, or the selected executable price expired between
@@ -1975,6 +2214,31 @@ def _is_transient_money_path_reason(reason: str | None) -> bool:
             reason,
         )
     return True
+
+
+# ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Reason BASES that mean "this
+# family's replacement-posterior BELIEF SUBSTRATE is stale or absent" — a REFRESHABLE block whose
+# cure is re-materializing the posterior onto a fresher model cycle (the cycle-advance reseed
+# lane), NOT requeueing against the same unchanging posterior. Explicit closed set (segment
+# membership, never substring soup): the adapter raises these from its readiness/bundle gate
+# (event_reactor_adapter.py ~9609-9622). A reason CHAIN that nests one of these ANYWHERE
+# (e.g. wrapped in a stage prefix) still counts — the belief substrate is the root cause.
+_POSTERIOR_STALENESS_REASON_BASES = frozenset(
+    {
+        "REPLACEMENT_0_1_LIVE_AUTHORITY_READINESS_MISSING",
+        "REPLACEMENT_0_1_LIVE_AUTHORITY_BUNDLE_BLOCKED",
+    }
+)
+
+
+def _is_posterior_staleness_reason(reason: str | None) -> bool:
+    """True iff ``reason`` indicates the replacement posterior (belief substrate) is stale/absent,
+    so the always-decidable handler should enqueue a single-family cycle-advance reseed. Explicit
+    segment membership against the closed set; empty/None => False (nothing to refresh)."""
+    if not reason:
+        return False
+    segments = [seg.strip() for seg in str(reason).split(":")]
+    return any(seg in _POSTERIOR_STALENESS_REASON_BASES for seg in segments)
 
 
 def _day0_hard_fact_payload_live_eligible(event: OpportunityEvent) -> bool:

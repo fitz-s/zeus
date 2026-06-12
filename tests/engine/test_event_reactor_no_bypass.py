@@ -1367,6 +1367,61 @@ def test_latest_snapshot_rows_exclude_future_captured_rows_without_freshness_gat
     assert "future-snapshot" not in {str(row.get("snapshot_id")) for row in rows}
 
 
+def test_negrisk_active_false_but_tradeable_row_is_admitted_not_dropped():
+    """WRONG-FIELD WALL acceptance (fill-drought root, 2026-06-12). On negRisk multi-outcome
+    weather families a fully-TRADEABLE child carries the Gamma routing label active=0 while
+    enable_orderbook=1 / closed=0 / accepting_orders=1 (executable_allowed=True per the snapshot
+    contract). The entry gate must ADMIT such a row — filtering on the routing-label ``active`` (the
+    old COALESCE(active,0)=1 predicate) DROPPED these minutes-fresh tradeable rows and produced an
+    indefinite EXECUTABLE_SNAPSHOT_BLOCKED (Qingdao 2026-06-13 high). Entry must share the
+    submit-time authority: enable_orderbook AND NOT closed AND accepting_orders is not False."""
+    from src.engine.event_reactor_adapter import (
+        _latest_snapshot_rows_for_event_family,
+        executable_snapshot_gate_from_trade_conn,
+    )
+
+    conn = _trade_conn_with_snapshot()
+    # Flip the routing label to the negRisk-tradeable shape: active=0, tradeable flags intact.
+    # (APPEND-ONLY table forbids UPDATE; insert a NEWER row with active=0 — it wins by captured_at.)
+    cols = [str(row[1]) for row in conn.execute("PRAGMA table_info(executable_market_snapshots)").fetchall()]
+    seed = dict(conn.execute("SELECT * FROM executable_market_snapshots WHERE condition_id = 'condition-1' AND selected_outcome_token_id = 'yes-1'").fetchone())
+    seed["snapshot_id"] = "active-false-tradeable"
+    seed["active"] = 0  # routing label: NOT tradeability
+    seed["closed"] = 0
+    seed["enable_orderbook"] = 1
+    seed["accepting_orders"] = 1
+    seed["captured_at"] = "2026-05-24T08:13:30+00:00"  # newest row, wins dedup
+    conn.execute(
+        f"INSERT INTO executable_market_snapshots ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+        [seed[col] for col in cols],
+    )
+    # Decide at 08:14 so the 08:13:30 active=0 row is admissible (captured <= decision) and is the
+    # NEWEST row for (condition-1, yes-1) — it wins dedup, so the gate's selected-bin resolution
+    # sees ONLY the active=0-but-tradeable row.
+    decide_at = datetime(2026, 5, 24, 8, 14, tzinfo=timezone.utc)
+
+    rows = _latest_snapshot_rows_for_event_family(
+        conn,
+        _forecast_event(),
+        condition_ids=("condition-1",),
+        fresh_at=decide_at,
+        require_fresh=False,
+    )
+    # The active=0-but-tradeable row is RETURNED (not dropped by a routing-label filter) AND wins
+    # dedup for its side, so the OLD active=1 seed row no longer masks the bug.
+    selected_for_yes = next(
+        (r for r in rows if str(r.get("selected_outcome_token_id")) == "yes-1"), None
+    )
+    assert selected_for_yes is not None
+    assert str(selected_for_yes.get("snapshot_id")) == "active-false-tradeable"
+    assert int(selected_for_yes.get("active")) == 0  # proves the row admitted IS active=0
+
+    # End-to-end: the entry gate ADMITS the event whose selected bin is backed by the active=0 row.
+    # In this harness market_events lives in the SAME conn as the snapshots (topology_conn=conn).
+    gate = executable_snapshot_gate_from_trade_conn(conn, topology_conn=conn)
+    assert gate(_forecast_event(), decide_at) is True
+
+
 def test_adapter_source_truth_status_comes_from_forecast_authority():
     event = _forecast_event()
     conn = _trade_conn_with_snapshot()

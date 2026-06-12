@@ -439,6 +439,147 @@ def enqueue_cycle_advance_reseeds(
     return report
 
 
+def enqueue_single_family_cycle_advance_reseed(
+    *,
+    forecast_db: Path | str,
+    seed_dir: Path | str,
+    raw_manifest_dir: Path | str,
+    city: str,
+    target_date: str,
+    metric: str,
+    computed_at: datetime | None = None,
+) -> dict[str, object]:
+    """ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Single-family variant of
+    ``enqueue_cycle_advance_reseeds``: when the reactor finds ONE family blocked on a STALE/absent
+    replacement posterior, re-materialize THAT family's posterior onto the freshest materializable
+    cycle — no plan scan, no fan-out. Same comparison (``scope_needs_cycle_advance``), same seed
+    builder, same idempotency marker (``cycle_advance_enqueues`` UNIQUE(scope, target_cycle)) as
+    the poll-lane batch variant, so a family already enqueued by the poll never double-enqueues
+    here and vice-versa.
+
+    Fail-soft throughout: any error returns a status dict, never raises into the reactor cycle.
+    Returns a compact report ({status, enqueued, seed_file, ...}).
+    """
+    from src.data.replacement_forecast_materialization_seed_builder import (  # noqa: PLC0415
+        build_replacement_forecast_materialization_seed,
+        latest_baseline_coverage_for_replacement_seed,
+        market_bins_for_replacement_seed,
+        write_seed,
+    )
+    from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+        _latest_manifest,
+        _load_manifests,
+        _manifest_base_dir,
+        _manifest_path_value,
+        _resolve_path,
+        _seed_name,
+    )
+    from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
+        expected_replacement_dependency_identity_by_role,
+    )
+    from src.state.db import _connect  # noqa: PLC0415
+    from src.state.schema.v2_schema import (  # noqa: PLC0415
+        ensure_replacement_forecast_shadow_schema,
+    )
+
+    now = (computed_at or datetime.now(tz=UTC)).astimezone(UTC)
+    forecast_db = Path(forecast_db)
+    seed_path = Path(seed_dir)
+    raw_dir = Path(raw_manifest_dir)
+    city = str(city)
+    target_date = str(target_date)
+    metric = str(metric)
+    report: dict[str, object] = {
+        "status": "SINGLE_FAMILY_CYCLE_ADVANCE",
+        "city": city,
+        "target_date": target_date,
+        "metric": metric,
+        "enqueued": False,
+    }
+    if not forecast_db.exists():
+        report["status"] = "CYCLE_ADVANCE_FORECAST_DB_MISSING"
+        return report
+    if metric not in {"high", "low"}:
+        report["status"] = "CYCLE_ADVANCE_METRIC_INVALID"
+        return report
+
+    manifests = _load_manifests(raw_dir, computed_at=now)
+    conn = _connect(forecast_db, write_class="live")
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_replacement_forecast_shadow_schema(conn)
+        freshest = freshest_materializable_cycle(conn)
+        if freshest is None:
+            report["status"] = "CYCLE_ADVANCE_NO_MATERIALIZABLE_CYCLE"
+            return report
+        report["freshest_materializable_cycle"] = freshest.isoformat()
+        verdict = scope_needs_cycle_advance(
+            conn, city=city, target_date=target_date, metric=metric, freshest_cycle=freshest
+        )
+        if not verdict["needs_advance"]:
+            # No newer cycle than the one the posterior already consumed: the staleness is not a
+            # missed-cycle gap this lane can cure (e.g. no posterior exists yet — that is the
+            # fresh-seed discovery's job, not re-materialization). Honest no-op.
+            report["status"] = "CYCLE_ADVANCE_NOT_NEEDED"
+            report["consumed_cycle"] = verdict["consumed_cycle"]
+            return report
+        consumed_cycle_iso = str(verdict["consumed_cycle"])
+        target_cycle_iso = str(verdict["target_cycle"])
+        if _already_enqueued(
+            conn, city=city, target_date=target_date, metric=metric, target_cycle_iso=target_cycle_iso
+        ):
+            report["status"] = "CYCLE_ADVANCE_ALREADY_ENQUEUED"
+            return report
+        seed_file = _build_and_write_advance_seed(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            manifests=manifests,
+            raw_dir=raw_dir,
+            seed_path=seed_path,
+            computed_at=now,
+            build_seed=build_replacement_forecast_materialization_seed,
+            latest_baseline_coverage=latest_baseline_coverage_for_replacement_seed,
+            market_bins=market_bins_for_replacement_seed,
+            write_seed=write_seed,
+            latest_manifest=_latest_manifest,
+            manifest_path_value=_manifest_path_value,
+            manifest_base_dir=_manifest_base_dir,
+            resolve_path=_resolve_path,
+            seed_name=_seed_name,
+            expected_identity=expected_replacement_dependency_identity_by_role,
+        )
+        if seed_file is None:
+            report["status"] = "CYCLE_ADVANCE_MANIFEST_MISSING"
+            return report
+        inserted = _record_enqueue(
+            conn,
+            city=city,
+            target_date=target_date,
+            metric=metric,
+            consumed_cycle_iso=consumed_cycle_iso,
+            target_cycle_iso=target_cycle_iso,
+            held_position=False,
+            seed_file=str(seed_file),
+        )
+        conn.commit()
+        report["enqueued"] = bool(inserted)
+        report["status"] = "CYCLE_ADVANCE_ENQUEUED" if inserted else "CYCLE_ADVANCE_ALREADY_ENQUEUED"
+        report["seed_file"] = str(seed_file)
+        report["consumed_cycle"] = consumed_cycle_iso
+        report["target_cycle"] = target_cycle_iso
+    except Exception as exc:  # noqa: BLE001 — fail-soft: never raise into the reactor cycle
+        _LOG.debug(
+            "single-family cycle-advance failed for %s/%s/%s: %s", city, target_date, metric, exc
+        )
+        report["status"] = "CYCLE_ADVANCE_FAILSOFT_SKIPPED"
+        report["error"] = str(exc)
+    finally:
+        conn.close()
+    return report
+
+
 def _build_and_write_advance_seed(
     conn: sqlite3.Connection,
     *,

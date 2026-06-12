@@ -5794,6 +5794,14 @@ def _edli_event_reactor_cycle() -> None:
         _decision_family_snapshot_refresher = _edli_decision_family_snapshot_refresher(
             forecasts_conn
         )
+        # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): the reactor itself must make a
+        # blocked event's substrate fresh, so a transient SUBSTRATE block can never requeue
+        # forever without a refresh attempt. The SAME decision-time refresher is threaded INTO the
+        # reactor (Build 1: executable-snapshot blocks AT the reactor gate now invoke it), plus a
+        # single-family cycle-advance reseed enqueuer (Build 2: stale/absent replacement-posterior
+        # blocks enqueue a targeted re-materialization). Both run from the reactor's end-of-cycle
+        # drain — outside any world/trade txn (three-phase law), debounced, fail-soft.
+        _reactor_cycle_advance_enqueuer = _edli_reactor_cycle_advance_enqueuer()
         submit_adapter = (
             event_bound_live_adapter_from_trade_conn(
                 trade_conn,
@@ -5872,6 +5880,15 @@ def _edli_event_reactor_cycle() -> None:
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,
             regret_ledger=regret_ledger,
+            # ALWAYS-DECIDABLE invariant (operator law 2026-06-12): the reactor refreshes a blocked
+            # family's substrate as part of the SAME handling (Build 1 snapshot refresher + Build 2
+            # single-family cycle-advance reseed), so requeue-without-refresh is structurally
+            # impossible for refreshable substrate classes.
+            family_snapshot_refresher=_decision_family_snapshot_refresher,
+            cycle_advance_enqueuer=_reactor_cycle_advance_enqueuer,
+            # Held-position families are refreshed FIRST (money at risk); NO liquidity ordering
+            # (operator correction 2026-06-12). Fail-soft read-only provider on zeus_trades.
+            held_family_provider=_edli_reactor_held_family_provider(),
             config=ReactorConfig(
                 reactor_mode=reactor_mode,
                 real_order_submit_enabled=real_order_submit_enabled,
@@ -7189,6 +7206,85 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
             write_conn.close()
 
     return _refresh
+
+
+def _edli_reactor_held_family_provider():
+    """ALWAYS-DECIDABLE invariant — ordering (operator correction 2026-06-12). Build the read-only,
+    fail-soft provider of currently-HELD (city, target_date, metric) families so the reactor's
+    refresh fan-out refreshes money-at-risk families FIRST (then liquidity-blind fair rotation —
+    NO liquidity ordering). Reads zeus_trades.position_current via a short-lived mode=ro connection
+    per call (the reactor owns zeus-world only; the trades read is injected so the reactor never
+    opens a trades conn). Absent trades DB / any error => empty set (no held bias). Returns None
+    when the trades DB path is unconfigured."""
+    from src.state.db import _zeus_trade_db_path
+
+    try:
+        trades_path = _zeus_trade_db_path()
+    except Exception:
+        return None
+    if not trades_path:
+        return None
+
+    def _provider():
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
+
+        from src.data.replacement_cycle_advance_trigger import _held_position_families
+
+        p = _Path(str(trades_path))
+        if not p.exists():
+            return frozenset()
+        conn_t = _sqlite3.connect(f"file:{p}?mode=ro", uri=True, timeout=5.0)
+        try:
+            return frozenset(_held_position_families(conn_t))
+        finally:
+            conn_t.close()
+
+    return _provider
+
+
+def _edli_reactor_cycle_advance_enqueuer():
+    """ALWAYS-DECIDABLE invariant — Build 2 (operator law 2026-06-12). Build the single-family
+    cycle-advance reseed enqueuer the reactor invokes when a family is blocked on a STALE/absent
+    replacement posterior. Reuses the SAME cycle-advance re-materialization lane (seed builder +
+    seed_dir the materialize cycle drains + idempotency marker) scoped to ONE family.
+
+    Reads forecast_db / seed_dir / raw_manifest_dir from the shadow-materialization queue config
+    (the same source the poll-lane batch trigger uses). Returns None when the lane is not
+    configured (no seed_dir) so the reactor simply skips the enqueue (fail-soft). The callable is
+    fail-soft itself: any error returns a status dict, never raises into the reactor cycle.
+
+    LOCK LAW: the enqueuer opens its OWN short-lived forecast-DB write connection inside the
+    single-family function; the reactor invokes it from the end-of-cycle drain where NO per-event
+    world/trade txn is open — no DB connection is held across this call from the reactor side.
+    """
+    from src.data.replacement_forecast_production import (
+        _replacement_forecast_shadow_materialization_queue_config,
+    )
+
+    cfg = _replacement_forecast_shadow_materialization_queue_config()
+    forecast_db = cfg.get("forecast_db")
+    seed_dir = cfg.get("seed_dir")
+    raw_manifest_dir = cfg.get("raw_manifest_dir")
+    if forecast_db is None or seed_dir is None or raw_manifest_dir is None:
+        return None
+
+    def _enqueue(*, city, target_date, metric):
+        from src.data.replacement_cycle_advance_trigger import (
+            enqueue_single_family_cycle_advance_reseed,
+        )
+
+        report = enqueue_single_family_cycle_advance_reseed(
+            forecast_db=Path(str(forecast_db)),
+            seed_dir=Path(str(seed_dir)),
+            raw_manifest_dir=Path(str(raw_manifest_dir)),
+            city=city,
+            target_date=target_date,
+            metric=metric,
+        )
+        return bool(report.get("enqueued"))
+
+    return _enqueue
 
 
 def _edli_pre_submit_book_from_jit_fetch(book_quote_provider, *, token_id: str):
