@@ -628,7 +628,6 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
             ON fusion_upgrade_enqueues(city, target_date, metric, source_cycle_time,
                                        capturable_family_set)
     """)
-<<<<<<< Updated upstream
     # U5 step 2a (newer-cycle-triggered re-materialization, freshness investigation 2026-06-12)
     # idempotency marker. Sibling of fusion_upgrade_enqueues: when the cycle-advance trigger
     # (src/data/replacement_cycle_advance_trigger.py) detects that a scope's latest posterior
@@ -655,8 +654,6 @@ def _create_replacement_forecast_shadow_tables(conn: sqlite3.Connection) -> None
         CREATE UNIQUE INDEX IF NOT EXISTS uq_cycle_advance_enqueues_scope_target_cycle
             ON cycle_advance_enqueues(city, target_date, metric, target_cycle_time)
     """)
-=======
->>>>>>> Stashed changes
 
 
 def _create_calibration_pairs(conn: sqlite3.Connection) -> None:
