@@ -112,6 +112,14 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   source_id="hko_daily_api", callable_ref="_k2_hko_tick", family="observation",
                   notes="job id ingest_k2_hko_tick (aligned to callable by upstream #324 HKO "
                         "job-id boot-crash fix); callable _k2_hko_tick"),
+    SourceJobSpec("ingest_k2_obs_fast_tick", "ingest_main", "live", "default", True,
+                  source_ids=("wu_icao_history", "ogimet_metar"),
+                  callable_ref="_k2_obs_fast_tick", family="observation",
+                  notes="day0 obs fast lane (Option C, 2026-06-12): 15-min METAR tick for "
+                        "cities inside their [local-midnight, peak+6h] trading window; "
+                        "advisory lock 'obs_fast' (separate from 'obs'); registration was "
+                        "missed at deploy -> registry guard crash-looped data-ingest until "
+                        "this entry (boot RuntimeError job-set mismatch)"),
     SourceJobSpec("ingest_etl_recalibrate", "ingest_main", "derived", "default", True,
                   callable_ref="_etl_recalibrate"),
     SourceJobSpec("ingest_harvester_truth_writer", "ingest_main", "settlement", "default", True,
