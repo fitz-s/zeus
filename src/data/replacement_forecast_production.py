@@ -472,9 +472,15 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
     # q_lcb NULL = honest no-edge = no orders, while every extras row sat unfetched).
     # Idempotent per persisted (model, city, target, metric, cycle, endpoint) row;
     # flag-gated + fail-soft inside — it never breaks the poll.
+<<<<<<< Updated upstream
     bayes_precision_fusion_report = _download_bayes_precision_fusion_extra_raw_inputs_if_needed(cfg)
     if bayes_precision_fusion_report is not None:
         report["bayes_precision_fusion_extras_status"] = bayes_precision_fusion_report.get("status")
+=======
+    u0r_report = _download_u0r_extra_raw_inputs_if_needed(cfg)
+    if u0r_report is not None:
+        report["u0r_extras_status"] = u0r_report.get("status")
+>>>>>>> Stashed changes
     # Task #32 — PARTIAL-fusion UPGRADE TRIGGER. The extras fetch above may have just landed a
     # decorrelated provider's current value (single_runs row) for a scope whose latest posterior
     # was fused from a strictly smaller instrument set. This availability-poll lane already KNOWS
@@ -492,6 +498,7 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
                 k: upgrade_report.get(k)
                 for k in ("upgrades_detected", "seeds_enqueued", "already_enqueued", "enqueued")
             }
+<<<<<<< Updated upstream
     # U5 step 2a — NEWER-CYCLE re-materialization TRIGGER (sister of the fusion-upgrade trigger).
     # This availability-poll lane already KNOWS the moment a fresher cycle's raw legs land (the
     # per-leg fetches above), so the cycle-advance re-seed rides the SAME tick (operator law:
@@ -516,6 +523,8 @@ def _replacement_cycle_availability_poll_if_needed(cfg: dict[str, object]) -> di
                     "enqueued",
                 )
             }
+=======
+>>>>>>> Stashed changes
     return report
 
 
@@ -546,6 +555,7 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(cfg: dict[str, object]) -> dict[st
         return {"status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
+<<<<<<< Updated upstream
 def _enqueue_cycle_advance_reseeds_if_needed(cfg: dict[str, object]) -> dict[str, object] | None:
     """U5 step 2a — enqueue re-materialization seeds for active-window families whose latest
     posterior consumed a STRICTLY OLDER cycle than the freshest materializable in-universe cycle.
@@ -576,6 +586,8 @@ def _enqueue_cycle_advance_reseeds_if_needed(cfg: dict[str, object]) -> dict[str
         return {"status": "CYCLE_ADVANCE_TRIGGER_FAILSOFT_SKIPPED", "error": str(exc)}
 
 
+=======
+>>>>>>> Stashed changes
 @_scheduler_job("anchor_meta_stamp_cross_check")
 def _anchor_meta_stamp_cross_check() -> None:
     """Hourly: re-verify meta-stamped anchor artifacts against single-runs once the same
